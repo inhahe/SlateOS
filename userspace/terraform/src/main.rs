@@ -68,7 +68,9 @@ fn run_terraform(args: Vec<String>) -> i32 {
         }
         "plan" => {
             let destroy = cmd_args.iter().any(|a| a == "-destroy");
-            println!("Terraform used the selected providers to generate the following execution plan.");
+            println!(
+                "Terraform used the selected providers to generate the following execution plan."
+            );
             println!();
             if destroy {
                 println!("Plan: 0 to add, 0 to change, 3 to destroy.");
@@ -138,7 +140,10 @@ fn run_terraform(args: Vec<String>) -> i32 {
                     println!("aws_security_group.web_sg");
                 }
                 "show" => {
-                    let resource = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("aws_instance.web");
+                    let resource = cmd_args
+                        .get(1)
+                        .map(|s| s.as_str())
+                        .unwrap_or("aws_instance.web");
                     println!("# {}:", resource);
                     println!("resource \"aws_instance\" \"web\" {{");
                     println!("    ami           = \"ami-0123456789abcdef0\"");
@@ -187,14 +192,38 @@ fn run_terraform(args: Vec<String>) -> i32 {
             println!("└── provider[registry.terraform.io/hashicorp/aws] ~> 5.0");
             0
         }
-        "show" => { println!("(showing state/plan — simulated)"); 0 }
-        "import" => { println!("Import successful (simulated)"); 0 }
-        "refresh" => { println!("aws_instance.web: Refreshing state... [id=i-1234567890abcdef0]"); 0 }
-        "taint" => { println!("Resource has been marked as tainted (simulated)"); 0 }
-        "untaint" => { println!("Resource has been untainted (simulated)"); 0 }
-        "console" => { println!("(interactive console — simulated)"); 0 }
-        "get" => { println!("Downloading modules... done (simulated)"); 0 }
-        other => { eprintln!("terraform: unknown command \"{}\"", other); 1 }
+        "show" => {
+            println!("(showing state/plan — simulated)");
+            0
+        }
+        "import" => {
+            println!("Import successful (simulated)");
+            0
+        }
+        "refresh" => {
+            println!("aws_instance.web: Refreshing state... [id=i-1234567890abcdef0]");
+            0
+        }
+        "taint" => {
+            println!("Resource has been marked as tainted (simulated)");
+            0
+        }
+        "untaint" => {
+            println!("Resource has been untainted (simulated)");
+            0
+        }
+        "console" => {
+            println!("(interactive console — simulated)");
+            0
+        }
+        "get" => {
+            println!("Downloading modules... done (simulated)");
+            0
+        }
+        other => {
+            eprintln!("terraform: unknown command \"{}\"", other);
+            1
+        }
     }
 }
 
@@ -211,7 +240,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_terraform};
+    use super::run_terraform;
 
     #[test]
     fn help_exits_zero() {

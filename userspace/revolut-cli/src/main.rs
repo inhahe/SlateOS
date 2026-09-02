@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("revolut-cli 0.1.0 (super-app personality build)"); }
+fn print_version() {
+    println!("revolut-cli 0.1.0 (super-app personality build)");
+}
 
 fn run_about() {
     println!("Revolut Ltd / Revolut Bank UAB.");

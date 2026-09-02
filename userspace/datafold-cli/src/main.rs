@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_datafold(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_datafold(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Datafold 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Datafold 2024 (Slate OS)");
+        return 0;
+    }
     println!("Datafold 2024 (Slate OS) — Data Diff + Data-Aware CI");
     println!("  Vendor: Datafold (Brooklyn, NYC + remote)");
     println!("  Founders: Gleb Mezhanskiy (CEO) + Olha Hrytsay + Itai Kafalkov, 2020");
@@ -31,12 +38,24 @@ fn run_datafold(args: &[String], _prog: &str) -> i32 {
     println!("  Funding: ~$22M total");
     println!("         Series A 2022: $20M led by NEA");
     println!("         seed 2021: $2.1M led by Amplify");
-    println!("  Strategic position: 'data diff is the missing primitive for safe data engineering':");
-    println!("                    pitch: 'know exactly what changes in your data when you change your code'");
-    println!("                    target: dbt-using data engineering teams running production pipelines");
-    println!("                    primary competitor: Monte Carlo (broader obs), dbt's own data-diff support");
-    println!("                    Datafold's wedge: open-source data-diff lib + CI/PR integration + cross-DB diff");
-    println!("                    differentiator vs observability: catches issues PRE-prod, not after");
+    println!(
+        "  Strategic position: 'data diff is the missing primitive for safe data engineering':"
+    );
+    println!(
+        "                    pitch: 'know exactly what changes in your data when you change your code'"
+    );
+    println!(
+        "                    target: dbt-using data engineering teams running production pipelines"
+    );
+    println!(
+        "                    primary competitor: Monte Carlo (broader obs), dbt's own data-diff support"
+    );
+    println!(
+        "                    Datafold's wedge: open-source data-diff lib + CI/PR integration + cross-DB diff"
+    );
+    println!(
+        "                    differentiator vs observability: catches issues PRE-prod, not after"
+    );
     println!("  Pricing:");
     println!("    data-diff OSS — FREE, MIT (Python library)");
     println!("    Datafold Cloud — $50K-200K/yr typical (CI integration + cross-DB + dashboard)");
@@ -65,7 +84,9 @@ fn run_datafold(args: &[String], _prog: &str) -> i32 {
     println!("    - Compete with: Bladebridge, Compilerworks, manual consultancy");
     println!("    - One of the most novel uses of LLMs in data tooling");
     println!("  Integrations:");
-    println!("    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Postgres, MySQL, MSSQL, Trino, Presto");
+    println!(
+        "    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Postgres, MySQL, MSSQL, Trino, Presto"
+    );
     println!("    - dbt Cloud + dbt Core (deepest integration in market)");
     println!("    - GitHub, GitLab, Bitbucket (PR comment integration)");
     println!("    - Airflow, Dagster (run diffs as DAG tasks)");
@@ -81,20 +102,33 @@ fn run_datafold(args: &[String], _prog: &str) -> i32 {
     println!("    - Lyft (founder's home — heavy reference), Toast, Mode");
     println!("    - sweet spot: 5-50 person dbt-using analytics-engineering team");
     println!("    - heavy in: tech/SaaS, fintech, marketplaces");
-    println!("  Critique: narrower than Monte Carlo / Anomalo (diff-focused, not full observability)");
-    println!("           dbt-tests + dbt's data-diff (free, since 1.7) compete from open-source side");
-    println!("           Migration Agent ambitious — accuracy on real-world legacy SQL still proving out");
-    println!("           CI-focused = catches pre-deploy bugs but doesn't help with runtime issues");
+    println!(
+        "  Critique: narrower than Monte Carlo / Anomalo (diff-focused, not full observability)"
+    );
+    println!(
+        "           dbt-tests + dbt's data-diff (free, since 1.7) compete from open-source side"
+    );
+    println!(
+        "           Migration Agent ambitious — accuracy on real-world legacy SQL still proving out"
+    );
+    println!(
+        "           CI-focused = catches pre-deploy bugs but doesn't help with runtime issues"
+    );
     println!("           smaller team + funding than Monte Carlo / Bigeye");
     println!("           data-diff OSS could disintermediate Cloud if users self-host");
     println!("           cross-DB diff is hash-based, can be slow on large tables");
-    println!("  Differentiator: open-source data-diff library + GitHub PR-native CI + cross-database diff + LLM-powered migration agent + dbt-deepest integration — the shift-left data quality choice for dbt-using teams, catching bugs before prod");
+    println!(
+        "  Differentiator: open-source data-diff library + GitHub PR-native CI + cross-database diff + LLM-powered migration agent + dbt-deepest integration — the shift-left data quality choice for dbt-using teams, catching bugs before prod"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "datafold".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "datafold".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_datafold(&rest, &_prog);
     process::exit(code);
@@ -102,7 +136,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_datafold};
+    use super::{basename, run_datafold, strip_ext};
 
     #[test]
     fn basename_strips_path() {

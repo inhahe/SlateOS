@@ -8,7 +8,11 @@ use std::env;
 use std::process;
 
 fn run_otelcol(args: Vec<String>, contrib: bool) -> i32 {
-    let name = if contrib { "otelcol-contrib" } else { "otelcol" };
+    let name = if contrib {
+        "otelcol-contrib"
+    } else {
+        "otelcol"
+    };
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [FLAGS]", name);
@@ -64,21 +68,39 @@ fn run_otelcol(args: Vec<String>, contrib: bool) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "validate") {
-        let config = args.iter().find_map(|a| a.strip_prefix("--config="))
+        let config = args
+            .iter()
+            .find_map(|a| a.strip_prefix("--config="))
             .unwrap_or("otelcol.yaml");
         println!("{}: configuration is valid ({})", name, config);
         return 0;
     }
 
-    let config = args.iter().find_map(|a| a.strip_prefix("--config="))
+    let config = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--config="))
         .unwrap_or("otelcol.yaml");
 
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.000Z\",\"msg\":\"Starting {}\",\"version\":\"0.100.0\"}}", name);
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.001Z\",\"msg\":\"Loading config\",\"file\":\"{}\"}}", config);
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.010Z\",\"msg\":\"Starting receivers\"}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.011Z\",\"msg\":\"OTLP receiver started\",\"grpc\":\"0.0.0.0:4317\",\"http\":\"0.0.0.0:4318\"}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.015Z\",\"msg\":\"Starting exporters\"}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.020Z\",\"msg\":\"Everything is ready.\"}}");
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.000Z\",\"msg\":\"Starting {}\",\"version\":\"0.100.0\"}}",
+        name
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.001Z\",\"msg\":\"Loading config\",\"file\":\"{}\"}}",
+        config
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.010Z\",\"msg\":\"Starting receivers\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.011Z\",\"msg\":\"OTLP receiver started\",\"grpc\":\"0.0.0.0:4317\",\"http\":\"0.0.0.0:4318\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.015Z\",\"msg\":\"Starting exporters\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.020Z\",\"msg\":\"Everything is ready.\"}}"
+    );
     0
 }
 
@@ -89,7 +111,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -127,10 +151,7 @@ mod tests {
         assert_eq!(run_otelcol(vec!["validate".to_string()], false), 0);
         assert_eq!(
             run_otelcol(
-                vec![
-                    "validate".to_string(),
-                    "--config=my.yaml".to_string(),
-                ],
+                vec!["validate".to_string(), "--config=my.yaml".to_string(),],
                 false,
             ),
             0
@@ -140,9 +161,6 @@ mod tests {
     #[test]
     fn default_run_exits_zero() {
         let _ = run_otelcol(vec![], false);
-        assert_eq!(
-            run_otelcol(vec!["--config=etc.yaml".to_string()], true),
-            0
-        );
+        assert_eq!(run_otelcol(vec!["--config=etc.yaml".to_string()], true), 0);
     }
 }

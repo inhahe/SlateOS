@@ -52,17 +52,17 @@ struct BatteryInfo {
     present: bool,
     status: BatteryStatus,
     percentage: Option<u32>,
-    capacity_full: Option<u64>,    // microWh
-    capacity_now: Option<u64>,     // microWh
-    voltage_now: Option<u64>,      // microV
-    current_now: Option<i64>,      // microA (negative = discharging)
-    time_remaining: Option<u64>,   // minutes
+    capacity_full: Option<u64>,  // microWh
+    capacity_now: Option<u64>,   // microWh
+    voltage_now: Option<u64>,    // microV
+    current_now: Option<i64>,    // microA (negative = discharging)
+    time_remaining: Option<u64>, // minutes
     technology: String,
     model: String,
     manufacturer: String,
     serial: String,
     cycle_count: Option<u32>,
-    design_capacity: Option<u64>,  // microWh
+    design_capacity: Option<u64>, // microWh
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,7 +249,9 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 // ---------------------------------------------------------------------------
 
 fn read_sysfs_string(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 fn read_sysfs_u64(path: &Path) -> Option<u64> {
@@ -277,17 +279,13 @@ fn read_batteries() -> Vec<BatteryInfo> {
                 continue;
             }
 
-            let name = entry
-                .file_name()
-                .to_string_lossy()
-                .to_string();
+            let name = entry.file_name().to_string_lossy().to_string();
 
             let present = read_sysfs_string(&path.join("present"))
                 .map(|s| s == "1")
                 .unwrap_or(false);
 
-            let status_str = read_sysfs_string(&path.join("status"))
-                .unwrap_or_default();
+            let status_str = read_sysfs_string(&path.join("status")).unwrap_or_default();
             let status = match status_str.as_str() {
                 "Charging" => BatteryStatus::Charging,
                 "Discharging" => BatteryStatus::Discharging,
@@ -356,10 +354,7 @@ fn read_ac_adapters() -> Vec<AcAdapterInfo> {
                 continue;
             }
 
-            let name = entry
-                .file_name()
-                .to_string_lossy()
-                .to_string();
+            let name = entry.file_name().to_string_lossy().to_string();
 
             let online = read_sysfs_string(&path.join("online"))
                 .map(|s| s == "1")
@@ -490,7 +485,10 @@ fn run_acpi(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
                 continue;
             }
 
-            let pct = bat.percentage.map(|p| format!(", {p}%")).unwrap_or_default();
+            let pct = bat
+                .percentage
+                .map(|p| format!(", {p}%"))
+                .unwrap_or_default();
             let time = bat
                 .time_remaining
                 .map(|t| format!(", {}", format_time(t)))

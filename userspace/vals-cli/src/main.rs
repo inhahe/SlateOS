@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_vals(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -46,7 +50,10 @@ fn run_vals(args: &[String], _prog: &str) -> i32 {
             println!("export API_KEY=ak_live_1234567890");
         }
         "get" => {
-            let key = args.get(1).map(|s| s.as_str()).unwrap_or("ref+vault://secret/data/app#/password");
+            let key = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("ref+vault://secret/data/app#/password");
             println!("{}: resolved-value", key);
         }
         "flatten" => println!("Flattened 5 references."),
@@ -57,7 +64,10 @@ fn run_vals(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "vals".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "vals".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_vals(&rest, &prog);
     process::exit(code);
@@ -65,7 +75,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_vals};
+    use super::{basename, run_vals, strip_ext};
 
     #[test]
     fn basename_strips_path() {

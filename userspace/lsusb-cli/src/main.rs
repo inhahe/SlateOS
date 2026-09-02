@@ -52,17 +52,62 @@ fn run_lsusb(args: &[String]) -> i32 {
     }
 
     let devices = [
-        ("001", "001", "1d6b", "0002", "Linux Foundation", "2.0 root hub"),
-        ("002", "001", "1d6b", "0003", "Linux Foundation", "3.0 root hub"),
-        ("001", "002", "046d", "c52b", "Logitech, Inc.", "Unifying Receiver"),
-        ("001", "003", "8087", "0029", "Intel Corp.", "AX200 Bluetooth"),
+        (
+            "001",
+            "001",
+            "1d6b",
+            "0002",
+            "Linux Foundation",
+            "2.0 root hub",
+        ),
+        (
+            "002",
+            "001",
+            "1d6b",
+            "0003",
+            "Linux Foundation",
+            "3.0 root hub",
+        ),
+        (
+            "001",
+            "002",
+            "046d",
+            "c52b",
+            "Logitech, Inc.",
+            "Unifying Receiver",
+        ),
+        (
+            "001",
+            "003",
+            "8087",
+            "0029",
+            "Intel Corp.",
+            "AX200 Bluetooth",
+        ),
         ("001", "004", "0c45", "6366", "Microdia", "USB 2.0 Camera"),
-        ("001", "005", "1050", "0407", "Yubico.com", "Yubikey 4/5 OTP+U2F+CCID"),
-        ("002", "002", "0781", "5583", "SanDisk Corp.", "Ultra Fit USB 3.1"),
+        (
+            "001",
+            "005",
+            "1050",
+            "0407",
+            "Yubico.com",
+            "Yubikey 4/5 OTP+U2F+CCID",
+        ),
+        (
+            "002",
+            "002",
+            "0781",
+            "5583",
+            "SanDisk Corp.",
+            "Ultra Fit USB 3.1",
+        ),
     ];
 
     for (bus, dev, vid, pid, vendor, product) in &devices {
-        println!("Bus {} Device {}: ID {}:{} {} {}", bus, dev, vid, pid, vendor, product);
+        println!(
+            "Bus {} Device {}: ID {}:{} {} {}",
+            bus, dev, vid, pid, vendor, product
+        );
         if verbose {
             println!("  bcdUSB               2.00");
             println!("  bDeviceClass         0");
@@ -96,7 +141,8 @@ fn run_usb_devices(_args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "lsusb".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -110,7 +156,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lsusb};
+    use super::{basename, run_lsusb, strip_ext};
 
     #[test]
     fn basename_strips_path() {

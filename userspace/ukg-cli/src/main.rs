@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ukg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -17,16 +21,23 @@ fn run_ukg(args: &[String], _prog: &str) -> i32 {
         println!();
         println!("Options:");
         println!("  --pro                  UKG Pro (large enterprise, formerly UltiPro)");
-        println!("  --ready                UKG Ready (mid-market, formerly Kronos Workforce Ready)");
+        println!(
+            "  --ready                UKG Ready (mid-market, formerly Kronos Workforce Ready)"
+        );
         println!("  --dimensions           UKG Dimensions (workforce management, formerly Kronos)");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("UKG Pro 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("UKG Pro 2024 (Slate OS)");
+        return 0;
+    }
     println!("UKG Pro 2024 (Slate OS)");
     println!("  Vendor: Ultimate Kronos Group (Lowell, MA + Weston, FL)");
     println!("  Formation: April 2020 merger of Kronos Incorporated + Ultimate Software ($22B)");
-    println!("            taken private 2017 (Kronos Hellman & Friedman) + 2019 (Ultimate Software H&F + Blackstone)");
+    println!(
+        "            taken private 2017 (Kronos Hellman & Friedman) + 2019 (Ultimate Software H&F + Blackstone)"
+    );
     println!("            merged under shared H&F ownership");
     println!("  Original companies:");
     println!("    - Kronos: founded 1977 (MIT — Mark Ain), workforce-mgmt + time-clock pioneer");
@@ -37,13 +48,19 @@ fn run_ukg(args: &[String], _prog: &str) -> i32 {
     println!("        $4B+ revenue (private — Blackstone/H&F backed)");
     println!("  Kronos ransomware attack (Dec 2021):");
     println!("    UKG's Kronos Private Cloud hit by ransomware");
-    println!("    Many customers — including New York public schools, hospitals — couldn't run payroll");
+    println!(
+        "    Many customers — including New York public schools, hospitals — couldn't run payroll"
+    );
     println!("    Recovery took months; class-action lawsuits followed");
     println!("    Cautionary tale for cloud HCM vendor concentration");
     println!("  Products:");
-    println!("    - UKG Pro (large enterprise — payroll + HRIS + benefits + talent — formerly UltiPro)");
+    println!(
+        "    - UKG Pro (large enterprise — payroll + HRIS + benefits + talent — formerly UltiPro)"
+    );
     println!("    - UKG Ready (SMB → mid-market — formerly Kronos Workforce Ready)");
-    println!("    - UKG Dimensions (workforce management, scheduling, time + attendance — formerly Kronos)");
+    println!(
+        "    - UKG Dimensions (workforce management, scheduling, time + attendance — formerly Kronos)"
+    );
     println!("    - UKG Pro Workforce Management (Dimensions integrated into Pro suite)");
     println!("  Features:");
     println!("    - Global payroll (50+ countries via partner network + native US/CA/UK/PR)");
@@ -54,16 +71,23 @@ fn run_ukg(args: &[String], _prog: &str) -> i32 {
     println!("    - AI assistant Bryte (people-data insights)");
     println!("    - UKG D&I Suite (DEI metrics + pay equity analytics)");
     println!("  Customers: large enterprise — Marriott, Hard Rock Cafe, Tesla, Cisco, Aramark");
-    println!("            heavy in retail, hospitality, healthcare, manufacturing (shift-worker industries)");
+    println!(
+        "            heavy in retail, hospitality, healthcare, manufacturing (shift-worker industries)"
+    );
     println!("  Critique: complex implementation (6-18 months), legacy UI in places");
     println!("           still recovering reputation from 2021 ransomware");
-    println!("  Differentiator: best-in-class workforce mgmt (Kronos heritage) + enterprise HCM (UltiPro) unified");
+    println!(
+        "  Differentiator: best-in-class workforce mgmt (Kronos heritage) + enterprise HCM (UltiPro) unified"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "ukg".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "ukg".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ukg(&rest, &_prog);
     process::exit(code);
@@ -71,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ukg};
+    use super::{basename, run_ukg, strip_ext};
 
     #[test]
     fn basename_strips_path() {

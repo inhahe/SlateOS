@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_meta(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_meta(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Metaplane 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Metaplane 2024 (Slate OS)");
+        return 0;
+    }
     println!("Metaplane 2024 (Slate OS) — Data Observability (now Datadog Data Observability)");
     println!("  Vendor: Metaplane, Inc. (Boston) — ACQUIRED by Datadog Oct 2024");
     println!("  Founders: Kevin Hu (CEO) + Peter Casinelli (CTO), 2020");
@@ -34,18 +41,28 @@ fn run_meta(args: &[String], _prog: &str) -> i32 {
     println!("         seed 2020: Y Combinator + Khosla + Slack Fund");
     println!("         total raised ~$15M before acquisition");
     println!("  Acquisition Oct 2024:");
-    println!("         Datadog acquired Metaplane for undisclosed amount (estimated $50-150M range)");
+    println!(
+        "         Datadog acquired Metaplane for undisclosed amount (estimated $50-150M range)"
+    );
     println!("         became Datadog Data Observability (announced Datadog DASH 2024)");
-    println!("         strategic fit: Datadog already had Database Monitoring; data obs natural extension");
+    println!(
+        "         strategic fit: Datadog already had Database Monitoring; data obs natural extension"
+    );
     println!("         Kevin Hu became Senior Director of Product at Datadog");
     println!("         most of Metaplane team moved to Datadog Boston office");
     println!("  Strategic position (pre-acquisition):");
-    println!("                    pitch: 'data observability for the modern data stack — fast time-to-value'");
+    println!(
+        "                    pitch: 'data observability for the modern data stack — fast time-to-value'"
+    );
     println!("                    target: mid-market data teams (50-1000 employees)");
-    println!("                    primary competitor: Monte Carlo (more enterprise), Bigeye, Anomalo, Soda");
+    println!(
+        "                    primary competitor: Monte Carlo (more enterprise), Bigeye, Anomalo, Soda"
+    );
     println!("                    Metaplane's wedge: cheaper + faster onboarding than Monte Carlo");
     println!("                    YC pedigree + MIT + 'data Datadog' branding");
-    println!("                    accidentally telegraphed the exit thesis ('we are data's Datadog')");
+    println!(
+        "                    accidentally telegraphed the exit thesis ('we are data's Datadog')"
+    );
     println!("  Pricing (pre-acquisition):");
     println!("    Free tier — 5 tables, basic monitoring");
     println!("    Starter — $1K-3K/mo for small teams");
@@ -82,28 +99,39 @@ fn run_meta(args: &[String], _prog: &str) -> i32 {
     println!("  Customers (~250+ at acquisition):");
     println!("    - Imperfect Foods, Vendr, Reforge, Drift, Plaid (some)");
     println!("    - heavy SaaS/tech mid-market");
-    println!("    - many continued post-Datadog; some defected to Monte Carlo/Anomalo over integration uncertainty");
+    println!(
+        "    - many continued post-Datadog; some defected to Monte Carlo/Anomalo over integration uncertainty"
+    );
     println!("  Datadog acquisition logic:");
     println!("    - Datadog needs to expand TAM beyond pure infra/APM");
     println!("    - Data observability is a fast-growing adjacent market");
     println!("    - Metaplane's tech + team much cheaper than building from scratch");
     println!("    - Cross-sell into Datadog's 30K customer base");
     println!("    - Compete with New Relic (no data obs offering), Splunk (data obs ambitions)");
-    println!("    - Datadog's 'observability platform' thesis now spans data, infra, apps, security");
+    println!(
+        "    - Datadog's 'observability platform' thesis now spans data, infra, apps, security"
+    );
     println!("  Critique (legacy + acquisition era):");
-    println!("           independent product lifespan now ending — Datadog integration may take 1-2 years");
+    println!(
+        "           independent product lifespan now ending — Datadog integration may take 1-2 years"
+    );
     println!("           customers worried about Datadog pricing tier creep");
     println!("           Datadog Data Observability is still nascent (announced Oct 2024)");
     println!("           Monte Carlo + Anomalo aggressively recruiting Metaplane customers");
     println!("           Anomalo's deeper ML may outpace Metaplane in pure data quality");
     println!("           historically: less mature than Monte Carlo for enterprise governance");
-    println!("  Differentiator: YC + MIT pedigree + 'data Datadog' early positioning + cheaper than Monte Carlo + now backed by Datadog's distribution + integrated into Datadog observability platform — the data observability that became Datadog");
+    println!(
+        "  Differentiator: YC + MIT pedigree + 'data Datadog' early positioning + cheaper than Monte Carlo + now backed by Datadog's distribution + integrated into Datadog observability platform — the data observability that became Datadog"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "metaplane".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "metaplane".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_meta(&rest, &_prog);
     process::exit(code);
@@ -111,7 +139,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_meta};
+    use super::{basename, run_meta, strip_ext};
 
     #[test]
     fn basename_strips_path() {

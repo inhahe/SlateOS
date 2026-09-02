@@ -51,8 +51,15 @@ fn run_zenity(args: &[String]) -> i32 {
         return 0;
     }
 
-    let title = args.windows(2).find(|w| w[0] == "--title").map(|w| w[1].as_str()).unwrap_or("Zenity");
-    let text = args.windows(2).find(|w| w[0] == "--text").map(|w| w[1].as_str());
+    let title = args
+        .windows(2)
+        .find(|w| w[0] == "--title")
+        .map(|w| w[1].as_str())
+        .unwrap_or("Zenity");
+    let text = args
+        .windows(2)
+        .find(|w| w[0] == "--text")
+        .map(|w| w[1].as_str());
 
     if args.iter().any(|a| a == "--info") {
         println!("[INFO] {}: {}", title, text.unwrap_or("Information"));
@@ -101,7 +108,11 @@ fn run_kdialog(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--msgbox") {
-        let text = args.windows(2).find(|w| w[0] == "--msgbox").map(|w| w[1].as_str()).unwrap_or("Message");
+        let text = args
+            .windows(2)
+            .find(|w| w[0] == "--msgbox")
+            .map(|w| w[1].as_str())
+            .unwrap_or("Message");
         println!("[OK] {}", text);
     } else if args.iter().any(|a| a == "--yesno") {
         println!("[Yes/No]");
@@ -115,7 +126,8 @@ fn run_kdialog(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "zenity".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -129,7 +141,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_zenity};
+    use super::{basename, run_zenity, strip_ext};
 
     #[test]
     fn basename_strips_path() {

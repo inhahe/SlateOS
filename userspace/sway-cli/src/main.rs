@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sway(args: &[String], prog: &str) -> i32 {
     if prog == "swaynag" {
@@ -20,8 +24,11 @@ fn run_sway(args: &[String], prog: &str) -> i32 {
             println!("  -e EDGE       Edge (top, bottom)");
             return 0;
         }
-        let msg = args.windows(2).find(|w| w[0] == "-m")
-            .map(|w| w[1].as_str()).unwrap_or("Warning");
+        let msg = args
+            .windows(2)
+            .find(|w| w[0] == "-m")
+            .map(|w| w[1].as_str())
+            .unwrap_or("Warning");
         println!("swaynag: {}", msg);
         return 0;
     }
@@ -38,15 +45,21 @@ fn run_sway(args: &[String], prog: &str) -> i32 {
         println!("  -q           Quiet");
         return 0;
     }
-    let msg_type = args.windows(2).find(|w| w[0] == "-t")
+    let msg_type = args
+        .windows(2)
+        .find(|w| w[0] == "-t")
         .map(|w| w[1].as_str());
 
     match msg_type {
         Some("get_inputs") => {
-            println!("[{{\"identifier\":\"1:1:AT_Translated_Set_2_keyboard\",\"name\":\"AT keyboard\",\"type\":\"keyboard\"}}]");
+            println!(
+                "[{{\"identifier\":\"1:1:AT_Translated_Set_2_keyboard\",\"name\":\"AT keyboard\",\"type\":\"keyboard\"}}]"
+            );
         }
         Some("get_outputs") => {
-            println!("[{{\"name\":\"DP-1\",\"make\":\"Dell\",\"model\":\"U2723QE\",\"active\":true,\"scale\":1.0,\"transform\":\"normal\",\"current_mode\":{{\"width\":2560,\"height\":1440,\"refresh\":60000}}}}]");
+            println!(
+                "[{{\"name\":\"DP-1\",\"make\":\"Dell\",\"model\":\"U2723QE\",\"active\":true,\"scale\":1.0,\"transform\":\"normal\",\"current_mode\":{{\"width\":2560,\"height\":1440,\"refresh\":60000}}}}]"
+            );
         }
         Some("get_workspaces") => {
             println!("[{{\"num\":1,\"name\":\"1\",\"focused\":true,\"output\":\"DP-1\"}}]");
@@ -60,7 +73,10 @@ fn run_sway(args: &[String], prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "swaymsg".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "swaymsg".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_sway(&rest, &prog);
     process::exit(code);
@@ -68,7 +84,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sway};
+    use super::{basename, run_sway, strip_ext};
 
     #[test]
     fn basename_strips_path() {

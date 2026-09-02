@@ -142,7 +142,11 @@ fn run_obs_cli(args: Vec<String>) -> i32 {
             0
         }
         ("screenshot", _) => {
-            let file = if subcmd.is_empty() { "screenshot.png" } else { subcmd };
+            let file = if subcmd.is_empty() {
+                "screenshot.png"
+            } else {
+                subcmd
+            };
             println!("📷 Screenshot saved: {}", file);
             println!("  Resolution: 1920x1080");
             0
@@ -186,8 +190,15 @@ fn run_obs_cli(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}{}'. See --help.", cmd,
-                if subcmd.is_empty() { String::new() } else { format!(" {}", subcmd) });
+            eprintln!(
+                "Error: unknown command '{}{}'. See --help.",
+                cmd,
+                if subcmd.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", subcmd)
+                }
+            );
             1
         }
     }
@@ -202,7 +213,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_obs_cli};
+    use super::run_obs_cli;
 
     #[test]
     fn help_exits_zero() {

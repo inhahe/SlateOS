@@ -48,7 +48,9 @@ fn run_convert(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "-version" || a == "--version") {
         println!("Version: ImageMagick 7.1.0 (Slate OS)");
         println!("Features: DPC Modules OpenMP(4.5)");
-        println!("Delegates (built-in): bzlib fontconfig freetype jng jpeg lcms lzma png tiff webp xml zlib");
+        println!(
+            "Delegates (built-in): bzlib fontconfig freetype jng jpeg lcms lzma png tiff webp xml zlib"
+        );
         return 0;
     }
 
@@ -59,42 +61,64 @@ fn run_convert(args: Vec<String>) -> i32 {
         match args[i].as_str() {
             "-resize" => {
                 i += 1;
-                if i < args.len() { operations.push(format!("Resize: {}", args[i])); }
+                if i < args.len() {
+                    operations.push(format!("Resize: {}", args[i]));
+                }
             }
             "-quality" => {
                 i += 1;
-                if i < args.len() { operations.push(format!("Quality: {}", args[i])); }
+                if i < args.len() {
+                    operations.push(format!("Quality: {}", args[i]));
+                }
             }
             "-crop" => {
                 i += 1;
-                if i < args.len() { operations.push(format!("Crop: {}", args[i])); }
+                if i < args.len() {
+                    operations.push(format!("Crop: {}", args[i]));
+                }
             }
             "-rotate" => {
                 i += 1;
-                if i < args.len() { operations.push(format!("Rotate: {}°", args[i])); }
+                if i < args.len() {
+                    operations.push(format!("Rotate: {}°", args[i]));
+                }
             }
             "-flip" => operations.push("Flip vertical".to_string()),
             "-flop" => operations.push("Flip horizontal".to_string()),
             "-blur" => {
                 i += 1;
-                if i < args.len() { operations.push(format!("Blur: {}", args[i])); }
+                if i < args.len() {
+                    operations.push(format!("Blur: {}", args[i]));
+                }
             }
             "-sharpen" => {
                 i += 1;
-                if i < args.len() { operations.push(format!("Sharpen: {}", args[i])); }
+                if i < args.len() {
+                    operations.push(format!("Sharpen: {}", args[i]));
+                }
             }
             "-strip" => operations.push("Strip metadata".to_string()),
             "-colorspace" => {
                 i += 1;
-                if i < args.len() { operations.push(format!("Colorspace: {}", args[i])); }
+                if i < args.len() {
+                    operations.push(format!("Colorspace: {}", args[i]));
+                }
             }
             _ => {}
         }
         i += 1;
     }
 
-    let input = args.first().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("input.png");
-    let output = args.iter().rfind(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("output.png");
+    let input = args
+        .first()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("input.png");
+    let output = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("output.png");
 
     if !operations.is_empty() {
         for op in &operations {
@@ -119,7 +143,11 @@ fn run_identify(args: Vec<String>) -> i32 {
     }
 
     let verbose = args.iter().any(|a| a == "-verbose");
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
 
     if files.is_empty() {
         eprintln!("identify: no input file specified");
@@ -159,7 +187,11 @@ fn run_mogrify(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     for file in &files {
         println!("{}: modified in-place (simulated)", file);
     }
@@ -180,9 +212,17 @@ fn run_composite(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     let output = files.last().copied().unwrap_or("composite.png");
-    println!("Compositing {} files -> {} (simulated)", files.len().saturating_sub(1), output);
+    println!(
+        "Compositing {} files -> {} (simulated)",
+        files.len().saturating_sub(1),
+        output
+    );
     0
 }
 
@@ -203,9 +243,17 @@ fn run_montage(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     let output = files.last().copied().unwrap_or("montage.png");
-    println!("Creating montage from {} images -> {} (simulated)", files.len().saturating_sub(1).max(1), output);
+    println!(
+        "Creating montage from {} images -> {} (simulated)",
+        files.len().saturating_sub(1).max(1),
+        output
+    );
     0
 }
 
@@ -254,7 +302,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -279,7 +329,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_convert};
+    use super::run_convert;
 
     #[test]
     fn help_exits_zero() {

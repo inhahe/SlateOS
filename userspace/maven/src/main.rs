@@ -32,7 +32,11 @@ fn run_maven(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let phases: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let phases: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     let quiet = args.iter().any(|a| a == "-q" || a == "--quiet");
 
     if !quiet {
@@ -87,7 +91,9 @@ fn run_maven(args: Vec<String>) -> i32 {
         println!("[INFO] \\- org.junit.jupiter:junit-jupiter:jar:5.10.0:test");
     } else {
         for phase in &phases {
-            if !quiet { println!("[INFO] Executing: {} (simulated)", phase); }
+            if !quiet {
+                println!("[INFO] Executing: {} (simulated)", phase);
+            }
         }
     }
 
@@ -109,7 +115,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_maven};
+    use super::run_maven;
 
     #[test]
     fn help_exits_zero() {

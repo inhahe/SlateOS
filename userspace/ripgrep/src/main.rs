@@ -79,11 +79,14 @@ fn run_rg(args: Vec<String>) -> i32 {
     }
 
     let count_only = args.iter().any(|a| a == "-c" || a == "--count");
-    let files_only = args.iter().any(|a| a == "-l" || a == "--files-with-matches");
+    let files_only = args
+        .iter()
+        .any(|a| a == "-l" || a == "--files-with-matches");
     let json_out = args.iter().any(|a| a == "--json");
     let stats = args.iter().any(|a| a == "--stats");
 
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -99,8 +102,14 @@ fn run_rg(args: Vec<String>) -> i32 {
         println!("src/lib.rs");
         println!("tests/test.rs");
     } else if json_out {
-        println!("{{\"type\":\"match\",\"data\":{{\"path\":{{\"text\":\"src/main.rs\"}},\"lines\":{{\"text\":\"    let {} = value;\\n\"}},\"line_number\":10}}}}", pattern);
-        println!("{{\"type\":\"match\",\"data\":{{\"path\":{{\"text\":\"src/lib.rs\"}},\"lines\":{{\"text\":\"// {} implementation\\n\"}},\"line_number\":3}}}}", pattern);
+        println!(
+            "{{\"type\":\"match\",\"data\":{{\"path\":{{\"text\":\"src/main.rs\"}},\"lines\":{{\"text\":\"    let {} = value;\\n\"}},\"line_number\":10}}}}",
+            pattern
+        );
+        println!(
+            "{{\"type\":\"match\",\"data\":{{\"path\":{{\"text\":\"src/lib.rs\"}},\"lines\":{{\"text\":\"// {} implementation\\n\"}},\"line_number\":3}}}}",
+            pattern
+        );
     } else {
         println!("src/main.rs:10:    let {} = value;", pattern);
         println!("src/main.rs:25:    // {} processing", pattern);
@@ -132,7 +141,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_rg};
+    use super::run_rg;
 
     #[test]
     fn help_exits_zero() {

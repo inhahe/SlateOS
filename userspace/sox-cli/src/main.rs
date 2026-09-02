@@ -34,7 +34,8 @@ fn run_sox(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -65,9 +66,13 @@ fn run_sox(args: Vec<String>) -> i32 {
     let output = files[1];
     let effects: Vec<&str> = files.iter().skip(2).copied().collect();
 
-    let rate = args.windows(2).find(|w| w[0] == "-r" || w[0] == "--rate")
+    let rate = args
+        .windows(2)
+        .find(|w| w[0] == "-r" || w[0] == "--rate")
         .map(|w| w[1].as_str());
-    let channels = args.windows(2).find(|w| w[0] == "-c" || w[0] == "--channels")
+    let channels = args
+        .windows(2)
+        .find(|w| w[0] == "-c" || w[0] == "--channels")
         .map(|w| w[1].as_str());
 
     print!("sox: {} -> {}", input, output);
@@ -97,7 +102,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sox};
+    use super::run_sox;
 
     #[test]
     fn help_exits_zero() {

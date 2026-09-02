@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_http(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") || args.is_empty() {
@@ -35,11 +39,15 @@ fn run_http(args: &[String]) -> i32 {
         return 0;
     }
     let methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
-    let method = args.first()
+    let method = args
+        .first()
         .filter(|a| methods.contains(&a.to_uppercase().as_str()))
         .map(|s| s.to_uppercase());
     let url_idx = if method.is_some() { 1 } else { 0 };
-    let url = args.get(url_idx).map(|s| s.as_str()).unwrap_or("http://localhost");
+    let url = args
+        .get(url_idx)
+        .map(|s| s.as_str())
+        .unwrap_or("http://localhost");
     let method_str = method.as_deref().unwrap_or("GET");
     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
     let headers_only = args.iter().any(|a| a == "-h" || a == "--headers");
@@ -67,7 +75,10 @@ fn run_http(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "http".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "http".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_http(&rest);
     process::exit(code);
@@ -75,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_http};
+    use super::{basename, run_http, strip_ext};
 
     #[test]
     fn basename_strips_path() {

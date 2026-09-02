@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_munin_node(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_munin_node(args: &[String], _prog: &str) -> i32 {
         println!("Collects system metrics and serves them to munin-update.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("munin-node v2.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("munin-node v2.0 (Slate OS)");
+        return 0;
+    }
     println!("munin-node: listening on port 4949");
     println!("  Plugins loaded: cpu, memory, disk, network, processes");
     println!("  Update interval: 5 minutes");
@@ -52,7 +59,10 @@ fn run_munin_update(args: &[String], _prog: &str) -> i32 {
         println!("munin-update v2.0 (Slate OS) — Fetch data from munin nodes");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("munin-update v2.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("munin-update v2.0 (Slate OS)");
+        return 0;
+    }
     println!("munin-update: fetching data from 3 nodes...");
     println!("  localhost: 12 plugins, 48 values collected");
     println!("  server1: 8 plugins, 32 values collected");
@@ -76,7 +86,10 @@ fn run_munin_cron(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "munin-node".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "munin-node".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "munin-run" => run_munin_run(&rest, &prog),
@@ -89,7 +102,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_munin_node};
+    use super::{basename, run_munin_node, strip_ext};
 
     #[test]
     fn basename_strips_path() {

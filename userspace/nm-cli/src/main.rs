@@ -57,11 +57,26 @@ fn run_nm(args: &[String]) -> i32 {
     } else {
         let size_col = if with_size { " 00000017" } else { "" };
         println!("0000000000401000{} T _start", size_col);
-        println!("0000000000401020{} T main", if with_size { " 00000064" } else { "" });
-        println!("00000000004010a0{} T helper_func", if with_size { " 00000032" } else { "" });
-        println!("0000000000403000{} R message_str", if with_size { " 0000000d" } else { "" });
-        println!("0000000000404000{} D global_var", if with_size { " 00000008" } else { "" });
-        println!("0000000000405000{} B bss_buffer", if with_size { " 00000100" } else { "" });
+        println!(
+            "0000000000401020{} T main",
+            if with_size { " 00000064" } else { "" }
+        );
+        println!(
+            "00000000004010a0{} T helper_func",
+            if with_size { " 00000032" } else { "" }
+        );
+        println!(
+            "0000000000403000{} R message_str",
+            if with_size { " 0000000d" } else { "" }
+        );
+        println!(
+            "0000000000404000{} D global_var",
+            if with_size { " 00000008" } else { "" }
+        );
+        println!(
+            "0000000000405000{} B bss_buffer",
+            if with_size { " 00000100" } else { "" }
+        );
         println!("                 U printf");
         println!("                 U __libc_start_main");
     }
@@ -82,7 +97,11 @@ fn run_cppfilt(args: &[String]) -> i32 {
         return 0;
     }
 
-    let symbols: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let symbols: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     for sym in &symbols {
         if sym.starts_with("_Z") {
             println!("demangled::{}", sym);
@@ -145,7 +164,8 @@ fn run_ranlib(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "nm".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -161,7 +181,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_nm};
+    use super::{basename, run_nm, strip_ext};
 
     #[test]
     fn basename_strips_path() {

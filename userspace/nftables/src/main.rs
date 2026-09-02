@@ -298,23 +298,75 @@ impl fmt::Display for MetaKey {
 /// A single match expression in a rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum MatchExpr {
-    IpSaddr { op: CmpOp, value: String },
-    IpDaddr { op: CmpOp, value: String },
-    IpProtocol { op: CmpOp, value: String },
-    TcpDport { op: CmpOp, value: String },
-    TcpSport { op: CmpOp, value: String },
-    UdpDport { op: CmpOp, value: String },
-    UdpSport { op: CmpOp, value: String },
-    CtState { states: Vec<CtState> },
-    Iifname { op: CmpOp, value: String },
-    Oifname { op: CmpOp, value: String },
-    Meta { key: MetaKey, op: CmpOp, value: String },
-    EtherSaddr { op: CmpOp, value: String },
-    EtherDaddr { op: CmpOp, value: String },
-    IcmpType { op: CmpOp, value: String },
-    SetLookup { field: String, set_name: String },
-    AnonSet { field: String, elements: Vec<String> },
-    Interval { field: String, low: String, high: String },
+    IpSaddr {
+        op: CmpOp,
+        value: String,
+    },
+    IpDaddr {
+        op: CmpOp,
+        value: String,
+    },
+    IpProtocol {
+        op: CmpOp,
+        value: String,
+    },
+    TcpDport {
+        op: CmpOp,
+        value: String,
+    },
+    TcpSport {
+        op: CmpOp,
+        value: String,
+    },
+    UdpDport {
+        op: CmpOp,
+        value: String,
+    },
+    UdpSport {
+        op: CmpOp,
+        value: String,
+    },
+    CtState {
+        states: Vec<CtState>,
+    },
+    Iifname {
+        op: CmpOp,
+        value: String,
+    },
+    Oifname {
+        op: CmpOp,
+        value: String,
+    },
+    Meta {
+        key: MetaKey,
+        op: CmpOp,
+        value: String,
+    },
+    EtherSaddr {
+        op: CmpOp,
+        value: String,
+    },
+    EtherDaddr {
+        op: CmpOp,
+        value: String,
+    },
+    IcmpType {
+        op: CmpOp,
+        value: String,
+    },
+    SetLookup {
+        field: String,
+        set_name: String,
+    },
+    AnonSet {
+        field: String,
+        elements: Vec<String>,
+    },
+    Interval {
+        field: String,
+        low: String,
+        high: String,
+    },
 }
 
 impl fmt::Display for MatchExpr {
@@ -867,8 +919,7 @@ impl<'a> Tokens<'a> {
     }
 
     fn expect(&mut self, what: &str) -> Result<&str, String> {
-        self.next_token()
-            .ok_or_else(|| format!("expected {what}"))
+        self.next_token().ok_or_else(|| format!("expected {what}"))
     }
 
     fn remaining(&self) -> &[String] {
@@ -905,24 +956,15 @@ fn parse_match(tokens: &mut Tokens<'_>) -> Result<Option<MatchExpr>, String> {
             match field {
                 "saddr" => {
                     let (op, val) = parse_cmp_value(tokens)?;
-                    Ok(Some(MatchExpr::IpSaddr {
-                        op,
-                        value: val,
-                    }))
+                    Ok(Some(MatchExpr::IpSaddr { op, value: val }))
                 }
                 "daddr" => {
                     let (op, val) = parse_cmp_value(tokens)?;
-                    Ok(Some(MatchExpr::IpDaddr {
-                        op,
-                        value: val,
-                    }))
+                    Ok(Some(MatchExpr::IpDaddr { op, value: val }))
                 }
                 "protocol" => {
                     let (op, val) = parse_cmp_value(tokens)?;
-                    Ok(Some(MatchExpr::IpProtocol {
-                        op,
-                        value: val,
-                    }))
+                    Ok(Some(MatchExpr::IpProtocol { op, value: val }))
                 }
                 _ => Err(format!("unknown ip field '{field}'")),
             }
@@ -952,10 +994,7 @@ fn parse_match(tokens: &mut Tokens<'_>) -> Result<Option<MatchExpr>, String> {
                 }
                 "sport" => {
                     let (op, val) = parse_cmp_value(tokens)?;
-                    Ok(Some(MatchExpr::UdpSport {
-                        op,
-                        value: val,
-                    }))
+                    Ok(Some(MatchExpr::UdpSport { op, value: val }))
                 }
                 _ => Err(format!("unknown udp field '{field}'")),
             }
@@ -1002,17 +1041,11 @@ fn parse_match(tokens: &mut Tokens<'_>) -> Result<Option<MatchExpr>, String> {
             match field {
                 "saddr" => {
                     let (op, val) = parse_cmp_value(tokens)?;
-                    Ok(Some(MatchExpr::EtherSaddr {
-                        op,
-                        value: val,
-                    }))
+                    Ok(Some(MatchExpr::EtherSaddr { op, value: val }))
                 }
                 "daddr" => {
                     let (op, val) = parse_cmp_value(tokens)?;
-                    Ok(Some(MatchExpr::EtherDaddr {
-                        op,
-                        value: val,
-                    }))
+                    Ok(Some(MatchExpr::EtherDaddr { op, value: val }))
                 }
                 _ => Err(format!("unknown ether field '{field}'")),
             }
@@ -1191,11 +1224,7 @@ fn parse_verdicts(tokens: &mut Tokens<'_>) -> Result<Vec<Verdict>, String> {
 // ---------------------------------------------------------------------------
 
 /// Execute a single nft command line.
-fn exec_command(
-    rs: &mut Ruleset,
-    flags: &Flags,
-    words: &[String],
-) -> Result<String, String> {
+fn exec_command(rs: &mut Ruleset, flags: &Flags, words: &[String]) -> Result<String, String> {
     if words.is_empty() {
         return Ok(String::new());
     }
@@ -1284,7 +1313,9 @@ fn add_chain(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String
     let table = rs.get_table_mut(family, &table_name)?;
 
     if table.find_chain(&chain_name).is_some() {
-        return Err(format!("chain '{chain_name}' already exists in table '{table_name}'"));
+        return Err(format!(
+            "chain '{chain_name}' already exists in table '{table_name}'"
+        ));
     }
 
     // Check for base chain specifiers
@@ -1361,11 +1392,7 @@ fn add_chain(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String
     Ok(String::new())
 }
 
-fn add_rule(
-    rs: &mut Ruleset,
-    tokens: &mut Tokens<'_>,
-    insert: bool,
-) -> Result<String, String> {
+fn add_rule(rs: &mut Ruleset, tokens: &mut Tokens<'_>, insert: bool) -> Result<String, String> {
     let family_or_table = tokens.expect("family or table name")?;
     let (family, table_name) = if let Ok(f) = Family::parse(family_or_table) {
         let n = tokens.expect("table name")?.to_string();
@@ -1832,9 +1859,7 @@ fn delete_chain(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Str
         .find_chain(&chain_name)
         .ok_or_else(|| format!("chain '{chain_name}' not found"))?;
     if !table.chains[idx].rules.is_empty() {
-        return Err(format!(
-            "chain '{chain_name}' is not empty; flush it first"
-        ));
+        return Err(format!("chain '{chain_name}' is not empty; flush it first"));
     }
     table.chains.remove(idx);
     Ok(String::new())
@@ -1965,11 +1990,7 @@ fn delete_limit(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Str
 // list command
 // ---------------------------------------------------------------------------
 
-fn exec_list(
-    rs: &Ruleset,
-    flags: &Flags,
-    tokens: &mut Tokens<'_>,
-) -> Result<String, String> {
+fn exec_list(rs: &Ruleset, flags: &Flags, tokens: &mut Tokens<'_>) -> Result<String, String> {
     let obj_type = tokens.expect("object type to list")?;
     match obj_type {
         "ruleset" => list_ruleset(rs, flags),
@@ -2070,11 +2091,7 @@ fn list_tables(rs: &Ruleset, flags: &Flags) -> Result<String, String> {
     Ok(out)
 }
 
-fn list_table(
-    rs: &Ruleset,
-    flags: &Flags,
-    tokens: &mut Tokens<'_>,
-) -> Result<String, String> {
+fn list_table(rs: &Ruleset, flags: &Flags, tokens: &mut Tokens<'_>) -> Result<String, String> {
     let (family, name) = parse_family_and_name(tokens)?;
     let table = rs.get_table(family, &name)?;
     let mut out = String::new();
@@ -2082,11 +2099,7 @@ fn list_table(
     Ok(out)
 }
 
-fn list_chain(
-    rs: &Ruleset,
-    flags: &Flags,
-    tokens: &mut Tokens<'_>,
-) -> Result<String, String> {
+fn list_chain(rs: &Ruleset, flags: &Flags, tokens: &mut Tokens<'_>) -> Result<String, String> {
     let (family, table_name) = parse_family_and_name(tokens)?;
     let chain_name = tokens.expect("chain name")?.to_string();
     let table = rs.get_table(family, &table_name)?;
@@ -2120,10 +2133,7 @@ fn list_all_chains(rs: &Ruleset, flags: &Flags) -> Result<String, String> {
                 ));
             }
             for rule in &chain.rules {
-                out.push_str(&format!(
-                    "\t{}\n",
-                    rule.display_nft(flags.show_handles)
-                ));
+                out.push_str(&format!("\t{}\n", rule.display_nft(flags.show_handles)));
             }
             out.push_str("}\n");
         }
@@ -2131,11 +2141,7 @@ fn list_all_chains(rs: &Ruleset, flags: &Flags) -> Result<String, String> {
     Ok(out)
 }
 
-fn list_all_sets(
-    rs: &Ruleset,
-    flags: &Flags,
-    tokens: &mut Tokens<'_>,
-) -> Result<String, String> {
+fn list_all_sets(rs: &Ruleset, flags: &Flags, tokens: &mut Tokens<'_>) -> Result<String, String> {
     // Optional family filter
     let family_filter = if let Some(tok) = tokens.peek() {
         Family::parse(tok).ok().inspect(|_f| {
@@ -2149,9 +2155,10 @@ fn list_all_sets(
     let mut out = String::new();
     for table in &rs.tables {
         if let Some(ff) = family_filter
-            && table.family != ff {
-                continue;
-            }
+            && table.family != ff
+        {
+            continue;
+        }
         for set in &table.sets {
             format_set_nft(&mut out, table, set);
         }
@@ -2159,11 +2166,7 @@ fn list_all_sets(
     Ok(out)
 }
 
-fn list_set(
-    rs: &Ruleset,
-    _flags: &Flags,
-    tokens: &mut Tokens<'_>,
-) -> Result<String, String> {
+fn list_set(rs: &Ruleset, _flags: &Flags, tokens: &mut Tokens<'_>) -> Result<String, String> {
     let (family, table_name) = parse_family_and_name(tokens)?;
     let set_name = tokens.expect("set name")?.to_string();
     let table = rs.get_table(family, &table_name)?;
@@ -2175,11 +2178,7 @@ fn list_set(
     Ok(out)
 }
 
-fn list_all_maps(
-    rs: &Ruleset,
-    _flags: &Flags,
-    tokens: &mut Tokens<'_>,
-) -> Result<String, String> {
+fn list_all_maps(rs: &Ruleset, _flags: &Flags, tokens: &mut Tokens<'_>) -> Result<String, String> {
     let family_filter = if let Some(tok) = tokens.peek() {
         Family::parse(tok).ok().inspect(|_f| {
             tokens.next_token();
@@ -2191,9 +2190,10 @@ fn list_all_maps(
     let mut out = String::new();
     for table in &rs.tables {
         if let Some(ff) = family_filter
-            && table.family != ff {
-                continue;
-            }
+            && table.family != ff
+        {
+            continue;
+        }
         for map in &table.maps {
             format_map_nft(&mut out, table, map);
         }
@@ -2201,11 +2201,7 @@ fn list_all_maps(
     Ok(out)
 }
 
-fn list_map(
-    rs: &Ruleset,
-    _flags: &Flags,
-    tokens: &mut Tokens<'_>,
-) -> Result<String, String> {
+fn list_map(rs: &Ruleset, _flags: &Flags, tokens: &mut Tokens<'_>) -> Result<String, String> {
     let (family, table_name) = parse_family_and_name(tokens)?;
     let map_name = tokens.expect("map name")?.to_string();
     let table = rs.get_table(family, &table_name)?;
@@ -2217,10 +2213,7 @@ fn list_map(
     Ok(out)
 }
 
-fn list_all_counters(
-    rs: &Ruleset,
-    tokens: &mut Tokens<'_>,
-) -> Result<String, String> {
+fn list_all_counters(rs: &Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String> {
     let family_filter = if let Some(tok) = tokens.peek() {
         Family::parse(tok).ok().inspect(|_f| {
             tokens.next_token();
@@ -2232,9 +2225,10 @@ fn list_all_counters(
     let mut out = String::new();
     for table in &rs.tables {
         if let Some(ff) = family_filter
-            && table.family != ff {
-                continue;
-            }
+            && table.family != ff
+        {
+            continue;
+        }
         for counter in &table.counters {
             out.push_str(&format!(
                 "table {} {} {{\n\tcounter {} {{\n\t\tpackets {} bytes {}\n\t}}\n}}\n",
@@ -2245,10 +2239,7 @@ fn list_all_counters(
     Ok(out)
 }
 
-fn list_all_quotas(
-    rs: &Ruleset,
-    tokens: &mut Tokens<'_>,
-) -> Result<String, String> {
+fn list_all_quotas(rs: &Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String> {
     let family_filter = if let Some(tok) = tokens.peek() {
         Family::parse(tok).ok().inspect(|_f| {
             tokens.next_token();
@@ -2260,9 +2251,10 @@ fn list_all_quotas(
     let mut out = String::new();
     for table in &rs.tables {
         if let Some(ff) = family_filter
-            && table.family != ff {
-                continue;
-            }
+            && table.family != ff
+        {
+            continue;
+        }
         for quota in &table.quotas {
             let inv_str = if quota.inv { "over " } else { "" };
             out.push_str(&format!(
@@ -2274,10 +2266,7 @@ fn list_all_quotas(
     Ok(out)
 }
 
-fn list_all_limits(
-    rs: &Ruleset,
-    tokens: &mut Tokens<'_>,
-) -> Result<String, String> {
+fn list_all_limits(rs: &Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String> {
     let family_filter = if let Some(tok) = tokens.peek() {
         Family::parse(tok).ok().inspect(|_f| {
             tokens.next_token();
@@ -2289,9 +2278,10 @@ fn list_all_limits(
     let mut out = String::new();
     for table in &rs.tables {
         if let Some(ff) = family_filter
-            && table.family != ff {
-                continue;
-            }
+            && table.family != ff
+        {
+            continue;
+        }
         for limit in &table.limits {
             out.push_str(&format!(
                 "table {} {} {{\n\tlimit {} {{\n\t\trate {}/{}\n",
@@ -2432,7 +2422,10 @@ fn format_table_nft(out: &mut String, table: &Table, flags: &Flags) {
     }
 
     for limit in &table.limits {
-        out.push_str(&format!("\tlimit {} {{\n\t\trate {}/{}\n", limit.name, limit.rate, limit.unit));
+        out.push_str(&format!(
+            "\tlimit {} {{\n\t\trate {}/{}\n",
+            limit.name, limit.rate, limit.unit
+        ));
         if let Some(b) = limit.burst {
             out.push_str(&format!("\t\tburst {} packets\n", b));
         }
@@ -2446,13 +2439,7 @@ fn format_table_nft(out: &mut String, table: &Table, flags: &Flags) {
     out.push_str("}\n");
 }
 
-fn format_chain_nft(
-    out: &mut String,
-    _table: &Table,
-    chain: &Chain,
-    flags: &Flags,
-    indent: usize,
-) {
+fn format_chain_nft(out: &mut String, _table: &Table, chain: &Chain, flags: &Flags, indent: usize) {
     let prefix: String = "\t".repeat(indent);
     out.push_str(&format!("{prefix}chain {} {{\n", chain.name));
     if let Some(ref cfg) = chain.base_config {
@@ -2620,11 +2607,7 @@ fn split_commands(tokens: &[String]) -> Vec<Vec<String>> {
 // Batch file processing
 // ---------------------------------------------------------------------------
 
-fn run_batch_file(
-    rs: &mut Ruleset,
-    flags: &Flags,
-    path: &str,
-) -> Result<String, String> {
+fn run_batch_file(rs: &mut Ruleset, flags: &Flags, path: &str) -> Result<String, String> {
     let content = if path == "-" {
         let mut buf = String::new();
         io::stdin()
@@ -2632,18 +2615,13 @@ fn run_batch_file(
             .map_err(|e| format!("failed to read stdin: {e}"))?;
         buf
     } else {
-        std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read '{path}': {e}"))?
+        std::fs::read_to_string(path).map_err(|e| format!("failed to read '{path}': {e}"))?
     };
 
     run_batch_string(rs, flags, &content)
 }
 
-fn run_batch_string(
-    rs: &mut Ruleset,
-    flags: &Flags,
-    content: &str,
-) -> Result<String, String> {
+fn run_batch_string(rs: &mut Ruleset, flags: &Flags, content: &str) -> Result<String, String> {
     let mut output = String::new();
     let mut line_num = 0u64;
 
@@ -2912,11 +2890,7 @@ mod tests {
         Ok(output)
     }
 
-    fn run_cmd_flags(
-        rs: &mut Ruleset,
-        flags: &Flags,
-        cmd: &str,
-    ) -> Result<String, String> {
+    fn run_cmd_flags(rs: &mut Ruleset, flags: &Flags, cmd: &str) -> Result<String, String> {
         let tokens = tokenize(cmd);
         let commands = split_commands(&tokens);
         let mut output = String::new();
@@ -3123,11 +3097,26 @@ mod tests {
 
     #[test]
     fn test_set_data_type_parse_all() {
-        assert_eq!(SetDataType::parse("ipv4_addr").unwrap(), SetDataType::Ipv4Addr);
-        assert_eq!(SetDataType::parse("ipv6_addr").unwrap(), SetDataType::Ipv6Addr);
-        assert_eq!(SetDataType::parse("ether_addr").unwrap(), SetDataType::EtherAddr);
-        assert_eq!(SetDataType::parse("inet_proto").unwrap(), SetDataType::InetProto);
-        assert_eq!(SetDataType::parse("inet_service").unwrap(), SetDataType::InetService);
+        assert_eq!(
+            SetDataType::parse("ipv4_addr").unwrap(),
+            SetDataType::Ipv4Addr
+        );
+        assert_eq!(
+            SetDataType::parse("ipv6_addr").unwrap(),
+            SetDataType::Ipv6Addr
+        );
+        assert_eq!(
+            SetDataType::parse("ether_addr").unwrap(),
+            SetDataType::EtherAddr
+        );
+        assert_eq!(
+            SetDataType::parse("inet_proto").unwrap(),
+            SetDataType::InetProto
+        );
+        assert_eq!(
+            SetDataType::parse("inet_service").unwrap(),
+            SetDataType::InetService
+        );
         assert_eq!(SetDataType::parse("mark").unwrap(), SetDataType::Mark);
         assert_eq!(SetDataType::parse("ifname").unwrap(), SetDataType::Ifname);
     }
@@ -3191,7 +3180,10 @@ mod tests {
 
     #[test]
     fn test_verdict_display_jump() {
-        assert_eq!(Verdict::Jump("mychain".to_string()).to_string(), "jump mychain");
+        assert_eq!(
+            Verdict::Jump("mychain".to_string()).to_string(),
+            "jump mychain"
+        );
     }
 
     #[test]
@@ -3236,7 +3228,9 @@ mod tests {
         let tokens = tokenize("add table ip t; add chain ip t c");
         assert_eq!(
             tokens,
-            vec!["add", "table", "ip", "t", ";", "add", "chain", "ip", "t", "c"]
+            vec![
+                "add", "table", "ip", "t", ";", "add", "chain", "ip", "t", "c"
+            ]
         );
     }
 
@@ -3510,11 +3504,7 @@ mod tests {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter input").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter input tcp dport 80 accept",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter input tcp dport 80 accept").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         assert_eq!(rule.matches.len(), 1);
     }
@@ -3524,11 +3514,7 @@ mod tests {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter input").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter input udp dport 53 accept",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter input udp dport 53 accept").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         assert_eq!(rule.matches.len(), 1);
     }
@@ -3576,11 +3562,7 @@ mod tests {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter output").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter output oifname \"lo\" accept",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter output oifname \"lo\" accept").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         match &rule.matches[0] {
             MatchExpr::Oifname { value, .. } => assert_eq!(value, "lo"),
@@ -3593,11 +3575,7 @@ mod tests {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter input").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter input meta mark 0x42 accept",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter input meta mark 0x42 accept").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         match &rule.matches[0] {
             MatchExpr::Meta { key, value, .. } => {
@@ -3647,11 +3625,7 @@ mod tests {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter input").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter input counter accept",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter input counter accept").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         assert_eq!(rule.verdicts.len(), 2);
         assert_eq!(rule.verdicts[0], Verdict::Counter);
@@ -3663,11 +3637,7 @@ mod tests {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter input").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter input log drop",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter input log drop").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         assert_eq!(rule.verdicts.len(), 2);
         assert_eq!(rule.verdicts[0], Verdict::Log { prefix: None });
@@ -3680,11 +3650,7 @@ mod tests {
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter input").unwrap();
         run_cmd(&mut rs, "add chain inet filter mychain").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter input jump mychain",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter input jump mychain").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         assert_eq!(rule.verdicts[0], Verdict::Jump("mychain".to_string()));
     }
@@ -3695,11 +3661,7 @@ mod tests {
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter input").unwrap();
         run_cmd(&mut rs, "add chain inet filter other").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter input goto other",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter input goto other").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         assert_eq!(rule.verdicts[0], Verdict::Goto("other".to_string()));
     }
@@ -3709,11 +3671,7 @@ mod tests {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter input").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter input tcp dport != 22 drop",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter input tcp dport != 22 drop").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         match &rule.matches[0] {
             MatchExpr::TcpDport { op, value } => {
@@ -3729,11 +3687,7 @@ mod tests {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter input").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter input ip protocol tcp accept",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter input ip protocol tcp accept").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         match &rule.matches[0] {
             MatchExpr::IpProtocol { value, .. } => assert_eq!(value, "tcp"),
@@ -3796,10 +3750,7 @@ mod tests {
         run_cmd(&mut rs, "add rule inet filter input accept").unwrap();
         run_cmd(&mut rs, "insert rule inet filter input drop").unwrap();
         assert_eq!(rs.tables[0].chains[0].rules[0].verdicts[0], Verdict::Drop);
-        assert_eq!(
-            rs.tables[0].chains[0].rules[1].verdicts[0],
-            Verdict::Accept
-        );
+        assert_eq!(rs.tables[0].chains[0].rules[1].verdicts[0], Verdict::Accept);
     }
 
     // -----------------------------------------------------------------------
@@ -3810,11 +3761,7 @@ mod tests {
     fn test_add_set() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add set inet filter myset { type ipv4_addr ; }",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add set inet filter myset { type ipv4_addr ; }").unwrap();
         assert_eq!(rs.tables[0].sets.len(), 1);
         assert_eq!(rs.tables[0].sets[0].name, "myset");
         assert_eq!(rs.tables[0].sets[0].key_type, SetDataType::Ipv4Addr);
@@ -3848,15 +3795,8 @@ mod tests {
     fn test_add_set_duplicate_error() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add set inet filter myset { type ipv4_addr ; }",
-        )
-        .unwrap();
-        let result = run_cmd(
-            &mut rs,
-            "add set inet filter myset { type ipv4_addr ; }",
-        );
+        run_cmd(&mut rs, "add set inet filter myset { type ipv4_addr ; }").unwrap();
+        let result = run_cmd(&mut rs, "add set inet filter myset { type ipv4_addr ; }");
         assert!(result.is_err());
     }
 
@@ -3864,11 +3804,7 @@ mod tests {
     fn test_add_element_to_set() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add set inet filter myset { type ipv4_addr ; }",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add set inet filter myset { type ipv4_addr ; }").unwrap();
         run_cmd(
             &mut rs,
             "add element inet filter myset { 10.0.0.1, 10.0.0.2 }",
@@ -3881,21 +3817,13 @@ mod tests {
     fn test_delete_element_from_set() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add set inet filter myset { type ipv4_addr ; }",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add set inet filter myset { type ipv4_addr ; }").unwrap();
         run_cmd(
             &mut rs,
             "add element inet filter myset { 10.0.0.1, 10.0.0.2 }",
         )
         .unwrap();
-        run_cmd(
-            &mut rs,
-            "delete element inet filter myset { 10.0.0.1 }",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "delete element inet filter myset { 10.0.0.1 }").unwrap();
         assert_eq!(rs.tables[0].sets[0].elements.len(), 1);
         assert_eq!(rs.tables[0].sets[0].elements[0], "10.0.0.2");
     }
@@ -3904,11 +3832,7 @@ mod tests {
     fn test_delete_set() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add set inet filter myset { type ipv4_addr ; }",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add set inet filter myset { type ipv4_addr ; }").unwrap();
         run_cmd(&mut rs, "delete set inet filter myset").unwrap();
         assert!(rs.tables[0].sets.is_empty());
     }
@@ -3917,16 +3841,8 @@ mod tests {
     fn test_flush_set() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add set inet filter myset { type ipv4_addr ; }",
-        )
-        .unwrap();
-        run_cmd(
-            &mut rs,
-            "add element inet filter myset { 1.2.3.4 }",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add set inet filter myset { type ipv4_addr ; }").unwrap();
+        run_cmd(&mut rs, "add element inet filter myset { 1.2.3.4 }").unwrap();
         run_cmd(&mut rs, "flush set inet filter myset").unwrap();
         assert!(rs.tables[0].sets[0].elements.is_empty());
     }
@@ -3935,16 +3851,8 @@ mod tests {
     fn test_list_set() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add set inet filter blocked { type ipv4_addr ; }",
-        )
-        .unwrap();
-        run_cmd(
-            &mut rs,
-            "add element inet filter blocked { 1.2.3.4 }",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add set inet filter blocked { type ipv4_addr ; }").unwrap();
+        run_cmd(&mut rs, "add element inet filter blocked { 1.2.3.4 }").unwrap();
         let out = run_cmd(&mut rs, "list set inet filter blocked").unwrap();
         assert!(out.contains("blocked"));
         assert!(out.contains("ipv4_addr"));
@@ -3974,15 +3882,8 @@ mod tests {
     fn test_add_map_duplicate_error() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add map inet filter m { type ipv4_addr : mark ; }",
-        )
-        .unwrap();
-        let result = run_cmd(
-            &mut rs,
-            "add map inet filter m { type ipv4_addr : mark ; }",
-        );
+        run_cmd(&mut rs, "add map inet filter m { type ipv4_addr : mark ; }").unwrap();
+        let result = run_cmd(&mut rs, "add map inet filter m { type ipv4_addr : mark ; }");
         assert!(result.is_err());
     }
 
@@ -3990,11 +3891,7 @@ mod tests {
     fn test_delete_map() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add map inet filter m { type ipv4_addr : mark ; }",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add map inet filter m { type ipv4_addr : mark ; }").unwrap();
         run_cmd(&mut rs, "delete map inet filter m").unwrap();
         assert!(rs.tables[0].maps.is_empty());
     }
@@ -4003,11 +3900,7 @@ mod tests {
     fn test_flush_map() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add map inet filter m { type ipv4_addr : mark ; }",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add map inet filter m { type ipv4_addr : mark ; }").unwrap();
         run_cmd(&mut rs, "flush map inet filter m").unwrap();
         assert!(rs.tables[0].maps[0].elements.is_empty());
     }
@@ -4267,11 +4160,7 @@ mod tests {
     fn test_list_sets() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add set inet filter myset { type ipv4_addr ; }",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add set inet filter myset { type ipv4_addr ; }").unwrap();
         let out = run_cmd(&mut rs, "list sets").unwrap();
         assert!(out.contains("myset"));
     }
@@ -4280,11 +4169,7 @@ mod tests {
     fn test_list_maps() {
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
-        run_cmd(
-            &mut rs,
-            "add map inet filter m { type ipv4_addr : mark ; }",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add map inet filter m { type ipv4_addr : mark ; }").unwrap();
         let out = run_cmd(&mut rs, "list maps").unwrap();
         assert!(out.contains("map m"));
     }
@@ -4342,7 +4227,11 @@ mod tests {
     #[test]
     fn test_semicolon_separated_commands() {
         let mut rs = Ruleset::new();
-        run_cmd(&mut rs, "add table inet filter ; add chain inet filter input").unwrap();
+        run_cmd(
+            &mut rs,
+            "add table inet filter ; add chain inet filter input",
+        )
+        .unwrap();
         assert_eq!(rs.tables.len(), 1);
         assert_eq!(rs.tables[0].chains.len(), 1);
     }
@@ -4791,11 +4680,7 @@ add rule inet filter input ip saddr @blocklist drop
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter output").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter output tcp sport 443 accept",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter output tcp sport 443 accept").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         match &rule.matches[0] {
             MatchExpr::TcpSport { value, .. } => assert_eq!(value, "443"),
@@ -4808,11 +4693,7 @@ add rule inet filter input ip saddr @blocklist drop
         let mut rs = Ruleset::new();
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter input").unwrap();
-        run_cmd(
-            &mut rs,
-            "add rule inet filter input udp sport 1234 accept",
-        )
-        .unwrap();
+        run_cmd(&mut rs, "add rule inet filter input udp sport 1234 accept").unwrap();
         let rule = &rs.tables[0].chains[0].rules[0];
         match &rule.matches[0] {
             MatchExpr::UdpSport { value, .. } => assert_eq!(value, "1234"),
@@ -4877,10 +4758,7 @@ add rule inet filter input ip saddr @blocklist drop
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(&mut rs, "add chain inet filter mychain").unwrap();
         run_cmd(&mut rs, "add rule inet filter mychain return").unwrap();
-        assert_eq!(
-            rs.tables[0].chains[0].rules[0].verdicts[0],
-            Verdict::Return
-        );
+        assert_eq!(rs.tables[0].chains[0].rules[0].verdicts[0], Verdict::Return);
     }
 
     #[test]
@@ -4914,10 +4792,16 @@ add rule inet filter input ip saddr @blocklist drop
         let mut table = Table::new(Family::Inet, "test");
         table.chains.push(Chain::new("c1"));
         table.sets.push(NamedSet::new("s1", SetDataType::Ipv4Addr));
-        table.maps.push(NamedMap::new("m1", SetDataType::Ipv4Addr, SetDataType::Mark));
+        table.maps.push(NamedMap::new(
+            "m1",
+            SetDataType::Ipv4Addr,
+            SetDataType::Mark,
+        ));
         table.counters.push(CounterObj::new("cnt1"));
         table.quotas.push(QuotaObj::new("q1", 1000, false));
-        table.limits.push(LimitObj::new("l1", 100, LimitUnit::Second));
+        table
+            .limits
+            .push(LimitObj::new("l1", 100, LimitUnit::Second));
 
         assert_eq!(table.find_chain("c1"), Some(0));
         assert_eq!(table.find_chain("noexist"), None);

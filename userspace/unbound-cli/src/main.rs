@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_unbound(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -84,7 +88,9 @@ fn run_unbound_control(args: &[String]) -> i32 {
             println!(". IN forward 8.8.8.8 8.8.4.4");
             println!("corp.example.com. IN forward 10.0.0.53");
         }
-        "dump_cache" => println!("START_RRSET_CACHE\nEND_RRSET_CACHE\nSTART_MSG_CACHE\nEND_MSG_CACHE\nEOF"),
+        "dump_cache" => {
+            println!("START_RRSET_CACHE\nEND_RRSET_CACHE\nSTART_MSG_CACHE\nEND_MSG_CACHE\nEOF")
+        }
         _ => println!("ok"),
     }
     0
@@ -95,21 +101,34 @@ fn run_unbound_host(args: &[String]) -> i32 {
         println!("Usage: unbound-host [-v] [-t type] <name>");
         return 0;
     }
-    let name = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("example.com");
+    let name = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("example.com");
     println!("{} has address 93.184.216.34 (secure)", name);
-    println!("{} has IPv6 address 2606:2800:220:1:248:1893:25c8:1946 (secure)", name);
+    println!(
+        "{} has IPv6 address 2606:2800:220:1:248:1893:25c8:1946 (secure)",
+        name
+    );
     println!("{} mail is handled by 10 mail.{} (secure)", name, name);
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "unbound".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "unbound".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "unbound-control" => run_unbound_control(&rest),
         "unbound-host" => run_unbound_host(&rest),
-        "unbound-checkconf" => { println!("unbound-checkconf: no errors in /etc/unbound/unbound.conf"); 0 }
+        "unbound-checkconf" => {
+            println!("unbound-checkconf: no errors in /etc/unbound/unbound.conf");
+            0
+        }
         _ => run_unbound(&rest),
     };
     process::exit(code);
@@ -117,7 +136,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_unbound};
+    use super::{basename, run_unbound, strip_ext};
 
     #[test]
     fn basename_strips_path() {

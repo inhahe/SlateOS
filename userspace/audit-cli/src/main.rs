@@ -82,12 +82,18 @@ fn run_ausearch(args: &[String]) -> i32 {
 
     println!("----");
     println!("time->Thu Jan  1 10:00:00 2025");
-    println!("type=SYSCALL msg=audit(1735689600.000:100): arch=c000003e syscall=59 success=yes exit=0 a0=7fff ppid=1000 pid=1234 uid=1000 gid=1000 comm=\"bash\" exe=\"/usr/bin/bash\"");
+    println!(
+        "type=SYSCALL msg=audit(1735689600.000:100): arch=c000003e syscall=59 success=yes exit=0 a0=7fff ppid=1000 pid=1234 uid=1000 gid=1000 comm=\"bash\" exe=\"/usr/bin/bash\""
+    );
     println!("type=EXECVE msg=audit(1735689600.000:100): argc=2 a0=\"/usr/bin/ls\" a1=\"-la\"");
-    println!("type=PATH msg=audit(1735689600.000:100): item=0 name=\"/usr/bin/ls\" inode=12345 dev=08:02 mode=0100755 ouid=0 ogid=0");
+    println!(
+        "type=PATH msg=audit(1735689600.000:100): item=0 name=\"/usr/bin/ls\" inode=12345 dev=08:02 mode=0100755 ouid=0 ogid=0"
+    );
     println!("----");
     println!("time->Thu Jan  1 10:01:00 2025");
-    println!("type=USER_AUTH msg=audit(1735689660.000:101): pid=5678 uid=0 auid=1000 msg='op=PAM:authentication acct=\"user\" exe=\"/usr/bin/sudo\" res=success'");
+    println!(
+        "type=USER_AUTH msg=audit(1735689660.000:101): pid=5678 uid=0 auid=1000 msg='op=PAM:authentication acct=\"user\" exe=\"/usr/bin/sudo\" res=success'"
+    );
     0
 }
 
@@ -168,7 +174,8 @@ fn run_autrace(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "auditctl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -185,7 +192,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_auditctl};
+    use super::{basename, run_auditctl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

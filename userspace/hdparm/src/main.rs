@@ -55,7 +55,8 @@ fn detect_personality(argv0: &[u8]) -> Personality {
         argv0
     };
 
-    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe") {
+    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe")
+    {
         &basename[..basename.len() - 4]
     } else {
         basename
@@ -74,13 +75,13 @@ struct DriveInfo {
     model: Vec<u8>,
     serial: Vec<u8>,
     firmware: Vec<u8>,
-    transport: Vec<u8>,     // "SATA 3.0", "SATA 2.0", etc.
+    transport: Vec<u8>, // "SATA 3.0", "SATA 2.0", etc.
     sector_size_logical: u32,
     sector_size_physical: u32,
     capacity_sectors: u64,
     features: u32,
-    rpm: u32,               // 0 = SSD
-    form_factor: Vec<u8>,   // "2.5 inch", "3.5 inch", "M.2"
+    rpm: u32,             // 0 = SSD
+    form_factor: Vec<u8>, // "2.5 inch", "3.5 inch", "M.2"
     sata_version: Vec<u8>,
     queue_depth: u32,
 }
@@ -102,15 +103,15 @@ struct DriveSettings {
 struct HdparmArgs {
     device: Vec<u8>,
     // Query operations
-    show_info: bool,         // -i/-I (identify)
-    show_geometry: bool,     // -g (geometry)
-    show_settings: bool,     // default if no flags
-    show_readonly: bool,     // -r (readonly flag)
-    timed_read: bool,        // -t (timing buffered reads)
-    timed_cache: bool,       // -T (timing cache reads)
+    show_info: bool,     // -i/-I (identify)
+    show_geometry: bool, // -g (geometry)
+    show_settings: bool, // default if no flags
+    show_readonly: bool, // -r (readonly flag)
+    timed_read: bool,    // -t (timing buffered reads)
+    timed_cache: bool,   // -T (timing cache reads)
     // Set operations
-    set_read_ahead: Option<bool>,   // -A 0/1
-    set_write_cache: Option<bool>,  // -W 0/1
+    set_read_ahead: Option<bool>,  // -A 0/1
+    set_write_cache: Option<bool>, // -W 0/1
     set_apm: Option<u8>,           // -B <level>
     set_aam: Option<u8>,           // -M <level>
     set_standby: Option<u16>,      // -S <timeout>
@@ -120,15 +121,15 @@ struct HdparmArgs {
     set_unmaskirq: Option<bool>,   // -u 0/1
     set_readonly: Option<bool>,    // -r 0/1
     // Security
-    security_freeze: bool,          // --security-freeze
+    security_freeze: bool, // --security-freeze
     // TRIM
-    trim_sector: Option<u64>,      // --trim-sector-ranges
+    trim_sector: Option<u64>, // --trim-sector-ranges
     // Other
-    flush_cache: bool,              // -f (flush)
-    sleep: bool,                    // -Y (sleep)
-    standby: bool,                  // -y (standby)
-    idle: bool,                     // -E (idle)
-    direct: bool,                   // --direct (O_DIRECT)
+    flush_cache: bool, // -f (flush)
+    sleep: bool,       // -Y (sleep)
+    standby: bool,     // -y (standby)
+    idle: bool,        // -E (idle)
+    direct: bool,      // --direct (O_DIRECT)
     verbose: bool,
     show_help: bool,
     show_version: bool,
@@ -259,7 +260,11 @@ fn parse_u8_arg(arg: &[u8], prefix: &[u8], args: &[Vec<u8>], i: &mut usize) -> u
         &arg[prefix.len()..]
     } else {
         *i += 1;
-        if *i < args.len() { &args[*i] } else { return 0; }
+        if *i < args.len() {
+            &args[*i]
+        } else {
+            return 0;
+        }
     };
     parse_u64_bytes(val_bytes).unwrap_or(0) as u8
 }
@@ -269,7 +274,11 @@ fn parse_u16_arg(arg: &[u8], prefix: &[u8], args: &[Vec<u8>], i: &mut usize) -> 
         &arg[prefix.len()..]
     } else {
         *i += 1;
-        if *i < args.len() { &args[*i] } else { return 0; }
+        if *i < args.len() {
+            &args[*i]
+        } else {
+            return 0;
+        }
     };
     parse_u64_bytes(val_bytes).unwrap_or(0) as u16
 }
@@ -481,7 +490,9 @@ fn cmd_sdparm(args: &HdparmArgs) -> i32 {
 
 fn parse_u64_bytes(s: &[u8]) -> Option<u64> {
     let s = trim_bytes(s);
-    if s.is_empty() { return None; }
+    if s.is_empty() {
+        return None;
+    }
     let mut result: u64 = 0;
     for &b in s {
         match b {
@@ -495,7 +506,9 @@ fn parse_u64_bytes(s: &[u8]) -> Option<u64> {
 }
 
 fn format_u64(mut n: u64) -> Vec<u8> {
-    if n == 0 { return vec![b'0']; }
+    if n == 0 {
+        return vec![b'0'];
+    }
     let mut buf = Vec::new();
     while n > 0 {
         buf.push(b'0' + (n % 10) as u8);
@@ -506,31 +519,51 @@ fn format_u64(mut n: u64) -> Vec<u8> {
 }
 
 fn trim_bytes(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n').unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
-        .map(|p| p + 1).unwrap_or(start);
+    let start = s
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+        .unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+        .map(|p| p + 1)
+        .unwrap_or(start);
     if start >= end { &[] } else { &s[start..end] }
 }
 
 fn print_out(msg: &[u8]) {
     #[cfg(not(test))]
-    { use std::io::Write; let _ = std::io::stdout().write_all(msg); }
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(msg);
+    }
     #[cfg(test)]
-    { let _ = msg; }
+    {
+        let _ = msg;
+    }
 }
 
 fn print_err(msg: &[u8]) {
     #[cfg(not(test))]
-    { use std::io::Write; let _ = std::io::stderr().write_all(msg); }
+    {
+        use std::io::Write;
+        let _ = std::io::stderr().write_all(msg);
+    }
     #[cfg(test)]
-    { let _ = msg; }
+    {
+        let _ = msg;
+    }
 }
 
 fn get_args() -> Vec<Vec<u8>> {
     #[cfg(not(test))]
-    { std::env::args().map(|a| a.into_bytes()).collect() }
+    {
+        std::env::args().map(|a| a.into_bytes()).collect()
+    }
     #[cfg(test)]
-    { Vec::new() }
+    {
+        Vec::new()
+    }
 }
 
 // ── Entry Point ────────────────────────────────────────────────────────
@@ -539,7 +572,9 @@ fn get_args() -> Vec<Vec<u8>> {
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let args = get_args();
-    if args.is_empty() { return 1; }
+    if args.is_empty() {
+        return 1;
+    }
 
     let personality = detect_personality(&args[0]);
     let rest: Vec<Vec<u8>> = args.into_iter().skip(1).collect();
@@ -657,14 +692,33 @@ mod tests {
     #[test]
     fn test_hdparm_no_device() {
         let args = HdparmArgs {
-            device: Vec::new(), show_info: false, show_geometry: false,
-            show_settings: true, show_readonly: false, timed_read: false,
-            timed_cache: false, set_read_ahead: None, set_write_cache: None,
-            set_apm: None, set_aam: None, set_standby: None, set_multcount: None,
-            set_dma: None, set_io32bit: None, set_unmaskirq: None, set_readonly: None,
-            security_freeze: false, trim_sector: None, flush_cache: false,
-            sleep: false, standby: false, idle: false, direct: false,
-            verbose: false, show_help: false, show_version: false,
+            device: Vec::new(),
+            show_info: false,
+            show_geometry: false,
+            show_settings: true,
+            show_readonly: false,
+            timed_read: false,
+            timed_cache: false,
+            set_read_ahead: None,
+            set_write_cache: None,
+            set_apm: None,
+            set_aam: None,
+            set_standby: None,
+            set_multcount: None,
+            set_dma: None,
+            set_io32bit: None,
+            set_unmaskirq: None,
+            set_readonly: None,
+            security_freeze: false,
+            trim_sector: None,
+            flush_cache: false,
+            sleep: false,
+            standby: false,
+            idle: false,
+            direct: false,
+            verbose: false,
+            show_help: false,
+            show_version: false,
         };
         assert_eq!(cmd_hdparm(&args), 1);
     }
@@ -672,14 +726,33 @@ mod tests {
     #[test]
     fn test_hdparm_help() {
         let args = HdparmArgs {
-            device: Vec::new(), show_info: false, show_geometry: false,
-            show_settings: false, show_readonly: false, timed_read: false,
-            timed_cache: false, set_read_ahead: None, set_write_cache: None,
-            set_apm: None, set_aam: None, set_standby: None, set_multcount: None,
-            set_dma: None, set_io32bit: None, set_unmaskirq: None, set_readonly: None,
-            security_freeze: false, trim_sector: None, flush_cache: false,
-            sleep: false, standby: false, idle: false, direct: false,
-            verbose: false, show_help: true, show_version: false,
+            device: Vec::new(),
+            show_info: false,
+            show_geometry: false,
+            show_settings: false,
+            show_readonly: false,
+            timed_read: false,
+            timed_cache: false,
+            set_read_ahead: None,
+            set_write_cache: None,
+            set_apm: None,
+            set_aam: None,
+            set_standby: None,
+            set_multcount: None,
+            set_dma: None,
+            set_io32bit: None,
+            set_unmaskirq: None,
+            set_readonly: None,
+            security_freeze: false,
+            trim_sector: None,
+            flush_cache: false,
+            sleep: false,
+            standby: false,
+            idle: false,
+            direct: false,
+            verbose: false,
+            show_help: true,
+            show_version: false,
         };
         assert_eq!(cmd_hdparm(&args), 0);
     }
@@ -712,14 +785,33 @@ mod tests {
     #[test]
     fn test_sdparm_no_device() {
         let args = HdparmArgs {
-            device: Vec::new(), show_info: false, show_geometry: false,
-            show_settings: false, show_readonly: false, timed_read: false,
-            timed_cache: false, set_read_ahead: None, set_write_cache: None,
-            set_apm: None, set_aam: None, set_standby: None, set_multcount: None,
-            set_dma: None, set_io32bit: None, set_unmaskirq: None, set_readonly: None,
-            security_freeze: false, trim_sector: None, flush_cache: false,
-            sleep: false, standby: false, idle: false, direct: false,
-            verbose: false, show_help: false, show_version: false,
+            device: Vec::new(),
+            show_info: false,
+            show_geometry: false,
+            show_settings: false,
+            show_readonly: false,
+            timed_read: false,
+            timed_cache: false,
+            set_read_ahead: None,
+            set_write_cache: None,
+            set_apm: None,
+            set_aam: None,
+            set_standby: None,
+            set_multcount: None,
+            set_dma: None,
+            set_io32bit: None,
+            set_unmaskirq: None,
+            set_readonly: None,
+            security_freeze: false,
+            trim_sector: None,
+            flush_cache: false,
+            sleep: false,
+            standby: false,
+            idle: false,
+            direct: false,
+            verbose: false,
+            show_help: false,
+            show_version: false,
         };
         assert_eq!(cmd_sdparm(&args), 1);
     }
@@ -743,9 +835,18 @@ mod tests {
         assert_ne!(ATA_FLAG_LBA, ATA_FLAG_LBA48);
         assert_ne!(ATA_FLAG_NCQ, ATA_FLAG_SMART);
         // Flags should be non-overlapping powers of 2
-        let all = ATA_FLAG_LBA | ATA_FLAG_LBA48 | ATA_FLAG_NCQ | ATA_FLAG_SMART
-                | ATA_FLAG_APM | ATA_FLAG_AAM | ATA_FLAG_WRITE_CACHE | ATA_FLAG_READ_AHEAD
-                | ATA_FLAG_SECURITY | ATA_FLAG_HPA | ATA_FLAG_TRIM | ATA_FLAG_DEVSLP;
+        let all = ATA_FLAG_LBA
+            | ATA_FLAG_LBA48
+            | ATA_FLAG_NCQ
+            | ATA_FLAG_SMART
+            | ATA_FLAG_APM
+            | ATA_FLAG_AAM
+            | ATA_FLAG_WRITE_CACHE
+            | ATA_FLAG_READ_AHEAD
+            | ATA_FLAG_SECURITY
+            | ATA_FLAG_HPA
+            | ATA_FLAG_TRIM
+            | ATA_FLAG_DEVSLP;
         assert_eq!(all.count_ones(), 12);
     }
 }

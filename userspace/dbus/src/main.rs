@@ -239,10 +239,17 @@ impl DbusType {
             Self::Byte(_) | Self::Signature(_) => 1,
             Self::Boolean(_) | Self::Int16(_) | Self::Uint16(_) => 2,
             // Note: boolean is actually 4-byte aligned in D-Bus wire format
-            Self::Int32(_) | Self::Uint32(_) | Self::String(_)
-            | Self::ObjectPath(_) | Self::Array(_) | Self::UnixFd(_) => 4,
-            Self::Int64(_) | Self::Uint64(_) | Self::Double(_)
-            | Self::Struct(_) | Self::DictEntry(_, _) => 8,
+            Self::Int32(_)
+            | Self::Uint32(_)
+            | Self::String(_)
+            | Self::ObjectPath(_)
+            | Self::Array(_)
+            | Self::UnixFd(_) => 4,
+            Self::Int64(_)
+            | Self::Uint64(_)
+            | Self::Double(_)
+            | Self::Struct(_)
+            | Self::DictEntry(_, _) => 8,
             Self::Variant(_) => 1,
         }
     }
@@ -432,7 +439,12 @@ impl MarshalBuffer {
                 // Align to element type alignment
                 let elem_alignment = if let Some(first) = items.first() {
                     wire_alignment_for_sig_char(
-                        first.signature_str().as_bytes().first().copied().unwrap_or(b'v'),
+                        first
+                            .signature_str()
+                            .as_bytes()
+                            .first()
+                            .copied()
+                            .unwrap_or(b'v'),
                     )
                 } else {
                     1
@@ -628,9 +640,8 @@ impl<'a> UnmarshalCursor<'a> {
         let len = self.read_u32()? as usize;
         self.check_remaining(len + 1)?; // +1 for NUL
         let bytes = &self.data[self.pos..self.pos + len];
-        let s = String::from_utf8(bytes.to_vec()).map_err(|e| {
-            DbusError::UnmarshalError(format!("invalid UTF-8 in string: {e}"))
-        })?;
+        let s = String::from_utf8(bytes.to_vec())
+            .map_err(|e| DbusError::UnmarshalError(format!("invalid UTF-8 in string: {e}")))?;
         self.pos += len + 1; // skip NUL
         Ok(s)
     }
@@ -645,9 +656,8 @@ impl<'a> UnmarshalCursor<'a> {
         let len = self.read_byte()? as usize;
         self.check_remaining(len + 1)?; // +1 for NUL
         let bytes = &self.data[self.pos..self.pos + len];
-        let s = String::from_utf8(bytes.to_vec()).map_err(|e| {
-            DbusError::UnmarshalError(format!("invalid UTF-8 in signature: {e}"))
-        })?;
+        let s = String::from_utf8(bytes.to_vec())
+            .map_err(|e| DbusError::UnmarshalError(format!("invalid UTF-8 in signature: {e}")))?;
         self.pos += len + 1; // skip NUL
         Ok(s)
     }
@@ -1127,16 +1137,18 @@ impl DbusMessage {
 
         // Parse body if there's a signature
         if let Some(ref sig) = msg.signature
-            && !sig.is_empty() && body_start < data.len() {
-                let body_data = &data[body_start..];
-                let mut body_cursor = UnmarshalCursor::new(body_data, endian);
-                let mut sig_bytes = sig.as_bytes();
+            && !sig.is_empty()
+            && body_start < data.len()
+        {
+            let body_data = &data[body_start..];
+            let mut body_cursor = UnmarshalCursor::new(body_data, endian);
+            let mut sig_bytes = sig.as_bytes();
 
-                while !sig_bytes.is_empty() && body_cursor.remaining() > 0 {
-                    let val = body_cursor.read_value(&mut sig_bytes)?;
-                    msg.body.push(val);
-                }
+            while !sig_bytes.is_empty() && body_cursor.remaining() > 0 {
+                let val = body_cursor.read_value(&mut sig_bytes)?;
+                msg.body.push(val);
             }
+        }
 
         Ok(msg)
     }
@@ -1191,9 +1203,7 @@ pub fn validate_bus_name(name: &str) -> Result<(), DbusError> {
     if name.starts_with(':') {
         // Unique connection name: :N.M
         if name.len() < 4 {
-            return Err(DbusError::InvalidBusName(
-                "unique name too short".into(),
-            ));
+            return Err(DbusError::InvalidBusName("unique name too short".into()));
         }
         return Ok(());
     }
@@ -1208,9 +1218,7 @@ pub fn validate_bus_name(name: &str) -> Result<(), DbusError> {
 
     for elem in &elements {
         if elem.is_empty() {
-            return Err(DbusError::InvalidBusName(
-                "empty element in name".into(),
-            ));
+            return Err(DbusError::InvalidBusName("empty element in name".into()));
         }
         for (i, c) in elem.chars().enumerate() {
             if i == 0 && c.is_ascii_digit() {
@@ -1309,14 +1317,10 @@ pub fn validate_member_name(name: &str) -> Result<(), DbusError> {
     }
     for (i, c) in name.chars().enumerate() {
         if i == 0 && c.is_ascii_digit() {
-            return Err(DbusError::InvalidMember(
-                "cannot start with digit".into(),
-            ));
+            return Err(DbusError::InvalidMember("cannot start with digit".into()));
         }
         if !c.is_ascii_alphanumeric() && c != '_' {
-            return Err(DbusError::InvalidMember(format!(
-                "invalid character '{c}'"
-            )));
+            return Err(DbusError::InvalidMember(format!("invalid character '{c}'")));
         }
     }
     Ok(())
@@ -1342,23 +1346,19 @@ fn validate_single_complete_type(sig: &[u8], pos: usize) -> Result<usize, DbusEr
         ));
     }
     match sig[pos] {
-        b'y' | b'b' | b'n' | b'q' | b'i' | b'u' | b'x' | b't' | b'd' | b's' | b'o'
-        | b'g' | b'v' | b'h' => Ok(pos + 1),
+        b'y' | b'b' | b'n' | b'q' | b'i' | b'u' | b'x' | b't' | b'd' | b's' | b'o' | b'g'
+        | b'v' | b'h' => Ok(pos + 1),
         b'a' => validate_single_complete_type(sig, pos + 1),
         b'(' => {
             let mut p = pos + 1;
             if p >= sig.len() || sig[p] == b')' {
-                return Err(DbusError::MarshalError(
-                    "empty struct in signature".into(),
-                ));
+                return Err(DbusError::MarshalError("empty struct in signature".into()));
             }
             while p < sig.len() && sig[p] != b')' {
                 p = validate_single_complete_type(sig, p)?;
             }
             if p >= sig.len() {
-                return Err(DbusError::MarshalError(
-                    "unmatched '(' in signature".into(),
-                ));
+                return Err(DbusError::MarshalError("unmatched '(' in signature".into()));
             }
             Ok(p + 1) // skip ')'
         }
@@ -1366,9 +1366,7 @@ fn validate_single_complete_type(sig: &[u8], pos: usize) -> Result<usize, DbusEr
             let mut p = pos + 1;
             // Key must be a basic type
             if p >= sig.len() {
-                return Err(DbusError::MarshalError(
-                    "unmatched '{' in signature".into(),
-                ));
+                return Err(DbusError::MarshalError("unmatched '{' in signature".into()));
             }
             p = validate_single_complete_type(sig, p)?;
             // Value
@@ -1379,9 +1377,7 @@ fn validate_single_complete_type(sig: &[u8], pos: usize) -> Result<usize, DbusEr
             }
             p = validate_single_complete_type(sig, p)?;
             if p >= sig.len() || sig[p] != b'}' {
-                return Err(DbusError::MarshalError(
-                    "unmatched '{' in signature".into(),
-                ));
+                return Err(DbusError::MarshalError("unmatched '{' in signature".into()));
             }
             Ok(p + 1) // skip '}'
         }
@@ -1462,25 +1458,30 @@ impl MatchRule {
     /// Check if a message matches this rule.
     pub fn matches(&self, msg: &DbusMessage) -> bool {
         if let Some(t) = self.msg_type
-            && msg.message_type != t {
-                return false;
-            }
+            && msg.message_type != t
+        {
+            return false;
+        }
         if let Some(ref s) = self.sender
-            && msg.sender.as_deref() != Some(s.as_str()) {
-                return false;
-            }
+            && msg.sender.as_deref() != Some(s.as_str())
+        {
+            return false;
+        }
         if let Some(ref i) = self.interface
-            && msg.interface.as_deref() != Some(i.as_str()) {
-                return false;
-            }
+            && msg.interface.as_deref() != Some(i.as_str())
+        {
+            return false;
+        }
         if let Some(ref m) = self.member
-            && msg.member.as_deref() != Some(m.as_str()) {
-                return false;
-            }
+            && msg.member.as_deref() != Some(m.as_str())
+        {
+            return false;
+        }
         if let Some(ref p) = self.path
-            && msg.path.as_deref() != Some(p.as_str()) {
-                return false;
-            }
+            && msg.path.as_deref() != Some(p.as_str())
+        {
+            return false;
+        }
         if let Some(ref ns) = self.path_namespace {
             match &msg.path {
                 Some(p) => {
@@ -1492,9 +1493,10 @@ impl MatchRule {
             }
         }
         if let Some(ref d) = self.destination
-            && msg.destination.as_deref() != Some(d.as_str()) {
-                return false;
-            }
+            && msg.destination.as_deref() != Some(d.as_str())
+        {
+            return false;
+        }
         if let Some(ref a0) = self.arg0 {
             // Match first string argument in body
             let first_str = msg.body.first().and_then(|v| {
@@ -1787,9 +1789,7 @@ impl BusDaemon {
         let mut properties = HashMap::new();
         properties.insert(
             "Features".to_string(),
-            DbusType::Array(vec![
-                DbusType::String("SystemdActivation".to_string()),
-            ]),
+            DbusType::Array(vec![DbusType::String("SystemdActivation".to_string())]),
         );
         properties.insert(
             "Interfaces".to_string(),
@@ -1851,13 +1851,10 @@ impl BusDaemon {
 
         // Also signal that the unique name itself went away
         let serial = self.alloc_serial();
-        let mut sig =
-            DbusMessage::signal(serial, DBUS_PATH, DBUS_INTERFACE, "NameOwnerChanged");
+        let mut sig = DbusMessage::signal(serial, DBUS_PATH, DBUS_INTERFACE, "NameOwnerChanged");
         sig.sender = Some(DBUS_BUS_NAME.to_string());
-        sig.body
-            .push(DbusType::String(unique_name.to_string()));
-        sig.body
-            .push(DbusType::String(unique_name.to_string()));
+        sig.body.push(DbusType::String(unique_name.to_string()));
+        sig.body.push(DbusType::String(unique_name.to_string()));
         sig.body.push(DbusType::String(String::new()));
         sig.signature = Some("sss".to_string());
         signals.push(sig);
@@ -1938,8 +1935,7 @@ impl BusDaemon {
                     _ => 0,
                 };
 
-                let (result_code, old_owner) =
-                    self.names.request_name(&name, sender, flags)?;
+                let (result_code, old_owner) = self.names.request_name(&name, sender, flags)?;
 
                 let serial = self.alloc_serial();
                 let mut reply = DbusMessage::method_return(serial, msg.serial);
@@ -1968,12 +1964,8 @@ impl BusDaemon {
 
                     // NameAcquired to new owner
                     let acq_serial = self.alloc_serial();
-                    let mut acq = DbusMessage::signal(
-                        acq_serial,
-                        DBUS_PATH,
-                        DBUS_INTERFACE,
-                        "NameAcquired",
-                    );
+                    let mut acq =
+                        DbusMessage::signal(acq_serial, DBUS_PATH, DBUS_INTERFACE, "NameAcquired");
                     acq.sender = Some(DBUS_BUS_NAME.to_string());
                     acq.destination = Some(sender.to_string());
                     acq.body.push(DbusType::String(name));
@@ -1992,8 +1984,7 @@ impl BusDaemon {
                     }
                 };
 
-                let (result_code, new_owner) =
-                    self.names.release_name(&name, sender)?;
+                let (result_code, new_owner) = self.names.release_name(&name, sender)?;
 
                 let serial = self.alloc_serial();
                 let mut reply = DbusMessage::method_return(serial, msg.serial);
@@ -2021,12 +2012,8 @@ impl BusDaemon {
 
                     // NameLost to old owner
                     let lost_serial = self.alloc_serial();
-                    let mut lost = DbusMessage::signal(
-                        lost_serial,
-                        DBUS_PATH,
-                        DBUS_INTERFACE,
-                        "NameLost",
-                    );
+                    let mut lost =
+                        DbusMessage::signal(lost_serial, DBUS_PATH, DBUS_INTERFACE, "NameLost");
                     lost.sender = Some(DBUS_BUS_NAME.to_string());
                     lost.destination = Some(sender.to_string());
                     lost.body.push(DbusType::String(name));
@@ -2216,8 +2203,7 @@ impl BusDaemon {
                 ));
             }
 
-            "GetConnectionUnixUser" | "GetConnectionUnixProcessID"
-            | "GetConnectionCredentials" => {
+            "GetConnectionUnixUser" | "GetConnectionUnixProcessID" | "GetConnectionCredentials" => {
                 // Return dummy values (no real Unix underneath).
                 let serial = self.alloc_serial();
                 let mut reply = DbusMessage::method_return(serial, msg.serial);
@@ -2333,9 +2319,7 @@ impl BusDaemon {
                     let mut reply = DbusMessage::method_return(serial, msg.serial);
                     reply.sender = Some(DBUS_BUS_NAME.to_string());
                     reply.destination = Some(sender.to_string());
-                    reply
-                        .body
-                        .push(DbusType::Variant(Box::new(val.clone())));
+                    reply.body.push(DbusType::Variant(Box::new(val.clone())));
                     reply.signature = Some("v".to_string());
                     Ok(vec![reply])
                 } else {
@@ -2407,10 +2391,7 @@ impl BusDaemon {
     }
 
     /// Route a message to the appropriate destination.
-    pub fn route_message(
-        &self,
-        msg: &DbusMessage,
-    ) -> Vec<String> {
+    pub fn route_message(&self, msg: &DbusMessage) -> Vec<String> {
         let mut destinations = Vec::new();
 
         // Direct destination
@@ -2422,9 +2403,10 @@ impl BusDaemon {
 
             // Resolve well-known name to unique name
             if let Some(owner) = self.names.get_name_owner(dest)
-                && !destinations.contains(&owner.to_string()) {
-                    destinations.push(owner.to_string());
-                }
+                && !destinations.contains(&owner.to_string())
+            {
+                destinations.push(owner.to_string());
+            }
         }
 
         // For signals, also check match rules
@@ -2452,7 +2434,9 @@ impl BusDaemon {
 
 fn generate_introspection_xml() -> String {
     let mut xml = String::new();
-    xml.push_str("<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\"\n");
+    xml.push_str(
+        "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\"\n",
+    );
     xml.push_str("  \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n");
     xml.push_str("<node name=\"/org/freedesktop/DBus\">\n");
 
@@ -2638,9 +2622,8 @@ pub enum PolicyContext {
 impl BusConfig {
     /// Parse a D-Bus configuration file (simplified XML-like format).
     pub fn parse_file(path: &Path) -> Result<Self, DbusError> {
-        let content = fs::read_to_string(path).map_err(|e| {
-            DbusError::ConfigError(format!("cannot read {}: {e}", path.display()))
-        })?;
+        let content = fs::read_to_string(path)
+            .map_err(|e| DbusError::ConfigError(format!("cannot read {}: {e}", path.display())))?;
         Self::parse_str(&content)
     }
 
@@ -2667,22 +2650,25 @@ impl BusConfig {
             } else if line.contains("<limit name=\"max_incoming_bytes\">") {
                 // Parse limits
                 if let Some(val) = extract_xml_text(line, "limit")
-                    && let Ok(n) = val.parse::<u32>() {
-                        config.max_message_size = n;
-                    }
+                    && let Ok(n) = val.parse::<u32>()
+                {
+                    config.max_message_size = n;
+                }
             } else if line.contains("<limit name=\"max_connections\">") {
                 if let Some(val) = extract_xml_text(line, "limit")
-                    && let Ok(n) = val.parse::<usize>() {
-                        config.max_connections = n;
-                    }
+                    && let Ok(n) = val.parse::<usize>()
+                {
+                    config.max_connections = n;
+                }
             } else if line.contains("<allow") {
                 if let Some(rule) = parse_policy_rule(line, true) {
                     config.policies.push(rule);
                 }
             } else if line.contains("<deny")
-                && let Some(rule) = parse_policy_rule(line, false) {
-                    config.policies.push(rule);
-                }
+                && let Some(rule) = parse_policy_rule(line, false)
+            {
+                config.policies.push(rule);
+            }
         }
 
         Ok(config)
@@ -2693,9 +2679,10 @@ impl BusConfig {
         let mut allowed = true; // default: allow
         for rule in &self.policies {
             if let Some(ref own_name) = rule.own
-                && (own_name == "*" || own_name == name) {
-                    allowed = rule.allow;
-                }
+                && (own_name == "*" || own_name == name)
+            {
+                allowed = rule.allow;
+            }
         }
         allowed
     }
@@ -2711,24 +2698,31 @@ impl BusConfig {
         for rule in &self.policies {
             let mut matches = true;
             if let Some(ref dest) = rule.send_destination
-                && destination != Some(dest.as_str()) && dest != "*" {
-                    matches = false;
-                }
+                && destination != Some(dest.as_str())
+                && dest != "*"
+            {
+                matches = false;
+            }
             if let Some(ref iface) = rule.send_interface
-                && interface != Some(iface.as_str()) && iface != "*" {
-                    matches = false;
-                }
+                && interface != Some(iface.as_str())
+                && iface != "*"
+            {
+                matches = false;
+            }
             if let Some(ref mem) = rule.send_member
-                && member != Some(mem.as_str()) && mem != "*" {
-                    matches = false;
-                }
+                && member != Some(mem.as_str())
+                && mem != "*"
+            {
+                matches = false;
+            }
             // Only apply if there was at least one send_* constraint
             if (rule.send_destination.is_some()
                 || rule.send_interface.is_some()
                 || rule.send_member.is_some())
-                && matches {
-                    allowed = rule.allow;
-                }
+                && matches
+            {
+                allowed = rule.allow;
+            }
         }
         allowed
     }
@@ -2917,7 +2911,9 @@ fn run_dbus_send(args: &[String]) -> i32 {
         Ok(a) => a,
         Err(e) => {
             eprintln!("dbus-send: {e}");
-            eprintln!("Usage: dbus-send [--system|--session] --dest=NAME [--print-reply] PATH INTERFACE.MEMBER [type:value ...]");
+            eprintln!(
+                "Usage: dbus-send [--system|--session] --dest=NAME [--print-reply] PATH INTERFACE.MEMBER [type:value ...]"
+            );
             return 1;
         }
     };
@@ -2946,8 +2942,10 @@ fn run_dbus_send(args: &[String]) -> i32 {
     match msg.marshal() {
         Ok(bytes) => {
             if sa.print_reply {
-                println!("method call sender=:1.0 -> dest={} serial=1 path={} interface={} member={}",
-                    sa.dest, sa.object_path, interface, member);
+                println!(
+                    "method call sender=:1.0 -> dest={} serial=1 path={} interface={} member={}",
+                    sa.dest, sa.object_path, interface, member
+                );
                 for val in &msg.body {
                     println!("   {val}");
                 }
@@ -3149,15 +3147,14 @@ fn run_main() -> i32 {
     let personality = detect_personality(&args);
 
     // Strip the subcommand if present to pass remaining args
-    let sub_args: Vec<String> = if args.len() > 1
-        && matches!(args[1].as_str(), "send" | "monitor" | "daemon")
-    {
-        args[2..].to_vec()
-    } else if args.len() > 1 {
-        args[1..].to_vec()
-    } else {
-        Vec::new()
-    };
+    let sub_args: Vec<String> =
+        if args.len() > 1 && matches!(args[1].as_str(), "send" | "monitor" | "daemon") {
+            args[2..].to_vec()
+        } else if args.len() > 1 {
+            args[1..].to_vec()
+        } else {
+            Vec::new()
+        };
 
     match personality {
         "dbus-send" => run_dbus_send(&sub_args),
@@ -3254,10 +3251,7 @@ mod tests {
 
     #[test]
     fn test_struct_signature() {
-        let s = DbusType::Struct(vec![
-            DbusType::String("a".into()),
-            DbusType::Int32(1),
-        ]);
+        let s = DbusType::Struct(vec![DbusType::String("a".into()), DbusType::Int32(1)]);
         assert_eq!(s.signature_str(), "(si)");
     }
 
@@ -3495,7 +3489,8 @@ mod tests {
 
     #[test]
     fn test_method_call_creation() {
-        let msg = DbusMessage::method_call(1, "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello");
+        let msg =
+            DbusMessage::method_call(1, "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello");
         assert_eq!(msg.message_type, MSG_METHOD_CALL);
         assert_eq!(msg.serial, 1);
         assert_eq!(msg.path.as_deref(), Some("/org/freedesktop/DBus"));
@@ -3514,7 +3509,10 @@ mod tests {
     fn test_error_creation() {
         let msg = DbusMessage::error(3, 1, "org.freedesktop.DBus.Error.Failed", "oops");
         assert_eq!(msg.message_type, MSG_ERROR);
-        assert_eq!(msg.error_name.as_deref(), Some("org.freedesktop.DBus.Error.Failed"));
+        assert_eq!(
+            msg.error_name.as_deref(),
+            Some("org.freedesktop.DBus.Error.Failed")
+        );
         assert_eq!(msg.reply_serial, Some(1));
         assert_eq!(msg.body.len(), 1);
     }
@@ -3528,8 +3526,14 @@ mod tests {
 
     #[test]
     fn test_message_type_name() {
-        assert_eq!(DbusMessage::new(MSG_METHOD_CALL, 1).type_name(), "method_call");
-        assert_eq!(DbusMessage::new(MSG_METHOD_RETURN, 1).type_name(), "method_return");
+        assert_eq!(
+            DbusMessage::new(MSG_METHOD_CALL, 1).type_name(),
+            "method_call"
+        );
+        assert_eq!(
+            DbusMessage::new(MSG_METHOD_RETURN, 1).type_name(),
+            "method_return"
+        );
         assert_eq!(DbusMessage::new(MSG_ERROR, 1).type_name(), "error");
         assert_eq!(DbusMessage::new(MSG_SIGNAL, 1).type_name(), "signal");
         assert_eq!(DbusMessage::new(MSG_INVALID, 1).type_name(), "invalid");
@@ -3761,15 +3765,20 @@ mod tests {
     fn test_request_name_do_not_queue() {
         let mut reg = NameRegistry::new();
         reg.request_name("org.test.Foo", ":1.1", 0).unwrap();
-        let (code, _) = reg.request_name("org.test.Foo", ":1.2", NAME_FLAG_DO_NOT_QUEUE).unwrap();
+        let (code, _) = reg
+            .request_name("org.test.Foo", ":1.2", NAME_FLAG_DO_NOT_QUEUE)
+            .unwrap();
         assert_eq!(code, NAME_REPLY_EXISTS);
     }
 
     #[test]
     fn test_request_name_replace() {
         let mut reg = NameRegistry::new();
-        reg.request_name("org.test.Foo", ":1.1", NAME_FLAG_ALLOW_REPLACEMENT).unwrap();
-        let (code, old) = reg.request_name("org.test.Foo", ":1.2", NAME_FLAG_REPLACE_EXISTING).unwrap();
+        reg.request_name("org.test.Foo", ":1.1", NAME_FLAG_ALLOW_REPLACEMENT)
+            .unwrap();
+        let (code, old) = reg
+            .request_name("org.test.Foo", ":1.2", NAME_FLAG_REPLACE_EXISTING)
+            .unwrap();
         assert_eq!(code, NAME_REPLY_PRIMARY_OWNER);
         assert_eq!(old.as_deref(), Some(":1.1"));
     }
@@ -3894,9 +3903,16 @@ mod tests {
         let responses = daemon.handle_bus_message(&msg, &conn).unwrap();
         assert_eq!(responses.len(), 1);
         if let DbusType::Array(items) = &responses[0].body[0] {
-            let names: Vec<&str> = items.iter().filter_map(|v| {
-                if let DbusType::String(s) = v { Some(s.as_str()) } else { None }
-            }).collect();
+            let names: Vec<&str> = items
+                .iter()
+                .filter_map(|v| {
+                    if let DbusType::String(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert!(names.contains(&DBUS_BUS_NAME));
         } else {
             panic!("expected array");
@@ -3910,7 +3926,10 @@ mod tests {
 
         let msg = DbusMessage::method_call(1, DBUS_PATH, DBUS_INTERFACE, "GetId");
         let responses = daemon.handle_bus_message(&msg, &conn).unwrap();
-        assert_eq!(responses[0].body[0], DbusType::String("slateos-dbus-00000001".into()));
+        assert_eq!(
+            responses[0].body[0],
+            DbusType::String("slateos-dbus-00000001".into())
+        );
     }
 
     #[test]
@@ -3974,7 +3993,8 @@ mod tests {
         let mut msg = DbusMessage::method_call(1, DBUS_PATH, PROPERTIES_IFACE, "Set");
         msg.body.push(DbusType::String(DBUS_INTERFACE.into()));
         msg.body.push(DbusType::String("Features".into()));
-        msg.body.push(DbusType::Variant(Box::new(DbusType::String("x".into()))));
+        msg.body
+            .push(DbusType::Variant(Box::new(DbusType::String("x".into()))));
         msg.signature = Some("ssv".into());
 
         let responses = daemon.handle_bus_message(&msg, &conn).unwrap();
@@ -4000,7 +4020,9 @@ mod tests {
         let conn = daemon.register_connection();
 
         let mut msg = DbusMessage::method_call(1, DBUS_PATH, DBUS_INTERFACE, "AddMatch");
-        msg.body.push(DbusType::String("type='signal',interface='org.test'".into()));
+        msg.body.push(DbusType::String(
+            "type='signal',interface='org.test'".into(),
+        ));
         msg.signature = Some("s".into());
 
         let responses = daemon.handle_bus_message(&msg, &conn).unwrap();
@@ -4074,9 +4096,8 @@ mod tests {
 
         // Add a match rule
         if let Some(c) = daemon.connections.get_mut(&conn1) {
-            c.match_rules.push(
-                MatchRule::parse("type='signal',interface='org.test.Foo'").unwrap()
-            );
+            c.match_rules
+                .push(MatchRule::parse("type='signal',interface='org.test.Foo'").unwrap());
         }
 
         let mut sig = DbusMessage::signal(10, "/test", "org.test.Foo", "Bar");
@@ -4188,9 +4209,18 @@ mod tests {
 
     #[test]
     fn test_parse_typed_boolean() {
-        assert_eq!(parse_typed_value("boolean:true").unwrap(), DbusType::Boolean(true));
-        assert_eq!(parse_typed_value("boolean:false").unwrap(), DbusType::Boolean(false));
-        assert_eq!(parse_typed_value("bool:1").unwrap(), DbusType::Boolean(true));
+        assert_eq!(
+            parse_typed_value("boolean:true").unwrap(),
+            DbusType::Boolean(true)
+        );
+        assert_eq!(
+            parse_typed_value("boolean:false").unwrap(),
+            DbusType::Boolean(false)
+        );
+        assert_eq!(
+            parse_typed_value("bool:1").unwrap(),
+            DbusType::Boolean(true)
+        );
     }
 
     #[test]
@@ -4269,8 +4299,14 @@ mod tests {
     fn test_dbustype_display() {
         assert_eq!(format!("{}", DbusType::Byte(42)), "byte 42");
         assert_eq!(format!("{}", DbusType::Boolean(true)), "boolean true");
-        assert_eq!(format!("{}", DbusType::String("hi".into())), "string \"hi\"");
-        assert_eq!(format!("{}", DbusType::ObjectPath("/x".into())), "object_path \"/x\"");
+        assert_eq!(
+            format!("{}", DbusType::String("hi".into())),
+            "string \"hi\""
+        );
+        assert_eq!(
+            format!("{}", DbusType::ObjectPath("/x".into())),
+            "object_path \"/x\""
+        );
     }
 
     #[test]
@@ -4292,8 +4328,14 @@ mod tests {
 
     #[test]
     fn test_endianness_marker_roundtrip() {
-        assert_eq!(Endianness::from_marker(Endianness::Little.marker()), Some(Endianness::Little));
-        assert_eq!(Endianness::from_marker(Endianness::Big.marker()), Some(Endianness::Big));
+        assert_eq!(
+            Endianness::from_marker(Endianness::Little.marker()),
+            Some(Endianness::Little)
+        );
+        assert_eq!(
+            Endianness::from_marker(Endianness::Big.marker()),
+            Some(Endianness::Big)
+        );
         assert_eq!(Endianness::from_marker(b'X'), None);
     }
 
@@ -4321,8 +4363,14 @@ mod tests {
 
     #[test]
     fn test_extract_xml_text() {
-        assert_eq!(extract_xml_text("<type>system</type>", "type"), Some("system".into()));
-        assert_eq!(extract_xml_text("<type>session</type>", "type"), Some("session".into()));
+        assert_eq!(
+            extract_xml_text("<type>system</type>", "type"),
+            Some("system".into())
+        );
+        assert_eq!(
+            extract_xml_text("<type>session</type>", "type"),
+            Some("session".into())
+        );
         assert_eq!(extract_xml_text("no tags here", "type"), None);
     }
 

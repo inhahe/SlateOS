@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_anomalo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_anomalo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Anomalo 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Anomalo 2024 (Slate OS)");
+        return 0;
+    }
     println!("Anomalo 2024 (Slate OS) — ML-first Data Quality");
     println!("  Vendor: Anomalo, Inc. (Palo Alto / San Francisco)");
     println!("  Founders: Elliot Shmukler (CEO) + Jeremy Stanley (CTO), 2018");
@@ -35,13 +42,23 @@ fn run_anomalo(args: &[String], _prog: &str) -> i32 {
     println!("         seed: Two Sigma Ventures, Foundation Capital");
     println!("  Strategic position: deep ML auto-quality (vs Monte Carlo's broad observability):");
     println!("                    pitch: 'Anomalo finds the issues your dbt tests can't catch'");
-    println!("                    target: large-warehouse data quality teams (Fortune 500 data orgs)");
-    println!("                    primary competitor: Monte Carlo (broader), Bigeye (similar ML focus)");
-    println!("                    Anomalo's edge: ML model sophistication + unstructured data (2024 unique)");
-    println!("                    typical buyer: head of data engineering at retail/fintech/healthcare");
+    println!(
+        "                    target: large-warehouse data quality teams (Fortune 500 data orgs)"
+    );
+    println!(
+        "                    primary competitor: Monte Carlo (broader), Bigeye (similar ML focus)"
+    );
+    println!(
+        "                    Anomalo's edge: ML model sophistication + unstructured data (2024 unique)"
+    );
+    println!(
+        "                    typical buyer: head of data engineering at retail/fintech/healthcare"
+    );
     println!("  Pricing: enterprise sales-led, ~$100K-$1M+/yr typical");
     println!("         no free tier — proof-of-value pilot then annual contract");
-    println!("         pricing pegged to # of tables monitored + warehouse credits consumed by checks");
+    println!(
+        "         pricing pegged to # of tables monitored + warehouse credits consumed by checks"
+    );
     println!("  Core checks (auto-enabled on every table):");
     println!("    - Freshness: did data arrive on schedule?");
     println!("    - Volume: row count anomalies vs historical baseline");
@@ -59,7 +76,9 @@ fn run_anomalo(args: &[String], _prog: &str) -> i32 {
     println!("  Root cause analysis:");
     println!("    - When an anomaly fires, Anomalo back-traces to upstream cause");
     println!("    - Correlates schema changes, volume drops, freshness issues across pipeline");
-    println!("    - Identifies which segment of data is anomalous (e.g., 'all NULLs in US-East-2 region')");
+    println!(
+        "    - Identifies which segment of data is anomalous (e.g., 'all NULLs in US-East-2 region')"
+    );
     println!("    - Hypothesis ranking: most likely root causes ranked by historical precedent");
     println!("  Unstructured Data Quality (2024 — first in market):");
     println!("    - Quality checks on text (PII detection, language drift, toxicity)");
@@ -85,18 +104,27 @@ fn run_anomalo(args: &[String], _prog: &str) -> i32 {
     println!("    - heavy in: financial services, retail/e-commerce, media");
     println!("    - sweet spot: 500K+ rows/day + 100+ critical tables");
     println!("  Critique: expensive — $100K floor pricing puts off smaller teams");
-    println!("           ML auto-checks can over-fit to recent data (need historical horizon tuning)");
+    println!(
+        "           ML auto-checks can over-fit to recent data (need historical horizon tuning)"
+    );
     println!("           narrower than Monte Carlo: lacks full lineage + BI/ML integration depth");
     println!("           dbt tests (free) + manual SQL still cover many use cases");
     println!("           Snowflake Cortex AI + Databricks Genie compete from warehouse side");
-    println!("           unstructured data quality nascent — VLM costs significant on large image corpora");
-    println!("  Differentiator: deepest ML-driven anomaly detection + first-to-market unstructured data quality + Instacart-veteran founders + clean root-cause UX — the data quality choice for teams that want ML doing the work, not humans writing rules");
+    println!(
+        "           unstructured data quality nascent — VLM costs significant on large image corpora"
+    );
+    println!(
+        "  Differentiator: deepest ML-driven anomaly detection + first-to-market unstructured data quality + Instacart-veteran founders + clean root-cause UX — the data quality choice for teams that want ML doing the work, not humans writing rules"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "anomalo".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "anomalo".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_anomalo(&rest, &_prog);
     process::exit(code);
@@ -104,7 +132,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_anomalo};
+    use super::{basename, run_anomalo, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -26,8 +26,16 @@ fn run_csound(args: &[String]) -> i32 {
         println!("JACK, ALSA, PortAudio, PortMIDI");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".csd") || a.ends_with(".orc")).map(|s| s.as_str()).unwrap_or("piece.csd");
-    let output = args.windows(2).find(|w| w[0] == "-o").map(|w| w[1].as_str()).unwrap_or("dac");
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".csd") || a.ends_with(".orc"))
+        .map(|s| s.as_str())
+        .unwrap_or("piece.csd");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o")
+        .map(|w| w[1].as_str())
+        .unwrap_or("dac");
     println!("--Csound version 6.18.1 (Slate OS)");
     println!("Reading CSD file: {}", file);
     println!("Orchestra: sr=48000, kr=4800, ksmps=10, nchnls=2, 0dbfs=1.0");
@@ -55,7 +63,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_csound};
+    use super::run_csound;
 
     #[test]
     fn help_exits_zero() {

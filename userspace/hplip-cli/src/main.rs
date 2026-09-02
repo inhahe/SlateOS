@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_setup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_setup(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hp-setup v3.22 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("hp-setup v3.22 (Slate OS)");
+        return 0;
+    }
     println!("hp-setup: searching for HP devices...");
     println!("  Found: HP LaserJet Pro M404 (USB)");
     println!("  Driver: hp-laserjet_pro_m404-ps.ppd");
@@ -37,7 +44,10 @@ fn run_info(args: &[String], _prog: &str) -> i32 {
         println!("hp-info v3.22 (Slate OS) — HP device information");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hp-info v3.22 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("hp-info v3.22 (Slate OS)");
+        return 0;
+    }
     println!("HP Device Information:");
     println!("  Model: HP LaserJet Pro M404");
     println!("  Serial: VNB1234567");
@@ -53,7 +63,10 @@ fn run_levels(args: &[String], _prog: &str) -> i32 {
         println!("hp-levels v3.22 (Slate OS) — Show supply levels");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hp-levels v3.22 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("hp-levels v3.22 (Slate OS)");
+        return 0;
+    }
     println!("HP LaserJet Pro M404:");
     println!("  Black toner:  75%");
     println!("  Drum:         85%");
@@ -67,7 +80,10 @@ fn run_toolbox(args: &[String], _prog: &str) -> i32 {
         println!("hp-toolbox v3.22 (Slate OS) — HP device management GUI");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hp-toolbox v3.22 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("hp-toolbox v3.22 (Slate OS)");
+        return 0;
+    }
     println!("hp-toolbox: device management GUI started");
     println!("  Devices: 1 connected");
     0
@@ -75,7 +91,10 @@ fn run_toolbox(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "hp-setup".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "hp-setup".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "hp-info" => run_info(&rest, &prog),
@@ -88,7 +107,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_setup};
+    use super::{basename, run_setup, strip_ext};
 
     #[test]
     fn basename_strips_path() {

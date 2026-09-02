@@ -42,7 +42,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("excalidraw-cli 0.1.0 (open-source-sketchy-whiteboard personality build)"); }
+fn print_version() {
+    println!("excalidraw-cli 0.1.0 (open-source-sketchy-whiteboard personality build)");
+}
 
 fn run_about() {
     println!("Excalidraw (open-source project).");

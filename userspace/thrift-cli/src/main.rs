@@ -27,11 +27,13 @@ fn run_thrift(args: &[String]) -> i32 {
         println!("Thrift version 0.20.0 (Slate OS)");
         return 0;
     }
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| a.ends_with(".thrift"))
         .map(|s| s.as_str())
         .unwrap_or("service.thrift");
-    let lang = args.windows(2)
+    let lang = args
+        .windows(2)
         .find(|w| w[0] == "--gen")
         .map(|w| w[1].as_str())
         .unwrap_or("cpp");
@@ -70,7 +72,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_thrift};
+    use super::run_thrift;
 
     #[test]
     fn help_exits_zero() {

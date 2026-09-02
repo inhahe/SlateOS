@@ -51,10 +51,14 @@ fn run_openvpn(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let config = args.windows(2).find(|w| w[0] == "--config")
+    let config = args
+        .windows(2)
+        .find(|w| w[0] == "--config")
         .map(|w| w[1].as_str());
     let server_mode = args.iter().any(|a| a == "--server");
-    let remote = args.windows(2).find(|w| w[0] == "--remote")
+    let remote = args
+        .windows(2)
+        .find(|w| w[0] == "--remote")
         .map(|w| w[1].as_str());
 
     let config_name = config.unwrap_or("client.ovpn");
@@ -71,7 +75,10 @@ fn run_openvpn(args: Vec<String>) -> i32 {
     } else {
         let host = remote.unwrap_or("vpn.example.com");
         println!("  Mode: Client");
-        println!("  Attempting to establish TCP/UDP connection with {}:1194", host);
+        println!(
+            "  Attempting to establish TCP/UDP connection with {}:1194",
+            host
+        );
         println!("  TCP/UDP: Connected to {}:1194", host);
         println!("  TLS: Initial packet from {}:1194", host);
         println!("  VERIFY OK: CN=server");
@@ -94,7 +101,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_openvpn};
+    use super::run_openvpn;
 
     #[test]
     fn help_exits_zero() {

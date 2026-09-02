@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_duo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duosecurity [OPTIONS]");
-        println!("Duo Security (Slate OS) — the green push-button MFA (now Cisco Duo Trusted Access)");
+        println!(
+            "Duo Security (Slate OS) — the green push-button MFA (now Cisco Duo Trusted Access)"
+        );
         println!();
         println!("Options:");
         println!("  --mfa                  Multi-factor authentication (push, OTP, FIDO2)");
@@ -22,7 +28,10 @@ fn run_duo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Duo Security 2024 (Slate OS) — duo-cli (Admin API)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Duo Security 2024 (Slate OS) — duo-cli (Admin API)");
+        return 0;
+    }
     println!("Duo Security 2024 (Slate OS) — Cisco Duo (the green-button MFA, zero-trust access)");
     println!("  Vendor: Cisco Duo (Ann Arbor, MI — division of Cisco Systems NASDAQ:CSCO)");
     println!("  Founders: Dug Song + Jon Oberheide, 2009");
@@ -42,13 +51,23 @@ fn run_duo(args: &[String], _prog: &str) -> i32 {
     println!("         Largest Michigan tech exit ever at the time");
     println!("         Founders stayed at Cisco for 3+ years post-acquisition");
     println!("  Strategic position (under Cisco):");
-    println!("                    pitch: 'simplest, friendliest MFA + zero-trust access for any org'");
+    println!(
+        "                    pitch: 'simplest, friendliest MFA + zero-trust access for any org'"
+    );
     println!("                    target: every org needing MFA — SMB to Fortune 500");
-    println!("                    primary competitor: Microsoft Entra MFA, Okta MFA, RSA SecurID, YubiKey");
-    println!("                    secondary: Authy (Twilio), Auth0, Beyond Identity, Google Authenticator");
+    println!(
+        "                    primary competitor: Microsoft Entra MFA, Okta MFA, RSA SecurID, YubiKey"
+    );
+    println!(
+        "                    secondary: Authy (Twilio), Auth0, Beyond Identity, Google Authenticator"
+    );
     println!("                    Duo wedge: easiest user experience (the green push button)");
-    println!("                    + universal 'works with any app' positioning (200+ integrations)");
-    println!("                    + acquired by Cisco = enterprise channel + Cisco Secure portfolio");
+    println!(
+        "                    + universal 'works with any app' positioning (200+ integrations)"
+    );
+    println!(
+        "                    + acquired by Cisco = enterprise channel + Cisco Secure portfolio"
+    );
     println!("                    + heavy in education (universities use Duo extensively)");
     println!("                    'Duo Push' became generic term for push-based MFA");
     println!("  Pricing (per-user/month, transparent):");
@@ -100,7 +119,9 @@ fn run_duo(args: &[String], _prog: &str) -> i32 {
     println!("    6. Risk-Based Authentication (RBA, adaptive):");
     println!("       - ML-driven risk scoring");
     println!("       - Step-up to phishing-resistant when risky");
-    println!("       - 'Don't ask for MFA if you're already trusted; force WebAuthn if you're sketchy'");
+    println!(
+        "       - 'Don't ask for MFA if you're already trusted; force WebAuthn if you're sketchy'"
+    );
     println!("    7. Verified Duo Push:");
     println!("       - Login screen displays a number");
     println!("       - User enters that number in Duo Mobile to approve");
@@ -123,7 +144,9 @@ fn run_duo(args: &[String], _prog: &str) -> i32 {
     println!("    - User just taps 'Approve' on phone — no code typing");
     println!("    - Initially considered too simple by security purists");
     println!("    - Became the dominant MFA UX paradigm");
-    println!("    - Every modern MFA copies the push pattern (Okta Verify, Microsoft Authenticator)");
+    println!(
+        "    - Every modern MFA copies the push pattern (Okta Verify, Microsoft Authenticator)"
+    );
     println!("    - 'Duo Push' = generic noun in industry");
     println!("  The Cisco acquisition (the largest MI tech exit):");
     println!("    - Aug 2018: Cisco acquired for $2.35B cash");
@@ -136,7 +159,9 @@ fn run_duo(args: &[String], _prog: &str) -> i32 {
     println!("  The University of Michigan + Ann Arbor heritage:");
     println!("    - Founders met in Ann Arbor security community");
     println!("    - UMich was an early Duo customer");
-    println!("    - Strong in higher ed: Yale, Stanford, MIT, Harvard, U. Michigan, hundreds of universities");
+    println!(
+        "    - Strong in higher ed: Yale, Stanford, MIT, Harvard, U. Michigan, hundreds of universities"
+    );
     println!("    - 'Universities use Duo' became a marketing line");
     println!("    - Ann Arbor's biggest tech success story");
     println!("  Integrations:");
@@ -155,7 +180,9 @@ fn run_duo(args: &[String], _prog: &str) -> i32 {
     println!("    - Terraform provider");
     println!("  Duo CLI usage:");
     println!("    # Duo Admin API (curl + HMAC auth):");
-    println!("    duo_unix --version                                       # the duo_unix CLI (PAM)");
+    println!(
+        "    duo_unix --version                                       # the duo_unix CLI (PAM)"
+    );
     println!("    # duo_unix PAM module config (for SSH MFA):");
     println!("    # cat /etc/duo/pam_duo.conf");
     println!("    # ikey, skey, host, pushinfo=yes, autopush=yes, prompts=1");
@@ -167,7 +194,9 @@ fn run_duo(args: &[String], _prog: &str) -> i32 {
     println!("    # GET /admin/v1/policies → list policies");
     println!("    # POST /admin/v1/integrations → create integration");
     println!("    # Terraform:");
-    println!("    # resource \"duo_integration\" \"my_app\" {{ type = \"sso\" name = \"My App\" }}");
+    println!(
+        "    # resource \"duo_integration\" \"my_app\" {{ type = \"sso\" name = \"My App\" }}"
+    );
     println!("    # Duo Mobile app for end-users:");
     println!("    # Install, scan QR, approve pushes");
     println!("  Customers (universities + enterprise + everyone needing MFA):");
@@ -188,13 +217,18 @@ fn run_duo(args: &[String], _prog: &str) -> i32 {
     println!("           SMB-friendly UX feels less powerful at Fortune 50 scale");
     println!("           IGA + provisioning weaker than dedicated IDaaS");
     println!("           founders departure (~2022) raised continuity questions");
-    println!("  Differentiator: the green push-button MFA (founded 2009 by Dug Song + Jon Oberheide in Ann Arbor MI, acquired by Cisco Aug 2018 for $2.35B largest MI tech exit ever) + Duo Push (the iconic UX, generic noun in MFA industry, every modern MFA copies the push pattern) + Duo Mobile app (50M+ downloads, iOS + Android) + Verified Duo Push (number-challenge defeats push-fatigue attacks, 2022) + WebAuthn/FIDO2 + biometric (Touch ID/Face ID) + Duo SSO (SAML IdP) + Trusted Endpoints (device trust + posture) + Duo Network Gateway (modern VPN replacement, browser-based ZTNA-lite) + Risk-Based Authentication + Passwordless + Trust Monitor anomaly detection + Universal Prompt + 200+ pre-built integrations + duo_unix PAM module + Login Duo for Windows + Cisco AnyConnect/Meraki/ASA synergy + AWS/Azure/GCP integration + Yale/Stanford/MIT/Harvard/UMich/hundreds-of-universities-proven + 30,000+ organizations + 1M+ daily Duo Push users + transparent per-user pricing ($3-9/user/mo) + Ann Arbor tech success story + University of Michigan heritage + Cisco Secure suite anchor + FedRAMP authorized + simplest MFA UX in the industry + the brand that made 2FA something users don't hate — the friendly green-button MFA that taught the entire industry how to do push-based authentication right");
+    println!(
+        "  Differentiator: the green push-button MFA (founded 2009 by Dug Song + Jon Oberheide in Ann Arbor MI, acquired by Cisco Aug 2018 for $2.35B largest MI tech exit ever) + Duo Push (the iconic UX, generic noun in MFA industry, every modern MFA copies the push pattern) + Duo Mobile app (50M+ downloads, iOS + Android) + Verified Duo Push (number-challenge defeats push-fatigue attacks, 2022) + WebAuthn/FIDO2 + biometric (Touch ID/Face ID) + Duo SSO (SAML IdP) + Trusted Endpoints (device trust + posture) + Duo Network Gateway (modern VPN replacement, browser-based ZTNA-lite) + Risk-Based Authentication + Passwordless + Trust Monitor anomaly detection + Universal Prompt + 200+ pre-built integrations + duo_unix PAM module + Login Duo for Windows + Cisco AnyConnect/Meraki/ASA synergy + AWS/Azure/GCP integration + Yale/Stanford/MIT/Harvard/UMich/hundreds-of-universities-proven + 30,000+ organizations + 1M+ daily Duo Push users + transparent per-user pricing ($3-9/user/mo) + Ann Arbor tech success story + University of Michigan heritage + Cisco Secure suite anchor + FedRAMP authorized + simplest MFA UX in the industry + the brand that made 2FA something users don't hate — the friendly green-button MFA that taught the entire industry how to do push-based authentication right"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "duosecurity".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "duosecurity".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_duo(&rest, &_prog);
     process::exit(code);
@@ -202,7 +236,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_duo};
+    use super::{basename, run_duo, strip_ext};
 
     #[test]
     fn basename_strips_path() {

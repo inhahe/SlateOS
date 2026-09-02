@@ -106,23 +106,15 @@ fn read_memory_blocks() -> Vec<MemoryBlock> {
                 .map(|s| s.trim() == "1")
                 .unwrap_or(false);
 
-            let node = fs::read_dir(&block_path)
-                .ok()
-                .and_then(|entries| {
-                    entries.flatten().find_map(|e| {
-                        let n = e.file_name().to_string_lossy().to_string();
-                        n.strip_prefix("node")
-                            .and_then(|s| s.parse::<u32>().ok())
-                    })
-                });
+            let node = fs::read_dir(&block_path).ok().and_then(|entries| {
+                entries.flatten().find_map(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    n.strip_prefix("node").and_then(|s| s.parse::<u32>().ok())
+                })
+            });
 
             let zone = fs::read_to_string(format!("{block_path}/valid_zones"))
-                .map(|s| {
-                    s.split_whitespace()
-                        .next()
-                        .unwrap_or("Normal")
-                        .to_string()
-                })
+                .map(|s| s.split_whitespace().next().unwrap_or("Normal").to_string())
                 .unwrap_or_else(|_| "Normal".to_string());
 
             blocks.push(MemoryBlock {
@@ -209,9 +201,10 @@ fn get_meminfo_total() -> u64 {
             if let Some(val) = line.strip_prefix("MemTotal:") {
                 let val = val.trim();
                 if let Some(kb_str) = val.strip_suffix("kB").or_else(|| val.strip_suffix("KB"))
-                    && let Ok(kb) = kb_str.trim().parse::<u64>() {
-                        return kb * 1024;
-                    }
+                    && let Ok(kb) = kb_str.trim().parse::<u64>()
+                {
+                    return kb * 1024;
+                }
             }
         }
     }
@@ -253,10 +246,20 @@ fn default_columns() -> Vec<String> {
 
 fn column_value(range: &MemoryRange, col: &str, use_bytes: bool) -> String {
     match col.to_uppercase().as_str() {
-        "RANGE" => format!("{}-{}", format_address(range.start), format_address(range.end)),
+        "RANGE" => format!(
+            "{}-{}",
+            format_address(range.start),
+            format_address(range.end)
+        ),
         "SIZE" => format_size(range.size, use_bytes),
         "STATE" => range.state.clone(),
-        "REMOVABLE" => if range.removable { "yes".to_string() } else { "no".to_string() },
+        "REMOVABLE" => {
+            if range.removable {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            }
+        }
         "BLOCK" => {
             if range.block_count == 1 {
                 format!("{}", range.start / (128 * 1024 * 1024))
@@ -265,7 +268,10 @@ fn column_value(range: &MemoryRange, col: &str, use_bytes: bool) -> String {
                 format!("{}-{}", first, first + range.block_count as u64 - 1)
             }
         }
-        "NODE" => range.node.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string()),
+        "NODE" => range
+            .node
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".to_string()),
         "ZONES" => range.zone.clone(),
         _ => String::new(),
     }
@@ -276,7 +282,11 @@ fn column_value(range: &MemoryRange, col: &str, use_bytes: bool) -> String {
 // ============================================================================
 
 fn print_table(out: &mut io::StdoutLock<'_>, ranges: &[MemoryRange], opts: &LsmemOpts) {
-    let cols = if opts.columns.is_empty() { default_columns() } else { opts.columns.clone() };
+    let cols = if opts.columns.is_empty() {
+        default_columns()
+    } else {
+        opts.columns.clone()
+    };
 
     let mut widths: Vec<usize> = cols.iter().map(|c| c.len()).collect();
     for range in ranges {
@@ -331,7 +341,12 @@ fn print_json(out: &mut io::StdoutLock<'_>, ranges: &[MemoryRange], opts: &Lsmem
     let _ = opts;
 }
 
-fn print_summary(out: &mut io::StdoutLock<'_>, ranges: &[MemoryRange], blocks: &[MemoryBlock], opts: &LsmemOpts) {
+fn print_summary(
+    out: &mut io::StdoutLock<'_>,
+    ranges: &[MemoryRange],
+    blocks: &[MemoryBlock],
+    opts: &LsmemOpts,
+) {
     let total_online: u64 = blocks.iter().filter(|b| b.online).map(|b| b.size).sum();
     let total_offline: u64 = blocks.iter().filter(|b| !b.online).map(|b| b.size).sum();
     let total = total_online + total_offline;
@@ -341,21 +356,49 @@ fn print_summary(out: &mut io::StdoutLock<'_>, ranges: &[MemoryRange], blocks: &
         let mem = get_meminfo_total();
         let _ = writeln!(out);
         let _ = writeln!(out, "Memory block size:       unknown");
-        let _ = writeln!(out, "Total online memory:     {}", format_size(mem, opts.bytes));
+        let _ = writeln!(
+            out,
+            "Total online memory:     {}",
+            format_size(mem, opts.bytes)
+        );
         let _ = writeln!(out, "Total offline memory:    0B");
-        let _ = writeln!(out, "Total memory:            {}", format_size(mem, opts.bytes));
+        let _ = writeln!(
+            out,
+            "Total memory:            {}",
+            format_size(mem, opts.bytes)
+        );
         return;
     } else {
         total
     };
 
-    let block_size = if !blocks.is_empty() { blocks[0].size } else { 128 * 1024 * 1024 };
+    let block_size = if !blocks.is_empty() {
+        blocks[0].size
+    } else {
+        128 * 1024 * 1024
+    };
 
     let _ = writeln!(out);
-    let _ = writeln!(out, "Memory block size:       {}", format_size(block_size, opts.bytes));
-    let _ = writeln!(out, "Total online memory:     {}", format_size(total_online, opts.bytes));
-    let _ = writeln!(out, "Total offline memory:    {}", format_size(total_offline, opts.bytes));
-    let _ = writeln!(out, "Total memory:            {}", format_size(total, opts.bytes));
+    let _ = writeln!(
+        out,
+        "Memory block size:       {}",
+        format_size(block_size, opts.bytes)
+    );
+    let _ = writeln!(
+        out,
+        "Total online memory:     {}",
+        format_size(total_online, opts.bytes)
+    );
+    let _ = writeln!(
+        out,
+        "Total offline memory:    {}",
+        format_size(total_offline, opts.bytes)
+    );
+    let _ = writeln!(
+        out,
+        "Total memory:            {}",
+        format_size(total, opts.bytes)
+    );
     let _ = ranges;
 }
 
@@ -391,7 +434,9 @@ fn main() {
                 println!("  -n, --noheadings     No headers");
                 println!("  -b, --bytes          Show sizes in bytes");
                 println!("  -a, --all            Show all memory ranges");
-                println!("  -o, --output COLS    Columns (RANGE,SIZE,STATE,REMOVABLE,BLOCK,NODE,ZONES)");
+                println!(
+                    "  -o, --output COLS    Columns (RANGE,SIZE,STATE,REMOVABLE,BLOCK,NODE,ZONES)"
+                );
                 println!("  -s, --summary[=WHEN] Summary (auto, only, never)");
                 println!("  -h, --help           Show this help");
                 println!("  -V, --version        Show version");
@@ -410,7 +455,10 @@ fn main() {
             "-o" | "--output" => {
                 i += 1;
                 if i < args.len() {
-                    opts.columns = args[i].split(',').map(|s| s.trim().to_uppercase()).collect();
+                    opts.columns = args[i]
+                        .split(',')
+                        .map(|s| s.trim().to_uppercase())
+                        .collect();
                 }
             }
             s if s.starts_with("--summary") => {
@@ -529,12 +577,24 @@ mod tests {
         let bs = 128 * 1024 * 1024;
         let blocks = vec![
             MemoryBlock {
-                index: 0, phys_start: 0, size: bs, online: true,
-                removable: false, node: Some(0), zone: "Normal".to_string(), state: "online".to_string(),
+                index: 0,
+                phys_start: 0,
+                size: bs,
+                online: true,
+                removable: false,
+                node: Some(0),
+                zone: "Normal".to_string(),
+                state: "online".to_string(),
             },
             MemoryBlock {
-                index: 1, phys_start: bs, size: bs, online: true,
-                removable: false, node: Some(0), zone: "Normal".to_string(), state: "online".to_string(),
+                index: 1,
+                phys_start: bs,
+                size: bs,
+                online: true,
+                removable: false,
+                node: Some(0),
+                zone: "Normal".to_string(),
+                state: "online".to_string(),
             },
         ];
         let ranges = merge_blocks(&blocks);
@@ -548,12 +608,24 @@ mod tests {
         let bs = 128 * 1024 * 1024;
         let blocks = vec![
             MemoryBlock {
-                index: 0, phys_start: 0, size: bs, online: true,
-                removable: false, node: Some(0), zone: "Normal".to_string(), state: "online".to_string(),
+                index: 0,
+                phys_start: 0,
+                size: bs,
+                online: true,
+                removable: false,
+                node: Some(0),
+                zone: "Normal".to_string(),
+                state: "online".to_string(),
             },
             MemoryBlock {
-                index: 1, phys_start: bs, size: bs, online: false,
-                removable: false, node: Some(0), zone: "Normal".to_string(), state: "offline".to_string(),
+                index: 1,
+                phys_start: bs,
+                size: bs,
+                online: false,
+                removable: false,
+                node: Some(0),
+                zone: "Normal".to_string(),
+                state: "offline".to_string(),
             },
         ];
         let ranges = merge_blocks(&blocks);
@@ -579,26 +651,42 @@ mod tests {
     #[test]
     fn test_column_value_removable() {
         let range = MemoryRange {
-            start: 0, end: 0, size: 0,
-            state: "online".to_string(), removable: true,
-            block_count: 1, node: None, zone: "Normal".to_string(),
+            start: 0,
+            end: 0,
+            size: 0,
+            state: "online".to_string(),
+            removable: true,
+            block_count: 1,
+            node: None,
+            zone: "Normal".to_string(),
         };
         assert_eq!(column_value(&range, "REMOVABLE", false), "yes");
 
-        let range2 = MemoryRange { removable: false, ..range.clone() };
+        let range2 = MemoryRange {
+            removable: false,
+            ..range.clone()
+        };
         assert_eq!(column_value(&range2, "REMOVABLE", false), "no");
     }
 
     #[test]
     fn test_column_value_node() {
         let range = MemoryRange {
-            start: 0, end: 0, size: 0,
-            state: "online".to_string(), removable: false,
-            block_count: 1, node: Some(0), zone: "Normal".to_string(),
+            start: 0,
+            end: 0,
+            size: 0,
+            state: "online".to_string(),
+            removable: false,
+            block_count: 1,
+            node: Some(0),
+            zone: "Normal".to_string(),
         };
         assert_eq!(column_value(&range, "NODE", false), "0");
 
-        let range_no_node = MemoryRange { node: None, ..range.clone() };
+        let range_no_node = MemoryRange {
+            node: None,
+            ..range.clone()
+        };
         assert_eq!(column_value(&range_no_node, "NODE", false), "-");
     }
 

@@ -108,9 +108,7 @@ fn detect_personality(argv0: &str) -> Personality {
         .next()
         .unwrap_or(argv0);
     // Strip common extensions.
-    let name = basename
-        .strip_suffix(".exe")
-        .unwrap_or(basename);
+    let name = basename.strip_suffix(".exe").unwrap_or(basename);
     match name {
         "lastb" => Personality::Lastb,
         "lastlog" => Personality::Lastlog,
@@ -502,14 +500,11 @@ fn parse_wtmp_records(data: &[u8]) -> Vec<WtmpRecord> {
             }
         };
         let pid = read_u32_le(data, offset + UT_PID_OFFSET).unwrap_or(0);
-        let terminal = extract_string(data, offset + UT_LINE_OFFSET, UT_LINE_SIZE)
-            .unwrap_or_default();
-        let id = extract_string(data, offset + UT_ID_OFFSET, UT_ID_SIZE)
-            .unwrap_or_default();
-        let user = extract_string(data, offset + UT_USER_OFFSET, UT_USER_SIZE)
-            .unwrap_or_default();
-        let host = extract_string(data, offset + UT_HOST_OFFSET, UT_HOST_SIZE)
-            .unwrap_or_default();
+        let terminal =
+            extract_string(data, offset + UT_LINE_OFFSET, UT_LINE_SIZE).unwrap_or_default();
+        let id = extract_string(data, offset + UT_ID_OFFSET, UT_ID_SIZE).unwrap_or_default();
+        let user = extract_string(data, offset + UT_USER_OFFSET, UT_USER_SIZE).unwrap_or_default();
+        let host = extract_string(data, offset + UT_HOST_OFFSET, UT_HOST_SIZE).unwrap_or_default();
         let exit_status = read_u32_le(data, offset + UT_EXIT_OFFSET).unwrap_or(0);
         let session = read_u32_le(data, offset + UT_SESSION_OFFSET).unwrap_or(0);
         let time_sec = read_u32_le(data, offset + UT_TV_SEC_OFFSET).unwrap_or(0);
@@ -685,11 +680,7 @@ fn filter_entries(entries: &[LoginEntry], filters: &[String]) -> Vec<LoginEntry>
     }
     entries
         .iter()
-        .filter(|e| {
-            filters.iter().any(|f| {
-                e.user == *f || e.terminal == *f
-            })
-        })
+        .filter(|e| filters.iter().any(|f| e.user == *f || e.terminal == *f))
         .cloned()
         .collect()
 }
@@ -767,19 +758,30 @@ fn print_last_entries(entries: &[LoginEntry], opts: &LastOptions) {
             // -a: hostname in last column.
             println!(
                 "{:<user_width$} {:<12} {} {}   {}",
-                user_display, term_display, login_str, status_str, host_display,
+                user_display,
+                term_display,
+                login_str,
+                status_str,
+                host_display,
                 user_width = user_width
             );
         } else if opts.no_host {
             println!(
                 "{:<user_width$} {:<12} {} {}",
-                user_display, term_display, login_str, status_str,
+                user_display,
+                term_display,
+                login_str,
+                status_str,
                 user_width = user_width
             );
         } else {
             println!(
                 "{:<user_width$} {:<12} {:<host_width$} {} {}",
-                user_display, term_display, host_display, login_str, status_str,
+                user_display,
+                term_display,
+                host_display,
+                login_str,
+                status_str,
                 user_width = user_width,
                 host_width = host_width
             );
@@ -857,9 +859,10 @@ fn resolve_usernames(records: &mut [LastlogRecord]) {
     for line in passwd.lines() {
         let fields: Vec<&str> = line.split(':').collect();
         if fields.len() >= 3
-            && let Ok(uid) = fields[2].parse::<u32>() {
-                uid_map.push((uid, fields[0].to_string()));
-            }
+            && let Ok(uid) = fields[2].parse::<u32>()
+        {
+            uid_map.push((uid, fields[0].to_string()));
+        }
     }
 
     for record in records.iter_mut() {
@@ -887,17 +890,15 @@ fn lookup_uid(username: &str) -> Option<u32> {
 fn print_lastlog(records: &[LastlogRecord], opts: &LastlogOptions) {
     let now = current_epoch_secs();
 
-    println!(
-        "{:<16} {:<8} {:<16} Latest",
-        "Username", "Port", "From"
-    );
+    println!("{:<16} {:<8} {:<16} Latest", "Username", "Port", "From");
 
     for record in records {
         // Apply user filter.
         if let Some(ref filter) = opts.user_filter
-            && record.username != *filter {
-                continue;
-            }
+            && record.username != *filter
+        {
+            continue;
+        }
 
         // Skip entries with no login time (never logged in).
         if record.time_sec == 0 {
@@ -913,13 +914,15 @@ fn print_lastlog(records: &[LastlogRecord], opts: &LastlogOptions) {
         // Apply before/time filters.
         let login_age_days = now.saturating_sub(record.time_sec as u64) / 86400;
         if let Some(before) = opts.before_days
-            && login_age_days < before {
-                continue;
-            }
+            && login_age_days < before
+        {
+            continue;
+        }
         if let Some(time) = opts.time_days
-            && login_age_days > time {
-                continue;
-            }
+            && login_age_days > time
+        {
+            continue;
+        }
 
         let time_str = format_full_time(record.time_sec);
         println!(
@@ -949,11 +952,12 @@ fn parse_last_args(args: &[String], personality: Personality) -> Result<LastOpti
         if arg.starts_with('-') && arg.len() > 1 {
             let maybe_num = &arg[1..];
             if maybe_num.chars().all(|c| c.is_ascii_digit())
-                && let Ok(n) = maybe_num.parse::<usize>() {
-                    opts.count = n;
-                    i += 1;
-                    continue;
-                }
+                && let Ok(n) = maybe_num.parse::<usize>()
+            {
+                opts.count = n;
+                i += 1;
+                continue;
+            }
         }
 
         match arg {
@@ -1515,7 +1519,14 @@ mod tests {
     #[test]
     fn test_parse_single_wtmp_record() {
         let data = build_wtmp_record_bytes(
-            USER_PROCESS, 1234, "pts/0", "s0", "alice", "192.168.1.1", 1700000000, [0x0101A8C0, 0, 0, 0],
+            USER_PROCESS,
+            1234,
+            "pts/0",
+            "s0",
+            "alice",
+            "192.168.1.1",
+            1700000000,
+            [0x0101A8C0, 0, 0, 0],
         );
         let records = parse_wtmp_records(&data);
         assert_eq!(records.len(), 1);
@@ -1530,10 +1541,24 @@ mod tests {
     #[test]
     fn test_parse_multiple_wtmp_records() {
         let mut data = build_wtmp_record_bytes(
-            USER_PROCESS, 100, "tty1", "t1", "bob", "", 1700000000, [0; 4],
+            USER_PROCESS,
+            100,
+            "tty1",
+            "t1",
+            "bob",
+            "",
+            1700000000,
+            [0; 4],
         );
         data.extend(build_wtmp_record_bytes(
-            DEAD_PROCESS, 100, "tty1", "t1", "", "", 1700003600, [0; 4],
+            DEAD_PROCESS,
+            100,
+            "tty1",
+            "t1",
+            "",
+            "",
+            1700003600,
+            [0; 4],
         ));
         let records = parse_wtmp_records(&data);
         assert_eq!(records.len(), 2);
@@ -1557,9 +1582,8 @@ mod tests {
 
     #[test]
     fn test_parse_boot_time_record() {
-        let data = build_wtmp_record_bytes(
-            BOOT_TIME, 0, "~", "~~", "reboot", "", 1700000000, [0; 4],
-        );
+        let data =
+            build_wtmp_record_bytes(BOOT_TIME, 0, "~", "~~", "reboot", "", 1700000000, [0; 4]);
         let records = parse_wtmp_records(&data);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].record_type, BOOT_TIME);
@@ -1572,14 +1596,30 @@ mod tests {
     fn test_resolve_simple_login_logout() {
         let records = vec![
             WtmpRecord {
-                record_type: USER_PROCESS, pid: 100, terminal: "tty1".into(),
-                id: "t1".into(), user: "alice".into(), host: "".into(),
-                exit_status: 0, session: 0, time_sec: 1000, time_usec: 0, addr: [0; 4],
+                record_type: USER_PROCESS,
+                pid: 100,
+                terminal: "tty1".into(),
+                id: "t1".into(),
+                user: "alice".into(),
+                host: "".into(),
+                exit_status: 0,
+                session: 0,
+                time_sec: 1000,
+                time_usec: 0,
+                addr: [0; 4],
             },
             WtmpRecord {
-                record_type: DEAD_PROCESS, pid: 100, terminal: "tty1".into(),
-                id: "t1".into(), user: "".into(), host: "".into(),
-                exit_status: 0, session: 0, time_sec: 2000, time_usec: 0, addr: [0; 4],
+                record_type: DEAD_PROCESS,
+                pid: 100,
+                terminal: "tty1".into(),
+                id: "t1".into(),
+                user: "".into(),
+                host: "".into(),
+                exit_status: 0,
+                session: 0,
+                time_sec: 2000,
+                time_usec: 0,
+                addr: [0; 4],
             },
         ];
         let entries = resolve_login_entries(&records, false);
@@ -1591,13 +1631,19 @@ mod tests {
 
     #[test]
     fn test_resolve_still_logged_in() {
-        let records = vec![
-            WtmpRecord {
-                record_type: USER_PROCESS, pid: 200, terminal: "pts/0".into(),
-                id: "s0".into(), user: "bob".into(), host: "example.com".into(),
-                exit_status: 0, session: 0, time_sec: 5000, time_usec: 0, addr: [0; 4],
-            },
-        ];
+        let records = vec![WtmpRecord {
+            record_type: USER_PROCESS,
+            pid: 200,
+            terminal: "pts/0".into(),
+            id: "s0".into(),
+            user: "bob".into(),
+            host: "example.com".into(),
+            exit_status: 0,
+            session: 0,
+            time_sec: 5000,
+            time_usec: 0,
+            addr: [0; 4],
+        }];
         let entries = resolve_login_entries(&records, false);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].user, "bob");
@@ -1608,14 +1654,30 @@ mod tests {
     fn test_resolve_boot_clears_sessions() {
         let records = vec![
             WtmpRecord {
-                record_type: USER_PROCESS, pid: 100, terminal: "tty1".into(),
-                id: "t1".into(), user: "alice".into(), host: "".into(),
-                exit_status: 0, session: 0, time_sec: 1000, time_usec: 0, addr: [0; 4],
+                record_type: USER_PROCESS,
+                pid: 100,
+                terminal: "tty1".into(),
+                id: "t1".into(),
+                user: "alice".into(),
+                host: "".into(),
+                exit_status: 0,
+                session: 0,
+                time_sec: 1000,
+                time_usec: 0,
+                addr: [0; 4],
             },
             WtmpRecord {
-                record_type: BOOT_TIME, pid: 0, terminal: "~".into(),
-                id: "~~".into(), user: "reboot".into(), host: "".into(),
-                exit_status: 0, session: 0, time_sec: 3000, time_usec: 0, addr: [0; 4],
+                record_type: BOOT_TIME,
+                pid: 0,
+                terminal: "~".into(),
+                id: "~~".into(),
+                user: "reboot".into(),
+                host: "".into(),
+                exit_status: 0,
+                session: 0,
+                time_sec: 3000,
+                time_usec: 0,
+                addr: [0; 4],
             },
         ];
         let entries = resolve_login_entries(&records, false);
@@ -1629,14 +1691,30 @@ mod tests {
     fn test_resolve_with_system_entries() {
         let records = vec![
             WtmpRecord {
-                record_type: BOOT_TIME, pid: 0, terminal: "~".into(),
-                id: "~~".into(), user: "reboot".into(), host: "".into(),
-                exit_status: 0, session: 0, time_sec: 1000, time_usec: 0, addr: [0; 4],
+                record_type: BOOT_TIME,
+                pid: 0,
+                terminal: "~".into(),
+                id: "~~".into(),
+                user: "reboot".into(),
+                host: "".into(),
+                exit_status: 0,
+                session: 0,
+                time_sec: 1000,
+                time_usec: 0,
+                addr: [0; 4],
             },
             WtmpRecord {
-                record_type: RUN_LVL, pid: 3, terminal: "~".into(),
-                id: "~~".into(), user: "runlevel".into(), host: "".into(),
-                exit_status: 0, session: 0, time_sec: 1001, time_usec: 0, addr: [0; 4],
+                record_type: RUN_LVL,
+                pid: 3,
+                terminal: "~".into(),
+                id: "~~".into(),
+                user: "runlevel".into(),
+                host: "".into(),
+                exit_status: 0,
+                session: 0,
+                time_sec: 1001,
+                time_usec: 0,
+                addr: [0; 4],
             },
         ];
         let entries_no_sys = resolve_login_entries(&records, false);
@@ -1652,13 +1730,21 @@ mod tests {
     fn test_filter_by_user() {
         let entries = vec![
             LoginEntry {
-                user: "alice".into(), terminal: "tty1".into(), host: "".into(),
-                login_time: 1000, logout_time: Some(2000), record_type: USER_PROCESS,
+                user: "alice".into(),
+                terminal: "tty1".into(),
+                host: "".into(),
+                login_time: 1000,
+                logout_time: Some(2000),
+                record_type: USER_PROCESS,
                 addr: [0; 4],
             },
             LoginEntry {
-                user: "bob".into(), terminal: "pts/0".into(), host: "".into(),
-                login_time: 3000, logout_time: None, record_type: USER_PROCESS,
+                user: "bob".into(),
+                terminal: "pts/0".into(),
+                host: "".into(),
+                login_time: 3000,
+                logout_time: None,
+                record_type: USER_PROCESS,
                 addr: [0; 4],
             },
         ];
@@ -1671,13 +1757,21 @@ mod tests {
     fn test_filter_by_tty() {
         let entries = vec![
             LoginEntry {
-                user: "alice".into(), terminal: "tty1".into(), host: "".into(),
-                login_time: 1000, logout_time: None, record_type: USER_PROCESS,
+                user: "alice".into(),
+                terminal: "tty1".into(),
+                host: "".into(),
+                login_time: 1000,
+                logout_time: None,
+                record_type: USER_PROCESS,
                 addr: [0; 4],
             },
             LoginEntry {
-                user: "bob".into(), terminal: "pts/0".into(), host: "".into(),
-                login_time: 2000, logout_time: None, record_type: USER_PROCESS,
+                user: "bob".into(),
+                terminal: "pts/0".into(),
+                host: "".into(),
+                login_time: 2000,
+                logout_time: None,
+                record_type: USER_PROCESS,
                 addr: [0; 4],
             },
         ];
@@ -1688,26 +1782,30 @@ mod tests {
 
     #[test]
     fn test_filter_no_filters_returns_all() {
-        let entries = vec![
-            LoginEntry {
-                user: "alice".into(), terminal: "tty1".into(), host: "".into(),
-                login_time: 1000, logout_time: None, record_type: USER_PROCESS,
-                addr: [0; 4],
-            },
-        ];
+        let entries = vec![LoginEntry {
+            user: "alice".into(),
+            terminal: "tty1".into(),
+            host: "".into(),
+            login_time: 1000,
+            logout_time: None,
+            record_type: USER_PROCESS,
+            addr: [0; 4],
+        }];
         let filtered = filter_entries(&entries, &[]);
         assert_eq!(filtered.len(), 1);
     }
 
     #[test]
     fn test_filter_no_match() {
-        let entries = vec![
-            LoginEntry {
-                user: "alice".into(), terminal: "tty1".into(), host: "".into(),
-                login_time: 1000, logout_time: None, record_type: USER_PROCESS,
-                addr: [0; 4],
-            },
-        ];
+        let entries = vec![LoginEntry {
+            user: "alice".into(),
+            terminal: "tty1".into(),
+            host: "".into(),
+            login_time: 1000,
+            logout_time: None,
+            record_type: USER_PROCESS,
+            addr: [0; 4],
+        }];
         let filtered = filter_entries(&entries, &["nonexistent".to_string()]);
         assert!(filtered.is_empty());
     }
@@ -1741,7 +1839,11 @@ mod tests {
 
     #[test]
     fn test_parse_last_args_file() {
-        let args = vec!["last".to_string(), "-f".to_string(), "/tmp/wtmp".to_string()];
+        let args = vec![
+            "last".to_string(),
+            "-f".to_string(),
+            "/tmp/wtmp".to_string(),
+        ];
         let opts = parse_last_args(&args, Personality::Last).unwrap();
         assert_eq!(opts.file, "/tmp/wtmp");
     }
@@ -1749,9 +1851,14 @@ mod tests {
     #[test]
     fn test_parse_last_args_flags() {
         let args = vec![
-            "last".to_string(), "-R".to_string(), "-a".to_string(),
-            "-F".to_string(), "-i".to_string(), "-x".to_string(),
-            "-w".to_string(), "-d".to_string(),
+            "last".to_string(),
+            "-R".to_string(),
+            "-a".to_string(),
+            "-F".to_string(),
+            "-i".to_string(),
+            "-x".to_string(),
+            "-w".to_string(),
+            "-d".to_string(),
         ];
         let opts = parse_last_args(&args, Personality::Last).unwrap();
         assert!(opts.no_host);
@@ -1892,8 +1999,12 @@ mod tests {
     #[test]
     fn test_host_display_no_host_flag() {
         let entry = LoginEntry {
-            user: "alice".into(), terminal: "tty1".into(), host: "myhost".into(),
-            login_time: 1000, logout_time: None, record_type: USER_PROCESS,
+            user: "alice".into(),
+            terminal: "tty1".into(),
+            host: "myhost".into(),
+            login_time: 1000,
+            logout_time: None,
+            record_type: USER_PROCESS,
             addr: [0; 4],
         };
         let mut opts = LastOptions::new(DEFAULT_WTMP);
@@ -1904,8 +2015,12 @@ mod tests {
     #[test]
     fn test_host_display_show_ip() {
         let entry = LoginEntry {
-            user: "alice".into(), terminal: "tty1".into(), host: "myhost".into(),
-            login_time: 1000, logout_time: None, record_type: USER_PROCESS,
+            user: "alice".into(),
+            terminal: "tty1".into(),
+            host: "myhost".into(),
+            login_time: 1000,
+            logout_time: None,
+            record_type: USER_PROCESS,
             addr: [0x0100007F, 0, 0, 0],
         };
         let mut opts = LastOptions::new(DEFAULT_WTMP);
@@ -1916,8 +2031,12 @@ mod tests {
     #[test]
     fn test_host_display_normal() {
         let entry = LoginEntry {
-            user: "alice".into(), terminal: "tty1".into(), host: "remotehost".into(),
-            login_time: 1000, logout_time: None, record_type: USER_PROCESS,
+            user: "alice".into(),
+            terminal: "tty1".into(),
+            host: "remotehost".into(),
+            login_time: 1000,
+            logout_time: None,
+            record_type: USER_PROCESS,
             addr: [0; 4],
         };
         let opts = LastOptions::new(DEFAULT_WTMP);
@@ -1933,10 +2052,24 @@ mod tests {
             BOOT_TIME, 0, "~", "~~", "reboot", "", 1000, [0; 4],
         ));
         data.extend(build_wtmp_record_bytes(
-            USER_PROCESS, 500, "tty1", "t1", "root", "10.0.0.1", 2000, [0x0100000A, 0, 0, 0],
+            USER_PROCESS,
+            500,
+            "tty1",
+            "t1",
+            "root",
+            "10.0.0.1",
+            2000,
+            [0x0100000A, 0, 0, 0],
         ));
         data.extend(build_wtmp_record_bytes(
-            DEAD_PROCESS, 500, "tty1", "t1", "", "", 3000, [0; 4],
+            DEAD_PROCESS,
+            500,
+            "tty1",
+            "t1",
+            "",
+            "",
+            3000,
+            [0; 4],
         ));
 
         let records = parse_wtmp_records(&data);

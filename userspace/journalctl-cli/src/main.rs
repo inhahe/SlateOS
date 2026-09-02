@@ -47,11 +47,18 @@ fn run_journalctl(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let unit = args.windows(2).find(|w| w[0] == "-u" || w[0] == "--unit")
+    let unit = args
+        .windows(2)
+        .find(|w| w[0] == "-u" || w[0] == "--unit")
         .map(|w| w[1].as_str());
-    let lines = args.windows(2).find(|w| w[0] == "-n" || w[0] == "--lines")
-        .and_then(|w| w[1].parse::<usize>().ok()).unwrap_or(10);
-    let json = args.windows(2).any(|w| (w[0] == "-o" || w[0] == "--output") && w[1] == "json");
+    let lines = args
+        .windows(2)
+        .find(|w| w[0] == "-n" || w[0] == "--lines")
+        .and_then(|w| w[1].parse::<usize>().ok())
+        .unwrap_or(10);
+    let json = args
+        .windows(2)
+        .any(|w| (w[0] == "-o" || w[0] == "--output") && w[1] == "json");
     let kernel = args.iter().any(|a| a == "-k" || a == "--dmesg");
 
     if kernel {
@@ -68,7 +75,12 @@ fn run_journalctl(args: Vec<String>) -> i32 {
 
     if json {
         for i in 0..max {
-            println!("{{\"__REALTIME_TIMESTAMP\":\"170523600{}000000\",\"_HOSTNAME\":\"slateos\",\"SYSLOG_IDENTIFIER\":\"{}\",\"MESSAGE\":\"Log entry {}\"}}", i, svc, i + 1);
+            println!(
+                "{{\"__REALTIME_TIMESTAMP\":\"170523600{}000000\",\"_HOSTNAME\":\"slateos\",\"SYSLOG_IDENTIFIER\":\"{}\",\"MESSAGE\":\"Log entry {}\"}}",
+                i,
+                svc,
+                i + 1
+            );
         }
     } else {
         let messages = [
@@ -83,7 +95,13 @@ fn run_journalctl(args: Vec<String>) -> i32 {
         ];
         for i in 0..max {
             let msg = messages.get(i).copied().unwrap_or("Log entry");
-            println!("Jan 15 12:{:02}:{:02} slateos {}[1234]: {}", i, i * 5, svc, msg);
+            println!(
+                "Jan 15 12:{:02}:{:02} slateos {}[1234]: {}",
+                i,
+                i * 5,
+                svc,
+                msg
+            );
         }
     }
     0
@@ -98,7 +116,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_journalctl};
+    use super::run_journalctl;
 
     #[test]
     fn help_exits_zero() {

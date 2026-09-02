@@ -47,7 +47,10 @@ fn run_john(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a.starts_with("--list=")) {
-        let what = args.iter().find_map(|a| a.strip_prefix("--list=")).unwrap_or("formats");
+        let what = args
+            .iter()
+            .find_map(|a| a.strip_prefix("--list="))
+            .unwrap_or("formats");
         match what {
             "formats" => {
                 println!("descrypt, bsdicrypt, md5crypt, bcrypt, scrypt, LM, AFS,");
@@ -105,7 +108,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -123,7 +128,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_x2john};
+    use super::run_x2john;
 
     #[test]
     fn help_exits_zero() {

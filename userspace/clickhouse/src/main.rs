@@ -23,12 +23,24 @@ fn run_ch_server(args: Vec<String>) -> i32 {
         println!("ClickHouse server version 24.4.1 (Slate OS).");
         return 0;
     }
-    println!("{{}}'ts':'2025-05-22 10:00:00.000','level':'Information','msg':'Starting ClickHouse 24.4.1 (Slate OS)'}}");
-    println!("{{}}'ts':'2025-05-22 10:00:00.100','level':'Information','msg':'Listening for connections with native protocol on port 9000'}}");
-    println!("{{}}'ts':'2025-05-22 10:00:00.200','level':'Information','msg':'Listening for HTTP on port 8123'}}");
-    println!("{{}}'ts':'2025-05-22 10:00:00.300','level':'Information','msg':'Listening for MySQL on port 9004'}}");
-    println!("{{}}'ts':'2025-05-22 10:00:00.400','level':'Information','msg':'Listening for PostgreSQL on port 9005'}}");
-    println!("{{}}'ts':'2025-05-22 10:00:01.000','level':'Information','msg':'Ready for connections.'}}");
+    println!(
+        "{{}}'ts':'2025-05-22 10:00:00.000','level':'Information','msg':'Starting ClickHouse 24.4.1 (Slate OS)'}}"
+    );
+    println!(
+        "{{}}'ts':'2025-05-22 10:00:00.100','level':'Information','msg':'Listening for connections with native protocol on port 9000'}}"
+    );
+    println!(
+        "{{}}'ts':'2025-05-22 10:00:00.200','level':'Information','msg':'Listening for HTTP on port 8123'}}"
+    );
+    println!(
+        "{{}}'ts':'2025-05-22 10:00:00.300','level':'Information','msg':'Listening for MySQL on port 9004'}}"
+    );
+    println!(
+        "{{}}'ts':'2025-05-22 10:00:00.400','level':'Information','msg':'Listening for PostgreSQL on port 9005'}}"
+    );
+    println!(
+        "{{}}'ts':'2025-05-22 10:00:01.000','level':'Information','msg':'Ready for connections.'}}"
+    );
     0
 }
 
@@ -53,7 +65,9 @@ fn run_ch_client(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let query = args.iter().position(|a| a == "--query" || a == "-q")
+    let query = args
+        .iter()
+        .position(|a| a == "--query" || a == "-q")
         .and_then(|i| args.get(i + 1));
 
     if let Some(q) = query {
@@ -73,7 +87,9 @@ fn run_ch_client(args: Vec<String>) -> i32 {
             println!("│  2 │ bob     │ 2025-02-20 14:15:00 │");
             println!("│  3 │ charlie │ 2025-03-10 11:45:00 │");
             println!("└────┴─────────┴─────────────────────┘");
-            println!("3 rows in set. Elapsed: 0.004 sec. Processed 3 rows, 256 B (750 rows/s., 64.00 KB/s.)");
+            println!(
+                "3 rows in set. Elapsed: 0.004 sec. Processed 3 rows, 256 B (750 rows/s., 64.00 KB/s.)"
+            );
         } else {
             println!("Ok. 0 rows in set. Elapsed: 0.001 sec.");
         }
@@ -81,7 +97,9 @@ fn run_ch_client(args: Vec<String>) -> i32 {
     }
 
     // Interactive mode
-    let host = args.iter().position(|a| a == "--host")
+    let host = args
+        .iter()
+        .position(|a| a == "--host")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("localhost");
@@ -118,7 +136,9 @@ fn run_ch_local(args: Vec<String>) -> i32 {
         println!("ClickHouse local version 24.4.1 (Slate OS).");
         return 0;
     }
-    let query = args.iter().position(|a| a == "--query" || a == "-q")
+    let query = args
+        .iter()
+        .position(|a| a == "--query" || a == "-q")
         .and_then(|i| args.get(i + 1));
     if let Some(q) = query {
         let _ = q;
@@ -132,11 +152,16 @@ fn run_ch_local(args: Vec<String>) -> i32 {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("clickhouse-server");
+        let s = args
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("clickhouse-server");
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -152,7 +177,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ch_server};
+    use super::run_ch_server;
 
     #[test]
     fn help_exits_zero() {

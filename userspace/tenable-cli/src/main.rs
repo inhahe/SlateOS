@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_tenable(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,14 +27,23 @@ fn run_tenable(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tenable 2024 (Slate OS), Nessus 10.8"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Tenable 2024 (Slate OS), Nessus 10.8");
+        return 0;
+    }
     println!("Tenable 2024 (Slate OS) — Exposure Management");
     println!("  Vendor: Tenable Holdings, Inc. (Columbia, MD — NASDAQ:TENB since 2018)");
     println!("  Founders: Ron Gula + Jack Huffard + Renaud Deraison, 2002");
-    println!("          Renaud Deraison: original creator of Nessus (1998) — at age 17 from France");
-    println!("          Nessus = the foundational open-source vulnerability scanner of the 1990s-2000s");
+    println!(
+        "          Renaud Deraison: original creator of Nessus (1998) — at age 17 from France"
+    );
+    println!(
+        "          Nessus = the foundational open-source vulnerability scanner of the 1990s-2000s"
+    );
     println!("          Nessus closed-source 2005 (controversial — angered OSS community)");
-    println!("          Tenable founded to commercialize Nessus + enterprise vulnerability management");
+    println!(
+        "          Tenable founded to commercialize Nessus + enterprise vulnerability management"
+    );
     println!("          longest-running pure-play vulnerability management vendor");
     println!("  Public market (NASDAQ:TENB):");
     println!("         IPO July 2018 at $23/share, raised $250M");
@@ -38,14 +51,26 @@ fn run_tenable(args: &[String], _prog: &str) -> i32 {
     println!("         FY2024 revenue: ~$830M+ (+11% YoY)");
     println!("         Market cap: ~$5-7B range");
     println!("         Operating margin improving — focus on profitability post-2022");
-    println!("         Long-time CEO Amit Yoran stepped down 2023, replaced by Steve Vintz + Mark Thurmond");
-    println!("  Strategic position: 'exposure management — see and reduce cyber risk across your attack surface':");
-    println!("                    pitch: 'know all your assets, prioritize what matters, fix what hurts'");
+    println!(
+        "         Long-time CEO Amit Yoran stepped down 2023, replaced by Steve Vintz + Mark Thurmond"
+    );
+    println!(
+        "  Strategic position: 'exposure management — see and reduce cyber risk across your attack surface':"
+    );
+    println!(
+        "                    pitch: 'know all your assets, prioritize what matters, fix what hurts'"
+    );
     println!("                    target: every enterprise (broadest vuln-mgmt customer base)");
-    println!("                    primary competitor: Qualys (head-to-head), Rapid7, Microsoft Defender Vulnerability Mgmt");
+    println!(
+        "                    primary competitor: Qualys (head-to-head), Rapid7, Microsoft Defender Vulnerability Mgmt"
+    );
     println!("                    secondary: Wiz, Orca (cloud-only), CrowdStrike (endpoint-led)");
-    println!("                    Tenable's wedge: Nessus install base + on-prem dominance + OT + identity");
-    println!("                    'Exposure Management' rebrand 2023 to compete with CNAPP/CTEM trends");
+    println!(
+        "                    Tenable's wedge: Nessus install base + on-prem dominance + OT + identity"
+    );
+    println!(
+        "                    'Exposure Management' rebrand 2023 to compete with CNAPP/CTEM trends"
+    );
     println!("  Pricing:");
     println!("    Nessus Essentials — FREE for up to 16 IPs (home/personal use)");
     println!("    Nessus Pro — $4K/yr (single scanner, unlimited IPs)");
@@ -117,20 +142,29 @@ fn run_tenable(args: &[String], _prog: &str) -> i32 {
     println!("    - International governments + utilities");
     println!("    - Widest install base of any vuln-mgmt vendor");
     println!("  Critique: legacy vulnerability-scanning positioning vs modern CNAPP/CTEM");
-    println!("           agentless cloud security entry was late (Ermetic acq Oct 2023 vs Wiz 2020 founding)");
+    println!(
+        "           agentless cloud security entry was late (Ermetic acq Oct 2023 vs Wiz 2020 founding)"
+    );
     println!("           on-prem dominance = exposure to cloud-migration headwinds");
     println!("           UX dated vs newer competitors (Wiz)");
     println!("           stock price under pressure: cloud transition + competitive intensity");
     println!("           Qualys head-to-head competition keeps margins compressed");
-    println!("           Microsoft Defender Vulnerability Management free for E5 customers = price pressure");
+    println!(
+        "           Microsoft Defender Vulnerability Management free for E5 customers = price pressure"
+    );
     println!("           Tenable One bundling helps but unbundled pricing still revenue base");
-    println!("  Differentiator: Nessus creator (47K+ detection plugins) + 65% Fortune 500 footprint + dominant on-prem + OT/ICS leadership + Identity Exposure (Alsid) + recent CNAPP entry (Ermetic) — the exposure-management platform for organizations that need broad scope across IT, cloud, identity, and OT");
+    println!(
+        "  Differentiator: Nessus creator (47K+ detection plugins) + 65% Fortune 500 footprint + dominant on-prem + OT/ICS leadership + Identity Exposure (Alsid) + recent CNAPP entry (Ermetic) — the exposure-management platform for organizations that need broad scope across IT, cloud, identity, and OT"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "tenable".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "tenable".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_tenable(&rest, &_prog);
     process::exit(code);
@@ -138,7 +172,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_tenable};
+    use super::{basename, run_tenable, strip_ext};
 
     #[test]
     fn basename_strips_path() {

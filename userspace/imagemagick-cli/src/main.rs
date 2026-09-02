@@ -51,7 +51,8 @@ fn run_convert(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -65,21 +66,24 @@ fn run_convert(args: &[String]) -> i32 {
 
     println!("Converting: {} -> {}", input, output);
     if has_resize {
-        let geom = args.windows(2)
+        let geom = args
+            .windows(2)
             .find(|w| w[0] == "-resize")
             .map(|w| w[1].as_str())
             .unwrap_or("800x600");
         println!("  Resize: {}", geom);
     }
     if has_crop {
-        let geom = args.windows(2)
+        let geom = args
+            .windows(2)
             .find(|w| w[0] == "-crop")
             .map(|w| w[1].as_str())
             .unwrap_or("400x300+100+50");
         println!("  Crop: {}", geom);
     }
     if has_blur {
-        let spec = args.windows(2)
+        let spec = args
+            .windows(2)
             .find(|w| w[0] == "-blur")
             .map(|w| w[1].as_str())
             .unwrap_or("0x5");
@@ -106,7 +110,8 @@ fn run_identify(args: &[String]) -> i32 {
 
     let verbose = args.iter().any(|a| a == "-verbose");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -158,7 +163,8 @@ fn run_mogrify(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -185,7 +191,8 @@ fn run_composite(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -220,7 +227,8 @@ fn run_montage(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -239,7 +247,10 @@ fn run_montage(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("convert"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("convert"));
     let p = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
@@ -261,7 +272,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_convert};
+    use super::run_convert;
 
     #[test]
     fn help_exits_zero() {

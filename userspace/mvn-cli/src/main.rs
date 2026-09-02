@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mvn(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -44,7 +48,8 @@ fn run_mvn(args: &[String]) -> i32 {
         return 0;
     }
     let quiet = args.iter().any(|a| a == "-q");
-    let phases: Vec<&str> = args.iter()
+    let phases: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -60,21 +65,27 @@ fn run_mvn(args: &[String]) -> i32 {
             "clean" => {
                 if !quiet {
                     println!("[INFO]");
-                    println!("[INFO] --- maven-clean-plugin:3.3.2:clean (default-clean) @ myapp ---");
+                    println!(
+                        "[INFO] --- maven-clean-plugin:3.3.2:clean (default-clean) @ myapp ---"
+                    );
                     println!("[INFO] Deleting target/");
                 }
             }
             "compile" => {
                 if !quiet {
                     println!("[INFO]");
-                    println!("[INFO] --- maven-compiler-plugin:3.12.1:compile (default-compile) @ myapp ---");
+                    println!(
+                        "[INFO] --- maven-compiler-plugin:3.12.1:compile (default-compile) @ myapp ---"
+                    );
                     println!("[INFO] Compiling 15 source files to target/classes");
                 }
             }
             "test" => {
                 if !quiet {
                     println!("[INFO]");
-                    println!("[INFO] --- maven-surefire-plugin:3.2.5:test (default-test) @ myapp ---");
+                    println!(
+                        "[INFO] --- maven-surefire-plugin:3.2.5:test (default-test) @ myapp ---"
+                    );
                     println!("[INFO] Tests run: 42, Failures: 0, Errors: 0, Skipped: 0");
                 }
             }
@@ -88,14 +99,18 @@ fn run_mvn(args: &[String]) -> i32 {
             "install" => {
                 if !quiet {
                     println!("[INFO]");
-                    println!("[INFO] --- maven-install-plugin:3.1.1:install (default-install) @ myapp ---");
+                    println!(
+                        "[INFO] --- maven-install-plugin:3.1.1:install (default-install) @ myapp ---"
+                    );
                     println!("[INFO] Installing target/myapp-1.0-SNAPSHOT.jar to ~/.m2/repository");
                 }
             }
             "deploy" => {
                 if !quiet {
                     println!("[INFO]");
-                    println!("[INFO] --- maven-deploy-plugin:3.1.1:deploy (default-deploy) @ myapp ---");
+                    println!(
+                        "[INFO] --- maven-deploy-plugin:3.1.1:deploy (default-deploy) @ myapp ---"
+                    );
                     println!("[INFO] Deploying to remote repository");
                 }
             }
@@ -123,7 +138,10 @@ fn run_mvn(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mvn".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mvn".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mvn(&rest);
     process::exit(code);
@@ -131,7 +149,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mvn};
+    use super::{basename, run_mvn, strip_ext};
 
     #[test]
     fn basename_strips_path() {

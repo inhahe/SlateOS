@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_s2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -16,12 +20,17 @@ fn run_s2(args: &[String], _prog: &str) -> i32 {
         println!("Options:");
         println!("  --universal-storage    Universal Storage (rowstore + columnstore unified)");
         println!("  --vector               Native vector search (HNSW + cosine/dot/Euclidean)");
-        println!("  --pipelines            Pipelines (continuous ingest from Kafka/S3/Pulsar/etc.)");
+        println!(
+            "  --pipelines            Pipelines (continuous ingest from Kafka/S3/Pulsar/etc.)"
+        );
         println!("  --workspaces           Workspaces (isolated compute on shared storage)");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SingleStore 2024 (Slate OS) — singlestore CLI 1.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("SingleStore 2024 (Slate OS) — singlestore CLI 1.x");
+        return 0;
+    }
     println!("SingleStore 2024 (Slate OS) — Real-Time Distributed HTAP Database");
     println!("  Vendor: SingleStore, Inc. (San Francisco, CA — private)");
     println!("          Renamed from MemSQL in October 2020");
@@ -30,20 +39,34 @@ fn run_s2(args: &[String], _prog: &str) -> i32 {
     println!("          Nikita Shamgunov: CTO, deep DB systems background, now Neon (Postgres)");
     println!("          Raj Verma: CEO 2019+ (ex-TIBCO president)");
     println!("          'MemSQL' = MySQL-compatible in-memory database");
-    println!("          Renaming to SingleStore signaled HTAP positioning (one DB, transactional + analytical)");
+    println!(
+        "          Renaming to SingleStore signaled HTAP positioning (one DB, transactional + analytical)"
+    );
     println!("  Funding:");
     println!("         Total raised: ~$464M across rounds");
     println!("         Series F May 2022: $116M at $1.3B+ valuation");
     println!("         Goldman Sachs, GV, IA Ventures, Khosla Ventures investors");
     println!("         Profitable as of 2024 — preparing for eventual IPO");
     println!("         Revenue ~$100M+ (estimate 2024, ~50% YoY growth)");
-    println!("  Strategic position: 'one database for transactions + analytics + AI — HTAP for real-time':");
-    println!("                    pitch: 'no more Postgres+Snowflake+vector DB — one engine, real-time everything'");
+    println!(
+        "  Strategic position: 'one database for transactions + analytics + AI — HTAP for real-time':"
+    );
+    println!(
+        "                    pitch: 'no more Postgres+Snowflake+vector DB — one engine, real-time everything'"
+    );
     println!("                    target: real-time analytics + dashboards + AI applications");
-    println!("                    primary competitor: Snowflake + Postgres + Pinecone (the assembly)");
-    println!("                    secondary: Clickhouse, Rockset (acquired by OpenAI), Pinot, Druid");
-    println!("                    SingleStore's wedge: true HTAP — concurrent reads/writes with no replication delay");
-    println!("                    Universal Storage (rowstore + columnstore in one table) = unique");
+    println!(
+        "                    primary competitor: Snowflake + Postgres + Pinecone (the assembly)"
+    );
+    println!(
+        "                    secondary: Clickhouse, Rockset (acquired by OpenAI), Pinot, Druid"
+    );
+    println!(
+        "                    SingleStore's wedge: true HTAP — concurrent reads/writes with no replication delay"
+    );
+    println!(
+        "                    Universal Storage (rowstore + columnstore in one table) = unique"
+    );
     println!("                    AI/vector push 2023+: native HNSW + JSON + relational + vector");
     println!("  Pricing (consumption-based on cloud, custom for self-managed):");
     println!("    Free tier: 'Shared Tier' free starter workspace");
@@ -56,7 +79,9 @@ fn run_s2(args: &[String], _prog: &str) -> i32 {
     println!("    - Distributed shared-nothing across aggregator + leaf nodes");
     println!("    - Aggregator: SQL compilation, query routing, transaction coordination");
     println!("    - Leaf: data storage + execution");
-    println!("    - Universal Storage: every table can be rowstore (OLTP) or columnstore (OLAP) or both");
+    println!(
+        "    - Universal Storage: every table can be rowstore (OLTP) or columnstore (OLAP) or both"
+    );
     println!("    - In-memory rowstore (lock-free, MVCC)");
     println!("    - Compiled query plans → C++ → native machine code (cached)");
     println!("    - MySQL wire protocol (drop-in replacement-ish)");
@@ -68,7 +93,9 @@ fn run_s2(args: &[String], _prog: &str) -> i32 {
     println!("       - JSON + geospatial + full-text + vector support");
     println!("       - Real-time ingest + analytics in same engine");
     println!("    2. Pipelines (the real-time ingest):");
-    println!("       - Continuous data ingestion from Kafka, S3, Azure Blob, GCS, Pulsar, Filesystem");
+    println!(
+        "       - Continuous data ingestion from Kafka, S3, Azure Blob, GCS, Pulsar, Filesystem"
+    );
     println!("       - Exactly-once semantics");
     println!("       - In-flight SQL transformations");
     println!("       - 'Stream + batch unified in one engine' pitch");
@@ -108,7 +135,9 @@ fn run_s2(args: &[String], _prog: &str) -> i32 {
     println!("    - This eliminates the OLTP/OLAP split that forces 2 DBs in most architectures");
     println!("  The MemSQL → SingleStore rename (Oct 2020):");
     println!("    - 'MemSQL' = in-memory MySQL-compatible (original 2011 positioning)");
-    println!("    - As columnstore + Universal Storage matured, name became misleading (not just memory anymore)");
+    println!(
+        "    - As columnstore + Universal Storage matured, name became misleading (not just memory anymore)"
+    );
     println!("    - 'SingleStore' = positions as 'one store for everything' (HTAP message)");
     println!("    - Smart rebrand — captured HTAP + vector momentum 2021-2024");
     println!("  The AI bet (2023+):");
@@ -126,9 +155,13 @@ fn run_s2(args: &[String], _prog: &str) -> i32 {
     println!("    - LangChain + LlamaIndex vector store");
     println!("  SingleStore CLI usage:");
     println!("    singlestore login                                        # auth");
-    println!("    singlestore workspace-group create --name=my-wg --provider=aws --region=us-east-1");
+    println!(
+        "    singlestore workspace-group create --name=my-wg --provider=aws --region=us-east-1"
+    );
     println!("    singlestore workspace create --name=my-ws --size=S-2 --workspace-group-id=ID");
-    println!("    mysql -h ws-host -P 3306 -u admin -p                     # MySQL-compatible connection");
+    println!(
+        "    mysql -h ws-host -P 3306 -u admin -p                     # MySQL-compatible connection"
+    );
     println!("    CREATE DATABASE my_db;");
     println!("    USE my_db;");
     println!("    CREATE TABLE docs (id INT, content TEXT, embedding VECTOR(1536));");
@@ -143,21 +176,30 @@ fn run_s2(args: &[String], _prog: &str) -> i32 {
     println!("    - AI startups using as RAG vector store");
     println!("    - 1,000+ enterprise customers");
     println!("    - Use cases: real-time dashboards, fraud detection, IoT analytics, RAG/LLM apps");
-    println!("  Critique: Snowflake + Postgres + Pinecone assembly remains common despite HTAP pitch");
+    println!(
+        "  Critique: Snowflake + Postgres + Pinecone assembly remains common despite HTAP pitch"
+    );
     println!("           MySQL wire compat is partial (not 100% drop-in for app code)");
     println!("           perception: 'in-memory only' lingers from MemSQL days");
     println!("           less open-source presence than Postgres/Clickhouse");
     println!("           rebrand consumed marketing attention 2020-2022");
-    println!("           competition: ClickHouse + Snowflake + Postgres + Pinecone each strong in their lanes");
+    println!(
+        "           competition: ClickHouse + Snowflake + Postgres + Pinecone each strong in their lanes"
+    );
     println!("           vector search came after Pinecone/Weaviate already established");
     println!("           closed-source business model in an open-source-friendly DB world");
-    println!("  Differentiator: HTAP architecture (Universal Storage rowstore + columnstore in same table) + real-time ingest via Pipelines + native vector search (HNSW + cosine/dot/Euclidean) + MySQL wire protocol compatibility + distributed SQL across aggregator/leaf nodes + Workspaces compute isolation + compiled query plans (C++ codegen) + ex-Facebook founders (Eric Frenkiel + Nikita Shamgunov, 2011) + $464M raised + $1.3B+ valuation + 'one DB for transactions + analytics + vector' positioning + Goldman/Comcast/Akamai customers + ~$100M revenue with 50% growth — the HTAP database that replaces Postgres + Snowflake + Pinecone with one engine for real-time apps + AI/RAG workloads");
+    println!(
+        "  Differentiator: HTAP architecture (Universal Storage rowstore + columnstore in same table) + real-time ingest via Pipelines + native vector search (HNSW + cosine/dot/Euclidean) + MySQL wire protocol compatibility + distributed SQL across aggregator/leaf nodes + Workspaces compute isolation + compiled query plans (C++ codegen) + ex-Facebook founders (Eric Frenkiel + Nikita Shamgunov, 2011) + $464M raised + $1.3B+ valuation + 'one DB for transactions + analytics + vector' positioning + Goldman/Comcast/Akamai customers + ~$100M revenue with 50% growth — the HTAP database that replaces Postgres + Snowflake + Pinecone with one engine for real-time apps + AI/RAG workloads"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "singlestore".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "singlestore".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_s2(&rest, &_prog);
     process::exit(code);
@@ -165,7 +207,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_s2};
+    use super::{basename, run_s2, strip_ext};
 
     #[test]
     fn basename_strips_path() {

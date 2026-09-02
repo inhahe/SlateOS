@@ -48,7 +48,8 @@ fn run_yazi(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let entry = args.iter()
+    let entry = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(".");
@@ -80,7 +81,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_yazi};
+    use super::run_yazi;
 
     #[test]
     fn help_exits_zero() {

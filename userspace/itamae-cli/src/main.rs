@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_itamae(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -30,7 +34,12 @@ fn run_itamae(args: &[String], _prog: &str) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match cmd {
         "local" => {
-            let recipes: Vec<&str> = args.iter().skip(1).filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+            let recipes: Vec<&str> = args
+                .iter()
+                .skip(1)
+                .filter(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .collect();
             let recipe = recipes.first().copied().unwrap_or("recipe.rb");
             let dry = args.iter().any(|a| a == "-n" || a == "--dry-run");
             if dry {
@@ -59,7 +68,10 @@ fn run_itamae(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "itamae".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "itamae".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_itamae(&rest, &prog);
     process::exit(code);
@@ -67,7 +79,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_itamae};
+    use super::{basename, run_itamae, strip_ext};
 
     #[test]
     fn basename_strips_path() {

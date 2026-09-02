@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_magento(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,36 +26,69 @@ fn run_magento(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe Commerce / Magento 2.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Adobe Commerce / Magento 2.4 (Slate OS)");
+        return 0;
+    }
     println!("Adobe Commerce / Magento 2.4 (Slate OS)");
     println!("  Vendor: Adobe Inc. (San Jose, CA — NASDAQ:ADBE)");
-    println!("  Originally: Magento Inc. acquired by eBay 2011 ($180M), spun out 2015, acquired by Adobe May 2018 ($1.68B)");
-    println!("  Founders: Roy Rubin (CEO), Yoav Kutner (CTO), Bob Schwartz, 2008 — originally Varien LLC consultancy in 2007");
-    println!("          Magento was the third commercial attempt by Varien (consulting business) at building open-source e-commerce");
-    println!("          beat osCommerce + Zen Cart with a PHP 5 architecture + EAV product model + extensible event system");
-    println!("          Kutner left 2012 to found Oro Inc. (OroCRM + OroCommerce) — competes with Adobe Commerce in B2B");
-    println!("  Founded: 2008 (Magento 1) — Magento 2 launched 2015 (complete rewrite, breaking change)");
-    println!("          Magento 1 end-of-life June 2020 — caused massive merchant migration crisis");
+    println!(
+        "  Originally: Magento Inc. acquired by eBay 2011 ($180M), spun out 2015, acquired by Adobe May 2018 ($1.68B)"
+    );
+    println!(
+        "  Founders: Roy Rubin (CEO), Yoav Kutner (CTO), Bob Schwartz, 2008 — originally Varien LLC consultancy in 2007"
+    );
+    println!(
+        "          Magento was the third commercial attempt by Varien (consulting business) at building open-source e-commerce"
+    );
+    println!(
+        "          beat osCommerce + Zen Cart with a PHP 5 architecture + EAV product model + extensible event system"
+    );
+    println!(
+        "          Kutner left 2012 to found Oro Inc. (OroCRM + OroCommerce) — competes with Adobe Commerce in B2B"
+    );
+    println!(
+        "  Founded: 2008 (Magento 1) — Magento 2 launched 2015 (complete rewrite, breaking change)"
+    );
+    println!(
+        "          Magento 1 end-of-life June 2020 — caused massive merchant migration crisis"
+    );
     println!("          Adobe acquired May 2018 to add commerce to Adobe Experience Cloud");
     println!("          rebranded 'Magento Commerce' → 'Adobe Commerce' (2020)");
     println!("          Magento Open Source still maintained as free version");
     println!("          ~150K live stores running Magento (down from peak ~250K)");
     println!("  Strategic position: 'enterprise commerce within Adobe Experience Cloud':");
-    println!("                    Adobe sells it bundled with AEM + Marketo + Workfront + Target + Analytics");
-    println!("                    primary head-to-head competitor: Salesforce Commerce Cloud (Demandware)");
-    println!("                    pressure from: Shopify Plus going up-market, commercetools composable wave");
-    println!("                    legacy strength: massive partner ecosystem (10K+ devs, 1K+ agencies)");
-    println!("                    weakness: still PHP + complex deployments — hard to staff in 2024");
+    println!(
+        "                    Adobe sells it bundled with AEM + Marketo + Workfront + Target + Analytics"
+    );
+    println!(
+        "                    primary head-to-head competitor: Salesforce Commerce Cloud (Demandware)"
+    );
+    println!(
+        "                    pressure from: Shopify Plus going up-market, commercetools composable wave"
+    );
+    println!(
+        "                    legacy strength: massive partner ecosystem (10K+ devs, 1K+ agencies)"
+    );
+    println!(
+        "                    weakness: still PHP + complex deployments — hard to staff in 2024"
+    );
     println!("  Editions + pricing:");
     println!("    Magento Open Source — FREE, self-hosted, full source code (Apache 2.0)");
-    println!("    Adobe Commerce — paid, license + your hosting (typically $22K-$190K+/yr depending on GMV)");
+    println!(
+        "    Adobe Commerce — paid, license + your hosting (typically $22K-$190K+/yr depending on GMV)"
+    );
     println!("    Adobe Commerce Cloud — Adobe-hosted on AWS ($35K-$400K+/yr typical)");
     println!("    pricing scales by avg-GMV per year — opaque enterprise contracts");
-    println!("    requires Solution Partner agency for implementation (typically $200K-$2M+ project)");
+    println!(
+        "    requires Solution Partner agency for implementation (typically $200K-$2M+ project)"
+    );
     println!("  Core architecture (PHP, MySQL, EAV product model):");
     println!("    - PHP 8.1+ + MySQL/MariaDB + Elasticsearch + Redis + Varnish");
     println!("    - EAV (Entity-Attribute-Value) catalog model — infinite product attributes");
-    println!("    - Modular architecture: every feature is a 'module', overridable via DI + plugins");
+    println!(
+        "    - Modular architecture: every feature is a 'module', overridable via DI + plugins"
+    );
     println!("    - GraphQL API + REST API + SOAP API (legacy)");
     println!("    - Event-driven extensibility (observers + plugins)");
     println!("    - Composer-based dependency management (modern Magento)");
@@ -81,24 +118,41 @@ fn run_magento(args: &[String], _prog: &str) -> i32 {
     println!("    - extension conflicts are the #1 Magento operational pain point");
     println!("    - Adobe vetting extensions more aggressively post-acquisition");
     println!("  Customers: ~150,000 active stores (Open Source + Commerce combined)");
-    println!("            HP, Nike (some regions), Olympus, Sigma Beauty, Land Rover, Ford (parts), Coca-Cola Bottlers");
+    println!(
+        "            HP, Nike (some regions), Olympus, Sigma Beauty, Land Rover, Ford (parts), Coca-Cola Bottlers"
+    );
     println!("            Helly Hansen, Bulgari, Christian Louboutin, Liverpool FC, Asics");
-    println!("            sweet spot: enterprise B2B + complex catalog merchants + brands requiring full source code");
-    println!("            historic weakness: SMB (too complex — most SMBs migrated to Shopify 2018-2023)");
+    println!(
+        "            sweet spot: enterprise B2B + complex catalog merchants + brands requiring full source code"
+    );
+    println!(
+        "            historic weakness: SMB (too complex — most SMBs migrated to Shopify 2018-2023)"
+    );
     println!("  Critique: complexity tax: requires specialized devs, agencies, hosting partners");
-    println!("           hosting costs are enterprise: $5K-$50K+/mo for Commerce Cloud on serious traffic");
+    println!(
+        "           hosting costs are enterprise: $5K-$50K+/mo for Commerce Cloud on serious traffic"
+    );
     println!("           upgrade pain: 2.4.x version upgrades regularly break extensions");
     println!("           security: high-profile breaches (MageCart card-skimming attacks)");
     println!("           PHP perception: harder to attract young devs vs Node/Python/Go shops");
-    println!("           Shopify Plus eating mid-market — Magento market share declining since 2020");
-    println!("           Adobe sales motion (long enterprise cycles) doesn't match dev-led merchant adoption");
-    println!("  Differentiator: most extensible self-hosted e-commerce + Adobe Experience Cloud bundle + native multi-store + B2B — the platform Fortune 500 brands buy when they need full control + Adobe stack");
+    println!(
+        "           Shopify Plus eating mid-market — Magento market share declining since 2020"
+    );
+    println!(
+        "           Adobe sales motion (long enterprise cycles) doesn't match dev-led merchant adoption"
+    );
+    println!(
+        "  Differentiator: most extensible self-hosted e-commerce + Adobe Experience Cloud bundle + native multi-store + B2B — the platform Fortune 500 brands buy when they need full control + Adobe stack"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "magento".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "magento".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_magento(&rest, &_prog);
     process::exit(code);
@@ -106,7 +160,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_magento};
+    use super::{basename, run_magento, strip_ext};
 
     #[test]
     fn basename_strips_path() {

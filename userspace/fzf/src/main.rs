@@ -87,7 +87,13 @@ fn run_fzf(args: Vec<String>) -> i32 {
     if let Some(idx) = filter_idx {
         let query = args.get(idx + 1).map(|s| s.as_str()).unwrap_or("");
         // Simulate filter mode
-        let items = ["src/main.rs", "src/lib.rs", "src/config.rs", "tests/test.rs", "Cargo.toml"];
+        let items = [
+            "src/main.rs",
+            "src/lib.rs",
+            "src/config.rs",
+            "tests/test.rs",
+            "Cargo.toml",
+        ];
         for item in &items {
             if item.contains(query) {
                 println!("{}", item);
@@ -130,7 +136,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_fzf};
+    use super::run_fzf;
 
     #[test]
     fn help_exits_zero() {

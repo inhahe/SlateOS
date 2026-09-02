@@ -38,7 +38,8 @@ fn run_amber(args: Vec<String>) -> i32 {
     let json = args.iter().any(|a| a == "--json");
 
     // Parse positional args
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -54,12 +55,21 @@ fn run_amber(args: Vec<String>) -> i32 {
     if json {
         if let Some(repl) = replacement {
             println!("[");
-            println!("  {{\"file\":\"src/main.rs\",\"line\":10,\"before\":\"let {} = value;\",\"after\":\"let {} = value;\"}}", pattern, repl);
+            println!(
+                "  {{\"file\":\"src/main.rs\",\"line\":10,\"before\":\"let {} = value;\",\"after\":\"let {} = value;\"}}",
+                pattern, repl
+            );
             println!("]");
         } else {
             println!("[");
-            println!("  {{\"file\":\"src/main.rs\",\"line\":10,\"text\":\"let {} = value;\"}}", pattern);
-            println!("  {{\"file\":\"src/lib.rs\",\"line\":25,\"text\":\"// {} implementation\"}}", pattern);
+            println!(
+                "  {{\"file\":\"src/main.rs\",\"line\":10,\"text\":\"let {} = value;\"}}",
+                pattern
+            );
+            println!(
+                "  {{\"file\":\"src/lib.rs\",\"line\":25,\"text\":\"// {} implementation\"}}",
+                pattern
+            );
             println!("]");
         }
         return 0;
@@ -108,7 +118,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_amber};
+    use super::run_amber;
 
     #[test]
     fn help_exits_zero() {

@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("helpcrunch-cli 0.1.0 (budget-customer-comms personality build)"); }
+fn print_version() {
+    println!("helpcrunch-cli 0.1.0 (budget-customer-comms personality build)");
+}
 
 fn run_about() {
     println!("HelpCrunch.");
@@ -50,7 +52,9 @@ fn run_about() {
     println!("  Team:       distributed across Ukraine + EU; operational through and");
     println!("              post the 2022+ wartime period — typical Ukrainian-SaaS resilience.");
     println!("  Position:   ~3rd of Intercom's per-seat price for a comparable feature set,");
-    println!("              aimed squarely at SMBs that were priced out of Intercom's market move.");
+    println!(
+        "              aimed squarely at SMBs that were priced out of Intercom's market move."
+    );
 }
 
 fn run_intercom() {
@@ -82,7 +86,9 @@ fn run_email() {
     println!("  Drip sequences + welcome series + reactivation campaigns.");
     println!("  Segmentation by custom attributes + tags + lifecycle stage.");
     println!("  A/B testing on subject lines + body content.");
-    println!("  Less depth than Customer.io / Klaviyo but more than basic transactional-email tools.");
+    println!(
+        "  Less depth than Customer.io / Klaviyo but more than basic transactional-email tools."
+    );
 }
 
 fn run_kb() {

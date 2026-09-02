@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_r7(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,31 +28,52 @@ fn run_r7(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Rapid7 + Metasploit 6.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Rapid7 + Metasploit 6.4 (Slate OS)");
+        return 0;
+    }
     println!("Rapid7 2024 (Slate OS) — Insight Platform");
     println!("  Vendor: Rapid7, Inc. (Boston, MA — NASDAQ:RPD since 2015)");
     println!("  Founders: Alan Matthews + Tas Giakouminakis + Chad Loder, 2000");
     println!("          founded in Manhattan, moved to Boston");
     println!("          early product: NeXpose (vulnerability scanner) — competed with Nessus");
-    println!("          long history: 24+ years operating + most diverse pure-play security portfolio");
+    println!(
+        "          long history: 24+ years operating + most diverse pure-play security portfolio"
+    );
     println!("          Corey Thomas: long-time CEO (2012-2024)");
     println!("          Tas Giakouminakis: still CTO + founder still involved");
     println!("  Public market (NASDAQ:RPD):");
     println!("         IPO July 2015 at $16/share, raised ~$103M");
     println!("         peak ~$135 late 2021");
-    println!("         Decline to $30-40 range 2023-2024 — multi-year struggles vs CrowdStrike/Wiz competition");
+    println!(
+        "         Decline to $30-40 range 2023-2024 — multi-year struggles vs CrowdStrike/Wiz competition"
+    );
     println!("         FY2024 revenue: ~$830M+ (similar size to Tenable, growth ~10%)");
     println!("         Market cap: $2-3B range");
     println!("         Activist investor Jana Partners 2023 — pushed for sale/M&A");
     println!("         Strategic review and sale process underway 2024 — possible PE acquisition");
     println!("         Operating margins improving but topline pressure");
-    println!("  Strategic position: 'security operations + visibility — broad portfolio for mid-market':");
-    println!("                    pitch: 'unified security operations across attack surface + cloud + SIEM'");
-    println!("                    target: mid-market + lower-enterprise (sweet spot vs Tenable's broader, Qualys's bigger)");
-    println!("                    primary competitor: Tenable, Qualys, CrowdStrike (XDR), Microsoft Defender, Wiz (cloud)");
-    println!("                    secondary: ServiceNow Security Ops (overlap with InsightConnect SOAR)");
-    println!("                    Rapid7's wedge: Metasploit ownership + broad portfolio + MDR services attached");
-    println!("                    challenge: not a leader in any single category — 'jack of all trades' problem");
+    println!(
+        "  Strategic position: 'security operations + visibility — broad portfolio for mid-market':"
+    );
+    println!(
+        "                    pitch: 'unified security operations across attack surface + cloud + SIEM'"
+    );
+    println!(
+        "                    target: mid-market + lower-enterprise (sweet spot vs Tenable's broader, Qualys's bigger)"
+    );
+    println!(
+        "                    primary competitor: Tenable, Qualys, CrowdStrike (XDR), Microsoft Defender, Wiz (cloud)"
+    );
+    println!(
+        "                    secondary: ServiceNow Security Ops (overlap with InsightConnect SOAR)"
+    );
+    println!(
+        "                    Rapid7's wedge: Metasploit ownership + broad portfolio + MDR services attached"
+    );
+    println!(
+        "                    challenge: not a leader in any single category — 'jack of all trades' problem"
+    );
     println!("  Pricing:");
     println!("    Metasploit Framework — FREE, BSD (community OSS)");
     println!("    Metasploit Pro — $15K+/yr (commercial pen-test platform)");
@@ -108,7 +133,9 @@ fn run_r7(args: &[String], _prog: &str) -> i32 {
     println!("  Integrations (200+):");
     println!("    - SIEM/SOAR: Splunk, Sentinel, Sumo Logic, Datadog, Cortex XSOAR");
     println!("    - Cloud: AWS, Azure, GCP, OCI native APIs");
-    println!("    - Endpoint: CrowdStrike, SentinelOne, Defender for Endpoint (some) — XDR partners");
+    println!(
+        "    - Endpoint: CrowdStrike, SentinelOne, Defender for Endpoint (some) — XDR partners"
+    );
     println!("    - Ticketing: ServiceNow, Jira, PagerDuty, BMC Remedy");
     println!("    - CMDB: ServiceNow, BMC Atrium, Lansweeper");
     println!("    - Patch mgmt: WSUS, SCCM, Tanium");
@@ -127,20 +154,29 @@ fn run_r7(args: &[String], _prog: &str) -> i32 {
     println!("    - sweet spot: mid-market + lower-enterprise (1K-10K employees)");
     println!("    - heavy in: financial services, healthcare, retail, government");
     println!("  Critique: broad-but-not-deep across multiple categories");
-    println!("           losing share to leaders in each segment (Wiz cloud, CrowdStrike XDR, Tenable VM)");
+    println!(
+        "           losing share to leaders in each segment (Wiz cloud, CrowdStrike XDR, Tenable VM)"
+    );
     println!("           InsightCloudSec (DivvyCloud) behind Wiz in CNAPP innovation");
     println!("           InsightIDR (SIEM) struggling against Microsoft Sentinel + Datadog");
     println!("           stock pressure + activist Jana = strategic review with possible sale");
     println!("           Metasploit is the brand strength but not the revenue driver");
-    println!("           multi-product portfolio = complex sales motion + slower wins than focused vendors");
+    println!(
+        "           multi-product portfolio = complex sales motion + slower wins than focused vendors"
+    );
     println!("           pricing pressure from Microsoft Defender E5 bundling");
-    println!("  Differentiator: Metasploit ownership (security icon) + Velociraptor + broadest pure-play security portfolio (VM + SIEM + CSPM + SOAR + DAST + MDR + threat intel) + mid-market sweet spot + MDR-as-add-on — the security operations platform that everyone uses Metasploit even if they don't pay for the rest");
+    println!(
+        "  Differentiator: Metasploit ownership (security icon) + Velociraptor + broadest pure-play security portfolio (VM + SIEM + CSPM + SOAR + DAST + MDR + threat intel) + mid-market sweet spot + MDR-as-add-on — the security operations platform that everyone uses Metasploit even if they don't pay for the rest"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "rapid7".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "rapid7".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_r7(&rest, &_prog);
     process::exit(code);
@@ -148,7 +184,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_r7};
+    use super::{basename, run_r7, strip_ext};
 
     #[test]
     fn basename_strips_path() {

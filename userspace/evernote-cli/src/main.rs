@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_en(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_en(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Evernote 10.107.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Evernote 10.107.4 (Slate OS)");
+        return 0;
+    }
     println!("Evernote 10.107.4 (Slate OS)");
     println!("  Owner: Bending Spoons (Italy, acquired Evernote from owner Nov 2022)");
     println!("  Founded: 2008 by Stepan Pachikov; Phil Libin CEO 2010-15");
@@ -38,13 +45,18 @@ fn run_en(args: &[String], _prog: &str) -> i32 {
     println!("  Web Clipper: save URLs/articles/screenshots from Chrome/Firefox/Edge/Safari");
     println!("  Scannable: companion iOS app, document/business card scanner");
     println!("  Penultimate: iPad handwriting note app");
-    println!("  Notable history: layoffs 2018, China spin-off (Yinxiang Biji), Bending Spoons rebuild");
+    println!(
+        "  Notable history: layoffs 2018, China spin-off (Yinxiang Biji), Bending Spoons rebuild"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "evernote".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "evernote".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_en(&rest, &_prog);
     process::exit(code);
@@ -52,7 +64,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_en};
+    use super::{basename, run_en, strip_ext};
 
     #[test]
     fn basename_strips_path() {

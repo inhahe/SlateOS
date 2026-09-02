@@ -34,13 +34,28 @@ fn run_mypy(args: Vec<String>) -> i32 {
 
     let code_suffix = if show_codes { "  [assignment]" } else { "" };
 
-    println!("src/main.py:12: error: Incompatible types in assignment (expression has type \"str\", variable has type \"int\"){}", code_suffix);
-    println!("src/main.py:25: error: Missing return statement{}", if show_codes { "  [return]" } else { "" });
-    println!("src/utils.py:8: error: Argument 1 to \"process\" has incompatible type \"Optional[str]\"; expected \"str\"{}", if show_codes { "  [arg-type]" } else { "" });
+    println!(
+        "src/main.py:12: error: Incompatible types in assignment (expression has type \"str\", variable has type \"int\"){}",
+        code_suffix
+    );
+    println!(
+        "src/main.py:25: error: Missing return statement{}",
+        if show_codes { "  [return]" } else { "" }
+    );
+    println!(
+        "src/utils.py:8: error: Argument 1 to \"process\" has incompatible type \"Optional[str]\"; expected \"str\"{}",
+        if show_codes { "  [arg-type]" } else { "" }
+    );
 
     if strict {
-        println!("src/utils.py:15: error: Function is missing a type annotation{}", if show_codes { "  [no-untyped-def]" } else { "" });
-        println!("src/helpers.py:3: error: Function is missing a return type annotation{}", if show_codes { "  [no-untyped-def]" } else { "" });
+        println!(
+            "src/utils.py:15: error: Function is missing a type annotation{}",
+            if show_codes { "  [no-untyped-def]" } else { "" }
+        );
+        println!(
+            "src/helpers.py:3: error: Function is missing a return type annotation{}",
+            if show_codes { "  [no-untyped-def]" } else { "" }
+        );
         println!("Found 5 errors in 3 files (checked 8 source files)");
     } else {
         println!("Found 3 errors in 2 files (checked 8 source files)");
@@ -57,7 +72,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mypy};
+    use super::run_mypy;
 
     #[test]
     fn help_exits_zero() {

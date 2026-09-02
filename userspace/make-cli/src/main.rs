@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_make(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,31 +26,54 @@ fn run_make(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Make 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Make 2024 (Slate OS)");
+        return 0;
+    }
     println!("Make.com 2024 (Slate OS) — Visual Automation Platform");
-    println!("  Vendor: Make.com (Celonis subsidiary since 2020 — Prague, Czech Republic + global)");
+    println!(
+        "  Vendor: Make.com (Celonis subsidiary since 2020 — Prague, Czech Republic + global)"
+    );
     println!("  Founder: Patrik Šimek + Adam Tilton + Ondrej Andrlik, 2012 (as 'Integromat')");
     println!("          founded in Brno, Czech Republic");
     println!("          'Integromat' name 2012-2022 — rebranded to 'Make' in early 2022");
-    println!("          Differentiator from day one: visual canvas with bubbles + connecting lines");
+    println!(
+        "          Differentiator from day one: visual canvas with bubbles + connecting lines"
+    );
     println!("          richer logic than Zapier (loops, routers, aggregators, iterators)");
     println!("  Corporate history:");
     println!("         Acquired by Celonis April 2020 (terms undisclosed, estimated ~$80M)");
     println!("         Celonis = German process-mining unicorn ($13B valuation 2022)");
-    println!("         Strategic for Celonis: process-mining + iPaaS = full process-execution platform");
+    println!(
+        "         Strategic for Celonis: process-mining + iPaaS = full process-execution platform"
+    );
     println!("         Patrik Šimek remains as CEO of Make division");
     println!("         estimated $100M+ ARR (private — within Celonis)");
-    println!("  Strategic position: 'visual automation — more powerful than Zapier, simpler than Workato':");
-    println!("                    pitch: 'build complex automations visually — no code, but more than no-code'");
-    println!("                    target: SMB to mid-market — sweet spot for marketing/ops teams + agencies");
-    println!("                    primary competitor: Zapier (lower-cost), n8n (open-source), Workato (enterprise)");
-    println!("                    secondary: Microsoft Power Automate (E5 bundle), Pipedream, Tray.io");
-    println!("                    Make's wedge: visual canvas UI + sophisticated logic primitives + lower price than enterprise iPaaS");
+    println!(
+        "  Strategic position: 'visual automation — more powerful than Zapier, simpler than Workato':"
+    );
+    println!(
+        "                    pitch: 'build complex automations visually — no code, but more than no-code'"
+    );
+    println!(
+        "                    target: SMB to mid-market — sweet spot for marketing/ops teams + agencies"
+    );
+    println!(
+        "                    primary competitor: Zapier (lower-cost), n8n (open-source), Workato (enterprise)"
+    );
+    println!(
+        "                    secondary: Microsoft Power Automate (E5 bundle), Pipedream, Tray.io"
+    );
+    println!(
+        "                    Make's wedge: visual canvas UI + sophisticated logic primitives + lower price than enterprise iPaaS"
+    );
     println!("                    'Zapier on steroids' positioning resonates with power users");
     println!("  Pricing (per-operation model — friendly):");
     println!("    Free: 1,000 ops/month, 2 active scenarios");
     println!("    Core: $9/mo (10K ops/month, unlimited active scenarios)");
-    println!("    Pro: $16/mo (10K ops + advanced features: custom variables, full execution logs)");
+    println!(
+        "    Pro: $16/mo (10K ops + advanced features: custom variables, full execution logs)"
+    );
     println!("    Teams: $29/mo (10K ops + team workspaces + RBAC)");
     println!("    Enterprise: custom (SSO, audit logs, SLA)");
     println!("    typically 30-50% cheaper than equivalent Zapier plan for high-volume");
@@ -124,13 +151,18 @@ fn run_make(args: &[String], _prog: &str) -> i32 {
     println!("           connector count (~1,500) less than Zapier (7,000)");
     println!("           Microsoft Power Automate E5 bundle threatens prosumer base");
     println!("           operation-based pricing can balloon for high-volume use cases");
-    println!("  Differentiator: bubble-style visual canvas (UX differentiator — more powerful than Zapier's linear UI) + advanced logic primitives (routers, iterators, aggregators) + Celonis ownership (process-mining synergy) + ~1,500 apps + 500K+ users + lower price than Zapier for high-volume + European-founded (Brno, Czech Republic) — the visual automation platform that power users choose when Zapier's linear flows aren't expressive enough but enterprise iPaaS is overkill");
+    println!(
+        "  Differentiator: bubble-style visual canvas (UX differentiator — more powerful than Zapier's linear UI) + advanced logic primitives (routers, iterators, aggregators) + Celonis ownership (process-mining synergy) + ~1,500 apps + 500K+ users + lower price than Zapier for high-volume + European-founded (Brno, Czech Republic) — the visual automation platform that power users choose when Zapier's linear flows aren't expressive enough but enterprise iPaaS is overkill"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "make".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "make".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_make(&rest, &_prog);
     process::exit(code);
@@ -138,7 +170,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_make};
+    use super::{basename, run_make, strip_ext};
 
     #[test]
     fn basename_strips_path() {

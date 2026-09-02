@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_zotero(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -27,7 +31,10 @@ fn run_zotero(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Zotero v6.0.30 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Zotero v6.0.30 (Slate OS)");
+        return 0;
+    }
     println!("Zotero v6.0.30 (Slate OS)");
     println!("  Library: ~/Zotero");
     println!("  Items: 2,456 references");
@@ -42,7 +49,10 @@ fn run_zotero(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "zotero".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "zotero".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_zotero(&rest, &_prog);
     process::exit(code);
@@ -50,7 +60,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_zotero};
+    use super::{basename, run_zotero, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -42,7 +42,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("checkpoint-cli 0.1.0 (stateful-inspection-pioneer personality build)"); }
+fn print_version() {
+    println!("checkpoint-cli 0.1.0 (stateful-inspection-pioneer personality build)");
+}
 
 fn run_about() {
     println!("Check Point Software Technologies Ltd.");

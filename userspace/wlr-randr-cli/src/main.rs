@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_wlr_randr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -26,7 +30,12 @@ fn run_wlr_randr(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--output") {
-        let output = args.iter().skip_while(|a| a.as_str() != "--output").nth(1).map(|s| s.as_str()).unwrap_or("HDMI-A-1");
+        let output = args
+            .iter()
+            .skip_while(|a| a.as_str() != "--output")
+            .nth(1)
+            .map(|s| s.as_str())
+            .unwrap_or("HDMI-A-1");
         println!("Configuring: {}", output);
         println!("  Applied.");
         return 0;
@@ -55,7 +64,10 @@ fn run_wlr_randr(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "wlr-randr".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "wlr-randr".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_wlr_randr(&rest, &prog);
     process::exit(code);
@@ -63,7 +75,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_wlr_randr};
+    use super::{basename, run_wlr_randr, strip_ext};
 
     #[test]
     fn basename_strips_path() {

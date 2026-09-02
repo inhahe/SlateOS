@@ -43,7 +43,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("invision-cli 0.1.0 (sunset-design-tool personality build)"); }
+fn print_version() {
+    println!("invision-cli 0.1.0 (sunset-design-tool personality build)");
+}
 
 fn run_about() {
     println!("InVisionApp, Inc.");
@@ -122,7 +124,9 @@ fn run_pricing() {
     println!("  Enterprise: custom; mostly Fortune 500 design-systems teams.");
     println!("  Sunset migration paths: export prototypes + assets; recommend Figma + Miro");
     println!("  as successors; InVision wrote migration guides + provided export tools.");
-    println!("  No new signups accepted in the final months leading to the December 2024 shutdown.");
+    println!(
+        "  No new signups accepted in the final months leading to the December 2024 shutdown."
+    );
 }
 
 fn run_customers() {

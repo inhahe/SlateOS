@@ -149,7 +149,11 @@ fn parse_spec(input: &str) -> Result<LexSpec, String> {
 
         // %option directives.
         if line.trim_start().starts_with("%option") {
-            let rest = line.trim_start().strip_prefix("%option").unwrap_or("").trim();
+            let rest = line
+                .trim_start()
+                .strip_prefix("%option")
+                .unwrap_or("")
+                .trim();
             for opt in rest.split_whitespace() {
                 if let Some((k, v)) = opt.split_once('=') {
                     option_directives.push((k.to_string(), v.trim_matches('"').to_string()));
@@ -270,7 +274,10 @@ fn parse_spec(input: &str) -> Result<LexSpec, String> {
 
 /// Parse a single rule from the rules section.
 /// Returns (start_conditions, pattern, action, next_line_index).
-fn parse_rule(lines: &[&str], start: usize) -> Result<(Vec<String>, String, String, usize), String> {
+fn parse_rule(
+    lines: &[&str],
+    start: usize,
+) -> Result<(Vec<String>, String, String, usize), String> {
     let line = lines[start];
     let mut pos = 0;
     let bytes = line.as_bytes();
@@ -676,7 +683,8 @@ impl<'a> RegexParser<'a> {
                 None => Err("unterminated escape".into()),
             }
         } else {
-            self.advance().ok_or_else(|| "unexpected end of char class".into())
+            self.advance()
+                .ok_or_else(|| "unexpected end of char class".into())
         }
     }
 }
@@ -737,10 +745,9 @@ impl Nfa {
     }
 
     fn add_transition(&mut self, from: usize, label: NfaLabel, to: usize) {
-        self.states[from].transitions.push(NfaTransition {
-            label,
-            target: to,
-        });
+        self.states[from]
+            .transitions
+            .push(NfaTransition { label, target: to });
     }
 }
 
@@ -1024,9 +1031,7 @@ fn move_on_byte(nfa: &Nfa, states: &StateSet, byte: u8) -> StateSet {
                 NfaLabel::Byte(b2) => *b2 == byte,
                 NfaLabel::ByteRange(lo, hi) => byte >= *lo && byte <= *hi,
                 NfaLabel::AnyByte => byte != b'\n',
-                NfaLabel::NegatedClass(excluded) => {
-                    byte != b'\n' && !excluded.contains(&byte)
-                }
+                NfaLabel::NegatedClass(excluded) => byte != b'\n' && !excluded.contains(&byte),
                 NfaLabel::Epsilon => false,
             };
             if matches {
@@ -1141,10 +1146,7 @@ fn minimize_dfa(dfa: &Dfa) -> Dfa {
     // non-accepting states.
     let mut accepting_groups: BTreeMap<Option<usize>, Vec<usize>> = BTreeMap::new();
     for (i, state) in dfa.states.iter().enumerate() {
-        accepting_groups
-            .entry(state.accepting)
-            .or_default()
-            .push(i);
+        accepting_groups.entry(state.accepting).or_default().push(i);
     }
 
     let mut partitions: Vec<BTreeSet<usize>> = accepting_groups
@@ -1176,9 +1178,7 @@ fn minimize_dfa(dfa: &Dfa) -> Dfa {
             let mut sub_groups: BTreeMap<Vec<Option<usize>>, BTreeSet<usize>> = BTreeMap::new();
             for &s in part {
                 let signature: Vec<Option<usize>> = (0..256)
-                    .map(|b| {
-                        dfa.states[s].transitions[b].map(|t| state_to_part[t])
-                    })
+                    .map(|b| dfa.states[s].transitions[b].map(|t| state_to_part[t]))
                     .collect();
                 sub_groups.entry(signature).or_default().insert(s);
             }
@@ -1227,12 +1227,7 @@ fn minimize_dfa(dfa: &Dfa) -> Dfa {
 // C code generation
 // ---------------------------------------------------------------------------
 
-fn generate_scanner(
-    spec: &LexSpec,
-    dfa: &Dfa,
-    rules: &[Rule],
-    options: &Options,
-) -> String {
+fn generate_scanner(spec: &LexSpec, dfa: &Dfa, rules: &[Rule], options: &Options) -> String {
     let prefix = &options.prefix;
     let mut out = String::with_capacity(16384);
 
@@ -1254,7 +1249,11 @@ fn generate_scanner(
     let _ = writeln!(out, "/* Start conditions */");
     let _ = writeln!(out, "#define INITIAL 0");
     for (i, sc) in spec.start_conditions.iter().enumerate() {
-        let kind = if sc.exclusive { "exclusive" } else { "inclusive" };
+        let kind = if sc.exclusive {
+            "exclusive"
+        } else {
+            "inclusive"
+        };
         let _ = writeln!(out, "#define {} {} /* {} */", sc.name, i + 1, kind);
     }
     let _ = writeln!(out);
@@ -1284,16 +1283,31 @@ fn generate_scanner(
     let _ = writeln!(out, "    int {prefix}_n_chars;");
     let _ = writeln!(out, "    int {prefix}_eof;");
     let _ = writeln!(out, "}};");
-    let _ = writeln!(out, "typedef struct {prefix}_buffer_state *YY_BUFFER_STATE;");
-    let _ = writeln!(out, "static YY_BUFFER_STATE {prefix}_current_buffer = NULL;");
+    let _ = writeln!(
+        out,
+        "typedef struct {prefix}_buffer_state *YY_BUFFER_STATE;"
+    );
+    let _ = writeln!(
+        out,
+        "static YY_BUFFER_STATE {prefix}_current_buffer = NULL;"
+    );
     let _ = writeln!(out);
 
     // Buffer management functions.
-    let _ = writeln!(out, "YY_BUFFER_STATE {prefix}_create_buffer(FILE *file, int size) {{");
-    let _ = writeln!(out, "    YY_BUFFER_STATE b = (YY_BUFFER_STATE)malloc(sizeof(struct {prefix}_buffer_state));");
+    let _ = writeln!(
+        out,
+        "YY_BUFFER_STATE {prefix}_create_buffer(FILE *file, int size) {{"
+    );
+    let _ = writeln!(
+        out,
+        "    YY_BUFFER_STATE b = (YY_BUFFER_STATE)malloc(sizeof(struct {prefix}_buffer_state));"
+    );
     let _ = writeln!(out, "    if (!b) return NULL;");
     let _ = writeln!(out, "    b->{prefix}_ch_buf = (char *)malloc(size + 2);");
-    let _ = writeln!(out, "    if (!b->{prefix}_ch_buf) {{ free(b); return NULL; }}");
+    let _ = writeln!(
+        out,
+        "    if (!b->{prefix}_ch_buf) {{ free(b); return NULL; }}"
+    );
     let _ = writeln!(out, "    b->{prefix}_buf_size = size;");
     let _ = writeln!(out, "    b->{prefix}_input_file = file;");
     let _ = writeln!(out, "    b->{prefix}_buf_pos = 0;");
@@ -1329,7 +1343,11 @@ fn generate_scanner(
     generate_dfa_tables(&mut out, dfa, prefix);
 
     // Accept table.
-    let _ = writeln!(out, "static const int {prefix}_accept[{}] = {{", dfa.states.len());
+    let _ = writeln!(
+        out,
+        "static const int {prefix}_accept[{}] = {{",
+        dfa.states.len()
+    );
     for (i, state) in dfa.states.iter().enumerate() {
         let val = state.accepting.map_or(-1i32, |r| r as i32);
         if i + 1 < dfa.states.len() {
@@ -1348,11 +1366,17 @@ fn generate_scanner(
     let _ = writeln!(out, "    if (!{prefix}out) {prefix}out = stdout;");
     let _ = writeln!(out);
     let _ = writeln!(out, "    if (!{prefix}_current_buffer) {{");
-    let _ = writeln!(out, "        {prefix}_current_buffer = {prefix}_create_buffer({prefix}in, YY_BUF_SIZE);");
+    let _ = writeln!(
+        out,
+        "        {prefix}_current_buffer = {prefix}_create_buffer({prefix}in, YY_BUF_SIZE);"
+    );
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out);
     let _ = writeln!(out, "    static char {prefix}_textbuf[YY_BUF_SIZE];");
-    let _ = writeln!(out, "    int {prefix}_textpos = {prefix}_more_flag ? {prefix}_more_len : 0;");
+    let _ = writeln!(
+        out,
+        "    int {prefix}_textpos = {prefix}_more_flag ? {prefix}_more_len : 0;"
+    );
     let _ = writeln!(out, "    {prefix}_more_flag = 0;");
     let _ = writeln!(out);
     let _ = writeln!(out, "scan_again:");
@@ -1364,33 +1388,54 @@ fn generate_scanner(
     let _ = writeln!(out);
     let _ = writeln!(out, "        while (1) {{");
     let _ = writeln!(out, "            int c;");
-    let _ = writeln!(out, "            YY_BUFFER_STATE buf = {prefix}_current_buffer;");
-    let _ = writeln!(out, "            if (buf->{prefix}_buf_pos < buf->{prefix}_n_chars) {{");
-    let _ = writeln!(out, "                c = (unsigned char)buf->{prefix}_ch_buf[buf->{prefix}_buf_pos++];");
+    let _ = writeln!(
+        out,
+        "            YY_BUFFER_STATE buf = {prefix}_current_buffer;"
+    );
+    let _ = writeln!(
+        out,
+        "            if (buf->{prefix}_buf_pos < buf->{prefix}_n_chars) {{"
+    );
+    let _ = writeln!(
+        out,
+        "                c = (unsigned char)buf->{prefix}_ch_buf[buf->{prefix}_buf_pos++];"
+    );
     let _ = writeln!(out, "            }} else if (buf->{prefix}_eof) {{");
     let _ = writeln!(out, "                c = -1;");
     let _ = writeln!(out, "            }} else {{");
-    let _ = writeln!(out, "                int n = fread(buf->{prefix}_ch_buf, 1, buf->{prefix}_buf_size, buf->{prefix}_input_file);");
+    let _ = writeln!(
+        out,
+        "                int n = fread(buf->{prefix}_ch_buf, 1, buf->{prefix}_buf_size, buf->{prefix}_input_file);"
+    );
     let _ = writeln!(out, "                if (n <= 0) {{");
     let _ = writeln!(out, "                    buf->{prefix}_eof = 1;");
     let _ = writeln!(out, "                    c = -1;");
     let _ = writeln!(out, "                }} else {{");
     let _ = writeln!(out, "                    buf->{prefix}_n_chars = n;");
     let _ = writeln!(out, "                    buf->{prefix}_buf_pos = 0;");
-    let _ = writeln!(out, "                    c = (unsigned char)buf->{prefix}_ch_buf[buf->{prefix}_buf_pos++];");
+    let _ = writeln!(
+        out,
+        "                    c = (unsigned char)buf->{prefix}_ch_buf[buf->{prefix}_buf_pos++];"
+    );
     let _ = writeln!(out, "                }}");
     let _ = writeln!(out, "            }}");
     let _ = writeln!(out);
     let _ = writeln!(out, "            if (c < 0) {{");
     let _ = writeln!(out, "                if (last_accept >= 0) break;");
-    let _ = writeln!(out, "                if ({prefix}_textpos > scan_start) break;");
+    let _ = writeln!(
+        out,
+        "                if ({prefix}_textpos > scan_start) break;"
+    );
     let _ = writeln!(out, "                return 0; /* EOF */");
     let _ = writeln!(out, "            }}");
     let _ = writeln!(out);
     let _ = writeln!(out, "            int next = {prefix}_dfa_trans[state][c];");
     let _ = writeln!(out, "            if (next < 0) break;");
     let _ = writeln!(out);
-    let _ = writeln!(out, "            {prefix}_textbuf[{prefix}_textpos++] = (char)c;");
+    let _ = writeln!(
+        out,
+        "            {prefix}_textbuf[{prefix}_textpos++] = (char)c;"
+    );
     let _ = writeln!(out, "            state = next;");
     let _ = writeln!(out);
     let _ = writeln!(out, "            if ({prefix}_accept[state] >= 0) {{");
@@ -1400,22 +1445,46 @@ fn generate_scanner(
     let _ = writeln!(out, "        }}");
     let _ = writeln!(out);
     let _ = writeln!(out, "        /* Push back characters beyond the match */");
-    let _ = writeln!(out, "        if ({prefix}_textpos > last_accept_pos && last_accept >= 0) {{");
-    let _ = writeln!(out, "            int pushback = {prefix}_textpos - last_accept_pos;");
-    let _ = writeln!(out, "            {prefix}_current_buffer->{prefix}_buf_pos -= pushback;");
+    let _ = writeln!(
+        out,
+        "        if ({prefix}_textpos > last_accept_pos && last_accept >= 0) {{"
+    );
+    let _ = writeln!(
+        out,
+        "            int pushback = {prefix}_textpos - last_accept_pos;"
+    );
+    let _ = writeln!(
+        out,
+        "            {prefix}_current_buffer->{prefix}_buf_pos -= pushback;"
+    );
     let _ = writeln!(out, "            {prefix}_textpos = last_accept_pos;");
     let _ = writeln!(out, "        }}");
     let _ = writeln!(out);
     let _ = writeln!(out, "        if (last_accept < 0) {{");
-    let _ = writeln!(out, "            /* No match -- output one character and try again (default rule) */");
+    let _ = writeln!(
+        out,
+        "            /* No match -- output one character and try again (default rule) */"
+    );
     let _ = writeln!(out, "            if ({prefix}_textpos > scan_start) {{");
-    let _ = writeln!(out, "                fputc({prefix}_textbuf[scan_start], {prefix}out);");
+    let _ = writeln!(
+        out,
+        "                fputc({prefix}_textbuf[scan_start], {prefix}out);"
+    );
     if options.yylineno {
-        let _ = writeln!(out, "                if ({prefix}_textbuf[scan_start] == '\\n') {prefix}lineno++;");
+        let _ = writeln!(
+            out,
+            "                if ({prefix}_textbuf[scan_start] == '\\n') {prefix}lineno++;"
+        );
     }
     let _ = writeln!(out, "                /* push back remaining */");
-    let _ = writeln!(out, "                int remain = {prefix}_textpos - scan_start - 1;");
-    let _ = writeln!(out, "                if (remain > 0) {prefix}_current_buffer->{prefix}_buf_pos -= remain;");
+    let _ = writeln!(
+        out,
+        "                int remain = {prefix}_textpos - scan_start - 1;"
+    );
+    let _ = writeln!(
+        out,
+        "                if (remain > 0) {prefix}_current_buffer->{prefix}_buf_pos -= remain;"
+    );
     let _ = writeln!(out, "                {prefix}_textpos = 0;");
     let _ = writeln!(out, "                goto scan_again;");
     let _ = writeln!(out, "            }}");
@@ -1426,7 +1495,10 @@ fn generate_scanner(
     let _ = writeln!(out, "        {prefix}text = {prefix}_textbuf + scan_start;");
     let _ = writeln!(out, "        {prefix}leng = last_accept_pos - scan_start;");
     if options.yylineno {
-        let _ = writeln!(out, "        {{ int _i; for (_i = scan_start; _i < last_accept_pos; _i++) if ({prefix}_textbuf[_i] == '\\n') {prefix}lineno++; }}");
+        let _ = writeln!(
+            out,
+            "        {{ int _i; for (_i = scan_start; _i < last_accept_pos; _i++) if ({prefix}_textbuf[_i] == '\\n') {prefix}lineno++; }}"
+        );
     }
     let _ = writeln!(out);
 
@@ -1458,9 +1530,18 @@ fn generate_scanner(
     // REJECT support: if the REJECT macro was invoked, we would need to try
     // the next-best match. For simplicity, we re-scan with a shortened match.
     let _ = writeln!(out, "        if ({prefix}_reject_flag) {{");
-    let _ = writeln!(out, "            /* REJECT: push back matched text and skip one char */");
-    let _ = writeln!(out, "            {prefix}_current_buffer->{prefix}_buf_pos -= ({prefix}leng - 1);");
-    let _ = writeln!(out, "            fputc({prefix}_textbuf[scan_start], {prefix}out);");
+    let _ = writeln!(
+        out,
+        "            /* REJECT: push back matched text and skip one char */"
+    );
+    let _ = writeln!(
+        out,
+        "            {prefix}_current_buffer->{prefix}_buf_pos -= ({prefix}leng - 1);"
+    );
+    let _ = writeln!(
+        out,
+        "            fputc({prefix}_textbuf[scan_start], {prefix}out);"
+    );
     let _ = writeln!(out, "            {prefix}_textpos = 0;");
     let _ = writeln!(out, "            goto scan_again;");
     let _ = writeln!(out, "        }}");
@@ -1490,7 +1571,10 @@ fn generate_scanner(
     let _ = writeln!(out, "    if (argc > 1) {{");
     let _ = writeln!(out, "        {prefix}in = fopen(argv[1], \"r\");");
     let _ = writeln!(out, "        if (!{prefix}in) {{");
-    let _ = writeln!(out, "            fprintf(stderr, \"Cannot open %s\\n\", argv[1]);");
+    let _ = writeln!(
+        out,
+        "            fprintf(stderr, \"Cannot open %s\\n\", argv[1]);"
+    );
     let _ = writeln!(out, "            return 1;");
     let _ = writeln!(out, "        }}");
     let _ = writeln!(out, "    }}");
@@ -1715,7 +1799,9 @@ fn run() -> Result<i32, String> {
     }
 
     let input = match &cli.input_file {
-        Some(path) => fs::read_to_string(path).map_err(|e| format!("cannot read '{}': {}", path, e))?,
+        Some(path) => {
+            fs::read_to_string(path).map_err(|e| format!("cannot read '{}': {}", path, e))?
+        }
         None => {
             let mut buf = String::new();
             io::stdin()
@@ -1737,10 +1823,7 @@ fn run() -> Result<i32, String> {
 
     let c_source = compile_spec(&input, &mut options)?;
 
-    let output_path = options
-        .output_file
-        .as_deref()
-        .unwrap_or("lex.yy.c");
+    let output_path = options.output_file.as_deref().unwrap_or("lex.yy.c");
 
     if cli.output_file.is_none() && cli.input_file.is_some() {
         // Write to file.
@@ -1933,7 +2016,9 @@ mod tests {
     fn test_parse_char_class_simple() {
         let ast = parse_ok("[abc]");
         match ast {
-            RegexAst::CharClass { singles, negated, .. } => {
+            RegexAst::CharClass {
+                singles, negated, ..
+            } => {
                 assert!(!negated);
                 assert!(singles.contains(&b'a'));
                 assert!(singles.contains(&b'b'));
@@ -1947,7 +2032,9 @@ mod tests {
     fn test_parse_char_class_range() {
         let ast = parse_ok("[a-z]");
         match ast {
-            RegexAst::CharClass { ranges, negated, .. } => {
+            RegexAst::CharClass {
+                ranges, negated, ..
+            } => {
                 assert!(!negated);
                 assert_eq!(ranges.len(), 1);
                 assert_eq!(ranges[0], (b'a', b'z'));
@@ -2029,7 +2116,9 @@ mod tests {
         defs.insert("DIGIT".into(), "[0-9]".into());
         let ast = parse_regex("{DIGIT}", &defs, false).unwrap();
         match ast {
-            RegexAst::CharClass { ranges, negated, .. } => {
+            RegexAst::CharClass {
+                ranges, negated, ..
+            } => {
                 assert!(!negated);
                 assert_eq!(ranges[0], (b'0', b'9'));
             }
@@ -2473,10 +2562,7 @@ b  printf(\"a or b\");
     #[test]
     fn test_apply_case_insensitive() {
         let mut opts = Options::new();
-        apply_options(
-            &mut opts,
-            &[("case-insensitive".into(), String::new())],
-        );
+        apply_options(&mut opts, &[("case-insensitive".into(), String::new())]);
         assert!(opts.case_insensitive);
     }
 

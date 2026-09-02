@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("hanko-cli 0.1.0 (passkeys-first personality build)"); }
+fn print_version() {
+    println!("hanko-cli 0.1.0 (passkeys-first personality build)");
+}
 
 fn run_about() {
     println!("Hanko GmbH.");

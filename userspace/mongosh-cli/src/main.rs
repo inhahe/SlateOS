@@ -29,12 +29,20 @@ fn run_mongosh(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let host = args.windows(2).find(|w| w[0] == "--host")
-        .map(|w| w[1].as_str()).unwrap_or("localhost");
-    let port = args.windows(2).find(|w| w[0] == "--port")
-        .map(|w| w[1].as_str()).unwrap_or("27017");
+    let host = args
+        .windows(2)
+        .find(|w| w[0] == "--host")
+        .map(|w| w[1].as_str())
+        .unwrap_or("localhost");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "--port")
+        .map(|w| w[1].as_str())
+        .unwrap_or("27017");
 
-    let eval_cmd = args.windows(2).find(|w| w[0] == "--eval")
+    let eval_cmd = args
+        .windows(2)
+        .find(|w| w[0] == "--eval")
         .map(|w| w[1].as_str());
 
     if let Some(cmd) = eval_cmd {
@@ -93,7 +101,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mongosh};
+    use super::run_mongosh;
 
     #[test]
     fn help_exits_zero() {

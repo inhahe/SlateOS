@@ -43,7 +43,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("marvel-cli 0.1.0 (london-design-and-prototype personality build)"); }
+fn print_version() {
+    println!("marvel-cli 0.1.0 (london-design-and-prototype personality build)");
+}
 
 fn run_about() {
     println!("Marvel Prototyping Ltd.");

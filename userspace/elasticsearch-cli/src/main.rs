@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_elasticsearch(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -31,12 +35,24 @@ fn run_elasticsearch(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("[2024-05-22T12:00:00,000][INFO ][o.e.n.Node] [slateos-node-1] version[8.12.0], pid[1234]");
-    println!("[2024-05-22T12:00:00,100][INFO ][o.e.n.Node] [slateos-node-1] JVM: OpenJDK 64-Bit Server VM 21.0.1");
-    println!("[2024-05-22T12:00:01,000][INFO ][o.e.e.NodeEnvironment] [slateos-node-1] using [1] data paths, mounts [[(/)]], net usable [456.7gb], net total [500.0gb]");
-    println!("[2024-05-22T12:00:02,000][INFO ][o.e.p.PluginsService] [slateos-node-1] loaded module [analysis-common]");
-    println!("[2024-05-22T12:00:03,000][INFO ][o.e.c.s.ClusterApplierService] [slateos-node-1] master node changed {{previous [], current [slateos-node-1]}}");
-    println!("[2024-05-22T12:00:04,000][INFO ][o.e.h.AbstractHttpServerTransport] [slateos-node-1] publish_address {{192.168.1.100:9200}}, bound_addresses {{[::]:9200}}");
+    println!(
+        "[2024-05-22T12:00:00,000][INFO ][o.e.n.Node] [slateos-node-1] version[8.12.0], pid[1234]"
+    );
+    println!(
+        "[2024-05-22T12:00:00,100][INFO ][o.e.n.Node] [slateos-node-1] JVM: OpenJDK 64-Bit Server VM 21.0.1"
+    );
+    println!(
+        "[2024-05-22T12:00:01,000][INFO ][o.e.e.NodeEnvironment] [slateos-node-1] using [1] data paths, mounts [[(/)]], net usable [456.7gb], net total [500.0gb]"
+    );
+    println!(
+        "[2024-05-22T12:00:02,000][INFO ][o.e.p.PluginsService] [slateos-node-1] loaded module [analysis-common]"
+    );
+    println!(
+        "[2024-05-22T12:00:03,000][INFO ][o.e.c.s.ClusterApplierService] [slateos-node-1] master node changed {{previous [], current [slateos-node-1]}}"
+    );
+    println!(
+        "[2024-05-22T12:00:04,000][INFO ][o.e.h.AbstractHttpServerTransport] [slateos-node-1] publish_address {{192.168.1.100:9200}}, bound_addresses {{[::]:9200}}"
+    );
     println!("[2024-05-22T12:00:04,100][INFO ][o.e.n.Node] [slateos-node-1] started");
     println!();
     println!("Cluster health: green");
@@ -62,7 +78,9 @@ fn run_elasticsearch_keystore(args: &[String]) -> i32 {
             println!("keystore.seed");
             println!("xpack.security.transport.ssl.keystore.secure_password");
         }
-        "create" => println!("Created elasticsearch keystore in /etc/elasticsearch/elasticsearch.keystore"),
+        "create" => {
+            println!("Created elasticsearch keystore in /etc/elasticsearch/elasticsearch.keystore")
+        }
         _ => println!("elasticsearch-keystore: {} completed", subcmd),
     }
     0
@@ -93,7 +111,10 @@ fn run_elasticsearch_plugin(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "elasticsearch".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "elasticsearch".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "elasticsearch-keystore" => run_elasticsearch_keystore(&rest),
@@ -105,7 +126,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_elasticsearch};
+    use super::{basename, run_elasticsearch, strip_ext};
 
     #[test]
     fn basename_strips_path() {

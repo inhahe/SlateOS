@@ -12,7 +12,9 @@ fn run_git_absorb(args: Vec<String>) -> i32 {
         println!("Usage: git absorb [OPTIONS]");
         println!();
         println!("Automatically absorb staged changes into your current branch's commits.");
-        println!("Creates fixup commits that can be autosquashed with `git rebase -i --autosquash`.");
+        println!(
+            "Creates fixup commits that can be autosquashed with `git rebase -i --autosquash`."
+        );
         println!();
         println!("Options:");
         println!("  -r, --and-rebase       Automatically rebase after absorbing");
@@ -68,7 +70,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_git_absorb};
+    use super::run_git_absorb;
 
     #[test]
     fn help_exits_zero() {

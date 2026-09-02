@@ -39,10 +39,17 @@ fn run_socat(args: Vec<String>) -> i32 {
     let verbose = args.iter().any(|a| a == "-v");
     let debug = args.iter().filter(|a| a.as_str() == "-d").count();
 
-    let addr1 = args.iter().find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("STDIO");
-    let addr2 = args.iter().filter(|a| !a.starts_with('-'))
-        .nth(1).map(|s| s.as_str()).unwrap_or("TCP:localhost:80");
+    let addr1 = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("STDIO");
+    let addr2 = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .nth(1)
+        .map(|s| s.as_str())
+        .unwrap_or("TCP:localhost:80");
 
     if debug > 0 {
         println!("N socat[12345] starting");
@@ -50,7 +57,9 @@ fn run_socat(args: Vec<String>) -> i32 {
     }
 
     if addr1.starts_with("TCP-LISTEN") || addr2.starts_with("TCP-LISTEN") {
-        let port = addr1.split(':').nth(1)
+        let port = addr1
+            .split(':')
+            .nth(1)
             .or_else(|| addr2.split(':').nth(1))
             .unwrap_or("8080");
         println!("Listening on TCP port {}...", port);
@@ -81,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_socat};
+    use super::run_socat;
 
     #[test]
     fn help_exits_zero() {

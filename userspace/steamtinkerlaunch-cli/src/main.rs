@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_stl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -25,7 +29,10 @@ fn run_stl(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("steamtinkerlaunch v12.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("steamtinkerlaunch v12.0 (Slate OS)");
+        return 0;
+    }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("gui");
     match cmd {
         "gui" => println!("steamtinkerlaunch: settings GUI opened"),
@@ -42,7 +49,10 @@ fn run_stl(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "steamtinkerlaunch".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "steamtinkerlaunch".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_stl(&rest, &prog);
     process::exit(code);
@@ -50,12 +60,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_stl};
+    use super::{basename, run_stl, strip_ext};
 
     #[test]
     fn basename_strips_path() {
         assert_eq!(basename("/usr/bin/steamtinkerlaunch"), "steamtinkerlaunch");
-        assert_eq!(basename(r"C:\bin\steamtinkerlaunch.exe"), "steamtinkerlaunch.exe");
+        assert_eq!(
+            basename(r"C:\bin\steamtinkerlaunch.exe"),
+            "steamtinkerlaunch.exe"
+        );
         assert_eq!(basename("plain"), "plain");
     }
 

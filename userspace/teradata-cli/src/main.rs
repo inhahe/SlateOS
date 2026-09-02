@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_td(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: teradata [OPTIONS]");
-        println!("Teradata (Slate OS) — Vantage MPP data warehouse (the original 1979 MPP DW, NYSE:TDC)");
+        println!(
+            "Teradata (Slate OS) — Vantage MPP data warehouse (the original 1979 MPP DW, NYSE:TDC)"
+        );
         println!();
         println!("Options:");
         println!("  --vantage              VantageCloud (cloud-native managed Teradata)");
@@ -21,12 +27,21 @@ fn run_td(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Teradata 2024 (Slate OS) — bteq / tdload / Studio CLI"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Teradata 2024 (Slate OS) — bteq / tdload / Studio CLI");
+        return 0;
+    }
     println!("Teradata 2024 (Slate OS) — The Original MPP Data Warehouse (since 1979)");
     println!("  Vendor: Teradata Corporation (San Diego, CA — NYSE:TDC since 2007)");
-    println!("  Founders: Jack Shemer + Walter Muir + Carroll Reed + Jerold Modes + Phil Neches + others, 1979");
-    println!("          Founded at Caltech research initiative — 'tera' = 10^12 = trillion (bytes)");
-    println!("          One of the first companies built around MPP (Massively Parallel Processing)");
+    println!(
+        "  Founders: Jack Shemer + Walter Muir + Carroll Reed + Jerold Modes + Phil Neches + others, 1979"
+    );
+    println!(
+        "          Founded at Caltech research initiative — 'tera' = 10^12 = trillion (bytes)"
+    );
+    println!(
+        "          One of the first companies built around MPP (Massively Parallel Processing)"
+    );
     println!("          Coined the 'data warehouse' category in 1980s");
     println!("          AT&T's NCR acquired Teradata 1991 → spun off Sep 2007 (NYSE IPO)");
     println!("          Steve McMillan: CEO 2020+ (turnaround focus, ex-Rackspace)");
@@ -37,13 +52,25 @@ fn run_td(args: &[String], _prog: &str) -> i32 {
     println!("         Once $10B+ in early 2010s — eroded by cloud DWs");
     println!("         Recurring revenue ~$1.5B (cloud + subscription)");
     println!("         Activist investor Elliott Management 2023 pushing changes");
-    println!("  Strategic position: 'enterprise data warehouse for the world's largest companies, evolving to cloud':");
-    println!("                    pitch: 'enterprise-class analytics at massive scale — no other DW handles your size'");
-    println!("                    target: Fortune 500 (banks, telcos, retailers) with petabyte-scale workloads");
-    println!("                    primary competitor: Snowflake, Databricks, BigQuery (all eroding Teradata's base)");
+    println!(
+        "  Strategic position: 'enterprise data warehouse for the world's largest companies, evolving to cloud':"
+    );
+    println!(
+        "                    pitch: 'enterprise-class analytics at massive scale — no other DW handles your size'"
+    );
+    println!(
+        "                    target: Fortune 500 (banks, telcos, retailers) with petabyte-scale workloads"
+    );
+    println!(
+        "                    primary competitor: Snowflake, Databricks, BigQuery (all eroding Teradata's base)"
+    );
     println!("                    secondary: Oracle Exadata, Microsoft Synapse, Redshift");
-    println!("                    Teradata's wedge: 40+ years engineering, proven petabyte-scale, deep enterprise relationships");
-    println!("                    challenge: customers slowly migrating to Snowflake/BQ for new workloads");
+    println!(
+        "                    Teradata's wedge: 40+ years engineering, proven petabyte-scale, deep enterprise relationships"
+    );
+    println!(
+        "                    challenge: customers slowly migrating to Snowflake/BQ for new workloads"
+    );
     println!("                    counter: VantageCloud + multi-cloud + AI/ML features");
     println!("  Pricing (enterprise-only, custom contracts):");
     println!("    VantageCloud Enterprise: from $20K/mo (multi-cloud, AWS/Azure/GCP)");
@@ -59,7 +86,9 @@ fn run_td(args: &[String], _prog: &str) -> i32 {
     println!("    - Each AMP owns slice of data + queries run in parallel");
     println!("    - Optimizer: 40+ years of cost-based optimization heritage");
     println!("    - Workload Management (TASM): industrial-grade priority + concurrency control");
-    println!("    - 1000+ concurrent queries supported (vs Snowflake/BQ less concurrent before queueing)");
+    println!(
+        "    - 1000+ concurrent queries supported (vs Snowflake/BQ less concurrent before queueing)"
+    );
     println!("  Product portfolio:");
     println!("    1. VantageCloud (the cloud product):");
     println!("       - VantageCloud Enterprise: multi-cloud (AWS, Azure, GCP)");
@@ -109,7 +138,9 @@ fn run_td(args: &[String], _prog: &str) -> i32 {
     println!("    - Defensive cloud product (VantageCloud 2017+) — late but improving");
     println!("    - Strategy: monetize 40+ year Fortune 500 customer base while modernizing");
     println!("    - Many enterprises still use Teradata for highest-scale + most-mature workloads");
-    println!("    - Migration off Teradata is genuinely hard (thousands of stored procedures + workflows)");
+    println!(
+        "    - Migration off Teradata is genuinely hard (thousands of stored procedures + workflows)"
+    );
     println!("  Integrations:");
     println!("    - bteq (Basic TEradata Query — the iconic CLI since 1980s)");
     println!("    - tdload / FastLoad / MultiLoad (bulk loaders)");
@@ -120,7 +151,9 @@ fn run_td(args: &[String], _prog: &str) -> i32 {
     println!("    - Spark connector + Hive QueryGrid bridges");
     println!("    - Airflow + Informatica + Talend integration");
     println!("  Teradata CLI usage:");
-    println!("    bteq                                                     # interactive SQL shell (since 1980s)");
+    println!(
+        "    bteq                                                     # interactive SQL shell (since 1980s)"
+    );
     println!("    bteq <<EOF");
     println!("    .LOGON tdprod/user,password");
     println!("    SELECT COUNT(*) FROM customer;");
@@ -131,7 +164,9 @@ fn run_td(args: &[String], _prog: &str) -> i32 {
     println!("    multiload <multiload-script.ml>                          # MultiLoad updates");
     println!("    bteq -e 'SHOW TABLE my_db.my_table;'                     # show DDL");
     println!("    bteq -e 'HELP TABLE my_db.my_table;'                     # describe");
-    println!("    tdwallet add MY_DB_PASSWORD                              # secure credential storage");
+    println!(
+        "    tdwallet add MY_DB_PASSWORD                              # secure credential storage"
+    );
     println!("    teradata-ask 'show me sales by region last quarter'     # NLP query (2024)");
     println!("  Customers (Fortune 500 + global enterprise):");
     println!("    - Walmart (one of the world's largest Teradata installations)");
@@ -151,13 +186,18 @@ fn run_td(args: &[String], _prog: &str) -> i32 {
     println!("           workload manager + concurrency strengths underappreciated");
     println!("           activist investor pressure (Elliott Management 2023) shows market doubt");
     println!("           churn risk: large customers eventually plan exits");
-    println!("  Differentiator: 45+ year MPP data warehouse pioneer (since 1979) + invented data warehouse category + BYNET interconnect heritage + 1000+ concurrent query support + petabyte-scale proven at Walmart/eBay/airlines/banks + workload manager (TASM) industrial-grade priority control + 1,500+ Fortune 500 customers + VantageCloud multi-cloud (AWS/Azure/GCP) + ClearScape in-DB ML + Open Lake Iceberg + Teradata ASK NLP-to-SQL + $1.83B revenue with deep enterprise relationships — the original MPP data warehouse that still handles the largest workloads at the world's largest companies, evolving to cloud while monetizing 40+ years of Fortune 500 entrenchment");
+    println!(
+        "  Differentiator: 45+ year MPP data warehouse pioneer (since 1979) + invented data warehouse category + BYNET interconnect heritage + 1000+ concurrent query support + petabyte-scale proven at Walmart/eBay/airlines/banks + workload manager (TASM) industrial-grade priority control + 1,500+ Fortune 500 customers + VantageCloud multi-cloud (AWS/Azure/GCP) + ClearScape in-DB ML + Open Lake Iceberg + Teradata ASK NLP-to-SQL + $1.83B revenue with deep enterprise relationships — the original MPP data warehouse that still handles the largest workloads at the world's largest companies, evolving to cloud while monetizing 40+ years of Fortune 500 entrenchment"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "teradata".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "teradata".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_td(&rest, &_prog);
     process::exit(code);
@@ -165,7 +205,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_td};
+    use super::{basename, run_td, strip_ext};
 
     #[test]
     fn basename_strips_path() {

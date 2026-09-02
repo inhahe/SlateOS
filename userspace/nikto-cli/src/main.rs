@@ -52,13 +52,23 @@ fn run_nikto(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let host = args.windows(2).find(|w| w[0] == "-h" || w[0] == "-host")
-        .map(|w| w[1].as_str()).unwrap_or("localhost");
-    let port = args.windows(2).find(|w| w[0] == "-p" || w[0] == "-port")
-        .map(|w| w[1].as_str()).unwrap_or("80");
+    let host = args
+        .windows(2)
+        .find(|w| w[0] == "-h" || w[0] == "-host")
+        .map(|w| w[1].as_str())
+        .unwrap_or("localhost");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "-p" || w[0] == "-port")
+        .map(|w| w[1].as_str())
+        .unwrap_or("80");
     let ssl = args.iter().any(|a| a == "-ssl");
 
-    let scheme = if ssl || port == "443" { "https" } else { "http" };
+    let scheme = if ssl || port == "443" {
+        "https"
+    } else {
+        "http"
+    };
 
     println!("- Nikto v2.5.0 (Slate OS)");
     println!("---------------------------------------------------------------------------");
@@ -75,7 +85,10 @@ fn run_nikto(args: Vec<String>) -> i32 {
     println!("+ /.git/config: Git configuration file found.");
     println!("+ /admin/: Admin directory found.");
     println!("+ /backup/: Backup directory found.");
-    println!("+ {}://{}:{}/server-status: Apache server-status found.", scheme, host, port);
+    println!(
+        "+ {}://{}:{}/server-status: Apache server-status found.",
+        scheme, host, port
+    );
     println!("+ 7542 requests: 0 error(s) and 8 item(s) reported on remote host");
     println!("+ End Time:           2024-01-15 12:05:23 (GMT) (323 seconds)");
     println!("---------------------------------------------------------------------------");
@@ -92,7 +105,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_nikto};
+    use super::run_nikto;
 
     #[test]
     fn help_exits_zero() {

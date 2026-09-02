@@ -31,8 +31,7 @@ const MAX_DIVERSIONS: usize = 256;
 // ---------------------------------------------------------------------------
 
 /// Parsed command-line options.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct Options {
     /// `-D name=value` pre-definitions.
     defines: Vec<(String, String)>,
@@ -49,7 +48,6 @@ struct Options {
     /// Positional input files (empty = stdin).
     input_files: Vec<String>,
 }
-
 
 fn parse_args(args: &[String]) -> Options {
     let mut opts = Options::default();
@@ -751,12 +749,12 @@ impl Processor {
                     for arg in args {
                         if let Ok(n) = arg.trim().parse::<usize>()
                             && n > 0
-                                && n < self.diversions.len()
-                                && n as i32 != self.current_diversion
-                            {
-                                let text = std::mem::take(&mut self.diversions[n]);
-                                self.output(&text);
-                            }
+                            && n < self.diversions.len()
+                            && n as i32 != self.current_diversion
+                        {
+                            let text = std::mem::take(&mut self.diversions[n]);
+                            self.output(&text);
+                        }
                     }
                 }
             }
@@ -1015,9 +1013,10 @@ fn substitute_args(name: &str, body: &str, args: &[String]) -> String {
                 '1'..='9' => {
                     let idx = (next as usize) - ('0' as usize);
                     if idx <= args.len()
-                        && let Some(arg) = args.get(idx - 1) {
-                            result.push_str(arg);
-                        }
+                        && let Some(arg) = args.get(idx - 1)
+                    {
+                        result.push_str(arg);
+                    }
                     i += 2;
                 }
                 '#' => {
@@ -1915,10 +1914,12 @@ fn match_recursive(s: &[char], mut si: usize, p: &[char], mut pi: usize) -> bool
         if pi + 1 < p.len() && p[pi + 1] == '?' {
             let pat_char = p[pi];
             // Try with one match.
-            if si < s.len() && char_matches(s[si], pat_char)
-                && match_recursive(s, si + 1, p, pi + 2) {
-                    return true;
-                }
+            if si < s.len()
+                && char_matches(s[si], pat_char)
+                && match_recursive(s, si + 1, p, pi + 2)
+            {
+                return true;
+            }
             // Try with zero matches.
             return match_recursive(s, si, p, pi + 2);
         }
@@ -1977,29 +1978,30 @@ fn simple_regex_sub(string: &str, pattern: &str, replacement: &str) -> String {
 
     while pos <= slen {
         if (!did_replace || !anchored_start)
-            && let Some(match_len) = find_match_len(&string_chars, pos, pattern) {
-                // Found a match at `pos` of length `match_len`.
-                let matched: String = string_chars[pos..pos + match_len].iter().collect();
-                // Build replacement, substituting `&` for matched text.
-                for ch in replacement.chars() {
-                    if ch == '&' {
-                        result.push_str(&matched);
-                    } else {
-                        result.push(ch);
-                    }
+            && let Some(match_len) = find_match_len(&string_chars, pos, pattern)
+        {
+            // Found a match at `pos` of length `match_len`.
+            let matched: String = string_chars[pos..pos + match_len].iter().collect();
+            // Build replacement, substituting `&` for matched text.
+            for ch in replacement.chars() {
+                if ch == '&' {
+                    result.push_str(&matched);
+                } else {
+                    result.push(ch);
                 }
-                pos += if match_len > 0 { match_len } else { 1 };
-                did_replace = true;
-                if anchored_start {
-                    // Only replace once for anchored patterns.
-                    while pos < slen {
-                        result.push(string_chars[pos]);
-                        pos += 1;
-                    }
-                    return result;
-                }
-                continue;
             }
+            pos += if match_len > 0 { match_len } else { 1 };
+            did_replace = true;
+            if anchored_start {
+                // Only replace once for anchored patterns.
+                while pos < slen {
+                    result.push(string_chars[pos]);
+                    pos += 1;
+                }
+                return result;
+            }
+            continue;
+        }
         if pos < slen {
             result.push(string_chars[pos]);
         }

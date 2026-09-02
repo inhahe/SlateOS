@@ -30,7 +30,9 @@ fn run_eza(args: Vec<String>) -> i32 {
         println!("  --git-ignore          Respect .gitignore");
         println!();
         println!("Sorting:");
-        println!("  -s, --sort=FIELD      Sort by (name/size/date/ext/type/modified/accessed/created)");
+        println!(
+            "  -s, --sort=FIELD      Sort by (name/size/date/ext/type/modified/accessed/created)"
+        );
         println!("  -r, --reverse         Reverse sort");
         println!();
         println!("Long view:");
@@ -96,7 +98,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_eza};
+    use super::run_eza;
 
     #[test]
     fn help_exits_zero() {

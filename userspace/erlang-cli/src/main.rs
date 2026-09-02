@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_erl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -29,7 +33,11 @@ fn run_erl(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-eval") {
-        let expr = args.windows(2).find(|w| w[0] == "-eval").map(|w| w[1].as_str()).unwrap_or("ok.");
+        let expr = args
+            .windows(2)
+            .find(|w| w[0] == "-eval")
+            .map(|w| w[1].as_str())
+            .unwrap_or("ok.");
         println!("Erlang/OTP 26 [erts-14.2.2]");
         println!("> {}", expr);
         println!("ok");
@@ -51,7 +59,11 @@ fn run_erlc(args: &[String]) -> i32 {
         println!("  -v            Verbose");
         return 0;
     }
-    let files: Vec<&str> = args.iter().filter(|a| a.ends_with(".erl")).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| a.ends_with(".erl"))
+        .map(|s| s.as_str())
+        .collect();
     for f in &files {
         let base = f.rsplit_once('.').map_or(*f, |(b, _)| b);
         println!("Compiling {} -> {}.beam", f, base);
@@ -86,16 +98,26 @@ fn run_dialyzer(args: &[String]) -> i32 {
         println!("  done (passed successfully)");
         return 0;
     }
-    let files: Vec<&str> = args.iter().filter(|a| a.ends_with(".beam") || a.ends_with(".erl")).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| a.ends_with(".beam") || a.ends_with(".erl"))
+        .map(|s| s.as_str())
+        .collect();
     println!("  Proceeding with analysis...");
     println!("  done in 0m12.34s");
-    println!("  No warnings found ({} files)", if files.is_empty() { 5 } else { files.len() });
+    println!(
+        "  No warnings found ({} files)",
+        if files.is_empty() { 5 } else { files.len() }
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "erl".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "erl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "erlc" => run_erlc(&rest),
@@ -108,7 +130,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_erl};
+    use super::{basename, run_erl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

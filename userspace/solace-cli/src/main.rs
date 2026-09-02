@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_solace(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: solace [OPTIONS]");
-        println!("Solace (Slate OS) — PubSub+ event broker + event mesh + event portal (Kanata, Ontario)");
+        println!(
+            "Solace (Slate OS) — PubSub+ event broker + event mesh + event portal (Kanata, Ontario)"
+        );
         println!();
         println!("Options:");
         println!("  --event-broker         PubSub+ Event Broker (multi-protocol broker)");
@@ -22,12 +28,19 @@ fn run_solace(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Solace PubSub+ 2024 (Slate OS) — solace CLI 10.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Solace PubSub+ 2024 (Slate OS) — solace CLI 10.x");
+        return 0;
+    }
     println!("Solace PubSub+ 2024 (Slate OS) — Event Broker + Event Mesh + Event Portal");
     println!("  Vendor: Solace Corporation (Kanata, Ontario, Canada — private)");
     println!("  Founders: Larry Neumann + Craig Betts + Greg Hyatt + others, 2001");
-    println!("          Originally founded as Solace Systems for financial-services hardware messaging");
-    println!("          Spun off from Nortel R&D in Ottawa-area (Kanata is the Silicon Valley North hub)");
+    println!(
+        "          Originally founded as Solace Systems for financial-services hardware messaging"
+    );
+    println!(
+        "          Spun off from Nortel R&D in Ottawa-area (Kanata is the Silicon Valley North hub)"
+    );
     println!("          Started with purpose-built hardware appliances for low-latency messaging");
     println!("          Pivoted to software + cloud (PubSub+ branding) ~2015");
     println!("          Renamed Solace Corporation (dropped 'Systems')");
@@ -36,14 +49,26 @@ fn run_solace(args: &[String], _prog: &str) -> i32 {
     println!("         Founded 2001, raised total ~$25M early venture (Bessemer, OAK)");
     println!("         Acquired Bridge Growth Partners investment 2016");
     println!("         Acquired by Hg Capital (UK private equity) Jan 2024 majority stake");
-    println!("         Revenue private — believed >$100M ARR (financial services + logistics enterprise)");
+    println!(
+        "         Revenue private — believed >$100M ARR (financial services + logistics enterprise)"
+    );
     println!("         '23 years of building event-driven infrastructure'");
-    println!("  Strategic position: 'event mesh — federated brokers across cloud + on-prem + edge':");
-    println!("                    pitch: 'one event mesh spanning multi-cloud, on-prem, IoT, partner systems'");
-    println!("                    target: large enterprises with hybrid cloud, banks, airlines, logistics");
-    println!("                    primary competitor: Confluent (Kafka), IBM MQ, TIBCO EMS, Software AG webMethods");
+    println!(
+        "  Strategic position: 'event mesh — federated brokers across cloud + on-prem + edge':"
+    );
+    println!(
+        "                    pitch: 'one event mesh spanning multi-cloud, on-prem, IoT, partner systems'"
+    );
+    println!(
+        "                    target: large enterprises with hybrid cloud, banks, airlines, logistics"
+    );
+    println!(
+        "                    primary competitor: Confluent (Kafka), IBM MQ, TIBCO EMS, Software AG webMethods"
+    );
     println!("                    secondary: AWS SQS+SNS, Azure Service Bus, RabbitMQ");
-    println!("                    Solace's wedge: multi-protocol (AMQP + MQTT + JMS + Kafka + REST + WebSocket) in ONE broker");
+    println!(
+        "                    Solace's wedge: multi-protocol (AMQP + MQTT + JMS + Kafka + REST + WebSocket) in ONE broker"
+    );
     println!("                    + event mesh (federated brokers form a global event fabric)");
     println!("                    + Event Portal (governance, schema catalog)");
     println!("                    + Canadian engineering pedigree (Ottawa-area telecom heritage)");
@@ -57,7 +82,9 @@ fn run_solace(args: &[String], _prog: &str) -> i32 {
     println!("    typically 6-figure annual contracts for large deployments");
     println!("    Hg's PE ownership = pricing remains enterprise-style");
     println!("  Architecture (the multi-protocol broker + mesh):");
-    println!("    - Single broker supports: AMQP 1.0, MQTT 3.1.1/5.0, JMS 1.1/2.0, REST, WebSocket, Solace SMF");
+    println!(
+        "    - Single broker supports: AMQP 1.0, MQTT 3.1.1/5.0, JMS 1.1/2.0, REST, WebSocket, Solace SMF"
+    );
     println!("    - Topic hierarchy with wildcard routing");
     println!("    - Topic-to-queue mapping (subscribe queues to topics)");
     println!("    - Direct messaging (low-latency, no persistence)");
@@ -147,10 +174,14 @@ fn run_solace(args: &[String], _prog: &str) -> i32 {
     println!("    - Salesforce Event Bus connector");
     println!("  Solace CLI usage:");
     println!("    solace cloud login                                       # PubSub+ Cloud auth");
-    println!("    solace cloud services list                               # list managed services");
+    println!(
+        "    solace cloud services list                               # list managed services"
+    );
     println!("    solace cloud services create --name my-broker --service-class production");
     println!("    # SolAdmin CLI (broker-side):");
-    println!("    enable                                                   # enter privileged mode");
+    println!(
+        "    enable                                                   # enter privileged mode"
+    );
     println!("    configure                                                # configuration mode");
     println!("    message-vpn my-vpn                                       # select VPN");
     println!("    create queue my-queue                                    # create queue");
@@ -174,13 +205,18 @@ fn run_solace(args: &[String], _prog: &str) -> i32 {
     println!("           Event Portal less mature than data catalogs (Collibra, Atlan)");
     println!("           appliance heritage = some legacy concepts in newer cloud product");
     println!("           Canadian timezone for support (some intl customer friction)");
-    println!("  Differentiator: 23+ years (founded 2001 in Kanata Ontario, Nortel telecom heritage) + multi-protocol single broker (AMQP + MQTT + JMS + REST + WebSocket + Kafka API + Solace SMF native in one engine, no protocol-specific clusters) + Event Mesh (brokers federated via bridges into single global event fabric spanning AWS + Azure + GCP + on-prem + edge + IoT, automatic dynamic routing, no MirrorMaker required) + Event Portal (event catalog + modeling + schema management + lineage + impact analysis, like data catalog for events) + PubSub+ Appliance (purpose-built hardware used by NYSE/NASDAQ/CBOE/ICE for sub-millisecond deterministic latency) + Replay Log + topic-to-queue mapping + wildcard topic routing + JCSMP native API + Spring Cloud Stream binder + Quarkus connector + Salesforce Event Bus connector + Lufthansa/Singapore Airlines/JPMorgan/FedEx/DHL/Maersk-proven + Hg Capital PE backed (Jan 2024) + Service Class managed cloud tier + 'every major options exchange in the world uses Solace' — the enterprise event mesh platform for hybrid + multi-cloud + edge financial-services / airline / logistics workloads, the only broker that natively speaks every major messaging protocol");
+    println!(
+        "  Differentiator: 23+ years (founded 2001 in Kanata Ontario, Nortel telecom heritage) + multi-protocol single broker (AMQP + MQTT + JMS + REST + WebSocket + Kafka API + Solace SMF native in one engine, no protocol-specific clusters) + Event Mesh (brokers federated via bridges into single global event fabric spanning AWS + Azure + GCP + on-prem + edge + IoT, automatic dynamic routing, no MirrorMaker required) + Event Portal (event catalog + modeling + schema management + lineage + impact analysis, like data catalog for events) + PubSub+ Appliance (purpose-built hardware used by NYSE/NASDAQ/CBOE/ICE for sub-millisecond deterministic latency) + Replay Log + topic-to-queue mapping + wildcard topic routing + JCSMP native API + Spring Cloud Stream binder + Quarkus connector + Salesforce Event Bus connector + Lufthansa/Singapore Airlines/JPMorgan/FedEx/DHL/Maersk-proven + Hg Capital PE backed (Jan 2024) + Service Class managed cloud tier + 'every major options exchange in the world uses Solace' — the enterprise event mesh platform for hybrid + multi-cloud + edge financial-services / airline / logistics workloads, the only broker that natively speaks every major messaging protocol"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "solace".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "solace".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_solace(&rest, &_prog);
     process::exit(code);
@@ -188,7 +224,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_solace};
+    use super::{basename, run_solace, strip_ext};
 
     #[test]
     fn basename_strips_path() {

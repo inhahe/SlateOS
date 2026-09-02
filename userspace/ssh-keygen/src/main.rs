@@ -37,10 +37,7 @@
 // OpenSSH key blobs. Arithmetic on field limbs and key offsets is by
 // construction modular / bounded by blob length checks; indexing is
 // gated by preceding length checks. Errors propagate as Err.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use std::env;
 use std::fmt;
@@ -190,14 +187,30 @@ fn base64_encode(data: &[u8]) -> String {
     let mut i = 0usize;
     while i < data.len() {
         let b0 = data[i] as u32;
-        let b1 = if i + 1 < data.len() { data[i + 1] as u32 } else { 0 };
-        let b2 = if i + 2 < data.len() { data[i + 2] as u32 } else { 0 };
+        let b1 = if i + 1 < data.len() {
+            data[i + 1] as u32
+        } else {
+            0
+        };
+        let b2 = if i + 2 < data.len() {
+            data[i + 2] as u32
+        } else {
+            0
+        };
 
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(B64_CHARS[((n >> 18) & 0x3f) as usize]);
         out.push(B64_CHARS[((n >> 12) & 0x3f) as usize]);
-        out.push(if i + 1 < data.len() { B64_CHARS[((n >> 6) & 0x3f) as usize] } else { b'=' });
-        out.push(if i + 2 < data.len() { B64_CHARS[(n & 0x3f) as usize] } else { b'=' });
+        out.push(if i + 1 < data.len() {
+            B64_CHARS[((n >> 6) & 0x3f) as usize]
+        } else {
+            b'='
+        });
+        out.push(if i + 2 < data.len() {
+            B64_CHARS[(n & 0x3f) as usize]
+        } else {
+            b'='
+        });
         i = i.saturating_add(3);
     }
     // SAFETY: `out` only contains ASCII characters from B64_CHARS and `=`.
@@ -307,8 +320,14 @@ const SHA512_K: [u64; 80] = [
 
 /// SHA-512 initial hash values.
 const SHA512_INIT: [u64; 8] = [
-    0x6a09_e667_f3bc_c908, 0xbb67_ae85_84ca_a73b, 0x3c6e_f372_fe94_f82b, 0xa54f_f53a_5f1d_36f1,
-    0x510e_527f_ade6_82d1, 0x9b05_688c_2b3e_6c1f, 0x1f83_d9ab_fb41_bd6b, 0x5be0_cd19_137e_2179,
+    0x6a09_e667_f3bc_c908,
+    0xbb67_ae85_84ca_a73b,
+    0x3c6e_f372_fe94_f82b,
+    0xa54f_f53a_5f1d_36f1,
+    0x510e_527f_ade6_82d1,
+    0x9b05_688c_2b3e_6c1f,
+    0x1f83_d9ab_fb41_bd6b,
+    0x5be0_cd19_137e_2179,
 ];
 
 /// Process one 128-byte block into the running SHA-512 state.
@@ -485,11 +504,21 @@ impl Fe {
         // every limb is < 2^51 except h0, which may be up to 2^51 + 18 from the
         // final fold; the carry chains below tolerate that.
         for _ in 0..2 {
-            let c = h0 >> 51; h0 &= mask; h1 = h1.wrapping_add(c);
-            let c = h1 >> 51; h1 &= mask; h2 = h2.wrapping_add(c);
-            let c = h2 >> 51; h2 &= mask; h3 = h3.wrapping_add(c);
-            let c = h3 >> 51; h3 &= mask; h4 = h4.wrapping_add(c);
-            let c = h4 >> 51; h4 &= mask; h0 = h0.wrapping_add(c.wrapping_mul(19));
+            let c = h0 >> 51;
+            h0 &= mask;
+            h1 = h1.wrapping_add(c);
+            let c = h1 >> 51;
+            h1 &= mask;
+            h2 = h2.wrapping_add(c);
+            let c = h2 >> 51;
+            h2 &= mask;
+            h3 = h3.wrapping_add(c);
+            let c = h3 >> 51;
+            h3 &= mask;
+            h4 = h4.wrapping_add(c);
+            let c = h4 >> 51;
+            h4 &= mask;
+            h0 = h0.wrapping_add(c.wrapping_mul(19));
         }
 
         // q = 1 iff v ≥ p, computed as the carry out of bit 255 of (v + 19).
@@ -506,10 +535,18 @@ impl Fe {
         // carry-propagate (without folding), then mask off the 2^255 bit, which
         // performs the - q·2^255. The result is the canonical value in [0, p).
         h0 = h0.wrapping_add(q.wrapping_mul(19));
-        let c = h0 >> 51; h0 &= mask; h1 = h1.wrapping_add(c);
-        let c = h1 >> 51; h1 &= mask; h2 = h2.wrapping_add(c);
-        let c = h2 >> 51; h2 &= mask; h3 = h3.wrapping_add(c);
-        let c = h3 >> 51; h3 &= mask; h4 = h4.wrapping_add(c);
+        let c = h0 >> 51;
+        h0 &= mask;
+        h1 = h1.wrapping_add(c);
+        let c = h1 >> 51;
+        h1 &= mask;
+        h2 = h2.wrapping_add(c);
+        let c = h2 >> 51;
+        h2 &= mask;
+        h3 = h3.wrapping_add(c);
+        let c = h3 >> 51;
+        h3 &= mask;
+        h4 = h4.wrapping_add(c);
         h4 &= mask;
 
         Fe([h0, h1, h2, h3, h4])
@@ -581,23 +618,29 @@ impl Fe {
         let b4_19 = b4_19 as u128;
 
         let mut t0 = a0 * b0 + a1 * b4_19 + a2 * b3_19 + a3 * b2_19 + a4 * b1_19;
-        let mut t1 = a0 * b1 + a1 * b0   + a2 * b4_19 + a3 * b3_19 + a4 * b2_19;
-        let mut t2 = a0 * b2 + a1 * b1   + a2 * b0   + a3 * b4_19 + a4 * b3_19;
-        let mut t3 = a0 * b3 + a1 * b2   + a2 * b1   + a3 * b0   + a4 * b4_19;
-        let mut t4 = a0 * b4 + a1 * b3   + a2 * b2   + a3 * b1   + a4 * b0;
+        let mut t1 = a0 * b1 + a1 * b0 + a2 * b4_19 + a3 * b3_19 + a4 * b2_19;
+        let mut t2 = a0 * b2 + a1 * b1 + a2 * b0 + a3 * b4_19 + a4 * b3_19;
+        let mut t3 = a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0 + a4 * b4_19;
+        let mut t4 = a0 * b4 + a1 * b3 + a2 * b2 + a3 * b1 + a4 * b0;
 
         let mask = 0x0007_ffff_ffff_ffffu128;
-        let c0 = t0 >> 51; t0 &= mask;
+        let c0 = t0 >> 51;
+        t0 &= mask;
         t1 += c0;
-        let c1 = t1 >> 51; t1 &= mask;
+        let c1 = t1 >> 51;
+        t1 &= mask;
         t2 += c1;
-        let c2 = t2 >> 51; t2 &= mask;
+        let c2 = t2 >> 51;
+        t2 &= mask;
         t3 += c2;
-        let c3 = t3 >> 51; t3 &= mask;
+        let c3 = t3 >> 51;
+        t3 &= mask;
         t4 += c3;
-        let c4 = t4 >> 51; t4 &= mask;
+        let c4 = t4 >> 51;
+        t4 &= mask;
         t0 += c4 * 19;
-        let c0 = t0 >> 51; t0 &= mask;
+        let c0 = t0 >> 51;
+        t0 &= mask;
         t1 += c0;
 
         Fe([t0 as u64, t1 as u64, t2 as u64, t3 as u64, t4 as u64])
@@ -632,7 +675,6 @@ impl Fe {
         }
         result
     }
-
 }
 
 // ============================================================================
@@ -658,36 +700,43 @@ struct EdPoint {
 /// Value from RFC 8032 appendix.
 fn ed25519_d() -> Fe {
     Fe::from_bytes(&[
-        0xa3, 0x78, 0x59, 0x26, 0xd2, 0xa0, 0x45, 0x0a,
-        0x21, 0x6f, 0x1b, 0x3f, 0x2e, 0xdb, 0xb7, 0xd4,
-        0x5f, 0x0e, 0xa1, 0xa9, 0x65, 0xa2, 0x09, 0xad,
-        0x0d, 0xb9, 0x75, 0x52, 0xa1, 0x4a, 0x37, 0x52,
+        0xa3, 0x78, 0x59, 0x26, 0xd2, 0xa0, 0x45, 0x0a, 0x21, 0x6f, 0x1b, 0x3f, 0x2e, 0xdb, 0xb7,
+        0xd4, 0x5f, 0x0e, 0xa1, 0xa9, 0x65, 0xa2, 0x09, 0xad, 0x0d, 0xb9, 0x75, 0x52, 0xa1, 0x4a,
+        0x37, 0x52,
     ])
 }
 
 impl EdPoint {
     /// The neutral element (identity) of the group: (0, 1, 1, 0).
     fn identity() -> Self {
-        EdPoint { x: FE_ZERO, y: FE_ONE, z: FE_ONE, t: FE_ZERO }
+        EdPoint {
+            x: FE_ZERO,
+            y: FE_ONE,
+            z: FE_ONE,
+            t: FE_ZERO,
+        }
     }
 
     /// The standard Ed25519 base point G.
     fn base_point() -> Self {
         // Canonical coordinates from RFC 8032 §5.1.
         let gy = Fe::from_bytes(&[
-            0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-            0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-            0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-            0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+            0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+            0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+            0x66, 0x66, 0x66, 0x66,
         ]);
         let gx = Fe::from_bytes(&[
-            0x1a, 0xd5, 0x25, 0x8f, 0x60, 0x2d, 0x56, 0xc9,
-            0xb2, 0xa7, 0x25, 0x95, 0x60, 0xc7, 0x2c, 0x69,
-            0x5c, 0xdc, 0xd6, 0xfd, 0x31, 0xe2, 0xa4, 0xc0,
-            0xfe, 0x53, 0x6e, 0xcd, 0xd3, 0x36, 0x69, 0x21,
+            0x1a, 0xd5, 0x25, 0x8f, 0x60, 0x2d, 0x56, 0xc9, 0xb2, 0xa7, 0x25, 0x95, 0x60, 0xc7,
+            0x2c, 0x69, 0x5c, 0xdc, 0xd6, 0xfd, 0x31, 0xe2, 0xa4, 0xc0, 0xfe, 0x53, 0x6e, 0xcd,
+            0xd3, 0x36, 0x69, 0x21,
         ]);
         let gt = gx.mul(gy);
-        EdPoint { x: gx, y: gy, z: FE_ONE, t: gt }
+        EdPoint {
+            x: gx,
+            y: gy,
+            z: FE_ONE,
+            t: gt,
+        }
     }
 
     /// Unified twisted Edwards point addition.
@@ -708,7 +757,12 @@ impl EdPoint {
         let y3 = g2.mul(h);
         let t3 = e.mul(h);
         let z3 = f.mul(g2);
-        EdPoint { x: x3, y: y3, z: z3, t: t3 }
+        EdPoint {
+            x: x3,
+            y: y3,
+            z: z3,
+            t: t3,
+        }
     }
 
     /// Point doubling using the dedicated formula dbl-2008-hwcd.
@@ -724,7 +778,12 @@ impl EdPoint {
         let y3 = g2.mul(h);
         let t3 = e.mul(h);
         let z3 = f.mul(g2);
-        EdPoint { x: x3, y: y3, z: z3, t: t3 }
+        EdPoint {
+            x: x3,
+            y: y3,
+            z: z3,
+            t: t3,
+        }
     }
 
     /// Scalar multiplication: compute `scalar * self` using a simple double-and-add.
@@ -778,9 +837,9 @@ impl Ed25519KeyPair {
         // Step 2: Clamp the first 32 bytes to produce the scalar.
         let mut scalar = [0u8; 32];
         scalar.copy_from_slice(&h[..32]);
-        scalar[0] &= 0xf8;   // clear the lowest 3 bits
-        scalar[31] &= 0x7f;  // clear the highest bit
-        scalar[31] |= 0x40;  // set the second-highest bit
+        scalar[0] &= 0xf8; // clear the lowest 3 bits
+        scalar[31] &= 0x7f; // clear the highest bit
+        scalar[31] |= 0x40; // set the second-highest bit
 
         // Step 3: Compute the public key as scalar * G.
         let public_point = EdPoint::base_point().scalar_mul(&scalar);
@@ -924,7 +983,9 @@ fn parse_public_key_line(line: &str) -> Result<([u8; 32], String), KeygenError> 
     ]) as usize;
     let key_start = key_len_offset + 4;
     if wire.len() < key_start + key_len || key_len != 32 {
-        return Err(KeygenError::InvalidKeyFile("bad public key length".to_string()));
+        return Err(KeygenError::InvalidKeyFile(
+            "bad public key length".to_string(),
+        ));
     }
     let mut public = [0u8; 32];
     public.copy_from_slice(&wire[key_start..key_start + 32]);
@@ -1035,10 +1096,7 @@ fn generate_key(args: &Args) -> Result<(), KeygenError> {
         return Err(KeygenError::UnsupportedKeyType(t.clone()));
     }
 
-    let priv_path = args
-        .output_file
-        .clone()
-        .unwrap_or_else(default_key_path);
+    let priv_path = args.output_file.clone().unwrap_or_else(default_key_path);
     let pub_path = public_key_path(&priv_path);
 
     let comment = args.comment.clone().unwrap_or_else(|| {
@@ -1251,10 +1309,9 @@ mod tests {
         assert_eq!(
             digest,
             [
-                0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
-                0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
-                0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
-                0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
+                0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+                0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+                0x78, 0x52, 0xb8, 0x55,
             ]
         );
     }
@@ -1267,10 +1324,9 @@ mod tests {
         assert_eq!(
             digest,
             [
-                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
-                0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
-                0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
-                0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+                0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+                0xf2, 0x00, 0x15, 0xad,
             ]
         );
     }
@@ -1282,10 +1338,9 @@ mod tests {
         assert_eq!(
             digest,
             [
-                0x24, 0x8d, 0x6a, 0x61, 0xd2, 0x06, 0x38, 0xb8,
-                0xe5, 0xc0, 0x26, 0x93, 0x0c, 0x3e, 0x60, 0x39,
-                0xa3, 0x3c, 0xe4, 0x59, 0x64, 0xff, 0x21, 0x67,
-                0xf6, 0xec, 0xed, 0xd4, 0x19, 0xdb, 0x06, 0xc1,
+                0x24, 0x8d, 0x6a, 0x61, 0xd2, 0x06, 0x38, 0xb8, 0xe5, 0xc0, 0x26, 0x93, 0x0c, 0x3e,
+                0x60, 0x39, 0xa3, 0x3c, 0xe4, 0x59, 0x64, 0xff, 0x21, 0x67, 0xf6, 0xec, 0xed, 0xd4,
+                0x19, 0xdb, 0x06, 0xc1,
             ]
         );
     }
@@ -1499,8 +1554,15 @@ mod tests {
     #[test]
     fn test_parse_args_all_flags() {
         let args: Vec<String> = [
-            "ssh-keygen", "-t", "ed25519", "-f", "/tmp/key",
-            "-C", "my comment", "-l", "-q",
+            "ssh-keygen",
+            "-t",
+            "ed25519",
+            "-f",
+            "/tmp/key",
+            "-C",
+            "my comment",
+            "-l",
+            "-q",
         ]
         .iter()
         .map(|s| s.to_string())

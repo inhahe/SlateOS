@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("noloco-cli 0.1.0 (no-code-portal-and-internal-tools personality build)"); }
+fn print_version() {
+    println!("noloco-cli 0.1.0 (no-code-portal-and-internal-tools personality build)");
+}
 
 fn run_about() {
     println!("Noloco Limited.");

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_zendesk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -26,14 +30,21 @@ fn run_zendesk(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Zendesk 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Zendesk 2024 (Slate OS)");
+        return 0;
+    }
     println!("Zendesk 2024 (Slate OS)");
     println!("  Vendor: Zendesk, Inc. (San Francisco, CA — private since June 2022)");
     println!("  Founders: Mikkel Svane (CEO), Alexander Aghassipour, Morten Primdahl");
     println!("          three Danes — built v1 in a Copenhagen loft 2007");
-    println!("          'Zendesk' name = Zen (calm) + Desk (helpdesk) — opposite of legacy Remedy/ServiceNow chaos");
+    println!(
+        "          'Zendesk' name = Zen (calm) + Desk (helpdesk) — opposite of legacy Remedy/ServiceNow chaos"
+    );
     println!("  Founded: 2007 in Copenhagen → SF HQ 2009 → IPO 2014 (NYSE:ZEN $9/share)");
-    println!("  Privatization: taken private June 28 2022 by Hellman & Friedman + Permira for $10.2B");
+    println!(
+        "  Privatization: taken private June 28 2022 by Hellman & Friedman + Permira for $10.2B"
+    );
     println!("                hostile activist Jana Partners had pushed for sale earlier in 2022");
     println!("                deal completed at $77.50/share — debated as undervalued");
     println!("  Scale: ~100,000 paying customer accounts across 160+ countries");
@@ -66,7 +77,9 @@ fn run_zendesk(args: &[String], _prog: &str) -> i32 {
     println!("    - Pre-chat forms, departments routing");
     println!("    - Triggers ('show chat after 30s on pricing page')");
     println!("    - Bots via Sunshine Conversations (multi-channel messaging)");
-    println!("    - WhatsApp Business, Facebook Messenger, Apple Business Chat, Instagram DM unified");
+    println!(
+        "    - WhatsApp Business, Facebook Messenger, Apple Business Chat, Instagram DM unified"
+    );
     println!("  Talk (cloud call center):");
     println!("    - IVR + skill-based routing");
     println!("    - Call recording + voicemail-to-ticket");
@@ -91,23 +104,34 @@ fn run_zendesk(args: &[String], _prog: &str) -> i32 {
     println!("              Cleverly.ai 2021 → automation/triage AI");
     println!("              Tymeshift (workforce mgmt) 2023");
     println!("  Integrations: 1,500+ marketplace apps");
-    println!("              Salesforce, Jira (deepest after Atlassian's own), Slack, Shopify, Stripe");
+    println!(
+        "              Salesforce, Jira (deepest after Atlassian's own), Slack, Shopify, Stripe"
+    );
     println!("              Sunshine SDKs for native iOS/Android/Web embedded messaging");
     println!("  Customers: 100,000+ accounts");
-    println!("            Uber, Slack (yes, Slack uses Zendesk), Airbnb, Tesco, Vimeo, Shopify, Etsy");
+    println!(
+        "            Uber, Slack (yes, Slack uses Zendesk), Airbnb, Tesco, Vimeo, Shopify, Etsy"
+    );
     println!("            Slack's outage updates flow through Zendesk Support");
     println!("            sweet spot: SMB to enterprise (5 agents to 5,000+)");
-    println!("  Critique: post-PE prices have crept up; some customers complain about renewal pressure");
+    println!(
+        "  Critique: post-PE prices have crept up; some customers complain about renewal pressure"
+    );
     println!("           UI is comprehensive but can feel cluttered");
     println!("           upmarket move + price hikes pushed SMBs toward Freshdesk + Help Scout");
     println!("           Advanced AI add-on stacks on top of already-pricey Suite tiers");
-    println!("  Differentiator: 17 years of category-defining product depth + largest support app marketplace");
+    println!(
+        "  Differentiator: 17 years of category-defining product depth + largest support app marketplace"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "zendesk".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "zendesk".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_zendesk(&rest, &_prog);
     process::exit(code);
@@ -115,7 +139,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_zendesk};
+    use super::{basename, run_zendesk, strip_ext};
 
     #[test]
     fn basename_strips_path() {

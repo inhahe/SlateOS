@@ -36,17 +36,25 @@ fn print_help(prog: &str) {
     println!("COMMANDS:");
     println!("    about         Bit9 2002 Waltham; merged Carbon Black 2014; rebranded 2016");
     println!("    history       Bit9 -> Carbon Black merger -> CBLK IPO -> VMware -> Broadcom");
-    println!("    cbcloud       Carbon Black Cloud platform + Endpoint Standard / Advanced / Enterprise");
+    println!(
+        "    cbcloud       Carbon Black Cloud platform + Endpoint Standard / Advanced / Enterprise"
+    );
     println!("    edr           Carbon Black EDR (legacy on-prem) + threat-hunting heritage");
     println!("    appcontrol    App Control (Bit9 lineage) + application whitelisting");
     println!("    vmware        VMware Carbon Black integration with vSphere + Workspace ONE");
-    println!("    broadcom      2023 Broadcom + VMware deal — Carbon Black inside Broadcom Software");
-    println!("    customers     Fortune 500 + government + long-running enterprise EDR install base");
+    println!(
+        "    broadcom      2023 Broadcom + VMware deal — Carbon Black inside Broadcom Software"
+    );
+    println!(
+        "    customers     Fortune 500 + government + long-running enterprise EDR install base"
+    );
     println!("    help          Show this help");
     println!("    version       Show version");
 }
 
-fn print_version() { println!("carbonblack-cli 0.1.0 (edr-pioneer-vmware-broadcom personality build)"); }
+fn print_version() {
+    println!("carbonblack-cli 0.1.0 (edr-pioneer-vmware-broadcom personality build)");
+}
 
 fn run_about() {
     println!("Carbon Black (now Broadcom Carbon Black).");
@@ -81,9 +89,13 @@ fn run_history() {
 fn run_cbcloud() {
     println!("Carbon Black Cloud (the platform).");
     println!("  Cloud-native multi-tenant SaaS endpoint platform launched ~2019.");
-    println!("  Carbon Black Cloud Endpoint Standard: next-gen antivirus + behavioural prevention.");
+    println!(
+        "  Carbon Black Cloud Endpoint Standard: next-gen antivirus + behavioural prevention."
+    );
     println!("  Carbon Black Cloud Endpoint Advanced: + EDR + threat-hunting + remediation.");
-    println!("  Carbon Black Cloud Endpoint Enterprise: + Threat Hunter Service + managed detection.");
+    println!(
+        "  Carbon Black Cloud Endpoint Enterprise: + Threat Hunter Service + managed detection."
+    );
     println!("  Carbon Black Cloud Workload: dedicated workload protection for vSphere + clouds.");
     println!("  Carbon Black Cloud Container: container + Kubernetes runtime protection.");
     println!("  Telemetry: continuous endpoint event recording — the original 'DVR for endpoint'");
@@ -107,9 +119,13 @@ fn run_appcontrol() {
     println!("  Originally Bit9 Parity / Bit9 Security Platform: application allowlisting,");
     println!("  device control + integrity monitoring on Windows + Linux + macOS endpoints.");
     println!("  Default-deny posture: only explicitly approved binaries execute on the endpoint.");
-    println!("  File-integrity monitoring + change-control for regulated environments (PCI, NERC-CIP).");
+    println!(
+        "  File-integrity monitoring + change-control for regulated environments (PCI, NERC-CIP)."
+    );
     println!("  Trust scoring: software-publisher-, hash-, and category-based trust policies.");
-    println!("  Use cases: fixed-function endpoints (ATMs, POS terminals, industrial workstations,");
+    println!(
+        "  Use cases: fixed-function endpoints (ATMs, POS terminals, industrial workstations,"
+    );
     println!("  medical devices, SCADA servers) where allowlisting is the appropriate posture.");
     println!("  Continues as Carbon Black App Control inside the modern portfolio.");
 }
@@ -132,7 +148,9 @@ fn run_broadcom() {
     println!("  Broadcom completes \\$69B acquisition of VMware in Nov 2023 — the largest");
     println!("  technology acquisition in history at signing.");
     println!("  Post-close: Carbon Black moves into Broadcom Software Group alongside Symantec,");
-    println!("  AppDynamics, CA Technologies — Hock Tan's classic strategic-account roll-up portfolio.");
+    println!(
+        "  AppDynamics, CA Technologies — Hock Tan's classic strategic-account roll-up portfolio."
+    );
     println!("  Common Broadcom playbook: focus on top ~600 strategic accounts; rationalise");
     println!("  long-tail SKUs + channel; raise prices on strategic customers; thin out adjacent");
     println!("  product investment that does not support the strategic core.");
@@ -151,9 +169,13 @@ fn run_customers() {
     println!("  Notable historical customers: many of the largest US banks + insurance + Fortune");
     println!("  100 industrials adopted Cb Response + App Control through the 2010s.");
     println!("  Geographic: heavy US + EU + APAC enterprise + government; modest LATAM.");
-    println!("  Anti-segment (today): net-new cloud-first SMB + mid-market (default to CrowdStrike,");
+    println!(
+        "  Anti-segment (today): net-new cloud-first SMB + mid-market (default to CrowdStrike,"
+    );
     println!("  SentinelOne, Microsoft Defender for Endpoint, Sophos).");
-    println!("  Channel: partner-channel rationalised under Broadcom; direct-strategic-account-led.");
+    println!(
+        "  Channel: partner-channel rationalised under Broadcom; direct-strategic-account-led."
+    );
 }
 
 fn main() {

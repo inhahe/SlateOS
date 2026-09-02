@@ -33,7 +33,8 @@ fn run_xclip(args: Vec<String>) -> i32 {
     }
 
     let output = args.iter().any(|a| a == "-o" || a == "--out");
-    let selection = args.windows(2)
+    let selection = args
+        .windows(2)
         .find(|w| w[0] == "-selection")
         .map(|w| w[1].as_str())
         .unwrap_or("primary");
@@ -58,7 +59,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_xclip};
+    use super::run_xclip;
 
     #[test]
     fn help_exits_zero() {

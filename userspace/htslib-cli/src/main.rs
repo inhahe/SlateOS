@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_htsfile(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -34,7 +38,8 @@ fn run_bgzip(args: &[String], _prog: &str) -> i32 {
         println!("  -@ N              Threads");
         return 0;
     }
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("data.vcf");
@@ -58,11 +63,13 @@ fn run_tabix(args: &[String], _prog: &str) -> i32 {
         println!("  -e N              End column");
         return 0;
     }
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("data.vcf.gz");
-    let region = args.iter()
+    let region = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .nth(1)
         .map(|s| s.as_str());
@@ -77,7 +84,10 @@ fn run_tabix(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "htsfile".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "htsfile".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "bgzip" => run_bgzip(&rest, &prog),
@@ -89,7 +99,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_htsfile};
+    use super::{basename, run_htsfile, strip_ext};
 
     #[test]
     fn basename_strips_path() {

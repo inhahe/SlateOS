@@ -67,7 +67,9 @@ fn run_smbclient(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-L") {
-        let host = args.iter().position(|a| a == "-L")
+        let host = args
+            .iter()
+            .position(|a| a == "-L")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("server");
@@ -79,7 +81,11 @@ fn run_smbclient(args: Vec<String>) -> i32 {
         println!("IPC$            IPC       IPC Service (Samba {})", host);
         return 0;
     }
-    let share = args.iter().find(|a| a.starts_with("//")).map(|s| s.as_str()).unwrap_or("//server/share");
+    let share = args
+        .iter()
+        .find(|a| a.starts_with("//"))
+        .map(|s| s.as_str())
+        .unwrap_or("//server/share");
     println!("Try \"help\" to get a list of possible commands.");
     println!("smb: {}\\> ls", share);
     println!("  .                D        0  Wed May 22 10:00:00 2025");
@@ -93,13 +99,25 @@ fn run_smbclient(args: Vec<String>) -> i32 {
 
 fn run_smbstatus(_args: Vec<String>) -> i32 {
     println!("Samba version 4.20.0 (Slate OS)");
-    println!("PID     Username     Group        Machine                     Protocol Version  Encryption  Signing");
-    println!("----------------------------------------------------------------------------------------------------------------------------------------");
-    println!("12345   alice        users        192.168.1.100 (ipv4:192.168.1.100:49876)  SMB3_11    -           AES-128-CMAC");
-    println!("12346   bob          users        192.168.1.101 (ipv4:192.168.1.101:49877)  SMB3_11    -           AES-128-CMAC");
+    println!(
+        "PID     Username     Group        Machine                     Protocol Version  Encryption  Signing"
+    );
+    println!(
+        "----------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    println!(
+        "12345   alice        users        192.168.1.100 (ipv4:192.168.1.100:49876)  SMB3_11    -           AES-128-CMAC"
+    );
+    println!(
+        "12346   bob          users        192.168.1.101 (ipv4:192.168.1.101:49877)  SMB3_11    -           AES-128-CMAC"
+    );
     println!();
-    println!("Service      pid     Machine       Connected at                   Encryption  Signing");
-    println!("--------------------------------------------------------------------------------------------------------------");
+    println!(
+        "Service      pid     Machine       Connected at                   Encryption  Signing"
+    );
+    println!(
+        "--------------------------------------------------------------------------------------------------------------"
+    );
     println!("public       12345   192.168.1.100 Wed May 22 09:30:00 2025       -           -");
     println!("homes        12346   192.168.1.101 Wed May 22 09:45:00 2025       -           -");
     0
@@ -112,7 +130,11 @@ fn run_testparm(args: Vec<String>) -> i32 {
         println!("  -v     Show default values");
         return 0;
     }
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/etc/samba/smb.conf");
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/etc/samba/smb.conf");
     println!("Load smb config files from {}", config);
     println!("Loaded services file OK.");
     println!("Weak crypto is allowed by GnuTLS (e.g. NTLM and RC4)");
@@ -140,7 +162,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -158,7 +182,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_smbd};
+    use super::run_smbd;
 
     #[test]
     fn help_exits_zero() {

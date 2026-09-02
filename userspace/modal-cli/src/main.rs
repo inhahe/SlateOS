@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("modal-cli 0.1.0 (Python-serverless-GPU personality build)"); }
+fn print_version() {
+    println!("modal-cli 0.1.0 (Python-serverless-GPU personality build)");
+}
 
 fn run_about() {
     println!("Modal Labs.");

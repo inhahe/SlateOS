@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_grpcurl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -30,8 +34,11 @@ fn run_grpcurl(args: &[String]) -> i32 {
         println!("grpcurl v1.9.1");
         return 0;
     }
-    let addr = args.iter().find(|a| a.contains(':') && !a.starts_with('-') && !a.contains('='))
-        .map(|s| s.as_str()).unwrap_or("localhost:50051");
+    let addr = args
+        .iter()
+        .find(|a| a.contains(':') && !a.starts_with('-') && !a.contains('='))
+        .map(|s| s.as_str())
+        .unwrap_or("localhost:50051");
     let symbol = args.last().map(|s| s.as_str()).unwrap_or("");
 
     if args.iter().any(|a| a == "list") {
@@ -43,11 +50,17 @@ fn run_grpcurl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "describe") {
         println!("myservice.v1.UserService is a service:");
         println!("  rpc GetUser ( .myservice.v1.GetUserRequest ) returns ( .myservice.v1.User )");
-        println!("  rpc ListUsers ( .myservice.v1.ListUsersRequest ) returns ( .myservice.v1.ListUsersResponse )");
-        println!("  rpc CreateUser ( .myservice.v1.CreateUserRequest ) returns ( .myservice.v1.User )");
+        println!(
+            "  rpc ListUsers ( .myservice.v1.ListUsersRequest ) returns ( .myservice.v1.ListUsersResponse )"
+        );
+        println!(
+            "  rpc CreateUser ( .myservice.v1.CreateUserRequest ) returns ( .myservice.v1.User )"
+        );
         return 0;
     }
-    let data = args.windows(2).find(|w| w[0] == "-d")
+    let data = args
+        .windows(2)
+        .find(|w| w[0] == "-d")
         .map(|w| w[1].as_str());
     println!("Calling {} at {}...", symbol, addr);
     if data.is_some() {
@@ -62,7 +75,10 @@ fn run_grpcurl(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "grpcurl".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "grpcurl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_grpcurl(&rest);
     process::exit(code);
@@ -70,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_grpcurl};
+    use super::{basename, run_grpcurl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

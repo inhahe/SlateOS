@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_lytics(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_lytics(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Lytics 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Lytics 2024 (Slate OS)");
+        return 0;
+    }
     println!("Lytics 2024 (Slate OS) — Composable CDP");
     println!("  Vendor: Lytics, Inc. (Portland, OR)");
     println!("  Founders: James McDermott (CEO) + Aaron Raddon (CTO), 2012");
@@ -35,12 +42,18 @@ fn run_lytics(args: &[String], _prog: &str) -> i32 {
     println!("         earlier: Voyager Capital, Comcast Ventures, Rembrandt Venture Partners");
     println!("         no recent major raise — bootstrapped-feeling growth post-2019");
     println!("  Strategic position: 'composable CDP — works ON your warehouse, not next to it':");
-    println!("                    pitch: 'CDP that runs natively in your BigQuery — no data movement'");
+    println!(
+        "                    pitch: 'CDP that runs natively in your BigQuery — no data movement'"
+    );
     println!("                    target: media + publishing + B2C marketing teams on GCP");
     println!("                    primary competitor: Segment, mParticle, Tealium (packaged CDPs)");
     println!("                    secondary: Hightouch + Census (reverse-ETL competitors)");
-    println!("                    Lytics' wedge: BigQuery-native architecture + content affinity ML");
-    println!("                    pivoted to 'composable' positioning early (2021) — ahead of trend");
+    println!(
+        "                    Lytics' wedge: BigQuery-native architecture + content affinity ML"
+    );
+    println!(
+        "                    pivoted to 'composable' positioning early (2021) — ahead of trend"
+    );
     println!("                    Google partnership: deep BigQuery + GA4 + GMP integration");
     println!("  Pricing:");
     println!("    Free tier — limited (Lytics for Startups)");
@@ -48,7 +61,9 @@ fn run_lytics(args: &[String], _prog: &str) -> i32 {
     println!("    Enterprise — $150K-1M+/yr");
     println!("    pricing pegged to data volume + audience sizes");
     println!("  Core platform:");
-    println!("    - Lytics Conductor: composable-CDP control plane (orchestrates data in YOUR warehouse)");
+    println!(
+        "    - Lytics Conductor: composable-CDP control plane (orchestrates data in YOUR warehouse)"
+    );
     println!("    - BigQuery-native: queries run in customer's BigQuery, no data exfiltration");
     println!("    - Cloud Connect: bidirectional sync with Salesforce + Adobe + Marketo");
     println!("    - Real-time + batch event ingestion");
@@ -80,7 +95,9 @@ fn run_lytics(args: &[String], _prog: &str) -> i32 {
     println!("  Lytics CLI usage:");
     println!("    lytics login");
     println!("    lytics conductor segment list");
-    println!("    lytics segment create --name 'cart-abandoners' --query 'shoppers WHERE last_cart > 0'");
+    println!(
+        "    lytics segment create --name 'cart-abandoners' --query 'shoppers WHERE last_cart > 0'"
+    );
     println!("    lytics decisions score --user-id u-123 --model content-affinity");
     println!("    lytics export --segment cart-abandoners --destination facebook-ads");
     println!("  Customers (~150+ paying):");
@@ -95,14 +112,21 @@ fn run_lytics(args: &[String], _prog: &str) -> i32 {
     println!("           Hightouch raised much more capital + has stronger marketing");
     println!("           ML/AI features need refresh vs Anthropic/OpenAI-powered competitors");
     println!("           no recent major funding round = capital constraints");
-    println!("           Google partnership double-edged — depends on Google's data partner strategy");
-    println!("  Differentiator: composable-CDP pioneer + BigQuery-native architecture + content-affinity ML + media/publishing vertical strength + Pacific Northwest data-analytics heritage — the CDP choice for content-heavy B2C brands on Google Cloud");
+    println!(
+        "           Google partnership double-edged — depends on Google's data partner strategy"
+    );
+    println!(
+        "  Differentiator: composable-CDP pioneer + BigQuery-native architecture + content-affinity ML + media/publishing vertical strength + Pacific Northwest data-analytics heritage — the CDP choice for content-heavy B2C brands on Google Cloud"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "lytics".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "lytics".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_lytics(&rest, &_prog);
     process::exit(code);
@@ -110,7 +134,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lytics};
+    use super::{basename, run_lytics, strip_ext};
 
     #[test]
     fn basename_strips_path() {

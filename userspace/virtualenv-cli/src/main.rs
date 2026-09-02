@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_virtualenv(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -34,9 +38,16 @@ fn run_virtualenv(args: &[String]) -> i32 {
         println!("virtualenv 20.26.3 from /usr/lib/python3/dist-packages/virtualenv");
         return 0;
     }
-    let dest = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or(".venv");
-    let python = args.windows(2).find(|w| w[0] == "-p" || w[0] == "--python")
-        .map(|w| w[1].as_str()).unwrap_or("python3");
+    let dest = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or(".venv");
+    let python = args
+        .windows(2)
+        .find(|w| w[0] == "-p" || w[0] == "--python")
+        .map(|w| w[1].as_str())
+        .unwrap_or("python3");
     let no_pip = args.iter().any(|a| a == "--no-pip");
     let clear = args.iter().any(|a| a == "--clear");
 
@@ -47,7 +58,9 @@ fn run_virtualenv(args: &[String]) -> i32 {
     println!("  creator CPython3Posix(dest={}, clear={})", dest, clear);
     println!("  interpreter: {}", python);
     if !no_pip {
-        println!("  seeder FromAppData(download=false, pip=bundle, setuptools=bundle, wheel=bundle)");
+        println!(
+            "  seeder FromAppData(download=false, pip=bundle, setuptools=bundle, wheel=bundle)"
+        );
         println!("    added seed packages: pip==24.1, setuptools==70.1.0, wheel==0.43.0");
     } else {
         println!("  seeder: none (--no-pip)");
@@ -58,7 +71,10 @@ fn run_virtualenv(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "virtualenv".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "virtualenv".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_virtualenv(&rest);
     process::exit(code);
@@ -66,7 +82,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_virtualenv};
+    use super::{basename, run_virtualenv, strip_ext};
 
     #[test]
     fn basename_strips_path() {

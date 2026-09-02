@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_lp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,16 +28,25 @@ fn run_lp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Logic Pro 11.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Logic Pro 11.1 (Slate OS)");
+        return 0;
+    }
     println!("Logic Pro 11.1 (Slate OS)");
     println!("  Vendor: Apple Inc. (acquired Emagic 2002, Notator/Logic ex-C-Lab)");
     println!("  Origin: Notator (Atari ST, 1987 by Gerhard Lengeling) → Logic Audio →");
-    println!("          Apple acquisition 2002 → Logic Pro 7 (2004 Mac-only) → Logic Pro X (2013) → 11");
+    println!(
+        "          Apple acquisition 2002 → Logic Pro 7 (2004 Mac-only) → Logic Pro X (2013) → 11"
+    );
     println!("  Platform: macOS 13.5+ (Apple Silicon optimized), Logic Pro for iPad ($4.99/mo)");
     println!("  Pricing: $199.99 one-time (no subscription)");
     println!("  Engine: 64-bit float, sample-accurate, dozens of native plugins, MIDI 2.0");
-    println!("  Plugin support: AU, AU v3 (sandboxed), AU MIDI FX, Apple's own Alchemy/Sculpture/etc.");
-    println!("  Sound library: ~6000 instruments + samples + loops + drum kits (free with purchase)");
+    println!(
+        "  Plugin support: AU, AU v3 (sandboxed), AU MIDI FX, Apple's own Alchemy/Sculpture/etc."
+    );
+    println!(
+        "  Sound library: ~6000 instruments + samples + loops + drum kits (free with purchase)"
+    );
     println!("  Session Players (Logic 11): Drummer (since Logic X), Bass Player (new),");
     println!("                              Keyboard Player (new) — AI-driven virtual musicians");
     println!("  Stem Splitter: separate any audio into drums/bass/vocals/other (ML)");
@@ -46,7 +59,10 @@ fn run_lp(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "logicpro".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "logicpro".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_lp(&rest, &_prog);
     process::exit(code);
@@ -54,7 +70,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lp};
+    use super::{basename, run_lp, strip_ext};
 
     #[test]
     fn basename_strips_path() {

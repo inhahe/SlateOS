@@ -5,23 +5,34 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_clerk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: clerk [OPTIONS]");
-        println!("Clerk (Slate OS) — modern React-first auth + user management for full-stack apps");
+        println!(
+            "Clerk (Slate OS) — modern React-first auth + user management for full-stack apps"
+        );
         println!();
         println!("Options:");
-        println!("  --components           Pre-built React components (SignIn, SignUp, UserButton, OrgSwitcher)");
+        println!(
+            "  --components           Pre-built React components (SignIn, SignUp, UserButton, OrgSwitcher)"
+        );
         println!("  --organizations        Multi-tenant orgs + roles + invitations built-in");
         println!("  --b2b-saas             B2B SaaS feature set (orgs, SSO/SAML, RBAC)");
         println!("  --jwt                  JWT session tokens + verification helpers");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Clerk 2024 (Slate OS) — clerk CLI (next-gen auth)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Clerk 2024 (Slate OS) — clerk CLI (next-gen auth)");
+        return 0;
+    }
     println!("Clerk 2024 (Slate OS) — Modern React-First Auth + User Management Platform");
     println!("  Vendor: Clerk, Inc. (San Francisco, CA — private)");
     println!("  Founders: Colin Sidoti + Braden Sidoti + Brent Pinkerton, 2019");
@@ -39,15 +50,29 @@ fn run_clerk(args: &[String], _prog: &str) -> i32 {
     println!("         Series B Feb 2024: $30M (CRV) at ~$300M valuation");
     println!("         Strong revenue growth trajectory");
     println!("         Smaller raise than Auth0 era — more capital efficient");
-    println!("  Strategic position: 'React-first auth + user management built for modern web apps':");
-    println!("                    pitch: 'auth that looks like Notion / Linear / Stripe — drop in, looks great'");
-    println!("                    target: React/Next.js + Remix + Astro + Svelte developers, SaaS startups, B2B SaaS");
-    println!("                    primary competitor: Auth0 (Okta), Supabase Auth, Stytch, Firebase Auth, NextAuth.js");
+    println!(
+        "  Strategic position: 'React-first auth + user management built for modern web apps':"
+    );
+    println!(
+        "                    pitch: 'auth that looks like Notion / Linear / Stripe — drop in, looks great'"
+    );
+    println!(
+        "                    target: React/Next.js + Remix + Astro + Svelte developers, SaaS startups, B2B SaaS"
+    );
+    println!(
+        "                    primary competitor: Auth0 (Okta), Supabase Auth, Stytch, Firebase Auth, NextAuth.js"
+    );
     println!("                    secondary: WorkOS (B2B), AuthKit (WorkOS), Kinde, FusionAuth");
-    println!("                    Clerk wedge: best-in-class React component library (looks beautiful out of the box)");
-    println!("                    + B2B-native (organizations + roles + invitations + SSO built-in)");
+    println!(
+        "                    Clerk wedge: best-in-class React component library (looks beautiful out of the box)"
+    );
+    println!(
+        "                    + B2B-native (organizations + roles + invitations + SSO built-in)"
+    );
     println!("                    + Next.js + Remix first-class");
-    println!("                    + drop-in <SignIn /> component vs assembling Lego pieces (Stytch style)");
+    println!(
+        "                    + drop-in <SignIn /> component vs assembling Lego pieces (Stytch style)"
+    );
     println!("                    Notion + Linear-quality UI default");
     println!("  Pricing (modern SaaS, transparent):");
     println!("    Clerk Free: free up to 10,000 MAU (Monthly Active Users)");
@@ -80,7 +105,9 @@ fn run_clerk(args: &[String], _prog: &str) -> i32 {
     println!("       - Email magic links (passwordless email)");
     println!("       - SMS OTP");
     println!("       - Email OTP");
-    println!("       - OAuth (Google, GitHub, Discord, Apple, Microsoft, Slack, LinkedIn, Twitter/X, 30+ providers)");
+    println!(
+        "       - OAuth (Google, GitHub, Discord, Apple, Microsoft, Slack, LinkedIn, Twitter/X, 30+ providers)"
+    );
     println!("       - Passkeys (WebAuthn/FIDO2) since 2023");
     println!("       - SAML SSO (Enterprise tier)");
     println!("    3. Multi-Factor Authentication:");
@@ -187,13 +214,18 @@ fn run_clerk(args: &[String], _prog: &str) -> i32 {
     println!("           young company (founded 2019) = less battle-tested at extreme scale");
     println!("           vendor lock-in to Clerk's data model (orgs, sessions, etc.)");
     println!("           supports many providers but lacks Apigee-style custom OAuth flows");
-    println!("  Differentiator: modern React-first auth + user management built for Next.js + Remix + Astro era (founded 2019 by Colin Sidoti + Braden Sidoti + Brent Pinkerton, YC W20, $55M+ raised including Madrona + CRV, ~$300M valuation Feb 2024) + pre-built React components that look beautiful out of the box (<SignIn /> + <SignUp /> + <UserButton /> + <UserProfile /> + <OrganizationSwitcher />, drop-in vs assembling primitives) + Organizations (first-class B2B SaaS multi-tenancy with invitations + roles + permissions + branding) + 30+ OAuth providers + email + SMS + magic links + TOTP + Passkeys + SAML SSO + SCIM 2.0 + Vercel/Next.js partnership (featured in Next.js docs as recommended auth) + JWT sessions + JWKS verification + webhooks via Svix + Clerk Dashboard admin UI + middleware for Next.js App Router + Svelte/Astro/Vue/Nuxt/Remix/Expo SDKs + Cal.com/Drata/Resend-proven + generous free tier (10K MAU free) + Pro $25/mo + transparent $0.02/MAU pricing + SOC 2 Type II + HIPAA + GDPR compliance + Custom Sign-in Elements (compose your own UI with Clerk logic) + Stripe-integration patterns + 'auth in 5 minutes for React/Next.js devs' + Notion/Linear/Stripe-quality UI default + the auth SaaS that emerged as Auth0 fatigue grew among modern dev teams — the most React-friendly auth + user management platform with the best out-of-the-box UI in the category");
+    println!(
+        "  Differentiator: modern React-first auth + user management built for Next.js + Remix + Astro era (founded 2019 by Colin Sidoti + Braden Sidoti + Brent Pinkerton, YC W20, $55M+ raised including Madrona + CRV, ~$300M valuation Feb 2024) + pre-built React components that look beautiful out of the box (<SignIn /> + <SignUp /> + <UserButton /> + <UserProfile /> + <OrganizationSwitcher />, drop-in vs assembling primitives) + Organizations (first-class B2B SaaS multi-tenancy with invitations + roles + permissions + branding) + 30+ OAuth providers + email + SMS + magic links + TOTP + Passkeys + SAML SSO + SCIM 2.0 + Vercel/Next.js partnership (featured in Next.js docs as recommended auth) + JWT sessions + JWKS verification + webhooks via Svix + Clerk Dashboard admin UI + middleware for Next.js App Router + Svelte/Astro/Vue/Nuxt/Remix/Expo SDKs + Cal.com/Drata/Resend-proven + generous free tier (10K MAU free) + Pro $25/mo + transparent $0.02/MAU pricing + SOC 2 Type II + HIPAA + GDPR compliance + Custom Sign-in Elements (compose your own UI with Clerk logic) + Stripe-integration patterns + 'auth in 5 minutes for React/Next.js devs' + Notion/Linear/Stripe-quality UI default + the auth SaaS that emerged as Auth0 fatigue grew among modern dev teams — the most React-friendly auth + user management platform with the best out-of-the-box UI in the category"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "clerk".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "clerk".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_clerk(&rest, &_prog);
     process::exit(code);
@@ -201,7 +233,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_clerk};
+    use super::{basename, run_clerk, strip_ext};
 
     #[test]
     fn basename_strips_path() {

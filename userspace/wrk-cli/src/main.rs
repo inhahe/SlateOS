@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_wrk(args: &[String], is_wrk2: bool) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -42,16 +46,27 @@ fn run_wrk(args: &[String], is_wrk2: bool) -> i32 {
         }
         return 0;
     }
-    let url = args.iter().rfind(|a| !a.starts_with('-') && a.contains("://"))
+    let url = args
+        .iter()
+        .rfind(|a| !a.starts_with('-') && a.contains("://"))
         .map(|s| s.as_str())
         .or_else(|| args.last().map(|s| s.as_str()))
         .unwrap_or("http://localhost:8080");
-    let threads = args.windows(2).find(|w| w[0] == "-t" || w[0] == "--threads")
-        .map(|w| w[1].as_str()).unwrap_or("2");
-    let conns = args.windows(2).find(|w| w[0] == "-c" || w[0] == "--connections")
-        .map(|w| w[1].as_str()).unwrap_or("10");
-    let duration = args.windows(2).find(|w| w[0] == "-d" || w[0] == "--duration")
-        .map(|w| w[1].as_str()).unwrap_or("10s");
+    let threads = args
+        .windows(2)
+        .find(|w| w[0] == "-t" || w[0] == "--threads")
+        .map(|w| w[1].as_str())
+        .unwrap_or("2");
+    let conns = args
+        .windows(2)
+        .find(|w| w[0] == "-c" || w[0] == "--connections")
+        .map(|w| w[1].as_str())
+        .unwrap_or("10");
+    let duration = args
+        .windows(2)
+        .find(|w| w[0] == "-d" || w[0] == "--duration")
+        .map(|w| w[1].as_str())
+        .unwrap_or("10s");
     let show_latency = args.iter().any(|a| a == "--latency");
 
     println!("Running {}s test @ {}", duration, url);
@@ -79,7 +94,10 @@ fn run_wrk(args: &[String], is_wrk2: bool) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "wrk".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "wrk".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let is_wrk2 = prog == "wrk2";
     let code = run_wrk(&rest, is_wrk2);
@@ -88,7 +106,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_wrk};
+    use super::{basename, run_wrk, strip_ext};
 
     #[test]
     fn basename_strips_path() {

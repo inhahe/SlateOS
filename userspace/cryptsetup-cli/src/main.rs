@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_cryptsetup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -31,7 +35,10 @@ fn run_cryptsetup(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cryptsetup v2.7 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("cryptsetup v2.7 (Slate OS)");
+        return 0;
+    }
     match args.first().map(|s| s.as_str()) {
         Some("luksDump") => {
             println!("LUKS header information:");
@@ -62,7 +69,10 @@ fn run_veritysetup(args: &[String], _prog: &str) -> i32 {
         println!("veritysetup v2.7 (Slate OS) — dm-verity volume setup");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("veritysetup v2.7 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("veritysetup v2.7 (Slate OS)");
+        return 0;
+    }
     println!("veritysetup: dm-verity tool");
     0
 }
@@ -73,14 +83,20 @@ fn run_integritysetup(args: &[String], _prog: &str) -> i32 {
         println!("integritysetup v2.7 (Slate OS) — dm-integrity volume setup");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("integritysetup v2.7 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("integritysetup v2.7 (Slate OS)");
+        return 0;
+    }
     println!("integritysetup: dm-integrity tool");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "cryptsetup".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "cryptsetup".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "veritysetup" => run_veritysetup(&rest, &prog),
@@ -118,16 +134,10 @@ mod tests {
     fn cryptsetup_actions_succeed() {
         assert_eq!(run_cryptsetup(&["luksDump".to_string()], "cryptsetup"), 0);
         assert_eq!(
-            run_cryptsetup(
-                &["status".to_string(), "myvol".to_string()],
-                "cryptsetup",
-            ),
+            run_cryptsetup(&["status".to_string(), "myvol".to_string()], "cryptsetup",),
             0
         );
-        assert_eq!(
-            run_cryptsetup(&["unknown".to_string()], "cryptsetup"),
-            0
-        );
+        assert_eq!(run_cryptsetup(&["unknown".to_string()], "cryptsetup"), 0);
     }
 
     #[test]

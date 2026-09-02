@@ -226,7 +226,9 @@ fn run_renewal() {
     println!("              to recover from a transient CA outage before the cert");
     println!("              actually expires.");
     println!("  systemd:    most distros ship certbot.timer (twice daily, randomized");
-    println!("              delay) + certbot.service (Type=oneshot ExecStart=/usr/bin/certbot -q renew).");
+    println!(
+        "              delay) + certbot.service (Type=oneshot ExecStart=/usr/bin/certbot -q renew)."
+    );
     println!("  cron:       /etc/cron.d/certbot - `0 */12 * * * root certbot -q renew`.");
     println!("  --post-hook:    runs once per `certbot renew` invocation, if any cert");
     println!("                  was renewed. Use to reload webserver.");

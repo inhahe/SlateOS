@@ -35,11 +35,14 @@ fn run_sphinx_build(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let builder = args.iter().position(|a| a == "-b")
+    let builder = args
+        .iter()
+        .position(|a| a == "-b")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("html");
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -76,7 +79,11 @@ fn run_sphinx_quickstart(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let root = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or(".");
+    let root = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or(".");
     println!("Welcome to the Sphinx quickstart utility.");
     println!();
     println!("Creating file {}/conf.py.", root);
@@ -102,7 +109,9 @@ fn run_sphinx_apidoc(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let destdir = args.iter().position(|a| a == "-o")
+    let destdir = args
+        .iter()
+        .position(|a| a == "-o")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("api");
@@ -123,7 +132,11 @@ fn run_sphinx_autogen(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     for f in &files {
         println!("Generating stub for {}", f);
     }
@@ -140,7 +153,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -157,7 +172,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sphinx_build};
+    use super::run_sphinx_build;
 
     #[test]
     fn help_exits_zero() {

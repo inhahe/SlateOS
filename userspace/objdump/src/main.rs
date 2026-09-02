@@ -31,11 +31,7 @@
 // bytes. Arithmetic operates on section offsets and instruction lengths
 // already bounded by ELF header limits, and indexing/slicing is gated by
 // length checks. Errors return Err rather than panic.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    dead_code,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
 
 use std::env;
 use std::fs::File;
@@ -226,10 +222,7 @@ enum Personality {
 
 fn detect_personality() -> Personality {
     let argv0 = env::args().next().unwrap_or_default();
-    let name = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(&argv0);
     // Strip .exe suffix for Windows compatibility
     let name = name.strip_suffix(".exe").unwrap_or(name);
     if name.ends_with("nm") {
@@ -1169,37 +1162,33 @@ fn disasm_one(code: &[u8], offset: usize, base_addr: u64) -> (String, usize) {
     // CALL rel32 (0xe8)
     if op == 0xe8 && actual.len() >= 5 {
         let rel = i32::from_le_bytes([actual[1], actual[2], actual[3], actual[4]]);
-        let target =
-            (base_addr as i64 + (offset + 5 + rex_offset) as i64 + rel as i64) as u64;
+        let target = (base_addr as i64 + (offset + 5 + rex_offset) as i64 + rel as i64) as u64;
         return (format!("call   {target:#x}"), 5 + rex_offset);
     }
 
     // JMP rel32 (0xe9)
     if op == 0xe9 && actual.len() >= 5 {
         let rel = i32::from_le_bytes([actual[1], actual[2], actual[3], actual[4]]);
-        let target =
-            (base_addr as i64 + (offset + 5 + rex_offset) as i64 + rel as i64) as u64;
+        let target = (base_addr as i64 + (offset + 5 + rex_offset) as i64 + rel as i64) as u64;
         return (format!("jmp    {target:#x}"), 5 + rex_offset);
     }
 
     // JMP rel8 (0xeb)
     if op == 0xeb && actual.len() >= 2 {
         let rel = actual[1] as i8;
-        let target =
-            (base_addr as i64 + (offset + 2 + rex_offset) as i64 + rel as i64) as u64;
+        let target = (base_addr as i64 + (offset + 2 + rex_offset) as i64 + rel as i64) as u64;
         return (format!("jmp    {target:#x}"), 2 + rex_offset);
     }
 
     // Jcc rel8 (0x70-0x7f)
     if (0x70..=0x7f).contains(&op) && actual.len() >= 2 {
         let cc_names = [
-            "jo", "jno", "jb", "jnb", "jz", "jnz", "jbe", "jnbe", "js", "jns", "jp",
-            "jnp", "jl", "jnl", "jle", "jnle",
+            "jo", "jno", "jb", "jnb", "jz", "jnz", "jbe", "jnbe", "js", "jns", "jp", "jnp", "jl",
+            "jnl", "jle", "jnle",
         ];
         let cc = (op - 0x70) as usize;
         let rel = actual[1] as i8;
-        let target =
-            (base_addr as i64 + (offset + 2 + rex_offset) as i64 + rel as i64) as u64;
+        let target = (base_addr as i64 + (offset + 2 + rex_offset) as i64 + rel as i64) as u64;
         let mnem = cc_names.get(cc).unwrap_or(&"j??");
         return (format!("{mnem:<6} {target:#x}"), 2 + rex_offset);
     }
@@ -1207,15 +1196,13 @@ fn disasm_one(code: &[u8], offset: usize, base_addr: u64) -> (String, usize) {
     // Jcc rel32 (0x0f 0x80-0x8f)
     if op == 0x0f && actual.len() > 1 && (0x80..=0x8f).contains(&actual[1]) {
         let cc_names = [
-            "jo", "jno", "jb", "jnb", "jz", "jnz", "jbe", "jnbe", "js", "jns", "jp",
-            "jnp", "jl", "jnl", "jle", "jnle",
+            "jo", "jno", "jb", "jnb", "jz", "jnz", "jbe", "jnbe", "js", "jns", "jp", "jnp", "jl",
+            "jnl", "jle", "jnle",
         ];
         let cc = (actual[1] - 0x80) as usize;
         if actual.len() >= 6 {
             let rel = i32::from_le_bytes([actual[2], actual[3], actual[4], actual[5]]);
-            let target = (base_addr as i64
-                + (offset + 6 + rex_offset) as i64
-                + rel as i64) as u64;
+            let target = (base_addr as i64 + (offset + 6 + rex_offset) as i64 + rel as i64) as u64;
             let mnem = cc_names.get(cc).unwrap_or(&"j??");
             return (format!("{mnem:<6} {target:#x}"), 6 + rex_offset);
         }
@@ -1232,8 +1219,7 @@ fn disasm_one(code: &[u8], offset: usize, base_addr: u64) -> (String, usize) {
             reg_names.get(idx).unwrap_or(&"???")
         };
         let imm = u64::from_le_bytes([
-            actual[1], actual[2], actual[3], actual[4], actual[5], actual[6], actual[7],
-            actual[8],
+            actual[1], actual[2], actual[3], actual[4], actual[5], actual[6], actual[7], actual[8],
         ]);
         return (format!("movabs {name},{imm:#x}"), 10);
     }
@@ -1709,44 +1695,87 @@ fn parse_size_args() -> SizeOpts {
 fn display_file_header(w: &mut impl Write, elf: &ElfFile, filename: &str) -> Result<()> {
     let h = &elf.header;
     writeln!(w)?;
-    writeln!(w, "{filename}:     file format elf{}-{}",
+    writeln!(
+        w,
+        "{filename}:     file format elf{}-{}",
         if h.class == ELFCLASS64 { "64" } else { "32" },
-        if h.little_endian { "little" } else { "big" })?;
-    writeln!(w, "architecture: {}, flags 0x{:08x}:", machine_str(h.e_machine), h.e_flags)?;
+        if h.little_endian { "little" } else { "big" }
+    )?;
+    writeln!(
+        w,
+        "architecture: {}, flags 0x{:08x}:",
+        machine_str(h.e_machine),
+        h.e_flags
+    )?;
     writeln!(w, "start address 0x{:016x}", h.e_entry)?;
     writeln!(w)?;
     writeln!(w, "ELF Header:")?;
-    writeln!(w, "  Type:                              {}", file_type_str(h.e_type))?;
-    writeln!(w, "  Machine:                           {}", machine_str(h.e_machine))?;
-    writeln!(w, "  Version:                           0x{:x}", h.e_version)?;
+    writeln!(
+        w,
+        "  Type:                              {}",
+        file_type_str(h.e_type)
+    )?;
+    writeln!(
+        w,
+        "  Machine:                           {}",
+        machine_str(h.e_machine)
+    )?;
+    writeln!(
+        w,
+        "  Version:                           0x{:x}",
+        h.e_version
+    )?;
     writeln!(w, "  Entry point address:               0x{:x}", h.e_entry)?;
-    writeln!(w, "  Start of program headers:          {} (bytes into file)", h.e_phoff)?;
-    writeln!(w, "  Start of section headers:          {} (bytes into file)", h.e_shoff)?;
+    writeln!(
+        w,
+        "  Start of program headers:          {} (bytes into file)",
+        h.e_phoff
+    )?;
+    writeln!(
+        w,
+        "  Start of section headers:          {} (bytes into file)",
+        h.e_shoff
+    )?;
     writeln!(w, "  Flags:                             0x{:x}", h.e_flags)?;
-    writeln!(w, "  Size of this header:               {} (bytes)", h.e_ehsize)?;
-    writeln!(w, "  Size of program headers:           {} (bytes)", h.e_phentsize)?;
+    writeln!(
+        w,
+        "  Size of this header:               {} (bytes)",
+        h.e_ehsize
+    )?;
+    writeln!(
+        w,
+        "  Size of program headers:           {} (bytes)",
+        h.e_phentsize
+    )?;
     writeln!(w, "  Number of program headers:         {}", h.e_phnum)?;
-    writeln!(w, "  Size of section headers:           {} (bytes)", h.e_shentsize)?;
+    writeln!(
+        w,
+        "  Size of section headers:           {} (bytes)",
+        h.e_shentsize
+    )?;
     writeln!(w, "  Number of section headers:         {}", h.e_shnum)?;
     writeln!(w, "  Section header string table index: {}", h.e_shstrndx)?;
-    writeln!(w, "  OS/ABI:                            {}", osabi_str(h.osabi))?;
+    writeln!(
+        w,
+        "  OS/ABI:                            {}",
+        osabi_str(h.osabi)
+    )?;
     Ok(())
 }
 
 fn display_section_headers(w: &mut impl Write, elf: &ElfFile, _filename: &str) -> Result<()> {
     writeln!(w)?;
     writeln!(w, "Sections:")?;
-    writeln!(w, "Idx Name          Size      VMA               LMA               File off  Algn  Flags")?;
+    writeln!(
+        w,
+        "Idx Name          Size      VMA               LMA               File off  Algn  Flags"
+    )?;
     for (i, s) in elf.sections.iter().enumerate() {
         writeln!(
             w,
             "{:3} {:13} {:08x}  {:016x}  {:016x}  {:08x}  2**{:<2} {}",
             i,
-            if s.name.is_empty() {
-                "(none)"
-            } else {
-                &s.name
-            },
+            if s.name.is_empty() { "(none)" } else { &s.name },
             s.sh_size,
             s.sh_addr,
             s.sh_addr,
@@ -1786,7 +1815,12 @@ fn display_program_headers(w: &mut impl Write, elf: &ElfFile) -> Result<()> {
     Ok(())
 }
 
-fn display_symbols(w: &mut impl Write, elf: &ElfFile, _filename: &str, dynamic: bool) -> Result<()> {
+fn display_symbols(
+    w: &mut impl Write,
+    elf: &ElfFile,
+    _filename: &str,
+    dynamic: bool,
+) -> Result<()> {
     let target_type = if dynamic { SHT_DYNSYM } else { SHT_SYMTAB };
     let label = if dynamic {
         "DYNAMIC SYMBOL TABLE"
@@ -1841,11 +1875,7 @@ fn display_symbols(w: &mut impl Write, elf: &ElfFile, _filename: &str, dynamic: 
     Ok(())
 }
 
-fn display_relocations(
-    w: &mut impl Write,
-    elf: &ElfFile,
-    dynamic_only: bool,
-) -> Result<()> {
+fn display_relocations(w: &mut impl Write, elf: &ElfFile, dynamic_only: bool) -> Result<()> {
     for sec in &elf.sections {
         if sec.sh_type != SHT_REL && sec.sh_type != SHT_RELA {
             continue;
@@ -1865,11 +1895,7 @@ fn display_relocations(
 
         let relocs = parse_relocations(&elf.data, &elf.header, sec, &elf.sections)?;
         writeln!(w)?;
-        writeln!(
-            w,
-            "RELOCATION RECORDS FOR [{}]:",
-            sec.name
-        )?;
+        writeln!(w, "RELOCATION RECORDS FOR [{}]:", sec.name)?;
         writeln!(w, "OFFSET           TYPE              VALUE")?;
         for r in &relocs {
             let (_sym_idx, rtype) = if elf.header.class == ELFCLASS64 {
@@ -1967,11 +1993,7 @@ fn display_disassembly(
     Ok(())
 }
 
-fn display_full_contents(
-    w: &mut impl Write,
-    elf: &ElfFile,
-    filter: Option<&str>,
-) -> Result<()> {
+fn display_full_contents(w: &mut impl Write, elf: &ElfFile, filter: Option<&str>) -> Result<()> {
     for sec in &elf.sections {
         if sec.sh_type == SHT_NULL || sec.sh_type == SHT_NOBITS {
             continue;
@@ -2035,12 +2057,8 @@ fn run_objdump() -> Result<()> {
     let mut w = BufWriter::new(stdout.lock());
 
     for filename in &opts.files {
-        let mut file = File::open(filename).map_err(|e| {
-            Error::Io(io::Error::new(
-                e.kind(),
-                format!("{filename}: {e}"),
-            ))
-        })?;
+        let mut file = File::open(filename)
+            .map_err(|e| Error::Io(io::Error::new(e.kind(), format!("{filename}: {e}"))))?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
         let elf = parse_elf(data)?;
@@ -2100,12 +2118,8 @@ fn run_nm() -> Result<()> {
     let mut w = BufWriter::new(stdout.lock());
 
     for filename in &opts.files {
-        let mut file = File::open(filename).map_err(|e| {
-            Error::Io(io::Error::new(
-                e.kind(),
-                format!("{filename}: {e}"),
-            ))
-        })?;
+        let mut file = File::open(filename)
+            .map_err(|e| Error::Io(io::Error::new(e.kind(), format!("{filename}: {e}"))))?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
         let elf = parse_elf(data)?;
@@ -2158,19 +2172,11 @@ fn run_nm() -> Result<()> {
                 if sym.st_shndx == SHN_UNDEF {
                     write!(w, "{prefix}{:16} ", "")?;
                 } else {
-                    write!(
-                        w,
-                        "{prefix}{} ",
-                        format_nm_value(sym.st_value, opts.radix),
-                    )?;
+                    write!(w, "{prefix}{} ", format_nm_value(sym.st_value, opts.radix),)?;
                 }
 
                 if opts.print_size {
-                    write!(
-                        w,
-                        "{} ",
-                        format_nm_value(sym.st_size, opts.radix),
-                    )?;
+                    write!(w, "{} ", format_nm_value(sym.st_size, opts.radix),)?;
                 }
 
                 writeln!(w, "{sym_char} {}", sym.name)?;
@@ -2204,12 +2210,8 @@ fn run_size() -> Result<()> {
     let mut total_bss: u64 = 0;
 
     for filename in &opts.files {
-        let mut file = File::open(filename).map_err(|e| {
-            Error::Io(io::Error::new(
-                e.kind(),
-                format!("{filename}: {e}"),
-            ))
-        })?;
+        let mut file = File::open(filename)
+            .map_err(|e| Error::Io(io::Error::new(e.kind(), format!("{filename}: {e}"))))?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
         let elf = parse_elf(data)?;
@@ -2239,10 +2241,7 @@ fn run_size() -> Result<()> {
                 let dec_total = text_size + data_size + bss_size;
 
                 if filename == &opts.files[0] {
-                    writeln!(
-                        w,
-                        "   text\t   data\t    bss\t    dec\t    hex\tfilename"
-                    )?;
+                    writeln!(w, "   text\t   data\t    bss\t    dec\t    hex\tfilename")?;
                 }
                 writeln!(
                     w,
@@ -2268,7 +2267,10 @@ fn run_size() -> Result<()> {
                     if sec.sh_type == SHT_NULL {
                         continue;
                     }
-                    if sec.sh_flags & SHF_ALLOC == 0 && sec.sh_type != SHT_SYMTAB && sec.sh_type != SHT_STRTAB {
+                    if sec.sh_flags & SHF_ALLOC == 0
+                        && sec.sh_type != SHT_SYMTAB
+                        && sec.sh_type != SHT_STRTAB
+                    {
                         continue;
                     }
                     writeln!(
@@ -2561,14 +2563,9 @@ mod tests {
         let e_shstrndx: u16 = 4;
 
         let mut file = make_elf64_header(
-            ET_EXEC,
-            EM_X86_64,
-            0x1000,
-            0,     // no program headers for simplicity
-            shoff,
-            0,     // phnum
-            e_shnum,
-            e_shstrndx,
+            ET_EXEC, EM_X86_64, 0x1000, 0, // no program headers for simplicity
+            shoff, 0, // phnum
+            e_shnum, e_shstrndx,
         );
 
         // Append section data
@@ -2694,21 +2691,23 @@ mod tests {
 
     #[test]
     fn test_parse_not_elf() {
-        let data = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-                        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-                        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-                        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
-                        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
-                        0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
-                        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
-                        0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f];
+        let data = vec![
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
+            0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+        ];
         assert!(matches!(parse_elf_header(&data), Err(Error::NotElf)));
     }
 
     #[test]
     fn test_truncated_header() {
         let data = vec![0x7f, b'E', b'L', b'F'];
-        assert!(matches!(parse_elf_header(&data), Err(Error::TruncatedHeader)));
+        assert!(matches!(
+            parse_elf_header(&data),
+            Err(Error::TruncatedHeader)
+        ));
     }
 
     #[test]
@@ -2717,7 +2716,10 @@ mod tests {
         data[0..4].copy_from_slice(&ELFMAG);
         data[EI_CLASS] = 99;
         data[EI_DATA] = ELFDATA2LSB;
-        assert!(matches!(parse_elf_header(&data), Err(Error::InvalidClass(99))));
+        assert!(matches!(
+            parse_elf_header(&data),
+            Err(Error::InvalidClass(99))
+        ));
     }
 
     #[test]
@@ -2726,7 +2728,10 @@ mod tests {
         data[0..4].copy_from_slice(&ELFMAG);
         data[EI_CLASS] = ELFCLASS64;
         data[EI_DATA] = 99;
-        assert!(matches!(parse_elf_header(&data), Err(Error::InvalidEncoding(99))));
+        assert!(matches!(
+            parse_elf_header(&data),
+            Err(Error::InvalidEncoding(99))
+        ));
     }
 
     #[test]
@@ -2775,7 +2780,10 @@ mod tests {
         assert_eq!(section_flags_str(SHF_WRITE | SHF_ALLOC), "WA");
         assert_eq!(section_flags_str(SHF_ALLOC | SHF_EXECINSTR), "AX");
         assert_eq!(section_flags_str(0), "");
-        assert_eq!(section_flags_str(SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR), "WAX");
+        assert_eq!(
+            section_flags_str(SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR),
+            "WAX"
+        );
         assert_eq!(section_flags_str(SHF_MERGE | SHF_STRINGS), "MS");
     }
 
@@ -2798,7 +2806,11 @@ mod tests {
     fn test_parse_symbols() {
         let data = make_test_elf64();
         let elf = parse_elf(data).unwrap();
-        let symtab = elf.sections.iter().find(|s| s.sh_type == SHT_SYMTAB).unwrap();
+        let symtab = elf
+            .sections
+            .iter()
+            .find(|s| s.sh_type == SHT_SYMTAB)
+            .unwrap();
         let syms = parse_symbols(&elf.data, &elf.header, symtab, &elf.sections).unwrap();
         assert_eq!(syms.len(), 4);
         // Symbol 0 is null
@@ -2823,7 +2835,11 @@ mod tests {
     fn test_nm_type_text_global() {
         let data = make_test_elf64();
         let elf = parse_elf(data).unwrap();
-        let symtab = elf.sections.iter().find(|s| s.sh_type == SHT_SYMTAB).unwrap();
+        let symtab = elf
+            .sections
+            .iter()
+            .find(|s| s.sh_type == SHT_SYMTAB)
+            .unwrap();
         let syms = parse_symbols(&elf.data, &elf.header, symtab, &elf.sections).unwrap();
         // main is a global function in .text -> 'T'
         assert_eq!(nm_symbol_type(&syms[1], &elf.sections), 'T');
@@ -2833,7 +2849,11 @@ mod tests {
     fn test_nm_type_data_global() {
         let data = make_test_elf64();
         let elf = parse_elf(data).unwrap();
-        let symtab = elf.sections.iter().find(|s| s.sh_type == SHT_SYMTAB).unwrap();
+        let symtab = elf
+            .sections
+            .iter()
+            .find(|s| s.sh_type == SHT_SYMTAB)
+            .unwrap();
         let syms = parse_symbols(&elf.data, &elf.header, symtab, &elf.sections).unwrap();
         // data_val is a global object in .data -> 'D'
         assert_eq!(nm_symbol_type(&syms[2], &elf.sections), 'D');
@@ -2843,7 +2863,11 @@ mod tests {
     fn test_nm_type_bss_global() {
         let data = make_test_elf64();
         let elf = parse_elf(data).unwrap();
-        let symtab = elf.sections.iter().find(|s| s.sh_type == SHT_SYMTAB).unwrap();
+        let symtab = elf
+            .sections
+            .iter()
+            .find(|s| s.sh_type == SHT_SYMTAB)
+            .unwrap();
         let syms = parse_symbols(&elf.data, &elf.header, symtab, &elf.sections).unwrap();
         // bss_zero is in .bss -> 'B'
         assert_eq!(nm_symbol_type(&syms[3], &elf.sections), 'B');
@@ -3395,6 +3419,9 @@ mod tests {
         // Should not contain the NOP at 0x1000
         let lines: Vec<&str> = text.lines().collect();
         let code_lines: Vec<&&str> = lines.iter().filter(|l| l.contains("1000:")).collect();
-        assert!(code_lines.is_empty(), "should not contain address 0x1000 instructions");
+        assert!(
+            code_lines.is_empty(),
+            "should not contain address 0x1000 instructions"
+        );
     }
 }

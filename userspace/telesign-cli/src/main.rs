@@ -37,7 +37,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("telesign-cli 0.1.0 (Proximus-era identity build)"); }
+fn print_version() {
+    println!("telesign-cli 0.1.0 (Proximus-era identity build)");
+}
 
 fn run_about() {
     println!("TeleSign Corporation");

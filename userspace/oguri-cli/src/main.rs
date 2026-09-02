@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_oguri(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,7 +26,10 @@ fn run_oguri(args: &[String], _prog: &str) -> i32 {
         println!("Supports animated GIFs and static images as wallpaper.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("oguri v0.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("oguri v0.1 (Slate OS)");
+        return 0;
+    }
     println!("oguri: animated wallpaper daemon started");
     println!("  Config: ~/.config/oguri/config");
     0
@@ -45,7 +52,10 @@ fn run_ogurictl(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "oguri".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "oguri".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "ogurictl" => run_ogurictl(&rest, &prog),
@@ -56,7 +66,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_oguri};
+    use super::{basename, run_oguri, strip_ext};
 
     #[test]
     fn basename_strips_path() {

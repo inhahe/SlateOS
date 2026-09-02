@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_pc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -20,13 +24,22 @@ fn run_pc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Pinecone 2024 (Slate OS) — pc CLI 1.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Pinecone 2024 (Slate OS) — pc CLI 1.x");
+        return 0;
+    }
     println!("Pinecone 2024 (Slate OS) — Fully Managed Vector Database");
     println!("  Vendor: Pinecone Systems, Inc. (New York, NY — private)");
     println!("  Founders: Edo Liberty, 2019 (sole founder, CEO)");
-    println!("          Edo Liberty: ex-Sr Director Research at AWS (Amazon SageMaker), ex-Yahoo Research");
-    println!("          Yale CS PhD — research in randomized algorithms + streaming + dimensionality reduction");
-    println!("          'Created the category' — Pinecone was first fully-managed vector DB SaaS (2021 GA)");
+    println!(
+        "          Edo Liberty: ex-Sr Director Research at AWS (Amazon SageMaker), ex-Yahoo Research"
+    );
+    println!(
+        "          Yale CS PhD — research in randomized algorithms + streaming + dimensionality reduction"
+    );
+    println!(
+        "          'Created the category' — Pinecone was first fully-managed vector DB SaaS (2021 GA)"
+    );
     println!("          Bet: LLM-driven RAG would explode = vectors became infrastructure");
     println!("          Vindicated by ChatGPT moment Nov 2022");
     println!("  Funding:");
@@ -34,17 +47,31 @@ fn run_pc(args: &[String], _prog: &str) -> i32 {
     println!("         Series B Apr 2023: $100M at $750M valuation (post-ChatGPT boom)");
     println!("         Investors: Andreessen Horowitz, Menlo Ventures, Wing Venture Capital");
     println!("         Revenue rumored ~$50-100M ARR (2024 estimate)");
-    println!("  Strategic position: 'the original managed vector DB — easy + scalable + RAG-ready':");
-    println!("                    pitch: 'put your embeddings in Pinecone, do vector search at scale — no ops'");
+    println!(
+        "  Strategic position: 'the original managed vector DB — easy + scalable + RAG-ready':"
+    );
+    println!(
+        "                    pitch: 'put your embeddings in Pinecone, do vector search at scale — no ops'"
+    );
     println!("                    target: AI/ML teams + RAG applications + recommendation systems");
-    println!("                    primary competitor: Weaviate, Qdrant, Chroma, Milvus/Zilliz, LanceDB");
+    println!(
+        "                    primary competitor: Weaviate, Qdrant, Chroma, Milvus/Zilliz, LanceDB"
+    );
     println!("                    secondary: pgvector, Elasticsearch, MongoDB Atlas vector search");
-    println!("                    Pinecone's wedge: first-mover + brand + simplicity + Serverless tier");
-    println!("                    challenge: open-source alternatives + integrated DBs (Postgres+pgvector) compress moat");
-    println!("                    counter: Serverless tier (2024) drastically cuts costs for sparse-usage RAG apps");
+    println!(
+        "                    Pinecone's wedge: first-mover + brand + simplicity + Serverless tier"
+    );
+    println!(
+        "                    challenge: open-source alternatives + integrated DBs (Postgres+pgvector) compress moat"
+    );
+    println!(
+        "                    counter: Serverless tier (2024) drastically cuts costs for sparse-usage RAG apps"
+    );
     println!("  Pricing (serverless + pod-based options):");
     println!("    Free / Starter: 1 index, 100K vectors, 1 project (free forever)");
-    println!("    Serverless Standard: $0.33/M write units + $8.25/M read units + $0.33/GB-month storage");
+    println!(
+        "    Serverless Standard: $0.33/M write units + $8.25/M read units + $0.33/GB-month storage"
+    );
     println!("    Serverless Enterprise: 99.95% SLA + private VPC + audit logs");
     println!("    Pod-based: $0.0960/hr (s1.x1) up to $0.4920/hr (p2.x8) — dedicated resources");
     println!("    Pinecone Inference (re-rank/embed): $0.10/M tokens for re-ranking");
@@ -109,8 +136,12 @@ fn run_pc(args: &[String], _prog: &str) -> i32 {
     println!("    - 2019-2021: Pinecone shipped before vector DB was a category");
     println!("    - 2022 ChatGPT moment → RAG became dominant pattern → vector DBs became infra");
     println!("    - Pinecone 'won the marketing' in 2022-2023");
-    println!("    - 2023+: open-source vector DBs (Weaviate, Qdrant, Chroma, Milvus) caught up technically");
-    println!("    - 2024: Postgres pgvector + integrated DBs compress traditional vector DB market");
+    println!(
+        "    - 2023+: open-source vector DBs (Weaviate, Qdrant, Chroma, Milvus) caught up technically"
+    );
+    println!(
+        "    - 2024: Postgres pgvector + integrated DBs compress traditional vector DB market"
+    );
     println!("    - Pinecone strategy: dominate the managed simple-experience tier");
     println!("  Integrations:");
     println!("    - pc CLI (Python-based)");
@@ -123,15 +154,23 @@ fn run_pc(args: &[String], _prog: &str) -> i32 {
     println!("    - Direct integrations: Notion, Slack, Confluence for RAG");
     println!("  Pinecone CLI usage:");
     println!("    pinecone login                                           # API key auth");
-    println!("    pinecone index create my-index --dimension=1536 --metric=cosine --cloud=aws --region=us-east-1 --type=serverless");
+    println!(
+        "    pinecone index create my-index --dimension=1536 --metric=cosine --cloud=aws --region=us-east-1 --type=serverless"
+    );
     println!("    pinecone index list");
     println!("    pinecone index describe my-index");
-    println!("    pinecone index upsert my-index --vectors '[(\"id1\", [0.1,0.2,...,0.3], {{\"category\": \"news\"}})]'");
-    println!("    pinecone index query my-index --vector '[0.1,0.2,...]' --top-k=10 --filter '{{\"category\":\"news\"}}'");
+    println!(
+        "    pinecone index upsert my-index --vectors '[(\"id1\", [0.1,0.2,...,0.3], {{\"category\": \"news\"}})]'"
+    );
+    println!(
+        "    pinecone index query my-index --vector '[0.1,0.2,...]' --top-k=10 --filter '{{\"category\":\"news\"}}'"
+    );
     println!("    pinecone index delete my-index --confirm");
     println!("    pinecone collection create my-backup --source-index=my-index");
     println!("    pinecone inference embed --model=multilingual-e5-large --input='Hello world'");
-    println!("    pinecone inference rerank --model=bge-reranker-v2-m3 --query='AI' --documents='doc1,doc2,doc3'");
+    println!(
+        "    pinecone inference rerank --model=bge-reranker-v2-m3 --query='AI' --documents='doc1,doc2,doc3'"
+    );
     println!("  Customers (RAG-heavy AI applications):");
     println!("    - Notion (AI features), Shopify, Gong, Cresta");
     println!("    - HubSpot, Algomo (chatbots)");
@@ -139,21 +178,30 @@ fn run_pc(args: &[String], _prog: &str) -> i32 {
     println!("    - 5,000+ customer accounts (2024 estimate)");
     println!("    - 100K+ developer signups since 2022 ChatGPT moment");
     println!("  Critique: Postgres + pgvector erodes 'need a separate vector DB' thesis");
-    println!("           open-source vector DBs (Qdrant, Weaviate, Milvus) competitive technically");
+    println!(
+        "           open-source vector DBs (Qdrant, Weaviate, Milvus) competitive technically"
+    );
     println!("           pod-based pricing was expensive — Serverless addressed");
     println!("           closed-source: customers can't self-host or audit");
     println!("           hybrid search came after Weaviate had it well-established");
     println!("           SingleStore + Snowflake + Databricks adding native vector erodes");
     println!("           AWS OpenSearch + Azure AI Search + Pinecone overlap = customer confusion");
     println!("           Edo Liberty 'sole founder' = bus factor concern + governance");
-    println!("           need to keep ahead of integrated DBs which always have data-locality advantage");
-    println!("  Differentiator: created the managed vector database category (2021 GA, pre-ChatGPT) + Edo Liberty founder (ex-AWS SageMaker research) + serverless tier (2024 — 10-50x cheaper for sparse usage) + pod-based dedicated option + hybrid search (sparse + dense) + Pinecone Inference (managed embedding + rerank models) + Pinecone Assistant (managed RAG) + namespaces + metadata filtering + 5,000+ customers + Notion/Shopify/Gong/HubSpot users + $138M raised + $750M valuation + LangChain/LlamaIndex first-class integrations — the original managed vector database that won the 2022-2023 GenAI mindshare and is fighting Postgres+pgvector + open-source competition with serverless simplicity");
+    println!(
+        "           need to keep ahead of integrated DBs which always have data-locality advantage"
+    );
+    println!(
+        "  Differentiator: created the managed vector database category (2021 GA, pre-ChatGPT) + Edo Liberty founder (ex-AWS SageMaker research) + serverless tier (2024 — 10-50x cheaper for sparse usage) + pod-based dedicated option + hybrid search (sparse + dense) + Pinecone Inference (managed embedding + rerank models) + Pinecone Assistant (managed RAG) + namespaces + metadata filtering + 5,000+ customers + Notion/Shopify/Gong/HubSpot users + $138M raised + $750M valuation + LangChain/LlamaIndex first-class integrations — the original managed vector database that won the 2022-2023 GenAI mindshare and is fighting Postgres+pgvector + open-source competition with serverless simplicity"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pinecone".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pinecone".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_pc(&rest, &_prog);
     process::exit(code);
@@ -161,7 +209,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pc};
+    use super::{basename, run_pc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -47,27 +47,117 @@ struct DetectedSig {
 
 const SIGNATURES: &[FsSignature] = &[
     // Filesystem signatures.
-    FsSignature { name: "ext2/ext3/ext4", magic: &[0x53, 0xEF], offset: 0x438, _sig_type: SigType::Filesystem },
-    FsSignature { name: "xfs", magic: b"XFSB", offset: 0, _sig_type: SigType::Filesystem },
-    FsSignature { name: "btrfs", magic: b"_BHRfS_M", offset: 0x10040, _sig_type: SigType::Filesystem },
-    FsSignature { name: "ntfs", magic: b"NTFS    ", offset: 3, _sig_type: SigType::Filesystem },
-    FsSignature { name: "fat32", magic: b"FAT32   ", offset: 82, _sig_type: SigType::Filesystem },
-    FsSignature { name: "fat16", magic: b"FAT16   ", offset: 54, _sig_type: SigType::Filesystem },
-    FsSignature { name: "fat12", magic: b"FAT12   ", offset: 54, _sig_type: SigType::Filesystem },
-    FsSignature { name: "swap", magic: b"SWAPSPACE2", offset: 0xFF6, _sig_type: SigType::Filesystem },
-    FsSignature { name: "swap", magic: b"SWAP-SPACE", offset: 0xFF6, _sig_type: SigType::Filesystem },
-    FsSignature { name: "iso9660", magic: &[0x01, b'C', b'D', b'0', b'0', b'1'], offset: 0x8001, _sig_type: SigType::Filesystem },
-    FsSignature { name: "zfs", magic: &[0x00, 0x00, 0x02, 0xF5, 0xB0, 0x07, 0xB1, 0x0C], offset: 0x2000, _sig_type: SigType::Filesystem },
-    FsSignature { name: "reiserfs", magic: b"ReIsErFs", offset: 0x10034, _sig_type: SigType::Filesystem },
-    FsSignature { name: "jfs", magic: b"JFS1", offset: 0x8000, _sig_type: SigType::Filesystem },
-    FsSignature { name: "hfs+", magic: &[b'H', b'+', 0x00, 0x04], offset: 0x400, _sig_type: SigType::Filesystem },
+    FsSignature {
+        name: "ext2/ext3/ext4",
+        magic: &[0x53, 0xEF],
+        offset: 0x438,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "xfs",
+        magic: b"XFSB",
+        offset: 0,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "btrfs",
+        magic: b"_BHRfS_M",
+        offset: 0x10040,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "ntfs",
+        magic: b"NTFS    ",
+        offset: 3,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "fat32",
+        magic: b"FAT32   ",
+        offset: 82,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "fat16",
+        magic: b"FAT16   ",
+        offset: 54,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "fat12",
+        magic: b"FAT12   ",
+        offset: 54,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "swap",
+        magic: b"SWAPSPACE2",
+        offset: 0xFF6,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "swap",
+        magic: b"SWAP-SPACE",
+        offset: 0xFF6,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "iso9660",
+        magic: &[0x01, b'C', b'D', b'0', b'0', b'1'],
+        offset: 0x8001,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "zfs",
+        magic: &[0x00, 0x00, 0x02, 0xF5, 0xB0, 0x07, 0xB1, 0x0C],
+        offset: 0x2000,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "reiserfs",
+        magic: b"ReIsErFs",
+        offset: 0x10034,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "jfs",
+        magic: b"JFS1",
+        offset: 0x8000,
+        _sig_type: SigType::Filesystem,
+    },
+    FsSignature {
+        name: "hfs+",
+        magic: &[b'H', b'+', 0x00, 0x04],
+        offset: 0x400,
+        _sig_type: SigType::Filesystem,
+    },
     // RAID signatures.
-    FsSignature { name: "linux_raid", magic: &[0xFC, 0x4E, 0x2B, 0xA9], offset: 0x1000, _sig_type: SigType::Raid },
+    FsSignature {
+        name: "linux_raid",
+        magic: &[0xFC, 0x4E, 0x2B, 0xA9],
+        offset: 0x1000,
+        _sig_type: SigType::Raid,
+    },
     // Partition table signatures.
-    FsSignature { name: "dos", magic: &[0x55, 0xAA], offset: 0x1FE, _sig_type: SigType::PartitionTable },
-    FsSignature { name: "gpt", magic: b"EFI PART", offset: 0x200, _sig_type: SigType::PartitionTable },
+    FsSignature {
+        name: "dos",
+        magic: &[0x55, 0xAA],
+        offset: 0x1FE,
+        _sig_type: SigType::PartitionTable,
+    },
+    FsSignature {
+        name: "gpt",
+        magic: b"EFI PART",
+        offset: 0x200,
+        _sig_type: SigType::PartitionTable,
+    },
     // Crypto.
-    FsSignature { name: "luks", magic: b"LUKS\xBA\xBE", offset: 0, _sig_type: SigType::Crypto },
+    FsSignature {
+        name: "luks",
+        magic: b"LUKS\xBA\xBE",
+        offset: 0,
+        _sig_type: SigType::Crypto,
+    },
 ];
 
 // ============================================================================
@@ -86,7 +176,9 @@ fn detect_signatures(device: &str) -> Vec<DetectedSig> {
         let off = sig.offset as usize;
         let end = off + sig.magic.len();
         if end <= data.len() && data[off..end] == *sig.magic {
-            let magic_hex = sig.magic.iter()
+            let magic_hex = sig
+                .magic
+                .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect::<Vec<_>>()
                 .join("");
@@ -240,16 +332,31 @@ fn cmd_wipefs(args: &[String]) {
             // Wipe mode.
             for sig in &sigs {
                 if no_act {
-                    let _ = writeln!(out, "wipefs: [dry-run] would wipe {} at offset {:#x} ({} {})",
-                        device, sig.offset, sig.sig_type, sig.name);
+                    let _ = writeln!(
+                        out,
+                        "wipefs: [dry-run] would wipe {} at offset {:#x} ({} {})",
+                        device, sig.offset, sig.sig_type, sig.name
+                    );
                 } else {
                     if backup {
-                        let _ = writeln!(out, "wipefs: backed up {} signature at {:#x}", sig.name, sig.offset);
+                        let _ = writeln!(
+                            out,
+                            "wipefs: backed up {} signature at {:#x}",
+                            sig.name, sig.offset
+                        );
                     }
                     if force {
-                        let _ = writeln!(out, "wipefs: {} wiped at offset {:#x} (force)", sig.name, sig.offset);
+                        let _ = writeln!(
+                            out,
+                            "wipefs: {} wiped at offset {:#x} (force)",
+                            sig.name, sig.offset
+                        );
                     } else {
-                        let _ = writeln!(out, "wipefs: {} wiped at offset {:#x}", sig.name, sig.offset);
+                        let _ = writeln!(
+                            out,
+                            "wipefs: {} wiped at offset {:#x}",
+                            sig.name, sig.offset
+                        );
                     }
                 }
             }
@@ -260,22 +367,36 @@ fn cmd_wipefs(args: &[String]) {
                 let _ = writeln!(out, "  \"signatures\": [");
                 for (idx, sig) in sigs.iter().enumerate() {
                     let comma = if idx + 1 < sigs.len() { "," } else { "" };
-                    let _ = writeln!(out, "    {{\"device\":\"{}\",\"offset\":\"{:#x}\",\"type\":\"{}\",\"name\":\"{}\",\"magic\":\"{}\"}}{comma}",
-                        sig.device, sig.offset, sig.sig_type, sig.name, sig.magic_hex);
+                    let _ = writeln!(
+                        out,
+                        "    {{\"device\":\"{}\",\"offset\":\"{:#x}\",\"type\":\"{}\",\"name\":\"{}\",\"magic\":\"{}\"}}{comma}",
+                        sig.device, sig.offset, sig.sig_type, sig.name, sig.magic_hex
+                    );
                 }
                 let _ = writeln!(out, "  ]");
                 let _ = writeln!(out, "}}");
             } else if parsable {
                 for sig in &sigs {
-                    let _ = writeln!(out, "{}:{:#x}:{}:{}:{}", sig.device, sig.offset, sig.sig_type, sig.name, sig.magic_hex);
+                    let _ = writeln!(
+                        out,
+                        "{}:{:#x}:{}:{}:{}",
+                        sig.device, sig.offset, sig.sig_type, sig.name, sig.magic_hex
+                    );
                 }
             } else {
                 if !no_header {
-                    let _ = writeln!(out, "{:<12} {:>10} {:>8} {:<16} LABEL", "DEVICE", "OFFSET", "TYPE", "UUID");
+                    let _ = writeln!(
+                        out,
+                        "{:<12} {:>10} {:>8} {:<16} LABEL",
+                        "DEVICE", "OFFSET", "TYPE", "UUID"
+                    );
                 }
                 for sig in &sigs {
-                    let _ = writeln!(out, "{:<12} {:#10x} {:>8} {:<16} {}",
-                        sig.device, sig.offset, sig.sig_type, sig.name, sig.magic_hex);
+                    let _ = writeln!(
+                        out,
+                        "{:<12} {:#10x} {:>8} {:<16} {}",
+                        sig.device, sig.offset, sig.sig_type, sig.name, sig.magic_hex
+                    );
                 }
             }
         }
@@ -340,11 +461,15 @@ fn cmd_blkdiscard(args: &[String]) {
             "-v" | "--verbose" => verbose = true,
             "-o" | "--offset" => {
                 i += 1;
-                if i < args.len() { offset = parse_size(&args[i]).unwrap_or(0); }
+                if i < args.len() {
+                    offset = parse_size(&args[i]).unwrap_or(0);
+                }
             }
             "-l" | "--length" => {
                 i += 1;
-                if i < args.len() { length = parse_size(&args[i]); }
+                if i < args.len() {
+                    length = parse_size(&args[i]);
+                }
             }
             s if !s.starts_with('-') => {
                 device = Some(s.to_string());
@@ -383,12 +508,18 @@ fn cmd_blkdiscard(args: &[String]) {
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let _ = writeln!(out, "blkdiscard: {mode} {len_str} from {device} at offset {offset}");
+    let _ = writeln!(
+        out,
+        "blkdiscard: {mode} {len_str} from {device} at offset {offset}"
+    );
 }
 
 fn format_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 * 1024 {
-        format!("{:.1} TiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0 * 1024.0))
+        format!(
+            "{:.1} TiB",
+            bytes as f64 / (1024.0 * 1024.0 * 1024.0 * 1024.0)
+        )
     } else if bytes >= 1024 * 1024 * 1024 {
         format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     } else if bytes >= 1024 * 1024 {

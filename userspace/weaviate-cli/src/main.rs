@@ -5,42 +5,63 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_wv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: weaviate [OPTIONS]");
-        println!("Weaviate (Slate OS) — open-source vector + AI-native database, modules-based architecture");
+        println!(
+            "Weaviate (Slate OS) — open-source vector + AI-native database, modules-based architecture"
+        );
         println!();
         println!("Options:");
-        println!("  --modules              Modules (text2vec-openai, generative-openai, qna-transformers, etc.)");
+        println!(
+            "  --modules              Modules (text2vec-openai, generative-openai, qna-transformers, etc.)"
+        );
         println!("  --hybrid               Hybrid search (BM25 + dense vectors built-in)");
         println!("  --multi-tenancy        Multi-tenancy (isolated tenants in same instance)");
         println!("  --cloud                Weaviate Cloud (managed multi-cloud)");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Weaviate 2024 (Slate OS) — weaviate CLI 1.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Weaviate 2024 (Slate OS) — weaviate CLI 1.x");
+        return 0;
+    }
     println!("Weaviate 2024 (Slate OS) — Open-Source AI-Native Vector Database");
     println!("  Vendor: Weaviate B.V. (Amsterdam, Netherlands — private)");
     println!("  Founders: Bob van Luijt (CEO) + Etienne Dilocker (CTO), 2019");
-    println!("          Bob van Luijt: ex-Apple designer + entrepreneur, conceived semantic search bet");
+    println!(
+        "          Bob van Luijt: ex-Apple designer + entrepreneur, conceived semantic search bet"
+    );
     println!("          Etienne Dilocker: engineer, built early Weaviate prototype");
     println!("          Originally called 'SeMI Technologies' (Semantic Machine Intelligence)");
     println!("          Renamed Weaviate matches the open-source database");
-    println!("          Pre-dates ChatGPT — built thesis on semantic search before LLMs went mainstream");
+    println!(
+        "          Pre-dates ChatGPT — built thesis on semantic search before LLMs went mainstream"
+    );
     println!("  Funding:");
     println!("         Total raised: ~$68M");
     println!("         Series B Mar 2023: $50M at $200M+ valuation (post-ChatGPT)");
     println!("         Investors: Index Ventures, NEA, Battery Ventures, Cortical Ventures");
     println!("         Revenue private but growing fast — open source download numbers strong");
     println!("  Strategic position: 'open-source vector DB + AI-native + modules ecosystem':");
-    println!("                    pitch: 'open-source, modular, do everything in the DB — vectors + hybrid + generative'");
+    println!(
+        "                    pitch: 'open-source, modular, do everything in the DB — vectors + hybrid + generative'"
+    );
     println!("                    target: AI/ML teams who want OSS option + flexibility");
-    println!("                    primary competitor: Pinecone (closed-source managed), Qdrant, Milvus, Chroma");
+    println!(
+        "                    primary competitor: Pinecone (closed-source managed), Qdrant, Milvus, Chroma"
+    );
     println!("                    secondary: pgvector, Elasticsearch, MongoDB Atlas");
-    println!("                    Weaviate's wedge: open-source + modules architecture + GraphQL API + early hybrid search");
+    println!(
+        "                    Weaviate's wedge: open-source + modules architecture + GraphQL API + early hybrid search"
+    );
     println!("                    AI-native: 'do generation + retrieval + reasoning in the DB'");
     println!("                    Apache 2.0 license = customer-friendly");
     println!("  Pricing (open-source + cloud + enterprise):");
@@ -54,7 +75,9 @@ fn run_wv(args: &[String], _prog: &str) -> i32 {
     println!("    - Written in Go (single binary, easy to deploy)");
     println!("    - HNSW index (default), with PQ (Product Quantization) compression");
     println!("    - Module system: pluggable embedders + generators + Q&A + classifiers");
-    println!("    - Modules: text2vec-openai, text2vec-cohere, generative-openai, qna-transformers, ref2vec-centroid, etc.");
+    println!(
+        "    - Modules: text2vec-openai, text2vec-cohere, generative-openai, qna-transformers, ref2vec-centroid, etc."
+    );
     println!("    - Multi-shard distributed (sharding by class)");
     println!("    - GraphQL + gRPC + REST APIs");
     println!("    - Multi-tenancy: per-tenant isolation with shared resource pool");
@@ -70,8 +93,12 @@ fn run_wv(args: &[String], _prog: &str) -> i32 {
     println!("       - Sandbox + Standard + Pro + Enterprise tiers");
     println!("       - Auto-scaling + backups");
     println!("    3. Modules ecosystem:");
-    println!("       - Vectorizer modules: text2vec-openai, text2vec-cohere, text2vec-huggingface, text2vec-transformers (self-hosted), text2vec-jina");
-    println!("       - Generator modules: generative-openai, generative-anthropic, generative-cohere, generative-palm");
+    println!(
+        "       - Vectorizer modules: text2vec-openai, text2vec-cohere, text2vec-huggingface, text2vec-transformers (self-hosted), text2vec-jina"
+    );
+    println!(
+        "       - Generator modules: generative-openai, generative-anthropic, generative-cohere, generative-palm"
+    );
     println!("       - Reader/QnA modules: qna-transformers, qna-openai");
     println!("       - Multi-modal: img2vec-neural, multi2vec-clip, multi2vec-bind");
     println!("       - Reranker modules: reranker-cohere, reranker-transformers");
@@ -125,17 +152,23 @@ fn run_wv(args: &[String], _prog: &str) -> i32 {
     println!("    - Snowflake + Databricks integrations");
     println!("    - Kubernetes operator (weaviate-helm)");
     println!("  Weaviate CLI usage:");
-    println!("    docker run -p 8080:8080 -p 50051:50051 cr.weaviate.io/semitechnologies/weaviate:latest");
+    println!(
+        "    docker run -p 8080:8080 -p 50051:50051 cr.weaviate.io/semitechnologies/weaviate:latest"
+    );
     println!("    # Or via Python:");
     println!("    # weaviate.connect_to_local() / weaviate.connect_to_wcs(...)");
     println!("    weaviate-cli ping http://localhost:8080");
-    println!("    weaviate-cli schema-create --class-name=Article --properties=title:text,content:text --vectorizer=text2vec-openai");
+    println!(
+        "    weaviate-cli schema-create --class-name=Article --properties=title:text,content:text --vectorizer=text2vec-openai"
+    );
     println!("    weaviate-cli data-import --class=Article --file=articles.json");
     println!("    weaviate-cli query --class=Article --near-text='AI databases' --limit=5");
     println!("    weaviate-cli backup-create --backend=s3 --include=Article");
     println!("    weaviate-cli tenants-create --class=Article --names=tenant_a,tenant_b");
     println!("    # GraphQL example:");
-    println!("    # {{ Get {{ Article(nearText: {{concepts: [\"vector search\"]}} limit: 3) {{ title }} }} }}");
+    println!(
+        "    # {{ Get {{ Article(nearText: {{concepts: [\"vector search\"]}} limit: 3) {{ title }} }} }}"
+    );
     println!("  Customers (open source + managed):");
     println!("    - Open source: many startups + research orgs (download-heavy)");
     println!("    - Cloud: Stack Overflow (semantic search), Vodafone, Instabase, Unstructured.io");
@@ -149,13 +182,18 @@ fn run_wv(args: &[String], _prog: &str) -> i32 {
     println!("           generative search modules call out to OpenAI/etc — latency adds up");
     println!("           v4 Python SDK breaking changes 2023 caused migration friction");
     println!("           closed-source competitors (Pinecone) have more enterprise traction");
-    println!("  Differentiator: open-source (Apache 2.0) + modules architecture (vectorize + generate + Q&A in DB) + GraphQL + gRPC + REST APIs + native hybrid search (BM25 + dense from early on) + multi-tenancy + multi-modal (CLIP/ImageBind) + generative search (RAG in one API call) + PQ/BQ compression + Go single-binary deployment + Bob van Luijt + Etienne Dilocker founders 2019 (pre-ChatGPT) + 11K+ GitHub stars + 50K+ Docker pulls/month + $68M raised + Stack Overflow customer — the AI-native open-source vector database with the deepest module ecosystem (vectorizers + generators + rerankers + Q&A all pluggable) and the strongest 'DB-does-it-all' philosophy");
+    println!(
+        "  Differentiator: open-source (Apache 2.0) + modules architecture (vectorize + generate + Q&A in DB) + GraphQL + gRPC + REST APIs + native hybrid search (BM25 + dense from early on) + multi-tenancy + multi-modal (CLIP/ImageBind) + generative search (RAG in one API call) + PQ/BQ compression + Go single-binary deployment + Bob van Luijt + Etienne Dilocker founders 2019 (pre-ChatGPT) + 11K+ GitHub stars + 50K+ Docker pulls/month + $68M raised + Stack Overflow customer — the AI-native open-source vector database with the deepest module ecosystem (vectorizers + generators + rerankers + Q&A all pluggable) and the strongest 'DB-does-it-all' philosophy"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "weaviate".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "weaviate".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_wv(&rest, &_prog);
     process::exit(code);
@@ -163,7 +201,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_wv};
+    use super::{basename, run_wv, strip_ext};
 
     #[test]
     fn basename_strips_path() {

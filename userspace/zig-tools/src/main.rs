@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_zig_fmt(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -20,7 +24,8 @@ fn run_zig_fmt(args: &[String]) -> i32 {
         return 0;
     }
     let check = args.iter().any(|a| a == "--check");
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| a.ends_with(".zig"))
         .map(|s| s.as_str())
         .collect();
@@ -41,14 +46,18 @@ fn run_zig_test(args: &[String]) -> i32 {
         println!("Usage: zig-test [OPTIONS] FILE.zig");
         println!("Run Zig unit tests.");
         println!("  --test-filter PATTERN  Filter tests by name");
-        println!("  -O MODE               Optimization mode (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall)");
+        println!(
+            "  -O MODE               Optimization mode (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall)"
+        );
         return 0;
     }
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| a.ends_with(".zig"))
         .map(|s| s.as_str())
         .unwrap_or("src/main.zig");
-    let filter = args.windows(2)
+    let filter = args
+        .windows(2)
         .find(|w| w[0] == "--test-filter")
         .map(|w| w[1].as_str());
     println!("zig test: {}", file);
@@ -70,7 +79,8 @@ fn run_zig_fetch(args: &[String]) -> i32 {
         println!("  --debug-hash   Print content hash");
         return 0;
     }
-    let url = args.iter()
+    let url = args
+        .iter()
         .find(|a| a.starts_with("http") || a.contains("://"))
         .map(|s| s.as_str())
         .unwrap_or("https://example.com/pkg.tar.gz");
@@ -85,7 +95,10 @@ fn run_zig_fetch(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "zig-fmt".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "zig-fmt".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "zig-test" => run_zig_test(&rest),
@@ -97,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_zig_fmt};
+    use super::{basename, run_zig_fmt, strip_ext};
 
     #[test]
     fn basename_strips_path() {

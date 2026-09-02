@@ -436,10 +436,7 @@ impl PowerDevice {
                     "    power supply:     {}",
                     if self.power_supply { "yes" } else { "no" }
                 )?;
-                writeln!(
-                    out,
-                    "    updated:          {obj}"
-                )?;
+                writeln!(out, "    updated:          {obj}")?;
                 writeln!(
                     out,
                     "    has history:      {}",
@@ -463,11 +460,7 @@ impl PowerDevice {
                 )?;
                 writeln!(out, "      state:               {}", self.state)?;
                 writeln!(out, "      warning-level:       {}", self.warning_level)?;
-                writeln!(
-                    out,
-                    "      energy:              {:.4} Wh",
-                    self.energy_wh
-                )?;
+                writeln!(out, "      energy:              {:.4} Wh", self.energy_wh)?;
                 writeln!(
                     out,
                     "      energy-empty:        {:.4} Wh",
@@ -488,11 +481,7 @@ impl PowerDevice {
                     "      energy-rate:         {:.4} W",
                     self.energy_rate_w
                 )?;
-                writeln!(
-                    out,
-                    "      voltage:             {:.4} V",
-                    self.voltage_v
-                )?;
+                writeln!(out, "      voltage:             {:.4} V", self.voltage_v)?;
                 if self.time_to_empty_sec > 0 {
                     writeln!(
                         out,
@@ -507,22 +496,14 @@ impl PowerDevice {
                         Self::format_time(self.time_to_full_sec)
                     )?;
                 }
+                writeln!(out, "      percentage:          {:.0}%", self.percentage)?;
+                writeln!(out, "      capacity:            {:.4}%", self.capacity)?;
+                writeln!(out, "      technology:          {}", self.technology)?;
                 writeln!(
                     out,
-                    "      percentage:          {:.0}%",
-                    self.percentage
+                    "      icon-name:           '{}'",
+                    self.compute_icon_name()
                 )?;
-                writeln!(
-                    out,
-                    "      capacity:            {:.4}%",
-                    self.capacity
-                )?;
-                writeln!(
-                    out,
-                    "      technology:          {}",
-                    self.technology
-                )?;
-                writeln!(out, "      icon-name:           '{}'", self.compute_icon_name())?;
             }
             _ => {
                 writeln!(out, "    type:             {}", self.device_type)?;
@@ -532,11 +513,7 @@ impl PowerDevice {
                     if self.power_supply { "yes" } else { "no" }
                 )?;
                 if self.percentage > 0.0 {
-                    writeln!(
-                        out,
-                        "    percentage:       {:.0}%",
-                        self.percentage
-                    )?;
+                    writeln!(out, "    percentage:       {:.0}%", self.percentage)?;
                 }
                 writeln!(out, "    icon-name:        '{}'", self.compute_icon_name())?;
             }
@@ -636,8 +613,7 @@ impl DaemonConfig {
                         }
                     }
                     "CriticalPowerAction" => {
-                        cfg.critical_power_action =
-                            CriticalPowerAction::from_str_loose(value);
+                        cfg.critical_power_action = CriticalPowerAction::from_str_loose(value);
                     }
                     _ => {}
                 }
@@ -676,8 +652,7 @@ impl DaemonConfig {
                         }
                     }
                     "CriticalPowerAction" => {
-                        cfg.critical_power_action =
-                            CriticalPowerAction::from_str_loose(value);
+                        cfg.critical_power_action = CriticalPowerAction::from_str_loose(value);
                     }
                     _ => {}
                 }
@@ -785,8 +760,7 @@ fn discover_power_devices() -> Vec<PowerDevice> {
         dev.energy_wh = micro_to_unit(read_sysfs_u64(&dev_path, "energy_now"));
         dev.energy_empty_wh = micro_to_unit(read_sysfs_u64(&dev_path, "energy_empty"));
         dev.energy_full_wh = micro_to_unit(read_sysfs_u64(&dev_path, "energy_full"));
-        dev.energy_full_design_wh =
-            micro_to_unit(read_sysfs_u64(&dev_path, "energy_full_design"));
+        dev.energy_full_design_wh = micro_to_unit(read_sysfs_u64(&dev_path, "energy_full_design"));
         dev.energy_rate_w = micro_to_unit_signed(read_sysfs_i64(&dev_path, "power_now"));
         dev.voltage_v = micro_to_unit(read_sysfs_u64(&dev_path, "voltage_now"));
 
@@ -986,16 +960,16 @@ fn parse_upowerd_args(args: &[String]) -> Result<UpowerdOptions, String> {
         match arg.as_str() {
             "-c" | "--config" => {
                 i += 1;
-                let path = args.get(i).ok_or_else(|| {
-                    "upowerd: --config requires a path argument".to_string()
-                })?;
+                let path = args
+                    .get(i)
+                    .ok_or_else(|| "upowerd: --config requires a path argument".to_string())?;
                 opts.config_file = PathBuf::from(path);
             }
             "-p" | "--pid-file" => {
                 i += 1;
-                let path = args.get(i).ok_or_else(|| {
-                    "upowerd: --pid-file requires a path argument".to_string()
-                })?;
+                let path = args
+                    .get(i)
+                    .ok_or_else(|| "upowerd: --pid-file requires a path argument".to_string())?;
                 opts.pid_file = PathBuf::from(path);
             }
             "-h" | "--help" => {
@@ -1076,10 +1050,7 @@ fn cmd_monitor(out: &mut dyn Write, detail: bool) -> io::Result<i32> {
     // Snapshot current state.
     let devices = discover_power_devices();
     for dev in &devices {
-        prev_states.insert(
-            dev.native_path.clone(),
-            (dev.state, dev.percentage),
-        );
+        prev_states.insert(dev.native_path.clone(), (dev.state, dev.percentage));
     }
 
     // Poll loop -- in production, this blocks until a power event arrives.
@@ -1092,11 +1063,7 @@ fn cmd_monitor(out: &mut dyn Write, detail: bool) -> io::Result<i32> {
             None => true,
         };
         if changed {
-            writeln!(
-                out,
-                "[event] device changed: {}",
-                dev.object_path()
-            )?;
+            writeln!(out, "[event] device changed: {}", dev.object_path())?;
             if detail {
                 dev.display_info(out)?;
                 writeln!(out)?;
@@ -1113,9 +1080,7 @@ fn cmd_show_info(out: &mut dyn Write, path: &str) -> io::Result<i32> {
 
     // Try to match by object path or by native path.
     let found = devices.iter().find(|d| {
-        d.object_path() == path
-            || d.native_path == path
-            || d.object_path().ends_with(path)
+        d.object_path() == path || d.native_path == path || d.object_path().ends_with(path)
     });
 
     match found {
@@ -1247,17 +1212,17 @@ fn run_daemon(opts: &UpowerdOptions, out: &mut dyn Write) -> io::Result<i32> {
         "upowerd: CriticalPowerAction={}",
         cfg.critical_power_action
     )?;
-    writeln!(
-        out,
-        "upowerd: NoPollBatteries={}",
-        cfg.no_poll_batteries
-    )?;
+    writeln!(out, "upowerd: NoPollBatteries={}", cfg.no_poll_batteries)?;
 
     // Write PID file.
     let pid = std::process::id();
     match write_pid_file(&opts.pid_file, pid) {
         Ok(()) => {
-            writeln!(out, "upowerd: PID {pid} written to {}", opts.pid_file.display())?;
+            writeln!(
+                out,
+                "upowerd: PID {pid} written to {}",
+                opts.pid_file.display()
+            )?;
         }
         Err(e) => {
             writeln!(
@@ -1272,7 +1237,12 @@ fn run_daemon(opts: &UpowerdOptions, out: &mut dyn Write) -> io::Result<i32> {
     let devices = discover_power_devices();
     writeln!(out, "upowerd: found {} power device(s)", devices.len())?;
     for dev in &devices {
-        writeln!(out, "upowerd:   {} ({})", dev.object_path(), dev.device_type)?;
+        writeln!(
+            out,
+            "upowerd:   {} ({})",
+            dev.object_path(),
+            dev.device_type
+        )?;
     }
 
     // Track history.
@@ -1351,9 +1321,7 @@ fn main() {
                     UpowerAction::Dump => cmd_dump(&mut out).unwrap_or(1),
                     UpowerAction::Monitor => cmd_monitor(&mut out, false).unwrap_or(1),
                     UpowerAction::MonitorDetail => cmd_monitor(&mut out, true).unwrap_or(1),
-                    UpowerAction::ShowInfo(path) => {
-                        cmd_show_info(&mut out, &path).unwrap_or(1)
-                    }
+                    UpowerAction::ShowInfo(path) => cmd_show_info(&mut out, &path).unwrap_or(1),
                     UpowerAction::Version => {
                         let _ = writeln!(out, "UPower client version {VERSION}");
                         0
@@ -1419,34 +1387,22 @@ mod tests {
 
     #[test]
     fn personality_with_unix_path() {
-        assert_eq!(
-            detect_personality("/usr/bin/upower"),
-            Personality::Upower
-        );
+        assert_eq!(detect_personality("/usr/bin/upower"), Personality::Upower);
     }
 
     #[test]
     fn personality_with_windows_path() {
-        assert_eq!(
-            detect_personality("C:\\bin\\upowerd"),
-            Personality::Upowerd
-        );
+        assert_eq!(detect_personality("C:\\bin\\upowerd"), Personality::Upowerd);
     }
 
     #[test]
     fn personality_with_exe_suffix() {
-        assert_eq!(
-            detect_personality("upower.exe"),
-            Personality::Upower
-        );
+        assert_eq!(detect_personality("upower.exe"), Personality::Upower);
     }
 
     #[test]
     fn personality_upowerd_exe() {
-        assert_eq!(
-            detect_personality("upowerd.exe"),
-            Personality::Upowerd
-        );
+        assert_eq!(detect_personality("upowerd.exe"), Personality::Upowerd);
     }
 
     #[test]
@@ -1459,10 +1415,7 @@ mod tests {
 
     #[test]
     fn personality_unknown_defaults_upower() {
-        assert_eq!(
-            detect_personality("something_else"),
-            Personality::Upower
-        );
+        assert_eq!(detect_personality("something_else"), Personality::Upower);
     }
 
     #[test]
@@ -1507,24 +1460,12 @@ mod tests {
             DeviceType::from_str_loose("linepower"),
             DeviceType::LinePower
         );
-        assert_eq!(
-            DeviceType::from_str_loose("Mains"),
-            DeviceType::LinePower
-        );
-        assert_eq!(
-            DeviceType::from_str_loose("Battery"),
-            DeviceType::Battery
-        );
+        assert_eq!(DeviceType::from_str_loose("Mains"), DeviceType::LinePower);
+        assert_eq!(DeviceType::from_str_loose("Battery"), DeviceType::Battery);
         assert_eq!(DeviceType::from_str_loose("ups"), DeviceType::Ups);
-        assert_eq!(
-            DeviceType::from_str_loose("monitor"),
-            DeviceType::Monitor
-        );
+        assert_eq!(DeviceType::from_str_loose("monitor"), DeviceType::Monitor);
         assert_eq!(DeviceType::from_str_loose("mouse"), DeviceType::Mouse);
-        assert_eq!(
-            DeviceType::from_str_loose("keyboard"),
-            DeviceType::Keyboard
-        );
+        assert_eq!(DeviceType::from_str_loose("keyboard"), DeviceType::Keyboard);
         assert_eq!(DeviceType::from_str_loose("phone"), DeviceType::Phone);
         assert_eq!(
             DeviceType::from_str_loose("media-player"),
@@ -1534,22 +1475,13 @@ mod tests {
             DeviceType::from_str_loose("mediaplayer"),
             DeviceType::MediaPlayer
         );
-        assert_eq!(
-            DeviceType::from_str_loose("tablet"),
-            DeviceType::Tablet
-        );
-        assert_eq!(
-            DeviceType::from_str_loose("computer"),
-            DeviceType::Computer
-        );
+        assert_eq!(DeviceType::from_str_loose("tablet"), DeviceType::Tablet);
+        assert_eq!(DeviceType::from_str_loose("computer"), DeviceType::Computer);
     }
 
     #[test]
     fn device_type_unknown() {
-        assert_eq!(
-            DeviceType::from_str_loose("spaceship"),
-            DeviceType::Unknown
-        );
+        assert_eq!(DeviceType::from_str_loose("spaceship"), DeviceType::Unknown);
     }
 
     #[test]
@@ -1569,10 +1501,7 @@ mod tests {
         assert_eq!(BatteryState::Discharging.as_str(), "discharging");
         assert_eq!(BatteryState::FullyCharged.as_str(), "fully-charged");
         assert_eq!(BatteryState::PendingCharge.as_str(), "pending-charge");
-        assert_eq!(
-            BatteryState::PendingDischarge.as_str(),
-            "pending-discharge"
-        );
+        assert_eq!(BatteryState::PendingDischarge.as_str(), "pending-discharge");
         assert_eq!(BatteryState::Empty.as_str(), "empty");
     }
 
@@ -1606,10 +1535,7 @@ mod tests {
             BatteryState::from_str_loose("pending-discharge"),
             BatteryState::PendingDischarge
         );
-        assert_eq!(
-            BatteryState::from_str_loose("empty"),
-            BatteryState::Empty
-        );
+        assert_eq!(BatteryState::from_str_loose("empty"), BatteryState::Empty);
     }
 
     #[test]
@@ -1647,10 +1573,7 @@ mod tests {
             "lithium-polymer"
         );
         assert_eq!(BatteryTechnology::LeadAcid.as_str(), "lead-acid");
-        assert_eq!(
-            BatteryTechnology::NickelCadmium.as_str(),
-            "nickel-cadmium"
-        );
+        assert_eq!(BatteryTechnology::NickelCadmium.as_str(), "nickel-cadmium");
         assert_eq!(
             BatteryTechnology::NickelMetalHydride.as_str(),
             "nickel-metal-hydride"
@@ -2008,10 +1931,7 @@ PercentageCritical=7
             state: BatteryState::Charging,
             ..Default::default()
         };
-        assert_eq!(
-            dev.compute_icon_name(),
-            "battery-good-charging-symbolic"
-        );
+        assert_eq!(dev.compute_icon_name(), "battery-good-charging-symbolic");
     }
 
     #[test]
@@ -2022,10 +1942,7 @@ PercentageCritical=7
             state: BatteryState::PendingCharge,
             ..Default::default()
         };
-        assert_eq!(
-            dev.compute_icon_name(),
-            "battery-low-charging-symbolic"
-        );
+        assert_eq!(dev.compute_icon_name(), "battery-low-charging-symbolic");
     }
 
     #[test]
@@ -2146,10 +2063,7 @@ PercentageCritical=7
             ..Default::default()
         };
         let cfg = DaemonConfig::default();
-        assert_eq!(
-            dev.compute_warning_level(&cfg),
-            WarningLevel::Discharging
-        );
+        assert_eq!(dev.compute_warning_level(&cfg), WarningLevel::Discharging);
     }
 
     #[test]

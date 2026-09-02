@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_posthog(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -28,14 +32,19 @@ fn run_posthog(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("PostHog 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("PostHog 2024 (Slate OS)");
+        return 0;
+    }
     println!("PostHog 2024 (Slate OS)");
     println!("  Vendor: PostHog Inc. (London, UK + SF, CA — distributed, public handbook)");
     println!("  Founders: James Hawkins (CEO), Tim Glaser (CTO), 2020 (!!)");
     println!("          both ex-British SaaS — built PostHog in Y Combinator W20 batch");
     println!("          stunningly fast climb: $0 to $50M+ ARR in ~4 years");
     println!("  Founded: 2020 — YC Winter 2020 batch, open-sourced immediately");
-    println!("          first product analytics tool to be MIT-licensed at the core (PostHog Cloud is hosted variant)");
+    println!(
+        "          first product analytics tool to be MIT-licensed at the core (PostHog Cloud is hosted variant)"
+    );
     println!("  Funding: ~$78M raised");
     println!("          Series A 2021 led by GV (Google Ventures)");
     println!("          Series B Oct 2021 $15M at unknown valuation");
@@ -50,7 +59,9 @@ fn run_posthog(args: &[String], _prog: &str) -> i32 {
     println!("    - Data warehouse (DuckDB-on-S3 — bring your own data)");
     println!("    - All open-source + self-hostable + cheap on cloud");
     println!("  Pricing (usage-based, transparent):");
-    println!("    Free — 1M events/mo, 5K recordings/mo, 1M flag requests/mo (incredibly generous)");
+    println!(
+        "    Free — 1M events/mo, 5K recordings/mo, 1M flag requests/mo (incredibly generous)"
+    );
     println!("    Pay-as-you-go: $0.00005/event after free tier (~5K per $1)");
     println!("    Session recordings: $0.005 per recording after free tier");
     println!("    Feature flags: $0.0001 per request after free tier");
@@ -105,20 +116,27 @@ fn run_posthog(args: &[String], _prog: &str) -> i32 {
     println!("  Customers: 50,000+ accounts (free + paid)");
     println!("            Y Combinator (uses PostHog internally), Hasura, Vercel, Replit, Resend");
     println!("            Brex, Airbyte, ClickHouse, Drift, Mistral AI, Linear");
-    println!("            heavy startup + scale-up adoption — 'PostHog is the default for new YC companies'");
+    println!(
+        "            heavy startup + scale-up adoption — 'PostHog is the default for new YC companies'"
+    );
     println!("            sweet spot: 5-500 person teams that want one tool not seven");
     println!("  Critique: dashboards can feel sprawling — 7 products in one UI");
     println!("           query performance lags Amplitude on very large datasets");
     println!("           enterprise governance still maturing vs Amplitude/Heap");
     println!("           LLM observability features early — Langfuse still deeper for prompt eval");
     println!("           self-hosted requires real ops work (Helm chart non-trivial)");
-    println!("  Differentiator: only product where analytics + replay + flags + LLM obs in ONE open-source repo at one price");
+    println!(
+        "  Differentiator: only product where analytics + replay + flags + LLM obs in ONE open-source repo at one price"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "posthog".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "posthog".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_posthog(&rest, &_prog);
     process::exit(code);
@@ -126,7 +144,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_posthog};
+    use super::{basename, run_posthog, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -45,7 +45,8 @@ fn run_ltrace(args: &[String]) -> i32 {
     let show_syscalls = args.iter().any(|a| a == "-S");
     let timing = args.iter().any(|a| a == "-t" || a == "-tt");
 
-    let command = args.iter()
+    let command = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("");
@@ -68,15 +69,27 @@ fn run_ltrace(args: &[String]) -> i32 {
         println!("100.00    0.005965                   570 total");
     } else {
         let prefix = if timing { "12:00:01.123456 " } else { "" };
-        println!("{}__libc_start_main(0x401130, 1, 0x7fff...) = <void>", prefix);
-        println!("{}malloc(64)                                = 0x1a2b000", prefix);
+        println!(
+            "{}__libc_start_main(0x401130, 1, 0x7fff...) = <void>",
+            prefix
+        );
+        println!(
+            "{}malloc(64)                                = 0x1a2b000",
+            prefix
+        );
         println!("{}strlen(\"hello world\")                     = 11", prefix);
-        println!("{}memcpy(0x1a2b000, \"hello world\", 11)      = 0x1a2b000", prefix);
+        println!(
+            "{}memcpy(0x1a2b000, \"hello world\", 11)      = 0x1a2b000",
+            prefix
+        );
         println!("{}puts(\"hello world\")                       = 12", prefix);
         if show_syscalls {
             println!("{}SYS_write(1, \"hello world\\n\", 12)        = 12", prefix);
         }
-        println!("{}free(0x1a2b000)                           = <void>", prefix);
+        println!(
+            "{}free(0x1a2b000)                           = <void>",
+            prefix
+        );
         println!("{}exit(0 <no return ...>)", prefix);
         println!("+++ exited (status 0) +++");
     }
@@ -85,7 +98,8 @@ fn run_ltrace(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first()
+    let _prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "ltrace".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -96,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ltrace};
+    use super::{basename, run_ltrace, strip_ext};
 
     #[test]
     fn basename_strips_path() {

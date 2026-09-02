@@ -411,16 +411,18 @@ fn parse_args(args: &[String]) -> Options {
             "--size" => {
                 i += 1;
                 if i < args.len()
-                    && let Ok(n) = args[i].parse::<usize>() {
-                        opts.size_limit = Some(n);
-                    }
+                    && let Ok(n) = args[i].parse::<usize>()
+                {
+                    opts.size_limit = Some(n);
+                }
             }
             "--pid" => {
                 i += 1;
                 if i < args.len()
-                    && let Ok(pid) = args[i].parse::<u32>() {
-                        opts.pid_override = Some(pid);
-                    }
+                    && let Ok(pid) = args[i].parse::<u32>()
+                {
+                    opts.pid_override = Some(pid);
+                }
             }
             "-h" | "--help" => {
                 print_help();
@@ -560,9 +562,10 @@ fn get_pid() -> u32 {
     // Read /proc/self/stat for PID
     if let Ok(stat) = fs::read_to_string("/proc/self/stat")
         && let Some(pid_str) = stat.split_whitespace().next()
-            && let Ok(pid) = pid_str.parse::<u32>() {
-                return pid;
-            }
+        && let Ok(pid) = pid_str.parse::<u32>()
+    {
+        return pid;
+    }
     // Fallback
     0
 }
@@ -598,16 +601,13 @@ fn format_syslog_entry(
         message
     };
 
-    format!("<{}>{} {} {}{}: {}", pri, timestamp, hostname, tag, pid_part, msg)
+    format!(
+        "<{}>{} {} {}{}: {}",
+        pri, timestamp, hostname, tag, pid_part, msg
+    )
 }
 
-fn format_json_entry(
-    opts: &Options,
-    message: &str,
-    hostname: &str,
-    tag: &str,
-    pid: u32,
-) -> String {
+fn format_json_entry(opts: &Options, message: &str, hostname: &str, tag: &str, pid: u32) -> String {
     let pri = (opts.priority.0 as u32) * 8 + (opts.priority.1 as u32);
 
     let msg = if let Some(limit) = opts.size_limit {
@@ -683,10 +683,7 @@ fn main() {
     let opts = parse_args(&args);
 
     let hostname = get_hostname();
-    let tag = opts
-        .tag
-        .clone()
-        .unwrap_or_else(get_username);
+    let tag = opts.tag.clone().unwrap_or_else(get_username);
     let pid = get_pid();
 
     if opts.read_stdin {
@@ -1045,7 +1042,11 @@ mod tests {
 
     #[test]
     fn test_parse_args_priority() {
-        let args = vec!["-p".to_string(), "daemon.err".to_string(), "msg".to_string()];
+        let args = vec![
+            "-p".to_string(),
+            "daemon.err".to_string(),
+            "msg".to_string(),
+        ];
         let opts = parse_args(&args);
         assert_eq!(opts.priority, (Facility::Daemon, Severity::Err));
         assert_eq!(opts.message_parts, vec!["msg"]);

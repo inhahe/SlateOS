@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("tooljet-cli 0.1.0 (open-source-MIT-low-code personality build)"); }
+fn print_version() {
+    println!("tooljet-cli 0.1.0 (open-source-MIT-low-code personality build)");
+}
 
 fn run_about() {
     println!("ToolJet, Inc.");

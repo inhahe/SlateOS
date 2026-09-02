@@ -136,7 +136,9 @@ struct Ipv4Addr {
 
 impl Ipv4Addr {
     const fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
-        Self { octets: [a, b, c, d] }
+        Self {
+            octets: [a, b, c, d],
+        }
     }
 
     fn from_str(s: &str) -> Option<Self> {
@@ -156,13 +158,19 @@ impl Ipv4Addr {
     }
 
     fn from_u32(val: u32) -> Self {
-        Self { octets: val.to_be_bytes() }
+        Self {
+            octets: val.to_be_bytes(),
+        }
     }
 }
 
 impl fmt::Display for Ipv4Addr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}.{}", self.octets[0], self.octets[1], self.octets[2], self.octets[3])
+        write!(
+            f,
+            "{}.{}.{}.{}",
+            self.octets[0], self.octets[1], self.octets[2], self.octets[3]
+        )
     }
 }
 
@@ -192,9 +200,14 @@ impl MacAddr {
 impl fmt::Display for MacAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
-            f, "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            self.bytes[0], self.bytes[1], self.bytes[2],
-            self.bytes[3], self.bytes[4], self.bytes[5]
+            f,
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            self.bytes[0],
+            self.bytes[1],
+            self.bytes[2],
+            self.bytes[3],
+            self.bytes[4],
+            self.bytes[5]
         )
     }
 }
@@ -318,7 +331,7 @@ impl DnsRcode {
             3 => Self::NxDomain,
             4 => Self::NotImp,
             5 => Self::Refused,
-        _ => Self::ServFail,
+            _ => Self::ServFail,
         }
     }
 }
@@ -330,12 +343,12 @@ impl DnsRcode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DnsHeader {
     id: u16,
-    qr: bool,      // false = query, true = response
+    qr: bool, // false = query, true = response
     opcode: u8,
-    aa: bool,       // authoritative answer
-    tc: bool,       // truncated
-    rd: bool,       // recursion desired
-    ra: bool,       // recursion available
+    aa: bool, // authoritative answer
+    tc: bool, // truncated
+    rd: bool, // recursion desired
+    ra: bool, // recursion available
     rcode: DnsRcode,
     qdcount: u16,
     ancount: u16,
@@ -397,8 +410,18 @@ impl DnsHeader {
         let nscount = u16::from_be_bytes([data[8], data[9]]);
         let arcount = u16::from_be_bytes([data[10], data[11]]);
         Some(Self {
-            id, qr, opcode, aa, tc, rd, ra, rcode,
-            qdcount, ancount, nscount, arcount,
+            id,
+            qr,
+            opcode,
+            aa,
+            tc,
+            rd,
+            ra,
+            rcode,
+            qdcount,
+            ancount,
+            nscount,
+            arcount,
         })
     }
 
@@ -407,15 +430,25 @@ impl DnsHeader {
         buf[0..2].copy_from_slice(&self.id.to_be_bytes());
 
         let mut flags1: u8 = 0;
-        if self.qr { flags1 |= 0x80; }
+        if self.qr {
+            flags1 |= 0x80;
+        }
         flags1 |= (self.opcode & 0x0F) << 3;
-        if self.aa { flags1 |= 0x04; }
-        if self.tc { flags1 |= 0x02; }
-        if self.rd { flags1 |= 0x01; }
+        if self.aa {
+            flags1 |= 0x04;
+        }
+        if self.tc {
+            flags1 |= 0x02;
+        }
+        if self.rd {
+            flags1 |= 0x01;
+        }
         buf[2] = flags1;
 
         let mut flags2: u8 = 0;
-        if self.ra { flags2 |= 0x80; }
+        if self.ra {
+            flags2 |= 0x80;
+        }
         flags2 |= self.rcode as u8 & 0x0F;
         buf[3] = flags2;
 
@@ -531,7 +564,14 @@ impl DnsQuestion {
         }
         let qtype = DnsRecordType::from_u16(u16::from_be_bytes([data[pos], data[pos + 1]]));
         let qclass = DnsClass::from_u16(u16::from_be_bytes([data[pos + 2], data[pos + 3]]));
-        Some((Self { name, qtype, qclass }, pos + 4))
+        Some((
+            Self {
+                name,
+                qtype,
+                qclass,
+            },
+            pos + 4,
+        ))
     }
 
     fn serialize(&self) -> Option<Vec<u8>> {
@@ -689,7 +729,16 @@ impl DnsRecord {
             return None;
         }
         let rdata = data[rdata_start..rdata_start + rdlength].to_vec();
-        Some((Self { name, rtype, rclass, ttl, rdata }, rdata_start + rdlength))
+        Some((
+            Self {
+                name,
+                rtype,
+                rclass,
+                ttl,
+                rdata,
+            },
+            rdata_start + rdlength,
+        ))
     }
 
     fn serialize(&self) -> Option<Vec<u8>> {
@@ -733,11 +782,7 @@ impl DnsPacket {
 
     fn new_response(query: &DnsPacket, rcode: DnsRcode, answers: Vec<DnsRecord>) -> Self {
         Self {
-            header: DnsHeader::new_response(
-                query.header.id,
-                rcode,
-                answers.len() as u16,
-            ),
+            header: DnsHeader::new_response(query.header.id, rcode, answers.len() as u16),
             questions: query.questions.clone(),
             answers,
             authorities: vec![],
@@ -777,7 +822,13 @@ impl DnsPacket {
             offset = new_offset;
         }
 
-        Some(Self { header, questions, answers, authorities, additionals })
+        Some(Self {
+            header,
+            questions,
+            answers,
+            authorities,
+            additionals,
+        })
     }
 
     fn serialize(&self) -> Option<Vec<u8>> {
@@ -843,7 +894,9 @@ impl DnsCache {
         }
         // If still full, remove the oldest entry
         if self.entries.len() >= self.max_entries {
-            let oldest_key = self.entries.iter()
+            let oldest_key = self
+                .entries
+                .iter()
                 .min_by_key(|(_, v)| v.cached_at)
                 .map(|(k, _)| k.clone());
             if let Some(key) = oldest_key {
@@ -852,11 +905,14 @@ impl DnsCache {
         }
 
         let key = (name.to_lowercase(), rtype);
-        self.entries.insert(key, DnsCacheEntry {
-            records,
-            cached_at: now,
-            min_ttl,
-        });
+        self.entries.insert(
+            key,
+            DnsCacheEntry {
+                records,
+                cached_at: now,
+                min_ttl,
+            },
+        );
     }
 
     fn lookup(&self, name: &str, rtype: DnsRecordType, now: u64) -> Option<Vec<DnsRecord>> {
@@ -868,13 +924,17 @@ impl DnsCache {
         }
         // Adjust TTLs to reflect remaining time
         let remaining = (entry.min_ttl as u64).saturating_sub(age) as u32;
-        let records: Vec<DnsRecord> = entry.records.iter().map(|r| {
-            let adj_ttl = if r.ttl > remaining { remaining } else { r.ttl };
-            DnsRecord {
-                ttl: adj_ttl,
-                ..r.clone()
-            }
-        }).collect();
+        let records: Vec<DnsRecord> = entry
+            .records
+            .iter()
+            .map(|r| {
+                let adj_ttl = if r.ttl > remaining { remaining } else { r.ttl };
+                DnsRecord {
+                    ttl: adj_ttl,
+                    ..r.clone()
+                }
+            })
+            .collect();
         Some(records)
     }
 
@@ -979,7 +1039,9 @@ struct DomainBlocklist {
 
 impl DomainBlocklist {
     fn new() -> Self {
-        Self { domains: Vec::new() }
+        Self {
+            domains: Vec::new(),
+        }
     }
 
     fn load_from_content(&mut self, content: &str) {
@@ -1113,19 +1175,31 @@ struct DhcpOption {
 
 impl DhcpOption {
     fn new_byte(code: u8, val: u8) -> Self {
-        Self { code, data: vec![val] }
+        Self {
+            code,
+            data: vec![val],
+        }
     }
 
     fn new_u32(code: u8, val: u32) -> Self {
-        Self { code, data: val.to_be_bytes().to_vec() }
+        Self {
+            code,
+            data: val.to_be_bytes().to_vec(),
+        }
     }
 
     fn new_ip(code: u8, addr: Ipv4Addr) -> Self {
-        Self { code, data: addr.octets.to_vec() }
+        Self {
+            code,
+            data: addr.octets.to_vec(),
+        }
     }
 
     fn new_string(code: u8, s: &str) -> Self {
-        Self { code, data: s.as_bytes().to_vec() }
+        Self {
+            code,
+            data: s.as_bytes().to_vec(),
+        }
     }
 
     fn get_u8(&self) -> Option<u8> {
@@ -1134,7 +1208,12 @@ impl DhcpOption {
 
     fn get_u32(&self) -> Option<u32> {
         if self.data.len() >= 4 {
-            Some(u32::from_be_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]))
+            Some(u32::from_be_bytes([
+                self.data[0],
+                self.data[1],
+                self.data[2],
+                self.data[3],
+            ]))
         } else {
             None
         }
@@ -1142,7 +1221,12 @@ impl DhcpOption {
 
     fn get_ip(&self) -> Option<Ipv4Addr> {
         if self.data.len() >= 4 {
-            Some(Ipv4Addr::new(self.data[0], self.data[1], self.data[2], self.data[3]))
+            Some(Ipv4Addr::new(
+                self.data[0],
+                self.data[1],
+                self.data[2],
+                self.data[3],
+            ))
         } else {
             None
         }
@@ -1155,11 +1239,11 @@ impl DhcpOption {
 
 #[derive(Clone, Debug)]
 struct DhcpPacket {
-    op: u8,          // 1 = request, 2 = reply
-    htype: u8,       // hardware type (1 = Ethernet)
-    hlen: u8,        // hardware address length (6 for Ethernet)
+    op: u8,    // 1 = request, 2 = reply
+    htype: u8, // hardware type (1 = Ethernet)
+    hlen: u8,  // hardware address length (6 for Ethernet)
     hops: u8,
-    xid: u32,        // transaction ID
+    xid: u32, // transaction ID
     secs: u16,
     flags: u16,
     ciaddr: Ipv4Addr, // client IP
@@ -1324,7 +1408,7 @@ impl DhcpPacket {
 struct DhcpLease {
     ip: Ipv4Addr,
     mac: MacAddr,
-    expires: u64,   // seconds since epoch
+    expires: u64, // seconds since epoch
     hostname: Option<String>,
 }
 
@@ -1346,8 +1430,17 @@ impl DhcpLease {
         let expires = parts[0].parse::<u64>().ok()?;
         let mac = MacAddr::from_str(parts[1])?;
         let ip = Ipv4Addr::from_str(parts[2])?;
-        let hostname = if parts[3] == "*" { None } else { Some(parts[3].to_string()) };
-        Some(Self { ip, mac, expires, hostname })
+        let hostname = if parts[3] == "*" {
+            None
+        } else {
+            Some(parts[3].to_string())
+        };
+        Some(Self {
+            ip,
+            mac,
+            expires,
+            hostname,
+        })
     }
 }
 
@@ -1379,11 +1472,7 @@ impl DhcpPool {
     fn pool_size(&self) -> u32 {
         let start = self.range_start.to_u32();
         let end = self.range_end.to_u32();
-        if end >= start {
-            end - start + 1
-        } else {
-            0
-        }
+        if end >= start { end - start + 1 } else { 0 }
     }
 
     fn is_in_range(&self, ip: Ipv4Addr) -> bool {
@@ -1411,9 +1500,10 @@ impl DhcpPool {
 
         // Check for existing lease for this MAC
         if let Some(lease) = self.find_lease_by_mac(mac)
-            && !lease.is_expired(now) {
-                return Some(lease.ip);
-            }
+            && !lease.is_expired(now)
+        {
+            return Some(lease.ip);
+        }
 
         // Find a free IP in the range
         let start = self.range_start.to_u32();
@@ -1421,9 +1511,15 @@ impl DhcpPool {
         for addr_u32 in start..=end {
             let addr = Ipv4Addr::from_u32(addr_u32);
             // Check if this IP is in use by a non-expired lease
-            let in_use = self.leases.iter().any(|l| l.ip == addr && !l.is_expired(now));
+            let in_use = self
+                .leases
+                .iter()
+                .any(|l| l.ip == addr && !l.is_expired(now));
             // Check if it's a static reservation for a different MAC
-            let reserved = self.static_hosts.iter().any(|(m, &ip)| ip == addr && m != mac);
+            let reserved = self
+                .static_hosts
+                .iter()
+                .any(|(m, &ip)| ip == addr && m != mac);
             if !in_use && !reserved {
                 return Some(addr);
             }
@@ -1431,11 +1527,22 @@ impl DhcpPool {
         None
     }
 
-    fn create_or_renew_lease(&mut self, mac: MacAddr, ip: Ipv4Addr, now: u64, hostname: Option<String>) {
+    fn create_or_renew_lease(
+        &mut self,
+        mac: MacAddr,
+        ip: Ipv4Addr,
+        now: u64,
+        hostname: Option<String>,
+    ) {
         let expires = now + self.lease_time;
         // Remove any existing lease for this MAC
         self.leases.retain(|l| l.mac != mac);
-        self.leases.push(DhcpLease { ip, mac, expires, hostname });
+        self.leases.push(DhcpLease {
+            ip,
+            mac,
+            expires,
+            hostname,
+        });
     }
 
     fn release_lease(&mut self, mac: &MacAddr) -> bool {
@@ -1547,9 +1654,17 @@ impl DhcpServer {
         reply.chaddr = packet.chaddr;
         reply.flags = packet.flags;
 
-        reply.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Offer as u8));
-        reply.options.push(DhcpOption::new_ip(DHCP_OPT_SERVER_ID, self.server_ip));
-        reply.options.push(DhcpOption::new_u32(DHCP_OPT_LEASE_TIME, self.pool.lease_time as u32));
+        reply.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Offer as u8,
+        ));
+        reply
+            .options
+            .push(DhcpOption::new_ip(DHCP_OPT_SERVER_ID, self.server_ip));
+        reply.options.push(DhcpOption::new_u32(
+            DHCP_OPT_LEASE_TIME,
+            self.pool.lease_time as u32,
+        ));
         self.add_common_options(&mut reply);
 
         Some(reply)
@@ -1559,8 +1674,14 @@ impl DhcpServer {
         let mac = packet.client_mac();
 
         // Determine which IP the client is requesting
-        let requested_ip = packet.get_requested_ip()
-            .or(if packet.ciaddr != Ipv4Addr::new(0, 0, 0, 0) { Some(packet.ciaddr) } else { None });
+        let requested_ip =
+            packet
+                .get_requested_ip()
+                .or(if packet.ciaddr != Ipv4Addr::new(0, 0, 0, 0) {
+                    Some(packet.ciaddr)
+                } else {
+                    None
+                });
 
         let requested_ip = match requested_ip {
             Some(ip) => ip,
@@ -1575,7 +1696,11 @@ impl DhcpServer {
 
         // Validate: is the IP in our range or a static assignment?
         let is_valid = self.pool.is_in_range(requested_ip)
-            || self.pool.static_hosts.values().any(|&ip| ip == requested_ip);
+            || self
+                .pool
+                .static_hosts
+                .values()
+                .any(|&ip| ip == requested_ip);
 
         if !is_valid {
             return self.send_nak(packet, "Requested IP not in range");
@@ -1583,12 +1708,15 @@ impl DhcpServer {
 
         // Check if the IP is taken by someone else
         if let Some(existing) = self.pool.find_lease_by_ip(requested_ip)
-            && existing.mac != mac && !existing.is_expired(now) {
-                return self.send_nak(packet, "IP already in use");
-            }
+            && existing.mac != mac
+            && !existing.is_expired(now)
+        {
+            return self.send_nak(packet, "IP already in use");
+        }
 
         // Create or renew the lease
-        self.pool.create_or_renew_lease(mac, requested_ip, now, None);
+        self.pool
+            .create_or_renew_lease(mac, requested_ip, now, None);
         self.log(format!("DHCP ACK {} to {}", requested_ip, mac));
 
         let mut reply = DhcpPacket::new();
@@ -1599,9 +1727,17 @@ impl DhcpServer {
         reply.chaddr = packet.chaddr;
         reply.flags = packet.flags;
 
-        reply.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Ack as u8));
-        reply.options.push(DhcpOption::new_ip(DHCP_OPT_SERVER_ID, self.server_ip));
-        reply.options.push(DhcpOption::new_u32(DHCP_OPT_LEASE_TIME, self.pool.lease_time as u32));
+        reply.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Ack as u8,
+        ));
+        reply
+            .options
+            .push(DhcpOption::new_ip(DHCP_OPT_SERVER_ID, self.server_ip));
+        reply.options.push(DhcpOption::new_u32(
+            DHCP_OPT_LEASE_TIME,
+            self.pool.lease_time as u32,
+        ));
         self.add_common_options(&mut reply);
 
         Some(reply)
@@ -1619,8 +1755,11 @@ impl DhcpServer {
         if let Some(ip) = packet.get_requested_ip() {
             self.log(format!("DHCP DECLINE of {} from {}", ip, mac));
             // Mark the IP as unavailable by creating a dummy lease with long expiry
-            let dummy_mac = MacAddr { bytes: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF] };
-            self.pool.create_or_renew_lease(dummy_mac, ip, now, Some("declined".into()));
+            let dummy_mac = MacAddr {
+                bytes: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+            };
+            self.pool
+                .create_or_renew_lease(dummy_mac, ip, now, Some("declined".into()));
         }
     }
 
@@ -1636,8 +1775,13 @@ impl DhcpServer {
         reply.chaddr = packet.chaddr;
         reply.flags = packet.flags;
 
-        reply.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Ack as u8));
-        reply.options.push(DhcpOption::new_ip(DHCP_OPT_SERVER_ID, self.server_ip));
+        reply.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Ack as u8,
+        ));
+        reply
+            .options
+            .push(DhcpOption::new_ip(DHCP_OPT_SERVER_ID, self.server_ip));
         self.add_common_options(&mut reply);
 
         Some(reply)
@@ -1652,17 +1796,27 @@ impl DhcpServer {
         reply.chaddr = packet.chaddr;
         reply.flags = packet.flags;
 
-        reply.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Nak as u8));
-        reply.options.push(DhcpOption::new_ip(DHCP_OPT_SERVER_ID, self.server_ip));
+        reply.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Nak as u8,
+        ));
+        reply
+            .options
+            .push(DhcpOption::new_ip(DHCP_OPT_SERVER_ID, self.server_ip));
 
         Some(reply)
     }
 
     fn add_common_options(&self, reply: &mut DhcpPacket) {
-        reply.options.push(DhcpOption::new_ip(DHCP_OPT_SUBNET_MASK, self.pool.subnet_mask));
+        reply.options.push(DhcpOption::new_ip(
+            DHCP_OPT_SUBNET_MASK,
+            self.pool.subnet_mask,
+        ));
 
         if let Some(router) = self.router {
-            reply.options.push(DhcpOption::new_ip(DHCP_OPT_ROUTER, router));
+            reply
+                .options
+                .push(DhcpOption::new_ip(DHCP_OPT_ROUTER, router));
         }
 
         if !self.dns_servers.is_empty() {
@@ -1670,11 +1824,16 @@ impl DhcpServer {
             for srv in &self.dns_servers {
                 data.extend_from_slice(&srv.octets);
             }
-            reply.options.push(DhcpOption { code: DHCP_OPT_DNS_SERVER, data });
+            reply.options.push(DhcpOption {
+                code: DHCP_OPT_DNS_SERVER,
+                data,
+            });
         }
 
         if let Some(ref domain) = self.domain_name {
-            reply.options.push(DhcpOption::new_string(DHCP_OPT_DOMAIN_NAME, domain));
+            reply
+                .options
+                .push(DhcpOption::new_string(DHCP_OPT_DOMAIN_NAME, domain));
         }
 
         for opt in &self.extra_options {
@@ -1756,7 +1915,9 @@ impl TftpPacket {
                     return None;
                 }
                 let null2 = rest[after_null1..].iter().position(|&b| b == 0)?;
-                let mode = std::str::from_utf8(&rest[after_null1..after_null1 + null2]).ok()?.to_string();
+                let mode = std::str::from_utf8(&rest[after_null1..after_null1 + null2])
+                    .ok()?
+                    .to_string();
                 if opcode == TftpOpcode::Rrq {
                     Some(TftpPacket::ReadRequest { filename, mode })
                 } else {
@@ -1769,7 +1930,10 @@ impl TftpPacket {
                 }
                 let block = u16::from_be_bytes([data[2], data[3]]);
                 let payload = data[4..].to_vec();
-                Some(TftpPacket::Data { block, data: payload })
+                Some(TftpPacket::Data {
+                    block,
+                    data: payload,
+                })
             }
             TftpOpcode::Ack => {
                 if data.len() < 4 {
@@ -1795,8 +1959,13 @@ impl TftpPacket {
                     _ => TftpError::NotDefined,
                 };
                 let msg = if data.len() > 4 {
-                    let end = data[4..].iter().position(|&b| b == 0).unwrap_or(data.len() - 4);
-                    std::str::from_utf8(&data[4..4 + end]).unwrap_or("").to_string()
+                    let end = data[4..]
+                        .iter()
+                        .position(|&b| b == 0)
+                        .unwrap_or(data.len() - 4);
+                    std::str::from_utf8(&data[4..4 + end])
+                        .unwrap_or("")
+                        .to_string()
                 } else {
                     String::new()
                 };
@@ -1878,9 +2047,7 @@ impl TftpServer {
         }
 
         match packet {
-            TftpPacket::ReadRequest { filename, mode } => {
-                self.handle_read(filename, mode)
-            }
+            TftpPacket::ReadRequest { filename, mode } => self.handle_read(filename, mode),
             TftpPacket::WriteRequest { .. } => {
                 vec![TftpPacket::Error {
                     code: TftpError::AccessViolation,
@@ -2135,7 +2302,12 @@ fn parse_dhcp_range(value: &str) -> Option<DhcpRangeConfig> {
     } else {
         DEFAULT_LEASE_TIME
     };
-    Some(DhcpRangeConfig { start, end, netmask, lease_time })
+    Some(DhcpRangeConfig {
+        start,
+        end,
+        netmask,
+        lease_time,
+    })
 }
 
 fn parse_dhcp_host(value: &str) -> Option<DhcpHostConfig> {
@@ -2214,12 +2386,20 @@ fn parse_cli_args(args: &[String], config: &mut Config) -> Result<(), String> {
 
         match key {
             "--port" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--port requires a value")?;
                 config.port = val.parse::<u16>().map_err(|_| "Invalid port number")?;
             }
             "--listen-address" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--listen-address requires a value")?;
                 config.listen_address = Some(val);
             }
@@ -2227,35 +2407,55 @@ fn parse_cli_args(args: &[String], config: &mut Config) -> Result<(), String> {
                 config.no_resolv = true;
             }
             "--server" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--server requires a value")?;
                 if let Some(addr) = Ipv4Addr::from_str(&val) {
                     config.upstream_servers.push(addr);
                 }
             }
             "--address" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--address requires a value")?;
                 if let Some(ovr) = parse_address_option(&val) {
                     config.address_overrides.push(ovr);
                 }
             }
             "--dhcp-range" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--dhcp-range requires a value")?;
                 if let Some(range) = parse_dhcp_range(&val) {
                     config.dhcp_ranges.push(range);
                 }
             }
             "--dhcp-host" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--dhcp-host requires a value")?;
                 if let Some(host) = parse_dhcp_host(&val) {
                     config.dhcp_hosts.push(host);
                 }
             }
             "--dhcp-option" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--dhcp-option requires a value")?;
                 if let Some(opt) = parse_dhcp_option(&val) {
                     config.dhcp_options.push(opt);
@@ -2265,12 +2465,20 @@ fn parse_cli_args(args: &[String], config: &mut Config) -> Result<(), String> {
                 config.enable_tftp = true;
             }
             "--tftp-root" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--tftp-root requires a value")?;
                 config.tftp_root = val;
             }
             "--interface" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--interface requires a value")?;
                 config.interface = Some(val);
             }
@@ -2287,17 +2495,29 @@ fn parse_cli_args(args: &[String], config: &mut Config) -> Result<(), String> {
                 config.log_dhcp = true;
             }
             "--conf-file" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--conf-file requires a value")?;
                 config.conf_file = val;
             }
             "--conf-dir" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--conf-dir requires a value")?;
                 config.conf_dir = Some(val);
             }
             "--pid-file" => {
-                let val = value.or_else(|| { i += 1; args.get(i).cloned() })
+                let val = value
+                    .or_else(|| {
+                        i += 1;
+                        args.get(i).cloned()
+                    })
                     .ok_or("--pid-file requires a value")?;
                 config.pid_file = Some(val);
             }
@@ -2363,19 +2583,21 @@ impl DnsResolver {
 
         // Check address overrides
         if qtype == DnsRecordType::A
-            && let Some(ip) = check_address_overrides(&self.address_overrides, name) {
-                self.log(format!("address override: {} -> {}", name, ip));
-                let record = DnsRecord::new_a(name, 300, ip);
-                return DnsPacket::new_response(packet, DnsRcode::NoError, vec![record]);
-            }
+            && let Some(ip) = check_address_overrides(&self.address_overrides, name)
+        {
+            self.log(format!("address override: {} -> {}", name, ip));
+            let record = DnsRecord::new_a(name, 300, ip);
+            return DnsPacket::new_response(packet, DnsRcode::NoError, vec![record]);
+        }
 
         // Check /etc/hosts
         if qtype == DnsRecordType::A
-            && let Some(ip) = hosts_lookup(&self.hosts_entries, name) {
-                self.log(format!("hosts: {} -> {}", name, ip));
-                let record = DnsRecord::new_a(name, 0, ip);
-                return DnsPacket::new_response(packet, DnsRcode::NoError, vec![record]);
-            }
+            && let Some(ip) = hosts_lookup(&self.hosts_entries, name)
+        {
+            self.log(format!("hosts: {} -> {}", name, ip));
+            let record = DnsRecord::new_a(name, 0, ip);
+            return DnsPacket::new_response(packet, DnsRcode::NoError, vec![record]);
+        }
 
         // Check cache
         if let Some(records) = self.cache.lookup(name, qtype, now) {
@@ -2384,7 +2606,11 @@ impl DnsResolver {
         }
 
         // In a real server, we would forward to upstream. Simulate an NXDOMAIN.
-        self.log(format!("forwarding: {} {} (simulated nxdomain)", qtype.name(), name));
+        self.log(format!(
+            "forwarding: {} {} (simulated nxdomain)",
+            qtype.name(),
+            name
+        ));
         DnsPacket::new_response(packet, DnsRcode::NxDomain, vec![])
     }
 }
@@ -2464,7 +2690,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -2512,8 +2740,10 @@ fn main() {
 
     if !config.dhcp_ranges.is_empty() {
         for range in &config.dhcp_ranges {
-            println!("  DHCP range: {} - {} (mask {}, lease {}s)",
-                range.start, range.end, range.netmask, range.lease_time);
+            println!(
+                "  DHCP range: {} - {} (mask {}, lease {}s)",
+                range.start, range.end, range.netmask, range.lease_time
+            );
         }
     }
 
@@ -2634,7 +2864,9 @@ mod tests {
 
     #[test]
     fn mac_display() {
-        let mac = MacAddr { bytes: [0x01, 0x23, 0x45, 0x67, 0x89, 0xab] };
+        let mac = MacAddr {
+            bytes: [0x01, 0x23, 0x45, 0x67, 0x89, 0xab],
+        };
         assert_eq!(format!("{}", mac), "01:23:45:67:89:ab");
     }
 
@@ -2645,9 +2877,14 @@ mod tests {
     #[test]
     fn dns_record_type_roundtrip() {
         let types = [
-            DnsRecordType::A, DnsRecordType::NS, DnsRecordType::Cname,
-            DnsRecordType::Soa, DnsRecordType::Ptr, DnsRecordType::MX,
-            DnsRecordType::Txt, DnsRecordType::Aaaa,
+            DnsRecordType::A,
+            DnsRecordType::NS,
+            DnsRecordType::Cname,
+            DnsRecordType::Soa,
+            DnsRecordType::Ptr,
+            DnsRecordType::MX,
+            DnsRecordType::Txt,
+            DnsRecordType::Aaaa,
         ];
         for t in &types {
             assert_eq!(DnsRecordType::from_u16(t.to_u16()), *t);
@@ -2689,7 +2926,12 @@ mod tests {
     #[test]
     fn dns_encode_simple_name() {
         let encoded = dns_encode_name("example.com").unwrap();
-        assert_eq!(encoded, vec![7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0]);
+        assert_eq!(
+            encoded,
+            vec![
+                7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0
+            ]
+        );
     }
 
     #[test]
@@ -2784,9 +3026,18 @@ mod tests {
     #[test]
     fn dns_header_flags_all_set() {
         let hdr = DnsHeader {
-            id: 1, qr: true, opcode: 0, aa: true, tc: true, rd: true,
-            ra: true, rcode: DnsRcode::NxDomain,
-            qdcount: 1, ancount: 0, nscount: 0, arcount: 0,
+            id: 1,
+            qr: true,
+            opcode: 0,
+            aa: true,
+            tc: true,
+            rd: true,
+            ra: true,
+            rcode: DnsRcode::NxDomain,
+            qdcount: 1,
+            ancount: 0,
+            nscount: 0,
+            arcount: 0,
         };
         let bytes = hdr.serialize();
         let parsed = DnsHeader::parse(&bytes).unwrap();
@@ -3015,7 +3266,11 @@ mod tests {
     #[test]
     fn cache_ttl_expiry() {
         let mut cache = DnsCache::new(100);
-        let records = vec![DnsRecord::new_a("expire.com", 60, Ipv4Addr::new(1, 1, 1, 1))];
+        let records = vec![DnsRecord::new_a(
+            "expire.com",
+            60,
+            Ipv4Addr::new(1, 1, 1, 1),
+        )];
         cache.insert("expire.com", DnsRecordType::A, records, 1000);
         // Not expired yet
         assert!(cache.lookup("expire.com", DnsRecordType::A, 1059).is_some());
@@ -3064,7 +3319,11 @@ mod tests {
         cache.insert("dual.com", DnsRecordType::A, a, 1000);
         cache.insert("dual.com", DnsRecordType::Aaaa, aaaa, 1000);
         assert!(cache.lookup("dual.com", DnsRecordType::A, 1000).is_some());
-        assert!(cache.lookup("dual.com", DnsRecordType::Aaaa, 1000).is_some());
+        assert!(
+            cache
+                .lookup("dual.com", DnsRecordType::Aaaa, 1000)
+                .is_some()
+        );
     }
 
     #[test]
@@ -3257,13 +3516,19 @@ mod tests {
     #[test]
     fn address_override_check_exact() {
         let overrides = vec![parse_address_option("/test.com/1.2.3.4").unwrap()];
-        assert_eq!(check_address_overrides(&overrides, "test.com"), Some(Ipv4Addr::new(1, 2, 3, 4)));
+        assert_eq!(
+            check_address_overrides(&overrides, "test.com"),
+            Some(Ipv4Addr::new(1, 2, 3, 4))
+        );
     }
 
     #[test]
     fn address_override_check_subdomain() {
         let overrides = vec![parse_address_option("/example.com/5.6.7.8").unwrap()];
-        assert_eq!(check_address_overrides(&overrides, "sub.example.com"), Some(Ipv4Addr::new(5, 6, 7, 8)));
+        assert_eq!(
+            check_address_overrides(&overrides, "sub.example.com"),
+            Some(Ipv4Addr::new(5, 6, 7, 8))
+        );
     }
 
     #[test]
@@ -3334,19 +3599,28 @@ mod tests {
 
     #[test]
     fn dhcp_option_get_u8_empty() {
-        let opt = DhcpOption { code: 1, data: vec![] };
+        let opt = DhcpOption {
+            code: 1,
+            data: vec![],
+        };
         assert!(opt.get_u8().is_none());
     }
 
     #[test]
     fn dhcp_option_get_u32_too_short() {
-        let opt = DhcpOption { code: 1, data: vec![1, 2] };
+        let opt = DhcpOption {
+            code: 1,
+            data: vec![1, 2],
+        };
         assert!(opt.get_u32().is_none());
     }
 
     #[test]
     fn dhcp_option_get_ip_too_short() {
-        let opt = DhcpOption { code: 1, data: vec![1, 2, 3] };
+        let opt = DhcpOption {
+            code: 1,
+            data: vec![1, 2, 3],
+        };
         assert!(opt.get_ip().is_none());
     }
 
@@ -3359,14 +3633,24 @@ mod tests {
         let mut pkt = DhcpPacket::new();
         pkt.xid = 0xDEADBEEF;
         pkt.yiaddr = Ipv4Addr::new(192, 168, 1, 100);
-        pkt.set_client_mac(MacAddr { bytes: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF] });
-        pkt.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Discover as u8));
+        pkt.set_client_mac(MacAddr {
+            bytes: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        });
+        pkt.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Discover as u8,
+        ));
 
         let bytes = pkt.serialize();
         let parsed = DhcpPacket::parse(&bytes).unwrap();
         assert_eq!(parsed.xid, 0xDEADBEEF);
         assert_eq!(parsed.yiaddr, Ipv4Addr::new(192, 168, 1, 100));
-        assert_eq!(parsed.client_mac(), MacAddr { bytes: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF] });
+        assert_eq!(
+            parsed.client_mac(),
+            MacAddr {
+                bytes: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
+            }
+        );
         assert_eq!(parsed.get_message_type(), Some(DhcpMessageType::Discover));
     }
 
@@ -3385,9 +3669,18 @@ mod tests {
     #[test]
     fn dhcp_packet_multiple_options() {
         let mut pkt = DhcpPacket::new();
-        pkt.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Offer as u8));
-        pkt.options.push(DhcpOption::new_ip(DHCP_OPT_SUBNET_MASK, Ipv4Addr::new(255, 255, 255, 0)));
-        pkt.options.push(DhcpOption::new_ip(DHCP_OPT_ROUTER, Ipv4Addr::new(192, 168, 1, 1)));
+        pkt.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Offer as u8,
+        ));
+        pkt.options.push(DhcpOption::new_ip(
+            DHCP_OPT_SUBNET_MASK,
+            Ipv4Addr::new(255, 255, 255, 0),
+        ));
+        pkt.options.push(DhcpOption::new_ip(
+            DHCP_OPT_ROUTER,
+            Ipv4Addr::new(192, 168, 1, 1),
+        ));
 
         let bytes = pkt.serialize();
         let parsed = DhcpPacket::parse(&bytes).unwrap();
@@ -3397,14 +3690,18 @@ mod tests {
     #[test]
     fn dhcp_packet_get_requested_ip() {
         let mut pkt = DhcpPacket::new();
-        pkt.options.push(DhcpOption::new_ip(DHCP_OPT_REQUESTED_IP, Ipv4Addr::new(10, 0, 0, 50)));
+        pkt.options.push(DhcpOption::new_ip(
+            DHCP_OPT_REQUESTED_IP,
+            Ipv4Addr::new(10, 0, 0, 50),
+        ));
         assert_eq!(pkt.get_requested_ip(), Some(Ipv4Addr::new(10, 0, 0, 50)));
     }
 
     #[test]
     fn dhcp_packet_get_option() {
         let mut pkt = DhcpPacket::new();
-        pkt.options.push(DhcpOption::new_string(DHCP_OPT_DOMAIN_NAME, "test.local"));
+        pkt.options
+            .push(DhcpOption::new_string(DHCP_OPT_DOMAIN_NAME, "test.local"));
         let opt = pkt.get_option(DHCP_OPT_DOMAIN_NAME);
         assert!(opt.is_some());
         assert_eq!(opt.unwrap().data, b"test.local");
@@ -3418,7 +3715,9 @@ mod tests {
     fn lease_not_expired() {
         let lease = DhcpLease {
             ip: Ipv4Addr::new(10, 0, 0, 1),
-            mac: MacAddr { bytes: [1, 2, 3, 4, 5, 6] },
+            mac: MacAddr {
+                bytes: [1, 2, 3, 4, 5, 6],
+            },
             expires: 2000,
             hostname: None,
         };
@@ -3431,7 +3730,9 @@ mod tests {
     fn lease_line_roundtrip() {
         let lease = DhcpLease {
             ip: Ipv4Addr::new(192, 168, 1, 50),
-            mac: MacAddr { bytes: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff] },
+            mac: MacAddr {
+                bytes: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            },
             expires: 1700000000,
             hostname: Some("myhost".to_string()),
         };
@@ -3447,7 +3748,9 @@ mod tests {
     fn lease_line_no_hostname() {
         let lease = DhcpLease {
             ip: Ipv4Addr::new(10, 0, 0, 1),
-            mac: MacAddr { bytes: [1, 2, 3, 4, 5, 6] },
+            mac: MacAddr {
+                bytes: [1, 2, 3, 4, 5, 6],
+            },
             expires: 9999,
             hostname: None,
         };
@@ -3502,7 +3805,9 @@ mod tests {
             Ipv4Addr::new(255, 255, 255, 0),
             3600,
         );
-        let mac = MacAddr { bytes: [1, 2, 3, 4, 5, 6] };
+        let mac = MacAddr {
+            bytes: [1, 2, 3, 4, 5, 6],
+        };
         let ip = pool.allocate_ip(&mac, 1000).unwrap();
         assert_eq!(ip, Ipv4Addr::new(10, 0, 0, 10));
     }
@@ -3515,7 +3820,9 @@ mod tests {
             Ipv4Addr::new(255, 255, 255, 0),
             3600,
         );
-        let mac = MacAddr { bytes: [0xAA, 0xBB, 0xCC, 0, 0, 1] };
+        let mac = MacAddr {
+            bytes: [0xAA, 0xBB, 0xCC, 0, 0, 1],
+        };
         pool.add_static_host(mac, Ipv4Addr::new(10, 0, 0, 50));
         let ip = pool.allocate_ip(&mac, 1000).unwrap();
         assert_eq!(ip, Ipv4Addr::new(10, 0, 0, 50));
@@ -3529,7 +3836,9 @@ mod tests {
             Ipv4Addr::new(255, 255, 255, 0),
             3600,
         );
-        let mac = MacAddr { bytes: [1, 2, 3, 4, 5, 6] };
+        let mac = MacAddr {
+            bytes: [1, 2, 3, 4, 5, 6],
+        };
         pool.create_or_renew_lease(mac, Ipv4Addr::new(10, 0, 0, 15), 1000, None);
         let ip = pool.allocate_ip(&mac, 1000).unwrap();
         assert_eq!(ip, Ipv4Addr::new(10, 0, 0, 15));
@@ -3543,8 +3852,12 @@ mod tests {
             Ipv4Addr::new(255, 255, 255, 0),
             3600,
         );
-        let mac1 = MacAddr { bytes: [1, 1, 1, 1, 1, 1] };
-        let mac2 = MacAddr { bytes: [2, 2, 2, 2, 2, 2] };
+        let mac1 = MacAddr {
+            bytes: [1, 1, 1, 1, 1, 1],
+        };
+        let mac2 = MacAddr {
+            bytes: [2, 2, 2, 2, 2, 2],
+        };
         pool.create_or_renew_lease(mac1, Ipv4Addr::new(10, 0, 0, 10), 1000, None);
         let ip = pool.allocate_ip(&mac2, 1000).unwrap();
         assert_eq!(ip, Ipv4Addr::new(10, 0, 0, 11));
@@ -3558,8 +3871,12 @@ mod tests {
             Ipv4Addr::new(255, 255, 255, 0),
             3600,
         );
-        let mac1 = MacAddr { bytes: [1, 1, 1, 1, 1, 1] };
-        let mac2 = MacAddr { bytes: [2, 2, 2, 2, 2, 2] };
+        let mac1 = MacAddr {
+            bytes: [1, 1, 1, 1, 1, 1],
+        };
+        let mac2 = MacAddr {
+            bytes: [2, 2, 2, 2, 2, 2],
+        };
         pool.create_or_renew_lease(mac1, Ipv4Addr::new(10, 0, 0, 10), 1000, None);
         assert!(pool.allocate_ip(&mac2, 1000).is_none());
     }
@@ -3572,7 +3889,9 @@ mod tests {
             Ipv4Addr::new(255, 255, 255, 0),
             3600,
         );
-        let mac = MacAddr { bytes: [1, 2, 3, 4, 5, 6] };
+        let mac = MacAddr {
+            bytes: [1, 2, 3, 4, 5, 6],
+        };
         pool.create_or_renew_lease(mac, Ipv4Addr::new(10, 0, 0, 10), 1000, None);
         assert!(pool.release_lease(&mac));
         assert!(!pool.release_lease(&mac)); // Already released
@@ -3586,8 +3905,12 @@ mod tests {
             Ipv4Addr::new(255, 255, 255, 0),
             100,
         );
-        let mac1 = MacAddr { bytes: [1, 1, 1, 1, 1, 1] };
-        let mac2 = MacAddr { bytes: [2, 2, 2, 2, 2, 2] };
+        let mac1 = MacAddr {
+            bytes: [1, 1, 1, 1, 1, 1],
+        };
+        let mac2 = MacAddr {
+            bytes: [2, 2, 2, 2, 2, 2],
+        };
         pool.create_or_renew_lease(mac1, Ipv4Addr::new(10, 0, 0, 10), 1000, None);
         pool.create_or_renew_lease(mac2, Ipv4Addr::new(10, 0, 0, 11), 1050, None);
         // At time 1101, first lease expired, second still valid
@@ -3604,8 +3927,15 @@ mod tests {
             Ipv4Addr::new(255, 255, 255, 0),
             3600,
         );
-        let mac = MacAddr { bytes: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF] };
-        pool.create_or_renew_lease(mac, Ipv4Addr::new(10, 0, 0, 10), 1000, Some("test-host".into()));
+        let mac = MacAddr {
+            bytes: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        };
+        pool.create_or_renew_lease(
+            mac,
+            Ipv4Addr::new(10, 0, 0, 10),
+            1000,
+            Some("test-host".into()),
+        );
         let serialized = pool.serialize_leases();
 
         let mut pool2 = DhcpPool::new(
@@ -3628,8 +3958,12 @@ mod tests {
             Ipv4Addr::new(255, 255, 255, 0),
             100,
         );
-        let mac1 = MacAddr { bytes: [1, 1, 1, 1, 1, 1] };
-        let mac2 = MacAddr { bytes: [2, 2, 2, 2, 2, 2] };
+        let mac1 = MacAddr {
+            bytes: [1, 1, 1, 1, 1, 1],
+        };
+        let mac2 = MacAddr {
+            bytes: [2, 2, 2, 2, 2, 2],
+        };
         pool.create_or_renew_lease(mac1, Ipv4Addr::new(10, 0, 0, 10), 1000, None);
         pool.create_or_renew_lease(mac2, Ipv4Addr::new(10, 0, 0, 11), 1000, None);
         assert_eq!(pool.active_lease_count(1000), 2);
@@ -3660,7 +3994,10 @@ mod tests {
         pkt.op = 1;
         pkt.xid = xid;
         pkt.set_client_mac(mac);
-        pkt.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Discover as u8));
+        pkt.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Discover as u8,
+        ));
         pkt
     }
 
@@ -3669,15 +4006,21 @@ mod tests {
         pkt.op = 1;
         pkt.xid = xid;
         pkt.set_client_mac(mac);
-        pkt.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Request as u8));
-        pkt.options.push(DhcpOption::new_ip(DHCP_OPT_REQUESTED_IP, requested_ip));
+        pkt.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Request as u8,
+        ));
+        pkt.options
+            .push(DhcpOption::new_ip(DHCP_OPT_REQUESTED_IP, requested_ip));
         pkt
     }
 
     #[test]
     fn dhcp_discover_offers_ip() {
         let mut server = make_test_server();
-        let mac = MacAddr { bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 1] };
+        let mac = MacAddr {
+            bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 1],
+        };
         let discover = make_discover(mac, 1);
         let reply = server.handle_packet(&discover, 1000).unwrap();
         assert_eq!(reply.get_message_type(), Some(DhcpMessageType::Offer));
@@ -3687,7 +4030,9 @@ mod tests {
     #[test]
     fn dhcp_request_acks_ip() {
         let mut server = make_test_server();
-        let mac = MacAddr { bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 2] };
+        let mac = MacAddr {
+            bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 2],
+        };
         let request = make_request(mac, 2, Ipv4Addr::new(192, 168, 1, 100));
         let reply = server.handle_packet(&request, 1000).unwrap();
         assert_eq!(reply.get_message_type(), Some(DhcpMessageType::Ack));
@@ -3697,7 +4042,9 @@ mod tests {
     #[test]
     fn dhcp_request_out_of_range_naks() {
         let mut server = make_test_server();
-        let mac = MacAddr { bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 3] };
+        let mac = MacAddr {
+            bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 3],
+        };
         let request = make_request(mac, 3, Ipv4Addr::new(10, 0, 0, 1));
         let reply = server.handle_packet(&request, 1000).unwrap();
         assert_eq!(reply.get_message_type(), Some(DhcpMessageType::Nak));
@@ -3706,7 +4053,9 @@ mod tests {
     #[test]
     fn dhcp_release_frees_ip() {
         let mut server = make_test_server();
-        let mac = MacAddr { bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 4] };
+        let mac = MacAddr {
+            bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 4],
+        };
 
         // First, get a lease
         let request = make_request(mac, 4, Ipv4Addr::new(192, 168, 1, 100));
@@ -3718,12 +4067,17 @@ mod tests {
         release.xid = 5;
         release.ciaddr = Ipv4Addr::new(192, 168, 1, 100);
         release.set_client_mac(mac);
-        release.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Release as u8));
+        release.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Release as u8,
+        ));
         let reply = server.handle_packet(&release, 1001);
         assert!(reply.is_none()); // Release doesn't generate a reply
 
         // IP should be available again
-        let mac2 = MacAddr { bytes: [0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA] };
+        let mac2 = MacAddr {
+            bytes: [0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA],
+        };
         let ip = server.pool.allocate_ip(&mac2, 1002).unwrap();
         assert_eq!(ip, Ipv4Addr::new(192, 168, 1, 100));
     }
@@ -3731,13 +4085,18 @@ mod tests {
     #[test]
     fn dhcp_inform_returns_ack() {
         let mut server = make_test_server();
-        let mac = MacAddr { bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 5] };
+        let mac = MacAddr {
+            bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 5],
+        };
         let mut inform = DhcpPacket::new();
         inform.op = 1;
         inform.xid = 6;
         inform.ciaddr = Ipv4Addr::new(192, 168, 1, 50);
         inform.set_client_mac(mac);
-        inform.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Inform as u8));
+        inform.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Inform as u8,
+        ));
         let reply = server.handle_packet(&inform, 1000).unwrap();
         assert_eq!(reply.get_message_type(), Some(DhcpMessageType::Ack));
     }
@@ -3745,7 +4104,9 @@ mod tests {
     #[test]
     fn dhcp_common_options_included() {
         let mut server = make_test_server();
-        let mac = MacAddr { bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 6] };
+        let mac = MacAddr {
+            bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 6],
+        };
         let discover = make_discover(mac, 7);
         let reply = server.handle_packet(&discover, 1000).unwrap();
 
@@ -3759,8 +4120,12 @@ mod tests {
     #[test]
     fn dhcp_static_host_reservation() {
         let mut server = make_test_server();
-        let mac = MacAddr { bytes: [0x11, 0x22, 0x33, 0x44, 0x55, 0x66] };
-        server.pool.add_static_host(mac, Ipv4Addr::new(192, 168, 1, 50));
+        let mac = MacAddr {
+            bytes: [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+        };
+        server
+            .pool
+            .add_static_host(mac, Ipv4Addr::new(192, 168, 1, 50));
 
         let discover = make_discover(mac, 8);
         let reply = server.handle_packet(&discover, 1000).unwrap();
@@ -3770,18 +4135,28 @@ mod tests {
     #[test]
     fn dhcp_decline_marks_ip_unavailable() {
         let mut server = make_test_server();
-        let mac = MacAddr { bytes: [0xAA, 0xBB, 0xCC, 0, 0, 1] };
+        let mac = MacAddr {
+            bytes: [0xAA, 0xBB, 0xCC, 0, 0, 1],
+        };
 
         let mut decline = DhcpPacket::new();
         decline.op = 1;
         decline.xid = 9;
         decline.set_client_mac(mac);
-        decline.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Decline as u8));
-        decline.options.push(DhcpOption::new_ip(DHCP_OPT_REQUESTED_IP, Ipv4Addr::new(192, 168, 1, 100)));
+        decline.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Decline as u8,
+        ));
+        decline.options.push(DhcpOption::new_ip(
+            DHCP_OPT_REQUESTED_IP,
+            Ipv4Addr::new(192, 168, 1, 100),
+        ));
         server.handle_packet(&decline, 1000);
 
         // The declined IP should not be offered to others
-        let mac2 = MacAddr { bytes: [0xDD, 0xEE, 0xFF, 0, 0, 1] };
+        let mac2 = MacAddr {
+            bytes: [0xDD, 0xEE, 0xFF, 0, 0, 1],
+        };
         let ip = server.pool.allocate_ip(&mac2, 1001).unwrap();
         assert_ne!(ip, Ipv4Addr::new(192, 168, 1, 100));
     }
@@ -3789,7 +4164,9 @@ mod tests {
     #[test]
     fn dhcp_logging() {
         let mut server = make_test_server();
-        let mac = MacAddr { bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 7] };
+        let mac = MacAddr {
+            bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0, 7],
+        };
         let discover = make_discover(mac, 10);
         server.handle_packet(&discover, 1000);
         assert!(!server.log_messages.is_empty());
@@ -3892,7 +4269,10 @@ mod tests {
 
     #[test]
     fn tftp_data_empty_payload() {
-        let pkt = TftpPacket::Data { block: 1, data: vec![] };
+        let pkt = TftpPacket::Data {
+            block: 1,
+            data: vec![],
+        };
         let bytes = pkt.serialize();
         let parsed = TftpPacket::parse(&bytes).unwrap();
         match parsed {
@@ -3911,7 +4291,10 @@ mod tests {
     #[test]
     fn tftp_server_disabled() {
         let server = TftpServer::new("/tftpboot");
-        let req = TftpPacket::ReadRequest { filename: "test".to_string(), mode: "octet".to_string() };
+        let req = TftpPacket::ReadRequest {
+            filename: "test".to_string(),
+            mode: "octet".to_string(),
+        };
         let responses = server.handle_request(&req);
         assert_eq!(responses.len(), 1);
         match &responses[0] {
@@ -3926,7 +4309,10 @@ mod tests {
         server.enabled = true;
         server.add_file("boot.img", vec![1, 2, 3, 4, 5]);
 
-        let req = TftpPacket::ReadRequest { filename: "boot.img".to_string(), mode: "octet".to_string() };
+        let req = TftpPacket::ReadRequest {
+            filename: "boot.img".to_string(),
+            mode: "octet".to_string(),
+        };
         let responses = server.handle_request(&req);
         assert_eq!(responses.len(), 1);
         match &responses[0] {
@@ -3946,7 +4332,10 @@ mod tests {
         let content: Vec<u8> = (0..1500).map(|i| (i % 256) as u8).collect();
         server.add_file("large.bin", content.clone());
 
-        let req = TftpPacket::ReadRequest { filename: "large.bin".to_string(), mode: "octet".to_string() };
+        let req = TftpPacket::ReadRequest {
+            filename: "large.bin".to_string(),
+            mode: "octet".to_string(),
+        };
         let responses = server.handle_request(&req);
         // 1500 bytes = 3 blocks (512 + 512 + 476)
         assert_eq!(responses.len(), 3);
@@ -3970,7 +4359,10 @@ mod tests {
         let mut server = TftpServer::new("/tftpboot");
         server.enabled = true;
 
-        let req = TftpPacket::ReadRequest { filename: "missing.bin".to_string(), mode: "octet".to_string() };
+        let req = TftpPacket::ReadRequest {
+            filename: "missing.bin".to_string(),
+            mode: "octet".to_string(),
+        };
         let responses = server.handle_request(&req);
         assert_eq!(responses.len(), 1);
         match &responses[0] {
@@ -3984,7 +4376,10 @@ mod tests {
         let mut server = TftpServer::new("/tftpboot");
         server.enabled = true;
 
-        let req = TftpPacket::WriteRequest { filename: "test".to_string(), mode: "octet".to_string() };
+        let req = TftpPacket::WriteRequest {
+            filename: "test".to_string(),
+            mode: "octet".to_string(),
+        };
         let responses = server.handle_request(&req);
         match &responses[0] {
             TftpPacket::Error { code, .. } => assert_eq!(*code, TftpError::AccessViolation),
@@ -3998,7 +4393,10 @@ mod tests {
         server.enabled = true;
         server.add_file("secret.txt", vec![0]);
 
-        let req = TftpPacket::ReadRequest { filename: "../../etc/passwd".to_string(), mode: "octet".to_string() };
+        let req = TftpPacket::ReadRequest {
+            filename: "../../etc/passwd".to_string(),
+            mode: "octet".to_string(),
+        };
         let responses = server.handle_request(&req);
         match &responses[0] {
             TftpPacket::Error { code, .. } => assert_eq!(*code, TftpError::AccessViolation),
@@ -4012,7 +4410,10 @@ mod tests {
         server.enabled = true;
         server.add_file("test.txt", vec![0]);
 
-        let req = TftpPacket::ReadRequest { filename: "test.txt".to_string(), mode: "mail".to_string() };
+        let req = TftpPacket::ReadRequest {
+            filename: "test.txt".to_string(),
+            mode: "mail".to_string(),
+        };
         let responses = server.handle_request(&req);
         match &responses[0] {
             TftpPacket::Error { message, .. } => assert!(message.contains("Unsupported mode")),
@@ -4026,7 +4427,10 @@ mod tests {
         server.enabled = true;
         server.add_file("file.txt", vec![42]);
 
-        let req = TftpPacket::ReadRequest { filename: "/file.txt".to_string(), mode: "octet".to_string() };
+        let req = TftpPacket::ReadRequest {
+            filename: "/file.txt".to_string(),
+            mode: "octet".to_string(),
+        };
         let responses = server.handle_request(&req);
         assert_eq!(responses.len(), 1);
         match &responses[0] {
@@ -4043,7 +4447,10 @@ mod tests {
         let content: Vec<u8> = vec![0xAB; TFTP_BLOCK_SIZE];
         server.add_file("exact.bin", content);
 
-        let req = TftpPacket::ReadRequest { filename: "exact.bin".to_string(), mode: "octet".to_string() };
+        let req = TftpPacket::ReadRequest {
+            filename: "exact.bin".to_string(),
+            mode: "octet".to_string(),
+        };
         let responses = server.handle_request(&req);
         // With our implementation, if data is exactly block size, we get 1 packet (last chunk is
         // exactly TFTP_BLOCK_SIZE which is not < TFTP_BLOCK_SIZE, so we continue) then a second
@@ -4085,7 +4492,10 @@ mod tests {
     #[test]
     fn config_parse_dhcp_range() {
         let mut config = Config::default_config();
-        parse_config_content("dhcp-range=192.168.1.100,192.168.1.200,255.255.255.0,1h\n", &mut config);
+        parse_config_content(
+            "dhcp-range=192.168.1.100,192.168.1.200,255.255.255.0,1h\n",
+            &mut config,
+        );
         assert_eq!(config.dhcp_ranges.len(), 1);
         assert_eq!(config.dhcp_ranges[0].start, Ipv4Addr::new(192, 168, 1, 100));
         assert_eq!(config.dhcp_ranges[0].lease_time, 3600);
@@ -4398,8 +4808,14 @@ mod tests {
     #[test]
     fn resolver_cache_hit() {
         let mut resolver = DnsResolver::new();
-        let records = vec![DnsRecord::new_a("cached.com", 300, Ipv4Addr::new(1, 2, 3, 4))];
-        resolver.cache.insert("cached.com", DnsRecordType::A, records, 1000);
+        let records = vec![DnsRecord::new_a(
+            "cached.com",
+            300,
+            Ipv4Addr::new(1, 2, 3, 4),
+        )];
+        resolver
+            .cache
+            .insert("cached.com", DnsRecordType::A, records, 1000);
 
         let query = DnsPacket::new_query(4, "cached.com", DnsRecordType::A);
         let response = resolver.resolve(&query, 1050);
@@ -4499,8 +4915,13 @@ mod tests {
         pkt.header.qr = true;
         pkt.header.nscount = 1;
         pkt.header.arcount = 1;
-        pkt.authorities.push(DnsRecord::new_ns("test.com", 3600, "ns1.test.com").unwrap());
-        pkt.additionals.push(DnsRecord::new_a("ns1.test.com", 3600, Ipv4Addr::new(1, 1, 1, 1)));
+        pkt.authorities
+            .push(DnsRecord::new_ns("test.com", 3600, "ns1.test.com").unwrap());
+        pkt.additionals.push(DnsRecord::new_a(
+            "ns1.test.com",
+            3600,
+            Ipv4Addr::new(1, 1, 1, 1),
+        ));
 
         let bytes = pkt.serialize().unwrap();
         let parsed = DnsPacket::parse(&bytes).unwrap();
@@ -4518,7 +4939,9 @@ mod tests {
     #[test]
     fn dhcp_full_workflow() {
         let mut server = make_test_server();
-        let mac = MacAddr { bytes: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55] };
+        let mac = MacAddr {
+            bytes: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        };
 
         // 1. DISCOVER
         let discover = make_discover(mac, 100);
@@ -4541,7 +4964,10 @@ mod tests {
         release.xid = 102;
         release.ciaddr = offered_ip;
         release.set_client_mac(mac);
-        release.options.push(DhcpOption::new_byte(DHCP_OPT_MESSAGE_TYPE, DhcpMessageType::Release as u8));
+        release.options.push(DhcpOption::new_byte(
+            DHCP_OPT_MESSAGE_TYPE,
+            DhcpMessageType::Release as u8,
+        ));
         server.handle_packet(&release, 1002);
 
         // 5. Verify lease released
@@ -4601,7 +5027,9 @@ mod tests {
             Ipv4Addr::new(255, 255, 255, 0),
             3600,
         );
-        let mac = MacAddr { bytes: [1, 2, 3, 4, 5, 6] };
+        let mac = MacAddr {
+            bytes: [1, 2, 3, 4, 5, 6],
+        };
         pool.create_or_renew_lease(mac, Ipv4Addr::new(10, 0, 0, 15), 1000, None);
         let lease = pool.find_lease_by_ip(Ipv4Addr::new(10, 0, 0, 15));
         assert!(lease.is_some());
@@ -4627,7 +5055,9 @@ mod tests {
             Ipv4Addr::new(255, 255, 255, 0),
             100,
         );
-        let mac = MacAddr { bytes: [1, 2, 3, 4, 5, 6] };
+        let mac = MacAddr {
+            bytes: [1, 2, 3, 4, 5, 6],
+        };
         pool.create_or_renew_lease(mac, Ipv4Addr::new(10, 0, 0, 10), 1000, None);
         assert_eq!(pool.leases[0].expires, 1100);
 

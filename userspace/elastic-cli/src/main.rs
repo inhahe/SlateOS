@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_elastic(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: elastic [OPTIONS]");
-        println!("Elastic (Slate OS) — Elasticsearch + Kibana + Beats (NYSE:ESTC, search + observability + security)");
+        println!(
+            "Elastic (Slate OS) — Elasticsearch + Kibana + Beats (NYSE:ESTC, search + observability + security)"
+        );
         println!();
         println!("Options:");
         println!("  --search               Elasticsearch (the search engine)");
@@ -23,13 +29,22 @@ fn run_elastic(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Elastic 2024 (Slate OS) — Elasticsearch 8.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Elastic 2024 (Slate OS) — Elasticsearch 8.x");
+        return 0;
+    }
     println!("Elastic 2024 (Slate OS) — Search + Observability + Security Platform");
     println!("  Vendor: Elastic N.V. (Mountain View, CA + Amsterdam — NYSE:ESTC since 2018)");
     println!("  Founder: Shay Banon, 2012 (Elasticsearch BV — then 'Elastic')");
-    println!("          Shay built Compass (search lib, 2004) → Elasticsearch (2010 — open-source)");
-    println!("          Elasticsearch first public release 2010, became dominant Lucene-based search engine");
-    println!("          ELK Stack: Elasticsearch + Logstash + Kibana — the open-source observability standard 2014-2020");
+    println!(
+        "          Shay built Compass (search lib, 2004) → Elasticsearch (2010 — open-source)"
+    );
+    println!(
+        "          Elasticsearch first public release 2010, became dominant Lucene-based search engine"
+    );
+    println!(
+        "          ELK Stack: Elasticsearch + Logstash + Kibana — the open-source observability standard 2014-2020"
+    );
     println!("          Shay Banon stepped down as CEO Aug 2022, replaced by Ash Kulkarni");
     println!("          remains as engineering leader + on board");
     println!("  Public market (NYSE:ESTC):");
@@ -39,13 +54,25 @@ fn run_elastic(args: &[String], _prog: &str) -> i32 {
     println!("         FY2024 revenue: ~$1.27B (+18% YoY)");
     println!("         Market cap: ~$10-13B range");
     println!("         Profitability improving — focus on operational discipline");
-    println!("  Strategic position: '3 use cases, one platform — search, observability, security':");
+    println!(
+        "  Strategic position: '3 use cases, one platform — search, observability, security':"
+    );
     println!("                    pitch: 'one platform, three solutions, the speed of relevance'");
-    println!("                    target: every developer + every enterprise (broadest base of any observability vendor)");
-    println!("                    primary competitor (observability): Datadog, Splunk, Logz.io, Sumo Logic");
-    println!("                    primary competitor (search): OpenSearch (Amazon fork), Algolia, Solr");
-    println!("                    primary competitor (security): Splunk, Microsoft Sentinel, CrowdStrike");
-    println!("                    Elastic's wedge: Elasticsearch ubiquity + open-source community + 3-product bundling");
+    println!(
+        "                    target: every developer + every enterprise (broadest base of any observability vendor)"
+    );
+    println!(
+        "                    primary competitor (observability): Datadog, Splunk, Logz.io, Sumo Logic"
+    );
+    println!(
+        "                    primary competitor (search): OpenSearch (Amazon fork), Algolia, Solr"
+    );
+    println!(
+        "                    primary competitor (security): Splunk, Microsoft Sentinel, CrowdStrike"
+    );
+    println!(
+        "                    Elastic's wedge: Elasticsearch ubiquity + open-source community + 3-product bundling"
+    );
     println!("                    'Search is the foundation of all data problems' positioning");
     println!("  Pricing:");
     println!("    Elastic Cloud (SaaS):");
@@ -60,7 +87,9 @@ fn run_elastic(args: &[String], _prog: &str) -> i32 {
     println!("    - Apache 2.0 since 2010");
     println!("    - Elastic License (SSPL+ELv2 dual) Jan 2021 — to prevent AWS competition");
     println!("    - Triggered the OpenSearch fork by AWS (Apache 2.0)");
-    println!("    - Sep 2024: re-licensed Elasticsearch + Kibana under AGPLv3 (in addition to Elastic License)");
+    println!(
+        "    - Sep 2024: re-licensed Elasticsearch + Kibana under AGPLv3 (in addition to Elastic License)"
+    );
     println!("    - 'Elastic is back to open source' — Shay Banon blog");
     println!("  Product portfolio (3 Solutions):");
     println!("    1. Elasticsearch (the search engine):");
@@ -111,7 +140,9 @@ fn run_elastic(args: &[String], _prog: &str) -> i32 {
     println!("  Integrations:");
     println!("    - Beats family + Logstash + Elastic Agent (Elastic's own shippers)");
     println!("    - OpenTelemetry (full ingestion support)");
-    println!("    - Filebeat connectors: AWS, Azure, GCP services, Kubernetes, syslog, NGINX, Apache, etc.");
+    println!(
+        "    - Filebeat connectors: AWS, Azure, GCP services, Kubernetes, syslog, NGINX, Apache, etc."
+    );
     println!("    - Cloud: AWS (deep), Azure, GCP (Elastic Cloud runs on all 3)");
     println!("    - Alerts: PagerDuty, Slack, Teams, ServiceNow, Jira");
     println!("    - SDK: Java, Python, Go, .NET, Ruby, PHP, JavaScript native clients");
@@ -134,21 +165,32 @@ fn run_elastic(args: &[String], _prog: &str) -> i32 {
     println!("    - GitHub: Elasticsearch powers GitHub code search at massive scale");
     println!("    - Stack Overflow: Q&A search on Elasticsearch");
     println!("    - international: heavy in EMEA + APAC");
-    println!("  Critique: 3-solution positioning can confuse buyers (search vs observability vs security)");
+    println!(
+        "  Critique: 3-solution positioning can confuse buyers (search vs observability vs security)"
+    );
     println!("           OpenSearch (AWS-led fork) divides community + erodes mindshare");
     println!("           Elasticsearch Kubernetes deployment notoriously complex");
-    println!("           Elastic Cloud pricing surprises at scale (especially for high-cardinality data)");
+    println!(
+        "           Elastic Cloud pricing surprises at scale (especially for high-cardinality data)"
+    );
     println!("           Datadog growing observability share faster (better UX + simpler model)");
     println!("           ML/AIOps features less polished than Dynatrace Davis or DataDog Bits");
-    println!("           Vector search competing with focused vendors (Pinecone) for RAG use cases");
+    println!(
+        "           Vector search competing with focused vendors (Pinecone) for RAG use cases"
+    );
     println!("           Endgame endpoint integration with Security Solution still maturing");
-    println!("  Differentiator: Elasticsearch ubiquity (50%+ Fortune 500 install base) + 3-in-one platform (search + observability + security) + OpenTelemetry-native + vector search + ELK Stack open-source heritage + AGPLv3 + Elastic License dual-license return to OSS (2024) + ESRE (Elasticsearch Relevance Engine) for RAG/LLM + $1.27B revenue — the search-foundation observability + security platform that nearly every Fortune 500 has Elasticsearch running somewhere in their stack");
+    println!(
+        "  Differentiator: Elasticsearch ubiquity (50%+ Fortune 500 install base) + 3-in-one platform (search + observability + security) + OpenTelemetry-native + vector search + ELK Stack open-source heritage + AGPLv3 + Elastic License dual-license return to OSS (2024) + ESRE (Elasticsearch Relevance Engine) for RAG/LLM + $1.27B revenue — the search-foundation observability + security platform that nearly every Fortune 500 has Elasticsearch running somewhere in their stack"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "elastic".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "elastic".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_elastic(&rest, &_prog);
     process::exit(code);
@@ -156,7 +198,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_elastic};
+    use super::{basename, run_elastic, strip_ext};
 
     #[test]
     fn basename_strips_path() {

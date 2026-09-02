@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_smbclient(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -30,17 +34,28 @@ fn run_smbclient(args: &[String]) -> i32 {
     }
 
     if args.iter().any(|a| a == "-L") {
-        let host = args.windows(2).find(|w| w[0] == "-L").map(|w| w[1].as_str()).unwrap_or("server");
+        let host = args
+            .windows(2)
+            .find(|w| w[0] == "-L")
+            .map(|w| w[1].as_str())
+            .unwrap_or("server");
         println!("Sharename       Type      Comment");
         println!("---------       ----      -------");
         println!("public          Disk      Public files");
         println!("homes           Disk      Home directories");
         println!("printers        Printer   All Printers");
-        println!("IPC$            IPC       IPC Service (Samba {} Slate OS)", host);
+        println!(
+            "IPC$            IPC       IPC Service (Samba {} Slate OS)",
+            host
+        );
         return 0;
     }
 
-    let share = args.iter().find(|a| a.starts_with("//")).map(|s| s.as_str()).unwrap_or("//server/share");
+    let share = args
+        .iter()
+        .find(|a| a.starts_with("//"))
+        .map(|s| s.as_str())
+        .unwrap_or("//server/share");
     println!("Try \"help\" to get a list of possible commands.");
     println!("smb: \\> ls");
     println!("  .                  D        0  Wed May 22 12:00:00 2024");
@@ -63,15 +78,31 @@ fn run_smbstatus(args: &[String]) -> i32 {
     }
 
     println!("Samba version 4.19.4 (Slate OS)");
-    println!("PID     Username     Group        Machine                            Protocol Version  Encryption           Signing");
-    println!("----------------------------------------------------------------------------------------------------------------------------------------");
-    println!("1234    user1        staff        192.168.1.50 (ipv4:192.168.1.50)   SMB3_11           -                    AES-128-GMAC");
-    println!("1235    user2        staff        192.168.1.51 (ipv4:192.168.1.51)   SMB3_11           -                    AES-128-GMAC");
+    println!(
+        "PID     Username     Group        Machine                            Protocol Version  Encryption           Signing"
+    );
+    println!(
+        "----------------------------------------------------------------------------------------------------------------------------------------"
+    );
+    println!(
+        "1234    user1        staff        192.168.1.50 (ipv4:192.168.1.50)   SMB3_11           -                    AES-128-GMAC"
+    );
+    println!(
+        "1235    user2        staff        192.168.1.51 (ipv4:192.168.1.51)   SMB3_11           -                    AES-128-GMAC"
+    );
     println!();
-    println!("Service      pid     Machine       Connected at                     Encryption   Signing");
-    println!("------------------------------------------------------------------------------------------------------------");
-    println!("public       1234    192.168.1.50  Wed May 22 10:00:00 AM 2024 UTC  -            AES-128-GMAC");
-    println!("homes        1235    192.168.1.51  Wed May 22 10:30:00 AM 2024 UTC  -            AES-128-GMAC");
+    println!(
+        "Service      pid     Machine       Connected at                     Encryption   Signing"
+    );
+    println!(
+        "------------------------------------------------------------------------------------------------------------"
+    );
+    println!(
+        "public       1234    192.168.1.50  Wed May 22 10:00:00 AM 2024 UTC  -            AES-128-GMAC"
+    );
+    println!(
+        "homes        1235    192.168.1.51  Wed May 22 10:30:00 AM 2024 UTC  -            AES-128-GMAC"
+    );
     0
 }
 
@@ -108,7 +139,11 @@ fn run_nmblookup(args: &[String]) -> i32 {
         println!("Usage: nmblookup [OPTIONS] <name>");
         return 0;
     }
-    let name = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("WORKGROUP");
+    let name = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("WORKGROUP");
     println!("querying {} on 192.168.1.255", name);
     println!("192.168.1.100 {}<00>", name);
     0
@@ -116,7 +151,10 @@ fn run_nmblookup(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "smbclient".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "smbclient".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "smbstatus" => run_smbstatus(&rest),
@@ -134,7 +172,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_smbclient};
+    use super::{basename, run_smbclient, strip_ext};
 
     #[test]
     fn basename_strips_path() {

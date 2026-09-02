@@ -688,11 +688,18 @@ fn cmd_general(state: &NmState, args: &[&str], global: &NmcliGlobal, out: &mut d
         }
         Some("logging") => {
             let _ = writeln!(out, "LEVEL  DOMAINS");
-            let _ = writeln!(out, "INFO   PLATFORM,RFKILL,ETHER,WIFI,BT,MB,DHCP4,DHCP6,PPP,IP4,IP6,AUTOIP4,DNS,VPN,SHARING,SUPPLICANT,AGENTS,SETTINGS,SUSPEND,CORE,DEVICE,OLPC,INFINIBAND,FIREWALL,ADSL,BOND,VLAN,BRIDGE,TEAM,CONCHECK,DCB,DISPATCH,AUDIT,SYSTEMD,PROXY");
+            let _ = writeln!(
+                out,
+                "INFO   PLATFORM,RFKILL,ETHER,WIFI,BT,MB,DHCP4,DHCP6,PPP,IP4,IP6,AUTOIP4,DNS,VPN,SHARING,SUPPLICANT,AGENTS,SETTINGS,SUSPEND,CORE,DEVICE,OLPC,INFINIBAND,FIREWALL,ADSL,BOND,VLAN,BRIDGE,TEAM,CONCHECK,DCB,DISPATCH,AUDIT,SYSTEMD,PROXY"
+            );
             0
         }
         Some(other) => {
-            let _ = writeln!(out, "Error: invalid command '{}'; use status, hostname, permissions, or logging.", other);
+            let _ = writeln!(
+                out,
+                "Error: invalid command '{}'; use status, hostname, permissions, or logging.",
+                other
+            );
             2
         }
     }
@@ -711,7 +718,14 @@ fn cmd_general_status(state: &NmState, global: &NmcliGlobal, out: &mut dyn Write
         "disabled"
     };
 
-    let headers = ["STATE", "CONNECTIVITY", "WIFI-HW", "WIFI", "WWAN-HW", "WWAN"];
+    let headers = [
+        "STATE",
+        "CONNECTIVITY",
+        "WIFI-HW",
+        "WIFI",
+        "WWAN-HW",
+        "WWAN",
+    ];
     let rows = vec![vec![
         running.to_string(),
         String::from("full"),
@@ -734,7 +748,12 @@ fn cmd_general_status(state: &NmState, global: &NmcliGlobal, out: &mut dyn Write
         let filt_headers: Vec<&str> = indices.iter().map(|&i| headers[i]).collect();
         let filt_rows: Vec<Vec<String>> = rows
             .iter()
-            .map(|row| indices.iter().filter_map(|&i| row.get(i).cloned()).collect())
+            .map(|row| {
+                indices
+                    .iter()
+                    .filter_map(|&i| row.get(i).cloned())
+                    .collect()
+            })
             .collect();
         output_table(&filt_headers, &filt_rows, global, out);
     } else {
@@ -785,7 +804,11 @@ fn cmd_networking(state: &mut NmState, args: &[&str], out: &mut dyn Write) -> i3
             0
         }
         Some(other) => {
-            let _ = writeln!(out, "Error: invalid command '{}'; use on, off, or connectivity.", other);
+            let _ = writeln!(
+                out,
+                "Error: invalid command '{}'; use on, off, or connectivity.",
+                other
+            );
             2
         }
     }
@@ -886,7 +909,11 @@ fn cmd_radio(state: &mut NmState, args: &[&str], global: &NmcliGlobal, out: &mut
             }
         }
         Some(other) => {
-            let _ = writeln!(out, "Error: invalid command '{}'; use all, wifi, or wwan.", other);
+            let _ = writeln!(
+                out,
+                "Error: invalid command '{}'; use all, wifi, or wwan.",
+                other
+            );
             2
         }
     }
@@ -896,7 +923,12 @@ fn cmd_radio(state: &mut NmState, args: &[&str], global: &NmcliGlobal, out: &mut
 // nmcli device
 // ============================================================================
 
-fn cmd_device(state: &mut NmState, args: &[&str], global: &NmcliGlobal, out: &mut dyn Write) -> i32 {
+fn cmd_device(
+    state: &mut NmState,
+    args: &[&str],
+    global: &NmcliGlobal,
+    out: &mut dyn Write,
+) -> i32 {
     match args.first().copied() {
         None | Some("status") => cmd_device_status(state, global, out),
         Some("show") => cmd_device_show(state, args.get(1).copied(), out),
@@ -928,7 +960,11 @@ fn cmd_device(state: &mut NmState, args: &[&str], global: &NmcliGlobal, out: &mu
             cmd_device_set(state, dev_name, prop, val, out)
         }
         Some(other) => {
-            let _ = writeln!(out, "Error: invalid command '{}'; use status, show, connect, disconnect, wifi, or set.", other);
+            let _ = writeln!(
+                out,
+                "Error: invalid command '{}'; use status, show, connect, disconnect, wifi, or set.",
+                other
+            );
             2
         }
     }
@@ -958,15 +994,13 @@ fn cmd_device_status(state: &NmState, global: &NmcliGlobal, out: &mut dyn Write)
 
 fn cmd_device_show(state: &NmState, dev_name: Option<&str>, out: &mut dyn Write) -> i32 {
     let devices: Vec<&NetworkDevice> = match dev_name {
-        Some(name) => {
-            match state.devices.iter().find(|d| d.name == name) {
-                Some(d) => vec![d],
-                None => {
-                    let _ = writeln!(out, "Error: device '{}' not found.", name);
-                    return 10;
-                }
+        Some(name) => match state.devices.iter().find(|d| d.name == name) {
+            Some(d) => vec![d],
+            None => {
+                let _ = writeln!(out, "Error: device '{}' not found.", name);
+                return 10;
             }
-        }
+        },
         None => state.devices.iter().collect(),
     };
 
@@ -975,10 +1009,23 @@ fn cmd_device_show(state: &NmState, dev_name: Option<&str>, out: &mut dyn Write)
             let _ = writeln!(out);
         }
         let _ = writeln!(out, "GENERAL.DEVICE:                         {}", dev.name);
-        let _ = writeln!(out, "GENERAL.TYPE:                           {}", dev.dev_type.as_str());
-        let _ = writeln!(out, "GENERAL.HWADDR:                         {}", dev.hwaddr);
+        let _ = writeln!(
+            out,
+            "GENERAL.TYPE:                           {}",
+            dev.dev_type.as_str()
+        );
+        let _ = writeln!(
+            out,
+            "GENERAL.HWADDR:                         {}",
+            dev.hwaddr
+        );
         let _ = writeln!(out, "GENERAL.MTU:                            {}", dev.mtu);
-        let _ = writeln!(out, "GENERAL.STATE:                          {} ({})", dev.state.code(), dev.state.as_str());
+        let _ = writeln!(
+            out,
+            "GENERAL.STATE:                          {} ({})",
+            dev.state.code(),
+            dev.state.as_str()
+        );
         let _ = writeln!(
             out,
             "GENERAL.CONNECTION:                     {}",
@@ -990,13 +1037,25 @@ fn cmd_device_show(state: &NmState, dev_name: Option<&str>, out: &mut dyn Write)
         );
         let _ = writeln!(out, "GENERAL.CON-PATH:                       --");
         if !dev.ip4_addr.is_empty() {
-            let _ = writeln!(out, "IP4.ADDRESS[1]:                         {}", dev.ip4_addr);
+            let _ = writeln!(
+                out,
+                "IP4.ADDRESS[1]:                         {}",
+                dev.ip4_addr
+            );
         }
         if !dev.ip4_gw.is_empty() {
-            let _ = writeln!(out, "IP4.GATEWAY:                            {}", dev.ip4_gw);
+            let _ = writeln!(
+                out,
+                "IP4.GATEWAY:                            {}",
+                dev.ip4_gw
+            );
         }
         if !dev.ip6_addr.is_empty() {
-            let _ = writeln!(out, "IP6.ADDRESS[1]:                         {}", dev.ip6_addr);
+            let _ = writeln!(
+                out,
+                "IP6.ADDRESS[1]:                         {}",
+                dev.ip6_addr
+            );
         }
         let _ = writeln!(out, "IP6.GATEWAY:                            --");
     }
@@ -1030,10 +1089,9 @@ fn cmd_device_connect(state: &mut NmState, dev_name: &str, out: &mut dyn Write) 
         }
     };
 
-    let conn_idx = state
-        .connections
-        .iter()
-        .position(|c| c.conn_type == conn_type && (c.interface_name == dev_name || c.interface_name.is_empty()));
+    let conn_idx = state.connections.iter().position(|c| {
+        c.conn_type == conn_type && (c.interface_name == dev_name || c.interface_name.is_empty())
+    });
 
     if let Some(ci) = conn_idx {
         state.devices[dev_idx].state = DeviceState::Connected;
@@ -1047,7 +1105,11 @@ fn cmd_device_connect(state: &mut NmState, dev_name: &str, out: &mut dyn Write) 
         );
         0
     } else {
-        let _ = writeln!(out, "Error: no suitable connection found for device '{}'.", dev_name);
+        let _ = writeln!(
+            out,
+            "Error: no suitable connection found for device '{}'.",
+            dev_name
+        );
         4
     }
 }
@@ -1085,7 +1147,13 @@ fn cmd_device_disconnect(state: &mut NmState, dev_name: &str, out: &mut dyn Writ
     0
 }
 
-fn cmd_device_set(state: &mut NmState, dev_name: &str, prop: &str, val: &str, out: &mut dyn Write) -> i32 {
+fn cmd_device_set(
+    state: &mut NmState,
+    dev_name: &str,
+    prop: &str,
+    val: &str,
+    out: &mut dyn Write,
+) -> i32 {
     let dev_idx = match state.find_device(dev_name) {
         Some(i) => i,
         None => {
@@ -1136,7 +1204,12 @@ fn cmd_device_set(state: &mut NmState, dev_name: &str, prop: &str, val: &str, ou
 // nmcli device wifi
 // ============================================================================
 
-fn cmd_device_wifi(state: &mut NmState, args: &[&str], global: &NmcliGlobal, out: &mut dyn Write) -> i32 {
+fn cmd_device_wifi(
+    state: &mut NmState,
+    args: &[&str],
+    global: &NmcliGlobal,
+    out: &mut dyn Write,
+) -> i32 {
     match args.first().copied() {
         None | Some("list") => cmd_device_wifi_list(state, global, out),
         Some("connect") => {
@@ -1157,7 +1230,11 @@ fn cmd_device_wifi(state: &mut NmState, args: &[&str], global: &NmcliGlobal, out
             4
         }
         Some(other) => {
-            let _ = writeln!(out, "Error: invalid wifi command '{}'; use list, connect, or rescan.", other);
+            let _ = writeln!(
+                out,
+                "Error: invalid wifi command '{}'; use list, connect, or rescan.",
+                other
+            );
             2
         }
     }
@@ -1169,7 +1246,9 @@ fn cmd_device_wifi_list(state: &NmState, global: &NmcliGlobal, out: &mut dyn Wri
         return 0;
     }
 
-    let headers = ["IN-USE", "BSSID", "SSID", "MODE", "CHAN", "RATE", "SIGNAL", "SECURITY"];
+    let headers = [
+        "IN-USE", "BSSID", "SSID", "MODE", "CHAN", "RATE", "SIGNAL", "SECURITY",
+    ];
     let rows: Vec<Vec<String>> = state
         .wifi_aps
         .iter()
@@ -1301,7 +1380,10 @@ fn cmd_connection(
             if let Some(name) = args.get(1) {
                 cmd_connection_up(state, name, out)
             } else {
-                let _ = writeln!(out, "Error: 'connection up' requires a connection name or UUID.");
+                let _ = writeln!(
+                    out,
+                    "Error: 'connection up' requires a connection name or UUID."
+                );
                 2
             }
         }
@@ -1309,7 +1391,10 @@ fn cmd_connection(
             if let Some(name) = args.get(1) {
                 cmd_connection_down(state, name, out)
             } else {
-                let _ = writeln!(out, "Error: 'connection down' requires a connection name or UUID.");
+                let _ = writeln!(
+                    out,
+                    "Error: 'connection down' requires a connection name or UUID."
+                );
                 2
             }
         }
@@ -1319,7 +1404,10 @@ fn cmd_connection(
             if let Some(name) = args.get(1) {
                 cmd_connection_delete(state, name, out)
             } else {
-                let _ = writeln!(out, "Error: 'connection delete' requires a connection name or UUID.");
+                let _ = writeln!(
+                    out,
+                    "Error: 'connection delete' requires a connection name or UUID."
+                );
                 2
             }
         }
@@ -1344,7 +1432,10 @@ fn cmd_connection(
             cmd_connection_clone(state, args[1], args[2], out)
         }
         Some("monitor") => {
-            let _ = writeln!(out, "Monitoring connection changes... (press Ctrl+C to stop)");
+            let _ = writeln!(
+                out,
+                "Monitoring connection changes... (press Ctrl+C to stop)"
+            );
             0
         }
         Some(other) => {
@@ -1391,8 +1482,16 @@ fn cmd_connection_show_detail(state: &NmState, id: &str, out: &mut dyn Write) ->
 
     let _ = writeln!(out, "connection.id:                          {}", conn.id);
     let _ = writeln!(out, "connection.uuid:                        {}", conn.uuid);
-    let _ = writeln!(out, "connection.type:                        {}", conn.conn_type.as_str());
-    let _ = writeln!(out, "connection.autoconnect:                 {}", if conn.autoconnect { "yes" } else { "no" });
+    let _ = writeln!(
+        out,
+        "connection.type:                        {}",
+        conn.conn_type.as_str()
+    );
+    let _ = writeln!(
+        out,
+        "connection.autoconnect:                 {}",
+        if conn.autoconnect { "yes" } else { "no" }
+    );
     let _ = writeln!(
         out,
         "connection.interface-name:              {}",
@@ -1402,28 +1501,59 @@ fn cmd_connection_show_detail(state: &NmState, id: &str, out: &mut dyn Write) ->
             &conn.interface_name
         }
     );
-    let _ = writeln!(out, "ipv4.method:                            {}", conn.ipv4_method.as_str());
+    let _ = writeln!(
+        out,
+        "ipv4.method:                            {}",
+        conn.ipv4_method.as_str()
+    );
     if !conn.ipv4_addresses.is_empty() {
         for (i, addr) in conn.ipv4_addresses.iter().enumerate() {
-            let _ = writeln!(out, "ipv4.addresses[{}]:                      {}", i + 1, addr);
+            let _ = writeln!(
+                out,
+                "ipv4.addresses[{}]:                      {}",
+                i + 1,
+                addr
+            );
         }
     }
     if !conn.ipv4_gateway.is_empty() {
-        let _ = writeln!(out, "ipv4.gateway:                           {}", conn.ipv4_gateway);
+        let _ = writeln!(
+            out,
+            "ipv4.gateway:                           {}",
+            conn.ipv4_gateway
+        );
     }
     if !conn.ipv4_dns.is_empty() {
         for (i, dns) in conn.ipv4_dns.iter().enumerate() {
-            let _ = writeln!(out, "ipv4.dns[{}]:                             {}", i + 1, dns);
+            let _ = writeln!(
+                out,
+                "ipv4.dns[{}]:                             {}",
+                i + 1,
+                dns
+            );
         }
     }
-    let _ = writeln!(out, "ipv6.method:                            {}", conn.ipv6_method.as_str());
+    let _ = writeln!(
+        out,
+        "ipv6.method:                            {}",
+        conn.ipv6_method.as_str()
+    );
     if !conn.ipv6_addresses.is_empty() {
         for (i, addr) in conn.ipv6_addresses.iter().enumerate() {
-            let _ = writeln!(out, "ipv6.addresses[{}]:                      {}", i + 1, addr);
+            let _ = writeln!(
+                out,
+                "ipv6.addresses[{}]:                      {}",
+                i + 1,
+                addr
+            );
         }
     }
     if !conn.ipv6_gateway.is_empty() {
-        let _ = writeln!(out, "ipv6.gateway:                           {}", conn.ipv6_gateway);
+        let _ = writeln!(
+            out,
+            "ipv6.gateway:                           {}",
+            conn.ipv6_gateway
+        );
     }
 
     match conn.conn_type {
@@ -1437,20 +1567,44 @@ fn cmd_connection_show_detail(state: &NmState, id: &str, out: &mut dyn Write) ->
                     &conn.wifi_ssid
                 }
             );
-            let _ = writeln!(out, "802-11-wireless.mode:                   {}", conn.wifi_mode);
+            let _ = writeln!(
+                out,
+                "802-11-wireless.mode:                   {}",
+                conn.wifi_mode
+            );
             if !conn.wifi_security.is_empty() {
-                let _ = writeln!(out, "802-11-wireless-security.key-mgmt:      {}", conn.wifi_security);
+                let _ = writeln!(
+                    out,
+                    "802-11-wireless-security.key-mgmt:      {}",
+                    conn.wifi_security
+                );
             }
         }
         ConnType::Bridge => {
-            let _ = writeln!(out, "bridge.stp:                             {}", if conn.bridge_stp { "yes" } else { "no" });
-            let _ = writeln!(out, "bridge.priority:                        {}", conn.bridge_priority);
+            let _ = writeln!(
+                out,
+                "bridge.stp:                             {}",
+                if conn.bridge_stp { "yes" } else { "no" }
+            );
+            let _ = writeln!(
+                out,
+                "bridge.priority:                        {}",
+                conn.bridge_priority
+            );
         }
         ConnType::Bond => {
-            let _ = writeln!(out, "bond.options:                           mode={}", conn.bond_mode);
+            let _ = writeln!(
+                out,
+                "bond.options:                           mode={}",
+                conn.bond_mode
+            );
         }
         ConnType::Vlan => {
-            let _ = writeln!(out, "vlan.id:                                {}", conn.vlan_id);
+            let _ = writeln!(
+                out,
+                "vlan.id:                                {}",
+                conn.vlan_id
+            );
             let _ = writeln!(
                 out,
                 "vlan.parent:                            {}",
@@ -1467,7 +1621,11 @@ fn cmd_connection_show_detail(state: &NmState, id: &str, out: &mut dyn Write) ->
     let _ = writeln!(
         out,
         "GENERAL.STATE:                          {}",
-        if conn.active { "activated" } else { "deactivated" }
+        if conn.active {
+            "activated"
+        } else {
+            "deactivated"
+        }
     );
     let _ = writeln!(
         out,
@@ -1560,10 +1718,11 @@ fn cmd_connection_down(state: &mut NmState, name: &str, out: &mut dyn Write) -> 
 
     // Disconnect the device
     if !dev_name.is_empty()
-        && let Some(di) = state.find_device(&dev_name) {
-            state.devices[di].state = DeviceState::Disconnected;
-            state.devices[di].connection.clear();
-        }
+        && let Some(di) = state.find_device(&dev_name)
+    {
+        state.devices[di].state = DeviceState::Disconnected;
+        state.devices[di].connection.clear();
+    }
 
     let _ = writeln!(
         out,
@@ -1588,8 +1747,7 @@ fn cmd_connection_add(state: &mut NmState, args: &[&str], out: &mut dyn Write) -
         }
     };
 
-    let con_name = find_option_value(args, "con-name")
-        .unwrap_or(conn_type.display_name());
+    let con_name = find_option_value(args, "con-name").unwrap_or(conn_type.display_name());
     let ifname = find_option_value(args, "ifname").unwrap_or("");
 
     // Check for duplicate
@@ -1608,11 +1766,7 @@ fn cmd_connection_add(state: &mut NmState, args: &[&str], out: &mut dyn Write) -
     let name = profile.id.clone();
     state.connections.push(profile);
 
-    let _ = writeln!(
-        out,
-        "Connection '{}' ({}) successfully added.",
-        name, uuid
-    );
+    let _ = writeln!(out, "Connection '{}' ({}) successfully added.", name, uuid);
     0
 }
 
@@ -1700,14 +1854,8 @@ fn parse_connection_settings(profile: &mut ConnectionProfile, args: &[&str]) {
             }
             _ => {
                 // Store unknown settings as custom properties
-                if !val.is_empty()
-                    && key != "type"
-                    && key != "con-name"
-                    && key != "ifname"
-                {
-                    profile
-                        .properties
-                        .insert(key.to_string(), val.to_string());
+                if !val.is_empty() && key != "type" && key != "con-name" && key != "ifname" {
+                    profile.properties.insert(key.to_string(), val.to_string());
                 }
                 i += 2;
             }
@@ -1717,7 +1865,10 @@ fn parse_connection_settings(profile: &mut ConnectionProfile, args: &[&str]) {
 
 fn cmd_connection_modify(state: &mut NmState, args: &[&str], out: &mut dyn Write) -> i32 {
     if args.is_empty() {
-        let _ = writeln!(out, "Error: 'connection modify' requires a connection name and settings.");
+        let _ = writeln!(
+            out,
+            "Error: 'connection modify' requires a connection name and settings."
+        );
         return 2;
     }
 
@@ -1759,10 +1910,11 @@ fn cmd_connection_delete(state: &mut NmState, name: &str, out: &mut dyn Write) -
     if state.connections[conn_idx].active {
         let dev_name = state.connections[conn_idx].device.clone();
         if !dev_name.is_empty()
-            && let Some(di) = state.find_device(&dev_name) {
-                state.devices[di].state = DeviceState::Disconnected;
-                state.devices[di].connection.clear();
-            }
+            && let Some(di) = state.find_device(&dev_name)
+        {
+            state.devices[di].state = DeviceState::Disconnected;
+            state.devices[di].connection.clear();
+        }
     }
 
     let removed = state.connections.remove(conn_idx);
@@ -1805,10 +1957,7 @@ fn cmd_connection_clone(
     let _ = writeln!(
         out,
         "'{}' ({}) cloned as '{}' ({}).",
-        src_name,
-        state.connections[src_idx].uuid,
-        new_name,
-        uuid
+        src_name, state.connections[src_idx].uuid, new_name, uuid
     );
     0
 }
@@ -1932,16 +2081,28 @@ fn print_nmcli_usage(out: &mut dyn Write) -> i32 {
     let _ = writeln!(out, "Usage: nmcli [OPTIONS] OBJECT {{ COMMAND | help }}");
     let _ = writeln!(out);
     let _ = writeln!(out, "OPTIONS");
-    let _ = writeln!(out, "  -t, --terse                      terse output (colon-separated)");
+    let _ = writeln!(
+        out,
+        "  -t, --terse                      terse output (colon-separated)"
+    );
     let _ = writeln!(out, "  -p, --pretty                     pretty output");
     let _ = writeln!(out, "  -m, --mode tabular|terse          output mode");
-    let _ = writeln!(out, "  -c, --colors auto|yes|no         whether to use colors");
-    let _ = writeln!(out, "  -f, --fields <field,...>          specify output fields");
+    let _ = writeln!(
+        out,
+        "  -c, --colors auto|yes|no         whether to use colors"
+    );
+    let _ = writeln!(
+        out,
+        "  -f, --fields <field,...>          specify output fields"
+    );
     let _ = writeln!(out, "  -v, --version                    show version");
     let _ = writeln!(out, "  -h, --help                       show this help");
     let _ = writeln!(out);
     let _ = writeln!(out, "OBJECT");
-    let _ = writeln!(out, "  general      NetworkManager general status and operations");
+    let _ = writeln!(
+        out,
+        "  general      NetworkManager general status and operations"
+    );
     let _ = writeln!(out, "  networking   overall networking control");
     let _ = writeln!(out, "  radio        NetworkManager radio switches");
     let _ = writeln!(out, "  connection   NetworkManager connection profiles");
@@ -2036,8 +2197,15 @@ fn run_networkmanager(args: &[String], out: &mut dyn Write) -> i32 {
         let _ = writeln!(out, "Options:");
         let _ = writeln!(out, "  -n, --no-daemon       don't become a daemon");
         let _ = writeln!(out, "  -d, --debug           enable debug logging");
-        let _ = writeln!(out, "  --log-level LEVEL     set log level (ERR, WARN, INFO, DEBUG, TRACE)");
-        let _ = writeln!(out, "  --config-dir PATH     set configuration directory (default: {})", NM_CONFIG_DIR);
+        let _ = writeln!(
+            out,
+            "  --log-level LEVEL     set log level (ERR, WARN, INFO, DEBUG, TRACE)"
+        );
+        let _ = writeln!(
+            out,
+            "  --config-dir PATH     set configuration directory (default: {})",
+            NM_CONFIG_DIR
+        );
         let _ = writeln!(out, "  -V, --version         show version");
         let _ = writeln!(out, "  -h, --help            show this help");
         return 0;
@@ -2056,11 +2224,27 @@ fn run_networkmanager(args: &[String], out: &mut dyn Write) -> i32 {
     }
 
     // Report simulated device discovery
-    let _ = writeln!(out, "<INFO>  [daemon] reading configuration from {}/NetworkManager.conf", opts.config_dir);
-    let _ = writeln!(out, "<INFO>  [device] (lo): new Loopback device (driver: 'unknown')");
-    let _ = writeln!(out, "<INFO>  [device] (eth0): new Ethernet device (driver: 'virtio-net')");
-    let _ = writeln!(out, "<INFO>  [device] (wlan0): new Wi-Fi device (driver: 'iwlwifi')");
-    let _ = writeln!(out, "<INFO>  [manager] NetworkManager state is now CONNECTED_GLOBAL");
+    let _ = writeln!(
+        out,
+        "<INFO>  [daemon] reading configuration from {}/NetworkManager.conf",
+        opts.config_dir
+    );
+    let _ = writeln!(
+        out,
+        "<INFO>  [device] (lo): new Loopback device (driver: 'unknown')"
+    );
+    let _ = writeln!(
+        out,
+        "<INFO>  [device] (eth0): new Ethernet device (driver: 'virtio-net')"
+    );
+    let _ = writeln!(
+        out,
+        "<INFO>  [device] (wlan0): new Wi-Fi device (driver: 'iwlwifi')"
+    );
+    let _ = writeln!(
+        out,
+        "<INFO>  [manager] NetworkManager state is now CONNECTED_GLOBAL"
+    );
 
     if opts.no_daemon {
         let _ = writeln!(out, "<INFO>  [daemon] running in foreground (--no-daemon)");
@@ -2102,9 +2286,7 @@ fn run(args: &[String], out: &mut dyn Write) -> i32 {
         return 1;
     }
 
-    let personality = detect_personality(
-        args.first().map(|s| s.as_str()).unwrap_or("nmcli"),
-    );
+    let personality = detect_personality(args.first().map(|s| s.as_str()).unwrap_or("nmcli"));
 
     match personality {
         Personality::Nmtui => run_nmtui(out),
@@ -3195,11 +3377,7 @@ mod tests {
         let headers = ["A", "BB", "CCC"];
         let rows = vec![
             vec![String::from("1"), String::from("22"), String::from("333")],
-            vec![
-                String::from("long"),
-                String::from("x"),
-                String::from("y"),
-            ],
+            vec![String::from("long"), String::from("x"), String::from("y")],
         ];
         format_table(&headers, &rows, &mut buf);
         let s = out_str(&buf);
@@ -3267,7 +3445,10 @@ mod tests {
     #[test]
     fn parse_settings_ipv4() {
         let mut p = ConnectionProfile::new("t", ConnType::Ethernet);
-        parse_connection_settings(&mut p, &["ipv4.method", "manual", "ipv4.addresses", "10.0.0.1/24"]);
+        parse_connection_settings(
+            &mut p,
+            &["ipv4.method", "manual", "ipv4.addresses", "10.0.0.1/24"],
+        );
         assert_eq!(p.ipv4_method, Ipv4Method::Manual);
         assert_eq!(p.ipv4_addresses.len(), 1);
         assert_eq!(p.ipv4_addresses[0], "10.0.0.1/24");

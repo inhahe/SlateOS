@@ -238,11 +238,7 @@ impl Regex {
         for start in 0..=text.len() {
             let mut groups = vec![None; 10];
             if let Some(end) = self.match_at(text, start, 0, &mut groups) {
-                return Some(MatchResult {
-                    start,
-                    end,
-                    groups,
-                });
+                return Some(MatchResult { start, end, groups });
             }
         }
         None
@@ -297,9 +293,7 @@ impl Regex {
                 if pos < text.len() {
                     let ch = text[pos];
                     let in_class = if self.ignore_case {
-                        bytes
-                            .iter()
-                            .any(|&b| b.eq_ignore_ascii_case(&ch))
+                        bytes.iter().any(|&b| b.eq_ignore_ascii_case(&ch))
                     } else {
                         bytes.contains(&ch)
                     };
@@ -369,9 +363,10 @@ impl Regex {
                 // Try matching once first (greedy), then zero times.
                 let mut dummy = groups.clone();
                 if let Some(end1) = self.match_single(inner, text, pos, &mut dummy)
-                    && let Some(end) = self.match_at(text, end1, node_idx + 1, groups) {
-                        return Some(end);
-                    }
+                    && let Some(end) = self.match_at(text, end1, node_idx + 1, groups)
+                {
+                    return Some(end);
+                }
                 self.match_at(text, pos, node_idx + 1, groups)
             }
             ReNode::GroupStart(n) => {
@@ -437,18 +432,12 @@ impl Regex {
                 if pos < text.len() {
                     let ch = text[pos];
                     let in_class = if self.ignore_case {
-                        bytes
-                            .iter()
-                            .any(|&b| b.eq_ignore_ascii_case(&ch))
+                        bytes.iter().any(|&b| b.eq_ignore_ascii_case(&ch))
                     } else {
                         bytes.contains(&ch)
                     };
                     let matches = if *negated { !in_class } else { in_class };
-                    if matches {
-                        Some(pos + 1)
-                    } else {
-                        None
-                    }
+                    if matches { Some(pos + 1) } else { None }
                 } else {
                     None
                 }
@@ -463,9 +452,10 @@ impl Regex {
             ReNode::GroupEnd(n) => {
                 let n = *n;
                 if n < groups.len()
-                    && let Some((start, _)) = groups[n] {
-                        groups[n] = Some((start, pos));
-                    }
+                    && let Some((start, _)) = groups[n]
+                {
+                    groups[n] = Some((start, pos));
+                }
                 Some(pos)
             }
             _ => None,
@@ -514,8 +504,7 @@ enum AddressRange {
 }
 
 /// Substitution flags.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct SubFlags {
     /// Replace all occurrences.
     global: bool,
@@ -526,7 +515,6 @@ struct SubFlags {
     /// Replace only the Nth occurrence (0 = not set).
     nth: usize,
 }
-
 
 /// A sed editing command.
 #[derive(Debug, Clone)]
@@ -623,7 +611,9 @@ fn parse_address(bytes: &[u8], pos: &mut usize, extended: bool) -> Result<Option
             *pos += 1;
         }
         let num_str = std::str::from_utf8(&bytes[start..*pos]).map_err(|e| e.to_string())?;
-        let num: usize = num_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+        let num: usize = num_str
+            .parse()
+            .map_err(|e: std::num::ParseIntError| e.to_string())?;
         Ok(Some(Address::Line(num)))
     } else if ch == b'$' {
         *pos += 1;
@@ -672,11 +662,7 @@ fn read_delimited(bytes: &[u8], pos: &mut usize, delim: u8) -> Result<Vec<u8>, S
 }
 
 /// Parse a complete command, including address and command letter.
-fn parse_one_command(
-    bytes: &[u8],
-    pos: &mut usize,
-    extended: bool,
-) -> Result<SedCommand, String> {
+fn parse_one_command(bytes: &[u8], pos: &mut usize, extended: bool) -> Result<SedCommand, String> {
     skip_whitespace(bytes, pos);
 
     // Parse first address.
@@ -743,10 +729,7 @@ fn parse_one_command(
             Command::Group(group_cmds)
         }
         other => {
-            return Err(format!(
-                "unknown command: '{}'",
-                char::from(other)
-            ));
+            return Err(format!("unknown command: '{}'", char::from(other)));
         }
     };
 
@@ -764,8 +747,7 @@ fn parse_text_argument(bytes: &[u8], pos: &mut usize) -> Vec<u8> {
     if *pos < bytes.len() && bytes[*pos] == b'\\' {
         *pos += 1;
     }
-    if *pos < bytes.len() && (bytes[*pos] == b'\n' || bytes[*pos] == b' ' || bytes[*pos] == b'\t')
-    {
+    if *pos < bytes.len() && (bytes[*pos] == b'\n' || bytes[*pos] == b' ' || bytes[*pos] == b'\t') {
         *pos += 1;
     }
     let mut text = Vec::new();
@@ -849,11 +831,7 @@ fn parse_transliterate(bytes: &[u8], pos: &mut usize) -> Result<Command, String>
 }
 
 /// Parse a `{ ... }` group of commands.
-fn parse_group(
-    bytes: &[u8],
-    pos: &mut usize,
-    extended: bool,
-) -> Result<Vec<SedCommand>, String> {
+fn parse_group(bytes: &[u8], pos: &mut usize, extended: bool) -> Result<Vec<SedCommand>, String> {
     let mut commands = Vec::new();
     loop {
         skip_whitespace_and_semicolons(bytes, pos);
@@ -904,11 +882,7 @@ impl SedEngine {
     }
 
     /// Process all lines from a reader, writing output to the given writer.
-    fn process<R: BufRead, W: Write>(
-        &mut self,
-        reader: R,
-        writer: &mut W,
-    ) -> io::Result<()> {
+    fn process<R: BufRead, W: Write>(&mut self, reader: R, writer: &mut W) -> io::Result<()> {
         let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
         self.total_lines = Some(lines.len());
 
@@ -958,12 +932,8 @@ impl SedEngine {
         writer: &mut W,
     ) -> io::Result<ExecResult> {
         for cmd in commands {
-            let matches_addr = self.matches_address(
-                &cmd.address,
-                pattern_space,
-                is_last,
-                range_idx,
-            );
+            let matches_addr =
+                self.matches_address(&cmd.address, pattern_space, is_last, range_idx);
             let should_exec = if cmd.negated {
                 !matches_addr
             } else {
@@ -984,8 +954,7 @@ impl SedEngine {
                     replacement,
                     flags,
                 } => {
-                    let changed =
-                        apply_substitute(pattern, replacement, flags, pattern_space);
+                    let changed = apply_substitute(pattern, replacement, flags, pattern_space);
                     if changed && flags.print {
                         writer.write_all(pattern_space)?;
                         writer.write_all(b"\n")?;
@@ -1025,9 +994,10 @@ impl SedEngine {
                 Command::Transliterate { src, dst } => {
                     for byte in pattern_space.iter_mut() {
                         if let Some(idx) = src.iter().position(|&s| s == *byte)
-                            && let Some(&replacement) = dst.get(idx) {
-                                *byte = replacement;
-                            }
+                            && let Some(&replacement) = dst.get(idx)
+                        {
+                            *byte = replacement;
+                        }
                     }
                 }
                 Command::LineNumber => {
@@ -1064,17 +1034,15 @@ impl SedEngine {
             AddressRange::Single(addr) => self.matches_single_address(addr, pattern_space, is_last),
             AddressRange::Range(start, end) => {
                 let idx = *range_idx;
-                let active = self
-                    .range_active
-                    .get(idx)
-                    .is_some_and(|c| c.get());
+                let active = self.range_active.get(idx).is_some_and(|c| c.get());
 
                 if active {
                     // We're inside the range. Check if end matches.
                     if self.matches_single_address(end, pattern_space, is_last)
-                        && let Some(cell) = self.range_active.get(idx) {
-                            cell.set(false);
-                        }
+                        && let Some(cell) = self.range_active.get(idx)
+                    {
+                        cell.set(false);
+                    }
                     true
                 } else if self.matches_single_address(start, pattern_space, is_last) {
                     if let Some(cell) = self.range_active.get(idx) {
@@ -1088,12 +1056,7 @@ impl SedEngine {
         }
     }
 
-    fn matches_single_address(
-        &self,
-        addr: &Address,
-        pattern_space: &[u8],
-        is_last: bool,
-    ) -> bool {
+    fn matches_single_address(&self, addr: &Address, pattern_space: &[u8], is_last: bool) -> bool {
         match addr {
             Address::Line(n) => self.line_number == *n,
             Address::Last => is_last,
@@ -1150,7 +1113,8 @@ fn apply_substitute(
                 Some(mat) => {
                     occurrence += 1;
                     // Copy text before the match.
-                    result.extend_from_slice(&pattern_space[search_start..search_start + mat.start]);
+                    result
+                        .extend_from_slice(&pattern_space[search_start..search_start + mat.start]);
                     // Build replacement.
                     let repl = build_replacement(replacement, search_slice, &mat);
                     result.extend_from_slice(&repl);
@@ -1191,9 +1155,7 @@ fn apply_substitute(
                         changed = true;
                         break;
                     }
-                    result.extend_from_slice(
-                        &pattern_space[search_start..search_start + mat.end],
-                    );
+                    result.extend_from_slice(&pattern_space[search_start..search_start + mat.end]);
                     search_start += mat.end.max(mat.start + 1);
                 }
                 None => {
@@ -1239,10 +1201,11 @@ fn build_replacement(template: &[u8], text: &[u8], mat: &MatchResult) -> Vec<u8>
                 let group_num = (next - b'0') as usize;
                 if group_num < mat.groups.len()
                     && let Some((gs, ge)) = mat.groups[group_num]
-                        && gs < text.len() {
-                            let end = ge.min(text.len());
-                            result.extend_from_slice(&text[gs..end]);
-                        }
+                    && gs < text.len()
+                {
+                    let end = ge.min(text.len());
+                    result.extend_from_slice(&text[gs..end]);
+                }
                 i += 2;
             } else if next == b'n' {
                 result.push(b'\n');
@@ -1358,8 +1321,7 @@ fn parse_args() -> Result<Args, String> {
                     b'e' => {
                         // Rest of this arg or next arg is the expression.
                         if j + 1 < flag_chars.len() {
-                            let rest =
-                                String::from_utf8_lossy(&flag_chars[j + 1..]).to_string();
+                            let rest = String::from_utf8_lossy(&flag_chars[j + 1..]).to_string();
                             args.expressions.push(rest);
                             j = flag_chars.len(); // consumed
                             continue;
@@ -1372,8 +1334,7 @@ fn parse_args() -> Result<Args, String> {
                     }
                     b'f' => {
                         if j + 1 < flag_chars.len() {
-                            let rest =
-                                String::from_utf8_lossy(&flag_chars[j + 1..]).to_string();
+                            let rest = String::from_utf8_lossy(&flag_chars[j + 1..]).to_string();
                             args.script_files.push(rest);
                             j = flag_chars.len();
                             continue;
@@ -1452,7 +1413,9 @@ fn run() -> Result<(), String> {
         let stdout = io::stdout();
         let mut writer = io::BufWriter::new(stdout.lock());
         let mut engine = SedEngine::new(commands.clone(), args.quiet);
-        engine.process(reader, &mut writer).map_err(|e| e.to_string())?;
+        engine
+            .process(reader, &mut writer)
+            .map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())?;
     } else {
         // Process listed files in order.
@@ -1462,7 +1425,9 @@ fn run() -> Result<(), String> {
         for file_path in &args.input_files {
             let contents = fs::read(file_path).map_err(|e| format!("{file_path}: {e}"))?;
             let reader = io::Cursor::new(contents);
-            engine.process(reader, &mut writer).map_err(|e| e.to_string())?;
+            engine
+                .process(reader, &mut writer)
+                .map_err(|e| e.to_string())?;
         }
         writer.flush().map_err(|e| e.to_string())?;
     }
@@ -1836,7 +1801,12 @@ mod tests {
 
     #[test]
     fn test_engine_negated_delete() {
-        let out = run_sed("/keep/!d", "drop\nkeep this\ndrop too\nkeep me\n", false, false);
+        let out = run_sed(
+            "/keep/!d",
+            "drop\nkeep this\ndrop too\nkeep me\n",
+            false,
+            false,
+        );
         assert_eq!(out, "keep this\nkeep me\n");
     }
 
@@ -1872,7 +1842,12 @@ mod tests {
 
     #[test]
     fn test_engine_pattern_range() {
-        let out = run_sed("/start/,/end/d", "before\nstart\nmiddle\nend\nafter\n", false, false);
+        let out = run_sed(
+            "/start/,/end/d",
+            "before\nstart\nmiddle\nend\nafter\n",
+            false,
+            false,
+        );
         assert_eq!(out, "before\nafter\n");
     }
 

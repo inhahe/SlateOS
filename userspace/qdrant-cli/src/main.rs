@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_qd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_qd(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Qdrant 2024 (Slate OS) — qdrant CLI 1.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Qdrant 2024 (Slate OS) — qdrant CLI 1.x");
+        return 0;
+    }
     println!("Qdrant 2024 (Slate OS) — Open-Source Rust Vector Database");
     println!("  Vendor: Qdrant Solutions GmbH (Berlin, Germany — private)");
     println!("  Founders: Andrey Vasnetsov (CTO) + Andre Zayarni (CEO), 2021");
@@ -35,14 +42,24 @@ fn run_qd(args: &[String], _prog: &str) -> i32 {
     println!("         Series A Jan 2024: $28M at $100M+ valuation");
     println!("         Investors: Spark Capital, Unusual Ventures, 42CAP, Pareto Holdings");
     println!("         Revenue private but growing — Cloud product 2023+");
-    println!("  Strategic position: 'fastest Rust-based vector DB — production-grade open source + cloud':");
-    println!("                    pitch: 'highest performance vector DB, written in Rust, open source, with filterable HNSW'");
+    println!(
+        "  Strategic position: 'fastest Rust-based vector DB — production-grade open source + cloud':"
+    );
+    println!(
+        "                    pitch: 'highest performance vector DB, written in Rust, open source, with filterable HNSW'"
+    );
     println!("                    target: AI/ML teams wanting performance + OSS option");
-    println!("                    primary competitor: Pinecone (closed managed), Weaviate, Milvus, Chroma");
+    println!(
+        "                    primary competitor: Pinecone (closed managed), Weaviate, Milvus, Chroma"
+    );
     println!("                    secondary: pgvector, Elasticsearch");
-    println!("                    Qdrant's wedge: Rust performance + filterable HNSW (filter inside HNSW traversal) + OSS");
+    println!(
+        "                    Qdrant's wedge: Rust performance + filterable HNSW (filter inside HNSW traversal) + OSS"
+    );
     println!("                    benchmark-leading on most public vector DB benchmarks 2023-2024");
-    println!("                    'production-grade since day one' — multi-node + replication + WAL early");
+    println!(
+        "                    'production-grade since day one' — multi-node + replication + WAL early"
+    );
     println!("  Pricing (open-source + cloud + enterprise):");
     println!("    Qdrant Open Source: free, Apache 2.0, self-hosted");
     println!("    Qdrant Cloud Free: 1GB cluster, 1 node (always free)");
@@ -108,7 +125,9 @@ fn run_qd(args: &[String], _prog: &str) -> i32 {
     println!("    - HNSW graph: navigable small world, fast nearest-neighbor search");
     println!("    - Standard HNSW: 'find top-K, then filter by metadata'");
     println!("    - Problem: top-K may not contain any matching items (e.g. filter user=Alice)");
-    println!("    - Qdrant's HNSW: graph traversal considers filter, only visits matching neighbors");
+    println!(
+        "    - Qdrant's HNSW: graph traversal considers filter, only visits matching neighbors"
+    );
     println!("    - Result: correct top-K respecting filter, no over-search needed");
     println!("    - This is a non-trivial engineering accomplishment");
     println!("  The Rust performance angle:");
@@ -133,8 +152,12 @@ fn run_qd(args: &[String], _prog: &str) -> i32 {
     println!("    qdrant-cli ping http://localhost:6333");
     println!("    qdrant-cli collection create my-coll --vector-size=1536 --distance=Cosine");
     println!("    qdrant-cli collection list");
-    println!("    qdrant-cli point upsert my-coll --id=1 --vector='[0.1,0.2,...]' --payload='{{\"category\":\"news\"}}'");
-    println!("    qdrant-cli point search my-coll --vector='[0.1,0.2,...]' --limit=10 --filter='{{\"must\":[{{\"key\":\"category\",\"match\":{{\"value\":\"news\"}}}}]}}'");
+    println!(
+        "    qdrant-cli point upsert my-coll --id=1 --vector='[0.1,0.2,...]' --payload='{{\"category\":\"news\"}}'"
+    );
+    println!(
+        "    qdrant-cli point search my-coll --vector='[0.1,0.2,...]' --limit=10 --filter='{{\"must\":[{{\"key\":\"category\",\"match\":{{\"value\":\"news\"}}}}]}}'"
+    );
     println!("    qdrant-cli snapshot create my-coll --location=/snapshots/");
     println!("    qdrant-cli cluster info                                  # multi-node info");
     println!("    qdrant-cli alias create my-alias --collection=my-coll");
@@ -155,13 +178,18 @@ fn run_qd(args: &[String], _prog: &str) -> i32 {
     println!("           v1.0 API stability good, but breaking changes in early versions");
     println!("           ecosystem of pre-built integrations smaller than Pinecone");
     println!("           FastEmbed is great but separate concern from DB");
-    println!("  Differentiator: written in Rust (single binary, no GC, SIMD-optimized) + filterable HNSW (filter during graph traversal — not just post-filter) + scalar/binary/product quantization for 4-32x memory reduction + multi-vector + sparse + dense hybrid + sharding + Raft replication + Apache 2.0 open source + Andrey Vasnetsov + Andre Zayarni founders 2021 + 19K+ GitHub stars + 5M+ Docker pulls + Qdrant Cloud + Hybrid Cloud (BYOC) + FastEmbed (50x faster embedding library) + GitLab/Bayer customers + $37M raised + Berlin engineering — the performance-leading open-source Rust vector database that solves the filter+vector search problem with filterable HNSW and ranks top-3 on public benchmarks");
+    println!(
+        "  Differentiator: written in Rust (single binary, no GC, SIMD-optimized) + filterable HNSW (filter during graph traversal — not just post-filter) + scalar/binary/product quantization for 4-32x memory reduction + multi-vector + sparse + dense hybrid + sharding + Raft replication + Apache 2.0 open source + Andrey Vasnetsov + Andre Zayarni founders 2021 + 19K+ GitHub stars + 5M+ Docker pulls + Qdrant Cloud + Hybrid Cloud (BYOC) + FastEmbed (50x faster embedding library) + GitLab/Bayer customers + $37M raised + Berlin engineering — the performance-leading open-source Rust vector database that solves the filter+vector search problem with filterable HNSW and ranks top-3 on public benchmarks"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "qdrant".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "qdrant".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_qd(&rest, &_prog);
     process::exit(code);
@@ -169,7 +197,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_qd};
+    use super::{basename, run_qd, strip_ext};
 
     #[test]
     fn basename_strips_path() {

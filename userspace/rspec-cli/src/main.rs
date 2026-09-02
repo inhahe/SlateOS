@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_rspec(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -40,8 +44,11 @@ fn run_rspec(args: &[String]) -> i32 {
         println!("  create  spec/spec_helper.rb");
         return 0;
     }
-    let format = args.windows(2).find(|w| w[0] == "-f" || w[0] == "--format")
-        .map(|w| w[1].as_str()).unwrap_or("progress");
+    let format = args
+        .windows(2)
+        .find(|w| w[0] == "-f" || w[0] == "--format")
+        .map(|w| w[1].as_str())
+        .unwrap_or("progress");
     let dry_run = args.iter().any(|a| a == "--dry-run");
     let fail_fast = args.iter().any(|a| a == "--fail-fast");
     let profile = args.iter().any(|a| a == "--profile");
@@ -92,7 +99,10 @@ fn run_rspec(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "rspec".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "rspec".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_rspec(&rest);
     process::exit(code);
@@ -100,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_rspec};
+    use super::{basename, run_rspec, strip_ext};
 
     #[test]
     fn basename_strips_path() {

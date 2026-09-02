@@ -72,11 +72,11 @@ impl LogLevel {
     fn ansi_color(self) -> &'static str {
         match self {
             Self::Emergency | Self::Alert => "\x1b[1;31m", // bold red
-            Self::Critical | Self::Error => "\x1b[31m",     // red
-            Self::Warning => "\x1b[33m",                     // yellow
-            Self::Notice => "\x1b[36m",                      // cyan
-            Self::Info => "",                                 // default
-            Self::Debug => "\x1b[90m",                       // dim gray
+            Self::Critical | Self::Error => "\x1b[31m",    // red
+            Self::Warning => "\x1b[33m",                   // yellow
+            Self::Notice => "\x1b[36m",                    // cyan
+            Self::Info => "",                              // default
+            Self::Debug => "\x1b[90m",                     // dim gray
         }
     }
 }
@@ -186,7 +186,9 @@ fn extract_json_number(json: &str, key: &str) -> Option<u64> {
     let search = format!("\"{}\":", key);
     let start = json.find(&search)? + search.len();
     let rest = json[start..].trim_start();
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 
@@ -198,23 +200,17 @@ fn extract_json_number(json: &str, key: &str) -> Option<u64> {
 fn read_kernel_messages() -> Vec<KernelMessage> {
     // Try /proc/kmsg first (live kernel ring buffer).
     if let Some(content) = read_file("/proc/kmsg") {
-        return content.lines()
-            .filter_map(parse_kmsg_line)
-            .collect();
+        return content.lines().filter_map(parse_kmsg_line).collect();
     }
 
     // Fall back to /var/log/kernel (syslogd-managed).
     if let Some(content) = read_file("/var/log/kernel") {
-        return content.lines()
-            .filter_map(parse_kmsg_line)
-            .collect();
+        return content.lines().filter_map(parse_kmsg_line).collect();
     }
 
     // Try /var/log/syslog as last resort.
     if let Some(content) = read_file("/var/log/syslog") {
-        return content.lines()
-            .filter_map(parse_kmsg_line)
-            .collect();
+        return content.lines().filter_map(parse_kmsg_line).collect();
     }
 
     Vec::new()
@@ -279,7 +275,10 @@ fn display_message(msg: &KernelMessage, config: &Config) {
     if config.color {
         let color = msg.level.ansi_color();
         let reset = if color.is_empty() { "" } else { "\x1b[0m" };
-        println!("{ts} {color}{level_tag}{reset} {facility_str}{}", msg.message);
+        println!(
+            "{ts} {color}{level_tag}{reset} {facility_str}{}",
+            msg.message
+        );
     } else {
         println!("{ts} {level_tag} {facility_str}{}", msg.message);
     }
@@ -465,9 +464,10 @@ fn main() {
 
     // Limit to last N.
     if let Some(count) = config.count
-        && messages.len() > count {
-            messages = messages.split_off(messages.len() - count);
-        }
+        && messages.len() > count
+    {
+        messages = messages.split_off(messages.len() - count);
+    }
 
     // Display.
     for msg in &messages {
@@ -495,9 +495,10 @@ fn main() {
                 for msg in new_messages.iter().skip(last_count) {
                     // Apply filters.
                     if let Some(min_level) = config.level_filter
-                        && (msg.level as u8) > (min_level as u8) {
-                            continue;
-                        }
+                        && (msg.level as u8) > (min_level as u8)
+                    {
+                        continue;
+                    }
                     if let Some(ref search) = config.search {
                         let search_lower = search.to_lowercase();
                         if !msg.message.to_lowercase().contains(&search_lower)

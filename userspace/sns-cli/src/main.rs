@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sns(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sns [OPTIONS]");
-        println!("AWS SNS (Slate OS) — Simple Notification Service (pub/sub + SMS + email + mobile push)");
+        println!(
+            "AWS SNS (Slate OS) — Simple Notification Service (pub/sub + SMS + email + mobile push)"
+        );
         println!();
         println!("Options:");
         println!("  --topic                Standard or FIFO topic (pub/sub)");
@@ -22,8 +28,13 @@ fn run_sns(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("AWS SNS 2024 (Slate OS) — sns CLI (aws-cli v2)"); return 0; }
-    println!("AWS SNS 2024 (Slate OS) — Simple Notification Service (pub/sub + multi-protocol delivery)");
+    if args.iter().any(|a| a == "--version") {
+        println!("AWS SNS 2024 (Slate OS) — sns CLI (aws-cli v2)");
+        return 0;
+    }
+    println!(
+        "AWS SNS 2024 (Slate OS) — Simple Notification Service (pub/sub + multi-protocol delivery)"
+    );
     println!("  Vendor: Amazon Web Services (Seattle, WA — NASDAQ: AMZN)");
     println!("  History:");
     println!("    - Launched Apr 2010 — fifth core AWS service");
@@ -35,10 +46,18 @@ fn run_sns(args: &[String], _prog: &str) -> i32 {
     println!("    - Cross-region delivery + global SMS expansion");
     println!("    - 'SNS = push, SQS = pull' — the two pillars of AWS messaging");
     println!("  Strategic position: 'cloud pub/sub with multi-protocol delivery':");
-    println!("                    pitch: 'fan out events to anywhere — SQS, Lambda, SMS, email, HTTP, mobile push'");
-    println!("                    target: event-driven architectures, alerts, notifications, A2A integration");
-    println!("                    primary competitor: GCP Pub/Sub, Azure Event Grid, Apache Kafka topics");
-    println!("                    secondary: Twilio (SMS), SendGrid (email), Firebase (mobile push)");
+    println!(
+        "                    pitch: 'fan out events to anywhere — SQS, Lambda, SMS, email, HTTP, mobile push'"
+    );
+    println!(
+        "                    target: event-driven architectures, alerts, notifications, A2A integration"
+    );
+    println!(
+        "                    primary competitor: GCP Pub/Sub, Azure Event Grid, Apache Kafka topics"
+    );
+    println!(
+        "                    secondary: Twilio (SMS), SendGrid (email), Firebase (mobile push)"
+    );
     println!("                    SNS wedge: pub/sub + multi-protocol delivery in one service");
     println!("                    pay-per-million-publishes pricing");
     println!("                    'Send a message, AWS fans it out everywhere'");
@@ -49,7 +68,9 @@ fn run_sns(args: &[String], _prog: &str) -> i32 {
     println!("    SQS deliveries: free");
     println!("    Lambda deliveries: free");
     println!("    Email deliveries: $2.00 per 100K emails");
-    println!("    SMS deliveries: variable by country ($0.00645+/SMS US, up to $0.50+/SMS some intl)");
+    println!(
+        "    SMS deliveries: variable by country ($0.00645+/SMS US, up to $0.50+/SMS some intl)"
+    );
     println!("    Mobile push (APNs/FCM): $0.50 per million");
     println!("    SMS pricing is THE main SNS cost driver — verify rates per country");
     println!("  Architecture (durable pub/sub):");
@@ -137,13 +158,25 @@ fn run_sns(args: &[String], _prog: &str) -> i32 {
     println!("  AWS CLI usage:");
     println!("    aws sns create-topic --name my-topic");
     println!("    aws sns create-topic --name my-fifo-topic.fifo --attributes FifoTopic=true");
-    println!("    aws sns subscribe --topic-arn <arn> --protocol sqs --notification-endpoint <sqs-arn>");
-    println!("    aws sns subscribe --topic-arn <arn> --protocol email --notification-endpoint user@example.com");
-    println!("    aws sns subscribe --topic-arn <arn> --protocol sms --notification-endpoint +15551234567");
+    println!(
+        "    aws sns subscribe --topic-arn <arn> --protocol sqs --notification-endpoint <sqs-arn>"
+    );
+    println!(
+        "    aws sns subscribe --topic-arn <arn> --protocol email --notification-endpoint user@example.com"
+    );
+    println!(
+        "    aws sns subscribe --topic-arn <arn> --protocol sms --notification-endpoint +15551234567"
+    );
     println!("    aws sns publish --topic-arn <arn> --message 'hello world'");
-    println!("    aws sns publish --phone-number +15551234567 --message 'OTP: 123456'   # direct SMS");
-    println!("    aws sns publish --topic-arn <arn> --message-attributes '{{\"priority\":{{\"DataType\":\"String\",\"StringValue\":\"high\"}}}}'");
-    println!("    aws sns set-subscription-attributes --subscription-arn <arn> --attribute-name FilterPolicy --attribute-value '{{\"priority\":[\"high\"]}}'");
+    println!(
+        "    aws sns publish --phone-number +15551234567 --message 'OTP: 123456'   # direct SMS"
+    );
+    println!(
+        "    aws sns publish --topic-arn <arn> --message-attributes '{{\"priority\":{{\"DataType\":\"String\",\"StringValue\":\"high\"}}}}'"
+    );
+    println!(
+        "    aws sns set-subscription-attributes --subscription-arn <arn> --attribute-name FilterPolicy --attribute-value '{{\"priority\":[\"high\"]}}'"
+    );
     println!("    aws sns list-topics");
     println!("    aws sns list-subscriptions-by-topic --topic-arn <arn>");
     println!("  Customers (every AWS customer using event-driven architecture):");
@@ -156,20 +189,27 @@ fn run_sns(args: &[String], _prog: &str) -> i32 {
     println!("    - 'Every CloudWatch alarm in production uses SNS' — common saying");
     println!("  Critique: SMS pricing per-country surprises (international SMS = expensive)");
     println!("           no native two-way SMS (use End User Messaging instead)");
-    println!("           SNS email deliverability inferior to SES (use SES for marketing/transactional)");
+    println!(
+        "           SNS email deliverability inferior to SES (use SES for marketing/transactional)"
+    );
     println!("           Standard topic duplicates = subscribers must be idempotent");
     println!("           FIFO 300 msg/s limit = bottleneck for high-throughput pub/sub");
     println!("           message size 256KB max (extended library for larger)");
     println!("           AWS lock-in — moving to Kafka requires architectural rework");
     println!("           no message retention (delivery only, no replay) — use Kinesis for that");
     println!("           filter policies have complexity limits");
-    println!("  Differentiator: AWS pub/sub fanout service (April 2010, fifth core AWS service) + Standard topics (unlimited throughput, at-least-once) + FIFO topics (exactly-once, strict ordering, 300 msg/s) + multi-protocol delivery (SQS + Lambda + HTTP/HTTPS + email + SMS + mobile push APNs/FCM/ADM/Baidu) + the canonical SNS→SQS fanout pattern (one publish, N queue copies) + Message Filtering (subscribers see only matching messages via JSON filter policy) + Dead-Letter Queues for failed deliveries + cross-region delivery + KMS server-side encryption + 200+ countries SMS reach + transactional + promotional SMS tiers + Kinesis Data Firehose subscription + EventBridge integration + Netflix/Airbnb/Lyft/Pinterest/Coinbase-proven + 'every CloudWatch alarm uses SNS' + $0.50/M publishes pricing — the AWS push-based messaging service that complements SQS, the foundation under which event-driven AWS architectures are built");
+    println!(
+        "  Differentiator: AWS pub/sub fanout service (April 2010, fifth core AWS service) + Standard topics (unlimited throughput, at-least-once) + FIFO topics (exactly-once, strict ordering, 300 msg/s) + multi-protocol delivery (SQS + Lambda + HTTP/HTTPS + email + SMS + mobile push APNs/FCM/ADM/Baidu) + the canonical SNS→SQS fanout pattern (one publish, N queue copies) + Message Filtering (subscribers see only matching messages via JSON filter policy) + Dead-Letter Queues for failed deliveries + cross-region delivery + KMS server-side encryption + 200+ countries SMS reach + transactional + promotional SMS tiers + Kinesis Data Firehose subscription + EventBridge integration + Netflix/Airbnb/Lyft/Pinterest/Coinbase-proven + 'every CloudWatch alarm uses SNS' + $0.50/M publishes pricing — the AWS push-based messaging service that complements SQS, the foundation under which event-driven AWS architectures are built"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sns".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "sns".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_sns(&rest, &_prog);
     process::exit(code);
@@ -177,7 +217,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sns};
+    use super::{basename, run_sns, strip_ext};
 
     #[test]
     fn basename_strips_path() {

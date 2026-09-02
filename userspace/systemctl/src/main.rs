@@ -362,12 +362,7 @@ impl UnitFile {
                 // Process the assembled line below.
                 let assembled = continued_line.clone();
                 continued_line.clear();
-                Self::parse_kv(
-                    &assembled,
-                    &current_section,
-                    &mut sections,
-                    line_no,
-                )?;
+                Self::parse_kv(&assembled, &current_section, &mut sections, line_no)?;
                 continue;
             }
 
@@ -402,12 +397,7 @@ impl UnitFile {
 
         if in_continuation && !continued_line.is_empty() {
             // Trailing continued line without a final line: treat as-is.
-            Self::parse_kv(
-                &continued_line,
-                &current_section,
-                &mut sections,
-                0,
-            )?;
+            Self::parse_kv(&continued_line, &current_section, &mut sections, 0)?;
         }
 
         Ok(UnitFile { sections })
@@ -419,9 +409,9 @@ impl UnitFile {
         sections: &mut BTreeMap<String, Vec<(String, String)>>,
         line_no: usize,
     ) -> Result<(), String> {
-        let section = current_section.as_ref().ok_or_else(|| {
-            format!("Key-value pair outside section at line {}", line_no + 1)
-        })?;
+        let section = current_section
+            .as_ref()
+            .ok_or_else(|| format!("Key-value pair outside section at line {}", line_no + 1))?;
         if let Some(eq_pos) = line.find('=') {
             let key = line[..eq_pos].trim().to_string();
             let value = line[eq_pos + 1..].trim().to_string();
@@ -653,8 +643,7 @@ fn unescape_unit_name(input: &str) -> String {
 // ============================================================================
 
 /// Parsed global flags for systemctl.
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct SystemctlFlags {
     user_scope: bool,
     no_pager: bool,
@@ -667,7 +656,6 @@ struct SystemctlFlags {
     type_filter: Option<String>,
     state_filter: Option<String>,
 }
-
 
 /// Parse systemctl arguments into flags and remaining positional args.
 fn parse_systemctl_args(args: &[String]) -> (SystemctlFlags, Vec<String>) {
@@ -850,22 +838,86 @@ struct UnitFileEntry {
 
 fn simulated_unit_files() -> Vec<UnitFileEntry> {
     vec![
-        UnitFileEntry { name: "init.service", state: EnableState::Static, preset: "-" },
-        UnitFileEntry { name: "network.service", state: EnableState::Enabled, preset: "enabled" },
-        UnitFileEntry { name: "sshd.service", state: EnableState::Enabled, preset: "enabled" },
-        UnitFileEntry { name: "dbus.service", state: EnableState::Static, preset: "-" },
-        UnitFileEntry { name: "cron.service", state: EnableState::Enabled, preset: "enabled" },
-        UnitFileEntry { name: "logd.service", state: EnableState::Enabled, preset: "enabled" },
-        UnitFileEntry { name: "sysctl.service", state: EnableState::Static, preset: "-" },
-        UnitFileEntry { name: "basic.target", state: EnableState::Static, preset: "-" },
-        UnitFileEntry { name: "multi-user.target", state: EnableState::Static, preset: "-" },
-        UnitFileEntry { name: "graphical.target", state: EnableState::Static, preset: "-" },
-        UnitFileEntry { name: "sockets.target", state: EnableState::Static, preset: "-" },
-        UnitFileEntry { name: "timers.target", state: EnableState::Static, preset: "-" },
-        UnitFileEntry { name: "dbus.socket", state: EnableState::Static, preset: "-" },
-        UnitFileEntry { name: "logwatch.timer", state: EnableState::Enabled, preset: "enabled" },
-        UnitFileEntry { name: "tmp.mount", state: EnableState::Static, preset: "-" },
-        UnitFileEntry { name: "rescue.service", state: EnableState::Disabled, preset: "disabled" },
+        UnitFileEntry {
+            name: "init.service",
+            state: EnableState::Static,
+            preset: "-",
+        },
+        UnitFileEntry {
+            name: "network.service",
+            state: EnableState::Enabled,
+            preset: "enabled",
+        },
+        UnitFileEntry {
+            name: "sshd.service",
+            state: EnableState::Enabled,
+            preset: "enabled",
+        },
+        UnitFileEntry {
+            name: "dbus.service",
+            state: EnableState::Static,
+            preset: "-",
+        },
+        UnitFileEntry {
+            name: "cron.service",
+            state: EnableState::Enabled,
+            preset: "enabled",
+        },
+        UnitFileEntry {
+            name: "logd.service",
+            state: EnableState::Enabled,
+            preset: "enabled",
+        },
+        UnitFileEntry {
+            name: "sysctl.service",
+            state: EnableState::Static,
+            preset: "-",
+        },
+        UnitFileEntry {
+            name: "basic.target",
+            state: EnableState::Static,
+            preset: "-",
+        },
+        UnitFileEntry {
+            name: "multi-user.target",
+            state: EnableState::Static,
+            preset: "-",
+        },
+        UnitFileEntry {
+            name: "graphical.target",
+            state: EnableState::Static,
+            preset: "-",
+        },
+        UnitFileEntry {
+            name: "sockets.target",
+            state: EnableState::Static,
+            preset: "-",
+        },
+        UnitFileEntry {
+            name: "timers.target",
+            state: EnableState::Static,
+            preset: "-",
+        },
+        UnitFileEntry {
+            name: "dbus.socket",
+            state: EnableState::Static,
+            preset: "-",
+        },
+        UnitFileEntry {
+            name: "logwatch.timer",
+            state: EnableState::Enabled,
+            preset: "enabled",
+        },
+        UnitFileEntry {
+            name: "tmp.mount",
+            state: EnableState::Static,
+            preset: "-",
+        },
+        UnitFileEntry {
+            name: "rescue.service",
+            state: EnableState::Disabled,
+            preset: "disabled",
+        },
     ]
 }
 
@@ -873,10 +925,7 @@ fn simulated_unit_files() -> Vec<UnitFileEntry> {
 // Systemctl sub-commands
 // ============================================================================
 
-fn cmd_list_units(
-    out: &mut dyn Write,
-    flags: &SystemctlFlags,
-) -> io::Result<i32> {
+fn cmd_list_units(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
     let units = simulated_units();
 
     if !flags.no_legend {
@@ -897,9 +946,10 @@ fn cmd_list_units(
         }
         // Apply state filter.
         if let Some(ref sf) = flags.state_filter
-            && u.active.as_str() != sf.as_str() {
-                continue;
-            }
+            && u.active.as_str() != sf.as_str()
+        {
+            continue;
+        }
         // Skip inactive unless --all.
         if !flags.all && u.active == ActiveState::Inactive {
             continue;
@@ -926,9 +976,10 @@ fn cmd_list_units(
                     }
                 }
                 if let Some(ref sf) = flags.state_filter
-                    && u.active.as_str() != sf.as_str() {
-                        return false;
-                    }
+                    && u.active.as_str() != sf.as_str()
+                {
+                    return false;
+                }
                 flags.all || u.active != ActiveState::Inactive
             })
             .count();
@@ -939,10 +990,7 @@ fn cmd_list_units(
     Ok(0)
 }
 
-fn cmd_list_unit_files(
-    out: &mut dyn Write,
-    flags: &SystemctlFlags,
-) -> io::Result<i32> {
+fn cmd_list_unit_files(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
     let files = simulated_unit_files();
 
     if !flags.no_legend {
@@ -966,11 +1014,7 @@ fn cmd_list_unit_files(
     Ok(0)
 }
 
-fn cmd_status(
-    out: &mut dyn Write,
-    unit_name: &str,
-    _flags: &SystemctlFlags,
-) -> io::Result<i32> {
+fn cmd_status(out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
     let units = simulated_units();
     if let Some(u) = units.iter().find(|e| e.name == unit_name) {
         writeln!(out, "● {} - {}", u.name, u.description)?;
@@ -992,11 +1036,7 @@ fn cmd_status(
         writeln!(out, "        CPU: 50ms")?;
         Ok(0)
     } else {
-        writeln!(
-            out,
-            "Unit {} could not be found.",
-            unit_name
-        )?;
+        writeln!(out, "Unit {} could not be found.", unit_name)?;
         Ok(4)
     }
 }
@@ -1051,7 +1091,11 @@ fn cmd_unit_action(
     };
 
     if !flags.quiet {
-        let scope = if flags.user_scope { "--user" } else { "--system" };
+        let scope = if flags.user_scope {
+            "--user"
+        } else {
+            "--system"
+        };
         match action {
             "start" => writeln!(out, "Starting {} ({})...", name_with_suffix, scope)?,
             "stop" => writeln!(out, "Stopping {} ({})...", name_with_suffix, scope)?,
@@ -1089,11 +1133,7 @@ fn cmd_unit_action(
     Ok(0)
 }
 
-fn cmd_is_active(
-    out: &mut dyn Write,
-    unit_name: &str,
-    _flags: &SystemctlFlags,
-) -> io::Result<i32> {
+fn cmd_is_active(out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
     let units = simulated_units();
     if let Some(u) = units.iter().find(|e| e.name == unit_name) {
         writeln!(out, "{}", u.active.as_str())?;
@@ -1127,11 +1167,7 @@ fn cmd_is_enabled(
     }
 }
 
-fn cmd_is_failed(
-    out: &mut dyn Write,
-    unit_name: &str,
-    _flags: &SystemctlFlags,
-) -> io::Result<i32> {
+fn cmd_is_failed(out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
     let units = simulated_units();
     if let Some(u) = units.iter().find(|e| e.name == unit_name) {
         if u.active == ActiveState::Failed {
@@ -1224,10 +1260,7 @@ fn cmd_list_timers(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i3
     writeln!(
         out,
         "{:<24} {:<24} {:<24} {:<24} logwatch.timer",
-        "Mon 2026-01-02 00:00:00",
-        "23h left",
-        "Mon 2026-01-01 00:00:00",
-        "1h ago"
+        "Mon 2026-01-02 00:00:00", "23h left", "Mon 2026-01-01 00:00:00", "1h ago"
     )?;
     if !flags.no_legend {
         writeln!(out)?;
@@ -1285,7 +1318,10 @@ fn cmd_list_dependencies(
 // ============================================================================
 
 fn analyze_time(out: &mut dyn Write) -> io::Result<i32> {
-    writeln!(out, "Startup finished in 1.200s (kernel) + 2.500s (userspace) = 3.700s")?;
+    writeln!(
+        out,
+        "Startup finished in 1.200s (kernel) + 2.500s (userspace) = 3.700s"
+    )?;
     writeln!(out, "graphical.target reached after 3.500s in userspace.")?;
     Ok(0)
 }
@@ -1308,8 +1344,14 @@ fn analyze_blame(out: &mut dyn Write) -> io::Result<i32> {
 
 fn analyze_critical_chain(out: &mut dyn Write, unit: Option<&str>) -> io::Result<i32> {
     let target = unit.unwrap_or("graphical.target");
-    writeln!(out, "The time when unit became active or started is printed after the \"@\" character.")?;
-    writeln!(out, "The time the unit took to start is printed after the \"+\" character.")?;
+    writeln!(
+        out,
+        "The time when unit became active or started is printed after the \"@\" character."
+    )?;
+    writeln!(
+        out,
+        "The time the unit took to start is printed after the \"+\" character."
+    )?;
     writeln!(out)?;
     writeln!(out, "{} @3.500s", target)?;
     writeln!(out, "└─multi-user.target @3.400s")?;
@@ -1363,7 +1405,11 @@ fn analyze_dot(out: &mut dyn Write, units: &[String]) -> io::Result<i32> {
 fn analyze_verify(out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
     // Try reading a unit file from stdin is not practical; just validate the name.
     if !unit_name.contains('.') {
-        writeln!(out, "{}: Unit name should include a type suffix.", unit_name)?;
+        writeln!(
+            out,
+            "{}: Unit name should include a type suffix.",
+            unit_name
+        )?;
         return Ok(1);
     }
     let ut = UnitType::from_unit_name(unit_name);
@@ -1377,14 +1423,36 @@ fn analyze_verify(out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
 
 fn analyze_security(out: &mut dyn Write, unit: Option<&str>) -> io::Result<i32> {
     let unit_name = unit.unwrap_or("sshd.service");
-    writeln!(out, "  NAME                           DESCRIPTION                          EXPOSURE")?;
-    writeln!(out, "✓ PrivateNetwork=               Service has private network namespace     0.5")?;
-    writeln!(out, "✗ PrivateTmp=                    Tmp is not private                        0.1")?;
-    writeln!(out, "✓ NoNewPrivileges=               No new privileges                        0.2")?;
-    writeln!(out, "✓ ProtectSystem=                 System is protected read-only             0.3")?;
-    writeln!(out, "✗ ProtectHome=                   Home is not protected                     0.2")?;
+    writeln!(
+        out,
+        "  NAME                           DESCRIPTION                          EXPOSURE"
+    )?;
+    writeln!(
+        out,
+        "✓ PrivateNetwork=               Service has private network namespace     0.5"
+    )?;
+    writeln!(
+        out,
+        "✗ PrivateTmp=                    Tmp is not private                        0.1"
+    )?;
+    writeln!(
+        out,
+        "✓ NoNewPrivileges=               No new privileges                        0.2"
+    )?;
+    writeln!(
+        out,
+        "✓ ProtectSystem=                 System is protected read-only             0.3"
+    )?;
+    writeln!(
+        out,
+        "✗ ProtectHome=                   Home is not protected                     0.2"
+    )?;
     writeln!(out)?;
-    writeln!(out, "→ Overall exposure level for {}: 4.2 MEDIUM", unit_name)?;
+    writeln!(
+        out,
+        "→ Overall exposure level for {}: 4.2 MEDIUM",
+        unit_name
+    )?;
     Ok(0)
 }
 
@@ -1546,9 +1614,15 @@ fn run_path(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
         ("system-state-cache", "/var/cache"),
         ("system-state-spool", "/var/spool"),
         ("system-runtime", "/run"),
-        ("system-generator-early", "/run/slateos/system-generators.early"),
+        (
+            "system-generator-early",
+            "/run/slateos/system-generators.early",
+        ),
         ("system-generator", "/usr/lib/slateos/system-generators"),
-        ("system-generator-late", "/run/slateos/system-generators.late"),
+        (
+            "system-generator-late",
+            "/run/slateos/system-generators.late",
+        ),
         ("system-preset", "/usr/lib/slateos/system-preset"),
         ("system-shutdown", "/usr/lib/slateos/system-shutdown"),
         ("system-sleep", "/usr/lib/slateos/system-sleep"),
@@ -1558,8 +1632,14 @@ fn run_path(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
         ("user-configuration", "/etc/slateos/user"),
         ("user-runtime", "/run/user"),
         ("user-unit-path", "/usr/lib/slateos/user"),
-        ("search-binaries", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
-        ("search-binaries-default", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+        (
+            "search-binaries",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        ),
+        (
+            "search-binaries-default",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        ),
         ("search-library-private", "/usr/local/lib:/usr/lib"),
     ];
 
@@ -1598,15 +1678,24 @@ fn run_path(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
 fn run_notify(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
     if args.is_empty() {
         writeln!(out, "Usage: systemd-notify [OPTIONS] [VARIABLE=VALUE...]")?;
-        writeln!(out, "Notify the service manager about service status changes.")?;
+        writeln!(
+            out,
+            "Notify the service manager about service status changes."
+        )?;
         writeln!(out)?;
         writeln!(out, "Options:")?;
-        writeln!(out, "  --ready         Notify that service startup is complete")?;
+        writeln!(
+            out,
+            "  --ready         Notify that service startup is complete"
+        )?;
         writeln!(out, "  --reloading     Notify that service is reloading")?;
         writeln!(out, "  --stopping      Notify that service is stopping")?;
         writeln!(out, "  --status=TEXT   Set service status text")?;
         writeln!(out, "  --pid=PID       Send from specific PID")?;
-        writeln!(out, "  --booted        Check if system was booted with systemd")?;
+        writeln!(
+            out,
+            "  --booted        Check if system was booted with systemd"
+        )?;
         return Ok(0);
     }
 
@@ -1723,7 +1812,10 @@ fn run_tmpfiles(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
             "--remove" => remove = true,
             "--help" => {
                 writeln!(out, "Usage: systemd-tmpfiles [OPTIONS] [CONFIGFILE...]")?;
-                writeln!(out, "Create, clean, and remove temporary files and directories.")?;
+                writeln!(
+                    out,
+                    "Create, clean, and remove temporary files and directories."
+                )?;
                 writeln!(out)?;
                 writeln!(out, "Options:")?;
                 writeln!(out, "  --create   Create files and directories")?;
@@ -1737,17 +1829,22 @@ fn run_tmpfiles(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
     }
 
     if !create && !clean && !remove {
-        writeln!(out, "systemd-tmpfiles: No action specified (use --create, --clean, or --remove).")?;
+        writeln!(
+            out,
+            "systemd-tmpfiles: No action specified (use --create, --clean, or --remove)."
+        )?;
         return Ok(1);
     }
 
     // Simulated default config entries.
-    let default_entries = ["d /tmp 1777 root root 10d",
+    let default_entries = [
+        "d /tmp 1777 root root 10d",
         "d /var/tmp 1777 root root 30d",
         "d /run/lock 0755 root root -",
         "d /run/user 0755 root root -",
         "f /run/utmp 0664 root utmp -",
-        "r! /tmp/.X*-lock - - - -"];
+        "r! /tmp/.X*-lock - - - -",
+    ];
 
     let entries: Vec<TmpfilesEntry> = if config_files.is_empty() {
         default_entries
@@ -1797,7 +1894,11 @@ fn run_tmpfiles(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
                 }
             }
             _ => {
-                writeln!(out, "Unknown tmpfiles type '{}' for {}", e.entry_type, e.path)?;
+                writeln!(
+                    out,
+                    "Unknown tmpfiles type '{}' for {}",
+                    e.entry_type, e.path
+                )?;
             }
         }
     }
@@ -1828,7 +1929,10 @@ fn run_systemctl(args: &[String]) -> io::Result<i32> {
 
     let (flags, positional) = parse_systemctl_args(args);
 
-    let cmd = positional.first().map(|s| s.as_str()).unwrap_or("list-units");
+    let cmd = positional
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("list-units");
     let unit = positional.get(1).map(|s| s.as_str());
 
     match cmd {
@@ -1951,15 +2055,30 @@ fn run_analyze(args: &[String]) -> io::Result<i32> {
 fn print_systemctl_help(out: &mut dyn Write) -> io::Result<()> {
     writeln!(out, "systemctl [OPTIONS...] COMMAND [UNIT...]")?;
     writeln!(out)?;
-    writeln!(out, "Query or send control commands to the service manager.")?;
+    writeln!(
+        out,
+        "Query or send control commands to the service manager."
+    )?;
     writeln!(out)?;
     writeln!(out, "Unit Commands:")?;
-    writeln!(out, "  list-units [PATTERN...]         List units in memory")?;
-    writeln!(out, "  list-unit-files [PATTERN...]    List installed unit files")?;
+    writeln!(
+        out,
+        "  list-units [PATTERN...]         List units in memory"
+    )?;
+    writeln!(
+        out,
+        "  list-unit-files [PATTERN...]    List installed unit files"
+    )?;
     writeln!(out, "  status [UNIT...]                Show unit status")?;
     writeln!(out, "  show [UNIT...|JOB...]           Show properties")?;
-    writeln!(out, "  cat UNIT...                     Show unit file contents")?;
-    writeln!(out, "  edit UNIT...                    Edit unit file overrides")?;
+    writeln!(
+        out,
+        "  cat UNIT...                     Show unit file contents"
+    )?;
+    writeln!(
+        out,
+        "  edit UNIT...                    Edit unit file overrides"
+    )?;
     writeln!(out, "  start UNIT...                   Start units")?;
     writeln!(out, "  stop UNIT...                    Stop units")?;
     writeln!(out, "  restart UNIT...                 Restart units")?;
@@ -1972,29 +2091,56 @@ fn print_systemctl_help(out: &mut dyn Write) -> io::Result<()> {
     writeln!(out, "  is-enabled UNIT...              Check if enabled")?;
     writeln!(out, "  is-failed UNIT...               Check if failed")?;
     writeln!(out, "  daemon-reload                   Reload unit files")?;
-    writeln!(out, "  list-dependencies [UNIT]        Show dependency tree")?;
+    writeln!(
+        out,
+        "  list-dependencies [UNIT]        Show dependency tree"
+    )?;
     writeln!(out, "  list-timers                     List timers")?;
     writeln!(out, "  list-sockets                    List sockets")?;
     writeln!(out)?;
     writeln!(out, "System Commands:")?;
-    writeln!(out, "  poweroff                        Power off the system")?;
+    writeln!(
+        out,
+        "  poweroff                        Power off the system"
+    )?;
     writeln!(out, "  reboot                          Reboot the system")?;
     writeln!(out, "  halt                            Halt the system")?;
     writeln!(out, "  suspend                         Suspend the system")?;
-    writeln!(out, "  hibernate                       Hibernate the system")?;
+    writeln!(
+        out,
+        "  hibernate                       Hibernate the system"
+    )?;
     writeln!(out, "  isolate TARGET                  Isolate a target")?;
     writeln!(out)?;
     writeln!(out, "Options:")?;
-    writeln!(out, "  --user                          Talk to the user service manager")?;
-    writeln!(out, "  --system                        Talk to the system manager (default)")?;
+    writeln!(
+        out,
+        "  --user                          Talk to the user service manager"
+    )?;
+    writeln!(
+        out,
+        "  --system                        Talk to the system manager (default)"
+    )?;
     writeln!(out, "  -t, --type=TYPE                 Filter by unit type")?;
-    writeln!(out, "  --state=STATE                   Filter by unit state")?;
-    writeln!(out, "  -a, --all                       Show all units/properties")?;
+    writeln!(
+        out,
+        "  --state=STATE                   Filter by unit state"
+    )?;
+    writeln!(
+        out,
+        "  -a, --all                       Show all units/properties"
+    )?;
     writeln!(out, "  -q, --quiet                     Suppress output")?;
-    writeln!(out, "  --no-pager                      Do not pipe output to pager")?;
+    writeln!(
+        out,
+        "  --no-pager                      Do not pipe output to pager"
+    )?;
     writeln!(out, "  --no-legend                     Do not print legend")?;
     writeln!(out, "  --plain                         Plain output")?;
-    writeln!(out, "  --now                           Start/stop immediately with enable/disable")?;
+    writeln!(
+        out,
+        "  --now                           Start/stop immediately with enable/disable"
+    )?;
     writeln!(out, "  -f, --force                     Force operation")?;
     writeln!(out, "  -h, --help                      Show this help")?;
     writeln!(out, "  --version                       Show version")?;
@@ -2142,10 +2288,7 @@ mod tests {
 
     #[test]
     fn test_detect_analyze() {
-        assert_eq!(
-            detect_personality("systemd-analyze"),
-            Personality::Analyze
-        );
+        assert_eq!(detect_personality("systemd-analyze"), Personality::Analyze);
     }
 
     #[test]
@@ -2241,10 +2384,7 @@ mod tests {
 
     #[test]
     fn test_unit_type_timer() {
-        assert_eq!(
-            UnitType::from_unit_name("foo.timer"),
-            Some(UnitType::Timer)
-        );
+        assert_eq!(UnitType::from_unit_name("foo.timer"), Some(UnitType::Timer));
     }
 
     #[test]
@@ -2417,9 +2557,11 @@ mod tests {
         let content = "[Unit]\nDescription=Test\n";
         let uf = UnitFile::parse(content).unwrap();
         let issues = uf.verify("bad.service");
-        assert!(issues
-            .iter()
-            .any(|i| i.contains("Missing [Service] section")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("Missing [Service] section"))
+        );
     }
 
     #[test]
@@ -2427,9 +2569,7 @@ mod tests {
         let content = "[Unit]\nAfter=basic.target\n[Service]\nExecStart=/bin/foo\n";
         let uf = UnitFile::parse(content).unwrap();
         let issues = uf.verify("nodesc.service");
-        assert!(issues
-            .iter()
-            .any(|i| i.contains("Missing Description")));
+        assert!(issues.iter().any(|i| i.contains("Missing Description")));
     }
 
     #[test]
@@ -2442,8 +2582,7 @@ mod tests {
 
     #[test]
     fn test_verify_oneshot_no_exec_ok() {
-        let content =
-            "[Unit]\nDescription=Test\n[Service]\nType=oneshot\nExecStart=/bin/setup\n";
+        let content = "[Unit]\nDescription=Test\n[Service]\nType=oneshot\nExecStart=/bin/setup\n";
         let uf = UnitFile::parse(content).unwrap();
         let issues = uf.verify("oneshot.service");
         assert!(!issues.iter().any(|i| i.contains("Missing ExecStart")));
@@ -2454,9 +2593,7 @@ mod tests {
         let content = "[Unit]\nDescription=Test\n";
         let uf = UnitFile::parse(content).unwrap();
         let issues = uf.verify("bad.timer");
-        assert!(issues
-            .iter()
-            .any(|i| i.contains("Missing [Timer] section")));
+        assert!(issues.iter().any(|i| i.contains("Missing [Timer] section")));
     }
 
     #[test]
@@ -2464,9 +2601,11 @@ mod tests {
         let content = "[Unit]\nDescription=Test\n";
         let uf = UnitFile::parse(content).unwrap();
         let issues = uf.verify("bad.socket");
-        assert!(issues
-            .iter()
-            .any(|i| i.contains("Missing [Socket] section")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("Missing [Socket] section"))
+        );
     }
 
     // --- Specifier expansion ---
@@ -2622,7 +2761,11 @@ mod tests {
 
     #[test]
     fn test_parse_flags_now() {
-        let args = vec!["--now".to_string(), "enable".to_string(), "sshd.service".to_string()];
+        let args = vec![
+            "--now".to_string(),
+            "enable".to_string(),
+            "sshd.service".to_string(),
+        ];
         let (flags, pos) = parse_systemctl_args(&args);
         assert!(flags.now);
         assert_eq!(pos, vec!["enable", "sshd.service"]);
@@ -2723,9 +2866,8 @@ mod tests {
 
     #[test]
     fn test_show_all_properties() {
-        let (out, code) = capture(|buf| {
-            cmd_show(buf, "sshd.service", None, &SystemctlFlags::default())
-        });
+        let (out, code) =
+            capture(|buf| cmd_show(buf, "sshd.service", None, &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.contains("Id=sshd.service"));
         assert!(out.contains("ActiveState=active"));
@@ -2750,18 +2892,16 @@ mod tests {
 
     #[test]
     fn test_is_active_active() {
-        let (out, code) = capture(|buf| {
-            cmd_is_active(buf, "sshd.service", &SystemctlFlags::default())
-        });
+        let (out, code) =
+            capture(|buf| cmd_is_active(buf, "sshd.service", &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.trim() == "active");
     }
 
     #[test]
     fn test_is_active_unknown() {
-        let (out, code) = capture(|buf| {
-            cmd_is_active(buf, "nonexistent.service", &SystemctlFlags::default())
-        });
+        let (out, code) =
+            capture(|buf| cmd_is_active(buf, "nonexistent.service", &SystemctlFlags::default()));
         assert_eq!(code, 3);
         assert!(out.trim() == "inactive");
     }
@@ -2770,18 +2910,16 @@ mod tests {
 
     #[test]
     fn test_is_enabled_enabled() {
-        let (out, code) = capture(|buf| {
-            cmd_is_enabled(buf, "sshd.service", &SystemctlFlags::default())
-        });
+        let (out, code) =
+            capture(|buf| cmd_is_enabled(buf, "sshd.service", &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.trim() == "enabled");
     }
 
     #[test]
     fn test_is_enabled_static() {
-        let (out, code) = capture(|buf| {
-            cmd_is_enabled(buf, "init.service", &SystemctlFlags::default())
-        });
+        let (out, code) =
+            capture(|buf| cmd_is_enabled(buf, "init.service", &SystemctlFlags::default()));
         assert_eq!(code, 1);
         assert!(out.trim() == "static");
     }
@@ -2790,9 +2928,8 @@ mod tests {
 
     #[test]
     fn test_is_failed_not_failed() {
-        let (out, code) = capture(|buf| {
-            cmd_is_failed(buf, "sshd.service", &SystemctlFlags::default())
-        });
+        let (out, code) =
+            capture(|buf| cmd_is_failed(buf, "sshd.service", &SystemctlFlags::default()));
         assert_eq!(code, 1);
         assert!(out.trim() == "active");
     }
@@ -2810,9 +2947,8 @@ mod tests {
 
     #[test]
     fn test_stop_unit() {
-        let (out, code) = capture(|buf| {
-            cmd_unit_action(buf, "stop", "sshd.service", &SystemctlFlags::default())
-        });
+        let (out, code) =
+            capture(|buf| cmd_unit_action(buf, "stop", "sshd.service", &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.contains("Stopping sshd.service"));
     }
@@ -2823,9 +2959,7 @@ mod tests {
             now: true,
             ..Default::default()
         };
-        let (out, code) = capture(|buf| {
-            cmd_unit_action(buf, "enable", "sshd.service", &flags)
-        });
+        let (out, code) = capture(|buf| cmd_unit_action(buf, "enable", "sshd.service", &flags));
         assert_eq!(code, 0);
         assert!(out.contains("Created symlink"));
         assert!(out.contains("Starting"));
@@ -2842,18 +2976,16 @@ mod tests {
 
     #[test]
     fn test_mask_unit() {
-        let (out, code) = capture(|buf| {
-            cmd_unit_action(buf, "mask", "sshd.service", &SystemctlFlags::default())
-        });
+        let (out, code) =
+            capture(|buf| cmd_unit_action(buf, "mask", "sshd.service", &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.contains("/dev/null"));
     }
 
     #[test]
     fn test_auto_append_service() {
-        let (out, code) = capture(|buf| {
-            cmd_unit_action(buf, "start", "sshd", &SystemctlFlags::default())
-        });
+        let (out, code) =
+            capture(|buf| cmd_unit_action(buf, "start", "sshd", &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.contains("sshd.service"));
     }
@@ -2864,9 +2996,7 @@ mod tests {
             quiet: true,
             ..Default::default()
         };
-        let (out, code) = capture(|buf| {
-            cmd_unit_action(buf, "start", "sshd.service", &flags)
-        });
+        let (out, code) = capture(|buf| cmd_unit_action(buf, "start", "sshd.service", &flags));
         assert_eq!(code, 0);
         assert!(out.is_empty());
     }
@@ -2875,8 +3005,7 @@ mod tests {
 
     #[test]
     fn test_daemon_reload() {
-        let (out, code) =
-            capture(|buf| cmd_daemon_reload(buf, &SystemctlFlags::default()));
+        let (out, code) = capture(|buf| cmd_daemon_reload(buf, &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.contains("Reloading"));
     }
@@ -2903,16 +3032,14 @@ mod tests {
 
     #[test]
     fn test_poweroff() {
-        let (out, code) =
-            capture(|buf| cmd_power(buf, "poweroff", &SystemctlFlags::default()));
+        let (out, code) = capture(|buf| cmd_power(buf, "poweroff", &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.contains("powering off"));
     }
 
     #[test]
     fn test_reboot() {
-        let (out, code) =
-            capture(|buf| cmd_power(buf, "reboot", &SystemctlFlags::default()));
+        let (out, code) = capture(|buf| cmd_power(buf, "reboot", &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.contains("rebooting"));
     }
@@ -2921,9 +3048,8 @@ mod tests {
 
     #[test]
     fn test_isolate() {
-        let (out, code) = capture(|buf| {
-            cmd_isolate(buf, "rescue.target", &SystemctlFlags::default())
-        });
+        let (out, code) =
+            capture(|buf| cmd_isolate(buf, "rescue.target", &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.contains("Isolating rescue.target"));
     }
@@ -2932,8 +3058,7 @@ mod tests {
 
     #[test]
     fn test_list_timers() {
-        let (out, code) =
-            capture(|buf| cmd_list_timers(buf, &SystemctlFlags::default()));
+        let (out, code) = capture(|buf| cmd_list_timers(buf, &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.contains("logwatch.timer"));
         assert!(out.contains("NEXT"));
@@ -2943,8 +3068,7 @@ mod tests {
 
     #[test]
     fn test_list_sockets() {
-        let (out, code) =
-            capture(|buf| cmd_list_sockets(buf, &SystemctlFlags::default()));
+        let (out, code) = capture(|buf| cmd_list_sockets(buf, &SystemctlFlags::default()));
         assert_eq!(code, 0);
         assert!(out.contains("dbus.socket"));
         assert!(out.contains("Stream"));
@@ -2991,8 +3115,7 @@ mod tests {
 
     #[test]
     fn test_analyze_critical_chain_unit() {
-        let (out, code) =
-            capture(|buf| analyze_critical_chain(buf, Some("multi-user.target")));
+        let (out, code) = capture(|buf| analyze_critical_chain(buf, Some("multi-user.target")));
         assert_eq!(code, 0);
         assert!(out.contains("multi-user.target"));
     }

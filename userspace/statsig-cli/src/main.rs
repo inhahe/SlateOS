@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("statsig-cli 0.1.0 (Gatekeeper-lineage personality build)"); }
+fn print_version() {
+    println!("statsig-cli 0.1.0 (Gatekeeper-lineage personality build)");
+}
 
 fn run_about() {
     println!("Statsig, Inc.");

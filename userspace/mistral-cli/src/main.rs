@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("mistral-cli 0.1.0 (open+closed-weight personality build)"); }
+fn print_version() {
+    println!("mistral-cli 0.1.0 (open+closed-weight personality build)");
+}
 
 fn run_about() {
     println!("Mistral AI.");

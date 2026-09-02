@@ -136,8 +136,11 @@ fn read_font_database() -> Vec<FontEntry> {
             family: "DejaVu Sans".to_string(),
             style: FontStyle::Regular,
             file: "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".to_string(),
-            _index: 0, _slant: FontSlant::_Roman, _weight: FontWeight::_Regular,
-            _width: FontWidth::_Normal, spacing: FontSpacing::Proportional,
+            _index: 0,
+            _slant: FontSlant::_Roman,
+            _weight: FontWeight::_Regular,
+            _width: FontWidth::_Normal,
+            spacing: FontSpacing::Proportional,
             _lang: vec!["en".to_string(), "de".to_string(), "fr".to_string()],
             _charset: "0000-FFFF".to_string(),
         },
@@ -145,8 +148,11 @@ fn read_font_database() -> Vec<FontEntry> {
             family: "DejaVu Sans".to_string(),
             style: FontStyle::Bold,
             file: "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf".to_string(),
-            _index: 0, _slant: FontSlant::_Roman, _weight: FontWeight::_Bold,
-            _width: FontWidth::_Normal, spacing: FontSpacing::Proportional,
+            _index: 0,
+            _slant: FontSlant::_Roman,
+            _weight: FontWeight::_Bold,
+            _width: FontWidth::_Normal,
+            spacing: FontSpacing::Proportional,
             _lang: vec!["en".to_string()],
             _charset: "0000-FFFF".to_string(),
         },
@@ -154,8 +160,11 @@ fn read_font_database() -> Vec<FontEntry> {
             family: "DejaVu Sans".to_string(),
             style: FontStyle::Italic,
             file: "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf".to_string(),
-            _index: 0, _slant: FontSlant::_Italic, _weight: FontWeight::_Regular,
-            _width: FontWidth::_Normal, spacing: FontSpacing::Proportional,
+            _index: 0,
+            _slant: FontSlant::_Italic,
+            _weight: FontWeight::_Regular,
+            _width: FontWidth::_Normal,
+            spacing: FontSpacing::Proportional,
             _lang: vec!["en".to_string()],
             _charset: "0000-FFFF".to_string(),
         },
@@ -163,8 +172,11 @@ fn read_font_database() -> Vec<FontEntry> {
             family: "DejaVu Sans Mono".to_string(),
             style: FontStyle::Regular,
             file: "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".to_string(),
-            _index: 0, _slant: FontSlant::_Roman, _weight: FontWeight::_Regular,
-            _width: FontWidth::_Normal, spacing: FontSpacing::Mono,
+            _index: 0,
+            _slant: FontSlant::_Roman,
+            _weight: FontWeight::_Regular,
+            _width: FontWidth::_Normal,
+            spacing: FontSpacing::Mono,
             _lang: vec!["en".to_string()],
             _charset: "0000-FFFF".to_string(),
         },
@@ -172,8 +184,11 @@ fn read_font_database() -> Vec<FontEntry> {
             family: "DejaVu Serif".to_string(),
             style: FontStyle::Regular,
             file: "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf".to_string(),
-            _index: 0, _slant: FontSlant::_Roman, _weight: FontWeight::_Regular,
-            _width: FontWidth::_Normal, spacing: FontSpacing::Proportional,
+            _index: 0,
+            _slant: FontSlant::_Roman,
+            _weight: FontWeight::_Regular,
+            _width: FontWidth::_Normal,
+            spacing: FontSpacing::Proportional,
             _lang: vec!["en".to_string()],
             _charset: "0000-FFFF".to_string(),
         },
@@ -181,8 +196,11 @@ fn read_font_database() -> Vec<FontEntry> {
             family: "Noto Sans".to_string(),
             style: FontStyle::Regular,
             file: "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf".to_string(),
-            _index: 0, _slant: FontSlant::_Roman, _weight: FontWeight::_Regular,
-            _width: FontWidth::_Normal, spacing: FontSpacing::Proportional,
+            _index: 0,
+            _slant: FontSlant::_Roman,
+            _weight: FontWeight::_Regular,
+            _width: FontWidth::_Normal,
+            spacing: FontSpacing::Proportional,
             _lang: vec!["en".to_string(), "ja".to_string(), "zh".to_string()],
             _charset: "0000-FFFF".to_string(),
         },
@@ -190,8 +208,11 @@ fn read_font_database() -> Vec<FontEntry> {
             family: "Noto Sans Mono".to_string(),
             style: FontStyle::Regular,
             file: "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf".to_string(),
-            _index: 0, _slant: FontSlant::_Roman, _weight: FontWeight::_Regular,
-            _width: FontWidth::_Normal, spacing: FontSpacing::Mono,
+            _index: 0,
+            _slant: FontSlant::_Roman,
+            _weight: FontWeight::_Regular,
+            _width: FontWidth::_Normal,
+            spacing: FontSpacing::Mono,
             _lang: vec!["en".to_string()],
             _charset: "0000-FFFF".to_string(),
         },
@@ -199,8 +220,11 @@ fn read_font_database() -> Vec<FontEntry> {
             family: "Liberation Sans".to_string(),
             style: FontStyle::Regular,
             file: "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf".to_string(),
-            _index: 0, _slant: FontSlant::_Roman, _weight: FontWeight::_Regular,
-            _width: FontWidth::_Normal, spacing: FontSpacing::Proportional,
+            _index: 0,
+            _slant: FontSlant::_Roman,
+            _weight: FontWeight::_Regular,
+            _width: FontWidth::_Normal,
+            spacing: FontSpacing::Proportional,
             _lang: vec!["en".to_string()],
             _charset: "0000-FFFF".to_string(),
         },
@@ -208,8 +232,11 @@ fn read_font_database() -> Vec<FontEntry> {
             family: "Liberation Mono".to_string(),
             style: FontStyle::Regular,
             file: "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf".to_string(),
-            _index: 0, _slant: FontSlant::_Roman, _weight: FontWeight::_Regular,
-            _width: FontWidth::_Normal, spacing: FontSpacing::Mono,
+            _index: 0,
+            _slant: FontSlant::_Roman,
+            _weight: FontWeight::_Regular,
+            _width: FontWidth::_Normal,
+            spacing: FontSpacing::Mono,
             _lang: vec!["en".to_string()],
             _charset: "0000-FFFF".to_string(),
         },
@@ -217,8 +244,11 @@ fn read_font_database() -> Vec<FontEntry> {
             family: "Fira Code".to_string(),
             style: FontStyle::Regular,
             file: "/usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf".to_string(),
-            _index: 0, _slant: FontSlant::_Roman, _weight: FontWeight::_Regular,
-            _width: FontWidth::_Normal, spacing: FontSpacing::Mono,
+            _index: 0,
+            _slant: FontSlant::_Roman,
+            _weight: FontWeight::_Regular,
+            _width: FontWidth::_Normal,
+            spacing: FontSpacing::Mono,
             _lang: vec!["en".to_string()],
             _charset: "0000-FFFF".to_string(),
         },
@@ -226,8 +256,11 @@ fn read_font_database() -> Vec<FontEntry> {
             family: "Fira Code".to_string(),
             style: FontStyle::Light,
             file: "/usr/share/fonts/truetype/firacode/FiraCode-Light.ttf".to_string(),
-            _index: 0, _slant: FontSlant::_Roman, _weight: FontWeight::_Light,
-            _width: FontWidth::_Normal, spacing: FontSpacing::Mono,
+            _index: 0,
+            _slant: FontSlant::_Roman,
+            _weight: FontWeight::_Light,
+            _width: FontWidth::_Normal,
+            spacing: FontSpacing::Mono,
             _lang: vec!["en".to_string()],
             _charset: "0000-FFFF".to_string(),
         },
@@ -246,9 +279,15 @@ fn run_fc_list(args: Vec<String>) -> i32 {
     while i < args.len() {
         match args[i].as_str() {
             "--help" | "-h" => show_help = true,
-            "--version" | "-V" => { println!("fc-list 0.1.0 (Slate OS)"); return 0; }
+            "--version" | "-V" => {
+                println!("fc-list 0.1.0 (Slate OS)");
+                return 0;
+            }
             "-f" | "--format" => {
-                if let Some(val) = args.get(i + 1) { format_str = Some(val.as_str()); i += 1; }
+                if let Some(val) = args.get(i + 1) {
+                    format_str = Some(val.as_str());
+                    i += 1;
+                }
             }
             "-b" | "--brief" => brief = true,
             s if !s.starts_with('-') => pattern = Some(s),
@@ -272,10 +311,13 @@ fn run_fc_list(args: Vec<String>) -> i32 {
     let fonts = read_font_database();
     let filtered: Vec<&FontEntry> = if let Some(pat) = pattern {
         let pat_lower = pat.to_lowercase();
-        fonts.iter().filter(|f| {
-            f.family.to_lowercase().contains(&pat_lower) ||
-            format!("{}", f.style).to_lowercase().contains(&pat_lower)
-        }).collect()
+        fonts
+            .iter()
+            .filter(|f| {
+                f.family.to_lowercase().contains(&pat_lower)
+                    || format!("{}", f.style).to_lowercase().contains(&pat_lower)
+            })
+            .collect()
     } else {
         fonts.iter().collect()
     };
@@ -295,7 +337,10 @@ fn run_fc_list(args: Vec<String>) -> i32 {
 // ── fc-match personality ──────────────────────────────────────────────
 
 fn run_fc_match(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "sans-serif".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "sans-serif".to_string());
 
     match cmd.as_str() {
         "--help" | "-h" => {
@@ -309,19 +354,31 @@ fn run_fc_match(args: Vec<String>) -> i32 {
             println!("  -V, --version Show version");
             0
         }
-        "--version" | "-V" => { println!("fc-match 0.1.0 (Slate OS)"); 0 }
+        "--version" | "-V" => {
+            println!("fc-match 0.1.0 (Slate OS)");
+            0
+        }
         _ => {
             let show_all = args.iter().any(|a| a == "-a" || a == "--all");
-            let pattern = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("sans-serif");
+            let pattern = args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("sans-serif");
             let fonts = read_font_database();
 
             let pat_lower = pattern.to_lowercase();
-            let mut matches: Vec<&FontEntry> = fonts.iter().filter(|f| {
-                f.family.to_lowercase().contains(&pat_lower) ||
-                (pat_lower == "monospace" && f.spacing == FontSpacing::Mono) ||
-                (pat_lower == "sans-serif" && !f.family.contains("Serif") && f.spacing == FontSpacing::Proportional) ||
-                (pat_lower == "serif" && f.family.contains("Serif"))
-            }).collect();
+            let mut matches: Vec<&FontEntry> = fonts
+                .iter()
+                .filter(|f| {
+                    f.family.to_lowercase().contains(&pat_lower)
+                        || (pat_lower == "monospace" && f.spacing == FontSpacing::Mono)
+                        || (pat_lower == "sans-serif"
+                            && !f.family.contains("Serif")
+                            && f.spacing == FontSpacing::Proportional)
+                        || (pat_lower == "serif" && f.family.contains("Serif"))
+                })
+                .collect();
 
             if matches.is_empty() {
                 // Fallback to first available font
@@ -366,24 +423,36 @@ fn run_fc_cache(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    if force { println!("fc-cache: forcing rebuild..."); }
+    if force {
+        println!("fc-cache: forcing rebuild...");
+    }
 
     let dirs: Vec<&str> = if system_only {
         vec!["/usr/share/fonts", "/usr/local/share/fonts"]
     } else {
-        vec!["/usr/share/fonts", "/usr/local/share/fonts", "/home/user/.local/share/fonts"]
+        vec![
+            "/usr/share/fonts",
+            "/usr/local/share/fonts",
+            "/home/user/.local/share/fonts",
+        ]
     };
 
     let fonts = read_font_database();
     for dir in &dirs {
         let count = fonts.iter().filter(|f| f.file.starts_with(dir)).count();
         if verbose {
-            println!("{}: caching, new cache contents: {} fonts, 0 dirs", dir, count);
+            println!(
+                "{}: caching, new cache contents: {} fonts, 0 dirs",
+                dir, count
+            );
         }
     }
 
-    println!("fc-cache: cache built for {} fonts in {} directories",
-        fonts.len(), dirs.len());
+    println!(
+        "fc-cache: cache built for {} fonts in {} directories",
+        fonts.len(),
+        dirs.len()
+    );
     0
 }
 
@@ -399,8 +468,10 @@ fn run_fc_cat(args: Vec<String>) -> i32 {
     let fonts = read_font_database();
     println!("\"\" 0 \"{}\"", _FC_CACHE_DIR);
     for f in &fonts {
-        println!("\"{}\" 0 \"{}:style={}:spacing={}\"",
-            f.file, f.family, f.style, f.spacing as u32);
+        println!(
+            "\"{}\" 0 \"{}:style={}:spacing={}\"",
+            f.file, f.family, f.style, f.spacing as u32
+        );
     }
     0
 }
@@ -437,7 +508,10 @@ fn run_fc_scan(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let dir = args.first().map(|s| s.as_str()).unwrap_or("/usr/share/fonts");
+    let dir = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("/usr/share/fonts");
     let fonts = read_font_database();
     let matching: Vec<_> = fonts.iter().filter(|f| f.file.starts_with(dir)).collect();
 
@@ -458,7 +532,9 @@ fn run_fc_validate(args: Vec<String>) -> i32 {
     }
 
     for file in &args {
-        if file.starts_with('-') { continue; }
+        if file.starts_with('-') {
+            continue;
+        }
         println!("{}: valid", file);
     }
     if args.is_empty() || args.iter().all(|a| a.starts_with('-')) {
@@ -547,7 +623,10 @@ mod tests {
     #[test]
     fn test_mono_fonts() {
         let fonts = read_font_database();
-        let mono: Vec<_> = fonts.iter().filter(|f| f.spacing == FontSpacing::Mono).collect();
+        let mono: Vec<_> = fonts
+            .iter()
+            .filter(|f| f.spacing == FontSpacing::Mono)
+            .collect();
         assert!(mono.len() >= 3);
     }
 
@@ -574,7 +653,10 @@ mod tests {
     #[test]
     fn test_dejavu_variants() {
         let fonts = read_font_database();
-        let dejavu: Vec<_> = fonts.iter().filter(|f| f.family.starts_with("DejaVu")).collect();
+        let dejavu: Vec<_> = fonts
+            .iter()
+            .filter(|f| f.family.starts_with("DejaVu"))
+            .collect();
         assert!(dejavu.len() >= 3);
     }
 

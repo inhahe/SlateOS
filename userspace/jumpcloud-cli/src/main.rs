@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_jc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,10 +29,15 @@ fn run_jc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("JumpCloud 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("JumpCloud 2024 (Slate OS)");
+        return 0;
+    }
     println!("JumpCloud 2024 (Slate OS)");
     println!("  Vendor: JumpCloud, Inc. (Louisville, Colorado — founded 2012)");
-    println!("  Founders: Rajat Bhargava (chairman; serial entrepreneur — StillSecure, MyMail) + Larry Middle");
+    println!(
+        "  Founders: Rajat Bhargava (chairman; serial entrepreneur — StillSecure, MyMail) + Larry Middle"
+    );
     println!("  Funding: General Atlantic, Sapphire Ventures, BlackRock + others");
     println!("          $400M+ raised");
     println!("          $2.6B valuation (Sep 2021)");
@@ -55,20 +64,29 @@ fn run_jc(args: &[String], _prog: &str) -> i32 {
     println!("  Killer features:");
     println!("    - Cross-OS device management — even Linux endpoints get full MDM");
     println!("    - Cloud LDAP / RADIUS (no on-prem servers needed)");
-    println!("    - Password Manager built into directory (vs requiring 1Password/Bitwarden separately)");
+    println!(
+        "    - Password Manager built into directory (vs requiring 1Password/Bitwarden separately)"
+    );
     println!("    - Cloud-native Active Directory bridge (sync AD on-prem ↔ JumpCloud cloud)");
     println!("  Customers: 200K+ — mostly SMB-mid-market with hybrid Mac/Linux/Win shops");
     println!("            popular with dev-tooling companies + design agencies");
-    println!("  Critique: feature breadth → depth uneven (some modules less polished than dedicated tools)");
+    println!(
+        "  Critique: feature breadth → depth uneven (some modules less polished than dedicated tools)"
+    );
     println!("           sales-led pricing despite SMB positioning");
     println!("           less recognized than Okta in enterprise circles");
-    println!("  Differentiator: one platform for AD + SSO + MDM + RADIUS + Patch — full SMB IT stack");
+    println!(
+        "  Differentiator: one platform for AD + SSO + MDM + RADIUS + Patch — full SMB IT stack"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "jumpcloud".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "jumpcloud".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_jc(&rest, &_prog);
     process::exit(code);
@@ -76,7 +94,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_jc};
+    use super::{basename, run_jc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

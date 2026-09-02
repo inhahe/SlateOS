@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_xero(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_xero(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Xero 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Xero 2024 (Slate OS)");
+        return 0;
+    }
     println!("Xero 2024 (Slate OS)");
     println!("  Vendor: Xero Limited (Wellington, New Zealand — ASX:XRO, $19B AUD market cap)");
     println!("  Founders: Rod Drury + Hamish Edwards (Wellington, 2006)");
@@ -42,7 +49,9 @@ fn run_xero(args: &[String], _prog: &str) -> i32 {
     println!("    - Double-entry accounting (proper GL, journals, trial balance)");
     println!("    - Bank feeds (3,000+ banks via direct feeds + Plaid)");
     println!("    - Bank reconciliation with ML rules (Xero learns)");
-    println!("    - Invoicing + recurring invoices + payment gateway integrations (Stripe, GoCardless)");
+    println!(
+        "    - Invoicing + recurring invoices + payment gateway integrations (Stripe, GoCardless)"
+    );
     println!("    - Quotes + purchase orders + inventory");
     println!("    - Multi-currency (Premium+) with FX gain/loss");
     println!("    - Project tracking + time tracking (Ultimate)");
@@ -52,17 +61,26 @@ fn run_xero(args: &[String], _prog: &str) -> i32 {
     println!("    - GST/VAT/HST + sales tax automation");
     println!("    - Hubdoc (receipt + bill capture, OCR'd, posted as drafts)");
     println!("    - Financial reports (P&L, balance sheet, cash flow, custom)");
-    println!("  Xero App Store: 1,000+ integrations (Stripe, Shopify, Squarespace, payroll vendors, ...)");
+    println!(
+        "  Xero App Store: 1,000+ integrations (Stripe, Shopify, Squarespace, payroll vendors, ...)"
+    );
     println!("  Customers: SMBs and accountants (Xero has huge accountant/bookkeeper community)");
     println!("            150+ countries, dominant in AU/NZ/UK, gaining in US (vs QuickBooks)");
-    println!("  History note: famously sponsored All Blacks rugby — global brand recognition campaign");
-    println!("  Differentiator: 'beautiful' UX + best-in-class bank feeds + accountant ecosystem outside US");
+    println!(
+        "  History note: famously sponsored All Blacks rugby — global brand recognition campaign"
+    );
+    println!(
+        "  Differentiator: 'beautiful' UX + best-in-class bank feeds + accountant ecosystem outside US"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "xero".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "xero".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_xero(&rest, &_prog);
     process::exit(code);
@@ -70,7 +88,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_xero};
+    use super::{basename, run_xero, strip_ext};
 
     #[test]
     fn basename_strips_path() {

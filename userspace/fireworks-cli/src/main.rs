@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("fireworks-cli 0.1.0 (FireAttention personality build)"); }
+fn print_version() {
+    println!("fireworks-cli 0.1.0 (FireAttention personality build)");
+}
 
 fn run_about() {
     println!("Fireworks AI.");

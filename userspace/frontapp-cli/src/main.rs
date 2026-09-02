@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_front(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_front(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Front 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Front 2024 (Slate OS)");
+        return 0;
+    }
     println!("Front 2024 (Slate OS)");
     println!("  Vendor: FrontApp, Inc. dba Front (San Francisco, CA — private)");
     println!("  Founders: Mathilde Collin (CEO) + Laurent Perrin (CTO), 2013");
@@ -38,9 +45,15 @@ fn run_front(args: &[String], _prog: &str) -> i32 {
     println!("  Category-defining concept — Shared Inbox (not 'ticketing'):");
     println!("    - Email/SMS/WhatsApp/social DMs/voicemails arrive in a SHARED inbox");
     println!("    - Looks/feels like Apple Mail or Gmail — not Zendesk");
-    println!("    - Multiple agents can collaborate on a SINGLE message thread (assign, comment, draft together)");
-    println!("    - Replies go from real shared address (support@, sales@, hello@) — not 'ticket #1234'");
-    println!("    - Best for teams that handle conversational, relationship-heavy work (logistics, B2B sales, finance ops, real estate)");
+    println!(
+        "    - Multiple agents can collaborate on a SINGLE message thread (assign, comment, draft together)"
+    );
+    println!(
+        "    - Replies go from real shared address (support@, sales@, hello@) — not 'ticket #1234'"
+    );
+    println!(
+        "    - Best for teams that handle conversational, relationship-heavy work (logistics, B2B sales, finance ops, real estate)"
+    );
     println!("  Pricing: Starter $19/user/mo (3 user min, basic shared inbox)");
     println!("          Growth $59/user/mo (rules, knowledge base, advanced API)");
     println!("          Scale $99/user/mo (analytics, custom roles, SSO, sandbox)");
@@ -77,20 +90,31 @@ fn run_front(args: &[String], _prog: &str) -> i32 {
     println!("              Salesforce, HubSpot, Slack, Jira, Asana, Linear, Notion");
     println!("              Shopify, Stripe, QuickBooks, Xero");
     println!("              REST API + webhooks + Plugins SDK for custom in-Front apps");
-    println!("  Customers: 8,000+ companies — heavy on logistics, fintech, real estate, B2B services");
-    println!("            ClickUp, MongoDB, Lyft (parts), Stripe (parts), Shopify (parts), Cushman & Wakefield, Flexport");
+    println!(
+        "  Customers: 8,000+ companies — heavy on logistics, fintech, real estate, B2B services"
+    );
+    println!(
+        "            ClickUp, MongoDB, Lyft (parts), Stripe (parts), Shopify (parts), Cushman & Wakefield, Flexport"
+    );
     println!("            sweet spot: 10-500 person teams that hate ticket interfaces");
-    println!("  Critique: not a replacement for a traditional ticketing helpdesk at high volume B2C");
+    println!(
+        "  Critique: not a replacement for a traditional ticketing helpdesk at high volume B2C"
+    );
     println!("           pricing on higher tiers approaches Zendesk Suite Enterprise");
     println!("           reporting historically weaker than Zendesk Explore (improving)");
     println!("           hybrid email/CRM positioning sometimes confuses prospects");
-    println!("  Differentiator: only platform where shared inbox + ticketing + light CRM feel like one product");
+    println!(
+        "  Differentiator: only platform where shared inbox + ticketing + light CRM feel like one product"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "front".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "front".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_front(&rest, &_prog);
     process::exit(code);
@@ -98,7 +122,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_front};
+    use super::{basename, run_front, strip_ext};
 
     #[test]
     fn basename_strips_path() {

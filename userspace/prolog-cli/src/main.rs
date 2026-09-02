@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_swipl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -30,12 +34,19 @@ fn run_swipl(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-g") {
-        let goal = args.windows(2).find(|w| w[0] == "-g").map(|w| w[1].as_str()).unwrap_or("halt");
+        let goal = args
+            .windows(2)
+            .find(|w| w[0] == "-g")
+            .map(|w| w[1].as_str())
+            .unwrap_or("halt");
         println!("?- {}.", goal);
         println!("true.");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".pl") || a.ends_with(".pro")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".pl") || a.ends_with(".pro"))
+        .map(|s| s.as_str());
     if let Some(f) = file {
         println!("% loading {}", f);
         println!("% compiled 0.001 sec, 42 clauses");
@@ -69,7 +80,10 @@ fn run_gprolog(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "swipl".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "swipl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "gprolog" => run_gprolog(&rest),
@@ -80,7 +94,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_swipl};
+    use super::{basename, run_swipl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

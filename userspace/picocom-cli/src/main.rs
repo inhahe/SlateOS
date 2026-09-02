@@ -35,8 +35,13 @@ fn run_picocom(args: &[String]) -> i32 {
         return 0;
     }
 
-    let device = args.iter().find(|a| a.starts_with('/') || a.starts_with("COM")).map(|s| s.as_str()).unwrap_or("/dev/ttyUSB0");
-    let baud = args.windows(2)
+    let device = args
+        .iter()
+        .find(|a| a.starts_with('/') || a.starts_with("COM"))
+        .map(|s| s.as_str())
+        .unwrap_or("/dev/ttyUSB0");
+    let baud = args
+        .windows(2)
         .find(|w| w[0] == "-b" || w[0] == "--baud")
         .and_then(|w| w[1].parse::<u32>().ok())
         .unwrap_or(9600);
@@ -71,8 +76,16 @@ fn run_cu(args: &[String]) -> i32 {
         return 0;
     }
 
-    let line = args.windows(2).find(|w| w[0] == "-l").map(|w| w[1].as_str()).unwrap_or("/dev/ttyUSB0");
-    let speed = args.windows(2).find(|w| w[0] == "-s").and_then(|w| w[1].parse::<u32>().ok()).unwrap_or(9600);
+    let line = args
+        .windows(2)
+        .find(|w| w[0] == "-l")
+        .map(|w| w[1].as_str())
+        .unwrap_or("/dev/ttyUSB0");
+    let speed = args
+        .windows(2)
+        .find(|w| w[0] == "-s")
+        .and_then(|w| w[1].parse::<u32>().ok())
+        .unwrap_or(9600);
     println!("Connected to {} at {} baud.", line, speed);
     println!("Escape character: '~'");
     0
@@ -80,7 +93,8 @@ fn run_cu(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "picocom".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -94,7 +108,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_picocom};
+    use super::{basename, run_picocom, strip_ext};
 
     #[test]
     fn basename_strips_path() {

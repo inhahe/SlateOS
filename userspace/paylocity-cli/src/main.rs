@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("paylocity-cli 0.1.0 (mid-market-HCM personality build)"); }
+fn print_version() {
+    println!("paylocity-cli 0.1.0 (mid-market-HCM personality build)");
+}
 
 fn run_about() {
     println!("Paylocity Holding Corporation (Nasdaq:PCTY).");

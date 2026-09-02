@@ -64,15 +64,51 @@ struct FsMagic {
 }
 
 const FS_MAGICS: &[FsMagic] = &[
-    FsMagic { offset: 0x438, magic: &[0x53, 0xEF], fs_type: "ext4" },     // ext2/3/4
-    FsMagic { offset: 0, magic: b"\xeb\x3c\x90", fs_type: "vfat" },       // FAT
-    FsMagic { offset: 0, magic: b"\xeb\x58\x90", fs_type: "vfat" },       // FAT32
-    FsMagic { offset: 0x10040, magic: b"-FVE-FS-", fs_type: "bitlocker" },
-    FsMagic { offset: 3, magic: b"NTFS    ", fs_type: "ntfs" },
-    FsMagic { offset: 0x8001, magic: b"CD001", fs_type: "iso9660" },
-    FsMagic { offset: 0, magic: b"XFSB", fs_type: "xfs" },
-    FsMagic { offset: 0x10034, magic: b"ReIsEr", fs_type: "reiserfs" },
-    FsMagic { offset: 0xFF6, magic: b"\x41\xc6\x4e\x92", fs_type: "swap" },
+    FsMagic {
+        offset: 0x438,
+        magic: &[0x53, 0xEF],
+        fs_type: "ext4",
+    }, // ext2/3/4
+    FsMagic {
+        offset: 0,
+        magic: b"\xeb\x3c\x90",
+        fs_type: "vfat",
+    }, // FAT
+    FsMagic {
+        offset: 0,
+        magic: b"\xeb\x58\x90",
+        fs_type: "vfat",
+    }, // FAT32
+    FsMagic {
+        offset: 0x10040,
+        magic: b"-FVE-FS-",
+        fs_type: "bitlocker",
+    },
+    FsMagic {
+        offset: 3,
+        magic: b"NTFS    ",
+        fs_type: "ntfs",
+    },
+    FsMagic {
+        offset: 0x8001,
+        magic: b"CD001",
+        fs_type: "iso9660",
+    },
+    FsMagic {
+        offset: 0,
+        magic: b"XFSB",
+        fs_type: "xfs",
+    },
+    FsMagic {
+        offset: 0x10034,
+        magic: b"ReIsEr",
+        fs_type: "reiserfs",
+    },
+    FsMagic {
+        offset: 0xFF6,
+        magic: b"\x41\xc6\x4e\x92",
+        fs_type: "swap",
+    },
 ];
 
 fn detect_filesystem(device_path: &Path) -> Option<BlkidInfo> {
@@ -141,11 +177,22 @@ fn parse_ext4_info(buf: &[u8], info: &mut BlkidInfo) {
     if sb.len() > 0x78 {
         info.uuid = format!(
             "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            sb[0x68], sb[0x69], sb[0x6A], sb[0x6B],
-            sb[0x6C], sb[0x6D],
-            sb[0x6E], sb[0x6F],
-            sb[0x70], sb[0x71],
-            sb[0x72], sb[0x73], sb[0x74], sb[0x75], sb[0x76], sb[0x77]
+            sb[0x68],
+            sb[0x69],
+            sb[0x6A],
+            sb[0x6B],
+            sb[0x6C],
+            sb[0x6D],
+            sb[0x6E],
+            sb[0x6F],
+            sb[0x70],
+            sb[0x71],
+            sb[0x72],
+            sb[0x73],
+            sb[0x74],
+            sb[0x75],
+            sb[0x76],
+            sb[0x77]
         );
     }
 
@@ -174,9 +221,7 @@ fn parse_fat_info(buf: &[u8], info: &mut BlkidInfo) {
         // Volume label at offset 71 (FAT32)
         if buf.len() > 82 {
             let label = &buf[71..82];
-            info.label = String::from_utf8_lossy(label)
-                .trim()
-                .to_string();
+            info.label = String::from_utf8_lossy(label).trim().to_string();
         }
         // Volume serial at offset 67 (FAT32)
         if buf.len() > 71 {
@@ -190,9 +235,7 @@ fn parse_fat_info(buf: &[u8], info: &mut BlkidInfo) {
         // Volume label at offset 43 (FAT16)
         if buf.len() > 54 {
             let label = &buf[43..54];
-            info.label = String::from_utf8_lossy(label)
-                .trim()
-                .to_string();
+            info.label = String::from_utf8_lossy(label).trim().to_string();
         }
         if buf.len() > 42 {
             info.uuid = format!(
@@ -209,8 +252,7 @@ fn parse_ntfs_info(buf: &[u8], info: &mut BlkidInfo) {
     }
     // Volume serial at offset 0x48
     let serial = u64::from_le_bytes([
-        buf[0x48], buf[0x49], buf[0x4A], buf[0x4B],
-        buf[0x4C], buf[0x4D], buf[0x4E], buf[0x4F],
+        buf[0x48], buf[0x49], buf[0x4A], buf[0x4B], buf[0x4C], buf[0x4D], buf[0x4E], buf[0x4F],
     ]);
     info.uuid = format!("{serial:016X}");
 }
@@ -225,11 +267,22 @@ fn parse_xfs_info(buf: &[u8], info: &mut BlkidInfo) {
     // UUID at offset 32, 16 bytes
     info.uuid = format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        buf[32], buf[33], buf[34], buf[35],
-        buf[36], buf[37],
-        buf[38], buf[39],
-        buf[40], buf[41],
-        buf[42], buf[43], buf[44], buf[45], buf[46], buf[47]
+        buf[32],
+        buf[33],
+        buf[34],
+        buf[35],
+        buf[36],
+        buf[37],
+        buf[38],
+        buf[39],
+        buf[40],
+        buf[41],
+        buf[42],
+        buf[43],
+        buf[44],
+        buf[45],
+        buf[46],
+        buf[47]
     );
 
     // Label at offset 0x6C, 12 bytes
@@ -246,11 +299,22 @@ fn parse_swap_info(buf: &[u8], info: &mut BlkidInfo) {
     if buf.len() >= 0x41C {
         info.uuid = format!(
             "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            buf[0x40C], buf[0x40D], buf[0x40E], buf[0x40F],
-            buf[0x410], buf[0x411],
-            buf[0x412], buf[0x413],
-            buf[0x414], buf[0x415],
-            buf[0x416], buf[0x417], buf[0x418], buf[0x419], buf[0x41A], buf[0x41B]
+            buf[0x40C],
+            buf[0x40D],
+            buf[0x40E],
+            buf[0x40F],
+            buf[0x410],
+            buf[0x411],
+            buf[0x412],
+            buf[0x413],
+            buf[0x414],
+            buf[0x415],
+            buf[0x416],
+            buf[0x417],
+            buf[0x418],
+            buf[0x419],
+            buf[0x41A],
+            buf[0x41B]
         );
     }
     // Label at offset 0x41C
@@ -383,9 +447,10 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 "-t" => {
                     i += 1;
                     if let Some(spec) = args.get(i)
-                        && let Some((tag, val)) = spec.split_once('=') {
-                            cfg.tag_filter = Some((tag.to_string(), val.to_string()));
-                        }
+                        && let Some((tag, val)) = spec.split_once('=')
+                    {
+                        cfg.tag_filter = Some((tag.to_string(), val.to_string()));
+                    }
                 }
                 "-c" => {
                     i += 1;
@@ -520,10 +585,7 @@ fn run_findfs(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
     let spec = match &cfg.findfs_spec {
         Some(s) => s.clone(),
         None => {
-            writeln!(
-                writer,
-                "findfs: usage: findfs LABEL=<label> | UUID=<uuid>"
-            )?;
+            writeln!(writer, "findfs: usage: findfs LABEL=<label> | UUID=<uuid>")?;
             return Ok(1);
         }
     };
@@ -677,11 +739,7 @@ mod tests {
             ("list", OutputFormat::List),
             ("export", OutputFormat::Export),
         ] {
-            let args = vec![
-                "blkid".to_string(),
-                "-o".to_string(),
-                fmt.to_string(),
-            ];
+            let args = vec!["blkid".to_string(), "-o".to_string(), fmt.to_string()];
             let cfg = parse_args(&args).unwrap();
             assert_eq!(cfg.output_format, expected);
         }
@@ -703,10 +761,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_findfs() {
-        let args = vec![
-            "findfs".to_string(),
-            "UUID=abc-123".to_string(),
-        ];
+        let args = vec!["findfs".to_string(), "UUID=abc-123".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.findfs_spec, Some("UUID=abc-123".to_string()));
     }

@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn run_doctl(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: doctl [GROUP] [COMMAND] [OPTIONS]");
         println!();
         println!("doctl — DigitalOcean CLI (Slate OS).");
@@ -43,7 +46,9 @@ fn run_doctl(args: Vec<String>) -> i32 {
                 println!("Enter your access token: ");
                 println!("Validating token... OK");
             }
-            _ => { println!("doctl auth: see doctl auth -h."); }
+            _ => {
+                println!("doctl auth: see doctl auth -h.");
+            }
         },
         "account" => {
             println!("Email: user@example.com");
@@ -60,47 +65,83 @@ fn run_doctl(args: Vec<String>) -> i32 {
         "compute" => match sub {
             "droplet" => match action {
                 "list" => {
-                    println!("ID          Name           Public IPv4      Region    Size        Status");
-                    println!("12345678    my-droplet     143.198.12.34    nyc1      s-1vcpu-1gb active");
-                    println!("23456789    web-server     143.198.56.78    sfo3      s-2vcpu-4gb active");
+                    println!(
+                        "ID          Name           Public IPv4      Region    Size        Status"
+                    );
+                    println!(
+                        "12345678    my-droplet     143.198.12.34    nyc1      s-1vcpu-1gb active"
+                    );
+                    println!(
+                        "23456789    web-server     143.198.56.78    sfo3      s-2vcpu-4gb active"
+                    );
                 }
                 "create" => {
-                    let name = args.iter().position(|a| a == "--name").and_then(|i| args.get(i + 1))
-                        .map(|s| s.as_str()).unwrap_or("new-droplet");
+                    let name = args
+                        .iter()
+                        .position(|a| a == "--name")
+                        .and_then(|i| args.get(i + 1))
+                        .map(|s| s.as_str())
+                        .unwrap_or("new-droplet");
                     println!("ID          Name           Public IPv4      Region    Status");
                     println!("34567890    {}    pending          nyc1      new", name);
                 }
-                _ => { println!("doctl compute droplet {}: see -h.", action); }
+                _ => {
+                    println!("doctl compute droplet {}: see -h.", action);
+                }
             },
             "volume" => {
-                println!("ID                                      Name         Size      Region    Droplet IDs");
-                println!("abcdef12-3456-7890-abcd-ef1234567890    my-vol       100 GiB   nyc1      12345678");
+                println!(
+                    "ID                                      Name         Size      Region    Droplet IDs"
+                );
+                println!(
+                    "abcdef12-3456-7890-abcd-ef1234567890    my-vol       100 GiB   nyc1      12345678"
+                );
             }
-            _ => { println!("doctl compute {}: see doctl compute -h.", sub); }
+            _ => {
+                println!("doctl compute {}: see doctl compute -h.", sub);
+            }
         },
         "kubernetes" => match sub {
             "cluster" => match action {
                 "list" => {
-                    println!("ID                                      Name           Region    Version    Status");
-                    println!("abcdef12-3456-7890-abcd-ef1234567890    my-k8s         nyc1      1.28.2     running");
+                    println!(
+                        "ID                                      Name           Region    Version    Status"
+                    );
+                    println!(
+                        "abcdef12-3456-7890-abcd-ef1234567890    my-k8s         nyc1      1.28.2     running"
+                    );
                 }
                 "kubeconfig" => {
                     println!("Notice: adding cluster credentials to kubeconfig file.");
                 }
-                _ => { println!("doctl kubernetes cluster {}: see -h.", action); }
+                _ => {
+                    println!("doctl kubernetes cluster {}: see -h.", action);
+                }
             },
-            _ => { println!("doctl kubernetes {}: see -h.", sub); }
+            _ => {
+                println!("doctl kubernetes {}: see -h.", sub);
+            }
         },
         "apps" => match sub {
             "list" => {
-                println!("ID                                      Spec Name      Default Ingress     Active Deployment");
-                println!("abcdef12-3456-7890-abcd-ef1234567890    my-app         my-app.ondigitalocean.app    OK");
+                println!(
+                    "ID                                      Spec Name      Default Ingress     Active Deployment"
+                );
+                println!(
+                    "abcdef12-3456-7890-abcd-ef1234567890    my-app         my-app.ondigitalocean.app    OK"
+                );
             }
-            _ => { println!("doctl apps {}: see -h.", sub); }
+            _ => {
+                println!("doctl apps {}: see -h.", sub);
+            }
         },
         "registry" => match sub {
-            "login" => { println!("Logging Docker in to registry.digitalocean.com"); }
-            _ => { println!("doctl registry {}: see -h.", sub); }
+            "login" => {
+                println!("Logging Docker in to registry.digitalocean.com");
+            }
+            _ => {
+                println!("doctl registry {}: see -h.", sub);
+            }
         },
         _ => {
             if group.is_empty() {
@@ -122,7 +163,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_doctl};
+    use super::run_doctl;
 
     #[test]
     fn help_exits_zero() {

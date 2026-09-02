@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_htmldoc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -34,13 +38,20 @@ fn run_htmldoc(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("htmldoc v1.9 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("htmldoc v1.9 (Slate OS)");
+        return 0;
+    }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if files.is_empty() {
         eprintln!("htmldoc: error: no input files specified");
         return 1;
     }
-    let format = args.windows(2).find(|w| w[0] == "-f").map(|w| w[1].as_str()).unwrap_or("pdf");
+    let format = args
+        .windows(2)
+        .find(|w| w[0] == "-f")
+        .map(|w| w[1].as_str())
+        .unwrap_or("pdf");
     println!("HTMLDOC v1.9 (Slate OS)");
     for f in &files {
         println!("  Processing: {}", f);
@@ -53,7 +64,10 @@ fn run_htmldoc(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "htmldoc".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "htmldoc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_htmldoc(&rest, &_prog);
     process::exit(code);
@@ -61,7 +75,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_htmldoc};
+    use super::{basename, run_htmldoc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

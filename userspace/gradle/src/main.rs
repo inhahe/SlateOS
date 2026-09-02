@@ -8,7 +8,11 @@ use std::env;
 use std::process;
 
 fn run_gradle(args: Vec<String>) -> i32 {
-    let tasks: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let tasks: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
 
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") {
         println!("USAGE: gradle [option...] [task...]");
@@ -112,7 +116,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gradle};
+    use super::run_gradle;
 
     #[test]
     fn help_exits_zero() {

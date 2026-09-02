@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_h2o(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,7 +26,10 @@ fn run_h2o(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("H2O v2.3.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("H2O v2.3.0 (Slate OS)");
+        return 0;
+    }
     println!("H2O v2.3.0 (Slate OS)");
     println!("  Listening: 0.0.0.0:80 (HTTP/1.1, HTTP/2)");
     println!("  Listening: 0.0.0.0:443 (HTTPS, HTTP/2, HTTP/3)");
@@ -37,7 +44,10 @@ fn run_h2o(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "h2o".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "h2o".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_h2o(&rest, &_prog);
     process::exit(code);
@@ -45,7 +55,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_h2o};
+    use super::{basename, run_h2o, strip_ext};
 
     #[test]
     fn basename_strips_path() {

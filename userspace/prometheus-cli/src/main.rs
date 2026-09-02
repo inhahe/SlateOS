@@ -57,13 +57,22 @@ fn run_promtool(args: Vec<String>) -> i32 {
         }
         ("query", "instant") => {
             let query = args.get(2).map(|s| s.as_str()).unwrap_or("up");
-            println!("{{__name__=\"{}\", instance=\"localhost:9090\", job=\"prometheus\"}} => 1 @[1705312200]", query);
-            println!("{{__name__=\"{}\", instance=\"localhost:9100\", job=\"node\"}} => 1 @[1705312200]", query);
+            println!(
+                "{{__name__=\"{}\", instance=\"localhost:9090\", job=\"prometheus\"}} => 1 @[1705312200]",
+                query
+            );
+            println!(
+                "{{__name__=\"{}\", instance=\"localhost:9100\", job=\"node\"}} => 1 @[1705312200]",
+                query
+            );
             0
         }
         ("query", "range") => {
-            let query = args.get(2).map(|s| s.as_str()).unwrap_or("rate(http_requests_total[5m])");
-            println!("{{method=\"GET\", status=\"200\"}} =>", );
+            let query = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("rate(http_requests_total[5m])");
+            println!("{{method=\"GET\", status=\"200\"}} =>",);
             println!("  1705312000 125.4");
             println!("  1705312060 128.7");
             println!("  1705312120 130.2");
@@ -81,10 +90,18 @@ fn run_promtool(args: Vec<String>) -> i32 {
             0
         }
         ("tsdb", "list") => {
-            println!("Block ID                           Min Time            Max Time            Duration    Samples   Series");
-            println!("01HR2Q3Z4K5M6N7P8R9S0T1U2V  2024-01-14 00:00:00  2024-01-14 02:00:00  2h          1.2M      5432");
-            println!("01HR3Q4Z5K6M7N8P9R0S1T2U3V  2024-01-14 02:00:00  2024-01-14 04:00:00  2h          1.1M      5430");
-            println!("01HR4Q5Z6K7M8N9P0R1S2T3U4V  2024-01-14 04:00:00  2024-01-14 06:00:00  2h          1.3M      5435");
+            println!(
+                "Block ID                           Min Time            Max Time            Duration    Samples   Series"
+            );
+            println!(
+                "01HR2Q3Z4K5M6N7P8R9S0T1U2V  2024-01-14 00:00:00  2024-01-14 02:00:00  2h          1.2M      5432"
+            );
+            println!(
+                "01HR3Q4Z5K6M7N8P9R0S1T2U3V  2024-01-14 02:00:00  2024-01-14 04:00:00  2h          1.1M      5430"
+            );
+            println!(
+                "01HR4Q5Z6K7M8N9P0R1S2T3U4V  2024-01-14 04:00:00  2024-01-14 06:00:00  2h          1.3M      5435"
+            );
             0
         }
         _ => {
@@ -107,7 +124,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_promtool};
+    use super::run_promtool;
 
     #[test]
     fn help_exits_zero() {

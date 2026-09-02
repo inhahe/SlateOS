@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_statping(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -29,7 +33,10 @@ fn run_statping(args: &[String], _prog: &str) -> i32 {
         println!("  --db-conn STRING   Database connection string");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "version") { println!("Statping-ng v0.91.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version" || a == "version") {
+        println!("Statping-ng v0.91.0 (Slate OS)");
+        return 0;
+    }
     println!("Statping-ng v0.91.0 (Slate OS)");
     println!("  Services: 15 (13 online, 2 offline)");
     println!("  Groups: 4");
@@ -42,7 +49,10 @@ fn run_statping(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "statping".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "statping".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_statping(&rest, &_prog);
     process::exit(code);
@@ -50,7 +60,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_statping};
+    use super::{basename, run_statping, strip_ext};
 
     #[test]
     fn basename_strips_path() {

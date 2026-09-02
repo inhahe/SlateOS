@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("cohere-cli 0.1.0 (enterprise-only personality build)"); }
+fn print_version() {
+    println!("cohere-cli 0.1.0 (enterprise-only personality build)");
+}
 
 fn run_about() {
     println!("Cohere Inc.");

@@ -46,12 +46,14 @@ fn run_oggenc(args: &[String]) -> i32 {
 
     let quiet = args.iter().any(|a| a == "-Q" || a == "--quiet");
 
-    let quality = args.windows(2)
+    let quality = args
+        .windows(2)
         .find(|w| w[0] == "-q" || w[0] == "--quality")
         .and_then(|w| w[1].parse::<f32>().ok())
         .unwrap_or(3.0);
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -69,7 +71,11 @@ fn run_oggenc(args: &[String]) -> i32 {
         };
         if !quiet {
             println!("Encoding \"{}\" to \"{}\"", file, output);
-            println!("  Quality: {:.1} (≈{} kbps)", quality, (quality * 32.0 + 64.0) as i32);
+            println!(
+                "  Quality: {:.1} (≈{} kbps)",
+                quality,
+                (quality * 32.0 + 64.0) as i32
+            );
             println!("  Input:  44100 Hz, 16-bit, stereo");
             println!("  [==================================================] 100.0%");
             println!("  Done. Output: {} ({:.1} MB)", output, 5.2_f64);
@@ -95,7 +101,8 @@ fn run_oggdec(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -120,7 +127,8 @@ fn run_ogginfo(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -170,11 +178,13 @@ fn run_vorbiscomment(args: &[String]) -> i32 {
     }
 
     let list = args.iter().any(|a| a == "-l" || a == "--list");
-    let tag = args.windows(2)
+    let tag = args
+        .windows(2)
         .find(|w| w[0] == "-t" || w[0] == "--tag")
         .map(|w| w[1].as_str());
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -198,7 +208,10 @@ fn run_vorbiscomment(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("oggenc"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("oggenc"));
     let p = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
@@ -219,7 +232,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_oggenc};
+    use super::run_oggenc;
 
     #[test]
     fn help_exits_zero() {

@@ -27,7 +27,9 @@ fn run_jellyfin(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let datadir = args.iter().position(|a| a == "--datadir")
+    let datadir = args
+        .iter()
+        .position(|a| a == "--datadir")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("/var/lib/jellyfin");
@@ -62,7 +64,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_jellyfin};
+    use super::run_jellyfin;
 
     #[test]
     fn help_exits_zero() {

@@ -5,41 +5,62 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_rs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rudderstack [OPTIONS]");
-        println!("RudderStack (Slate OS) — warehouse-native open-source CDP (the Segment alternative)");
+        println!(
+            "RudderStack (Slate OS) — warehouse-native open-source CDP (the Segment alternative)"
+        );
         println!();
         println!("Options:");
         println!("  --sources              SDKs + server + cloud sources (200+)");
         println!("  --destinations         200+ destinations");
         println!("  --transformations      JavaScript transformations on events");
-        println!("  --warehouse-first      Warehouse-first architecture (Snowflake/BigQuery as source of truth)");
+        println!(
+            "  --warehouse-first      Warehouse-first architecture (Snowflake/BigQuery as source of truth)"
+        );
         println!("  --self-host            Run RudderStack OSS on your own infra");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("RudderStack 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("RudderStack 2024 (Slate OS)");
+        return 0;
+    }
     println!("RudderStack 2024 (Slate OS) — Warehouse-Native CDP");
     println!("  Vendor: RudderStack, Inc. (San Francisco + Bangalore)");
     println!("  Founders: Soumyadeb Mitra (CEO), 2019");
     println!("          Soumyadeb: ex-8x8 + 1010data + IBM (data engineering background)");
     println!("          founded RudderStack to be 'the open-source Segment'");
     println!("          original positioning: 'Segment is too expensive, let's build OSS'");
-    println!("          pivoted post-2021 to 'warehouse-first CDP' (better moat than just cheaper-Segment)");
+    println!(
+        "          pivoted post-2021 to 'warehouse-first CDP' (better moat than just cheaper-Segment)"
+    );
     println!("  Funding: ~$82M total");
     println!("         Series B Oct 2021: $56M led by Insight Partners");
     println!("         Series A Jun 2021: $21M led by Insight Partners");
     println!("         seed 2019: Kleiner Perkins, S28 Capital");
-    println!("  Strategic position: 'warehouse-native CDP — data lives in your warehouse, not ours':");
-    println!("                    pitch: 'unify customer data in YOUR Snowflake, then route from there'");
-    println!("                    target: data-engineering-led teams using Snowflake/BigQuery/Databricks");
+    println!(
+        "  Strategic position: 'warehouse-native CDP — data lives in your warehouse, not ours':"
+    );
+    println!(
+        "                    pitch: 'unify customer data in YOUR Snowflake, then route from there'"
+    );
+    println!(
+        "                    target: data-engineering-led teams using Snowflake/BigQuery/Databricks"
+    );
     println!("                    primary competitor: Segment, mParticle (packaged CDPs)");
     println!("                    secondary: Hightouch + Census (composable CDP / reverse-ETL)");
-    println!("                    RudderStack's wedge: open-source + warehouse-first + cheaper than Segment");
+    println!(
+        "                    RudderStack's wedge: open-source + warehouse-first + cheaper than Segment"
+    );
     println!("                    'composable CDP' evangelist — won mid-market data teams");
     println!("                    Indian engineering team = cost advantage + 24/7 dev cycles");
     println!("  Pricing (tier + open-source):");
@@ -50,7 +71,9 @@ fn run_rs(args: &[String], _prog: &str) -> i32 {
     println!("    Enterprise — $50K-500K+/yr (Fortune 500)");
     println!("    typically 50-70% cheaper than Segment at same scale");
     println!("  Core architecture (warehouse-first):");
-    println!("    - Send events from SDKs → RudderStack → simultaneously to warehouse + downstream tools");
+    println!(
+        "    - Send events from SDKs → RudderStack → simultaneously to warehouse + downstream tools"
+    );
     println!("    - Warehouse becomes single source of truth");
     println!("    - Cloud Extract: pull data FROM cloud apps INTO warehouse");
     println!("    - Reverse-ETL: sync from warehouse TO destinations (compete with Hightouch)");
@@ -64,11 +87,15 @@ fn run_rs(args: &[String], _prog: &str) -> i32 {
     println!("  Sources (200+):");
     println!("    - SDKs: JavaScript, iOS Swift, Android Kotlin, React Native, Flutter, Unity");
     println!("    - Server: Node, Python, Go, Ruby, Java, PHP, .NET, Rust");
-    println!("    - Cloud Extract: Stripe, Salesforce, Zendesk, Mailchimp, HubSpot (API-based pulls)");
+    println!(
+        "    - Cloud Extract: Stripe, Salesforce, Zendesk, Mailchimp, HubSpot (API-based pulls)"
+    );
     println!("    - Streaming sources: Kafka, AWS Kinesis, GCP Pub/Sub");
     println!("    - Event Stream API");
     println!("  Destinations (200+):");
-    println!("    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Postgres, ClickHouse, S3");
+    println!(
+        "    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Postgres, ClickHouse, S3"
+    );
     println!("    - Analytics: Mixpanel, Amplitude, Heap, GA4, Adobe Analytics");
     println!("    - Marketing: Iterable, Braze, Customer.io, Marketo, Klaviyo");
     println!("    - Ads: Facebook CAPI, Google Ads, TikTok, LinkedIn (Conversions APIs)");
@@ -102,13 +129,18 @@ fn run_rs(args: &[String], _prog: &str) -> i32 {
     println!("           Hightouch + Census attack from 'pure reverse-ETL' angle");
     println!("           identity resolution still less mature than mParticle's IDSync");
     println!("           growing competition from Snowflake Streamlit + native data sharing");
-    println!("  Differentiator: open-source + warehouse-first architecture + cheaper than Segment + Indian-engineering scale economics + 'composable CDP' evangelist — the CDP choice for data-engineering-led teams already invested in Snowflake/BigQuery");
+    println!(
+        "  Differentiator: open-source + warehouse-first architecture + cheaper than Segment + Indian-engineering scale economics + 'composable CDP' evangelist — the CDP choice for data-engineering-led teams already invested in Snowflake/BigQuery"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "rudderstack".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "rudderstack".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_rs(&rest, &_prog);
     process::exit(code);
@@ -116,7 +148,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_rs};
+    use super::{basename, run_rs, strip_ext};
 
     #[test]
     fn basename_strips_path() {

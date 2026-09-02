@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_yacas(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -26,8 +30,15 @@ fn run_yacas(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("YACAS v1.9 (Slate OS)"); return 0; }
-    if let Some(expr) = args.windows(2).find(|w| w[0] == "-e").map(|w| w[1].as_str()) {
+    if args.iter().any(|a| a == "--version") {
+        println!("YACAS v1.9 (Slate OS)");
+        return 0;
+    }
+    if let Some(expr) = args
+        .windows(2)
+        .find(|w| w[0] == "-e")
+        .map(|w| w[1].as_str())
+    {
         println!("In> {}", expr);
         println!("Out> 42");
         return 0;
@@ -45,7 +56,10 @@ fn run_yacas(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "yacas".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "yacas".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_yacas(&rest, &_prog);
     process::exit(code);
@@ -53,7 +67,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_yacas};
+    use super::{basename, run_yacas, strip_ext};
 
     #[test]
     fn basename_strips_path() {

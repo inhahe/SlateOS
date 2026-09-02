@@ -46,11 +46,13 @@ fn run_a2ps(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let output = args.windows(2)
+    let output = args
+        .windows(2)
         .find(|w| w[0] == "-o" || w[0] == "--output")
         .map(|w| w[1].as_str());
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -59,9 +61,15 @@ fn run_a2ps(args: Vec<String>) -> i32 {
     let total_sheets = total_pages.div_ceil(2);
 
     if let Some(out) = output {
-        println!("[{}: {} pages on {} sheets]", out, total_pages, total_sheets);
+        println!(
+            "[{}: {} pages on {} sheets]",
+            out, total_pages, total_sheets
+        );
     } else {
-        println!("[Total: {} pages on {} sheets] sent to the default printer", total_pages, total_sheets);
+        println!(
+            "[Total: {} pages on {} sheets] sent to the default printer",
+            total_pages, total_sheets
+        );
     }
 
     for f in &files {
@@ -79,7 +87,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_a2ps};
+    use super::run_a2ps;
 
     #[test]
     fn help_exits_zero() {

@@ -26,8 +26,11 @@ fn run_crontab(args: Vec<String>) -> i32 {
     let edit = args.iter().any(|a| a == "-e");
     let remove = args.iter().any(|a| a == "-r");
     let confirm = args.iter().any(|a| a == "-i");
-    let user = args.windows(2).find(|w| w[0] == "-u")
-        .map(|w| w[1].as_str()).unwrap_or("root");
+    let user = args
+        .windows(2)
+        .find(|w| w[0] == "-u")
+        .map(|w| w[1].as_str())
+        .unwrap_or("root");
 
     if list {
         println!("# crontab for {}", user);
@@ -47,7 +50,9 @@ fn run_crontab(args: Vec<String>) -> i32 {
         println!("crontab: removed crontab for {}", user);
     } else {
         // Install from file
-        let file = args.iter().find(|a| !a.starts_with('-'))
+        let file = args
+            .iter()
+            .find(|a| !a.starts_with('-'))
             .map(|s| s.as_str());
         if let Some(f) = file {
             println!("crontab: installing new crontab from {}", f);
@@ -68,7 +73,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_crontab};
+    use super::run_crontab;
 
     #[test]
     fn help_exits_zero() {

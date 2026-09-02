@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn run_railway(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: railway <COMMAND> [OPTIONS]");
         println!();
         println!("Railway CLI — deploy apps on Railway (Slate OS).");
@@ -96,14 +99,18 @@ fn run_railway(args: Vec<String>) -> i32 {
                 println!("Variable set successfully.");
                 println!("Service will redeploy with new variables.");
             }
-            _ => { println!("railway variables {}: see --help.", sub); }
+            _ => {
+                println!("railway variables {}: see --help.", sub);
+            }
         },
         "domain" => match sub {
             "list" | "" => {
                 println!("Custom domains:");
                 println!("  app.example.com  →  my-project.up.railway.app");
             }
-            _ => { println!("railway domain {}: see --help.", sub); }
+            _ => {
+                println!("railway domain {}: see --help.", sub);
+            }
         },
         "service" => match sub {
             "list" | "" => {
@@ -112,9 +119,13 @@ fn run_railway(args: Vec<String>) -> i32 {
                 println!("  worker   Active");
                 println!("  cron     Active");
             }
-            _ => { println!("railway service {}: see --help.", sub); }
+            _ => {
+                println!("railway service {}: see --help.", sub);
+            }
         },
-        "logout" => { println!("Logged out."); }
+        "logout" => {
+            println!("Logged out.");
+        }
         _ => {
             if cmd.is_empty() {
                 eprintln!("railway: no command specified. See --help.");
@@ -135,7 +146,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_railway};
+    use super::run_railway;
 
     #[test]
     fn help_exits_zero() {

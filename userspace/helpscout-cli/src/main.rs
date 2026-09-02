@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_helpscout(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,17 +28,28 @@ fn run_helpscout(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Help Scout 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Help Scout 2024 (Slate OS)");
+        return 0;
+    }
     println!("Help Scout 2024 (Slate OS)");
     println!("  Vendor: Help Scout PBC (Boston, MA — fully remote, certified B-Corp)");
     println!("  Founders: Nick Francis (CEO), Jared McDaniel, Denny Swindle (2011)");
     println!("          all three previously ran a small web design agency in Nashville → Boston");
-    println!("          frustrated with Zendesk's 'ticket' UI killing personal feel of customer email");
+    println!(
+        "          frustrated with Zendesk's 'ticket' UI killing personal feel of customer email"
+    );
     println!("  Founded: 2011 in Boston — bootstrapped early, raised modest Series A 2018");
-    println!("          structured as Public Benefit Corporation (PBC) — formal commitment to social good");
+    println!(
+        "          structured as Public Benefit Corporation (PBC) — formal commitment to social good"
+    );
     println!("          'fully distributed' since pre-pandemic — ~140 employees in 80+ cities");
-    println!("  Core thesis: 'every customer conversation should feel like personal email — not a ticket'");
-    println!("            no ticket numbers visible to customers, no automated 'your case has been logged'");
+    println!(
+        "  Core thesis: 'every customer conversation should feel like personal email — not a ticket'"
+    );
+    println!(
+        "            no ticket numbers visible to customers, no automated 'your case has been logged'"
+    );
     println!("            agents see the conversation as if it were Gmail, not a ticketing system");
     println!("  Pricing: Standard $25/user/mo (2 mailboxes, 50 saved replies, basic reports)");
     println!("          Plus $50/user/mo (unlimited mailboxes, custom fields, advanced API)");
@@ -61,7 +76,9 @@ fn run_helpscout(args: &[String], _prog: &str) -> i32 {
     println!("    - Bulk article import + CSV export");
     println!("    - Restricted Docs sites (private to logged-in customers)");
     println!("  AI features (recently added):");
-    println!("    - AI Summarize — collapse a long conversation into 1 paragraph for the next agent");
+    println!(
+        "    - AI Summarize — collapse a long conversation into 1 paragraph for the next agent"
+    );
     println!("    - AI Assist — improve, shorten, or change tone of an agent draft");
     println!("    - AI Answers (beta) — draft reply from KB + prior conversation context");
     println!("    - launched Sep 2023, OpenAI-powered");
@@ -77,20 +94,29 @@ fn run_helpscout(args: &[String], _prog: &str) -> i32 {
     println!("              Mailchimp, Webhooks, Zapier");
     println!("              REST API + webhooks + iOS/Android SDKs for Beacon");
     println!("  Customers: 12,000+ companies");
-    println!("            Buffer (early adopter + case study), Reddit, Lemonade, Atlassian (parts), Trello");
+    println!(
+        "            Buffer (early adopter + case study), Reddit, Lemonade, Atlassian (parts), Trello"
+    );
     println!("            sweet spot: SaaS startups, e-commerce SMBs, mission-driven brands");
     println!("            very strong in 5-50 agent teams that hate enterprise helpdesk UX");
-    println!("  Critique: doesn't scale comfortably past ~500 agents — built for small intimate teams");
+    println!(
+        "  Critique: doesn't scale comfortably past ~500 agents — built for small intimate teams"
+    );
     println!("           voice/phone support limited compared to Zendesk Talk or Freshcaller");
     println!("           workflow engine simpler than Zendesk Triggers — can hit ceiling");
     println!("           reporting customization less powerful than Explore");
-    println!("  Differentiator: 'doesn't look like a helpdesk' — customers + agents both prefer it on small teams");
+    println!(
+        "  Differentiator: 'doesn't look like a helpdesk' — customers + agents both prefer it on small teams"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "helpscout".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "helpscout".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_helpscout(&rest, &_prog);
     process::exit(code);
@@ -98,7 +124,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_helpscout};
+    use super::{basename, run_helpscout, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -14,7 +14,9 @@ fn run_shellcheck(args: Vec<String>) -> i32 {
         println!("Shell script analysis tool.");
         println!();
         println!("Options:");
-        println!("  -f, --format <FMT>     Output format (tty/gcc/checkstyle/diff/json1/json/quiet)");
+        println!(
+            "  -f, --format <FMT>     Output format (tty/gcc/checkstyle/diff/json1/json/quiet)"
+        );
         println!("  -e, --exclude <CODE>   Exclude specific checks");
         println!("  --include <CODE>       Only run specific checks");
         println!("  -s, --shell <SHELL>    Override shell dialect (sh/bash/dash/ksh/zsh)");
@@ -35,10 +37,15 @@ fn run_shellcheck(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let json = args.windows(2).any(|w| (w[0] == "-f" || w[0] == "--format") && (w[1] == "json" || w[1] == "json1"));
-    let quiet = args.windows(2).any(|w| (w[0] == "-f" || w[0] == "--format") && w[1] == "quiet");
+    let json = args
+        .windows(2)
+        .any(|w| (w[0] == "-f" || w[0] == "--format") && (w[1] == "json" || w[1] == "json1"));
+    let quiet = args
+        .windows(2)
+        .any(|w| (w[0] == "-f" || w[0] == "--format") && w[1] == "quiet");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -54,9 +61,18 @@ fn run_shellcheck(args: Vec<String>) -> i32 {
 
     if json {
         println!("[");
-        println!("  {{\"file\":\"{}\",\"line\":3,\"column\":1,\"level\":\"warning\",\"code\":2034,\"message\":\"x appears unused. Verify use (or export/local).\"}},", files[0]);
-        println!("  {{\"file\":\"{}\",\"line\":7,\"column\":5,\"level\":\"error\",\"code\":2086,\"message\":\"Double quote to prevent globbing and word splitting.\"}},", files[0]);
-        println!("  {{\"file\":\"{}\",\"line\":12,\"column\":1,\"level\":\"info\",\"code\":2154,\"message\":\"var is referenced but not assigned.\"}}", files[0]);
+        println!(
+            "  {{\"file\":\"{}\",\"line\":3,\"column\":1,\"level\":\"warning\",\"code\":2034,\"message\":\"x appears unused. Verify use (or export/local).\"}},",
+            files[0]
+        );
+        println!(
+            "  {{\"file\":\"{}\",\"line\":7,\"column\":5,\"level\":\"error\",\"code\":2086,\"message\":\"Double quote to prevent globbing and word splitting.\"}},",
+            files[0]
+        );
+        println!(
+            "  {{\"file\":\"{}\",\"line\":12,\"column\":1,\"level\":\"info\",\"code\":2154,\"message\":\"var is referenced but not assigned.\"}}",
+            files[0]
+        );
         println!("]");
         return 1;
     }
@@ -94,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_shellcheck};
+    use super::run_shellcheck;
 
     #[test]
     fn help_exits_zero() {

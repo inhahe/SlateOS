@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_rbw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -28,7 +32,10 @@ fn run_rbw(args: &[String], _prog: &str) -> i32 {
         println!("  remove NAME       Remove entry");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rbw v1.9 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("rbw v1.9 (Slate OS)");
+        return 0;
+    }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("list");
     match cmd {
         "list" => {
@@ -62,7 +69,10 @@ fn run_agent(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "rbw".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "rbw".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "rbw-agent" => run_agent(&rest, &prog),
@@ -73,7 +83,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_rbw};
+    use super::{basename, run_rbw, strip_ext};
 
     #[test]
     fn basename_strips_path() {

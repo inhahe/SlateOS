@@ -440,10 +440,11 @@ fn pad_left_num(val: u64, buf: &mut [u8], width: usize) -> usize {
     }
     for j in 0..n {
         if pos < buf.len()
-            && let Some(c) = tmp.get(j) {
-                buf[pos] = *c;
-                pos += 1;
-            }
+            && let Some(c) = tmp.get(j)
+        {
+            buf[pos] = *c;
+            pos += 1;
+        }
     }
     pos
 }
@@ -1032,10 +1033,7 @@ fn resolve_dependencies(name: &[u8], deps: &mut [ModuleName; 64], dep_count: &mu
     for i in 0..info.dep_count {
         let dep_name = info.depends[i].as_bytes();
         // Check if already in list
-        let found = deps
-            .iter()
-            .take(*dep_count)
-            .any(|d| d.eq_bytes(dep_name));
+        let found = deps.iter().take(*dep_count).any(|d| d.eq_bytes(dep_name));
         if !found && *dep_count < 64 {
             deps[*dep_count] = info.depends[i];
             *dep_count += 1;
@@ -1213,14 +1211,13 @@ fn cmd_modprobe(opts: &ModprobeOpts) -> i32 {
             .take(count)
             .any(|m| m.name.eq_bytes(deps[i].as_bytes()));
 
-        if !dep_loaded
-            && (opts.verbose || opts.dry_run) {
-                print_out(b"insmod ");
-                print_out(MODULES_DIR);
-                print_out(b"/0.1.0/kernel/");
-                print_out(deps[i].as_bytes());
-                print_out(b".ko\n");
-            }
+        if !dep_loaded && (opts.verbose || opts.dry_run) {
+            print_out(b"insmod ");
+            print_out(MODULES_DIR);
+            print_out(b"/0.1.0/kernel/");
+            print_out(deps[i].as_bytes());
+            print_out(b".ko\n");
+        }
     }
 
     // Load the main module
@@ -1295,12 +1292,11 @@ fn cmd_modprobe_remove(opts: &ModprobeOpts) -> i32 {
             .find(|m| m.name.eq_bytes(dep_name))
             .map_or(0u32, |m| m.refcount);
         // Would be unused after removing our module
-        if dep_refcount <= 1
-            && (opts.verbose || opts.dry_run) {
-                print_out(b"rmmod ");
-                print_out(dep_name);
-                print_out(b"\n");
-            }
+        if dep_refcount <= 1 && (opts.verbose || opts.dry_run) {
+            print_out(b"rmmod ");
+            print_out(dep_name);
+            print_out(b"\n");
+        }
     }
 
     0
@@ -1497,18 +1493,17 @@ fn cmd_depmod(opts: &ModprobeOpts) -> i32 {
         }
     }
 
-    if !opts.dry_run
-        && opts.verbose {
-            print_out(b"depmod: Writing ");
-            print_out(MODULES_DIR);
-            print_out(b"/0.1.0/modules.dep\n");
-            print_out(b"depmod: Writing ");
-            print_out(MODULES_DIR);
-            print_out(b"/0.1.0/modules.alias\n");
-            print_out(b"depmod: Writing ");
-            print_out(MODULES_DIR);
-            print_out(b"/0.1.0/modules.symbols\n");
-        }
+    if !opts.dry_run && opts.verbose {
+        print_out(b"depmod: Writing ");
+        print_out(MODULES_DIR);
+        print_out(b"/0.1.0/modules.dep\n");
+        print_out(b"depmod: Writing ");
+        print_out(MODULES_DIR);
+        print_out(b"/0.1.0/modules.alias\n");
+        print_out(b"depmod: Writing ");
+        print_out(MODULES_DIR);
+        print_out(b"/0.1.0/modules.symbols\n");
+    }
 
     0
 }

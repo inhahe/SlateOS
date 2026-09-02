@@ -7,13 +7,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mixbus [OPTIONS] [SESSION]");
-        println!("Harrison Mixbus 10 (Slate OS) — Console-style DAW modeling Harrison 32C analog desk");
+        println!(
+            "Harrison Mixbus 10 (Slate OS) — Console-style DAW modeling Harrison 32C analog desk"
+        );
         println!();
         println!("Options:");
         println!("  --open FILE            Open .ardour-style session");
@@ -23,7 +29,10 @@ fn run_mb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Harrison Mixbus 10.0.5 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Harrison Mixbus 10.0.5 (Slate OS)");
+        return 0;
+    }
     println!("Harrison Mixbus 10.0.5 (Slate OS)");
     println!("  Editions: Mixbus (8-bus), Mixbus 32C (12-bus + EQ)");
     println!("  Engine: Built on Ardour (open source DAW)");
@@ -35,7 +44,10 @@ fn run_mb(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mixbus".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mixbus".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mb(&rest, &_prog);
     process::exit(code);
@@ -43,7 +55,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mb};
+    use super::{basename, run_mb, strip_ext};
 
     #[test]
     fn basename_strips_path() {

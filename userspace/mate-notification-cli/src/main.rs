@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mate_notifyd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -17,7 +21,10 @@ fn run_mate_notifyd(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mate-notification-daemon v1.28 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("mate-notification-daemon v1.28 (Slate OS)");
+        return 0;
+    }
     println!("mate-notification-daemon: running");
     println!("  Theme: standard");
     println!("  Position: top-right");
@@ -39,7 +46,10 @@ fn run_mate_notifyd_props(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mate-notification-daemon".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mate-notification-daemon".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "mate-notification-properties" => run_mate_notifyd_props(&rest, &prog),
@@ -50,12 +60,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mate_notifyd};
+    use super::{basename, run_mate_notifyd, strip_ext};
 
     #[test]
     fn basename_strips_path() {
         assert_eq!(basename("/usr/bin/mate-notification"), "mate-notification");
-        assert_eq!(basename(r"C:\bin\mate-notification.exe"), "mate-notification.exe");
+        assert_eq!(
+            basename(r"C:\bin\mate-notification.exe"),
+            "mate-notification.exe"
+        );
         assert_eq!(basename("plain"), "plain");
     }
 
@@ -67,8 +80,14 @@ mod tests {
 
     #[test]
     fn help_exits_zero() {
-        assert_eq!(run_mate_notifyd(&["--help".to_string()], "mate-notification"), 0);
-        assert_eq!(run_mate_notifyd(&["-h".to_string()], "mate-notification"), 0);
+        assert_eq!(
+            run_mate_notifyd(&["--help".to_string()], "mate-notification"),
+            0
+        );
+        assert_eq!(
+            run_mate_notifyd(&["-h".to_string()], "mate-notification"),
+            0
+        );
         let _ = run_mate_notifyd(&["--version".to_string()], "mate-notification");
     }
 

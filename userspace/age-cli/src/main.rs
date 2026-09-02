@@ -42,7 +42,9 @@ fn run_age(args: Vec<String>) -> i32 {
     let decrypt = args.iter().any(|a| a == "-d" || a == "--decrypt");
     let armor = args.iter().any(|a| a == "-a" || a == "--armor");
     let passphrase = args.iter().any(|a| a == "-p" || a == "--passphrase");
-    let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output")
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o" || w[0] == "--output")
         .map(|w| w[1].as_str());
 
     if decrypt {
@@ -82,7 +84,9 @@ fn run_age_keygen(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output")
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o" || w[0] == "--output")
         .map(|w| w[1].as_str());
 
     println!("# created: 2024-01-15T14:00:00Z");
@@ -99,7 +103,9 @@ fn run_age_keygen(args: Vec<String>) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string())
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "age".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
@@ -111,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_age};
+    use super::{basename, run_age, strip_ext};
 
     #[test]
     fn basename_strips_path() {

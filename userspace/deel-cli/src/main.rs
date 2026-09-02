@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_deel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_deel(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Deel 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Deel 2024 (Slate OS)");
+        return 0;
+    }
     println!("Deel 2024 (Slate OS)");
     println!("  Vendor: Deel Inc. (San Francisco — founded 2019)");
     println!("  Founders: Alex Bouaziz + Shuo Wang (MIT)");
@@ -36,29 +43,44 @@ fn run_deel(args: &[String], _prog: &str) -> i32 {
     println!("  Scale: 25,000+ customers, ~3,500 employees, 150+ countries supported");
     println!("        Deel itself is fully remote — operating in every country it supports");
     println!("  Pricing:");
-    println!("    Contractor management: $49/contractor/mo (mass contractor payments + agreements + tax forms)");
-    println!("    EOR (Employer of Record): from $599/employee/mo (Deel becomes legal employer abroad)");
+    println!(
+        "    Contractor management: $49/contractor/mo (mass contractor payments + agreements + tax forms)"
+    );
+    println!(
+        "    EOR (Employer of Record): from $599/employee/mo (Deel becomes legal employer abroad)"
+    );
     println!("    Global Payroll: custom (direct payroll where Deel has own entities)");
     println!("    Deel HR: FREE forever (HRIS up to 200 employees) — gateway-drug strategy");
     println!("  Killer features:");
     println!("    - 150+ countries — locally-compliant employment agreements out-of-box");
-    println!("    - Withdraw earnings in 15+ currencies + crypto (USDC) + Wise/PayPal/bank transfer");
+    println!(
+        "    - Withdraw earnings in 15+ currencies + crypto (USDC) + Wise/PayPal/bank transfer"
+    );
     println!("    - Tax forms generation: W-9/W-8BEN (US), 1099, equivalents in every country");
-    println!("    - Misclassification risk assessment (AI-based contractor-vs-employee classifier)");
+    println!(
+        "    - Misclassification risk assessment (AI-based contractor-vs-employee classifier)"
+    );
     println!("    - Equipment shipping / visa support / relocation services");
     println!("    - Background checks in 200+ countries");
     println!("  Rippling lawsuit: 2024 — Rippling sued Deel for paying a Rippling employee");
     println!("                    to steal Rippling's customer + sales data");
     println!("                    Deel denies, high-profile HR-tech rivalry");
     println!("  Critique: aggressive sales culture, customer service complaints at scale");
-    println!("           EOR pricing high; product breadth (HR/payroll) less mature than dedicated tools");
-    println!("  Differentiator: largest global EOR + contractor coverage — global hiring in 150+ countries");
+    println!(
+        "           EOR pricing high; product breadth (HR/payroll) less mature than dedicated tools"
+    );
+    println!(
+        "  Differentiator: largest global EOR + contractor coverage — global hiring in 150+ countries"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "deel".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "deel".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_deel(&rest, &_prog);
     process::exit(code);
@@ -66,7 +88,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_deel};
+    use super::{basename, run_deel, strip_ext};
 
     #[test]
     fn basename_strips_path() {

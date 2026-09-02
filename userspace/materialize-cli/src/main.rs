@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mz(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: materialize [OPTIONS]");
-        println!("Materialize (Slate OS) — streaming SQL database with incremental view maintenance");
+        println!(
+            "Materialize (Slate OS) — streaming SQL database with incremental view maintenance"
+        );
         println!();
         println!("Options:");
         println!("  --materialized-views   Always-fresh materialized views (key innovation)");
@@ -20,12 +26,17 @@ fn run_mz(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Materialize 2024 (Slate OS) — mz CLI 2.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Materialize 2024 (Slate OS) — mz CLI 2.x");
+        return 0;
+    }
     println!("Materialize 2024 (Slate OS) — Streaming SQL Database (Incremental View Maintenance)");
     println!("  Vendor: Materialize, Inc. (New York, NY — private)");
     println!("  Founders: Arjun Narayan (CEO) + Frank McSherry + Nikhil Benesch, 2019");
     println!("          Frank McSherry: researcher behind Timely Dataflow + Differential Dataflow");
-    println!("          McSherry: 'Naiad' MSR paper (2013) → Timely Dataflow → Differential Dataflow → Materialize");
+    println!(
+        "          McSherry: 'Naiad' MSR paper (2013) → Timely Dataflow → Differential Dataflow → Materialize"
+    );
     println!("          Arjun Narayan: ex-Cockroach Labs, ex-MSR");
     println!("          Nikhil Benesch: ex-Cockroach Labs");
     println!("          All Cornell PhD lineage (database systems research pedigree)");
@@ -34,20 +45,36 @@ fn run_mz(args: &[String], _prog: &str) -> i32 {
     println!("         Series C Aug 2022: $60M at $750M valuation");
     println!("         Investors: Kleiner Perkins, Lightspeed, Redpoint, Foundation Capital");
     println!("         Layoffs 2023 (industry-wide cooling)");
-    println!("  Strategic position: 'streaming SQL that's actually SQL — incremental view maintenance for real-time':");
-    println!("                    pitch: 'PostgreSQL-compatible streaming SQL — write a query, it stays fresh forever'");
+    println!(
+        "  Strategic position: 'streaming SQL that's actually SQL — incremental view maintenance for real-time':"
+    );
+    println!(
+        "                    pitch: 'PostgreSQL-compatible streaming SQL — write a query, it stays fresh forever'"
+    );
     println!("                    target: real-time apps + dashboards + operational analytics");
-    println!("                    primary competitor: Flink SQL, Spark Streaming, ksqlDB, Rising Wave");
-    println!("                    secondary: Snowflake Snowpipe Streaming, Pinot/Druid (different model)");
-    println!("                    Materialize's wedge: true incremental view maintenance, not micro-batches");
-    println!("                    Frank McSherry's Timely + Differential Dataflow = unique technical foundation");
-    println!("                    'A streaming database that thinks like a database' — strong DBA + DE positioning");
+    println!(
+        "                    primary competitor: Flink SQL, Spark Streaming, ksqlDB, Rising Wave"
+    );
+    println!(
+        "                    secondary: Snowflake Snowpipe Streaming, Pinot/Druid (different model)"
+    );
+    println!(
+        "                    Materialize's wedge: true incremental view maintenance, not micro-batches"
+    );
+    println!(
+        "                    Frank McSherry's Timely + Differential Dataflow = unique technical foundation"
+    );
+    println!(
+        "                    'A streaming database that thinks like a database' — strong DBA + DE positioning"
+    );
     println!("  Pricing (cloud, consumption-based):");
     println!("    Free trial: $400 credit + free starter tier");
     println!("    Standard: from ~$0.10/credit/hr (XS cluster) up to $20+/hr (XL cluster)");
     println!("    Per-cluster pricing (each cluster = isolated compute)");
     println!("    Storage: $0.10/GB-month");
-    println!("    typically more expensive per TB than batch DWs but for fundamentally different workloads");
+    println!(
+        "    typically more expensive per TB than batch DWs but for fundamentally different workloads"
+    );
     println!("  Architecture (the McSherry contribution):");
     println!("    - Built on Timely Dataflow (Rust, open-source) — McSherry's research engine");
     println!("    - Differential Dataflow: incremental computation over collections");
@@ -105,13 +132,21 @@ fn run_mz(args: &[String], _prog: &str) -> i32 {
     println!("    - Differential Dataflow generalizes: computes diffs over collections");
     println!("    - Cited by ~1000+ research papers");
     println!("    - Materialize commercializes McSherry's research → unique IP foundation");
-    println!("    - Open-source: github.com/MaterializeInc/timely-dataflow + differential-dataflow");
-    println!("    - Used by other projects: ClickHouse (some inspiration), Risingwave (competitor inspired by)");
+    println!(
+        "    - Open-source: github.com/MaterializeInc/timely-dataflow + differential-dataflow"
+    );
+    println!(
+        "    - Used by other projects: ClickHouse (some inspiration), Risingwave (competitor inspired by)"
+    );
     println!("  The 'streaming SQL is the future' bet:");
     println!("    - Traditional ETL: batch transforms run on cron (15min, hourly, daily)");
     println!("    - Streaming SQL: transforms always-fresh, real-time");
-    println!("    - Use cases: operational dashboards, fraud detection, real-time personalization, alerting");
-    println!("    - Competitors: Flink SQL (open-source, complex), ksqlDB (Confluent), RisingWave (open-source MZ competitor)");
+    println!(
+        "    - Use cases: operational dashboards, fraud detection, real-time personalization, alerting"
+    );
+    println!(
+        "    - Competitors: Flink SQL (open-source, complex), ksqlDB (Confluent), RisingWave (open-source MZ competitor)"
+    );
     println!("    - Materialize's bet: SQL-first + incrementality + true correctness wins");
     println!("  Integrations:");
     println!("    - mz CLI (Rust, open source)");
@@ -125,15 +160,21 @@ fn run_mz(args: &[String], _prog: &str) -> i32 {
     println!("  Materialize CLI usage:");
     println!("    mz profile init --profile=prod                           # auth + region");
     println!("    mz app-password create my-token");
-    println!("    psql 'host=region.materialize.cloud port=6875 user=me password=token dbname=materialize'");
+    println!(
+        "    psql 'host=region.materialize.cloud port=6875 user=me password=token dbname=materialize'"
+    );
     println!("    CREATE CLUSTER my_cluster SIZE = 'xsmall';");
-    println!("    CREATE SOURCE my_kafka_src FROM KAFKA CONNECTION my_kafka_conn (TOPIC 'orders') FORMAT JSON;");
+    println!(
+        "    CREATE SOURCE my_kafka_src FROM KAFKA CONNECTION my_kafka_conn (TOPIC 'orders') FORMAT JSON;"
+    );
     println!("    CREATE MATERIALIZED VIEW order_totals_by_region AS");
     println!("        SELECT region, COUNT(*) AS n, SUM(amount) AS total");
     println!("        FROM orders GROUP BY region;");
     println!("    SELECT * FROM order_totals_by_region;                    # always-fresh result");
     println!("    SUBSCRIBE TO order_totals_by_region;                     # streaming results");
-    println!("    CREATE SINK my_sink FROM order_totals_by_region INTO KAFKA CONNECTION my_kafka_conn (TOPIC 'aggregates');");
+    println!(
+        "    CREATE SINK my_sink FROM order_totals_by_region INTO KAFKA CONNECTION my_kafka_conn (TOPIC 'aggregates');"
+    );
     println!("    mz region list");
     println!("    mz cluster list");
     println!("  Customers (real-time ops):");
@@ -147,14 +188,21 @@ fn run_mz(args: &[String], _prog: &str) -> i32 {
     println!("           customer education needed — 'streaming SQL DB' is novel category");
     println!("           2023 layoffs reflected challenging fundraising environment");
     println!("           cluster sizing/cost can surprise teams used to serverless");
-    println!("           pure 'incremental view maintenance' is brilliant but may be overkill for some use cases");
-    println!("  Differentiator: Frank McSherry's Timely + Differential Dataflow (academic IP, MSR research) → only true incremental view maintenance database + always-fresh materialized views + PostgreSQL wire protocol + Kafka + Postgres CDC + S3 sources + cluster-based isolation + SUBSCRIBE for streaming dashboards + Arjun Narayan + Frank McSherry + Nikhil Benesch founders (Cornell + Cockroach Labs + MSR pedigree) + $148M raised + $750M valuation + Rust-built engine + open-source dataflow primitives — the streaming SQL database that uses incremental view maintenance (not micro-batches) so your dashboards and pipelines stay always-fresh with millisecond latency");
+    println!(
+        "           pure 'incremental view maintenance' is brilliant but may be overkill for some use cases"
+    );
+    println!(
+        "  Differentiator: Frank McSherry's Timely + Differential Dataflow (academic IP, MSR research) → only true incremental view maintenance database + always-fresh materialized views + PostgreSQL wire protocol + Kafka + Postgres CDC + S3 sources + cluster-based isolation + SUBSCRIBE for streaming dashboards + Arjun Narayan + Frank McSherry + Nikhil Benesch founders (Cornell + Cockroach Labs + MSR pedigree) + $148M raised + $750M valuation + Rust-built engine + open-source dataflow primitives — the streaming SQL database that uses incremental view maintenance (not micro-batches) so your dashboards and pipelines stay always-fresh with millisecond latency"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "materialize".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "materialize".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mz(&rest, &_prog);
     process::exit(code);
@@ -162,7 +210,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mz};
+    use super::{basename, run_mz, strip_ext};
 
     #[test]
     fn basename_strips_path() {

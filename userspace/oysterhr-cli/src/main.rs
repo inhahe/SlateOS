@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("oysterhr-cli 0.1.0 (distributed-EOR personality build)"); }
+fn print_version() {
+    println!("oysterhr-cli 0.1.0 (distributed-EOR personality build)");
+}
 
 fn run_about() {
     println!("Oyster HR, Inc.");

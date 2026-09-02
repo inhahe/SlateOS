@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("cockroachdb-cli 0.1.0 (Spanner-lineage personality build)"); }
+fn print_version() {
+    println!("cockroachdb-cli 0.1.0 (Spanner-lineage personality build)");
+}
 
 fn run_about() {
     println!("Cockroach Labs, Inc.");

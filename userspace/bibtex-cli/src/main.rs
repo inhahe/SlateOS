@@ -16,7 +16,10 @@ fn strip_ext(name: &str) -> &str {
 }
 
 fn run_bibtex(args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-help" || a == "-h") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-help" || a == "-h")
+    {
         println!("Usage: bibtex [OPTIONS] AUX-FILE");
         println!();
         println!("BibTeX — bibliography processor (Slate OS).");
@@ -31,7 +34,8 @@ fn run_bibtex(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("document");
@@ -69,7 +73,8 @@ fn run_biber(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("document");
@@ -83,8 +88,12 @@ fn run_biber(args: &[String]) -> i32 {
     println!("INFO - Processing section 0");
     println!("INFO - Looking for bibtex file 'references.bib' for section 0");
     println!("INFO - Found BibTeX data source 'references.bib'");
-    println!("INFO - Overriding locale 'en-US' defaults 'variable = shifted' with 'variable = non-ignorable'");
-    println!("INFO - Sorting list 'nty/global//global/global/global' of type 'entry' with locale 'en-US'");
+    println!(
+        "INFO - Overriding locale 'en-US' defaults 'variable = shifted' with 'variable = non-ignorable'"
+    );
+    println!(
+        "INFO - Sorting list 'nty/global//global/global/global' of type 'entry' with locale 'en-US'"
+    );
     println!("INFO - No sort tailoring available for locale 'en-US'");
     println!("INFO - Writing '{}.bbl' with encoding 'UTF-8'", base);
     println!("INFO - Output to {}.bbl", base);
@@ -93,7 +102,8 @@ fn run_biber(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "bibtex".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -107,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bibtex};
+    use super::{basename, run_bibtex, strip_ext};
 
     #[test]
     fn basename_strips_path() {

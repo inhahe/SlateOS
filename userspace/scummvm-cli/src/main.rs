@@ -58,7 +58,10 @@ fn run_scummvm(args: &[String]) -> i32 {
         return 0;
     }
 
-    let game = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let game = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(g) = game {
         println!("[ScummVM] Loading game: {}", g);
         println!("[ScummVM] Engine: scumm");
@@ -81,7 +84,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_scummvm};
+    use super::run_scummvm;
 
     #[test]
     fn help_exits_zero() {

@@ -58,7 +58,8 @@ fn run_nnn(args: Vec<String>) -> i32 {
     let hidden = args.iter().any(|a| a == "-H");
     let user_group = args.iter().any(|a| a == "-U");
 
-    let path = args.iter()
+    let path = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(".");
@@ -68,15 +69,39 @@ fn run_nnn(args: Vec<String>) -> i32 {
 
     if detail {
         if hidden {
-            println!("  drwxr-xr-x  {}  .git/", if user_group { "user user" } else { "" });
-            println!("  -rw-r--r--  {}  .gitignore       256 B", if user_group { "user user" } else { "" });
+            println!(
+                "  drwxr-xr-x  {}  .git/",
+                if user_group { "user user" } else { "" }
+            );
+            println!(
+                "  -rw-r--r--  {}  .gitignore       256 B",
+                if user_group { "user user" } else { "" }
+            );
         }
-        println!("  -rw-r--r--  {}  Cargo.toml       456 B", if user_group { "user user" } else { "" });
-        println!("  -rw-r--r--  {}  Cargo.lock      12.3K", if user_group { "user user" } else { "" });
-        println!("  -rw-r--r--  {}  README.md        3.1K", if user_group { "user user" } else { "" });
-        println!("  drwxr-xr-x  {}  src/", if user_group { "user user" } else { "" });
-        println!("  drwxr-xr-x  {}  tests/", if user_group { "user user" } else { "" });
-        println!("  drwxr-xr-x  {}  target/", if user_group { "user user" } else { "" });
+        println!(
+            "  -rw-r--r--  {}  Cargo.toml       456 B",
+            if user_group { "user user" } else { "" }
+        );
+        println!(
+            "  -rw-r--r--  {}  Cargo.lock      12.3K",
+            if user_group { "user user" } else { "" }
+        );
+        println!(
+            "  -rw-r--r--  {}  README.md        3.1K",
+            if user_group { "user user" } else { "" }
+        );
+        println!(
+            "  drwxr-xr-x  {}  src/",
+            if user_group { "user user" } else { "" }
+        );
+        println!(
+            "  drwxr-xr-x  {}  tests/",
+            if user_group { "user user" } else { "" }
+        );
+        println!(
+            "  drwxr-xr-x  {}  target/",
+            if user_group { "user user" } else { "" }
+        );
     } else {
         if hidden {
             println!("  .git/");
@@ -104,7 +129,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_nnn};
+    use super::run_nnn;
 
     #[test]
     fn help_exits_zero() {

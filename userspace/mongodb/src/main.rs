@@ -39,19 +39,36 @@ fn run_mongod(args: Vec<String>) -> i32 {
         println!("}}");
         return 0;
     }
-    let port = args.iter().position(|a| a == "--port")
+    let port = args
+        .iter()
+        .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(27017);
-    let dbpath = args.iter().position(|a| a == "--dbpath")
+    let dbpath = args
+        .iter()
+        .position(|a| a == "--dbpath")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("/data/db");
-    println!("{{\"t\":{{\"$date\":\"2025-05-22T10:00:00.000+00:00\"}},\"s\":\"I\",\"c\":\"CONTROL\",\"msg\":\"mongod starting\",\"attr\":{{\"pid\":12345,\"port\":{},\"dbPath\":\"{}\"}}}}", port, dbpath);
-    println!("{{\"t\":{{\"$date\":\"2025-05-22T10:00:00.100+00:00\"}},\"s\":\"I\",\"c\":\"CONTROL\",\"msg\":\"Build Info\",\"attr\":{{\"buildInfo\":{{\"version\":\"7.0.9\",\"gitVersion\":\"abc1234\"}}}}}}");
-    println!("{{\"t\":{{\"$date\":\"2025-05-22T10:00:00.500+00:00\"}},\"s\":\"I\",\"c\":\"STORAGE\",\"msg\":\"WiredTiger message\",\"attr\":{{\"message\":\"opened database\"}}}}");
-    println!("{{\"t\":{{\"$date\":\"2025-05-22T10:00:01.000+00:00\"}},\"s\":\"I\",\"c\":\"NETWORK\",\"msg\":\"Listening on\",\"attr\":{{\"address\":\"0.0.0.0\",\"port\":{}}}}}",port);
-    println!("{{\"t\":{{\"$date\":\"2025-05-22T10:00:01.001+00:00\"}},\"s\":\"I\",\"c\":\"NETWORK\",\"msg\":\"Waiting for connections\",\"attr\":{{\"port\":{}}}}}",port);
+    println!(
+        "{{\"t\":{{\"$date\":\"2025-05-22T10:00:00.000+00:00\"}},\"s\":\"I\",\"c\":\"CONTROL\",\"msg\":\"mongod starting\",\"attr\":{{\"pid\":12345,\"port\":{},\"dbPath\":\"{}\"}}}}",
+        port, dbpath
+    );
+    println!(
+        "{{\"t\":{{\"$date\":\"2025-05-22T10:00:00.100+00:00\"}},\"s\":\"I\",\"c\":\"CONTROL\",\"msg\":\"Build Info\",\"attr\":{{\"buildInfo\":{{\"version\":\"7.0.9\",\"gitVersion\":\"abc1234\"}}}}}}"
+    );
+    println!(
+        "{{\"t\":{{\"$date\":\"2025-05-22T10:00:00.500+00:00\"}},\"s\":\"I\",\"c\":\"STORAGE\",\"msg\":\"WiredTiger message\",\"attr\":{{\"message\":\"opened database\"}}}}"
+    );
+    println!(
+        "{{\"t\":{{\"$date\":\"2025-05-22T10:00:01.000+00:00\"}},\"s\":\"I\",\"c\":\"NETWORK\",\"msg\":\"Listening on\",\"attr\":{{\"address\":\"0.0.0.0\",\"port\":{}}}}}",
+        port
+    );
+    println!(
+        "{{\"t\":{{\"$date\":\"2025-05-22T10:00:01.001+00:00\"}},\"s\":\"I\",\"c\":\"NETWORK\",\"msg\":\"Waiting for connections\",\"attr\":{{\"port\":{}}}}}",
+        port
+    );
     0
 }
 
@@ -71,13 +88,23 @@ fn run_mongos(args: Vec<String>) -> i32 {
         println!("mongos version v7.0.9 (Slate OS)");
         return 0;
     }
-    let port = args.iter().position(|a| a == "--port")
+    let port = args
+        .iter()
+        .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(27017);
-    println!("{{\"t\":{{\"$date\":\"2025-05-22T10:00:00.000+00:00\"}},\"s\":\"I\",\"c\":\"CONTROL\",\"msg\":\"mongos starting\",\"attr\":{{\"pid\":12346,\"port\":{}}}}}",port);
-    println!("{{\"t\":{{\"$date\":\"2025-05-22T10:00:00.500+00:00\"}},\"s\":\"I\",\"c\":\"SHARDING\",\"msg\":\"Cluster identity established\"}}");
-    println!("{{\"t\":{{\"$date\":\"2025-05-22T10:00:01.000+00:00\"}},\"s\":\"I\",\"c\":\"NETWORK\",\"msg\":\"Waiting for connections\",\"attr\":{{\"port\":{}}}}}",port);
+    println!(
+        "{{\"t\":{{\"$date\":\"2025-05-22T10:00:00.000+00:00\"}},\"s\":\"I\",\"c\":\"CONTROL\",\"msg\":\"mongos starting\",\"attr\":{{\"pid\":12346,\"port\":{}}}}}",
+        port
+    );
+    println!(
+        "{{\"t\":{{\"$date\":\"2025-05-22T10:00:00.500+00:00\"}},\"s\":\"I\",\"c\":\"SHARDING\",\"msg\":\"Cluster identity established\"}}"
+    );
+    println!(
+        "{{\"t\":{{\"$date\":\"2025-05-22T10:00:01.000+00:00\"}},\"s\":\"I\",\"c\":\"NETWORK\",\"msg\":\"Waiting for connections\",\"attr\":{{\"port\":{}}}}}",
+        port
+    );
     0
 }
 
@@ -101,7 +128,9 @@ fn run_mongosh(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let eval_expr = args.iter().position(|a| a == "--eval")
+    let eval_expr = args
+        .iter()
+        .position(|a| a == "--eval")
         .and_then(|i| args.get(i + 1));
 
     if let Some(expr) = eval_expr {
@@ -131,11 +160,15 @@ fn run_mongosh(args: Vec<String>) -> i32 {
     }
 
     // Interactive mode
-    let host = args.iter().position(|a| a == "--host")
+    let host = args
+        .iter()
+        .position(|a| a == "--host")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("localhost");
-    let port = args.iter().position(|a| a == "--port")
+    let port = args
+        .iter()
+        .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("27017");
@@ -166,7 +199,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -182,7 +217,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mongod};
+    use super::run_mongod;
 
     #[test]
     fn help_exits_zero() {

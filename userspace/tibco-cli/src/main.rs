@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_tibco(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -14,17 +18,28 @@ fn run_tibco(args: &[String], _prog: &str) -> i32 {
         println!("TIBCO Software (Slate OS) — the original ESB/integration giant + EMS messaging");
         println!();
         println!("Options:");
-        println!("  --ems                  TIBCO Enterprise Message Service (JMS-compliant broker)");
-        println!("  --rendezvous           TIBCO Rendezvous (RV — original pub/sub middleware, 1985+)");
+        println!(
+            "  --ems                  TIBCO Enterprise Message Service (JMS-compliant broker)"
+        );
+        println!(
+            "  --rendezvous           TIBCO Rendezvous (RV — original pub/sub middleware, 1985+)"
+        );
         println!("  --businessworks        TIBCO BusinessWorks (ESB + integration platform)");
         println!("  --spotfire             TIBCO Spotfire (analytics + BI)");
         println!("  --cloud                TIBCO Cloud platform");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("TIBCO 2024 (Slate OS) — tibco CLI (multi-product)"); return 0; }
-    println!("TIBCO Software 2024 (Slate OS) — Enterprise Integration + Messaging + Analytics (40 years)");
-    println!("  Vendor: TIBCO Software, a Cloud Software Group company (Palo Alto, CA + Fort Lauderdale FL)");
+    if args.iter().any(|a| a == "--version") {
+        println!("TIBCO 2024 (Slate OS) — tibco CLI (multi-product)");
+        return 0;
+    }
+    println!(
+        "TIBCO Software 2024 (Slate OS) — Enterprise Integration + Messaging + Analytics (40 years)"
+    );
+    println!(
+        "  Vendor: TIBCO Software, a Cloud Software Group company (Palo Alto, CA + Fort Lauderdale FL)"
+    );
     println!("  History (one of Silicon Valley's oldest integration companies):");
     println!("    - Founded 1985 as Teknekron Software Systems by Vivek Ranadive");
     println!("    - 'The Information Bus' = Teknekron + 'tib' invented");
@@ -32,14 +47,28 @@ fn run_tibco(args: &[String], _prog: &str) -> i32 {
     println!("    - Reuters became major customer + investor; spun out 1992 as TIBCO");
     println!("    - IPO July 1999 NASDAQ:TIBX");
     println!("    - Acquired private by Vista Equity Partners Dec 2014 for $4.3B");
-    println!("    - Merged with Citrix systems Sep 2022 under 'Cloud Software Group' umbrella (Vista + Evergreen Coast Capital)");
-    println!("    - 'Vivek Ranadive: also owns Sacramento Kings NBA team, prominent tech entrepreneur'");
-    println!("  Strategic position: 'integration + messaging + analytics — the 40-year incumbent':");
-    println!("                    pitch: 'enterprise integration platform — connect anything to anything'");
-    println!("                    target: Fortune 500 enterprises, financial services, telecom, energy");
-    println!("                    primary competitor: IBM (MQ + App Connect), MuleSoft (Salesforce), Software AG, Solace");
+    println!(
+        "    - Merged with Citrix systems Sep 2022 under 'Cloud Software Group' umbrella (Vista + Evergreen Coast Capital)"
+    );
+    println!(
+        "    - 'Vivek Ranadive: also owns Sacramento Kings NBA team, prominent tech entrepreneur'"
+    );
+    println!(
+        "  Strategic position: 'integration + messaging + analytics — the 40-year incumbent':"
+    );
+    println!(
+        "                    pitch: 'enterprise integration platform — connect anything to anything'"
+    );
+    println!(
+        "                    target: Fortune 500 enterprises, financial services, telecom, energy"
+    );
+    println!(
+        "                    primary competitor: IBM (MQ + App Connect), MuleSoft (Salesforce), Software AG, Solace"
+    );
     println!("                    secondary: Kafka + Confluent, Boomi, SnapLogic");
-    println!("                    TIBCO wedge: long history + ESB heritage + broad product portfolio");
+    println!(
+        "                    TIBCO wedge: long history + ESB heritage + broad product portfolio"
+    );
     println!("                    + the original 'Information Bus' design");
     println!("                    'Decades-old EMS still runs major exchanges + banks'");
     println!("  Pricing (enterprise, opaque, expensive):");
@@ -173,13 +202,18 @@ fn run_tibco(args: &[String], _prog: &str) -> i32 {
     println!("           customer perception of stagnation among modern dev teams");
     println!("           BWCE container modernization came late");
     println!("           support quality varied since Vista acquisition");
-    println!("  Differentiator: 40-year integration giant (founded 1985 as Teknekron, spun out as TIBCO 1992, IPO 1999, Vista acquisition 2014 $4.3B, merged with Citrix Sep 2022 under Cloud Software Group) + EMS (JMS 1.1+2.0 compliant broker, persistent + non-persistent, used by banks/exchanges/telcos for decades) + Rendezvous (1992+ original 'Information Bus' UDP multicast pub/sub, subject-based hierarchical routing, sub-millisecond trading floor messaging, predates everything modern) + BusinessWorks ESB (graphical designer + 100+ connectors for SAP/Oracle/mainframe) + Spotfire (in-memory analytics + BI, acquired 2007, heavy in pharma/energy) + TIBCO Cloud Integration iPaaS + Streaming/LiveView CEP (acquired StreamBase 2013) + Data Virtualization (acquired Composite 2013) + Mashery API management (acquired 2013 $180M) + MFT secure file transfer + JPMorgan/Citi/Goldman/RBS/Deutsche/AT&T/Vodafone/Shell/BP/Pfizer/NASDAQ-proven + Vivek Ranadive founder (MIT + Harvard, Sacramento Kings owner) + Reuters heritage (built TIBCO's first wave of financial data delivery) + ~10,000 enterprise customers — the 40-year integration + messaging incumbent that quietly runs the backbone of Fortune 500 financial services + telecom + energy IT, the original information bus that predated Kafka by 25 years");
+    println!(
+        "  Differentiator: 40-year integration giant (founded 1985 as Teknekron, spun out as TIBCO 1992, IPO 1999, Vista acquisition 2014 $4.3B, merged with Citrix Sep 2022 under Cloud Software Group) + EMS (JMS 1.1+2.0 compliant broker, persistent + non-persistent, used by banks/exchanges/telcos for decades) + Rendezvous (1992+ original 'Information Bus' UDP multicast pub/sub, subject-based hierarchical routing, sub-millisecond trading floor messaging, predates everything modern) + BusinessWorks ESB (graphical designer + 100+ connectors for SAP/Oracle/mainframe) + Spotfire (in-memory analytics + BI, acquired 2007, heavy in pharma/energy) + TIBCO Cloud Integration iPaaS + Streaming/LiveView CEP (acquired StreamBase 2013) + Data Virtualization (acquired Composite 2013) + Mashery API management (acquired 2013 $180M) + MFT secure file transfer + JPMorgan/Citi/Goldman/RBS/Deutsche/AT&T/Vodafone/Shell/BP/Pfizer/NASDAQ-proven + Vivek Ranadive founder (MIT + Harvard, Sacramento Kings owner) + Reuters heritage (built TIBCO's first wave of financial data delivery) + ~10,000 enterprise customers — the 40-year integration + messaging incumbent that quietly runs the backbone of Fortune 500 financial services + telecom + energy IT, the original information bus that predated Kafka by 25 years"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "tibco".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "tibco".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_tibco(&rest, &_prog);
     process::exit(code);
@@ -187,7 +221,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_tibco};
+    use super::{basename, run_tibco, strip_ext};
 
     #[test]
     fn basename_strips_path() {

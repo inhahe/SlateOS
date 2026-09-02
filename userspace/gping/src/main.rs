@@ -34,7 +34,8 @@ fn run_gping(args: Vec<String>) -> i32 {
     }
 
     let simple = args.iter().any(|a| a == "-s" || a == "--simple-graphics");
-    let hosts: Vec<&str> = args.iter()
+    let hosts: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -71,7 +72,10 @@ fn run_gping(args: Vec<String>) -> i32 {
     println!();
 
     for host in &hosts {
-        println!("{}: min=12ms avg=25ms max=48ms (packets: 50 sent, 50 received, 0% loss)", host);
+        println!(
+            "{}: min=12ms avg=25ms max=48ms (packets: 50 sent, 50 received, 0% loss)",
+            host
+        );
     }
     0
 }
@@ -85,7 +89,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gping};
+    use super::run_gping;
 
     #[test]
     fn help_exits_zero() {

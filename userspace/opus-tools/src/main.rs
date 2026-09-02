@@ -47,7 +47,8 @@ fn run_opusenc(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -55,7 +56,8 @@ fn run_opusenc(args: &[String]) -> i32 {
     let input = files.first().copied().unwrap_or("input.wav");
     let output = files.get(1).copied().unwrap_or("output.opus");
 
-    let bitrate: u32 = args.windows(2)
+    let bitrate: u32 = args
+        .windows(2)
         .find(|w| w[0] == "--bitrate")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(128);
@@ -91,7 +93,8 @@ fn run_opusdec(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -119,7 +122,8 @@ fn run_opusinfo(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -151,7 +155,10 @@ fn run_opusinfo(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("opusenc"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("opusenc"));
     let p = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
@@ -171,7 +178,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_opusenc};
+    use super::run_opusenc;
 
     #[test]
     fn help_exits_zero() {

@@ -148,9 +148,7 @@ impl Regex {
 
     fn find(&self, text: &[u8]) -> Option<(usize, usize)> {
         if matches!(self.nodes.first(), Some(ReNode::StartAnchor)) {
-            return self
-                .match_at(text, 0, 1)
-                .map(|end| (0, end));
+            return self.match_at(text, 0, 1).map(|end| (0, end));
         }
         for start in 0..=text.len() {
             if let Some(end) = self.match_at(text, start, 0) {
@@ -250,9 +248,10 @@ impl Regex {
             }
             ReNode::Question(inner) => {
                 if let Some(end1) = self.match_single(inner, text, pos)
-                    && let Some(end) = self.match_at(text, end1, ni + 1) {
-                        return Some(end);
-                    }
+                    && let Some(end) = self.match_at(text, end1, ni + 1)
+                {
+                    return Some(end);
+                }
                 self.match_at(text, pos, ni + 1)
             }
         }
@@ -278,11 +277,7 @@ impl Regex {
                 if pos < text.len() {
                     let in_class = bytes.contains(&text[pos]);
                     let ok = if *negated { !in_class } else { in_class };
-                    if ok {
-                        Some(pos + 1)
-                    } else {
-                        None
-                    }
+                    if ok { Some(pos + 1) } else { None }
                 } else {
                     None
                 }
@@ -693,10 +688,7 @@ impl Lexer {
                     self.tokens.push(Token::Comma);
                 }
                 _ => {
-                    return Err(format!(
-                        "unexpected character: '{}'",
-                        char::from(b)
-                    ));
+                    return Err(format!("unexpected character: '{}'", char::from(b)));
                 }
             }
         }
@@ -756,9 +748,9 @@ impl Lexer {
             }
         }
         let s = String::from_utf8_lossy(&self.src[start..self.pos]).to_string();
-        let val: f64 = s.parse().map_err(|e: std::num::ParseFloatError| {
-            format!("bad number '{s}': {e}")
-        })?;
+        let val: f64 = s
+            .parse()
+            .map_err(|e: std::num::ParseFloatError| format!("bad number '{s}': {e}"))?;
         self.tokens.push(Token::Number(val));
         Ok(())
     }
@@ -887,7 +879,12 @@ enum Stmt {
     If(Expr, Box<Stmt>, Option<Box<Stmt>>),
     While(Expr, Box<Stmt>),
     DoWhile(Box<Stmt>, Expr),
-    For(Option<Box<Stmt>>, Option<Expr>, Option<Box<Stmt>>, Box<Stmt>),
+    For(
+        Option<Box<Stmt>>,
+        Option<Expr>,
+        Option<Box<Stmt>>,
+        Box<Stmt>,
+    ),
     ForIn(String, String, Box<Stmt>),
     Next,
     Exit(Option<Expr>),
@@ -1202,7 +1199,9 @@ impl Parser {
         let mut args = Vec::new();
         let mut dest = None;
 
-        if self.is_expr_start() && *self.peek() != Token::Gt && *self.peek() != Token::Append
+        if self.is_expr_start()
+            && *self.peek() != Token::Gt
+            && *self.peek() != Token::Append
             && *self.peek() != Token::Pipe
         {
             args.push(self.parse_non_assign_expr()?);
@@ -1795,10 +1794,7 @@ impl Interpreter {
     }
 
     fn get_var(&self, name: &str) -> Value {
-        self.globals
-            .get(name)
-            .cloned()
-            .unwrap_or(Value::Uninit)
+        self.globals.get(name).cloned().unwrap_or(Value::Uninit)
     }
 
     fn set_record(&mut self, line: &str) {
@@ -1866,7 +1862,10 @@ impl Interpreter {
         // Run BEGIN rules.
         for rule in &program.rules {
             if matches!(rule.pattern, Pattern::Begin)
-                && let ControlFlow::Exit(code) = self.exec_stmts(&rule.action, out)? { return Ok(code) }
+                && let ControlFlow::Exit(code) = self.exec_stmts(&rule.action, out)?
+            {
+                return Ok(code);
+            }
         }
 
         // Process input.
@@ -1905,7 +1904,10 @@ impl Interpreter {
         // Run END rules.
         for rule in &program.rules {
             if matches!(rule.pattern, Pattern::End)
-                && let ControlFlow::Exit(code) = self.exec_stmts(&rule.action, out)? { return Ok(code) }
+                && let ControlFlow::Exit(code) = self.exec_stmts(&rule.action, out)?
+            {
+                return Ok(code);
+            }
         }
 
         Ok(exit_code)
@@ -1945,11 +1947,7 @@ impl Interpreter {
             buf_reader
                 .read_to_string(&mut content)
                 .map_err(|e| e.to_string())?;
-            let sep = if rs.len() == 1 {
-                rs.clone()
-            } else {
-                rs
-            };
+            let sep = if rs.len() == 1 { rs.clone() } else { rs };
             let records: Vec<&str> = content.split(&sep).collect();
             for rec in records {
                 if rec.is_empty() && sep.len() <= 1 {
@@ -2003,11 +2001,7 @@ impl Interpreter {
         Ok(ControlFlow::None)
     }
 
-    fn exec_stmts(
-        &mut self,
-        stmts: &[Stmt],
-        out: &mut dyn Write,
-    ) -> Result<ControlFlow, String> {
+    fn exec_stmts(&mut self, stmts: &[Stmt], out: &mut dyn Write) -> Result<ControlFlow, String> {
         for stmt in stmts {
             match self.exec_stmt(stmt, out)? {
                 ControlFlow::None => {}
@@ -2301,10 +2295,7 @@ impl Interpreter {
             }
             Expr::InArray(arr, keys) => {
                 let key = self.build_array_key(keys, out)?;
-                let exists = self
-                    .arrays
-                    .get(arr)
-                    .is_some_and(|m| m.contains_key(&key));
+                let exists = self.arrays.get(arr).is_some_and(|m| m.contains_key(&key));
                 Ok(Value::Num(if exists { 1.0 } else { 0.0 }))
             }
             Expr::Call(name, args) => self.call_function(name, args, out),
@@ -2329,7 +2320,11 @@ impl Interpreter {
         }
     }
 
-    fn expr_to_regex_pattern(&mut self, expr: &Expr, out: &mut dyn Write) -> Result<String, String> {
+    fn expr_to_regex_pattern(
+        &mut self,
+        expr: &Expr,
+        out: &mut dyn Write,
+    ) -> Result<String, String> {
         match expr {
             Expr::Regex(r) => Ok(r.clone()),
             _ => Ok(self.eval_expr(expr, out)?.to_str()),
@@ -2402,10 +2397,7 @@ impl Interpreter {
 
     fn apply_comparison(&self, op: &str, lhs: &Value, rhs: &Value) -> Value {
         // If both sides look numeric, compare as numbers; otherwise as strings.
-        let numeric = matches!(
-            (lhs, rhs),
-            (Value::Num(_), _) | (_, Value::Num(_))
-        );
+        let numeric = matches!((lhs, rhs), (Value::Num(_), _) | (_, Value::Num(_)));
         let result = if numeric {
             let a = lhs.to_num();
             let b = rhs.to_num();
@@ -2465,7 +2457,6 @@ impl Interpreter {
                 let start_idx = if start < 1 { 0 } else { (start - 1) as usize };
                 let chars: Vec<char> = s.chars().collect();
                 let len = if args.len() > 2 {
-                    
                     self.eval_expr(&args[2], out)?.to_num() as usize
                 } else {
                     chars.len().saturating_sub(start_idx)
@@ -2694,11 +2685,7 @@ impl Interpreter {
         }
     }
 
-    fn eval_one_num_arg(
-        &mut self,
-        args: &[Expr],
-        out: &mut dyn Write,
-    ) -> Result<f64, String> {
+    fn eval_one_num_arg(&mut self, args: &[Expr], out: &mut dyn Write) -> Result<f64, String> {
         if args.is_empty() {
             Ok(0.0)
         } else {
@@ -2841,9 +2828,7 @@ impl Interpreter {
                     }
                     b'c' => {
                         let c = match &arg {
-                            Value::Str(s) if !s.is_empty() => {
-                                s.chars().next().unwrap_or('\0')
-                            }
+                            Value::Str(s) if !s.is_empty() => s.chars().next().unwrap_or('\0'),
                             _ => {
                                 let n = arg.to_num() as u32;
                                 char::from_u32(n).unwrap_or('\0')
@@ -3241,8 +3226,7 @@ mod tests {
         let mut exited = false;
         for rule in &prog.rules {
             if matches!(rule.pattern, Pattern::Begin)
-                && let Ok(ControlFlow::Exit(_)) =
-                    interp.exec_stmts(&rule.action, &mut output)
+                && let Ok(ControlFlow::Exit(_)) = interp.exec_stmts(&rule.action, &mut output)
             {
                 exited = true;
                 break;
@@ -3481,7 +3465,7 @@ mod tests {
 
     #[test]
     fn arithmetic() {
-        let out = run_awk("BEGIN { print 2 + 3 * 4 }",  "");
+        let out = run_awk("BEGIN { print 2 + 3 * 4 }", "");
         assert_eq!(out, "14\n");
     }
 
@@ -3567,16 +3551,16 @@ mod tests {
 
     #[test]
     fn builtin_match() {
-        let out = run_awk(
-            "BEGIN { print match(\"hello world\", /wor/) }",
-            "",
-        );
+        let out = run_awk("BEGIN { print match(\"hello world\", /wor/) }", "");
         assert_eq!(out, "7\n");
     }
 
     #[test]
     fn builtin_sprintf() {
-        let out = run_awk("BEGIN { s = sprintf(\"%d + %d = %d\", 1, 2, 3); print s }", "");
+        let out = run_awk(
+            "BEGIN { s = sprintf(\"%d + %d = %d\", 1, 2, 3); print s }",
+            "",
+        );
         assert_eq!(out, "1 + 2 = 3\n");
     }
 
@@ -3594,7 +3578,10 @@ mod tests {
 
     #[test]
     fn if_else() {
-        let out = run_awk("{ if ($1 > 2) print \"big\"; else print \"small\" }", "1\n3\n2\n");
+        let out = run_awk(
+            "{ if ($1 > 2) print \"big\"; else print \"small\" }",
+            "1\n3\n2\n",
+        );
         assert_eq!(out, "small\nbig\nsmall\n");
     }
 

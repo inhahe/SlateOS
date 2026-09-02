@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mulesoft(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mulesoft [OPTIONS]");
-        println!("MuleSoft (Slate OS) — Anypoint Platform (API + integration — Salesforce subsidiary)");
+        println!(
+            "MuleSoft (Slate OS) — Anypoint Platform (API + integration — Salesforce subsidiary)"
+        );
         println!();
         println!("Options:");
         println!("  --anypoint             Anypoint Platform (unified API + integration)");
@@ -23,13 +29,20 @@ fn run_mulesoft(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MuleSoft Anypoint 2024 (Slate OS) — Mule 4.6"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("MuleSoft Anypoint 2024 (Slate OS) — Mule 4.6");
+        return 0;
+    }
     println!("MuleSoft 2024 (Slate OS) — Anypoint Platform");
     println!("  Vendor: MuleSoft, LLC (San Francisco — Salesforce subsidiary since 2018)");
     println!("  Founder: Ross Mason, 2006 (originally as MuleSource)");
-    println!("          'Mule' name = 'pack mule' carrying heavy integration loads — also play on 'donkey work'");
+    println!(
+        "          'Mule' name = 'pack mule' carrying heavy integration loads — also play on 'donkey work'"
+    );
     println!("          ESB (Enterprise Service Bus) → modern iPaaS evolution");
-    println!("          'API-led connectivity' methodology popularized the API-first approach in enterprises");
+    println!(
+        "          'API-led connectivity' methodology popularized the API-first approach in enterprises"
+    );
     println!("          Greg Schott: long-time CEO 2009-2021");
     println!("          Brent Hayward: current CEO (since 2021, Salesforce-era)");
     println!("  Acquisition: Salesforce bought MuleSoft March 2018 for $6.5B");
@@ -37,14 +50,26 @@ fn run_mulesoft(args: &[String], _prog: &str) -> i32 {
     println!("              MuleSoft had IPO'd in 2017 at $17, peaked $44 pre-acquisition");
     println!("              acquired at $44.89/share — solid premium");
     println!("              Salesforce wanted MuleSoft for 'Customer 360' data integration story");
-    println!("              MuleSoft now part of Salesforce 'Data + AI' (with Tableau + Slack + Data Cloud)");
+    println!(
+        "              MuleSoft now part of Salesforce 'Data + AI' (with Tableau + Slack + Data Cloud)"
+    );
     println!("  Strategic position: 'API-led connectivity — unlock your data with reusable APIs':");
-    println!("                    pitch: 'compose connected experiences with APIs that are discoverable + reusable'");
+    println!(
+        "                    pitch: 'compose connected experiences with APIs that are discoverable + reusable'"
+    );
     println!("                    target: large enterprise (Salesforce ecosystem + standalone)");
-    println!("                    primary competitor: Boomi, Workato, Informatica, IBM webMethods, Microsoft Power Platform");
-    println!("                    secondary: Kong (API mgmt only), Apigee (Google), AWS API Gateway");
-    println!("                    MuleSoft's wedge: Anypoint unified platform + DataWeave + Salesforce go-to-market");
-    println!("                    'Composability + reusable APIs + Salesforce data' = enterprise architect's playbook");
+    println!(
+        "                    primary competitor: Boomi, Workato, Informatica, IBM webMethods, Microsoft Power Platform"
+    );
+    println!(
+        "                    secondary: Kong (API mgmt only), Apigee (Google), AWS API Gateway"
+    );
+    println!(
+        "                    MuleSoft's wedge: Anypoint unified platform + DataWeave + Salesforce go-to-market"
+    );
+    println!(
+        "                    'Composability + reusable APIs + Salesforce data' = enterprise architect's playbook"
+    );
     println!("  Pricing (notoriously expensive):");
     println!("    Anypoint Platform — $80K-$5M+/yr (enterprise iPaaS)");
     println!("    Per-core licensing: $40K-$120K per CPU-core/year for Mule runtime");
@@ -55,7 +80,9 @@ fn run_mulesoft(args: &[String], _prog: &str) -> i32 {
     println!("  Product portfolio (Anypoint Platform):");
     println!("    1. Anypoint Design Center (Flow Designer + API Designer):");
     println!("       - Visual API + flow design");
-    println!("       - RAML (RESTful API Modeling Language) — MuleSoft's spec, now also supports OpenAPI");
+    println!(
+        "       - RAML (RESTful API Modeling Language) — MuleSoft's spec, now also supports OpenAPI"
+    );
     println!("    2. Anypoint Studio (Eclipse-based IDE):");
     println!("       - Heavy desktop tool for Mule flow development");
     println!("       - Graphical 'connectors + transformers + flow control'");
@@ -77,7 +104,9 @@ fn run_mulesoft(args: &[String], _prog: &str) -> i32 {
     println!("       - Application Network Graph (Anypoint Visualizer)");
     println!("    8. MuleSoft Composer (low-code for business users):");
     println!("       - Salesforce + Slack integration without coding");
-    println!("       - Salesforce-platform-native low-code (alternative to Anypoint for citizen integrators)");
+    println!(
+        "       - Salesforce-platform-native low-code (alternative to Anypoint for citizen integrators)"
+    );
     println!("    9. MuleSoft RPA (was Servicetrace, acquired 2021):");
     println!("       - Robotic process automation");
     println!("       - Compete with: UiPath, Automation Anywhere, Microsoft Power Automate");
@@ -97,7 +126,9 @@ fn run_mulesoft(args: &[String], _prog: &str) -> i32 {
     println!("    - Application Network (all APIs as a graph)");
     println!("    - Influential conceptual framework — adopted across industry");
     println!("  Integrations (200+ connectors):");
-    println!("    - SaaS: Salesforce (native), Workday, ServiceNow, NetSuite, HubSpot, Marketo, Slack");
+    println!(
+        "    - SaaS: Salesforce (native), Workday, ServiceNow, NetSuite, HubSpot, Marketo, Slack"
+    );
     println!("    - ERP: SAP, Oracle EBS, Microsoft Dynamics, JD Edwards");
     println!("    - Database: Oracle, SQL Server, PostgreSQL, MongoDB, Snowflake");
     println!("    - Messaging: Kafka, RabbitMQ, IBM MQ, AMQP, JMS");
@@ -118,19 +149,30 @@ fn run_mulesoft(args: &[String], _prog: &str) -> i32 {
     println!("    - International: heavy in UK + Europe + APAC enterprise");
     println!("  Critique: very expensive — per-core pricing punishes scale");
     println!("           Mule 3 → Mule 4 migration was painful (breaking changes, 2018-2022)");
-    println!("           heavy ESB heritage = perceived as 'legacy' vs cloud-native iPaaS (Workato)");
+    println!(
+        "           heavy ESB heritage = perceived as 'legacy' vs cloud-native iPaaS (Workato)"
+    );
     println!("           Anypoint Studio (Eclipse) dated UX vs modern web-IDEs");
-    println!("           Salesforce ownership = pushed harder into Salesforce ecosystem, sometimes feels lock-in");
+    println!(
+        "           Salesforce ownership = pushed harder into Salesforce ecosystem, sometimes feels lock-in"
+    );
     println!("           Salesforce Composer overlap = strategic confusion (which tool to use?)");
     println!("           cloud-native challengers (Workato, Tray) winning new logos on price + UX");
-    println!("           API Manager is decent but loses to Kong on pure API mgmt + Apigee on Google ecosystem");
-    println!("  Differentiator: $6.5B Salesforce acquisition (huge) + Anypoint unified iPaaS + DataWeave (best-in-class transformation language) + API-led connectivity methodology + 200+ pre-built connectors + Salesforce Customer 360 data integration story + RAML/OpenAPI tooling + Application Network Graph — the enterprise-grade iPaaS for big customers who already run Salesforce and need complex hybrid (on-prem + cloud + SaaS) integration");
+    println!(
+        "           API Manager is decent but loses to Kong on pure API mgmt + Apigee on Google ecosystem"
+    );
+    println!(
+        "  Differentiator: $6.5B Salesforce acquisition (huge) + Anypoint unified iPaaS + DataWeave (best-in-class transformation language) + API-led connectivity methodology + 200+ pre-built connectors + Salesforce Customer 360 data integration story + RAML/OpenAPI tooling + Application Network Graph — the enterprise-grade iPaaS for big customers who already run Salesforce and need complex hybrid (on-prem + cloud + SaaS) integration"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mulesoft".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mulesoft".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mulesoft(&rest, &_prog);
     process::exit(code);
@@ -138,7 +180,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mulesoft};
+    use super::{basename, run_mulesoft, strip_ext};
 
     #[test]
     fn basename_strips_path() {

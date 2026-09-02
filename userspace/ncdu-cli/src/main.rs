@@ -27,11 +27,17 @@ fn run_ncdu(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let path = args.first().filter(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("/");
+    let path = args
+        .first()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/");
 
     println!("ncdu 2.3 ~ Use the arrow keys to navigate, press ? for help");
-    println!("--- {} -----------------------------------------------", path);
+    println!(
+        "--- {} -----------------------------------------------",
+        path
+    );
     println!("    4.2 GiB [##########] /home");
     println!("    2.1 GiB [#####     ] /var");
     println!("    1.8 GiB [####      ] /usr");
@@ -56,7 +62,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ncdu};
+    use super::run_ncdu;
 
     #[test]
     fn help_exits_zero() {

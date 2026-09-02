@@ -86,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_dust};
+    use super::run_dust;
 
     #[test]
     fn help_exits_zero() {

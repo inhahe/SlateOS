@@ -41,14 +41,23 @@ fn run_mdadm(args: Vec<String>) -> i32 {
     let stop = args.iter().any(|a| a == "--stop" || a == "-S");
     let scan = args.iter().any(|a| a == "--scan");
 
-    let device = args.iter().find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("/dev/md0");
+    let device = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/dev/md0");
 
     if create {
-        let level = args.windows(2).find(|w| w[0] == "--level" || w[0] == "-l")
-            .map(|w| w[1].as_str()).unwrap_or("1");
-        let num = args.windows(2).find(|w| w[0] == "--raid-devices" || w[0] == "-n")
-            .map(|w| w[1].as_str()).unwrap_or("2");
+        let level = args
+            .windows(2)
+            .find(|w| w[0] == "--level" || w[0] == "-l")
+            .map(|w| w[1].as_str())
+            .unwrap_or("1");
+        let num = args
+            .windows(2)
+            .find(|w| w[0] == "--raid-devices" || w[0] == "-n")
+            .map(|w| w[1].as_str())
+            .unwrap_or("2");
         println!("mdadm: array {} started.", device);
         println!("  RAID level: {}", level);
         println!("  Raid devices: {}", num);
@@ -80,7 +89,9 @@ fn run_mdadm(args: Vec<String>) -> i32 {
     } else if stop {
         println!("mdadm: stopped {}.", device);
     } else if scan {
-        println!("ARRAY /dev/md0 metadata=1.2 name=slateos:0 UUID=abcdef12:34567890:abcdef12:34567890");
+        println!(
+            "ARRAY /dev/md0 metadata=1.2 name=slateos:0 UUID=abcdef12:34567890:abcdef12:34567890"
+        );
     } else {
         eprintln!("mdadm: no mode specified. See --help.");
         return 1;
@@ -97,7 +108,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mdadm};
+    use super::run_mdadm;
 
     #[test]
     fn help_exits_zero() {

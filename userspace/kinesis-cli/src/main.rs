@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_kinesis(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -15,13 +19,20 @@ fn run_kinesis(args: &[String], _prog: &str) -> i32 {
         println!();
         println!("Options:");
         println!("  --data-streams         Kinesis Data Streams (raw streaming, shards)");
-        println!("  --firehose             Data Firehose (managed delivery to S3/Redshift/OpenSearch)");
+        println!(
+            "  --firehose             Data Firehose (managed delivery to S3/Redshift/OpenSearch)"
+        );
         println!("  --video-streams        Kinesis Video Streams (video ingestion + storage)");
-        println!("  --analytics            Managed Service for Apache Flink (formerly Kinesis Analytics)");
+        println!(
+            "  --analytics            Managed Service for Apache Flink (formerly Kinesis Analytics)"
+        );
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("AWS Kinesis 2024 (Slate OS) — kinesis CLI (aws-cli v2)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("AWS Kinesis 2024 (Slate OS) — kinesis CLI (aws-cli v2)");
+        return 0;
+    }
     println!("AWS Kinesis 2024 (Slate OS) — Real-Time Data Streaming on AWS");
     println!("  Vendor: Amazon Web Services (Seattle, WA — NASDAQ: AMZN)");
     println!("  History:");
@@ -34,14 +45,24 @@ fn run_kinesis(args: &[String], _prog: &str) -> i32 {
     println!("    - Kinesis Firehose renamed Data Firehose 2024");
     println!("  Strategic position: 'managed streaming for AWS-native data pipelines':");
     println!("                    pitch: 'real-time streams without managing Kafka brokers'");
-    println!("                    target: AWS-shop data engineering teams, clickstream, IoT, log ingestion");
-    println!("                    primary competitor: Apache Kafka (self-managed), MSK (AWS managed Kafka)");
-    println!("                    secondary: Google Pub/Sub, Azure Event Hubs, Confluent Cloud, Redpanda");
-    println!("                    Kinesis wedge: deepest AWS integration (IAM, KMS, CloudWatch, Lambda)");
+    println!(
+        "                    target: AWS-shop data engineering teams, clickstream, IoT, log ingestion"
+    );
+    println!(
+        "                    primary competitor: Apache Kafka (self-managed), MSK (AWS managed Kafka)"
+    );
+    println!(
+        "                    secondary: Google Pub/Sub, Azure Event Hubs, Confluent Cloud, Redpanda"
+    );
+    println!(
+        "                    Kinesis wedge: deepest AWS integration (IAM, KMS, CloudWatch, Lambda)"
+    );
     println!("                    pay-per-shard or pay-per-throughput pricing");
     println!("                    Amazon's first-party streaming = strong default for AWS shops");
     println!("  Pricing (multi-product, complex):");
-    println!("    Kinesis Data Streams Provisioned: $0.015/shard/hour + $0.014/million PUT records");
+    println!(
+        "    Kinesis Data Streams Provisioned: $0.015/shard/hour + $0.014/million PUT records"
+    );
     println!("    Kinesis Data Streams On-Demand: $0.04/GB ingress + $0.04/GB egress (Sep 2021+)");
     println!("    Data Firehose: $0.029/GB ingested + format conversion fees");
     println!("    Video Streams: $0.0085/MB ingested + $0.023/GB stored + processing");
@@ -124,21 +145,35 @@ fn run_kinesis(args: &[String], _prog: &str) -> i32 {
     println!("    - DataDog, New Relic, Splunk monitoring integrations");
     println!("  AWS CLI usage:");
     println!("    aws kinesis create-stream --stream-name my-stream --shard-count 4");
-    println!("    aws kinesis put-record --stream-name my-stream --partition-key user-123 --data 'hello'");
+    println!(
+        "    aws kinesis put-record --stream-name my-stream --partition-key user-123 --data 'hello'"
+    );
     println!("    aws kinesis describe-stream --stream-name my-stream");
-    println!("    aws kinesis get-shard-iterator --stream-name my-stream --shard-id shardId-0 --shard-iterator-type LATEST");
+    println!(
+        "    aws kinesis get-shard-iterator --stream-name my-stream --shard-id shardId-0 --shard-iterator-type LATEST"
+    );
     println!("    aws kinesis get-records --shard-iterator <iter>");
-    println!("    aws kinesis split-shard --stream-name my-stream --shard-to-split <id> --new-starting-hash-key <key>");
-    println!("    aws kinesis update-shard-count --stream-name my-stream --target-shard-count 8 --scaling-type UNIFORM_SCALING");
-    println!("    aws firehose create-delivery-stream --delivery-stream-name my-fh --s3-destination-configuration ...");
-    println!("    aws kinesisvideo create-stream --stream-name my-video --data-retention-in-hours 24");
+    println!(
+        "    aws kinesis split-shard --stream-name my-stream --shard-to-split <id> --new-starting-hash-key <key>"
+    );
+    println!(
+        "    aws kinesis update-shard-count --stream-name my-stream --target-shard-count 8 --scaling-type UNIFORM_SCALING"
+    );
+    println!(
+        "    aws firehose create-delivery-stream --delivery-stream-name my-fh --s3-destination-configuration ..."
+    );
+    println!(
+        "    aws kinesisvideo create-stream --stream-name my-video --data-retention-in-hours 24"
+    );
     println!("  Customers (any AWS-heavy data team):");
     println!("    - Netflix (early adopter — clickstream, log ingestion)");
     println!("    - Lyft, Airbnb, Pinterest, Coinbase, Slack");
     println!("    - Verizon, Comcast, Capital One (enterprise)");
     println!("    - Most AWS-native data engineering teams default to Kinesis or MSK");
     println!("    - 'If you're on AWS, your first streaming choice is Kinesis Firehose'");
-    println!("  Critique: shard-based pricing surprises (forgotten provisioned shards = bill spike)");
+    println!(
+        "  Critique: shard-based pricing surprises (forgotten provisioned shards = bill spike)"
+    );
     println!("           less mature ecosystem than Kafka (no Kafka Streams equivalent native)");
     println!("           Enhanced Fan-Out doubles cost (per-consumer dedicated bandwidth)");
     println!("           24h default retention too short for replay use cases (extend = $$)");
@@ -146,13 +181,18 @@ fn run_kinesis(args: &[String], _prog: &str) -> i32 {
     println!("           AWS MSK competing internally (Amazon's own managed Kafka)");
     println!("           Managed Flink expensive at scale (KPU pricing)");
     println!("           Firehose buffering minimum 60s/1MB = not truly real-time");
-    println!("  Differentiator: AWS first-party streaming family covering Data Streams (raw shard-based streaming like Kafka partitions) + Data Firehose (managed delivery to S3/Redshift/OpenSearch/Splunk with buffering + transform) + Video Streams (managed video ingestion + storage + WebRTC) + Managed Apache Flink (formerly Kinesis Analytics, stream processing with exactly-once) + Kinesis Agent (Linux log shipper) + KCL/KPL (client libraries) + Enhanced Fan-Out (dedicated bandwidth per consumer) + KMS encryption + IAM auth + Lambda triggers + CloudWatch metrics + on-demand pricing (no shard management) + dynamic shard split/merge resharding + cross-region replication + cross-account consumers + Netflix/Lyft/Airbnb-proven + AWS Console UX + 24h-365d retention — the AWS-native streaming platform with the deepest IAM + KMS + Lambda + Firehose integration, the default streaming choice for AWS-heavy data engineering teams");
+    println!(
+        "  Differentiator: AWS first-party streaming family covering Data Streams (raw shard-based streaming like Kafka partitions) + Data Firehose (managed delivery to S3/Redshift/OpenSearch/Splunk with buffering + transform) + Video Streams (managed video ingestion + storage + WebRTC) + Managed Apache Flink (formerly Kinesis Analytics, stream processing with exactly-once) + Kinesis Agent (Linux log shipper) + KCL/KPL (client libraries) + Enhanced Fan-Out (dedicated bandwidth per consumer) + KMS encryption + IAM auth + Lambda triggers + CloudWatch metrics + on-demand pricing (no shard management) + dynamic shard split/merge resharding + cross-region replication + cross-account consumers + Netflix/Lyft/Airbnb-proven + AWS Console UX + 24h-365d retention — the AWS-native streaming platform with the deepest IAM + KMS + Lambda + Firehose integration, the default streaming choice for AWS-heavy data engineering teams"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "kinesis".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "kinesis".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_kinesis(&rest, &_prog);
     process::exit(code);
@@ -160,7 +200,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_kinesis};
+    use super::{basename, run_kinesis, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -71,7 +71,8 @@ fn run_mpv(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -108,7 +109,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mpv};
+    use super::run_mpv;
 
     #[test]
     fn help_exits_zero() {

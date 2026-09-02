@@ -24,7 +24,8 @@ fn run_rebase_tool(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
@@ -59,7 +60,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_rebase_tool};
+    use super::run_rebase_tool;
 
     #[test]
     fn help_exits_zero() {

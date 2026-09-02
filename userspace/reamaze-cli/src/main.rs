@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("reamaze-cli 0.1.0 (ecommerce-customer-comms personality build)"); }
+fn print_version() {
+    println!("reamaze-cli 0.1.0 (ecommerce-customer-comms personality build)");
+}
 
 fn run_about() {
     println!("Re:amaze (GoDaddy-owned product).");

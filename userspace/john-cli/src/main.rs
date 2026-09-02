@@ -54,7 +54,9 @@ fn run_john(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a.starts_with("--list")) {
-        let what = args.iter().find(|a| a.starts_with("--list="))
+        let what = args
+            .iter()
+            .find(|a| a.starts_with("--list="))
             .map(|a| a.strip_prefix("--list=").unwrap_or("formats"))
             .unwrap_or("formats");
         match what {
@@ -64,14 +66,19 @@ fn run_john(args: Vec<String>) -> i32 {
                 println!("Raw-SHA256, Raw-SHA512, NTLM, LM, mysql-sha1,");
                 println!("ZIP, RAR, 7z, PDF, KeePass, SSH, PGP, WPA");
             }
-            _ => { println!("Unknown list type: {}", what); }
+            _ => {
+                println!("Unknown list type: {}", what);
+            }
         }
         return 0;
     }
 
     if args.iter().any(|a| a == "--show") {
-        let file = args.iter().find(|a| !a.starts_with('-'))
-            .map(|s| s.as_str()).unwrap_or("hashes.txt");
+        let file = args
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .unwrap_or("hashes.txt");
         println!("user1:password123");
         println!("user2:letmein");
         println!("admin:admin2024");
@@ -86,17 +93,22 @@ fn run_john(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
 
     let hash_file = files.first().copied().unwrap_or("hashes.txt");
-    let wordlist = args.iter().find(|a| a.starts_with("--wordlist="))
+    let wordlist = args
+        .iter()
+        .find(|a| a.starts_with("--wordlist="))
         .map(|a| a.strip_prefix("--wordlist=").unwrap_or("wordlist.txt"));
 
     println!("Using default input encoding: UTF-8");
-    println!("Loaded 5 password hashes with 5 different salts (sha512crypt [SHA512 128/128 AVX 2x])");
+    println!(
+        "Loaded 5 password hashes with 5 different salts (sha512crypt [SHA512 128/128 AVX 2x])"
+    );
 
     if let Some(wl) = wordlist {
         println!("Press 'q' or Ctrl-C to abort, almost any other key for status");
@@ -122,7 +134,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_john};
+    use super::run_john;
 
     #[test]
     fn help_exits_zero() {

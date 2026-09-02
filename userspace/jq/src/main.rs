@@ -105,7 +105,10 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(input: &'a str) -> Self {
-        Self { input: input.as_bytes(), pos: 0 }
+        Self {
+            input: input.as_bytes(),
+            pos: 0,
+        }
     }
 
     fn skip_ws(&mut self) {
@@ -176,7 +179,9 @@ impl<'a> Parser<'a> {
                                 if self.advance() == Some(b'\\') && self.advance() == Some(b'u') {
                                     let low = self.parse_hex4()?;
                                     if (0xDC00..=0xDFFF).contains(&low) {
-                                        let cp = 0x10000 + ((hex as u32 - 0xD800) << 10) + (low as u32 - 0xDC00);
+                                        let cp = 0x10000
+                                            + ((hex as u32 - 0xD800) << 10)
+                                            + (low as u32 - 0xDC00);
                                         if let Some(ch) = char::from_u32(cp) {
                                             s.push(ch);
                                         } else {
@@ -203,10 +208,15 @@ impl<'a> Parser<'a> {
                     } else {
                         // Collect UTF-8 bytes
                         let start = self.pos - 1;
-                        let width = if b & 0xE0 == 0xC0 { 2 }
-                            else if b & 0xF0 == 0xE0 { 3 }
-                            else if b & 0xF8 == 0xF0 { 4 }
-                            else { 1 };
+                        let width = if b & 0xE0 == 0xC0 {
+                            2
+                        } else if b & 0xF0 == 0xE0 {
+                            3
+                        } else if b & 0xF8 == 0xF0 {
+                            4
+                        } else {
+                            1
+                        };
                         let end = (start + width).min(self.input.len());
                         self.pos = end;
                         if let Ok(utf8) = std::str::from_utf8(&self.input[start..end]) {
@@ -231,7 +241,11 @@ impl<'a> Parser<'a> {
                 b'A'..=b'F' => b - b'A' + 10,
                 _ => return Err(format!("invalid hex digit: '{}'", b as char)),
             };
-            val = val.checked_mul(16).ok_or("hex overflow")?.checked_add(digit as u16).ok_or("hex overflow")?;
+            val = val
+                .checked_mul(16)
+                .ok_or("hex overflow")?
+                .checked_add(digit as u16)
+                .ok_or("hex overflow")?;
         }
         Ok(val)
     }
@@ -276,7 +290,9 @@ impl<'a> Parser<'a> {
             }
         }
         let s = std::str::from_utf8(&self.input[start..self.pos]).map_err(|e| e.to_string())?;
-        let n: f64 = s.parse().map_err(|e: std::num::ParseFloatError| e.to_string())?;
+        let n: f64 = s
+            .parse()
+            .map_err(|e: std::num::ParseFloatError| e.to_string())?;
         Ok(Value::Number(n))
     }
 
@@ -292,8 +308,13 @@ impl<'a> Parser<'a> {
             arr.push(self.parse_value()?);
             self.skip_ws();
             match self.peek() {
-                Some(b',') => { self.pos += 1; }
-                Some(b']') => { self.pos += 1; return Ok(Value::Array(arr)); }
+                Some(b',') => {
+                    self.pos += 1;
+                }
+                Some(b']') => {
+                    self.pos += 1;
+                    return Ok(Value::Array(arr));
+                }
                 _ => return Err("expected ',' or ']' in array".into()),
             }
         }
@@ -315,8 +336,13 @@ impl<'a> Parser<'a> {
             map.insert(key, val);
             self.skip_ws();
             match self.peek() {
-                Some(b',') => { self.pos += 1; }
-                Some(b'}') => { self.pos += 1; return Ok(Value::Object(map)); }
+                Some(b',') => {
+                    self.pos += 1;
+                }
+                Some(b'}') => {
+                    self.pos += 1;
+                    return Ok(Value::Object(map));
+                }
                 _ => return Err("expected ',' or '}' in object".into()),
             }
         }
@@ -389,19 +415,27 @@ fn format_value(val: &Value, out: &mut String, compact: bool, indent: usize, dep
                 return;
             }
             out.push('[');
-            if !compact { out.push('\n'); }
+            if !compact {
+                out.push('\n');
+            }
             for (i, v) in arr.iter().enumerate() {
                 if !compact {
-                    for _ in 0..(depth + 1) * indent { out.push(' '); }
+                    for _ in 0..(depth + 1) * indent {
+                        out.push(' ');
+                    }
                 }
                 format_value(v, out, compact, indent, depth + 1);
                 if i + 1 < arr.len() {
                     out.push(',');
                 }
-                if !compact { out.push('\n'); }
+                if !compact {
+                    out.push('\n');
+                }
             }
             if !compact {
-                for _ in 0..depth * indent { out.push(' '); }
+                for _ in 0..depth * indent {
+                    out.push(' ');
+                }
             }
             out.push(']');
         }
@@ -411,25 +445,35 @@ fn format_value(val: &Value, out: &mut String, compact: bool, indent: usize, dep
                 return;
             }
             out.push('{');
-            if !compact { out.push('\n'); }
+            if !compact {
+                out.push('\n');
+            }
             let len = map.len();
             for (i, (k, v)) in map.iter().enumerate() {
                 if !compact {
-                    for _ in 0..(depth + 1) * indent { out.push(' '); }
+                    for _ in 0..(depth + 1) * indent {
+                        out.push(' ');
+                    }
                 }
                 out.push('"');
                 out.push_str(k);
                 out.push('"');
                 out.push(':');
-                if !compact { out.push(' '); }
+                if !compact {
+                    out.push(' ');
+                }
                 format_value(v, out, compact, indent, depth + 1);
                 if i + 1 < len {
                     out.push(',');
                 }
-                if !compact { out.push('\n'); }
+                if !compact {
+                    out.push('\n');
+                }
             }
             if !compact {
-                for _ in 0..depth * indent { out.push(' '); }
+                for _ in 0..depth * indent {
+                    out.push(' ');
+                }
             }
             out.push('}');
         }
@@ -456,91 +500,91 @@ enum TypeClass {
 
 #[derive(Clone, Debug)]
 enum Filter {
-    Identity,                           // .
-    Field(String),                      // .foo
-    Index(i64),                         // .[N]
-    Iterate,                            // .[]
-    Pipe(Box<Filter>, Box<Filter>),     // f | g
-    Comma(Box<Filter>, Box<Filter>),    // f, g
-    Literal(Value),                     // null, true, 42, "str"
-    Length,                             // length
-    Keys,                               // keys
-    Values,                             // values
-    TypeF,                              // type
-    Not,                                // not
-    Add,                                // add
-    Sort,                               // sort
-    Unique,                             // unique
-    Flatten,                            // flatten
-    First,                              // first
-    Last,                               // last
-    Reverse,                            // reverse
-    Empty,                              // empty
-    Select(Box<Filter>),                // select(f)
-    Map(Box<Filter>),                   // map(f)
-    SortBy(Box<Filter>),               // sort_by(f)
-    GroupBy(Box<Filter>),              // group_by(f)
-    UniqueBy(Box<Filter>),             // unique_by(f)
-    Limit(usize, Box<Filter>),         // limit(n; f)
-    Has(String),                        // has("key")
-    Contains(Box<Filter>),             // contains(f)
-    ToEntries,                          // to_entries
-    FromEntries,                        // from_entries
-    Ascii,                              // ascii_downcase / ascii_upcase
+    Identity,                        // .
+    Field(String),                   // .foo
+    Index(i64),                      // .[N]
+    Iterate,                         // .[]
+    Pipe(Box<Filter>, Box<Filter>),  // f | g
+    Comma(Box<Filter>, Box<Filter>), // f, g
+    Literal(Value),                  // null, true, 42, "str"
+    Length,                          // length
+    Keys,                            // keys
+    Values,                          // values
+    TypeF,                           // type
+    Not,                             // not
+    Add,                             // add
+    Sort,                            // sort
+    Unique,                          // unique
+    Flatten,                         // flatten
+    First,                           // first
+    Last,                            // last
+    Reverse,                         // reverse
+    Empty,                           // empty
+    Select(Box<Filter>),             // select(f)
+    Map(Box<Filter>),                // map(f)
+    SortBy(Box<Filter>),             // sort_by(f)
+    GroupBy(Box<Filter>),            // group_by(f)
+    UniqueBy(Box<Filter>),           // unique_by(f)
+    Limit(usize, Box<Filter>),       // limit(n; f)
+    Has(String),                     // has("key")
+    Contains(Box<Filter>),           // contains(f)
+    ToEntries,                       // to_entries
+    FromEntries,                     // from_entries
+    Ascii,                           // ascii_downcase / ascii_upcase
     AsciiDown,
     AsciiUp,
-    Compare(CmpOp, Box<Filter>, Box<Filter>),  // ==, !=, <, >, <=, >=
-    Arith(ArithOp, Box<Filter>, Box<Filter>),   // +, -, *, /, %
-    And(Box<Filter>, Box<Filter>),      // and
-    Or(Box<Filter>, Box<Filter>),       // or
+    Compare(CmpOp, Box<Filter>, Box<Filter>), // ==, !=, <, >, <=, >=
+    Arith(ArithOp, Box<Filter>, Box<Filter>), // +, -, *, /, %
+    And(Box<Filter>, Box<Filter>),            // and
+    Or(Box<Filter>, Box<Filter>),             // or
     IfThenElse(Box<Filter>, Box<Filter>, Option<Box<Filter>>), // if f then g (else h) end
-    TryCatch(Box<Filter>),             // f?
-    ObjConstruct(Vec<(String, Filter)>), // {key: expr, ...}
-    ArrConstruct(Box<Filter>),          // [f]
-    Recurse,                            // ..
-    TypeSelect(TypeClass),              // numbers/strings/booleans/arrays/objects/nulls/values/iterables/scalars
-    Env,                                // env
-    Null,                               // null literal filter
-    Input,                              // input
-    Debug,                              // debug
+    TryCatch(Box<Filter>),                    // f?
+    ObjConstruct(Vec<(String, Filter)>),      // {key: expr, ...}
+    ArrConstruct(Box<Filter>),                // [f]
+    Recurse,                                  // ..
+    TypeSelect(TypeClass), // numbers/strings/booleans/arrays/objects/nulls/values/iterables/scalars
+    Env,                   // env
+    Null,                  // null literal filter
+    Input,                 // input
+    Debug,                 // debug
     Def(String, Vec<String>, Box<Filter>, Box<Filter>), // def name(args): body; rest
-    FuncCall(String, Vec<Filter>),       // user-defined function call
-    StringInterp(Vec<StringPart>),       // string with \(expr) interpolations
-    Optional(Box<Filter>),              // f?
-    Assign(Box<Filter>, Box<Filter>),   // .field = expr (update)
+    FuncCall(String, Vec<Filter>), // user-defined function call
+    StringInterp(Vec<StringPart>), // string with \(expr) interpolations
+    Optional(Box<Filter>), // f?
+    Assign(Box<Filter>, Box<Filter>), // .field = expr (update)
     UpdateAssign(Box<Filter>, Box<Filter>), // .field |= expr
-    Label(String, Box<Filter>),         // label $name | f
-    Range(Box<Filter>, Box<Filter>),    // range(a; b)
-    Split(String),                      // split("delim")
-    Join(String),                       // join("delim")
-    Test(String),                       // test("regex") — simple substring match
-    Ltrimstr(String),                   // ltrimstr("prefix")
-    Rtrimstr(String),                   // rtrimstr("suffix")
-    Startswith(String),                 // startswith("prefix")
-    Endswith(String),                   // endswith("suffix")
-    Tostring,                           // tostring
-    Tonumber,                           // tonumber
-    Floor,                              // floor
-    Ceil,                               // ceil
-    Round,                              // round
-    Fabs,                               // fabs
-    Sqrt,                               // sqrt
-    Indices(String),                    // indices("str")
-    Inside(Box<Filter>),               // inside(f)
-    Limit2(Box<Filter>, Box<Filter>),  // limit(n; f) — two-arg
-    Any(Option<Box<Filter>>),           // any / any(f)
-    All(Option<Box<Filter>>),           // all / all(f)
-    MinMax(bool),                       // min / max (bool=true for max)
-    MinMaxBy(bool, Box<Filter>),       // min_by(f) / max_by(f)
-    Paths,                              // paths / leaf_paths
-    GetPath(Box<Filter>),              // getpath(f)
-    Delpaths(Box<Filter>),             // delpaths(f)
-    Ascii2(bool),                       // ascii_downcase(false) / ascii_upcase(true)
-    Explode,                            // explode
-    Implode,                            // implode
-    Tojson,                             // tojson
-    Fromjson,                           // fromjson
-    Format(FormatKind),                 // @base64, @csv, @tsv, @html, @uri, @json, @text
+    Label(String, Box<Filter>), // label $name | f
+    Range(Box<Filter>, Box<Filter>), // range(a; b)
+    Split(String),         // split("delim")
+    Join(String),          // join("delim")
+    Test(String),          // test("regex") — simple substring match
+    Ltrimstr(String),      // ltrimstr("prefix")
+    Rtrimstr(String),      // rtrimstr("suffix")
+    Startswith(String),    // startswith("prefix")
+    Endswith(String),      // endswith("suffix")
+    Tostring,              // tostring
+    Tonumber,              // tonumber
+    Floor,                 // floor
+    Ceil,                  // ceil
+    Round,                 // round
+    Fabs,                  // fabs
+    Sqrt,                  // sqrt
+    Indices(String),       // indices("str")
+    Inside(Box<Filter>),   // inside(f)
+    Limit2(Box<Filter>, Box<Filter>), // limit(n; f) — two-arg
+    Any(Option<Box<Filter>>), // any / any(f)
+    All(Option<Box<Filter>>), // all / all(f)
+    MinMax(bool),          // min / max (bool=true for max)
+    MinMaxBy(bool, Box<Filter>), // min_by(f) / max_by(f)
+    Paths,                 // paths / leaf_paths
+    GetPath(Box<Filter>),  // getpath(f)
+    Delpaths(Box<Filter>), // delpaths(f)
+    Ascii2(bool),          // ascii_downcase(false) / ascii_upcase(true)
+    Explode,               // explode
+    Implode,               // implode
+    Tojson,                // tojson
+    Fromjson,              // fromjson
+    Format(FormatKind),    // @base64, @csv, @tsv, @html, @uri, @json, @text
 }
 
 #[derive(Clone, Debug)]
@@ -550,13 +594,35 @@ enum StringPart {
 }
 
 #[derive(Clone, Debug)]
-enum CmpOp { Eq, Ne, Lt, Gt, Le, Ge }
+enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
 
 #[derive(Clone, Debug)]
-enum ArithOp { Add, Sub, Mul, Div, Mod }
+enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
 
 #[derive(Clone, Debug)]
-enum FormatKind { Base64, Base64d, Csv, Tsv, Html, Uri, Json, Text }
+enum FormatKind {
+    Base64,
+    Base64d,
+    Csv,
+    Tsv,
+    Html,
+    Uri,
+    Json,
+    Text,
+}
 
 // ============================================================================
 // Filter Parser
@@ -619,48 +685,146 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, String> {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
-            b'.' if i + 1 < bytes.len() && bytes[i + 1] == b'.' => { tokens.push(Token::DotDot); i += 2; }
-            b'.' => { tokens.push(Token::Dot); i += 1; }
-            b'|' => { tokens.push(Token::Pipe); i += 1; }
-            b',' => { tokens.push(Token::Comma); i += 1; }
-            b'(' => { tokens.push(Token::LParen); i += 1; }
-            b')' => { tokens.push(Token::RParen); i += 1; }
-            b'[' => { tokens.push(Token::LBracket); i += 1; }
-            b']' => { tokens.push(Token::RBracket); i += 1; }
-            b'{' => { tokens.push(Token::LBrace); i += 1; }
-            b'}' => { tokens.push(Token::RBrace); i += 1; }
-            b':' => { tokens.push(Token::Colon); i += 1; }
-            b';' => { tokens.push(Token::Semi); i += 1; }
-            b'?' => { tokens.push(Token::Question); i += 1; }
-            b'+' => { tokens.push(Token::Plus); i += 1; }
-            b'-' if i + 1 < bytes.len() && bytes[i+1].is_ascii_digit() && (tokens.is_empty() || matches!(tokens.last(), Some(Token::LParen | Token::LBracket | Token::Pipe | Token::Comma | Token::Semi | Token::Colon))) => {
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                i += 1;
+            }
+            b'.' if i + 1 < bytes.len() && bytes[i + 1] == b'.' => {
+                tokens.push(Token::DotDot);
+                i += 2;
+            }
+            b'.' => {
+                tokens.push(Token::Dot);
+                i += 1;
+            }
+            b'|' => {
+                tokens.push(Token::Pipe);
+                i += 1;
+            }
+            b',' => {
+                tokens.push(Token::Comma);
+                i += 1;
+            }
+            b'(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            b')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+            }
+            b'[' => {
+                tokens.push(Token::LBracket);
+                i += 1;
+            }
+            b']' => {
+                tokens.push(Token::RBracket);
+                i += 1;
+            }
+            b'{' => {
+                tokens.push(Token::LBrace);
+                i += 1;
+            }
+            b'}' => {
+                tokens.push(Token::RBrace);
+                i += 1;
+            }
+            b':' => {
+                tokens.push(Token::Colon);
+                i += 1;
+            }
+            b';' => {
+                tokens.push(Token::Semi);
+                i += 1;
+            }
+            b'?' => {
+                tokens.push(Token::Question);
+                i += 1;
+            }
+            b'+' => {
+                tokens.push(Token::Plus);
+                i += 1;
+            }
+            b'-' if i + 1 < bytes.len()
+                && bytes[i + 1].is_ascii_digit()
+                && (tokens.is_empty()
+                    || matches!(
+                        tokens.last(),
+                        Some(
+                            Token::LParen
+                                | Token::LBracket
+                                | Token::Pipe
+                                | Token::Comma
+                                | Token::Semi
+                                | Token::Colon
+                        )
+                    )) =>
+            {
                 let start = i;
                 i += 1;
-                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') { i += 1; }
+                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                    i += 1;
+                }
                 let s = std::str::from_utf8(&bytes[start..i]).map_err(|e| e.to_string())?;
-                let n: f64 = s.parse().map_err(|e: std::num::ParseFloatError| e.to_string())?;
+                let n: f64 = s
+                    .parse()
+                    .map_err(|e: std::num::ParseFloatError| e.to_string())?;
                 tokens.push(Token::Num(n));
             }
-            b'-' => { tokens.push(Token::Minus); i += 1; }
-            b'*' => { tokens.push(Token::Star); i += 1; }
-            b'/' if i + 1 < bytes.len() && bytes[i+1] == b'/' => {
-                // Comment — skip to end of line
-                while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+            b'-' => {
+                tokens.push(Token::Minus);
+                i += 1;
             }
-            b'/' => { tokens.push(Token::Slash); i += 1; }
-            b'%' => { tokens.push(Token::Percent); i += 1; }
-            b'=' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { tokens.push(Token::Eq); i += 2; }
-            b'!' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { tokens.push(Token::Ne); i += 2; }
-            b'<' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { tokens.push(Token::Le); i += 2; }
-            b'>' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { tokens.push(Token::Ge); i += 2; }
-            b'<' => { tokens.push(Token::Lt); i += 1; }
-            b'>' => { tokens.push(Token::Gt); i += 1; }
+            b'*' => {
+                tokens.push(Token::Star);
+                i += 1;
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                // Comment — skip to end of line
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' => {
+                tokens.push(Token::Slash);
+                i += 1;
+            }
+            b'%' => {
+                tokens.push(Token::Percent);
+                i += 1;
+            }
+            b'=' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                tokens.push(Token::Eq);
+                i += 2;
+            }
+            b'!' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                tokens.push(Token::Ne);
+                i += 2;
+            }
+            b'<' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                tokens.push(Token::Le);
+                i += 2;
+            }
+            b'>' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                tokens.push(Token::Ge);
+                i += 2;
+            }
+            b'<' => {
+                tokens.push(Token::Lt);
+                i += 1;
+            }
+            b'>' => {
+                tokens.push(Token::Gt);
+                i += 1;
+            }
             b'@' => {
                 i += 1;
                 let start = i;
-                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }
-                let name = std::str::from_utf8(&bytes[start..i]).map_err(|e| e.to_string())?.to_string();
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let name = std::str::from_utf8(&bytes[start..i])
+                    .map_err(|e| e.to_string())?
+                    .to_string();
                 tokens.push(Token::At(name));
             }
             b'"' => {
@@ -676,26 +840,42 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, String> {
                             b'"' => s.push('"'),
                             b'/' => s.push('/'),
                             b'r' => s.push('\r'),
-                            other => { s.push('\\'); s.push(other as char); }
+                            other => {
+                                s.push('\\');
+                                s.push(other as char);
+                            }
                         }
                     } else {
                         s.push(bytes[i] as char);
                     }
                     i += 1;
                 }
-                if i < bytes.len() { i += 1; } // skip closing "
+                if i < bytes.len() {
+                    i += 1;
+                } // skip closing "
                 tokens.push(Token::Str(s));
             }
             b'0'..=b'9' => {
                 let start = i;
-                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.' || bytes[i] == b'e' || bytes[i] == b'E') { i += 1; }
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_digit()
+                        || bytes[i] == b'.'
+                        || bytes[i] == b'e'
+                        || bytes[i] == b'E')
+                {
+                    i += 1;
+                }
                 let s = std::str::from_utf8(&bytes[start..i]).map_err(|e| e.to_string())?;
-                let n: f64 = s.parse().map_err(|e: std::num::ParseFloatError| e.to_string())?;
+                let n: f64 = s
+                    .parse()
+                    .map_err(|e: std::num::ParseFloatError| e.to_string())?;
                 tokens.push(Token::Num(n));
             }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' => {
                 let start = i;
-                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
                 let word = std::str::from_utf8(&bytes[start..i]).map_err(|e| e.to_string())?;
                 let tok = match word {
                     "and" => Token::And,
@@ -717,9 +897,16 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, String> {
             }
             b'#' => {
                 // Comment
-                while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
             }
-            other => return Err(format!("unexpected character in filter: '{}'", other as char)),
+            other => {
+                return Err(format!(
+                    "unexpected character in filter: '{}'",
+                    other as char
+                ));
+            }
         }
     }
     Ok(tokens)
@@ -727,7 +914,11 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, String> {
 
 impl<'a> FilterParser<'a> {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0, _phantom: std::marker::PhantomData }
+        Self {
+            tokens,
+            pos: 0,
+            _phantom: std::marker::PhantomData,
+        }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -741,7 +932,8 @@ impl<'a> FilterParser<'a> {
     }
 
     fn expect_token(&mut self, desc: &str) -> Result<Token, String> {
-        self.advance().ok_or_else(|| format!("expected {}, got EOF", desc))
+        self.advance()
+            .ok_or_else(|| format!("expected {}, got EOF", desc))
     }
 
     fn parse(&mut self) -> Result<Filter, String> {
@@ -947,13 +1139,34 @@ impl<'a> FilterParser<'a> {
                     _ => Ok(Filter::Identity),
                 }
             }
-            Some(Token::DotDot) => { self.advance(); Ok(Filter::Recurse) }
-            Some(Token::Num(n)) => { self.advance(); Ok(Filter::Literal(Value::Number(n))) }
-            Some(Token::Str(s)) => { self.advance(); Ok(Filter::Literal(Value::String(s))) }
-            Some(Token::True) => { self.advance(); Ok(Filter::Literal(Value::Bool(true))) }
-            Some(Token::False) => { self.advance(); Ok(Filter::Literal(Value::Bool(false))) }
-            Some(Token::NullTok) => { self.advance(); Ok(Filter::Literal(Value::Null)) }
-            Some(Token::Not) => { self.advance(); Ok(Filter::Not) }
+            Some(Token::DotDot) => {
+                self.advance();
+                Ok(Filter::Recurse)
+            }
+            Some(Token::Num(n)) => {
+                self.advance();
+                Ok(Filter::Literal(Value::Number(n)))
+            }
+            Some(Token::Str(s)) => {
+                self.advance();
+                Ok(Filter::Literal(Value::String(s)))
+            }
+            Some(Token::True) => {
+                self.advance();
+                Ok(Filter::Literal(Value::Bool(true)))
+            }
+            Some(Token::False) => {
+                self.advance();
+                Ok(Filter::Literal(Value::Bool(false)))
+            }
+            Some(Token::NullTok) => {
+                self.advance();
+                Ok(Filter::Literal(Value::Null))
+            }
+            Some(Token::Not) => {
+                self.advance();
+                Ok(Filter::Not)
+            }
             Some(Token::LParen) => {
                 self.advance();
                 let f = self.parse_pipe()?;
@@ -983,10 +1196,18 @@ impl<'a> FilterParser<'a> {
                     loop {
                         let key = match self.peek() {
                             Some(Token::Ident(_)) => {
-                                if let Some(Token::Ident(k)) = self.advance() { k } else { return Err("expected key".into()); }
+                                if let Some(Token::Ident(k)) = self.advance() {
+                                    k
+                                } else {
+                                    return Err("expected key".into());
+                                }
                             }
                             Some(Token::Str(_)) => {
-                                if let Some(Token::Str(k)) = self.advance() { k } else { return Err("expected key".into()); }
+                                if let Some(Token::Str(k)) = self.advance() {
+                                    k
+                                } else {
+                                    return Err("expected key".into());
+                                }
                             }
                             _ => return Err("expected object key".into()),
                         };
@@ -1034,7 +1255,11 @@ impl<'a> FilterParser<'a> {
             Some(Token::Minus) => {
                 self.advance();
                 let right = self.parse_primary()?;
-                Ok(Filter::Arith(ArithOp::Sub, Box::new(Filter::Literal(Value::Number(0.0))), Box::new(right)))
+                Ok(Filter::Arith(
+                    ArithOp::Sub,
+                    Box::new(Filter::Literal(Value::Number(0.0))),
+                    Box::new(right),
+                ))
             }
             Some(Token::At(name)) => {
                 self.advance();
@@ -1115,17 +1340,23 @@ impl<'a> FilterParser<'a> {
                         return Err("expected ')'".into());
                     }
                     self.advance();
-                    if is_all { Ok(Filter::All(Some(Box::new(f)))) }
-                    else { Ok(Filter::Any(Some(Box::new(f)))) }
+                    if is_all {
+                        Ok(Filter::All(Some(Box::new(f))))
+                    } else {
+                        Ok(Filter::Any(Some(Box::new(f))))
+                    }
                 } else {
-                    if is_all { Ok(Filter::All(None)) }
-                    else { Ok(Filter::Any(None)) }
+                    if is_all {
+                        Ok(Filter::All(None))
+                    } else {
+                        Ok(Filter::Any(None))
+                    }
                 }
             }
             "select" | "map" | "sort_by" | "group_by" | "unique_by" | "min_by" | "max_by"
-            | "has" | "contains" | "inside" | "test" | "split" | "join"
-            | "ltrimstr" | "rtrimstr" | "startswith" | "endswith"
-            | "limit" | "range" | "getpath" | "delpaths" | "indices" => {
+            | "has" | "contains" | "inside" | "test" | "split" | "join" | "ltrimstr"
+            | "rtrimstr" | "startswith" | "endswith" | "limit" | "range" | "getpath"
+            | "delpaths" | "indices" => {
                 if !matches!(self.peek(), Some(Token::LParen)) {
                     return Err(format!("{}() requires arguments", name));
                 }
@@ -1169,8 +1400,11 @@ impl<'a> FilterParser<'a> {
                     "has" => {
                         let arg = self.expect_token("string argument")?;
                         self.expect_rparen()?;
-                        if let Token::Str(s) = arg { Ok(Filter::Has(s)) }
-                        else { Err("has() requires a string argument".into()) }
+                        if let Token::Str(s) = arg {
+                            Ok(Filter::Has(s))
+                        } else {
+                            Err("has() requires a string argument".into())
+                        }
                     }
                     "contains" => {
                         let f = self.parse_pipe()?;
@@ -1185,50 +1419,74 @@ impl<'a> FilterParser<'a> {
                     "test" => {
                         let arg = self.expect_token("string argument")?;
                         self.expect_rparen()?;
-                        if let Token::Str(s) = arg { Ok(Filter::Test(s)) }
-                        else { Err("test() requires a string argument".into()) }
+                        if let Token::Str(s) = arg {
+                            Ok(Filter::Test(s))
+                        } else {
+                            Err("test() requires a string argument".into())
+                        }
                     }
                     "split" => {
                         let arg = self.expect_token("string argument")?;
                         self.expect_rparen()?;
-                        if let Token::Str(s) = arg { Ok(Filter::Split(s)) }
-                        else { Err("split() requires a string argument".into()) }
+                        if let Token::Str(s) = arg {
+                            Ok(Filter::Split(s))
+                        } else {
+                            Err("split() requires a string argument".into())
+                        }
                     }
                     "join" => {
                         let arg = self.expect_token("string argument")?;
                         self.expect_rparen()?;
-                        if let Token::Str(s) = arg { Ok(Filter::Join(s)) }
-                        else { Err("join() requires a string argument".into()) }
+                        if let Token::Str(s) = arg {
+                            Ok(Filter::Join(s))
+                        } else {
+                            Err("join() requires a string argument".into())
+                        }
                     }
                     "ltrimstr" => {
                         let arg = self.expect_token("string argument")?;
                         self.expect_rparen()?;
-                        if let Token::Str(s) = arg { Ok(Filter::Ltrimstr(s)) }
-                        else { Err("ltrimstr() requires a string argument".into()) }
+                        if let Token::Str(s) = arg {
+                            Ok(Filter::Ltrimstr(s))
+                        } else {
+                            Err("ltrimstr() requires a string argument".into())
+                        }
                     }
                     "rtrimstr" => {
                         let arg = self.expect_token("string argument")?;
                         self.expect_rparen()?;
-                        if let Token::Str(s) = arg { Ok(Filter::Rtrimstr(s)) }
-                        else { Err("rtrimstr() requires a string argument".into()) }
+                        if let Token::Str(s) = arg {
+                            Ok(Filter::Rtrimstr(s))
+                        } else {
+                            Err("rtrimstr() requires a string argument".into())
+                        }
                     }
                     "startswith" => {
                         let arg = self.expect_token("string argument")?;
                         self.expect_rparen()?;
-                        if let Token::Str(s) = arg { Ok(Filter::Startswith(s)) }
-                        else { Err("startswith() requires a string argument".into()) }
+                        if let Token::Str(s) = arg {
+                            Ok(Filter::Startswith(s))
+                        } else {
+                            Err("startswith() requires a string argument".into())
+                        }
                     }
                     "endswith" => {
                         let arg = self.expect_token("string argument")?;
                         self.expect_rparen()?;
-                        if let Token::Str(s) = arg { Ok(Filter::Endswith(s)) }
-                        else { Err("endswith() requires a string argument".into()) }
+                        if let Token::Str(s) = arg {
+                            Ok(Filter::Endswith(s))
+                        } else {
+                            Err("endswith() requires a string argument".into())
+                        }
                     }
                     "indices" => {
                         let arg = self.expect_token("string argument")?;
                         self.expect_rparen()?;
-                        if let Token::Str(s) = arg { Ok(Filter::Indices(s)) }
-                        else { Err("indices() requires a string argument".into()) }
+                        if let Token::Str(s) = arg {
+                            Ok(Filter::Indices(s))
+                        } else {
+                            Err("indices() requires a string argument".into())
+                        }
                     }
                     "limit" => {
                         let n = self.parse_pipe()?;
@@ -1249,7 +1507,10 @@ impl<'a> FilterParser<'a> {
                             Ok(Filter::Range(Box::new(a), Box::new(b)))
                         } else {
                             self.expect_rparen()?;
-                            Ok(Filter::Range(Box::new(Filter::Literal(Value::Number(0.0))), Box::new(a)))
+                            Ok(Filter::Range(
+                                Box::new(Filter::Literal(Value::Number(0.0))),
+                                Box::new(a),
+                            ))
                         }
                     }
                     "getpath" => {
@@ -1306,7 +1567,11 @@ fn parse_filter(input: &str) -> Result<Filter, String> {
     let mut parser = FilterParser::new(tokens);
     let f = parser.parse()?;
     if parser.pos < parser.tokens.len() {
-        return Err(format!("unexpected token at position {}: {:?}", parser.pos, parser.tokens.get(parser.pos)));
+        return Err(format!(
+            "unexpected token at position {}: {:?}",
+            parser.pos,
+            parser.tokens.get(parser.pos)
+        ));
     }
     Ok(f)
 }
@@ -1319,37 +1584,37 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
     match filter {
         Filter::Identity => Ok(vec![input.clone()]),
         Filter::Literal(v) => Ok(vec![v.clone()]),
-        Filter::Field(name) => {
-            match input {
-                Value::Object(map) => {
-                    Ok(vec![map.get(name).cloned().unwrap_or(Value::Null)])
+        Filter::Field(name) => match input {
+            Value::Object(map) => Ok(vec![map.get(name).cloned().unwrap_or(Value::Null)]),
+            Value::Null => Ok(vec![Value::Null]),
+            _ => Err(format!(
+                "cannot index {} with string \"{}\"",
+                input.type_name(),
+                name
+            )),
+        },
+        Filter::Index(idx) => match input {
+            Value::Array(arr) => {
+                let i = if *idx < 0 {
+                    arr.len() as i64 + *idx
+                } else {
+                    *idx
+                };
+                if i >= 0 && (i as usize) < arr.len() {
+                    Ok(vec![arr[i as usize].clone()])
+                } else {
+                    Ok(vec![Value::Null])
                 }
-                Value::Null => Ok(vec![Value::Null]),
-                _ => Err(format!("cannot index {} with string \"{}\"", input.type_name(), name)),
             }
-        }
-        Filter::Index(idx) => {
-            match input {
-                Value::Array(arr) => {
-                    let i = if *idx < 0 { arr.len() as i64 + *idx } else { *idx };
-                    if i >= 0 && (i as usize) < arr.len() {
-                        Ok(vec![arr[i as usize].clone()])
-                    } else {
-                        Ok(vec![Value::Null])
-                    }
-                }
-                Value::Null => Ok(vec![Value::Null]),
-                _ => Err(format!("cannot index {} with number", input.type_name())),
-            }
-        }
-        Filter::Iterate => {
-            match input {
-                Value::Array(arr) => Ok(arr.clone()),
-                Value::Object(map) => Ok(map.values().cloned().collect()),
-                Value::Null => Ok(vec![]),
-                _ => Err(format!("cannot iterate over {}", input.type_name())),
-            }
-        }
+            Value::Null => Ok(vec![Value::Null]),
+            _ => Err(format!("cannot index {} with number", input.type_name())),
+        },
+        Filter::Iterate => match input {
+            Value::Array(arr) => Ok(arr.clone()),
+            Value::Object(map) => Ok(map.values().cloned().collect()),
+            Value::Null => Ok(vec![]),
+            _ => Err(format!("cannot iterate over {}", input.type_name())),
+        },
         Filter::Pipe(left, right) => {
             let mid = eval(left, input)?;
             let mut results = Vec::new();
@@ -1364,90 +1629,76 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
             Ok(results)
         }
         Filter::Length => Ok(vec![input.length()]),
-        Filter::Keys => {
-            match input {
-                Value::Object(map) => Ok(vec![Value::Array(map.keys().map(|k| Value::String(k.clone())).collect())]),
-                Value::Array(arr) => Ok(vec![Value::Array((0..arr.len()).map(|i| Value::Number(i as f64)).collect())]),
-                _ => Err(format!("{} has no keys", input.type_name())),
-            }
-        }
-        Filter::Values => {
-            match input {
-                Value::Object(map) => Ok(vec![Value::Array(map.values().cloned().collect())]),
-                Value::Array(arr) => Ok(vec![Value::Array(arr.clone())]),
-                _ => Err(format!("{} has no values", input.type_name())),
-            }
-        }
+        Filter::Keys => match input {
+            Value::Object(map) => Ok(vec![Value::Array(
+                map.keys().map(|k| Value::String(k.clone())).collect(),
+            )]),
+            Value::Array(arr) => Ok(vec![Value::Array(
+                (0..arr.len()).map(|i| Value::Number(i as f64)).collect(),
+            )]),
+            _ => Err(format!("{} has no keys", input.type_name())),
+        },
+        Filter::Values => match input {
+            Value::Object(map) => Ok(vec![Value::Array(map.values().cloned().collect())]),
+            Value::Array(arr) => Ok(vec![Value::Array(arr.clone())]),
+            _ => Err(format!("{} has no values", input.type_name())),
+        },
         Filter::TypeF => Ok(vec![Value::String(input.type_name().to_string())]),
         Filter::Not => Ok(vec![Value::Bool(!input.is_truthy())]),
         Filter::Empty => Ok(vec![]),
-        Filter::Add => {
-            match input {
-                Value::Array(arr) if arr.is_empty() => Ok(vec![Value::Null]),
-                Value::Array(arr) => {
-                    let mut acc = arr[0].clone();
-                    for item in &arr[1..] {
-                        acc = add_values(&acc, item)?;
-                    }
-                    Ok(vec![acc])
+        Filter::Add => match input {
+            Value::Array(arr) if arr.is_empty() => Ok(vec![Value::Null]),
+            Value::Array(arr) => {
+                let mut acc = arr[0].clone();
+                for item in &arr[1..] {
+                    acc = add_values(&acc, item)?;
                 }
-                _ => Err("add requires array input".into()),
+                Ok(vec![acc])
             }
-        }
-        Filter::Sort => {
-            match input {
-                Value::Array(arr) => {
-                    let mut sorted = arr.clone();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    Ok(vec![Value::Array(sorted)])
-                }
-                _ => Err("sort requires array input".into()),
+            _ => Err("add requires array input".into()),
+        },
+        Filter::Sort => match input {
+            Value::Array(arr) => {
+                let mut sorted = arr.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                Ok(vec![Value::Array(sorted)])
             }
-        }
-        Filter::Unique => {
-            match input {
-                Value::Array(arr) => {
-                    let mut sorted = arr.clone();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    sorted.dedup();
-                    Ok(vec![Value::Array(sorted)])
-                }
-                _ => Err("unique requires array input".into()),
+            _ => Err("sort requires array input".into()),
+        },
+        Filter::Unique => match input {
+            Value::Array(arr) => {
+                let mut sorted = arr.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.dedup();
+                Ok(vec![Value::Array(sorted)])
             }
-        }
-        Filter::Flatten => {
-            match input {
-                Value::Array(arr) => {
-                    let mut flat = Vec::new();
-                    flatten_into(arr, &mut flat);
-                    Ok(vec![Value::Array(flat)])
-                }
-                _ => Err("flatten requires array input".into()),
+            _ => Err("unique requires array input".into()),
+        },
+        Filter::Flatten => match input {
+            Value::Array(arr) => {
+                let mut flat = Vec::new();
+                flatten_into(arr, &mut flat);
+                Ok(vec![Value::Array(flat)])
             }
-        }
-        Filter::First => {
-            match input {
-                Value::Array(arr) => Ok(vec![arr.first().cloned().unwrap_or(Value::Null)]),
-                _ => Err("first requires array input".into()),
+            _ => Err("flatten requires array input".into()),
+        },
+        Filter::First => match input {
+            Value::Array(arr) => Ok(vec![arr.first().cloned().unwrap_or(Value::Null)]),
+            _ => Err("first requires array input".into()),
+        },
+        Filter::Last => match input {
+            Value::Array(arr) => Ok(vec![arr.last().cloned().unwrap_or(Value::Null)]),
+            _ => Err("last requires array input".into()),
+        },
+        Filter::Reverse => match input {
+            Value::Array(arr) => {
+                let mut rev = arr.clone();
+                rev.reverse();
+                Ok(vec![Value::Array(rev)])
             }
-        }
-        Filter::Last => {
-            match input {
-                Value::Array(arr) => Ok(vec![arr.last().cloned().unwrap_or(Value::Null)]),
-                _ => Err("last requires array input".into()),
-            }
-        }
-        Filter::Reverse => {
-            match input {
-                Value::Array(arr) => {
-                    let mut rev = arr.clone();
-                    rev.reverse();
-                    Ok(vec![Value::Array(rev)])
-                }
-                Value::String(s) => Ok(vec![Value::String(s.chars().rev().collect())]),
-                _ => Err("reverse requires array or string".into()),
-            }
-        }
+            Value::String(s) => Ok(vec![Value::String(s.chars().rev().collect())]),
+            _ => Err("reverse requires array or string".into()),
+        },
         Filter::Select(f) => {
             let results = eval(f, input)?;
             if results.iter().any(|v| v.is_truthy()) {
@@ -1456,112 +1707,117 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
                 Ok(vec![])
             }
         }
-        Filter::Map(f) => {
-            match input {
-                Value::Array(arr) => {
-                    let mut out = Vec::new();
-                    for item in arr {
-                        out.extend(eval(f, item)?);
-                    }
-                    Ok(vec![Value::Array(out)])
+        Filter::Map(f) => match input {
+            Value::Array(arr) => {
+                let mut out = Vec::new();
+                for item in arr {
+                    out.extend(eval(f, item)?);
                 }
-                _ => Err("map requires array input".into()),
+                Ok(vec![Value::Array(out)])
             }
-        }
-        Filter::SortBy(f) => {
-            match input {
-                Value::Array(arr) => {
-                    let mut pairs: Vec<(Value, Value)> = arr.iter()
-                        .map(|item| {
-                            let key = eval(f, item).ok().and_then(|v| v.into_iter().next()).unwrap_or(Value::Null);
-                            (key, item.clone())
-                        })
-                        .collect();
-                    pairs.sort_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    Ok(vec![Value::Array(pairs.into_iter().map(|(_, v)| v).collect())])
-                }
-                _ => Err("sort_by requires array input".into()),
+            _ => Err("map requires array input".into()),
+        },
+        Filter::SortBy(f) => match input {
+            Value::Array(arr) => {
+                let mut pairs: Vec<(Value, Value)> = arr
+                    .iter()
+                    .map(|item| {
+                        let key = eval(f, item)
+                            .ok()
+                            .and_then(|v| v.into_iter().next())
+                            .unwrap_or(Value::Null);
+                        (key, item.clone())
+                    })
+                    .collect();
+                pairs.sort_by(|(a, _), (b, _)| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                Ok(vec![Value::Array(
+                    pairs.into_iter().map(|(_, v)| v).collect(),
+                )])
             }
-        }
-        Filter::GroupBy(f) => {
-            match input {
-                Value::Array(arr) => {
-                    let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
-                    for item in arr {
-                        let key = eval(f, item).ok().and_then(|v| v.into_iter().next()).unwrap_or(Value::Null);
-                        if let Some(group) = groups.iter_mut().find(|(k, _)| k == &key) {
-                            group.1.push(item.clone());
-                        } else {
-                            groups.push((key, vec![item.clone()]));
-                        }
-                    }
-                    Ok(vec![Value::Array(groups.into_iter().map(|(_, v)| Value::Array(v)).collect())])
-                }
-                _ => Err("group_by requires array input".into()),
-            }
-        }
-        Filter::UniqueBy(f) => {
-            match input {
-                Value::Array(arr) => {
-                    let mut seen = Vec::new();
-                    let mut result = Vec::new();
-                    for item in arr {
-                        let key = eval(f, item).ok().and_then(|v| v.into_iter().next()).unwrap_or(Value::Null);
-                        if !seen.contains(&key) {
-                            seen.push(key);
-                            result.push(item.clone());
-                        }
-                    }
-                    Ok(vec![Value::Array(result)])
-                }
-                _ => Err("unique_by requires array input".into()),
-            }
-        }
-        Filter::Has(key) => {
-            match input {
-                Value::Object(map) => Ok(vec![Value::Bool(map.contains_key(key))]),
-                Value::Array(arr) => {
-                    if let Ok(idx) = key.parse::<usize>() {
-                        Ok(vec![Value::Bool(idx < arr.len())])
+            _ => Err("sort_by requires array input".into()),
+        },
+        Filter::GroupBy(f) => match input {
+            Value::Array(arr) => {
+                let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+                for item in arr {
+                    let key = eval(f, item)
+                        .ok()
+                        .and_then(|v| v.into_iter().next())
+                        .unwrap_or(Value::Null);
+                    if let Some(group) = groups.iter_mut().find(|(k, _)| k == &key) {
+                        group.1.push(item.clone());
                     } else {
-                        Ok(vec![Value::Bool(false)])
+                        groups.push((key, vec![item.clone()]));
                     }
                 }
-                _ => Ok(vec![Value::Bool(false)]),
+                Ok(vec![Value::Array(
+                    groups.into_iter().map(|(_, v)| Value::Array(v)).collect(),
+                )])
             }
-        }
-        Filter::ToEntries => {
-            match input {
-                Value::Object(map) => {
-                    let entries: Vec<Value> = map.iter().map(|(k, v)| {
+            _ => Err("group_by requires array input".into()),
+        },
+        Filter::UniqueBy(f) => match input {
+            Value::Array(arr) => {
+                let mut seen = Vec::new();
+                let mut result = Vec::new();
+                for item in arr {
+                    let key = eval(f, item)
+                        .ok()
+                        .and_then(|v| v.into_iter().next())
+                        .unwrap_or(Value::Null);
+                    if !seen.contains(&key) {
+                        seen.push(key);
+                        result.push(item.clone());
+                    }
+                }
+                Ok(vec![Value::Array(result)])
+            }
+            _ => Err("unique_by requires array input".into()),
+        },
+        Filter::Has(key) => match input {
+            Value::Object(map) => Ok(vec![Value::Bool(map.contains_key(key))]),
+            Value::Array(arr) => {
+                if let Ok(idx) = key.parse::<usize>() {
+                    Ok(vec![Value::Bool(idx < arr.len())])
+                } else {
+                    Ok(vec![Value::Bool(false)])
+                }
+            }
+            _ => Ok(vec![Value::Bool(false)]),
+        },
+        Filter::ToEntries => match input {
+            Value::Object(map) => {
+                let entries: Vec<Value> = map
+                    .iter()
+                    .map(|(k, v)| {
                         let mut entry = BTreeMap::new();
                         entry.insert("key".to_string(), Value::String(k.clone()));
                         entry.insert("value".to_string(), v.clone());
                         Value::Object(entry)
-                    }).collect();
-                    Ok(vec![Value::Array(entries)])
-                }
-                _ => Err("to_entries requires object input".into()),
+                    })
+                    .collect();
+                Ok(vec![Value::Array(entries)])
             }
-        }
-        Filter::FromEntries => {
-            match input {
-                Value::Array(arr) => {
-                    let mut map = BTreeMap::new();
-                    for item in arr {
-                        if let Value::Object(obj) = item {
-                            let key = obj.get("key").or_else(|| obj.get("name"));
-                            let val = obj.get("value").cloned().unwrap_or(Value::Null);
-                            if let Some(Value::String(k)) = key {
-                                map.insert(k.clone(), val);
-                            }
+            _ => Err("to_entries requires object input".into()),
+        },
+        Filter::FromEntries => match input {
+            Value::Array(arr) => {
+                let mut map = BTreeMap::new();
+                for item in arr {
+                    if let Value::Object(obj) = item {
+                        let key = obj.get("key").or_else(|| obj.get("name"));
+                        let val = obj.get("value").cloned().unwrap_or(Value::Null);
+                        if let Some(Value::String(k)) = key {
+                            map.insert(k.clone(), val);
                         }
                     }
-                    Ok(vec![Value::Object(map)])
                 }
-                _ => Err("from_entries requires array input".into()),
+                Ok(vec![Value::Object(map)])
             }
-        }
+            _ => Err("from_entries requires array input".into()),
+        },
         Filter::Compare(op, left, right) => {
             let l_vals = eval(left, input)?;
             let r_vals = eval(right, input)?;
@@ -1572,8 +1828,12 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
                 CmpOp::Ne => l != r,
                 CmpOp::Lt => l.partial_cmp(&r) == Some(std::cmp::Ordering::Less),
                 CmpOp::Gt => l.partial_cmp(&r) == Some(std::cmp::Ordering::Greater),
-                CmpOp::Le => l.partial_cmp(&r).is_some_and(|o| o != std::cmp::Ordering::Greater),
-                CmpOp::Ge => l.partial_cmp(&r).is_some_and(|o| o != std::cmp::Ordering::Less),
+                CmpOp::Le => l
+                    .partial_cmp(&r)
+                    .is_some_and(|o| o != std::cmp::Ordering::Greater),
+                CmpOp::Ge => l
+                    .partial_cmp(&r)
+                    .is_some_and(|o| o != std::cmp::Ordering::Less),
             };
             Ok(vec![Value::Bool(result)])
         }
@@ -1584,48 +1844,72 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
             let r = r_vals.first().cloned().unwrap_or(Value::Null);
             match op {
                 ArithOp::Add => Ok(vec![add_values(&l, &r)?]),
-                ArithOp::Sub => {
-                    match (&l, &r) {
-                        (Value::Number(a), Value::Number(b)) => Ok(vec![Value::Number(a - b)]),
-                        _ => Err(format!("cannot subtract {} and {}", l.type_name(), r.type_name())),
-                    }
-                }
-                ArithOp::Mul => {
-                    match (&l, &r) {
-                        (Value::Number(a), Value::Number(b)) => Ok(vec![Value::Number(a * b)]),
-                        _ => Err(format!("cannot multiply {} and {}", l.type_name(), r.type_name())),
-                    }
-                }
-                ArithOp::Div => {
-                    match (&l, &r) {
-                        (Value::Number(a), Value::Number(b)) => {
-                            if *b == 0.0 { Err("division by zero".into()) }
-                            else { Ok(vec![Value::Number(a / b)]) }
+                ArithOp::Sub => match (&l, &r) {
+                    (Value::Number(a), Value::Number(b)) => Ok(vec![Value::Number(a - b)]),
+                    _ => Err(format!(
+                        "cannot subtract {} and {}",
+                        l.type_name(),
+                        r.type_name()
+                    )),
+                },
+                ArithOp::Mul => match (&l, &r) {
+                    (Value::Number(a), Value::Number(b)) => Ok(vec![Value::Number(a * b)]),
+                    _ => Err(format!(
+                        "cannot multiply {} and {}",
+                        l.type_name(),
+                        r.type_name()
+                    )),
+                },
+                ArithOp::Div => match (&l, &r) {
+                    (Value::Number(a), Value::Number(b)) => {
+                        if *b == 0.0 {
+                            Err("division by zero".into())
+                        } else {
+                            Ok(vec![Value::Number(a / b)])
                         }
-                        _ => Err(format!("cannot divide {} by {}", l.type_name(), r.type_name())),
                     }
-                }
-                ArithOp::Mod => {
-                    match (&l, &r) {
-                        (Value::Number(a), Value::Number(b)) => {
-                            if *b == 0.0 { Err("modulo by zero".into()) }
-                            else { Ok(vec![Value::Number(a % b)]) }
+                    _ => Err(format!(
+                        "cannot divide {} by {}",
+                        l.type_name(),
+                        r.type_name()
+                    )),
+                },
+                ArithOp::Mod => match (&l, &r) {
+                    (Value::Number(a), Value::Number(b)) => {
+                        if *b == 0.0 {
+                            Err("modulo by zero".into())
+                        } else {
+                            Ok(vec![Value::Number(a % b)])
                         }
-                        _ => Err(format!("cannot modulo {} by {}", l.type_name(), r.type_name())),
                     }
-                }
+                    _ => Err(format!(
+                        "cannot modulo {} by {}",
+                        l.type_name(),
+                        r.type_name()
+                    )),
+                },
             }
         }
         Filter::And(left, right) => {
             let l = eval(left, input)?.into_iter().next().unwrap_or(Value::Null);
-            if !l.is_truthy() { return Ok(vec![Value::Bool(false)]); }
-            let r = eval(right, input)?.into_iter().next().unwrap_or(Value::Null);
+            if !l.is_truthy() {
+                return Ok(vec![Value::Bool(false)]);
+            }
+            let r = eval(right, input)?
+                .into_iter()
+                .next()
+                .unwrap_or(Value::Null);
             Ok(vec![Value::Bool(r.is_truthy())])
         }
         Filter::Or(left, right) => {
             let l = eval(left, input)?.into_iter().next().unwrap_or(Value::Null);
-            if l.is_truthy() { return Ok(vec![Value::Bool(true)]); }
-            let r = eval(right, input)?.into_iter().next().unwrap_or(Value::Null);
+            if l.is_truthy() {
+                return Ok(vec![Value::Bool(true)]);
+            }
+            let r = eval(right, input)?
+                .into_iter()
+                .next()
+                .unwrap_or(Value::Null);
             Ok(vec![Value::Bool(r.is_truthy())])
         }
         Filter::IfThenElse(cond, then_f, else_f) => {
@@ -1638,12 +1922,10 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
                 Ok(vec![input.clone()])
             }
         }
-        Filter::TryCatch(f) => {
-            match eval(f, input) {
-                Ok(v) => Ok(v),
-                Err(_) => Ok(vec![]),
-            }
-        }
+        Filter::TryCatch(f) => match eval(f, input) {
+            Ok(v) => Ok(v),
+            Err(_) => Ok(vec![]),
+        },
         Filter::ObjConstruct(fields) => {
             let mut map = BTreeMap::new();
             for (key, val_filter) in fields {
@@ -1673,123 +1955,120 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
                 TypeClass::Iterables => matches!(input, Value::Array(_) | Value::Object(_)),
                 TypeClass::Scalars => !matches!(input, Value::Array(_) | Value::Object(_)),
             };
-            if keep { Ok(vec![input.clone()]) } else { Ok(vec![]) }
-        }
-        Filter::AsciiDown => {
-            match input {
-                Value::String(s) => Ok(vec![Value::String(s.to_lowercase())]),
-                _ => Err("ascii_downcase requires string".into()),
+            if keep {
+                Ok(vec![input.clone()])
+            } else {
+                Ok(vec![])
             }
         }
-        Filter::AsciiUp => {
-            match input {
-                Value::String(s) => Ok(vec![Value::String(s.to_uppercase())]),
-                _ => Err("ascii_upcase requires string".into()),
+        Filter::AsciiDown => match input {
+            Value::String(s) => Ok(vec![Value::String(s.to_lowercase())]),
+            _ => Err("ascii_downcase requires string".into()),
+        },
+        Filter::AsciiUp => match input {
+            Value::String(s) => Ok(vec![Value::String(s.to_uppercase())]),
+            _ => Err("ascii_upcase requires string".into()),
+        },
+        Filter::Tostring => match input {
+            Value::String(s) => Ok(vec![Value::String(s.clone())]),
+            other => Ok(vec![Value::String(format_json(other, true, 0))]),
+        },
+        Filter::Tonumber => match input {
+            Value::Number(_) => Ok(vec![input.clone()]),
+            Value::String(s) => {
+                let n: f64 = s
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("cannot convert \"{}\" to number", s))?;
+                Ok(vec![Value::Number(n)])
             }
-        }
-        Filter::Tostring => {
-            match input {
-                Value::String(s) => Ok(vec![Value::String(s.clone())]),
-                other => Ok(vec![Value::String(format_json(other, true, 0))]),
-            }
-        }
-        Filter::Tonumber => {
-            match input {
-                Value::Number(_) => Ok(vec![input.clone()]),
-                Value::String(s) => {
-                    let n: f64 = s.trim().parse().map_err(|_| format!("cannot convert \"{}\" to number", s))?;
-                    Ok(vec![Value::Number(n)])
-                }
-                _ => Err(format!("cannot convert {} to number", input.type_name())),
-            }
-        }
+            _ => Err(format!("cannot convert {} to number", input.type_name())),
+        },
         Filter::Floor => num_op(input, f64::floor),
         Filter::Ceil => num_op(input, f64::ceil),
         Filter::Round => num_op(input, f64::round),
         Filter::Fabs => num_op(input, f64::abs),
         Filter::Sqrt => num_op(input, f64::sqrt),
-        Filter::Split(delim) => {
-            match input {
-                Value::String(s) => {
-                    let parts: Vec<Value> = s.split(delim.as_str()).map(|p| Value::String(p.to_string())).collect();
-                    Ok(vec![Value::Array(parts)])
-                }
-                _ => Err("split requires string input".into()),
+        Filter::Split(delim) => match input {
+            Value::String(s) => {
+                let parts: Vec<Value> = s
+                    .split(delim.as_str())
+                    .map(|p| Value::String(p.to_string()))
+                    .collect();
+                Ok(vec![Value::Array(parts)])
             }
-        }
-        Filter::Join(sep) => {
-            match input {
-                Value::Array(arr) => {
-                    let strs: Vec<String> = arr.iter().map(|v| match v {
+            _ => Err("split requires string input".into()),
+        },
+        Filter::Join(sep) => match input {
+            Value::Array(arr) => {
+                let strs: Vec<String> = arr
+                    .iter()
+                    .map(|v| match v {
                         Value::String(s) => s.clone(),
                         other => format_json(other, true, 0),
-                    }).collect();
-                    Ok(vec![Value::String(strs.join(sep))])
+                    })
+                    .collect();
+                Ok(vec![Value::String(strs.join(sep))])
+            }
+            _ => Err("join requires array input".into()),
+        },
+        Filter::Test(pat) => match input {
+            Value::String(s) => Ok(vec![Value::Bool(s.contains(pat.as_str()))]),
+            _ => Err("test requires string input".into()),
+        },
+        Filter::Ltrimstr(prefix) => match input {
+            Value::String(s) => {
+                if let Some(rest) = s.strip_prefix(prefix.as_str()) {
+                    Ok(vec![Value::String(rest.to_string())])
+                } else {
+                    Ok(vec![input.clone()])
                 }
-                _ => Err("join requires array input".into()),
             }
-        }
-        Filter::Test(pat) => {
-            match input {
-                Value::String(s) => Ok(vec![Value::Bool(s.contains(pat.as_str()))]),
-                _ => Err("test requires string input".into()),
+            _ => Ok(vec![input.clone()]),
+        },
+        Filter::Rtrimstr(suffix) => match input {
+            Value::String(s) => {
+                if let Some(rest) = s.strip_suffix(suffix.as_str()) {
+                    Ok(vec![Value::String(rest.to_string())])
+                } else {
+                    Ok(vec![input.clone()])
+                }
             }
-        }
-        Filter::Ltrimstr(prefix) => {
-            match input {
-                Value::String(s) => {
-                    if let Some(rest) = s.strip_prefix(prefix.as_str()) {
-                        Ok(vec![Value::String(rest.to_string())])
-                    } else {
-                        Ok(vec![input.clone()])
+            _ => Ok(vec![input.clone()]),
+        },
+        Filter::Startswith(prefix) => match input {
+            Value::String(s) => Ok(vec![Value::Bool(s.starts_with(prefix.as_str()))]),
+            _ => Ok(vec![Value::Bool(false)]),
+        },
+        Filter::Endswith(suffix) => match input {
+            Value::String(s) => Ok(vec![Value::Bool(s.ends_with(suffix.as_str()))]),
+            _ => Ok(vec![Value::Bool(false)]),
+        },
+        Filter::MinMax(is_max) => match input {
+            Value::Array(arr) if arr.is_empty() => Ok(vec![Value::Null]),
+            Value::Array(arr) => {
+                let mut best = &arr[0];
+                for item in &arr[1..] {
+                    if let Some(ord) = item.partial_cmp(best)
+                        && ((*is_max && ord == std::cmp::Ordering::Greater)
+                            || (!*is_max && ord == std::cmp::Ordering::Less))
+                    {
+                        best = item;
                     }
                 }
-                _ => Ok(vec![input.clone()]),
+                Ok(vec![best.clone()])
             }
-        }
-        Filter::Rtrimstr(suffix) => {
-            match input {
-                Value::String(s) => {
-                    if let Some(rest) = s.strip_suffix(suffix.as_str()) {
-                        Ok(vec![Value::String(rest.to_string())])
-                    } else {
-                        Ok(vec![input.clone()])
-                    }
-                }
-                _ => Ok(vec![input.clone()]),
-            }
-        }
-        Filter::Startswith(prefix) => {
-            match input {
-                Value::String(s) => Ok(vec![Value::Bool(s.starts_with(prefix.as_str()))]),
-                _ => Ok(vec![Value::Bool(false)]),
-            }
-        }
-        Filter::Endswith(suffix) => {
-            match input {
-                Value::String(s) => Ok(vec![Value::Bool(s.ends_with(suffix.as_str()))]),
-                _ => Ok(vec![Value::Bool(false)]),
-            }
-        }
-        Filter::MinMax(is_max) => {
-            match input {
-                Value::Array(arr) if arr.is_empty() => Ok(vec![Value::Null]),
-                Value::Array(arr) => {
-                    let mut best = &arr[0];
-                    for item in &arr[1..] {
-                        if let Some(ord) = item.partial_cmp(best)
-                            && ((*is_max && ord == std::cmp::Ordering::Greater) || (!*is_max && ord == std::cmp::Ordering::Less)) {
-                                best = item;
-                            }
-                    }
-                    Ok(vec![best.clone()])
-                }
-                _ => Err("min/max requires array".into()),
-            }
-        }
+            _ => Err("min/max requires array".into()),
+        },
         Filter::Range(start_f, end_f) => {
-            let start = eval(start_f, input)?.into_iter().next().unwrap_or(Value::Number(0.0));
-            let end = eval(end_f, input)?.into_iter().next().unwrap_or(Value::Number(0.0));
+            let start = eval(start_f, input)?
+                .into_iter()
+                .next()
+                .unwrap_or(Value::Number(0.0));
+            let end = eval(end_f, input)?
+                .into_iter()
+                .next()
+                .unwrap_or(Value::Number(0.0));
             match (start.as_f64(), end.as_f64()) {
                 (Some(s), Some(e)) => {
                     let mut results = Vec::new();
@@ -1812,8 +2091,11 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
             match kind {
                 FormatKind::Base64 => Ok(vec![Value::String(base64_encode(s.as_bytes()))]),
                 FormatKind::Base64d => {
-                    let decoded = base64_decode(&s).map_err(|e| format!("base64 decode error: {}", e))?;
-                    Ok(vec![Value::String(String::from_utf8_lossy(&decoded).to_string())])
+                    let decoded =
+                        base64_decode(&s).map_err(|e| format!("base64 decode error: {}", e))?;
+                    Ok(vec![Value::String(
+                        String::from_utf8_lossy(&decoded).to_string(),
+                    )])
                 }
                 FormatKind::Html => {
                     let mut out = String::new();
@@ -1832,7 +2114,12 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
                 FormatKind::Uri => {
                     let mut out = String::new();
                     for b in s.bytes() {
-                        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+                        if b.is_ascii_alphanumeric()
+                            || b == b'-'
+                            || b == b'_'
+                            || b == b'.'
+                            || b == b'~'
+                        {
                             out.push(b as char);
                         } else {
                             let _ = fmt::Write::write_fmt(&mut out, format_args!("%{:02X}", b));
@@ -1847,15 +2134,13 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
             }
         }
         Filter::Tojson => Ok(vec![Value::String(format_json(input, true, 0))]),
-        Filter::Fromjson => {
-            match input {
-                Value::String(s) => {
-                    let v = parse_json(s)?;
-                    Ok(vec![v])
-                }
-                _ => Err("fromjson requires string input".into()),
+        Filter::Fromjson => match input {
+            Value::String(s) => {
+                let v = parse_json(s)?;
+                Ok(vec![v])
             }
-        }
+            _ => Err("fromjson requires string input".into()),
+        },
         Filter::Contains(f) => {
             let other = eval(f, input)?.into_iter().next().unwrap_or(Value::Null);
             Ok(vec![Value::Bool(value_contains(input, &other))])
@@ -1887,7 +2172,11 @@ fn add_values(a: &Value, b: &Value) -> Result<Value, String> {
             Ok(Value::Object(combined))
         }
         (Value::Null, other) | (other, Value::Null) => Ok(other.clone()),
-        _ => Err(format!("cannot add {} and {}", a.type_name(), b.type_name())),
+        _ => Err(format!(
+            "cannot add {} and {}",
+            a.type_name(),
+            b.type_name()
+        )),
     }
 }
 
@@ -1903,8 +2192,16 @@ fn flatten_into(arr: &[Value], out: &mut Vec<Value>) {
 fn recurse_into(val: &Value, out: &mut Vec<Value>) {
     out.push(val.clone());
     match val {
-        Value::Array(arr) => { for item in arr { recurse_into(item, out); } }
-        Value::Object(map) => { for v in map.values() { recurse_into(v, out); } }
+        Value::Array(arr) => {
+            for item in arr {
+                recurse_into(item, out);
+            }
+        }
+        Value::Object(map) => {
+            for v in map.values() {
+                recurse_into(v, out);
+            }
+        }
         _ => {}
     }
 }
@@ -1912,12 +2209,12 @@ fn recurse_into(val: &Value, out: &mut Vec<Value>) {
 fn value_contains(haystack: &Value, needle: &Value) -> bool {
     match (haystack, needle) {
         (Value::String(h), Value::String(n)) => h.contains(n.as_str()),
-        (Value::Array(h), Value::Array(n)) => {
-            n.iter().all(|needle_item| h.iter().any(|h_item| value_contains(h_item, needle_item)))
-        }
-        (Value::Object(h), Value::Object(n)) => {
-            n.iter().all(|(k, nv)| h.get(k).is_some_and(|hv| value_contains(hv, nv)))
-        }
+        (Value::Array(h), Value::Array(n)) => n
+            .iter()
+            .all(|needle_item| h.iter().any(|h_item| value_contains(h_item, needle_item))),
+        (Value::Object(h), Value::Object(n)) => n
+            .iter()
+            .all(|(k, nv)| h.get(k).is_some_and(|hv| value_contains(hv, nv))),
         (a, b) => a == b,
     }
 }
@@ -1925,19 +2222,28 @@ fn value_contains(haystack: &Value, needle: &Value) -> bool {
 fn format_csv(input: &Value) -> Result<Vec<Value>, String> {
     match input {
         Value::Array(arr) => {
-            let fields: Vec<String> = arr.iter().map(|v| match v {
-                Value::String(s) => {
-                    if s.contains(',') || s.contains('"') || s.contains('\n') {
-                        format!("\"{}\"", s.replace('"', "\"\""))
-                    } else { s.clone() }
-                }
-                Value::Number(n) => {
-                    if n.fract() == 0.0 { format!("{}", *n as i64) } else { format!("{}", n) }
-                }
-                Value::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
-                Value::Null => String::new(),
-                other => format_json(other, true, 0),
-            }).collect();
+            let fields: Vec<String> = arr
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => {
+                        if s.contains(',') || s.contains('"') || s.contains('\n') {
+                            format!("\"{}\"", s.replace('"', "\"\""))
+                        } else {
+                            s.clone()
+                        }
+                    }
+                    Value::Number(n) => {
+                        if n.fract() == 0.0 {
+                            format!("{}", *n as i64)
+                        } else {
+                            format!("{}", n)
+                        }
+                    }
+                    Value::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
+                    Value::Null => String::new(),
+                    other => format_json(other, true, 0),
+                })
+                .collect();
             Ok(vec![Value::String(fields.join(","))])
         }
         _ => Err("@csv requires array input".into()),
@@ -1947,15 +2253,26 @@ fn format_csv(input: &Value) -> Result<Vec<Value>, String> {
 fn format_tsv(input: &Value) -> Result<Vec<Value>, String> {
     match input {
         Value::Array(arr) => {
-            let fields: Vec<String> = arr.iter().map(|v| match v {
-                Value::String(s) => s.replace('\t', "\\t").replace('\n', "\\n").replace('\r', "\\r").replace('\\', "\\\\"),
-                Value::Number(n) => {
-                    if n.fract() == 0.0 { format!("{}", *n as i64) } else { format!("{}", n) }
-                }
-                Value::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
-                Value::Null => String::new(),
-                other => format_json(other, true, 0),
-            }).collect();
+            let fields: Vec<String> = arr
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => s
+                        .replace('\t', "\\t")
+                        .replace('\n', "\\n")
+                        .replace('\r', "\\r")
+                        .replace('\\', "\\\\"),
+                    Value::Number(n) => {
+                        if n.fract() == 0.0 {
+                            format!("{}", *n as i64)
+                        } else {
+                            format!("{}", n)
+                        }
+                    }
+                    Value::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
+                    Value::Null => String::new(),
+                    other => format_json(other, true, 0),
+                })
+                .collect();
             Ok(vec![Value::String(fields.join("\t"))])
         }
         _ => Err("@tsv requires array input".into()),
@@ -2073,11 +2390,15 @@ fn parse_args() -> Result<Options, String> {
             "--tab" => opts.tab = true,
             "--indent" => {
                 i += 1;
-                if i >= args.len() { return Err("--indent requires argument".into()); }
+                if i >= args.len() {
+                    return Err("--indent requires argument".into());
+                }
                 opts.indent = args[i].parse().map_err(|_| "invalid indent".to_string())?;
             }
             "--arg" => {
-                if i + 2 >= args.len() { return Err("--arg requires name and value".into()); }
+                if i + 2 >= args.len() {
+                    return Err("--arg requires name and value".into());
+                }
                 let name = args[i + 1].clone();
                 let value = args[i + 2].clone();
                 opts.args.push((name, value));
@@ -2147,7 +2468,11 @@ fn main() {
     let mut any_output = false;
     let mut last_was_falsy = false;
 
-    let process_value = |val: &Value, filter: &Filter, opts: &Options, any: &mut bool, falsy: &mut bool| {
+    let process_value = |val: &Value,
+                         filter: &Filter,
+                         opts: &Options,
+                         any: &mut bool,
+                         falsy: &mut bool| {
         match eval(filter, val) {
             Ok(results) => {
                 for result in &results {
@@ -2183,7 +2508,10 @@ fn main() {
         }
 
         if opts.raw_input {
-            let lines: Vec<Value> = input_str.lines().map(|l| Value::String(l.to_string())).collect();
+            let lines: Vec<Value> = input_str
+                .lines()
+                .map(|l| Value::String(l.to_string()))
+                .collect();
             if opts.slurp {
                 let arr = Value::Array(lines);
                 process_value(&arr, &filter, &opts, &mut any_output, &mut last_was_falsy);
@@ -2200,7 +2528,9 @@ fn main() {
                 let mut parser = Parser::new(trimmed);
                 loop {
                     parser.skip_ws();
-                    if parser.pos >= parser.input.len() { break; }
+                    if parser.pos >= parser.input.len() {
+                        break;
+                    }
                     match parser.parse_value() {
                         Ok(v) => values.push(v),
                         Err(e) => {
@@ -2219,9 +2549,13 @@ fn main() {
                 let mut parser = Parser::new(trimmed);
                 loop {
                     parser.skip_ws();
-                    if parser.pos >= parser.input.len() { break; }
+                    if parser.pos >= parser.input.len() {
+                        break;
+                    }
                     match parser.parse_value() {
-                        Ok(v) => process_value(&v, &filter, &opts, &mut any_output, &mut last_was_falsy),
+                        Ok(v) => {
+                            process_value(&v, &filter, &opts, &mut any_output, &mut last_was_falsy)
+                        }
                         Err(e) => {
                             write_stderr(&format!("jq: parse error: {}\n", e));
                             std::process::exit(2);
@@ -2244,9 +2578,13 @@ fn main() {
                 let mut parser = Parser::new(trimmed);
                 loop {
                     parser.skip_ws();
-                    if parser.pos >= parser.input.len() { break; }
+                    if parser.pos >= parser.input.len() {
+                        break;
+                    }
                     match parser.parse_value() {
-                        Ok(v) => process_value(&v, &filter, &opts, &mut any_output, &mut last_was_falsy),
+                        Ok(v) => {
+                            process_value(&v, &filter, &opts, &mut any_output, &mut last_was_falsy)
+                        }
                         Err(e) => {
                             write_stderr(&format!("jq: {}: parse error: {}\n", file, e));
                             break;
@@ -2277,13 +2615,18 @@ mod tests {
     }
 
     fn eval_first(filter: &str, json: &str) -> Value {
-        eval_str(filter, json).into_iter().next().expect("at least one result")
+        eval_str(filter, json)
+            .into_iter()
+            .next()
+            .expect("at least one result")
     }
 
     // --- JSON parser tests ---
 
     #[test]
-    fn test_parse_null() { assert_eq!(parse_json("null").unwrap(), Value::Null); }
+    fn test_parse_null() {
+        assert_eq!(parse_json("null").unwrap(), Value::Null);
+    }
 
     #[test]
     fn test_parse_bool() {
@@ -2292,35 +2635,61 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_integer() { assert_eq!(parse_json("42").unwrap(), Value::Number(42.0)); }
+    fn test_parse_integer() {
+        assert_eq!(parse_json("42").unwrap(), Value::Number(42.0));
+    }
 
     #[test]
-    fn test_parse_negative() { assert_eq!(parse_json("-7").unwrap(), Value::Number(-7.0)); }
+    fn test_parse_negative() {
+        assert_eq!(parse_json("-7").unwrap(), Value::Number(-7.0));
+    }
 
     #[test]
-    fn test_parse_float() { assert_eq!(parse_json("3.25").unwrap(), Value::Number(3.25)); }
+    fn test_parse_float() {
+        assert_eq!(parse_json("3.25").unwrap(), Value::Number(3.25));
+    }
 
     #[test]
-    fn test_parse_string() { assert_eq!(parse_json(r#""hello""#).unwrap(), Value::String("hello".into())); }
+    fn test_parse_string() {
+        assert_eq!(
+            parse_json(r#""hello""#).unwrap(),
+            Value::String("hello".into())
+        );
+    }
 
     #[test]
     fn test_parse_string_escapes() {
-        assert_eq!(parse_json(r#""a\nb""#).unwrap(), Value::String("a\nb".into()));
-        assert_eq!(parse_json(r#""a\tb""#).unwrap(), Value::String("a\tb".into()));
+        assert_eq!(
+            parse_json(r#""a\nb""#).unwrap(),
+            Value::String("a\nb".into())
+        );
+        assert_eq!(
+            parse_json(r#""a\tb""#).unwrap(),
+            Value::String("a\tb".into())
+        );
     }
 
     #[test]
-    fn test_parse_empty_array() { assert_eq!(parse_json("[]").unwrap(), Value::Array(vec![])); }
+    fn test_parse_empty_array() {
+        assert_eq!(parse_json("[]").unwrap(), Value::Array(vec![]));
+    }
 
     #[test]
     fn test_parse_array() {
-        assert_eq!(parse_json("[1,2,3]").unwrap(), Value::Array(vec![
-            Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)
-        ]));
+        assert_eq!(
+            parse_json("[1,2,3]").unwrap(),
+            Value::Array(vec![
+                Value::Number(1.0),
+                Value::Number(2.0),
+                Value::Number(3.0)
+            ])
+        );
     }
 
     #[test]
-    fn test_parse_empty_object() { assert_eq!(parse_json("{}").unwrap(), Value::Object(BTreeMap::new())); }
+    fn test_parse_empty_object() {
+        assert_eq!(parse_json("{}").unwrap(), Value::Object(BTreeMap::new()));
+    }
 
     #[test]
     fn test_parse_object() {
@@ -2328,7 +2697,9 @@ mod tests {
         if let Value::Object(map) = v {
             assert_eq!(map.get("a"), Some(&Value::Number(1.0)));
             assert_eq!(map.get("b"), Some(&Value::String("two".into())));
-        } else { panic!("expected object"); }
+        } else {
+            panic!("expected object");
+        }
     }
 
     #[test]
@@ -2340,17 +2711,25 @@ mod tests {
     #[test]
     fn test_parse_whitespace() {
         assert_eq!(parse_json("  null  ").unwrap(), Value::Null);
-        assert_eq!(parse_json(" [ 1 , 2 ] ").unwrap(), Value::Array(vec![Value::Number(1.0), Value::Number(2.0)]));
+        assert_eq!(
+            parse_json(" [ 1 , 2 ] ").unwrap(),
+            Value::Array(vec![Value::Number(1.0), Value::Number(2.0)])
+        );
     }
 
     // --- Filter tests ---
 
     #[test]
-    fn test_identity() { assert_eq!(eval_first(".", "42"), Value::Number(42.0)); }
+    fn test_identity() {
+        assert_eq!(eval_first(".", "42"), Value::Number(42.0));
+    }
 
     #[test]
     fn test_field_access() {
-        assert_eq!(eval_first(".name", r#"{"name":"Alice"}"#), Value::String("Alice".into()));
+        assert_eq!(
+            eval_first(".name", r#"{"name":"Alice"}"#),
+            Value::String("Alice".into())
+        );
     }
 
     #[test]
@@ -2375,7 +2754,10 @@ mod tests {
 
     #[test]
     fn test_iterate_array() {
-        assert_eq!(eval_str(".[]", "[1,2,3]"), vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)]);
+        assert_eq!(
+            eval_str(".[]", "[1,2,3]"),
+            vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)]
+        );
     }
 
     #[test]
@@ -2386,7 +2768,10 @@ mod tests {
 
     #[test]
     fn test_pipe() {
-        assert_eq!(eval_first(".a | .b", r#"{"a":{"b":42}}"#), Value::Number(42.0));
+        assert_eq!(
+            eval_first(".a | .b", r#"{"a":{"b":42}}"#),
+            Value::Number(42.0)
+        );
     }
 
     #[test]
@@ -2411,45 +2796,79 @@ mod tests {
     #[test]
     fn test_keys() {
         let v = eval_first("keys", r#"{"b":2,"a":1}"#);
-        assert_eq!(v, Value::Array(vec![Value::String("a".into()), Value::String("b".into())]));
+        assert_eq!(
+            v,
+            Value::Array(vec![Value::String("a".into()), Value::String("b".into())])
+        );
     }
 
     #[test]
     fn test_values() {
         let v = eval_first("values", r#"{"a":1,"b":2}"#);
-        if let Value::Array(arr) = v { assert_eq!(arr.len(), 2); }
-        else { panic!("expected array"); }
+        if let Value::Array(arr) = v {
+            assert_eq!(arr.len(), 2);
+        } else {
+            panic!("expected array");
+        }
     }
 
     #[test]
     fn test_type() {
         assert_eq!(eval_first("type", "42"), Value::String("number".into()));
-        assert_eq!(eval_first("type", r#""hi""#), Value::String("string".into()));
+        assert_eq!(
+            eval_first("type", r#""hi""#),
+            Value::String("string".into())
+        );
         assert_eq!(eval_first("type", "null"), Value::String("null".into()));
     }
 
     #[test]
     fn test_map() {
-        assert_eq!(eval_first("map(. + 1)", "[1,2,3]"),
-            Value::Array(vec![Value::Number(2.0), Value::Number(3.0), Value::Number(4.0)]));
+        assert_eq!(
+            eval_first("map(. + 1)", "[1,2,3]"),
+            Value::Array(vec![
+                Value::Number(2.0),
+                Value::Number(3.0),
+                Value::Number(4.0)
+            ])
+        );
     }
 
     #[test]
     fn test_sort() {
-        assert_eq!(eval_first("sort", "[3,1,2]"),
-            Value::Array(vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)]));
+        assert_eq!(
+            eval_first("sort", "[3,1,2]"),
+            Value::Array(vec![
+                Value::Number(1.0),
+                Value::Number(2.0),
+                Value::Number(3.0)
+            ])
+        );
     }
 
     #[test]
     fn test_unique() {
-        assert_eq!(eval_first("unique", "[1,2,1,3,2]"),
-            Value::Array(vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)]));
+        assert_eq!(
+            eval_first("unique", "[1,2,1,3,2]"),
+            Value::Array(vec![
+                Value::Number(1.0),
+                Value::Number(2.0),
+                Value::Number(3.0)
+            ])
+        );
     }
 
     #[test]
     fn test_flatten() {
-        assert_eq!(eval_first("flatten", "[[1,2],[3,[4]]]"),
-            Value::Array(vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0), Value::Number(4.0)]));
+        assert_eq!(
+            eval_first("flatten", "[[1,2],[3,[4]]]"),
+            Value::Array(vec![
+                Value::Number(1.0),
+                Value::Number(2.0),
+                Value::Number(3.0),
+                Value::Number(4.0)
+            ])
+        );
     }
 
     #[test]
@@ -2459,7 +2878,10 @@ mod tests {
 
     #[test]
     fn test_add_strings() {
-        assert_eq!(eval_first("add", r#"["a","b","c"]"#), Value::String("abc".into()));
+        assert_eq!(
+            eval_first("add", r#"["a","b","c"]"#),
+            Value::String("abc".into())
+        );
     }
 
     #[test]
@@ -2487,8 +2909,14 @@ mod tests {
 
     #[test]
     fn test_if_then_else() {
-        assert_eq!(eval_first("if . > 3 then \"big\" else \"small\" end", "5"), Value::String("big".into()));
-        assert_eq!(eval_first("if . > 3 then \"big\" else \"small\" end", "1"), Value::String("small".into()));
+        assert_eq!(
+            eval_first("if . > 3 then \"big\" else \"small\" end", "5"),
+            Value::String("big".into())
+        );
+        assert_eq!(
+            eval_first("if . > 3 then \"big\" else \"small\" end", "1"),
+            Value::String("small".into())
+        );
     }
 
     #[test]
@@ -2519,26 +2947,50 @@ mod tests {
 
     #[test]
     fn test_ascii_case() {
-        assert_eq!(eval_first("ascii_downcase", r#""HELLO""#), Value::String("hello".into()));
-        assert_eq!(eval_first("ascii_upcase", r#""hello""#), Value::String("HELLO".into()));
+        assert_eq!(
+            eval_first("ascii_downcase", r#""HELLO""#),
+            Value::String("hello".into())
+        );
+        assert_eq!(
+            eval_first("ascii_upcase", r#""hello""#),
+            Value::String("HELLO".into())
+        );
     }
 
     #[test]
     fn test_split_join() {
-        assert_eq!(eval_first("split(\",\")", r#""a,b,c""#),
-            Value::Array(vec![Value::String("a".into()), Value::String("b".into()), Value::String("c".into())]));
-        assert_eq!(eval_first("join(\"-\")", r#"["a","b","c"]"#), Value::String("a-b-c".into()));
+        assert_eq!(
+            eval_first("split(\",\")", r#""a,b,c""#),
+            Value::Array(vec![
+                Value::String("a".into()),
+                Value::String("b".into()),
+                Value::String("c".into())
+            ])
+        );
+        assert_eq!(
+            eval_first("join(\"-\")", r#"["a","b","c"]"#),
+            Value::String("a-b-c".into())
+        );
     }
 
     #[test]
     fn test_startswith_endswith() {
-        assert_eq!(eval_first("startswith(\"hel\")", r#""hello""#), Value::Bool(true));
-        assert_eq!(eval_first("endswith(\"llo\")", r#""hello""#), Value::Bool(true));
+        assert_eq!(
+            eval_first("startswith(\"hel\")", r#""hello""#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_first("endswith(\"llo\")", r#""hello""#),
+            Value::Bool(true)
+        );
     }
 
     #[test]
     fn test_contains() {
-        assert_eq!(eval_first("contains(\"ell\")", r#""hello""#), Value::Bool(true));
+        assert_eq!(
+            eval_first("contains(\"ell\")", r#""hello""#),
+            Value::Bool(true)
+        );
     }
 
     #[test]
@@ -2549,8 +3001,14 @@ mod tests {
 
     #[test]
     fn test_reverse() {
-        assert_eq!(eval_first("reverse", "[1,2,3]"),
-            Value::Array(vec![Value::Number(3.0), Value::Number(2.0), Value::Number(1.0)]));
+        assert_eq!(
+            eval_first("reverse", "[1,2,3]"),
+            Value::Array(vec![
+                Value::Number(3.0),
+                Value::Number(2.0),
+                Value::Number(1.0)
+            ])
+        );
     }
 
     #[test]
@@ -2570,8 +3028,14 @@ mod tests {
 
     #[test]
     fn test_array_construct() {
-        assert_eq!(eval_first("[.[] | . * 2]", "[1,2,3]"),
-            Value::Array(vec![Value::Number(2.0), Value::Number(4.0), Value::Number(6.0)]));
+        assert_eq!(
+            eval_first("[.[] | . * 2]", "[1,2,3]"),
+            Value::Array(vec![
+                Value::Number(2.0),
+                Value::Number(4.0),
+                Value::Number(6.0)
+            ])
+        );
     }
 
     #[test]
@@ -2583,8 +3047,10 @@ mod tests {
 
     #[test]
     fn test_range() {
-        assert_eq!(eval_str("range(3)", "null"),
-            vec![Value::Number(0.0), Value::Number(1.0), Value::Number(2.0)]);
+        assert_eq!(
+            eval_str("range(3)", "null"),
+            vec![Value::Number(0.0), Value::Number(1.0), Value::Number(2.0)]
+        );
     }
 
     #[test]
@@ -2634,12 +3100,18 @@ mod tests {
 
     #[test]
     fn test_format_base64() {
-        assert_eq!(eval_first("@base64", r#""hello""#), Value::String("aGVsbG8=".into()));
+        assert_eq!(
+            eval_first("@base64", r#""hello""#),
+            Value::String("aGVsbG8=".into())
+        );
     }
 
     #[test]
     fn test_format_html() {
-        assert_eq!(eval_first("@html", r#""<b>hi</b>""#), Value::String("&lt;b&gt;hi&lt;/b&gt;".into()));
+        assert_eq!(
+            eval_first("@html", r#""<b>hi</b>""#),
+            Value::String("&lt;b&gt;hi&lt;/b&gt;".into())
+        );
     }
 
     #[test]
@@ -2654,7 +3126,10 @@ mod tests {
 
     #[test]
     fn test_group_by() {
-        let v = eval_first("group_by(.t)", r#"[{"t":"a","v":1},{"t":"b","v":2},{"t":"a","v":3}]"#);
+        let v = eval_first(
+            "group_by(.t)",
+            r#"[{"t":"a","v":1},{"t":"b","v":2},{"t":"a","v":3}]"#,
+        );
         if let Value::Array(groups) = v {
             assert_eq!(groups.len(), 2);
         }
@@ -2662,8 +3137,14 @@ mod tests {
 
     #[test]
     fn test_ltrimstr_rtrimstr() {
-        assert_eq!(eval_first("ltrimstr(\"hello\")", r#""helloworld""#), Value::String("world".into()));
-        assert_eq!(eval_first("rtrimstr(\"world\")", r#""helloworld""#), Value::String("hello".into()));
+        assert_eq!(
+            eval_first("ltrimstr(\"hello\")", r#""helloworld""#),
+            Value::String("world".into())
+        );
+        assert_eq!(
+            eval_first("rtrimstr(\"world\")", r#""helloworld""#),
+            Value::String("hello".into())
+        );
     }
 
     #[test]
@@ -2695,7 +3176,10 @@ mod tests {
 
     #[test]
     fn test_unicode_escape() {
-        assert_eq!(parse_json(r#""\u0041""#).unwrap(), Value::String("A".into()));
+        assert_eq!(
+            parse_json(r#""\u0041""#).unwrap(),
+            Value::String("A".into())
+        );
     }
 
     #[test]

@@ -295,12 +295,10 @@ impl JobDef {
             "name" => self.name = value.to_string(),
             "filename" => self.filename = value.to_string(),
             "size" => {
-                self.size =
-                    parse_size(value).ok_or_else(|| format!("invalid size: {value}"))?;
+                self.size = parse_size(value).ok_or_else(|| format!("invalid size: {value}"))?;
             }
             "bs" | "blocksize" => {
-                self.bs =
-                    parse_size(value).ok_or_else(|| format!("invalid blocksize: {value}"))?;
+                self.bs = parse_size(value).ok_or_else(|| format!("invalid blocksize: {value}"))?;
             }
             "rw" | "readwrite" => {
                 self.rw = IoPattern::parse(value)
@@ -328,8 +326,8 @@ impl JobDef {
                 self.direct = value != "0";
             }
             "ioengine" => {
-                self.ioengine = IoEngine::parse(value)
-                    .ok_or_else(|| format!("unknown ioengine: {value}"))?;
+                self.ioengine =
+                    IoEngine::parse(value).ok_or_else(|| format!("unknown ioengine: {value}"))?;
             }
             "rwmixread" => {
                 self.rwmixread = value
@@ -381,7 +379,11 @@ struct Xorshift64 {
 impl Xorshift64 {
     fn new(seed: u64) -> Self {
         Self {
-            state: if seed == 0 { 0x1234_5678_9ABC_DEF0 } else { seed },
+            state: if seed == 0 {
+                0x1234_5678_9ABC_DEF0
+            } else {
+                seed
+            },
         }
     }
 
@@ -432,22 +434,75 @@ fn crc32(data: &[u8]) -> u32 {
 
 fn md5(data: &[u8]) -> [u8; 16] {
     const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14,
-        20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11,
-        16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
     const K: [u32; 64] = [
-        0xd76a_a478, 0xe8c7_b756, 0x2420_70db, 0xc1bd_ceee, 0xf57c_0faf, 0x4787_c62a,
-        0xa830_4613, 0xfd46_9501, 0x6980_98d8, 0x8b44_f7af, 0xffff_5bb1, 0x895c_d7be,
-        0x6b90_1122, 0xfd98_7193, 0xa679_438e, 0x49b4_0821, 0xf61e_2562, 0xc040_b340,
-        0x265e_5a51, 0xe9b6_c7aa, 0xd62f_105d, 0x0244_1453, 0xd8a1_e681, 0xe7d3_fbc8,
-        0x21e1_cde6, 0xc337_07d6, 0xf4d5_0d87, 0x455a_14ed, 0xa9e3_e905, 0xfcef_a3f8,
-        0x676f_02d9, 0x8d2a_4c8a, 0xfffa_3942, 0x8771_f681, 0x6d9d_6122, 0xfde5_380c,
-        0xa4be_ea44, 0x4bde_cfa9, 0xf6bb_4b60, 0xbebf_bc70, 0x289b_7ec6, 0xeaa1_27fa,
-        0xd4ef_3085, 0x0488_1d05, 0xd9d4_d039, 0xe6db_99e5, 0x1fa2_7cf8, 0xc4ac_5665,
-        0xf429_2244, 0x432a_ff97, 0xab94_23a7, 0xfc93_a039, 0x655b_59c3, 0x8f0c_cc92,
-        0xffef_f47d, 0x8584_5dd1, 0x6fa8_7e4f, 0xfe2c_e6e0, 0xa301_4314, 0x4e08_11a1,
-        0xf753_7e82, 0xbd3a_f235, 0x2ad7_d2bb, 0xeb86_d391,
+        0xd76a_a478,
+        0xe8c7_b756,
+        0x2420_70db,
+        0xc1bd_ceee,
+        0xf57c_0faf,
+        0x4787_c62a,
+        0xa830_4613,
+        0xfd46_9501,
+        0x6980_98d8,
+        0x8b44_f7af,
+        0xffff_5bb1,
+        0x895c_d7be,
+        0x6b90_1122,
+        0xfd98_7193,
+        0xa679_438e,
+        0x49b4_0821,
+        0xf61e_2562,
+        0xc040_b340,
+        0x265e_5a51,
+        0xe9b6_c7aa,
+        0xd62f_105d,
+        0x0244_1453,
+        0xd8a1_e681,
+        0xe7d3_fbc8,
+        0x21e1_cde6,
+        0xc337_07d6,
+        0xf4d5_0d87,
+        0x455a_14ed,
+        0xa9e3_e905,
+        0xfcef_a3f8,
+        0x676f_02d9,
+        0x8d2a_4c8a,
+        0xfffa_3942,
+        0x8771_f681,
+        0x6d9d_6122,
+        0xfde5_380c,
+        0xa4be_ea44,
+        0x4bde_cfa9,
+        0xf6bb_4b60,
+        0xbebf_bc70,
+        0x289b_7ec6,
+        0xeaa1_27fa,
+        0xd4ef_3085,
+        0x0488_1d05,
+        0xd9d4_d039,
+        0xe6db_99e5,
+        0x1fa2_7cf8,
+        0xc4ac_5665,
+        0xf429_2244,
+        0x432a_ff97,
+        0xab94_23a7,
+        0xfc93_a039,
+        0x655b_59c3,
+        0x8f0c_cc92,
+        0xffef_f47d,
+        0x8584_5dd1,
+        0x6fa8_7e4f,
+        0xfe2c_e6e0,
+        0xa301_4314,
+        0x4e08_11a1,
+        0xf753_7e82,
+        0xbd3a_f235,
+        0x2ad7_d2bb,
+        0xeb86_d391,
     ];
 
     let mut a0: u32 = 0x6745_2301;
@@ -467,7 +522,8 @@ fn md5(data: &[u8]) -> [u8; 16] {
         let mut m = [0u32; 16];
         for (i, word) in m.iter_mut().enumerate() {
             let off = i * 4;
-            *word = u32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
+            *word =
+                u32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
         }
         let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
         for i in 0..64 {
@@ -484,8 +540,7 @@ fn md5(data: &[u8]) -> [u8; 16] {
             d = c;
             c = b;
             b = b.wrapping_add(
-                (a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g]))
-                    .rotate_left(S[i]),
+                (a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g])).rotate_left(S[i]),
             );
             a = temp;
         }
@@ -629,7 +684,14 @@ struct JobStats {
 }
 
 impl JobStats {
-    fn new(name: &str, rw: IoPattern, ioengine: IoEngine, bs: u64, iodepth: u32, numjobs: u32) -> Self {
+    fn new(
+        name: &str,
+        rw: IoPattern,
+        ioengine: IoEngine,
+        bs: u64,
+        iodepth: u32,
+        numjobs: u32,
+    ) -> Self {
         Self {
             name: name.to_string(),
             rw,
@@ -736,7 +798,10 @@ fn parse_job_file(content: &str) -> Result<Vec<JobDef>, String> {
                     current = Some(job);
                 }
             } else {
-                return Err(format!("line {}: unterminated section header", line_num + 1));
+                return Err(format!(
+                    "line {}: unterminated section header",
+                    line_num + 1
+                ));
             }
         } else if let Some((key, value)) = line.split_once('=') {
             let key = key.trim();
@@ -811,7 +876,14 @@ fn apply_preset(job: &mut JobDef) {
 
 /// Execute a single job and return statistics.
 fn execute_job(job: &JobDef) -> Result<JobStats, String> {
-    let mut stats = JobStats::new(&job.name, job.rw, job.ioengine, job.bs, job.iodepth, job.numjobs);
+    let mut stats = JobStats::new(
+        &job.name,
+        job.rw,
+        job.ioengine,
+        job.bs,
+        job.iodepth,
+        job.numjobs,
+    );
     let mut rng = Xorshift64::new(0xDEAD_BEEF_CAFE_1234);
 
     if job.filename.is_empty() {
@@ -833,17 +905,20 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
     let runtime_limit = job.runtime.map(Duration::from_secs);
 
     // Prepare the file
-    let needs_write = job.rw.is_write() || job.rw.is_mixed()
-        || job.rw == IoPattern::Write || job.rw == IoPattern::RandWrite
+    let needs_write = job.rw.is_write()
+        || job.rw.is_mixed()
+        || job.rw == IoPattern::Write
+        || job.rw == IoPattern::RandWrite
         || job.rw == IoPattern::Trim;
-    let needs_read = job.rw.is_read() || job.rw.is_mixed()
-        || job.rw == IoPattern::Read || job.rw == IoPattern::RandRead;
+    let needs_read = job.rw.is_read()
+        || job.rw.is_mixed()
+        || job.rw == IoPattern::Read
+        || job.rw == IoPattern::RandRead;
 
     // For read workloads, create the file if it doesn't exist
-    if needs_read && !needs_write
-        && !std::path::Path::new(&job.filename).exists() {
-            prepare_file(&job.filename, job.size, job.bs, &mut rng)?;
-        }
+    if needs_read && !needs_write && !std::path::Path::new(&job.filename).exists() {
+        prepare_file(&job.filename, job.size, job.bs, &mut rng)?;
+    }
 
     // For write/mixed workloads, create or truncate
     if needs_write {
@@ -882,9 +957,10 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
     loop {
         // Check runtime limit
         if let Some(limit) = runtime_limit
-            && start.elapsed() >= limit {
-                break;
-            }
+            && start.elapsed() >= limit
+        {
+            break;
+        }
 
         // Check if we've done all blocks (non-time_based)
         if !job.time_based && block_idx >= num_blocks {
@@ -916,7 +992,8 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
             file.seek(SeekFrom::Start(offset))
                 .map_err(|e| format!("seek error: {e}"))?;
             let zeros = vec![0u8; buf_size];
-            file.write_all(&zeros).map_err(|e| format!("trim write error: {e}"))?;
+            file.write_all(&zeros)
+                .map_err(|e| format!("trim write error: {e}"))?;
             let lat = op_start.elapsed().as_micros() as u64;
             stats.write_lat.record(lat);
             stats.trim_ios += 1;
@@ -934,18 +1011,21 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
             stats.io_depth_dist[depth_bucket] += 1;
 
             // Verify if we have a checksum stored for this offset
-            if job.verify.is_some() && job.do_verify
-                && let Some(stored) = verify_map.get(&offset) {
-                    let computed = compute_verify(&read_buf, job.verify.unwrap_or(VerifyMethod::Crc32));
-                    if *stored != computed {
-                        stats.verify_errors += 1;
-                    }
+            if job.verify.is_some()
+                && job.do_verify
+                && let Some(stored) = verify_map.get(&offset)
+            {
+                let computed = compute_verify(&read_buf, job.verify.unwrap_or(VerifyMethod::Crc32));
+                if *stored != computed {
+                    stats.verify_errors += 1;
                 }
+            }
         } else {
             fill_pattern_seeded(&mut write_buf, job.verify_pattern, offset);
             file.seek(SeekFrom::Start(offset))
                 .map_err(|e| format!("seek error: {e}"))?;
-            file.write_all(&write_buf).map_err(|e| format!("write error: {e}"))?;
+            file.write_all(&write_buf)
+                .map_err(|e| format!("write error: {e}"))?;
             let lat = op_start.elapsed().as_micros() as u64;
             stats.write_lat.record(lat);
             stats.write_ios += 1;
@@ -982,7 +1062,13 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
 
     // Run verification pass if requested
     if job.verify.is_some() && job.do_verify && !verify_map.is_empty() {
-        run_verify_pass(&job.filename, &verify_map, job.verify.unwrap_or(VerifyMethod::Crc32), job.bs, &mut stats)?;
+        run_verify_pass(
+            &job.filename,
+            &verify_map,
+            job.verify.unwrap_or(VerifyMethod::Crc32),
+            job.bs,
+            &mut stats,
+        )?;
     }
 
     Ok(stats)
@@ -990,7 +1076,8 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
 
 /// Prepare a file for I/O by writing it to the specified size.
 fn prepare_file(filename: &str, size: u64, bs: u64, rng: &mut Xorshift64) -> Result<(), String> {
-    let mut file = File::create(filename).map_err(|e| format!("failed to create {filename}: {e}"))?;
+    let mut file =
+        File::create(filename).map_err(|e| format!("failed to create {filename}: {e}"))?;
     let buf_size = bs.min(65536) as usize;
     let mut buf = vec![0u8; buf_size];
     let mut written = 0u64;
@@ -1230,41 +1317,77 @@ fn format_json(all_stats: &[JobStats], include_percentiles: bool) -> String {
 
     for (idx, stats) in all_stats.iter().enumerate() {
         out.push_str("    {\n");
-        out.push_str(&format!("      \"jobname\": \"{}\",\n", json_escape(&stats.name)));
+        out.push_str(&format!(
+            "      \"jobname\": \"{}\",\n",
+            json_escape(&stats.name)
+        ));
         out.push_str(&format!("      \"error\": {},\n", stats.errors));
 
         // Read stats
         out.push_str("      \"read\": {\n");
         out.push_str(&format!("        \"io_bytes\": {},\n", stats.read_bytes));
-        out.push_str(&format!("        \"io_kbytes\": {},\n", stats.read_bytes / 1024));
-        out.push_str(&format!("        \"bw_bytes\": {:.0},\n", stats.read_bw_kib() * 1024.0));
+        out.push_str(&format!(
+            "        \"io_kbytes\": {},\n",
+            stats.read_bytes / 1024
+        ));
+        out.push_str(&format!(
+            "        \"bw_bytes\": {:.0},\n",
+            stats.read_bw_kib() * 1024.0
+        ));
         out.push_str(&format!("        \"bw\": {:.0},\n", stats.read_bw_kib()));
         out.push_str(&format!("        \"iops\": {:.6},\n", stats.read_iops()));
         out.push_str(&format!("        \"total_ios\": {},\n", stats.read_ios));
         out.push_str("        \"lat_ns\": {\n");
-        out.push_str(&format!("          \"min\": {},\n", stats.read_lat.safe_min().saturating_mul(1000)));
-        out.push_str(&format!("          \"max\": {},\n", stats.read_lat.max_us.saturating_mul(1000)));
-        out.push_str(&format!("          \"mean\": {:.6}\n", stats.read_lat.avg_us() * 1000.0));
+        out.push_str(&format!(
+            "          \"min\": {},\n",
+            stats.read_lat.safe_min().saturating_mul(1000)
+        ));
+        out.push_str(&format!(
+            "          \"max\": {},\n",
+            stats.read_lat.max_us.saturating_mul(1000)
+        ));
+        out.push_str(&format!(
+            "          \"mean\": {:.6}\n",
+            stats.read_lat.avg_us() * 1000.0
+        ));
         out.push_str("        }\n");
         out.push_str("      },\n");
 
         // Write stats
         out.push_str("      \"write\": {\n");
         out.push_str(&format!("        \"io_bytes\": {},\n", stats.write_bytes));
-        out.push_str(&format!("        \"io_kbytes\": {},\n", stats.write_bytes / 1024));
-        out.push_str(&format!("        \"bw_bytes\": {:.0},\n", stats.write_bw_kib() * 1024.0));
+        out.push_str(&format!(
+            "        \"io_kbytes\": {},\n",
+            stats.write_bytes / 1024
+        ));
+        out.push_str(&format!(
+            "        \"bw_bytes\": {:.0},\n",
+            stats.write_bw_kib() * 1024.0
+        ));
         out.push_str(&format!("        \"bw\": {:.0},\n", stats.write_bw_kib()));
         out.push_str(&format!("        \"iops\": {:.6},\n", stats.write_iops()));
         out.push_str(&format!("        \"total_ios\": {},\n", stats.write_ios));
         out.push_str("        \"lat_ns\": {\n");
-        out.push_str(&format!("          \"min\": {},\n", stats.write_lat.safe_min().saturating_mul(1000)));
-        out.push_str(&format!("          \"max\": {},\n", stats.write_lat.max_us.saturating_mul(1000)));
-        out.push_str(&format!("          \"mean\": {:.6}\n", stats.write_lat.avg_us() * 1000.0));
+        out.push_str(&format!(
+            "          \"min\": {},\n",
+            stats.write_lat.safe_min().saturating_mul(1000)
+        ));
+        out.push_str(&format!(
+            "          \"max\": {},\n",
+            stats.write_lat.max_us.saturating_mul(1000)
+        ));
+        out.push_str(&format!(
+            "          \"mean\": {:.6}\n",
+            stats.write_lat.avg_us() * 1000.0
+        ));
         out.push_str("        }\n");
         out.push_str("      },\n");
 
         // Trim
-        out.push_str(&format!("      \"trim\": {{ \"total_ios\": {} }},\n", stats.trim_ios));
+        out.push_str(&format!(
+            "      \"trim\": {{ \"total_ios\": {} }},\n",
+            stats.trim_ios
+        ));
 
         // Job options
         out.push_str(&format!("      \"job_options\": {{ \"rw\": \"{}\", \"bs\": \"{}\", \"iodepth\": \"{}\", \"numjobs\": \"{}\" }},\n",
@@ -1287,7 +1410,13 @@ fn format_json(all_stats: &[JobStats], include_percentiles: bool) -> String {
             write_samples.sort_unstable();
 
             out.push_str(",\n      \"read_lat_percentiles\": {\n");
-            for (i, &pct) in [1.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 95.0, 99.0, 99.5, 99.9, 99.95, 99.99].iter().enumerate() {
+            for (i, &pct) in [
+                1.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 95.0, 99.0, 99.5,
+                99.9, 99.95, 99.99,
+            ]
+            .iter()
+            .enumerate()
+            {
                 let val = percentile_of(&read_samples, pct);
                 let comma = if i < 16 { "," } else { "" };
                 out.push_str(&format!("        \"{pct:.2}\": {val}{comma}\n"));
@@ -1295,7 +1424,13 @@ fn format_json(all_stats: &[JobStats], include_percentiles: bool) -> String {
             out.push_str("      },\n");
 
             out.push_str("      \"write_lat_percentiles\": {\n");
-            for (i, &pct) in [1.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 95.0, 99.0, 99.5, 99.9, 99.95, 99.99].iter().enumerate() {
+            for (i, &pct) in [
+                1.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 95.0, 99.0, 99.5,
+                99.9, 99.95, 99.99,
+            ]
+            .iter()
+            .enumerate()
+            {
                 let val = percentile_of(&write_samples, pct);
                 let comma = if i < 16 { "," } else { "" };
                 out.push_str(&format!("        \"{pct:.2}\": {val}{comma}\n"));
@@ -1454,8 +1589,7 @@ fn run_verify(args: &[String]) -> i32 {
                 match key {
                     "filename" => filename = value.to_string(),
                     "verify" => {
-                        method = VerifyMethod::parse(value)
-                            .unwrap_or(VerifyMethod::Crc32);
+                        method = VerifyMethod::parse(value).unwrap_or(VerifyMethod::Crc32);
                     }
                     "verify_pattern" => {
                         let hex = value.strip_prefix("0x").unwrap_or(value);
@@ -1723,7 +1857,9 @@ fn run_fio(args: &[String]) -> i32 {
         OutputFormat::Normal => {
             let mut out = String::new();
             for stats in &mut all_stats {
-                let show_pct = jobs.iter().any(|j| j.name == stats.name && j.lat_percentiles)
+                let show_pct = jobs
+                    .iter()
+                    .any(|j| j.name == stats.name && j.lat_percentiles)
                     || jobs.iter().any(|j| j.lat_percentiles);
                 out.push_str(&format_normal(stats, show_pct));
             }
@@ -2366,30 +2502,21 @@ mod tests {
     fn test_md5_empty() {
         // MD5("") = d41d8cd98f00b204e9800998ecf8427e
         let h = md5(b"");
-        assert_eq!(
-            hex_encode(&h),
-            "d41d8cd98f00b204e9800998ecf8427e"
-        );
+        assert_eq!(hex_encode(&h), "d41d8cd98f00b204e9800998ecf8427e");
     }
 
     #[test]
     fn test_md5_abc() {
         // MD5("abc") = 900150983cd24fb0d6963f7d28e17f72
         let h = md5(b"abc");
-        assert_eq!(
-            hex_encode(&h),
-            "900150983cd24fb0d6963f7d28e17f72"
-        );
+        assert_eq!(hex_encode(&h), "900150983cd24fb0d6963f7d28e17f72");
     }
 
     #[test]
     fn test_md5_hello() {
         // MD5("Hello, World!") = 65a8e27d8879283831b664bd8b7f0ad4
         let h = md5(b"Hello, World!");
-        assert_eq!(
-            hex_encode(&h),
-            "65a8e27d8879283831b664bd8b7f0ad4"
-        );
+        assert_eq!(hex_encode(&h), "65a8e27d8879283831b664bd8b7f0ad4");
     }
 
     // === SHA-256 tests ===
@@ -2600,7 +2727,8 @@ mod tests {
 
     #[test]
     fn test_parse_job_file_global_inherits() {
-        let content = "[global]\nioengine=libaio\ndirect=1\n\n[job1]\nrw=read\nsize=1m\nfilename=/tmp/t\n";
+        let content =
+            "[global]\nioengine=libaio\ndirect=1\n\n[job1]\nrw=read\nsize=1m\nfilename=/tmp/t\n";
         let jobs = parse_job_file(content).unwrap();
         assert_eq!(jobs[0].ioengine, IoEngine::Libaio);
         assert!(jobs[0].direct);
@@ -2944,7 +3072,14 @@ mod tests {
 
     #[test]
     fn test_format_json_valid_structure() {
-        let stats = vec![JobStats::new("t", IoPattern::Read, IoEngine::Sync, 4096, 1, 1)];
+        let stats = vec![JobStats::new(
+            "t",
+            IoPattern::Read,
+            IoEngine::Sync,
+            4096,
+            1,
+            1,
+        )];
         let json = format_json(&stats, false);
         assert!(json.starts_with('{'));
         assert!(json.contains("\"fio version\""));
@@ -3207,7 +3342,9 @@ mod tests {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -3220,7 +3357,9 @@ mod tests {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -3233,7 +3372,9 @@ mod tests {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -3246,7 +3387,9 @@ mod tests {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

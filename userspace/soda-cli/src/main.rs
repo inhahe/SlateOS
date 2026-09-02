@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_soda(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,23 +26,38 @@ fn run_soda(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Soda 3.3 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Soda 3.3 (Slate OS)");
+        return 0;
+    }
     println!("Soda 3.3 (Slate OS) — Open-Source Data Quality");
     println!("  Vendor: Soda Data NV (Brussels, Belgium + Amsterdam)");
     println!("  Founders: Tom Baeyens (CTO) + Maarten Masschelein (CEO), 2019");
-    println!("          Tom: former founder of Process Engine (jBPM/Activiti, Camunda predecessor) — JBoss veteran");
+    println!(
+        "          Tom: former founder of Process Engine (jBPM/Activiti, Camunda predecessor) — JBoss veteran"
+    );
     println!("          Maarten: ex-Collibra (lead Belgian data catalog company)");
     println!("          headquartered in Belgium — heavy EU presence");
     println!("  Funding: ~$31M total through Series B (2022)");
     println!("         Series B 2022: $25M led by Singular");
     println!("         Series A 2021: ~$11.5M led by HV Capital");
     println!("         seed: Hummingbird, Point Nine, others");
-    println!("  Strategic position: open-source-first data quality (vs proprietary observability):");
-    println!("                    pitch: 'data contracts written as code, owned by data producers'");
-    println!("                    target: data engineers wanting open-source + Python-friendly tooling");
-    println!("                    primary competitor: Great Expectations (OSS), Monte Carlo + Anomalo (closed)");
+    println!(
+        "  Strategic position: open-source-first data quality (vs proprietary observability):"
+    );
+    println!(
+        "                    pitch: 'data contracts written as code, owned by data producers'"
+    );
+    println!(
+        "                    target: data engineers wanting open-source + Python-friendly tooling"
+    );
+    println!(
+        "                    primary competitor: Great Expectations (OSS), Monte Carlo + Anomalo (closed)"
+    );
     println!("                    secondary: dbt tests + Elementary (dbt-native quality)");
-    println!("                    Soda's wedge: SodaCL DSL + open-source core + cheaper cloud tier than competitors");
+    println!(
+        "                    Soda's wedge: SodaCL DSL + open-source core + cheaper cloud tier than competitors"
+    );
     println!("                    EU-data-residency story strong for European enterprise");
     println!("  Pricing (tiered, with FREE OSS core):");
     println!("    Soda Core — FREE, Apache 2.0 (CLI + Python library)");
@@ -58,7 +77,9 @@ fn run_soda(args: &[String], _prog: &str) -> i32 {
     println!("  Soda Core (OSS):");
     println!("    - Python library + CLI: `pip install soda-core`");
     println!("    - Runs scans locally or in CI/CD pipelines");
-    println!("    - Connectors: 25+ warehouses including Snowflake/BigQuery/Databricks/Postgres/MySQL/Redshift");
+    println!(
+        "    - Connectors: 25+ warehouses including Snowflake/BigQuery/Databricks/Postgres/MySQL/Redshift"
+    );
     println!("    - Integrates into Airflow/Dagster/Prefect as a task");
     println!("    - Outputs JSON results or pushes to Soda Cloud");
     println!("  Soda Cloud (SaaS layer):");
@@ -75,7 +96,9 @@ fn run_soda(args: &[String], _prog: &str) -> i32 {
     println!("    - Soda is one of the most active data-contract evangelists");
     println!("    - Compete with: Gable.ai, dbt model contracts");
     println!("  Integrations:");
-    println!("    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Postgres, MySQL, MSSQL, Trino");
+    println!(
+        "    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Postgres, MySQL, MSSQL, Trino"
+    );
     println!("    - dbt: SodaCL checks runnable as dbt tests via integration");
     println!("    - Orchestration: Airflow, Dagster, Prefect");
     println!("    - Catalog: Atlan, DataHub, Collibra (push check results)");
@@ -104,13 +127,18 @@ fn run_soda(args: &[String], _prog: &str) -> i32 {
     println!("           OSS Core is good but most teams need Cloud for collaboration");
     println!("           Great Expectations (more mature OSS) still strong competitor");
     println!("           data contracts category still emerging — no clear winner yet");
-    println!("  Differentiator: open-source-first + SodaCL declarative DSL + EU data residency + active data contracts evangelist + cheaper than US competitors — the data quality platform of choice for European enterprises and Python-friendly teams");
+    println!(
+        "  Differentiator: open-source-first + SodaCL declarative DSL + EU data residency + active data contracts evangelist + cheaper than US competitors — the data quality platform of choice for European enterprises and Python-friendly teams"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "soda".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "soda".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_soda(&rest, &_prog);
     process::exit(code);
@@ -118,7 +146,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_soda};
+    use super::{basename, run_soda, strip_ext};
 
     #[test]
     fn basename_strips_path() {

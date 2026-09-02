@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_xlsxio_read(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_xlsxio_read(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("{} v0.2 (Slate OS)", prog); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("{} v0.2 (Slate OS)", prog);
+        return 0;
+    }
     if args.iter().any(|a| a == "-l") {
         println!("Sheets:");
         println!("  1: Sheet1 (150 rows x 8 cols)");
@@ -60,20 +67,33 @@ fn run_xlsxio_write(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("{} v0.2 (Slate OS)", prog); return 0; }
-    let output = args.windows(2).find(|w| w[0] == "-o").map(|w| w[1].as_str());
+    if args.iter().any(|a| a == "--version") {
+        println!("{} v0.2 (Slate OS)", prog);
+        return 0;
+    }
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o")
+        .map(|w| w[1].as_str());
     if output.is_none() {
         eprintln!("{}: error: no output file specified (-o)", prog);
         return 1;
     }
     println!("{}: reading input data from stdin...", prog);
-    println!("{}: wrote 50 rows, 6 columns to {}", prog, output.unwrap_or("output.xlsx"));
+    println!(
+        "{}: wrote 50 rows, 6 columns to {}",
+        prog,
+        output.unwrap_or("output.xlsx")
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "xlsxio_read".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "xlsxio_read".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "xlsxio_write" => run_xlsxio_write(&rest, &prog),
@@ -84,7 +104,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_xlsxio_read};
+    use super::{basename, run_xlsxio_read, strip_ext};
 
     #[test]
     fn basename_strips_path() {

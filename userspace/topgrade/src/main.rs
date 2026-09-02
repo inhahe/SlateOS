@@ -89,7 +89,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_topgrade};
+    use super::run_topgrade;
 
     #[test]
     fn help_exits_zero() {

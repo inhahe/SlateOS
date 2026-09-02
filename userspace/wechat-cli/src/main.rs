@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_wc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_wc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("WeChat 3.9.12 / Weixin 8.0.50 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("WeChat 3.9.12 / Weixin 8.0.50 (Slate OS)");
+        return 0;
+    }
     println!("WeChat 3.9.12 / Weixin 8.0.50 (Slate OS)");
     println!("  Vendor: Tencent (Shenzhen, China)");
     println!("  Launched: Jan 2011 by Allen Zhang (creator of QQmail before)");
@@ -36,14 +43,19 @@ fn run_wc(args: &[String], _prog: &str) -> i32 {
     println!("  Mini Programs: 4M+ mini-apps inside WeChat — full ecosystem, JS+WXML");
     println!("  Enterprise: Enterprise WeChat / WeCom (Tencent Conference, drive, mail)");
     println!("  Strengths: super-app model — chat + payment + identity + transit + ride + food");
-    println!("  Controversies: surveillance, censorship (Tiananmen, NBA), 2019/2021 US bans (rolled back)");
+    println!(
+        "  Controversies: surveillance, censorship (Tiananmen, NBA), 2019/2021 US bans (rolled back)"
+    );
     println!("  Westwise: app store, distribution outside China, ID required since 2017");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "wechat".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "wechat".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_wc(&rest, &_prog);
     process::exit(code);
@@ -51,7 +63,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_wc};
+    use super::{basename, run_wc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

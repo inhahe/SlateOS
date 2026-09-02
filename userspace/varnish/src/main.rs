@@ -23,11 +23,15 @@ fn run_varnishd(args: Vec<String>) -> i32 {
         println!("varnishd (varnish-7.5.0 revision abc1234) (Slate OS)");
         return 0;
     }
-    let addr = args.iter().position(|a| a == "-a")
+    let addr = args
+        .iter()
+        .position(|a| a == "-a")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or(":80");
-    let backend = args.iter().position(|a| a == "-b")
+    let backend = args
+        .iter()
+        .position(|a| a == "-b")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("127.0.0.1:8080");
@@ -100,7 +104,10 @@ fn run_varnishadm(args: Vec<String>) -> i32 {
         println!("  -S <secret>  Secret file path");
         return 0;
     }
-    let cmd = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let cmd = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     match cmd {
         Some("status") => println!("Child in state running"),
         Some("vcl.list") => {
@@ -132,7 +139,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -149,7 +158,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_varnishd};
+    use super::run_varnishd;
 
     #[test]
     fn help_exits_zero() {

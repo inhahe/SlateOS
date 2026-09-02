@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_xbox(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -16,7 +20,9 @@ fn run_xbox(args: &[String], _prog: &str) -> i32 {
         println!("Xbox app 2411 (Slate OS) — Microsoft Game Pass / xCloud / Xbox Network");
         println!();
         println!("Options:");
-        println!("  --library              Game library (installed + Game Pass + ready-to-install)");
+        println!(
+            "  --library              Game library (installed + Game Pass + ready-to-install)"
+        );
         println!("  --store                Microsoft Store games");
         println!("  --gamepass             Xbox Game Pass Ultimate ($16.99/mo)");
         println!("  --cloud-gaming         xCloud — stream from Microsoft's cloud (no download)");
@@ -24,7 +30,10 @@ fn run_xbox(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Xbox app 2411.1001.27.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Xbox app 2411.1001.27.0 (Slate OS)");
+        return 0;
+    }
     println!("Xbox app 2411.1001.27.0 (Slate OS)");
     println!("  Vendor: Microsoft Corporation (Microsoft Gaming division)");
     println!("  CEO Microsoft Gaming: Phil Spencer (since 2017)");
@@ -36,19 +45,26 @@ fn run_xbox(args: &[String], _prog: &str) -> i32 {
     println!("    Game Pass Ultimate $16.99/mo — PC + console + xCloud + EA Play");
     println!("    Standard $14.99/mo — no day-1 first-party");
     println!("  Studios under Xbox Game Studios (XGS):");
-    println!("    Bethesda Softworks (Mar 2021 acq, $7.5B) — Doom, Fallout, Elder Scrolls, Starfield");
+    println!(
+        "    Bethesda Softworks (Mar 2021 acq, $7.5B) — Doom, Fallout, Elder Scrolls, Starfield"
+    );
     println!("    Activision Blizzard King (Oct 2023, $68.7B) — CoD, Diablo, WoW, Candy Crush");
     println!("    343 Industries (Halo), The Coalition (Gears of War), Rare (Sea of Thieves),");
     println!("    Mojang (Minecraft), Obsidian, inXile, Ninja Theory, Playground (Forza), Turn 10");
     println!("  Key features in app: Game Pass discovery, cloud saves, achievements, friends,");
-    println!("                       xCloud beta (no install — stream 1080p60), remote console play");
+    println!(
+        "                       xCloud beta (no install — stream 1080p60), remote console play"
+    );
     println!("  Differentiator: Game Pass — Netflix-of-games at $11.99/mo PC = massive value");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "xbox".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "xbox".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_xbox(&rest, &_prog);
     process::exit(code);
@@ -56,7 +72,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_xbox};
+    use super::{basename, run_xbox, strip_ext};
 
     #[test]
     fn basename_strips_path() {

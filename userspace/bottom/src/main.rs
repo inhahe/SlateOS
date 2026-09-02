@@ -107,7 +107,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_btm};
+    use super::run_btm;
 
     #[test]
     fn help_exits_zero() {

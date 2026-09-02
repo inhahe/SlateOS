@@ -28,7 +28,8 @@ fn run_pylint(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -36,11 +37,15 @@ fn run_pylint(args: Vec<String>) -> i32 {
 
     println!("************* Module {}", target);
     println!("src/main.py:1:0: C0114: Missing module docstring (missing-module-docstring)");
-    println!("src/main.py:5:0: C0116: Missing function or method docstring (missing-function-docstring)");
+    println!(
+        "src/main.py:5:0: C0116: Missing function or method docstring (missing-function-docstring)"
+    );
     println!("src/main.py:12:4: W0612: Unused variable 'result' (unused-variable)");
     println!("src/main.py:18:0: R0913: Too many arguments (6/5) (too-many-arguments)");
     println!("src/utils.py:3:0: E0401: Unable to import 'nonexistent' (import-error)");
-    println!("src/utils.py:15:8: C0103: Variable name 'x' doesn't conform to snake_case naming style (invalid-name)");
+    println!(
+        "src/utils.py:15:8: C0103: Variable name 'x' doesn't conform to snake_case naming style (invalid-name)"
+    );
     println!("src/utils.py:22:0: R0201: Method could be a function (no-self-use)");
     println!();
     println!("------------------------------------------------------------------");
@@ -57,7 +62,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pylint};
+    use super::run_pylint;
 
     #[test]
     fn help_exits_zero() {

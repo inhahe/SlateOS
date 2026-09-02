@@ -35,7 +35,8 @@ fn run_howdoi(args: Vec<String>) -> i32 {
     let show_all = args.iter().any(|a| a == "-a" || a == "--all");
     let json = args.iter().any(|a| a == "-j" || a == "--json");
 
-    let query: Vec<&str> = args.iter()
+    let query: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -48,7 +49,9 @@ fn run_howdoi(args: Vec<String>) -> i32 {
     let q = query.join(" ");
 
     if json {
-        println!("[{{\"answer\":\"let result = do_thing();\",\"link\":\"https://stackoverflow.com/questions/12345678\",\"position\":1}}]");
+        println!(
+            "[{{\"answer\":\"let result = do_thing();\",\"link\":\"https://stackoverflow.com/questions/12345678\",\"position\":1}}]"
+        );
         return 0;
     }
 
@@ -88,7 +91,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_howdoi};
+    use super::run_howdoi;
 
     #[test]
     fn help_exits_zero() {

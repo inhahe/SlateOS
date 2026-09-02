@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_celigo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,7 +26,10 @@ fn run_celigo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Celigo integrator.io 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Celigo integrator.io 2024 (Slate OS)");
+        return 0;
+    }
     println!("Celigo 2024 (Slate OS) — integrator.io Integration Platform");
     println!("  Vendor: Celigo, Inc. (San Mateo, CA — private)");
     println!("  Founders: Jan Arendtsz + Rico Andrade + Scott Henderson, 2006");
@@ -36,12 +43,24 @@ fn run_celigo(args: &[String], _prog: &str) -> i32 {
     println!("         TCV, NewSpring, OurCrowd backers");
     println!("         estimated $80-100M ARR (private)");
     println!("         IPO not actively discussed");
-    println!("  Strategic position: 'NetSuite-centric iPaaS for the mid-market — pre-built integration apps':");
-    println!("                    pitch: 'AppCloud of pre-built integrations + flexible iPaaS for custom needs'");
-    println!("                    target: NetSuite customers (e-commerce, distribution, manufacturing)");
-    println!("                    primary competitor: Boomi, Workato, MuleSoft (in NetSuite shops)");
-    println!("                    secondary: Jitterbit, Zapier (lower-end), FarApp, In8 (smaller NetSuite specialists)");
-    println!("                    Celigo's wedge: deepest NetSuite integration depth + pre-built apps + Shopify ecosystem");
+    println!(
+        "  Strategic position: 'NetSuite-centric iPaaS for the mid-market — pre-built integration apps':"
+    );
+    println!(
+        "                    pitch: 'AppCloud of pre-built integrations + flexible iPaaS for custom needs'"
+    );
+    println!(
+        "                    target: NetSuite customers (e-commerce, distribution, manufacturing)"
+    );
+    println!(
+        "                    primary competitor: Boomi, Workato, MuleSoft (in NetSuite shops)"
+    );
+    println!(
+        "                    secondary: Jitterbit, Zapier (lower-end), FarApp, In8 (smaller NetSuite specialists)"
+    );
+    println!(
+        "                    Celigo's wedge: deepest NetSuite integration depth + pre-built apps + Shopify ecosystem"
+    );
     println!("                    '#1 iPaaS on NetSuite SuiteApp marketplace' is a real moat");
     println!("  Pricing:");
     println!("    Free tier: limited flows, no production");
@@ -53,7 +72,9 @@ fn run_celigo(args: &[String], _prog: &str) -> i32 {
     println!("  Product portfolio:");
     println!("    1. integrator.io (the iPaaS platform):");
     println!("       - Visual flow builder (mappings + transforms + branching)");
-    println!("       - 300+ connectors (NetSuite, Salesforce, Shopify, Amazon, eBay, ServiceNow, etc.)");
+    println!(
+        "       - 300+ connectors (NetSuite, Salesforce, Shopify, Amazon, eBay, ServiceNow, etc.)"
+    );
     println!("       - Real-time + batch flows");
     println!("       - Built-in error handling + retry semantics");
     println!("    2. Integration Apps (the differentiator):");
@@ -83,10 +104,14 @@ fn run_celigo(args: &[String], _prog: &str) -> i32 {
     println!("    - Shopify Plus Technology Partner (e-commerce flows)");
     println!("    - Amazon Selling Partner Network");
     println!("    - eBay Network");
-    println!("    - common deployment: NetSuite (ERP) ↔ Shopify + Amazon + eBay (channels) — Celigo specializes here");
+    println!(
+        "    - common deployment: NetSuite (ERP) ↔ Shopify + Amazon + eBay (channels) — Celigo specializes here"
+    );
     println!("  Integrations (300+ connectors):");
     println!("    - ERP: NetSuite (the anchor), SAP, Oracle, Microsoft Dynamics, Sage Intacct");
-    println!("    - E-commerce: Shopify, BigCommerce, Magento, WooCommerce, Salesforce Commerce Cloud");
+    println!(
+        "    - E-commerce: Shopify, BigCommerce, Magento, WooCommerce, Salesforce Commerce Cloud"
+    );
     println!("    - Marketplaces: Amazon, eBay, Walmart, Etsy, Wayfair");
     println!("    - 3PL/WMS: ShipStation, ShipHero, Stord, Deliverr (now Shopify)");
     println!("    - CRM: Salesforce, HubSpot, Zoho, Microsoft Dynamics");
@@ -113,16 +138,23 @@ fn run_celigo(args: &[String], _prog: &str) -> i32 {
     println!("           UI feels dated next to Workato/Tray cloud-native UX");
     println!("           AI features early stage (smaller R&D budget vs MuleSoft/Workato)");
     println!("           competition with Boomi increasing in NetSuite installed base");
-    println!("           connector count (300) below Workato (1,000) and Zapier (7,000) — long tail thinner");
+    println!(
+        "           connector count (300) below Workato (1,000) and Zapier (7,000) — long tail thinner"
+    );
     println!("           enterprise governance lighter than MuleSoft for very-large shops");
     println!("           growth depends on NetSuite + Shopify ecosystem health");
-    println!("  Differentiator: deepest NetSuite integration platform (#1 on SuiteApp marketplace) + 30+ pre-built Integration Apps (NetSuite ↔ Shopify/Amazon/eBay/Salesforce) + e-commerce + multi-channel selling sweet spot + capital-efficient profitable growth ($110M raised — modest by iPaaS standards) + 6K+ customers in NetSuite mid-market — the iPaaS that NetSuite + Shopify customers actually use for their day-one integration needs");
+    println!(
+        "  Differentiator: deepest NetSuite integration platform (#1 on SuiteApp marketplace) + 30+ pre-built Integration Apps (NetSuite ↔ Shopify/Amazon/eBay/Salesforce) + e-commerce + multi-channel selling sweet spot + capital-efficient profitable growth ($110M raised — modest by iPaaS standards) + 6K+ customers in NetSuite mid-market — the iPaaS that NetSuite + Shopify customers actually use for their day-one integration needs"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "celigo".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "celigo".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_celigo(&rest, &_prog);
     process::exit(code);
@@ -130,7 +162,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_celigo};
+    use super::{basename, run_celigo, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_hping3(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -29,20 +33,44 @@ fn run_hping3(args: &[String], _prog: &str) -> i32 {
         println!("  --flood           Flood mode");
         return 0;
     }
-    let host = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("192.168.1.1");
+    let host = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("192.168.1.1");
     if args.iter().any(|a| a == "-S" || a == "--syn") {
-        let port = args.iter().skip_while(|a| a.as_str() != "-p").nth(1).map(|s| s.as_str()).unwrap_or("80");
-        println!("HPING {} (eth0 {}): S set, 40 headers + 0 data bytes", host, host);
-        println!("len=44 ip={} ttl=64 DF id=0 sport={} flags=SA seq=0 win=29200 rtt=0.4 ms", host, port);
-        println!("len=44 ip={} ttl=64 DF id=0 sport={} flags=SA seq=1 win=29200 rtt=0.3 ms", host, port);
-        println!("len=44 ip={} ttl=64 DF id=0 sport={} flags=SA seq=2 win=29200 rtt=0.5 ms", host, port);
+        let port = args
+            .iter()
+            .skip_while(|a| a.as_str() != "-p")
+            .nth(1)
+            .map(|s| s.as_str())
+            .unwrap_or("80");
+        println!(
+            "HPING {} (eth0 {}): S set, 40 headers + 0 data bytes",
+            host, host
+        );
+        println!(
+            "len=44 ip={} ttl=64 DF id=0 sport={} flags=SA seq=0 win=29200 rtt=0.4 ms",
+            host, port
+        );
+        println!(
+            "len=44 ip={} ttl=64 DF id=0 sport={} flags=SA seq=1 win=29200 rtt=0.3 ms",
+            host, port
+        );
+        println!(
+            "len=44 ip={} ttl=64 DF id=0 sport={} flags=SA seq=2 win=29200 rtt=0.5 ms",
+            host, port
+        );
     } else if args.iter().any(|a| a == "--traceroute") {
         println!("HPING {} (eth0 {}): traceroute mode", host, host);
         println!(" 1  gateway (192.168.1.1)  0.5 ms");
         println!(" 2  10.0.0.1  2.1 ms");
         println!(" 3  {} 8.3 ms", host);
     } else {
-        println!("HPING {} (eth0 {}): icmp mode set, 28 headers + 0 data bytes", host, host);
+        println!(
+            "HPING {} (eth0 {}): icmp mode set, 28 headers + 0 data bytes",
+            host, host
+        );
         println!("len=46 ip={} ttl=64 id=0 icmp_seq=0 rtt=0.3 ms", host);
         println!("len=46 ip={} ttl=64 id=0 icmp_seq=1 rtt=0.4 ms", host);
         println!("len=46 ip={} ttl=64 id=0 icmp_seq=2 rtt=0.3 ms", host);
@@ -56,7 +84,10 @@ fn run_hping3(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "hping3".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "hping3".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_hping3(&rest, &prog);
     process::exit(code);
@@ -64,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_hping3};
+    use super::{basename, run_hping3, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -7,11 +7,18 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_spatialite(args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+    {
         println!("Usage: spatialite [OPTIONS] [DATABASE] [SQL]");
         println!("SpatiaLite 5.1.0 (Slate OS)");
         println!();
@@ -30,8 +37,14 @@ fn run_spatialite(args: &[String]) -> i32 {
         println!("RTTOPO version: 1.1.0");
         return 0;
     }
-    let db = args.iter().find(|a| a.ends_with(".db") || a.ends_with(".sqlite") || a.ends_with(".gpkg")).map(|s| s.as_str());
-    let sql = args.iter().find(|a| a.to_uppercase().starts_with("SELECT") || a.to_uppercase().starts_with("CREATE")).map(|s| s.as_str());
+    let db = args
+        .iter()
+        .find(|a| a.ends_with(".db") || a.ends_with(".sqlite") || a.ends_with(".gpkg"))
+        .map(|s| s.as_str());
+    let sql = args
+        .iter()
+        .find(|a| a.to_uppercase().starts_with("SELECT") || a.to_uppercase().starts_with("CREATE"))
+        .map(|s| s.as_str());
     if let Some(d) = db {
         println!("SpatiaLite 5.1.0 — opening: {}", d);
         if let Some(q) = sql {
@@ -85,7 +98,10 @@ fn run_spatialite_tool(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "spatialite".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "spatialite".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "spatialite_tool" => run_spatialite_tool(&rest),
@@ -96,7 +112,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_spatialite};
+    use super::{basename, run_spatialite, strip_ext};
 
     #[test]
     fn basename_strips_path() {

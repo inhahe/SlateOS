@@ -44,7 +44,8 @@ fn run_cargo_edit(args: Vec<String>, mode: &str) -> i32 {
                 println!("  -V, --version      Show version");
                 return 0;
             }
-            let crates: Vec<&str> = subargs.iter()
+            let crates: Vec<&str> = subargs
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -64,7 +65,8 @@ fn run_cargo_edit(args: Vec<String>, mode: &str) -> i32 {
                 println!("  -V, --version      Show version");
                 return 0;
             }
-            let crates: Vec<&str> = subargs.iter()
+            let crates: Vec<&str> = subargs
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -101,22 +103,27 @@ fn run_cargo_edit(args: Vec<String>, mode: &str) -> i32 {
                 println!("  -V, --version      Show version");
                 return 0;
             }
-            let ver = subargs.iter()
+            let ver = subargs
+                .iter()
                 .find(|a| !a.starts_with('-'))
                 .map(|s| s.as_str());
-            let bump = subargs.windows(2)
+            let bump = subargs
+                .windows(2)
                 .find(|w| w[0] == "--bump")
                 .map(|w| w[1].as_str());
 
             if let Some(v) = ver {
                 println!("    Setting version to {}", v);
             } else if let Some(b) = bump {
-                println!("    Bumping {} version: 1.0.0 -> {}", b,
+                println!(
+                    "    Bumping {} version: 1.0.0 -> {}",
+                    b,
                     match b {
                         "major" => "2.0.0",
                         "minor" => "1.1.0",
                         _ => "1.0.1",
-                    });
+                    }
+                );
             }
         }
         _ => {}
@@ -130,7 +137,10 @@ fn run_cargo_edit(args: Vec<String>, mode: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("cargo-add"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("cargo-add"));
     let mode = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_cargo_edit(rest, mode);
@@ -139,7 +149,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cargo_edit};
+    use super::run_cargo_edit;
 
     #[test]
     fn help_exits_zero() {

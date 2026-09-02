@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_aliyun(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: alibabacloud [OPTIONS]");
-        println!("Alibaba Cloud (Slate OS) — China's largest cloud (Aliyun), Qwen AI, parent NYSE:BABA");
+        println!(
+            "Alibaba Cloud (Slate OS) — China's largest cloud (Aliyun), Qwen AI, parent NYSE:BABA"
+        );
         println!();
         println!("Options:");
         println!("  --ecs                  Elastic Compute Service (Alibaba VMs)");
@@ -22,14 +28,19 @@ fn run_aliyun(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Alibaba Cloud 2024 (Slate OS) — aliyun CLI 3.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Alibaba Cloud 2024 (Slate OS) — aliyun CLI 3.x");
+        return 0;
+    }
     println!("Alibaba Cloud 2024 (Slate OS) — China's #1 Cloud Provider (Aliyun)");
     println!("  Vendor: Alibaba Cloud (Aliyun), subsidiary of Alibaba Group (Hangzhou, China)");
     println!("          Parent: Alibaba Group Holding Ltd (NYSE:BABA, HKEX:9988)");
     println!("  Founders: Jack Ma (Ma Yun) + Joseph Tsai + 16 others, Alibaba founded 1999");
     println!("          Aliyun (Alibaba Cloud) founded 2009 by Wang Jian (CTO)");
     println!("          Jack Ma: stepped down as chairman 2019, lower profile post-2020");
-    println!("          Daniel Zhang: led Aliyun 2022-2023, departed after Ant Group regulatory issues");
+    println!(
+        "          Daniel Zhang: led Aliyun 2022-2023, departed after Ant Group regulatory issues"
+    );
     println!("          Eddie Wu: CEO of Alibaba Group 2023+");
     println!("          Joseph Tsai: Chairman of Alibaba Group 2023+");
     println!("  Public market (parent NYSE:BABA / HKEX:9988):");
@@ -38,15 +49,29 @@ fn run_aliyun(args: &[String], _prog: &str) -> i32 {
     println!("         peak ~$310 (Oct 2020) — collapsed after Ant Group IPO blocked Nov 2020");
     println!("         settled $70-100 range 2023-2024");
     println!("         Aliyun revenue: FY2024 ~$15B+ (~12-15% of Alibaba Group revenue)");
-    println!("         Aliyun growth: slow ~3-5% (post China regulatory tightening + AWS competition)");
+    println!(
+        "         Aliyun growth: slow ~3-5% (post China regulatory tightening + AWS competition)"
+    );
     println!("         Alibaba Group market cap: $180-250B range");
-    println!("  Strategic position: '#1 cloud in China + #4 globally + AI leader for Chinese market':");
-    println!("                    pitch: 'China's most advanced cloud — AI, data, e-commerce platform infrastructure'");
-    println!("                    target: Chinese enterprises + APAC region + global brands needing China presence");
-    println!("                    primary competitor (China): Huawei Cloud, Tencent Cloud, Baidu Cloud");
+    println!(
+        "  Strategic position: '#1 cloud in China + #4 globally + AI leader for Chinese market':"
+    );
+    println!(
+        "                    pitch: 'China's most advanced cloud — AI, data, e-commerce platform infrastructure'"
+    );
+    println!(
+        "                    target: Chinese enterprises + APAC region + global brands needing China presence"
+    );
+    println!(
+        "                    primary competitor (China): Huawei Cloud, Tencent Cloud, Baidu Cloud"
+    );
     println!("                    primary competitor (global): AWS, Azure, GCP (Aliyun is #4)");
-    println!("                    Aliyun's wedge: dominant in China + Singapore APAC hub + Qwen open-source LLM family");
-    println!("                    China regulatory constraints limit international expansion potential");
+    println!(
+        "                    Aliyun's wedge: dominant in China + Singapore APAC hub + Qwen open-source LLM family"
+    );
+    println!(
+        "                    China regulatory constraints limit international expansion potential"
+    );
     println!("                    cancelled IPO of Aliyun (Cloud Intelligence Group) Nov 2023");
     println!("  Pricing (transparent, sometimes aggressive in China + APAC):");
     println!("    ECS (compute): $0.005-$5/hr (varies massively by region + family)");
@@ -132,10 +157,14 @@ fn run_aliyun(args: &[String], _prog: &str) -> i32 {
     println!("  Aliyun CLI usage:");
     println!("    aliyun configure                                         # configure AccessKey");
     println!("    aliyun ecs DescribeInstances --RegionId=cn-hangzhou");
-    println!("    aliyun ecs RunInstances --ImageId=ubuntu_22_04_x64_20G_alibase_20240826.vhd --InstanceType=ecs.t6-c1m1.large --RegionId=cn-hangzhou");
+    println!(
+        "    aliyun ecs RunInstances --ImageId=ubuntu_22_04_x64_20G_alibase_20240826.vhd --InstanceType=ecs.t6-c1m1.large --RegionId=cn-hangzhou"
+    );
     println!("    aliyun oss mb oss://my-bucket --region=oss-cn-hangzhou");
     println!("    aliyun oss cp file.txt oss://my-bucket/");
-    println!("    aliyun cs DescribeClusters                               # list ACK K8s clusters");
+    println!(
+        "    aliyun cs DescribeClusters                               # list ACK K8s clusters"
+    );
     println!("    aliyun pai dlc create-job --type=PyTorch --image=registry.ai/torch:2.0-gpu");
     println!("    aliyun ram CreateUser --UserName=my-user");
     println!("    aliyun dashscope completion --model=qwen-max --prompt='Hello'");
@@ -157,13 +186,18 @@ fn run_aliyun(args: &[String], _prog: &str) -> i32 {
     println!("           Jack Ma absence post-2020 affects brand internationally");
     println!("           data sovereignty concerns for Western customers");
     println!("           Apsara internal-OS not portable / not multi-cloud");
-    println!("  Differentiator: China's #1 cloud (Aliyun) + ~$15B revenue + global #4 by revenue + 29+ regions + Apsara internal OS (powers all of Alibaba) + Qwen LLM family (open-weights, Qwen-2.5 competitive with Llama/Mistral) + Tongyi Qianwen Chinese ChatGPT + T-Head/Pingtouge silicon (Yitian 710 ARM, Hanguang 800 AI chip — geopolitical resilience) + PolarDB distributed database + MaxCompute petabyte data warehouse + Alibaba e-commerce empire backbone (Taobao/Tmall/Alipay) + 4M+ paying customers + APAC dominance + dual NYSE:BABA / HKEX:9988 listing — the cloud platform that powers most of the Chinese internet and is China's open-source AI leader");
+    println!(
+        "  Differentiator: China's #1 cloud (Aliyun) + ~$15B revenue + global #4 by revenue + 29+ regions + Apsara internal OS (powers all of Alibaba) + Qwen LLM family (open-weights, Qwen-2.5 competitive with Llama/Mistral) + Tongyi Qianwen Chinese ChatGPT + T-Head/Pingtouge silicon (Yitian 710 ARM, Hanguang 800 AI chip — geopolitical resilience) + PolarDB distributed database + MaxCompute petabyte data warehouse + Alibaba e-commerce empire backbone (Taobao/Tmall/Alipay) + 4M+ paying customers + APAC dominance + dual NYSE:BABA / HKEX:9988 listing — the cloud platform that powers most of the Chinese internet and is China's open-source AI leader"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "alibabacloud".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "alibabacloud".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_aliyun(&rest, &_prog);
     process::exit(code);
@@ -171,7 +205,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_aliyun};
+    use super::{basename, run_aliyun, strip_ext};
 
     #[test]
     fn basename_strips_path() {

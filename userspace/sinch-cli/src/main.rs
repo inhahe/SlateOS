@@ -37,7 +37,9 @@ fn print_help(prog: &str) {
     println!("    version         Show version");
 }
 
-fn print_version() { println!("sinch-cli 0.1.0 (Super-Network personality build)"); }
+fn print_version() {
+    println!("sinch-cli 0.1.0 (Super-Network personality build)");
+}
 
 fn run_about() {
     println!("Sinch AB (publ)");

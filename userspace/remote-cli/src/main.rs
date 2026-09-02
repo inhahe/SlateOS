@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("remote-cli 0.1.0 (owned-entity-EOR personality build)"); }
+fn print_version() {
+    println!("remote-cli 0.1.0 (owned-entity-EOR personality build)");
+}
 
 fn run_about() {
     println!("Remote Technology, Inc.");

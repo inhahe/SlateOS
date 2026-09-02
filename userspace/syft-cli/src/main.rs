@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_syft(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -33,21 +37,36 @@ fn run_syft(args: &[String]) -> i32 {
         println!("syft 1.8.0");
         return 0;
     }
-    let source = args.iter().find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("alpine:latest");
-    let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output")
-        .map(|w| w[1].as_str()).unwrap_or("syft-table");
+    let source = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("alpine:latest");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o" || w[0] == "--output")
+        .map(|w| w[1].as_str())
+        .unwrap_or("syft-table");
 
     match output {
         "syft-json" | "json" => {
             println!("{{");
             println!("  \"artifacts\": [");
-            println!("    {{\"name\": \"alpine-baselayout\", \"version\": \"3.4.3-r2\", \"type\": \"apk\"}},");
-            println!("    {{\"name\": \"busybox\", \"version\": \"1.36.1-r15\", \"type\": \"apk\"}},");
-            println!("    {{\"name\": \"libcrypto3\", \"version\": \"3.3.0-r2\", \"type\": \"apk\"}},");
+            println!(
+                "    {{\"name\": \"alpine-baselayout\", \"version\": \"3.4.3-r2\", \"type\": \"apk\"}},"
+            );
+            println!(
+                "    {{\"name\": \"busybox\", \"version\": \"1.36.1-r15\", \"type\": \"apk\"}},"
+            );
+            println!(
+                "    {{\"name\": \"libcrypto3\", \"version\": \"3.3.0-r2\", \"type\": \"apk\"}},"
+            );
             println!("    {{\"name\": \"musl\", \"version\": \"1.2.5-r0\", \"type\": \"apk\"}}");
             println!("  ],");
-            println!("  \"source\": {{\"type\": \"image\", \"target\": \"{}\"}}", source);
+            println!(
+                "  \"source\": {{\"type\": \"image\", \"target\": \"{}\"}}",
+                source
+            );
             println!("}}");
         }
         "cyclonedx-json" => {
@@ -55,8 +74,12 @@ fn run_syft(args: &[String]) -> i32 {
             println!("  \"bomFormat\": \"CycloneDX\",");
             println!("  \"specVersion\": \"1.5\",");
             println!("  \"components\": [");
-            println!("    {{\"type\": \"library\", \"name\": \"alpine-baselayout\", \"version\": \"3.4.3-r2\"}},");
-            println!("    {{\"type\": \"library\", \"name\": \"busybox\", \"version\": \"1.36.1-r15\"}}");
+            println!(
+                "    {{\"type\": \"library\", \"name\": \"alpine-baselayout\", \"version\": \"3.4.3-r2\"}},"
+            );
+            println!(
+                "    {{\"type\": \"library\", \"name\": \"busybox\", \"version\": \"1.36.1-r15\"}}"
+            );
             println!("  ]");
             println!("}}");
         }
@@ -81,7 +104,10 @@ fn run_syft(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "syft".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "syft".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_syft(&rest);
     process::exit(code);
@@ -89,7 +115,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_syft};
+    use super::{basename, run_syft, strip_ext};
 
     #[test]
     fn basename_strips_path() {

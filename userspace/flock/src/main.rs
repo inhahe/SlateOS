@@ -108,11 +108,8 @@ fn parse_flock_args(args: &[String]) -> FlockOpts {
                 // -c "command" — rest is a single shell command string.
                 i += 1;
                 if i < args.len() {
-                    opts.command = vec![
-                        "/bin/sh".to_string(),
-                        "-c".to_string(),
-                        args[i].to_string(),
-                    ];
+                    opts.command =
+                        vec!["/bin/sh".to_string(), "-c".to_string(), args[i].to_string()];
                 }
             }
             s if !s.starts_with('-') || positional.is_empty() => {
@@ -158,7 +155,9 @@ fn parse_flock_args(args: &[String]) -> FlockOpts {
 /// we use atomic file creation as a lock mechanism.
 fn acquire_lock(path: &str, opts: &FlockOpts) -> bool {
     let lock_path = format!("{path}.lock");
-    let deadline = opts.timeout.map(|t| Instant::now() + Duration::from_secs(t));
+    let deadline = opts
+        .timeout
+        .map(|t| Instant::now() + Duration::from_secs(t));
 
     loop {
         // Try to create lock file exclusively.
@@ -190,22 +189,24 @@ fn acquire_lock(path: &str, opts: &FlockOpts) -> bool {
                 }
 
                 if let Some(dl) = deadline
-                    && Instant::now() >= dl {
-                        if opts.verbose {
-                            eprintln!("flock: timeout waiting for lock");
-                        }
-                        return false;
+                    && Instant::now() >= dl
+                {
+                    if opts.verbose {
+                        eprintln!("flock: timeout waiting for lock");
                     }
+                    return false;
+                }
 
                 // Shared locks can coexist.
                 if opts.lock_type == LockType::Shared
                     && let Ok(content) = fs::read_to_string(&lock_path)
-                        && content.starts_with("shared:") {
-                            if opts.verbose {
-                                eprintln!("flock: shared lock compatible, proceeding");
-                            }
-                            return true;
-                        }
+                    && content.starts_with("shared:")
+                {
+                    if opts.verbose {
+                        eprintln!("flock: shared lock compatible, proceeding");
+                    }
+                    return true;
+                }
 
                 // Wait and retry.
                 thread::sleep(Duration::from_millis(100));
@@ -299,7 +300,9 @@ fn parse_lockfile_args(args: &[String]) -> LockfileOpts {
         match args[i].as_str() {
             "-h" | "--help" => {
                 println!("Usage: lockfile [-sleeptime | -r retries |");
-                println!("               -l locktimeout | -s suspend | -!  | -ml | -mu ] filename ...");
+                println!(
+                    "               -l locktimeout | -s suspend | -!  | -ml | -mu ] filename ..."
+                );
                 println!();
                 println!("Create semaphore files.");
                 println!();
@@ -346,7 +349,10 @@ fn parse_lockfile_args(args: &[String]) -> LockfileOpts {
                 }
                 process::exit(0);
             }
-            s if s.starts_with('-') && s.len() > 1 && s[1..].chars().all(|c| c.is_ascii_digit()) => {
+            s if s.starts_with('-')
+                && s.len() > 1
+                && s[1..].chars().all(|c| c.is_ascii_digit()) =>
+            {
                 opts.sleeptime = s[1..].parse().unwrap_or(8);
             }
             s if !s.starts_with('-') => {
@@ -399,12 +405,13 @@ fn cmd_lockfile(args: &[String]) {
                     }
 
                     if let Some(dl) = deadline
-                        && Instant::now() >= dl {
-                            // Check for stale lock.
-                            let _ = fs::remove_file(file);
-                            thread::sleep(Duration::from_secs(opts.suspend));
-                            continue;
-                        }
+                        && Instant::now() >= dl
+                    {
+                        // Check for stale lock.
+                        let _ = fs::remove_file(file);
+                        thread::sleep(Duration::from_secs(opts.suspend));
+                        continue;
+                    }
 
                     thread::sleep(Duration::from_secs(opts.sleeptime));
                 }

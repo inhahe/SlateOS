@@ -16,7 +16,10 @@ fn strip_ext(name: &str) -> &str {
 }
 
 fn run_fly(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: fly <COMMAND> [OPTIONS]");
         println!();
         println!("flyctl — Fly.io CLI (Slate OS).");
@@ -55,8 +58,12 @@ fn run_fly(args: Vec<String>) -> i32 {
                 println!("Waiting for session... Done!");
                 println!("Successfully logged in as user@example.com");
             }
-            "whoami" => { println!("user@example.com"); }
-            _ => { println!("fly auth {}: see fly auth --help.", sub); }
+            "whoami" => {
+                println!("user@example.com");
+            }
+            _ => {
+                println!("fly auth {}: see fly auth --help.", sub);
+            }
         },
         "launch" => {
             println!("Creating app in /app");
@@ -89,7 +96,9 @@ fn run_fly(args: Vec<String>) -> i32 {
             println!();
             println!("Machines");
             println!("PROCESS  ID              VERSION  REGION  STATE    CHECKS  LAST UPDATED");
-            println!("app      1234567890abcd  2        iad     started  1/1     2024-01-15T12:00:00Z");
+            println!(
+                "app      1234567890abcd  2        iad     started  1/1     2024-01-15T12:00:00Z"
+            );
         }
         "apps" => match sub {
             "list" => {
@@ -97,7 +106,9 @@ fn run_fly(args: Vec<String>) -> i32 {
                 println!("my-app      personal    deployed    2024-01-15T12:00:00Z");
                 println!("api-app     personal    deployed    2024-01-14T08:00:00Z");
             }
-            _ => { println!("fly apps {}: see --help.", sub); }
+            _ => {
+                println!("fly apps {}: see --help.", sub);
+            }
         },
         "scale" => match sub {
             "show" => {
@@ -107,11 +118,17 @@ fn run_fly(args: Vec<String>) -> i32 {
                 println!("NAME    COUNT   KIND     CPUS   MEMORY   REGIONS");
                 println!("app     1       shared   1      256 MB   iad");
             }
-            "count" => { println!("Count changed to 2"); }
-            _ => { println!("fly scale {}: see --help.", sub); }
+            "count" => {
+                println!("Count changed to 2");
+            }
+            _ => {
+                println!("fly scale {}: see --help.", sub);
+            }
         },
         "logs" => {
-            println!("2024-01-15T12:00:01Z app[1234567890abcd] iad [info] Listening on 0.0.0.0:8080");
+            println!(
+                "2024-01-15T12:00:01Z app[1234567890abcd] iad [info] Listening on 0.0.0.0:8080"
+            );
             println!("2024-01-15T12:00:05Z app[1234567890abcd] iad [info] GET / 200 12ms");
             println!("2024-01-15T12:00:10Z app[1234567890abcd] iad [info] GET /api/health 200 2ms");
         }
@@ -121,7 +138,9 @@ fn run_fly(args: Vec<String>) -> i32 {
                 println!("DATABASE_URL  abcdef1234567890abcdef1234567890  2024-01-10T12:00:00Z");
                 println!("SECRET_KEY    1234567890abcdef1234567890abcdef  2024-01-10T12:00:00Z");
             }
-            _ => { println!("fly secrets {}: see --help.", sub); }
+            _ => {
+                println!("fly secrets {}: see --help.", sub);
+            }
         },
         "regions" => match sub {
             "list" => {
@@ -130,7 +149,9 @@ fn run_fly(args: Vec<String>) -> i32 {
                 println!("Backup Region:");
                 println!("ord    Chicago, Illinois (US)");
             }
-            _ => { println!("fly regions {}: see --help.", sub); }
+            _ => {
+                println!("fly regions {}: see --help.", sub);
+            }
         },
         _ => {
             if cmd.is_empty() {
@@ -145,7 +166,8 @@ fn run_fly(args: Vec<String>) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first()
+    let _prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "fly".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -155,7 +177,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fly};
+    use super::{basename, run_fly, strip_ext};
 
     #[test]
     fn basename_strips_path() {

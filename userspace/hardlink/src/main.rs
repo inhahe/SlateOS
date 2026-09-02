@@ -162,9 +162,10 @@ fn scan_directory(dir: &str, opts: &HardlinkOpts, files: &mut Vec<FileInfo>) {
                 continue;
             }
             if let Some(max) = opts.max_size
-                && size > max {
-                    continue;
-                }
+                && size > max
+            {
+                continue;
+            }
 
             // Skip empty files.
             if size == 0 {
@@ -490,33 +491,21 @@ mod tests {
 
     #[test]
     fn test_parse_args_min_size() {
-        let args = vec![
-            "-s".to_string(),
-            "1024".to_string(),
-            "/tmp".to_string(),
-        ];
+        let args = vec!["-s".to_string(), "1024".to_string(), "/tmp".to_string()];
         let opts = parse_args(&args);
         assert_eq!(opts.min_size, 1024);
     }
 
     #[test]
     fn test_parse_args_max_size() {
-        let args = vec![
-            "-S".to_string(),
-            "1048576".to_string(),
-            "/tmp".to_string(),
-        ];
+        let args = vec!["-S".to_string(), "1048576".to_string(), "/tmp".to_string()];
         let opts = parse_args(&args);
         assert_eq!(opts.max_size, Some(1048576));
     }
 
     #[test]
     fn test_parse_args_exclude() {
-        let args = vec![
-            "-X".to_string(),
-            ".git".to_string(),
-            "/tmp".to_string(),
-        ];
+        let args = vec!["-X".to_string(), ".git".to_string(), "/tmp".to_string()];
         let opts = parse_args(&args);
         assert_eq!(opts.exclude, vec![".git"]);
     }
@@ -545,12 +534,19 @@ mod tests {
     #[test]
     fn test_scan_nonexistent_dir() {
         let opts = HardlinkOpts {
-            dry_run: true, verbose: false, quiet: true,
-            respect_name: false, respect_time: false,
-            respect_perm: false, respect_owner: false,
-            respect_xattr: false, min_size: 1,
-            max_size: None, content: true,
-            exclude: Vec::new(), method: Method::Simple,
+            dry_run: true,
+            verbose: false,
+            quiet: true,
+            respect_name: false,
+            respect_time: false,
+            respect_perm: false,
+            respect_owner: false,
+            respect_xattr: false,
+            min_size: 1,
+            max_size: None,
+            content: true,
+            exclude: Vec::new(),
+            method: Method::Simple,
             dirs: Vec::new(),
         };
         let mut files = Vec::new();

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_fftw_wisdom(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -24,7 +28,8 @@ fn run_fftw_wisdom(args: &[String], _prog: &str) -> i32 {
         println!("  --threads N       Use N threads");
         return 0;
     }
-    let sizes: Vec<&str> = args.iter()
+    let sizes: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -41,7 +46,8 @@ fn run_fftw_bench(args: &[String], _prog: &str) -> i32 {
         println!("fftw-bench v3.3.10 (Slate OS) — Benchmark FFT performance");
         return 0;
     }
-    let size = args.iter()
+    let size = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("1024");
@@ -55,7 +61,10 @@ fn run_fftw_bench(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "fftw-wisdom".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "fftw-wisdom".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "fftw-bench" => run_fftw_bench(&rest, &prog),
@@ -66,7 +75,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fftw_wisdom};
+    use super::{basename, run_fftw_wisdom, strip_ext};
 
     #[test]
     fn basename_strips_path() {

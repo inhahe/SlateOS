@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sonar(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -31,11 +35,13 @@ fn run_sonar(args: &[String]) -> i32 {
         println!("SonarScanner 5.0.1");
         return 0;
     }
-    let project_key = args.iter()
+    let project_key = args
+        .iter()
         .find(|a| a.starts_with("-Dsonar.projectKey="))
         .map(|a| a.trim_start_matches("-Dsonar.projectKey="))
         .unwrap_or("my-project");
-    let host = args.iter()
+    let host = args
+        .iter()
         .find(|a| a.starts_with("-Dsonar.host.url="))
         .map(|a| a.trim_start_matches("-Dsonar.host.url="))
         .unwrap_or("http://localhost:9000");
@@ -76,7 +82,10 @@ fn run_sonar(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sonar-scanner".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "sonar-scanner".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_sonar(&rest);
     process::exit(code);
@@ -84,7 +93,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sonar};
+    use super::{basename, run_sonar, strip_ext};
 
     #[test]
     fn basename_strips_path() {

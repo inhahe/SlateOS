@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_guile(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -27,11 +31,18 @@ fn run_guile(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-c") {
-        let expr = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].as_str()).unwrap_or("(display \"hello\")");
+        let expr = args
+            .windows(2)
+            .find(|w| w[0] == "-c")
+            .map(|w| w[1].as_str())
+            .unwrap_or("(display \"hello\")");
         println!("{}", expr);
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".scm")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".scm"))
+        .map(|s| s.as_str());
     if let Some(f) = file {
         println!("guile: loading {}", f);
     } else {
@@ -54,7 +65,10 @@ fn run_chicken(args: &[String]) -> i32 {
         println!("CHICKEN 5.3.0 (Slate OS)");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".scm")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".scm"))
+        .map(|s| s.as_str());
     if let Some(f) = file {
         let base = f.rsplit_once('.').map_or(f, |(b, _)| b);
         println!("chicken: compiling {} -> {}.c", f, base);
@@ -79,7 +93,10 @@ fn run_chez(args: &[String]) -> i32 {
         println!("Chez Scheme Version 10.0.0 (Slate OS)");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".ss") || a.ends_with(".scm")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".ss") || a.ends_with(".scm"))
+        .map(|s| s.as_str());
     if let Some(f) = file {
         println!("chez: running {}", f);
     } else {
@@ -101,7 +118,10 @@ fn run_gambit(args: &[String]) -> i32 {
         println!("v4.9.5 20231210183054");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".scm")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".scm"))
+        .map(|s| s.as_str());
     if let Some(f) = file {
         println!("gsi: loading {}", f);
     } else {
@@ -113,7 +133,10 @@ fn run_gambit(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "guile".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "guile".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "chicken" | "csc" | "csi" => run_chicken(&rest),
@@ -126,7 +149,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_guile};
+    use super::{basename, run_guile, strip_ext};
 
     #[test]
     fn basename_strips_path() {

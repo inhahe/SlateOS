@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_aerc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_aerc(args: &[String], _prog: &str) -> i32 {
         println!("Bindings are configured in ~/.config/aerc/binds.conf");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("aerc v0.17 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("aerc v0.17 (Slate OS)");
+        return 0;
+    }
     if args.is_empty() {
         println!("aerc v0.17 — terminal email client");
         println!("  Accounts: 2 configured");
@@ -42,7 +49,10 @@ fn run_aerc(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "aerc".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "aerc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_aerc(&rest, &prog);
     process::exit(code);
@@ -50,7 +60,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_aerc};
+    use super::{basename, run_aerc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

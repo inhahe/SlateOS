@@ -43,8 +43,11 @@ fn run_just(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "-s" || a == "--show") {
-        let recipe = args.windows(2).find(|w| w[0] == "-s" || w[0] == "--show")
-            .map(|w| w[1].as_str()).unwrap_or("build");
+        let recipe = args
+            .windows(2)
+            .find(|w| w[0] == "-s" || w[0] == "--show")
+            .map(|w| w[1].as_str())
+            .unwrap_or("build");
         println!("# {}", recipe);
         match recipe {
             "build" => {
@@ -119,7 +122,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_just};
+    use super::run_just;
 
     #[test]
     fn help_exits_zero() {

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_hotjar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,23 +25,32 @@ fn run_hotjar(args: &[String], _prog: &str) -> i32 {
         println!("  --observe-business     Observe Business from $80/mo (500 sessions/day+)");
         println!("  --observe-scale        Observe Scale from $171/mo (1,500+/day)");
         println!("  --ask-basic            Ask (surveys + feedback) — also has free tier");
-        println!("  --engage               Engage (user interviews) — recruit users from Hotjar pool");
+        println!(
+            "  --engage               Engage (user interviews) — recruit users from Hotjar pool"
+        );
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Hotjar 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Hotjar 2024 (Slate OS)");
+        return 0;
+    }
     println!("Hotjar 2024 (Slate OS)");
     println!("  Vendor: Hotjar Ltd. (Malta — now part of Contentsquare, acquired Sep 2021)");
     println!("        Hotjar incorporated in Malta for EU/AU favorable tax regime");
     println!("        Contentsquare paid ~$700M for Hotjar (cash + stock)");
     println!("  Founders: David Darmanin (CEO), Marc von Brockdorff, Erik Naess, 2014");
-    println!("          David: ex-CRO consultant, founded Hotjar after years selling Crazy Egg integrations");
+    println!(
+        "          David: ex-CRO consultant, founded Hotjar after years selling Crazy Egg integrations"
+    );
     println!("          all three Maltese — founded entirely remote-first from day 1");
     println!("  Founded: 2014 in Malta — bootstrapped to $50M ARR before acquisition");
     println!("          poster child for 'bootstrapped + remote + small market HQ' SaaS success");
     println!("  Acquisition timeline:");
     println!("    - Acquired by Contentsquare Sep 2021 for ~$700M");
-    println!("    - Hotjar kept as a separate product brand (entry-level vs Contentsquare's enterprise tier)");
+    println!(
+        "    - Hotjar kept as a separate product brand (entry-level vs Contentsquare's enterprise tier)"
+    );
     println!("    - Strategy: Hotjar = SMB, Contentsquare = enterprise, Heap = product analytics");
     println!("    - combined entity ~$200M ARR, ~$1.4B valuation");
     println!("  Defining brand position: 'qualitative analytics for the rest of us':");
@@ -85,17 +98,24 @@ fn run_hotjar(args: &[String], _prog: &str) -> i32 {
     println!("            heavy SMB + mid-market — strong in EU + LATAM + ANZ");
     println!("            sweet spot: any website team without $50K analytics budget");
     println!("  Critique: ceiling on session volume — recording costs add up");
-    println!("           less enterprise-grade than FullStory (no Privacy/HIPAA hardening features)");
+    println!(
+        "           less enterprise-grade than FullStory (no Privacy/HIPAA hardening features)"
+    );
     println!("           Contentsquare era pushed price up modestly + introduced upsell pressure");
     println!("           limited compared to Heap on event analytics breadth");
     println!("           recordings retention windows tight at lower tiers");
-    println!("  Differentiator: most accessible heatmaps + recordings tool — generous free tier + 5-min setup");
+    println!(
+        "  Differentiator: most accessible heatmaps + recordings tool — generous free tier + 5-min setup"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "hotjar".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "hotjar".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_hotjar(&rest, &_prog);
     process::exit(code);
@@ -103,7 +123,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_hotjar};
+    use super::{basename, run_hotjar, strip_ext};
 
     #[test]
     fn basename_strips_path() {

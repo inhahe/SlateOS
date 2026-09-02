@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_nox(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -45,11 +49,14 @@ fn run_nox(args: &[String]) -> i32 {
         println!("sessions marked with * are selected, sessions marked with - are skipped.");
         return 0;
     }
-    let sessions: Vec<&str> = args.windows(2)
+    let sessions: Vec<&str> = args
+        .windows(2)
         .filter(|w| w[0] == "-s" || w[0] == "--sessions")
         .map(|w| w[1].as_str())
         .collect();
-    let reuse = args.iter().any(|a| a == "-r" || a == "--reuse-existing-virtualenvs");
+    let reuse = args
+        .iter()
+        .any(|a| a == "-r" || a == "--reuse-existing-virtualenvs");
 
     let run_sessions = if sessions.is_empty() {
         vec!["tests-3.12", "tests-3.11", "lint"]
@@ -76,7 +83,10 @@ fn run_nox(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "nox".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "nox".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_nox(&rest);
     process::exit(code);
@@ -84,7 +94,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_nox};
+    use super::{basename, run_nox, strip_ext};
 
     #[test]
     fn basename_strips_path() {

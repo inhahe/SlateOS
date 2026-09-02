@@ -44,7 +44,11 @@ fn run_efibootmgr(args: &[String]) -> i32 {
     let create = args.iter().any(|a| a == "-c" || a == "--create");
 
     if create {
-        let label = args.windows(2).find(|w| w[0] == "-L").map(|w| w[1].as_str()).unwrap_or("Slate OS");
+        let label = args
+            .windows(2)
+            .find(|w| w[0] == "-L")
+            .map(|w| w[1].as_str())
+            .unwrap_or("Slate OS");
         println!("Boot entry 0005 created: {label}");
     }
 
@@ -52,8 +56,12 @@ fn run_efibootmgr(args: &[String]) -> i32 {
     println!("Timeout: 5 seconds");
     println!("BootOrder: 0001,0002,0003,0004");
     if verbose {
-        println!("Boot0001* Slate OS\tHD(1,GPT,abcdef01-2345-6789-abcd-ef0123456789,0x800,0x100000)/File(\\EFI\\slateos\\grubx64.efi)");
-        println!("Boot0002* Windows Boot Manager\tHD(1,GPT,12345678-9abc-def0-1234-567890abcdef,0x800,0x100000)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)");
+        println!(
+            "Boot0001* Slate OS\tHD(1,GPT,abcdef01-2345-6789-abcd-ef0123456789,0x800,0x100000)/File(\\EFI\\slateos\\grubx64.efi)"
+        );
+        println!(
+            "Boot0002* Windows Boot Manager\tHD(1,GPT,12345678-9abc-def0-1234-567890abcdef,0x800,0x100000)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)"
+        );
         println!("Boot0003* USB\tPciRoot(0x0)/Pci(0x14,0x0)/USB(0,0)");
         println!("Boot0004* Network\tPciRoot(0x0)/Pci(0x1f,0x6)/MAC(aabbccddeeff,1)");
     } else {
@@ -87,7 +95,8 @@ fn run_efivar(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "efibootmgr".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -101,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_efibootmgr};
+    use super::{basename, run_efibootmgr, strip_ext};
 
     #[test]
     fn basename_strips_path() {

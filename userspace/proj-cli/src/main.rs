@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_proj(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -54,7 +58,11 @@ fn run_projinfo(args: &[String]) -> i32 {
         println!("PROJ 9.3.1 (Slate OS)");
         return 0;
     }
-    let crs = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("EPSG:4326");
+    let crs = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("EPSG:4326");
     println!("CRS: {}", crs);
     println!("Type: Geographic 2D CRS");
     println!("Name: WGS 84");
@@ -93,7 +101,10 @@ fn run_geod(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "proj".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "proj".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "cs2cs" => run_cs2cs(&rest),
@@ -107,7 +118,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_proj};
+    use super::{basename, run_proj, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -28,7 +28,9 @@ fn run_htop(args: Vec<String>) -> i32 {
     }
 
     let tree = args.iter().any(|a| a == "-t" || a == "--tree");
-    let user = args.windows(2).find(|w| w[0] == "-u" || w[0] == "--user")
+    let user = args
+        .windows(2)
+        .find(|w| w[0] == "-u" || w[0] == "--user")
         .map(|w| w[1].as_str());
 
     println!("  CPU[||||||||||||||||      56.2%]   Tasks: 142, 3 running");
@@ -46,10 +48,22 @@ fn run_htop(args: Vec<String>) -> i32 {
         println!(" 3456 user       20   0   56M  23M   12M S  0.5  0.3  0:45.12 └─ terminal");
     } else {
         if let Some(u) = user {
-            println!(" 1234 {}    20   0  1.2G 456M   78M S 15.3  5.7 12:34.56 firefox", u);
-            println!(" 1235 {}    20   0  800M 234M   56M S  8.7  2.9  3:21.09 Web Content", u);
-            println!(" 2345 {}    20   0  234M  89M   34M S  3.2  1.1  2:15.78 code-editor", u);
-            println!(" 3456 {}    20   0   56M  23M   12M S  0.5  0.3  0:45.12 terminal", u);
+            println!(
+                " 1234 {}    20   0  1.2G 456M   78M S 15.3  5.7 12:34.56 firefox",
+                u
+            );
+            println!(
+                " 1235 {}    20   0  800M 234M   56M S  8.7  2.9  3:21.09 Web Content",
+                u
+            );
+            println!(
+                " 2345 {}    20   0  234M  89M   34M S  3.2  1.1  2:15.78 code-editor",
+                u
+            );
+            println!(
+                " 3456 {}    20   0   56M  23M   12M S  0.5  0.3  0:45.12 terminal",
+                u
+            );
         } else {
             println!(" 1234 user       20   0  1.2G 456M   78M S 15.3  5.7 12:34.56 firefox");
             println!("  567 root       20   0  890M 234M   45M S  2.1  2.9  5:45.67 compositor");
@@ -72,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_htop};
+    use super::run_htop;
 
     #[test]
     fn help_exits_zero() {

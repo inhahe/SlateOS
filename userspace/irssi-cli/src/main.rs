@@ -29,11 +29,13 @@ fn run_irssi(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let server = args.windows(2)
+    let server = args
+        .windows(2)
         .find(|w| w[0] == "-c" || w[0] == "--connect")
         .map(|w| w[1].as_str());
 
-    let nick = args.windows(2)
+    let nick = args
+        .windows(2)
         .find(|w| w[0] == "-n" || w[0] == "--nick")
         .map(|w| w[1].as_str())
         .unwrap_or("user");
@@ -68,7 +70,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_irssi};
+    use super::run_irssi;
 
     #[test]
     fn help_exits_zero() {

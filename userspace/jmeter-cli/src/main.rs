@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_jmeter(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") || args.is_empty() {
@@ -35,9 +39,14 @@ fn run_jmeter(args: &[String]) -> i32 {
         return 0;
     }
     let non_gui = args.iter().any(|a| a == "-n");
-    let test_plan = args.windows(2).find(|w| w[0] == "-t")
-        .map(|w| w[1].as_str()).unwrap_or("test.jmx");
-    let log_file = args.windows(2).find(|w| w[0] == "-l")
+    let test_plan = args
+        .windows(2)
+        .find(|w| w[0] == "-t")
+        .map(|w| w[1].as_str())
+        .unwrap_or("test.jmx");
+    let log_file = args
+        .windows(2)
+        .find(|w| w[0] == "-l")
         .map(|w| w[1].as_str());
     let gen_report = args.iter().any(|a| a == "-e");
 
@@ -45,11 +54,19 @@ fn run_jmeter(args: &[String]) -> i32 {
         println!("Creating summariser <summary>");
         println!("Created the tree successfully using {}", test_plan);
         println!("Starting standalone test");
-        println!("Waiting for possible Shutdown/StopTestNow/HeapDump/ThreadDump message on port 4445");
+        println!(
+            "Waiting for possible Shutdown/StopTestNow/HeapDump/ThreadDump message on port 4445"
+        );
         println!();
-        println!("summary =    500 in 00:00:10 =   50.0/s Avg:    23 Min:     2 Max:   234 Err:     1 (0.20%)");
-        println!("summary +    500 in 00:00:10 =   50.0/s Avg:    25 Min:     3 Max:   198 Err:     0 (0.00%)");
-        println!("summary =   1000 in 00:00:20 =   50.0/s Avg:    24 Min:     2 Max:   234 Err:     1 (0.10%)");
+        println!(
+            "summary =    500 in 00:00:10 =   50.0/s Avg:    23 Min:     2 Max:   234 Err:     1 (0.20%)"
+        );
+        println!(
+            "summary +    500 in 00:00:10 =   50.0/s Avg:    25 Min:     3 Max:   198 Err:     0 (0.00%)"
+        );
+        println!(
+            "summary =   1000 in 00:00:20 =   50.0/s Avg:    24 Min:     2 Max:   234 Err:     1 (0.10%)"
+        );
         println!();
         println!("Tidying up ...");
 
@@ -62,10 +79,14 @@ fn run_jmeter(args: &[String]) -> i32 {
         }
         println!("... end of run");
     } else {
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
         println!("Don't use GUI mode for load testing! Only for test plan editing.");
         println!("Use: jmeter -n -t test.jmx -l results.jtl");
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
         println!("Starting JMeter GUI...");
     }
     0
@@ -73,7 +94,10 @@ fn run_jmeter(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "jmeter".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "jmeter".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_jmeter(&rest);
     process::exit(code);
@@ -81,7 +105,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_jmeter};
+    use super::{basename, run_jmeter, strip_ext};
 
     #[test]
     fn basename_strips_path() {

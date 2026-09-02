@@ -43,7 +43,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("sonicwall-cli 0.1.0 (mid-market-utm-pe-owned personality build)"); }
+fn print_version() {
+    println!("sonicwall-cli 0.1.0 (mid-market-utm-pe-owned personality build)");
+}
 
 fn run_about() {
     println!("SonicWall, Inc.");
@@ -104,7 +106,9 @@ fn run_cse() {
     println!("  Includes ZTNA, secure web gateway, CASB + DNS filtering through the cloud node.");
     println!("  Cloud-managed firewalls: NSv virtual firewalls administered alongside CSE.");
     println!("  Positioning: the SMB / mid-market alternative to Zscaler / Netskope / Cato.");
-    println!("  Strategy: avoid being left out of the SASE generation that displaces UTM appliances.");
+    println!(
+        "  Strategy: avoid being left out of the SASE generation that displaces UTM appliances."
+    );
 }
 
 fn run_cves() {
@@ -139,8 +143,12 @@ fn run_customers() {
     println!("  small + mid-size healthcare systems, regional banks + credit unions, municipal");
     println!("  + state governments, manufacturing + distributed-branch operations.");
     println!("  Geographic: heavy US + EU + LATAM; growing APAC + Middle East presence.");
-    println!("  Common deployment: retail chain with 50-500 stores standardised on TZ + Wireless +");
-    println!("  Capture Security Center, with the MSP managing the fleet on the customer's behalf.");
+    println!(
+        "  Common deployment: retail chain with 50-500 stores standardised on TZ + Wireless +"
+    );
+    println!(
+        "  Capture Security Center, with the MSP managing the fleet on the customer's behalf."
+    );
     println!("  Anti-segment: Fortune-500 + cloud-first net-new enterprises (go to Palo + Z).");
 }
 

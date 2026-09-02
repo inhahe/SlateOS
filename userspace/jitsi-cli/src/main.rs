@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_meet(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_meet(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("jitsi-meet v2.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("jitsi-meet v2.0 (Slate OS)");
+        return 0;
+    }
     println!("jitsi-meet: video conferencing client started");
     println!("  Server: meet.jit.si");
     println!("  WebRTC: enabled");
@@ -36,7 +43,10 @@ fn run_videobridge(args: &[String], _prog: &str) -> i32 {
         println!("jitsi-videobridge v2.3 (Slate OS) — Jitsi video bridge server");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("jitsi-videobridge v2.3 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("jitsi-videobridge v2.3 (Slate OS)");
+        return 0;
+    }
     println!("jitsi-videobridge: SFU server started");
     println!("  Port: 10000 (UDP)");
     println!("  REST API: http://localhost:8080");
@@ -45,7 +55,10 @@ fn run_videobridge(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "jitsi-meet".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "jitsi-meet".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "jitsi-videobridge" => run_videobridge(&rest, &prog),
@@ -56,7 +69,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_meet};
+    use super::{basename, run_meet, strip_ext};
 
     #[test]
     fn basename_strips_path() {

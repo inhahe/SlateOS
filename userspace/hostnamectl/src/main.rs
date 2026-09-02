@@ -70,7 +70,11 @@ fn get_hostname() -> String {
 
 fn get_domainname() -> String {
     let domain = read_file_trimmed(PROC_DOMAINNAME);
-    if domain == "(none)" { String::new() } else { domain }
+    if domain == "(none)" {
+        String::new()
+    } else {
+        domain
+    }
 }
 
 fn get_fqdn() -> String {
@@ -168,9 +172,7 @@ fn read_os_release() -> OsRelease {
 
 fn unquote(s: &str) -> String {
     let s = s.trim();
-    if (s.starts_with('"') && s.ends_with('"'))
-        || (s.starts_with('\'') && s.ends_with('\''))
-    {
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()
@@ -184,7 +186,11 @@ fn get_kernel_version() -> String {
 fn get_architecture() -> String {
     // Read from uname info or /proc/sys/kernel/arch.
     let arch = read_file_trimmed("/proc/sys/kernel/arch");
-    if arch.is_empty() { "x86_64".to_string() } else { arch }
+    if arch.is_empty() {
+        "x86_64".to_string()
+    } else {
+        arch
+    }
 }
 
 fn get_machine_id() -> String {
@@ -229,9 +235,10 @@ fn detect_virtualization() -> String {
         return "docker".to_string();
     }
     if let Ok(cgroup) = fs::read_to_string("/proc/1/cgroup")
-        && (cgroup.contains("/docker/") || cgroup.contains("/lxc/")) {
-            return "container".to_string();
-        }
+        && (cgroup.contains("/docker/") || cgroup.contains("/lxc/"))
+    {
+        return "container".to_string();
+    }
 
     "none".to_string()
 }
@@ -264,18 +271,24 @@ fn detect_chassis() -> String {
 fn set_hostname(name: &str) -> io::Result<()> {
     // Validate hostname.
     if name.is_empty() || name.len() > 64 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput,
-            "hostname must be 1-64 characters"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "hostname must be 1-64 characters",
+        ));
     }
     for ch in name.chars() {
         if !ch.is_ascii_alphanumeric() && ch != '-' && ch != '.' {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                format!("invalid character in hostname: '{ch}'")));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid character in hostname: '{ch}'"),
+            ));
         }
     }
     if name.starts_with('-') || name.ends_with('-') {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput,
-            "hostname must not start or end with '-'"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "hostname must not start or end with '-'",
+        ));
     }
 
     // Write to /etc/hostname (persistent).
@@ -325,7 +338,9 @@ fn cmd_hostnamectl(args: &[String]) {
     match subcmd {
         "status" => {
             // Parse optional --json flag.
-            let json = rest.iter().any(|a| a == "--json" || a == "-j" || a == "--json=pretty");
+            let json = rest
+                .iter()
+                .any(|a| a == "--json" || a == "-j" || a == "--json=pretty");
             if json {
                 show_status_json();
             } else {
@@ -396,11 +411,24 @@ fn cmd_hostnamectl(args: &[String]) {
                 println!("{}", detect_chassis());
                 return;
             }
-            let valid = ["desktop", "laptop", "convertible", "server", "tablet",
-                "handset", "watch", "embedded", "vm", "container", ""];
+            let valid = [
+                "desktop",
+                "laptop",
+                "convertible",
+                "server",
+                "tablet",
+                "handset",
+                "watch",
+                "embedded",
+                "vm",
+                "container",
+                "",
+            ];
             if !valid.contains(&rest[0].as_str()) {
                 eprintln!("hostnamectl: invalid chassis type: {}", rest[0]);
-                eprintln!("Valid types: desktop, laptop, convertible, server, tablet, handset, watch, embedded, vm, container");
+                eprintln!(
+                    "Valid types: desktop, laptop, convertible, server, tablet, handset, watch, embedded, vm, container"
+                );
                 process::exit(1);
             }
             if let Err(e) = set_machine_info_field("CHASSIS", &rest[0]) {
@@ -485,7 +513,15 @@ fn show_status() {
     if !machine_info.pretty_hostname.is_empty() {
         let _ = writeln!(out, "   Pretty hostname: {pretty}");
     }
-    let _ = writeln!(out, "         Icon name: {}", if machine_info.icon_name.is_empty() { "computer-desktop" } else { &machine_info.icon_name });
+    let _ = writeln!(
+        out,
+        "         Icon name: {}",
+        if machine_info.icon_name.is_empty() {
+            "computer-desktop"
+        } else {
+            &machine_info.icon_name
+        }
+    );
     let _ = writeln!(out, "           Chassis: {chassis}");
     if !machine_info.deployment.is_empty() {
         let _ = writeln!(out, "        Deployment: {}", machine_info.deployment);
@@ -498,7 +534,15 @@ fn show_status() {
     if virt != "none" {
         let _ = writeln!(out, "    Virtualization: {virt}");
     }
-    let _ = writeln!(out, "  Operating System: {}", if os.pretty_name.is_empty() { &os.name } else { &os.pretty_name });
+    let _ = writeln!(
+        out,
+        "  Operating System: {}",
+        if os.pretty_name.is_empty() {
+            &os.name
+        } else {
+            &os.pretty_name
+        }
+    );
     if !os.cpe_name.is_empty() {
         let _ = writeln!(out, "       CPE OS Name: {}", os.cpe_name);
     }
@@ -522,7 +566,11 @@ fn show_status_json() {
 
     let _ = writeln!(out, "{{");
     let _ = writeln!(out, "  \"Hostname\": \"{hostname}\",");
-    let _ = writeln!(out, "  \"PrettyHostname\": \"{}\",", machine_info.pretty_hostname);
+    let _ = writeln!(
+        out,
+        "  \"PrettyHostname\": \"{}\",",
+        machine_info.pretty_hostname
+    );
     let _ = writeln!(out, "  \"IconName\": \"{}\",", machine_info.icon_name);
     let _ = writeln!(out, "  \"Chassis\": \"{chassis}\",");
     let _ = writeln!(out, "  \"Deployment\": \"{}\",", machine_info.deployment);
@@ -530,7 +578,11 @@ fn show_status_json() {
     let _ = writeln!(out, "  \"MachineID\": \"{machine_id}\",");
     let _ = writeln!(out, "  \"BootID\": \"{boot_id}\",");
     let _ = writeln!(out, "  \"Virtualization\": \"{virt}\",");
-    let _ = writeln!(out, "  \"OperatingSystemPrettyName\": \"{}\",", os.pretty_name);
+    let _ = writeln!(
+        out,
+        "  \"OperatingSystemPrettyName\": \"{}\",",
+        os.pretty_name
+    );
     let _ = writeln!(out, "  \"Kernel\": \"{kernel}\",");
     let _ = writeln!(out, "  \"Architecture\": \"{arch}\"");
     let _ = writeln!(out, "}}");

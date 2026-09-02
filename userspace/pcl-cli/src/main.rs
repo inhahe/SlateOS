@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_pcl_viewer(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -20,7 +24,11 @@ fn run_pcl_viewer(args: &[String]) -> i32 {
         println!("  -normals N    Display normals (length N)");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".pcd") || a.ends_with(".ply")).map(|s| s.as_str()).unwrap_or("cloud.pcd");
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".pcd") || a.ends_with(".ply"))
+        .map(|s| s.as_str())
+        .unwrap_or("cloud.pcd");
     println!("PCL Viewer 1.14.0");
     println!("Loading: {}", file);
     println!("  Points: 1,234,567");
@@ -65,8 +73,16 @@ fn run_pcl_mesh_sampling(args: &[String]) -> i32 {
         println!("  -no_vis_result   Don't visualize");
         return 0;
     }
-    let input = args.iter().find(|a| a.ends_with(".ply") || a.ends_with(".obj") || a.ends_with(".stl")).map(|s| s.as_str()).unwrap_or("mesh.ply");
-    let n = args.windows(2).find(|w| w[0] == "-n_samples").map(|w| w[1].as_str()).unwrap_or("100000");
+    let input = args
+        .iter()
+        .find(|a| a.ends_with(".ply") || a.ends_with(".obj") || a.ends_with(".stl"))
+        .map(|s| s.as_str())
+        .unwrap_or("mesh.ply");
+    let n = args
+        .windows(2)
+        .find(|w| w[0] == "-n_samples")
+        .map(|w| w[1].as_str())
+        .unwrap_or("100000");
     println!("Sampling mesh: {}", input);
     println!("  Target samples: {}", n);
     println!("  Generated: {} points", n);
@@ -76,7 +92,10 @@ fn run_pcl_mesh_sampling(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pcl_viewer".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pcl_viewer".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "pcl_pcd2ply" => run_pcl_pcd2ply(&rest),
@@ -89,7 +108,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pcl_viewer};
+    use super::{basename, run_pcl_viewer, strip_ext};
 
     #[test]
     fn basename_strips_path() {

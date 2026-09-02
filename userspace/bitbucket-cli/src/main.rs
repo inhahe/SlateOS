@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_bb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Bitbucket Cloud (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Bitbucket Cloud (Slate OS)");
+        return 0;
+    }
     println!("Bitbucket Cloud (Slate OS)");
     println!("  Vendor: Atlassian Corporation (Sydney, Australia → NASDAQ:TEAM)");
     println!("  Founders: Mike Cannon-Brookes + Scott Farquhar (Atlassian 2002)");
@@ -34,30 +41,43 @@ fn run_bb(args: &[String], _prog: &str) -> i32 {
     println!("          now Git-only");
     println!("  Pricing: Free tier — unlimited private repos, up to 5 users");
     println!("          Standard $3/user/mo — 2,500 build minutes, branch permissions");
-    println!("          Premium $6/user/mo — 3,500 build minutes, deployment permissions, IP allowlists");
+    println!(
+        "          Premium $6/user/mo — 3,500 build minutes, deployment permissions, IP allowlists"
+    );
     println!("  Editions: Bitbucket Cloud (SaaS at bitbucket.org)");
-    println!("           Bitbucket Data Center (self-hosted, replaces deprecated Bitbucket Server)");
+    println!(
+        "           Bitbucket Data Center (self-hosted, replaces deprecated Bitbucket Server)"
+    );
     println!("  Features:");
     println!("    - Git hosting (unlimited private repos)");
     println!("    - Pull requests with code review, inline comments, approvals");
     println!("    - Bitbucket Pipelines — YAML-defined CI/CD (Docker-based)");
-    println!("    - Jira Software integration (the killer feature — first-class commit/branch/PR linking)");
+    println!(
+        "    - Jira Software integration (the killer feature — first-class commit/branch/PR linking)"
+    );
     println!("    - Trello, Confluence, Jenkins, Bamboo integration");
     println!("    - Code Insights — third-party scan results in PRs");
     println!("    - Smart Mirroring (Data Center) — geo-replicated repo caches");
     println!("    - Snippets — gist-equivalent");
     println!("    - Wiki per repo, issue tracker (basic)");
     println!("  Atlassian suite: Jira + Confluence + Bitbucket + Trello = full DevOps platform");
-    println!("  Critique: smaller community than GitHub/GitLab — primarily used by Atlassian-shop enterprises");
+    println!(
+        "  Critique: smaller community than GitHub/GitLab — primarily used by Atlassian-shop enterprises"
+    );
     println!("           Pipelines slower + more limited than GitHub Actions/GitLab CI");
     println!("           Mercurial drop angered die-hard hg users (Facebook, Mozilla used hg)");
-    println!("  Differentiator: deepest Jira integration in the industry — first choice for Jira-heavy teams");
+    println!(
+        "  Differentiator: deepest Jira integration in the industry — first choice for Jira-heavy teams"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bitbucket".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bitbucket".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_bb(&rest, &_prog);
     process::exit(code);
@@ -65,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bb};
+    use super::{basename, run_bb, strip_ext};
 
     #[test]
     fn basename_strips_path() {

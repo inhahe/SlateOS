@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn run_sqlite(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-help" || a == "-h") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-help" || a == "-h")
+    {
         println!("Usage: sqlite3 [OPTIONS] [DATABASE [SQL]]");
         println!();
         println!("SQLite3 — SQLite database shell (Slate OS).");
@@ -34,7 +37,8 @@ fn run_sqlite(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -89,7 +93,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sqlite};
+    use super::run_sqlite;
 
     #[test]
     fn help_exits_zero() {

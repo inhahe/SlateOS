@@ -40,7 +40,9 @@ fn run_cmake(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--build") {
-        let dir = args.iter().position(|a| a == "--build")
+        let dir = args
+            .iter()
+            .position(|a| a == "--build")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("build");
@@ -59,16 +61,22 @@ fn run_cmake(args: Vec<String>) -> i32 {
     }
 
     // Configure mode
-    let source = args.iter().position(|a| a == "-S")
+    let source = args
+        .iter()
+        .position(|a| a == "-S")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .or_else(|| args.last().map(|s| s.as_str()))
         .unwrap_or(".");
-    let build = args.iter().position(|a| a == "-B")
+    let build = args
+        .iter()
+        .position(|a| a == "-B")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("build");
-    let generator = args.iter().position(|a| a == "-G")
+    let generator = args
+        .iter()
+        .position(|a| a == "-G")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("Unix Makefiles");
@@ -107,7 +115,9 @@ fn run_ctest(args: Vec<String>) -> i32 {
 
     println!("Test project /build");
     println!("    Start 1: test_basic");
-    if verbose { println!("1: Test command: /build/test_basic"); }
+    if verbose {
+        println!("1: Test command: /build/test_basic");
+    }
     println!("1/3 Test #1: test_basic ...............   Passed    0.01 sec");
     println!("    Start 2: test_advanced");
     println!("2/3 Test #2: test_advanced ............   Passed    0.03 sec");
@@ -136,7 +146,9 @@ fn run_cpack(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let generator = args.iter().position(|a| a == "-G")
+    let generator = args
+        .iter()
+        .position(|a| a == "-G")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("TGZ");
@@ -159,7 +171,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

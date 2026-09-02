@@ -20,7 +20,9 @@ fn run_jaeger_all_in_one(args: Vec<String>) -> i32 {
         println!("  --collector.otlp.enabled             Enable OTLP receiver");
         println!("  --collector.otlp.grpc.host-port      OTLP gRPC endpoint");
         println!("  --collector.otlp.http.host-port      OTLP HTTP endpoint");
-        println!("  --span-storage.type <type>           Storage type (memory/badger/cassandra/elasticsearch/grpc-plugin)");
+        println!(
+            "  --span-storage.type <type>           Storage type (memory/badger/cassandra/elasticsearch/grpc-plugin)"
+        );
         println!("  --log-level <level>                  Log level (debug/info/warn/error)");
         println!("  --admin.http.host-port <addr>        Admin HTTP port (default: :14269)");
         println!("  --version                            Show version");
@@ -31,15 +33,30 @@ fn run_jaeger_all_in_one(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let storage = args.iter().find_map(|a| a.strip_prefix("--span-storage.type="))
+    let storage = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--span-storage.type="))
         .unwrap_or("memory");
 
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.000Z\",\"msg\":\"Starting jaeger (all-in-one)\",\"version\":\"1.57.0\"}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.001Z\",\"msg\":\"Memory storage initialized\",\"type\":\"{}\"}}",  storage);
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.010Z\",\"msg\":\"Starting agent\"}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.020Z\",\"msg\":\"Starting collector\"}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.030Z\",\"msg\":\"Starting query\",\"port\":16686}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.031Z\",\"msg\":\"Jaeger UI available at http://localhost:16686\"}}");
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.000Z\",\"msg\":\"Starting jaeger (all-in-one)\",\"version\":\"1.57.0\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.001Z\",\"msg\":\"Memory storage initialized\",\"type\":\"{}\"}}",
+        storage
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.010Z\",\"msg\":\"Starting agent\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.020Z\",\"msg\":\"Starting collector\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.030Z\",\"msg\":\"Starting query\",\"port\":16686}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.031Z\",\"msg\":\"Jaeger UI available at http://localhost:16686\"}}"
+    );
     0
 }
 
@@ -57,16 +74,25 @@ fn run_jaeger_component(args: Vec<String>, component: &str) -> i32 {
         return 0;
     }
 
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.000Z\",\"msg\":\"Starting jaeger-{}\",\"version\":\"1.57.0\"}}", component);
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.000Z\",\"msg\":\"Starting jaeger-{}\",\"version\":\"1.57.0\"}}",
+        component
+    );
     match component {
         "agent" => {
-            println!("{{\"level\":\"info\",\"msg\":\"Listening for spans\",\"udp\":\"localhost:6831\",\"http\":\"localhost:5778\"}}");
+            println!(
+                "{{\"level\":\"info\",\"msg\":\"Listening for spans\",\"udp\":\"localhost:6831\",\"http\":\"localhost:5778\"}}"
+            );
         }
         "collector" => {
-            println!("{{\"level\":\"info\",\"msg\":\"Collector started\",\"grpc\":\":14250\",\"http\":\":14268\"}}");
+            println!(
+                "{{\"level\":\"info\",\"msg\":\"Collector started\",\"grpc\":\":14250\",\"http\":\":14268\"}}"
+            );
         }
         "query" => {
-            println!("{{\"level\":\"info\",\"msg\":\"Query service started\",\"http\":\":16686\"}}");
+            println!(
+                "{{\"level\":\"info\",\"msg\":\"Query service started\",\"http\":\":16686\"}}"
+            );
         }
         _ => {}
     }
@@ -80,7 +106,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -97,11 +125,14 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_jaeger_component};
+    use super::run_jaeger_component;
 
     #[test]
     fn help_exits_zero() {
-        assert_eq!(run_jaeger_component(vec!["--help".to_string()], "jaeger"), 0);
+        assert_eq!(
+            run_jaeger_component(vec!["--help".to_string()], "jaeger"),
+            0
+        );
         assert_eq!(run_jaeger_component(vec!["-h".to_string()], "jaeger"), 0);
         let _ = run_jaeger_component(vec!["--version".to_string()], "jaeger");
     }

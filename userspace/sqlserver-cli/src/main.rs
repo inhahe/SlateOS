@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sqlserver(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_sqlserver(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microsoft SQL Server 2022 (16.0.4135.4) (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Microsoft SQL Server 2022 (16.0.4135.4) (Slate OS)");
+        return 0;
+    }
     println!("Microsoft SQL Server 2022 (16.0.4135.4) (Slate OS)");
     println!("  Editions: Express (free), Standard, Enterprise, Web, Developer");
     println!("  Cloud: Azure SQL Database, Azure SQL Managed Instance, SQL on Azure VMs");
@@ -40,7 +47,10 @@ fn run_sqlserver(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sqlserver".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "sqlserver".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_sqlserver(&rest, &_prog);
     process::exit(code);
@@ -48,7 +58,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sqlserver};
+    use super::{basename, run_sqlserver, strip_ext};
 
     #[test]
     fn basename_strips_path() {

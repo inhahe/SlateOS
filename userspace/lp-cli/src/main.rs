@@ -31,7 +31,8 @@ fn run_lp(args: &[String]) -> i32 {
         println!("  -P PAGES       Page range (e.g., 1-4)");
         return 0;
     }
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -182,7 +183,8 @@ fn run_lpoptions(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "lp".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -201,7 +203,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lp};
+    use super::{basename, run_lp, strip_ext};
 
     #[test]
     fn basename_strips_path() {

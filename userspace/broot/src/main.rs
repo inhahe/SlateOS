@@ -56,7 +56,8 @@ fn run_broot(args: Vec<String>) -> i32 {
     let perms = args.iter().any(|a| a == "-p" || a == "--permissions");
     let whale = args.iter().any(|a| a == "-w" || a == "--whale-hierarchies");
 
-    let root = args.iter()
+    let root = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(".");
@@ -124,7 +125,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_broot};
+    use super::run_broot;
 
     #[test]
     fn help_exits_zero() {

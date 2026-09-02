@@ -77,13 +77,15 @@ fn read_file(path: &str) -> Option<String> {
 fn get_meminfo_value(content: &str, key: &str) -> u64 {
     for line in content.lines() {
         if let Some((k, v)) = line.split_once(':')
-            && k.trim() == key {
-                let trimmed = v.trim()
-                    .trim_end_matches(" kB")
-                    .trim_end_matches(" KB")
-                    .trim();
-                return trimmed.parse().unwrap_or(0);
-            }
+            && k.trim() == key
+        {
+            let trimmed = v
+                .trim()
+                .trim_end_matches(" kB")
+                .trim_end_matches(" KB")
+                .trim();
+            return trimmed.parse().unwrap_or(0);
+        }
     }
     0
 }
@@ -192,10 +194,12 @@ fn print_standard(info: &MemInfo, config: &Config) {
     let u = config.unit;
 
     // Derived fields.
-    let buff_cache = info.buffers
+    let buff_cache = info
+        .buffers
         .saturating_add(info.cached)
         .saturating_add(info.s_reclaimable);
-    let mem_used = info.mem_total
+    let mem_used = info
+        .mem_total
         .saturating_sub(info.mem_free)
         .saturating_sub(info.buffers)
         .saturating_sub(info.cached)
@@ -262,7 +266,8 @@ fn print_wide(info: &MemInfo, config: &Config) {
     let u = config.unit;
 
     // In wide mode, "used" does not subtract buffers/cached/sreclaimable.
-    let mem_used = info.mem_total
+    let mem_used = info
+        .mem_total
         .saturating_sub(info.mem_free)
         .saturating_sub(info.buffers)
         .saturating_sub(info.cached)
@@ -332,12 +337,18 @@ fn print_wide(info: &MemInfo, config: &Config) {
 /// are not useful as machine-parsable numbers.
 fn print_json(info: &MemInfo, config: &Config) {
     // For JSON, human mode falls back to KiB (JSON consumers want numbers).
-    let u = if config.unit == Unit::Human { Unit::Kib } else { config.unit };
+    let u = if config.unit == Unit::Human {
+        Unit::Kib
+    } else {
+        config.unit
+    };
 
-    let buff_cache = info.buffers
+    let buff_cache = info
+        .buffers
         .saturating_add(info.cached)
         .saturating_add(info.s_reclaimable);
-    let mem_used = info.mem_total
+    let mem_used = info
+        .mem_total
         .saturating_sub(info.mem_free)
         .saturating_sub(info.buffers)
         .saturating_sub(info.cached)
@@ -363,7 +374,10 @@ fn print_json(info: &MemInfo, config: &Config) {
     println!("    \"buff_cache\": {},", format_value(buff_cache, u));
     println!("    \"buffers\": {},", format_value(info.buffers, u));
     println!("    \"cached\": {},", format_value(info.cached, u));
-    println!("    \"s_reclaimable\": {},", format_value(info.s_reclaimable, u));
+    println!(
+        "    \"s_reclaimable\": {},",
+        format_value(info.s_reclaimable, u)
+    );
     println!("    \"available\": {}", format_value(info.mem_available, u));
     println!("  }},");
     println!("  \"swap\": {{");
@@ -411,9 +425,10 @@ fn run(config: &Config) -> i32 {
 
         // Check count limit.
         if let Some(max) = config.repeat_count
-            && iterations >= max {
-                break;
-            }
+            && iterations >= max
+        {
+            break;
+        }
 
         // If no repeat interval, run once.
         let secs = match config.repeat_secs {
@@ -659,9 +674,7 @@ SReclaimable:     128000 kB
         let cached: u64 = 2_048_000;
         let sreclaimable: u64 = 128_000;
 
-        let buff_cache = buffers
-            .saturating_add(cached)
-            .saturating_add(sreclaimable);
+        let buff_cache = buffers.saturating_add(cached).saturating_add(sreclaimable);
 
         assert_eq!(buff_cache, 2_688_000);
     }

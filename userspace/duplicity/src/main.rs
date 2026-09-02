@@ -10,7 +10,9 @@ use std::process;
 fn run_duplicity(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duplicity [full|incremental] [options] source_dir target_url");
-        println!("       duplicity [restore|verify|list-current-files|collection-status|cleanup|remove-older-than] [options] target_url [restore_dir]");
+        println!(
+            "       duplicity [restore|verify|list-current-files|collection-status|cleanup|remove-older-than] [options] target_url [restore_dir]"
+        );
         println!();
         println!("Options:");
         println!("  --full-if-older-than T  Force full if last full > T");
@@ -91,7 +93,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_duplicity};
+    use super::run_duplicity;
 
     #[test]
     fn help_exits_zero() {

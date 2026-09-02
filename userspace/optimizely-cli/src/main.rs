@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("optimizely-cli 0.1.0 (DXP-era personality build)"); }
+fn print_version() {
+    println!("optimizely-cli 0.1.0 (DXP-era personality build)");
+}
 
 fn run_about() {
     println!("Optimizely, Inc.");

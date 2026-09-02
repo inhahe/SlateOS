@@ -1604,8 +1604,7 @@ fn analyze_health(data: &SmartData) -> i32 {
         if let Some(attr) = &data.attributes[i] {
             match attr.id {
                 ATTR_REALLOC_SECTOR | ATTR_REALLOC_EVENT
-                    if attr.raw >= REALLOC_WARN
-                        && !data.error_log.iter().all(Option::is_none) =>
+                    if attr.raw >= REALLOC_WARN && !data.error_log.iter().all(Option::is_none) =>
                 {
                     exit_status |= EXIT_ERROR_LOG;
                 }

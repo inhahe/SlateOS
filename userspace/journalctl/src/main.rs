@@ -124,13 +124,13 @@ impl Priority {
     fn ansi_color(self) -> &'static str {
         match self {
             Self::Emergency => "\x1b[1;41;37m", // bold white on red bg
-            Self::Alert => "\x1b[1;31m",         // bold red
-            Self::Critical => "\x1b[31m",        // red
-            Self::Error => "\x1b[91m",           // bright red
-            Self::Warning => "\x1b[33m",         // yellow
-            Self::Notice => "\x1b[1;37m",        // bold white
-            Self::Info => "",                     // default
-            Self::Debug => "\x1b[90m",           // dim gray
+            Self::Alert => "\x1b[1;31m",        // bold red
+            Self::Critical => "\x1b[31m",       // red
+            Self::Error => "\x1b[91m",          // bright red
+            Self::Warning => "\x1b[33m",        // yellow
+            Self::Notice => "\x1b[1;37m",       // bold white
+            Self::Info => "",                   // default
+            Self::Debug => "\x1b[90m",          // dim gray
         }
     }
 }
@@ -244,7 +244,10 @@ impl JournalEntry {
         if self.timestamp_usec != 0 {
             parts.push(format!("\"ts_usec\":{}", self.timestamp_usec));
         }
-        parts.push(format!("\"level\":\"{}\"", json_escape(self.priority.name())));
+        parts.push(format!(
+            "\"level\":\"{}\"",
+            json_escape(self.priority.name())
+        ));
         if !self.unit.is_empty() {
             parts.push(format!("\"service\":\"{}\"", json_escape(&self.unit)));
         }
@@ -257,9 +260,22 @@ impl JournalEntry {
         }
         // Include extra fields not already serialized.
         let known_keys: &[&str] = &[
-            "ts", "ts_usec", "level", "service", "msg", "boot_id", "pid", "time",
-            "__REALTIME_TIMESTAMP", "PRIORITY", "_SYSTEMD_UNIT", "SYSLOG_IDENTIFIER",
-            "unit", "MESSAGE", "_BOOT_ID", "_PID",
+            "ts",
+            "ts_usec",
+            "level",
+            "service",
+            "msg",
+            "boot_id",
+            "pid",
+            "time",
+            "__REALTIME_TIMESTAMP",
+            "PRIORITY",
+            "_SYSTEMD_UNIT",
+            "SYSLOG_IDENTIFIER",
+            "unit",
+            "MESSAGE",
+            "_BOOT_ID",
+            "_PID",
         ];
         for (k, v) in &self.fields {
             if !known_keys.contains(&k.as_str()) {
@@ -282,10 +298,7 @@ impl JournalEntry {
             json_escape(self.priority.name())
         ));
         if !self.unit.is_empty() {
-            lines.push(format!(
-                "    \"service\": \"{}\",",
-                json_escape(&self.unit)
-            ));
+            lines.push(format!("    \"service\": \"{}\",", json_escape(&self.unit)));
         }
         lines.push(format!("    \"msg\": \"{}\",", json_escape(&self.message)));
         if !self.boot_id.is_empty() {
@@ -298,9 +311,22 @@ impl JournalEntry {
             lines.push(format!("    \"pid\": {},", self.pid));
         }
         let known_keys: &[&str] = &[
-            "ts", "ts_usec", "level", "service", "msg", "boot_id", "pid", "time",
-            "__REALTIME_TIMESTAMP", "PRIORITY", "_SYSTEMD_UNIT", "SYSLOG_IDENTIFIER",
-            "unit", "MESSAGE", "_BOOT_ID", "_PID",
+            "ts",
+            "ts_usec",
+            "level",
+            "service",
+            "msg",
+            "boot_id",
+            "pid",
+            "time",
+            "__REALTIME_TIMESTAMP",
+            "PRIORITY",
+            "_SYSTEMD_UNIT",
+            "SYSLOG_IDENTIFIER",
+            "unit",
+            "MESSAGE",
+            "_BOOT_ID",
+            "_PID",
         ];
         let extras: Vec<_> = self
             .fields
@@ -316,9 +342,10 @@ impl JournalEntry {
         }
         // Remove trailing comma from last field line.
         if let Some(last) = lines.last_mut()
-            && last.ends_with(',') {
-                last.pop();
-            }
+            && last.ends_with(',')
+        {
+            last.pop();
+        }
         lines.push("}".to_string());
         lines.join("\n")
     }
@@ -439,9 +466,10 @@ fn parse_json_string_value(s: &str, pos: &mut usize) -> Option<String> {
                     if *pos + 5 < bytes.len() {
                         let hex = &s[*pos + 2..*pos + 6];
                         if let Ok(code) = u32::from_str_radix(hex, 16)
-                            && let Some(ch) = char::from_u32(code) {
-                                result.push(ch);
-                            }
+                            && let Some(ch) = char::from_u32(code)
+                        {
+                            result.push(ch);
+                        }
                         *pos += 6;
                     } else {
                         *pos += 2;
@@ -757,14 +785,8 @@ fn collect_jsonl_files(dir: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             collect_jsonl_files(&path, out);
         } else if path.is_file() {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-            if name.ends_with(".jsonl")
-                || name.ends_with(".log")
-                || name.ends_with(".journal")
-            {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.ends_with(".jsonl") || name.ends_with(".log") || name.ends_with(".journal") {
                 out.push(path);
             }
         }
@@ -1095,29 +1117,34 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
 
             // Priority filter: show entries at this level or more severe.
             if let Some(max_prio) = cfg.priority_filter
-                && (e.priority as u8) > (max_prio as u8) {
-                    return false;
-                }
+                && (e.priority as u8) > (max_prio as u8)
+            {
+                return false;
+            }
 
             // Since filter.
             if let Some(since) = cfg.since
-                && e.timestamp < since {
-                    return false;
-                }
+                && e.timestamp < since
+            {
+                return false;
+            }
 
             // Until filter.
             if let Some(until) = cfg.until
-                && e.timestamp > until {
-                    return false;
-                }
+                && e.timestamp > until
+            {
+                return false;
+            }
 
             // Boot filter.
             if let Some(ref boot) = cfg.boot_filter
-                && !boot.is_empty() && e.boot_id != *boot {
-                    return false;
-                }
-                // Empty boot_filter means "current boot" -- handled after
-                // collecting entries (we pick the most recent boot_id).
+                && !boot.is_empty()
+                && e.boot_id != *boot
+            {
+                return false;
+            }
+            // Empty boot_filter means "current boot" -- handled after
+            // collecting entries (we pick the most recent boot_id).
 
             // Dmesg: only kernel messages.
             if cfg.dmesg {
@@ -1129,9 +1156,10 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
 
             // Grep filter.
             if let Some(ref pattern) = cfg.grep_pattern
-                && !pattern_matches(&e.message, pattern) {
-                    return false;
-                }
+                && !pattern_matches(&e.message, pattern)
+            {
+                return false;
+            }
 
             true
         })
@@ -1140,12 +1168,13 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
 
     // Handle empty boot_filter (current boot = most recent boot_id).
     if let Some(ref boot) = cfg.boot_filter
-        && boot.is_empty() {
-            // Find the most recent boot_id.
-            if let Some(latest_boot) = find_latest_boot_id(&result) {
-                result.retain(|e| e.boot_id == latest_boot);
-            }
+        && boot.is_empty()
+    {
+        // Find the most recent boot_id.
+        if let Some(latest_boot) = find_latest_boot_id(&result) {
+            result.retain(|e| e.boot_id == latest_boot);
         }
+    }
 
     // Reverse if requested.
     if cfg.reverse {
@@ -1154,16 +1183,17 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
 
     // Limit number of entries.
     if let Some(n) = cfg.num_entries
-        && result.len() > n {
-            if cfg.reverse {
-                // Already reversed: take the first n.
-                result.truncate(n);
-            } else {
-                // Take the last n entries.
-                let start = result.len() - n;
-                result = result.split_off(start);
-            }
+        && result.len() > n
+    {
+        if cfg.reverse {
+            // Already reversed: take the first n.
+            result.truncate(n);
+        } else {
+            // Take the last n entries.
+            let start = result.len() - n;
+            result = result.split_off(start);
         }
+    }
 
     result
 }
@@ -1257,9 +1287,22 @@ fn render_verbose(entry: &JournalEntry, color: bool) {
     println!("    MESSAGE={}", entry.message);
 
     let known_keys: &[&str] = &[
-        "ts", "ts_usec", "level", "service", "msg", "boot_id", "pid", "time",
-        "__REALTIME_TIMESTAMP", "PRIORITY", "_SYSTEMD_UNIT", "SYSLOG_IDENTIFIER",
-        "unit", "MESSAGE", "_BOOT_ID", "_PID",
+        "ts",
+        "ts_usec",
+        "level",
+        "service",
+        "msg",
+        "boot_id",
+        "pid",
+        "time",
+        "__REALTIME_TIMESTAMP",
+        "PRIORITY",
+        "_SYSTEMD_UNIT",
+        "SYSLOG_IDENTIFIER",
+        "unit",
+        "MESSAGE",
+        "_BOOT_ID",
+        "_PID",
     ];
     for (k, v) in &entry.fields {
         if !known_keys.contains(&k.as_str()) {
@@ -1491,17 +1534,20 @@ fn entry_passes_filters(entry: &JournalEntry, cfg: &Config) -> bool {
         }
     }
     if let Some(max_prio) = cfg.priority_filter
-        && (entry.priority as u8) > (max_prio as u8) {
-            return false;
-        }
+        && (entry.priority as u8) > (max_prio as u8)
+    {
+        return false;
+    }
     if let Some(since) = cfg.since
-        && entry.timestamp < since {
-            return false;
-        }
+        && entry.timestamp < since
+    {
+        return false;
+    }
     if let Some(until) = cfg.until
-        && entry.timestamp > until {
-            return false;
-        }
+        && entry.timestamp > until
+    {
+        return false;
+    }
     if cfg.dmesg {
         let u = entry.unit.to_ascii_lowercase();
         if u != "kernel" && u != "kern" && u != "dmesg" {
@@ -1509,9 +1555,10 @@ fn entry_passes_filters(entry: &JournalEntry, cfg: &Config) -> bool {
         }
     }
     if let Some(ref pattern) = cfg.grep_pattern
-        && !pattern_matches(&entry.message, pattern) {
-            return false;
-        }
+        && !pattern_matches(&entry.message, pattern)
+    {
+        return false;
+    }
     true
 }
 
@@ -1697,11 +1744,32 @@ mod tests {
         vec![
             make_entry(1000, "emerg", "kernel", "panic: out of memory", "boot1", 0),
             make_entry(1001, "alert", "kernel", "watchdog timeout", "boot1", 0),
-            make_entry(1002, "crit", "fs.ext4", "journal checksum error", "boot1", 100),
+            make_entry(
+                1002,
+                "crit",
+                "fs.ext4",
+                "journal checksum error",
+                "boot1",
+                100,
+            ),
             make_entry(1003, "err", "net.dhcp", "lease expired", "boot1", 200),
-            make_entry(1004, "warning", "sshd", "auth failure from 10.0.0.1", "boot1", 300),
+            make_entry(
+                1004,
+                "warning",
+                "sshd",
+                "auth failure from 10.0.0.1",
+                "boot1",
+                300,
+            ),
             make_entry(1005, "notice", "init", "service started: crond", "boot1", 1),
-            make_entry(1006, "info", "net.dhcp", "lease renewed for 10.0.2.15", "boot1", 200),
+            make_entry(
+                1006,
+                "info",
+                "net.dhcp",
+                "lease renewed for 10.0.2.15",
+                "boot1",
+                200,
+            ),
             make_entry(1007, "debug", "scheduler", "rebalance cpus", "boot1", 0),
             make_entry(2000, "info", "kernel", "boot complete", "boot2", 0),
             make_entry(2001, "err", "net.tcp", "connection reset", "boot2", 500),
@@ -1915,8 +1983,7 @@ mod tests {
 
     #[test]
     fn test_entry_to_json_roundtrip() {
-        let original_line =
-            make_json_line(5000, "warning", "net.tcp", "retransmit", "boot99", 777);
+        let original_line = make_json_line(5000, "warning", "net.tcp", "retransmit", "boot99", 777);
         let entry = JournalEntry::from_json_line(&original_line).unwrap();
         let serialized = entry.to_json();
         let reparsed = JournalEntry::from_json_line(&serialized).unwrap();
@@ -2373,11 +2440,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_num_entries() {
-        let args = vec![
-            "journalctl".to_string(),
-            "-n".to_string(),
-            "25".to_string(),
-        ];
+        let args = vec!["journalctl".to_string(), "-n".to_string(), "25".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.num_entries, Some(25));
     }

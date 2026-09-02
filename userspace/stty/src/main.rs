@@ -32,10 +32,7 @@
 // are trusted user CLI args or kernel-supplied termios bytes, not
 // attacker-controlled byte streams. Allow them file-wide; the discipline
 // stays in place everywhere else in the workspace.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use std::env;
 use std::fs::File;
@@ -181,7 +178,10 @@ const BAUD_TABLE: &[(u32, u32)] = &[
 
 /// Encode a numeric baud rate to its CBAUD value. Returns `None` if unknown.
 fn baud_encode(rate: u32) -> Option<u32> {
-    BAUD_TABLE.iter().find(|(r, _)| *r == rate).map(|(_, enc)| *enc)
+    BAUD_TABLE
+        .iter()
+        .find(|(r, _)| *r == rate)
+        .map(|(_, enc)| *enc)
 }
 
 /// Decode a CBAUD value to a numeric baud rate. Returns 0 if unknown.
@@ -304,7 +304,13 @@ fn tiocgwinsz(fd: i32) -> Result<Winsize, String> {
 fn tiocswinsz(fd: i32, ws: &Winsize) -> Result<(), String> {
     // SAFETY: TIOCSWINSZ reads a Winsize struct; the pointer is valid for the
     // duration of the call.
-    let rc = unsafe { ioctl(fd, TIOCSWINSZ, core::ptr::from_ref(ws).cast::<u8>().cast_mut()) };
+    let rc = unsafe {
+        ioctl(
+            fd,
+            TIOCSWINSZ,
+            core::ptr::from_ref(ws).cast::<u8>().cast_mut(),
+        )
+    };
     if rc < 0 {
         Err(format!("TIOCSWINSZ failed: error {}", -rc))
     } else {
@@ -504,7 +510,11 @@ fn render_cc_all(t: &Termios) -> String {
 
     let mut pairs: Vec<String> = Vec::new();
     for (name, idx) in cc_names {
-        let val = if *idx < t.c_cc.len() { t.c_cc[*idx] } else { 0xFF };
+        let val = if *idx < t.c_cc.len() {
+            t.c_cc[*idx]
+        } else {
+            0xFF
+        };
         // min and time are displayed numerically, not as control chars.
         if *name == "min" || *name == "time" {
             pairs.push(format!("{name} = {val}"));
@@ -520,7 +530,10 @@ fn print_summary(t: &Termios, ws: &Winsize) {
     let ispeed = baud_decode(t.c_ispeed);
     let ospeed = baud_decode(t.c_ospeed);
     if ispeed == ospeed {
-        println!("speed {ispeed} baud; rows {}; columns {}", ws.ws_row, ws.ws_col);
+        println!(
+            "speed {ispeed} baud; rows {}; columns {}",
+            ws.ws_row, ws.ws_col
+        );
     } else {
         println!(
             "ispeed {ispeed} baud; ospeed {ospeed} baud; rows {}; columns {}",
@@ -653,8 +666,8 @@ fn parse_save(s: &str) -> Result<Termios, String> {
     let c_oflag = parse_hex_u32(parts[1])?;
     let c_cflag = parse_hex_u32(parts[2])?;
     let c_lflag = parse_hex_u32(parts[3])?;
-    let c_line = u8::from_str_radix(parts[4], 16)
-        .map_err(|_| format!("invalid hex u8: '{}'", parts[4]))?;
+    let c_line =
+        u8::from_str_radix(parts[4], 16).map_err(|_| format!("invalid hex u8: '{}'", parts[4]))?;
     let c_ispeed = parse_hex_u32(parts[5])?;
     let c_ospeed = parse_hex_u32(parts[6])?;
 
@@ -686,72 +699,216 @@ fn parse_save(s: &str) -> Result<Termios, String> {
 /// (e.g., `ispeed 9600`), or `Err` on parse failure.
 fn apply_setting(t: &mut Termios, setting: &str) -> Result<(), String> {
     // Negated flag: starts with '-' but is not a bare number.
-    let (negated, name) = if setting.starts_with('-') && !setting[1..].starts_with(|c: char| c.is_ascii_digit()) {
-        (true, &setting[1..])
-    } else {
-        (false, setting)
-    };
+    let (negated, name) =
+        if setting.starts_with('-') && !setting[1..].starts_with(|c: char| c.is_ascii_digit()) {
+            (true, &setting[1..])
+        } else {
+            (false, setting)
+        };
 
     // ---- input flags ----
     match name {
-        "ignbrk" => { toggle_flag(&mut t.c_iflag, IGNBRK, !negated); return Ok(()); }
-        "brkint" => { toggle_flag(&mut t.c_iflag, BRKINT, !negated); return Ok(()); }
-        "ignpar" => { toggle_flag(&mut t.c_iflag, IGNPAR, !negated); return Ok(()); }
-        "parmrk" => { toggle_flag(&mut t.c_iflag, PARMRK, !negated); return Ok(()); }
-        "inpck"  => { toggle_flag(&mut t.c_iflag, INPCK,  !negated); return Ok(()); }
-        "istrip" => { toggle_flag(&mut t.c_iflag, ISTRIP, !negated); return Ok(()); }
-        "inlcr"  => { toggle_flag(&mut t.c_iflag, INLCR,  !negated); return Ok(()); }
-        "igncr"  => { toggle_flag(&mut t.c_iflag, IGNCR,  !negated); return Ok(()); }
-        "icrnl"  => { toggle_flag(&mut t.c_iflag, ICRNL,  !negated); return Ok(()); }
-        "iuclc"  => { toggle_flag(&mut t.c_iflag, IUCLC,  !negated); return Ok(()); }
-        "ixon"   => { toggle_flag(&mut t.c_iflag, IXON,   !negated); return Ok(()); }
-        "ixany"  => { toggle_flag(&mut t.c_iflag, IXANY,  !negated); return Ok(()); }
-        "ixoff"  => { toggle_flag(&mut t.c_iflag, IXOFF,  !negated); return Ok(()); }
-        "imaxbel"=> { toggle_flag(&mut t.c_iflag, IMAXBEL,!negated); return Ok(()); }
-        "iutf8"  => { toggle_flag(&mut t.c_iflag, IUTF8,  !negated); return Ok(()); }
+        "ignbrk" => {
+            toggle_flag(&mut t.c_iflag, IGNBRK, !negated);
+            return Ok(());
+        }
+        "brkint" => {
+            toggle_flag(&mut t.c_iflag, BRKINT, !negated);
+            return Ok(());
+        }
+        "ignpar" => {
+            toggle_flag(&mut t.c_iflag, IGNPAR, !negated);
+            return Ok(());
+        }
+        "parmrk" => {
+            toggle_flag(&mut t.c_iflag, PARMRK, !negated);
+            return Ok(());
+        }
+        "inpck" => {
+            toggle_flag(&mut t.c_iflag, INPCK, !negated);
+            return Ok(());
+        }
+        "istrip" => {
+            toggle_flag(&mut t.c_iflag, ISTRIP, !negated);
+            return Ok(());
+        }
+        "inlcr" => {
+            toggle_flag(&mut t.c_iflag, INLCR, !negated);
+            return Ok(());
+        }
+        "igncr" => {
+            toggle_flag(&mut t.c_iflag, IGNCR, !negated);
+            return Ok(());
+        }
+        "icrnl" => {
+            toggle_flag(&mut t.c_iflag, ICRNL, !negated);
+            return Ok(());
+        }
+        "iuclc" => {
+            toggle_flag(&mut t.c_iflag, IUCLC, !negated);
+            return Ok(());
+        }
+        "ixon" => {
+            toggle_flag(&mut t.c_iflag, IXON, !negated);
+            return Ok(());
+        }
+        "ixany" => {
+            toggle_flag(&mut t.c_iflag, IXANY, !negated);
+            return Ok(());
+        }
+        "ixoff" => {
+            toggle_flag(&mut t.c_iflag, IXOFF, !negated);
+            return Ok(());
+        }
+        "imaxbel" => {
+            toggle_flag(&mut t.c_iflag, IMAXBEL, !negated);
+            return Ok(());
+        }
+        "iutf8" => {
+            toggle_flag(&mut t.c_iflag, IUTF8, !negated);
+            return Ok(());
+        }
 
         // ---- output flags ----
-        "opost"  => { toggle_flag(&mut t.c_oflag, OPOST,  !negated); return Ok(()); }
-        "olcuc"  => { toggle_flag(&mut t.c_oflag, OLCUC,  !negated); return Ok(()); }
-        "onlcr"  => { toggle_flag(&mut t.c_oflag, ONLCR,  !negated); return Ok(()); }
-        "ocrnl"  => { toggle_flag(&mut t.c_oflag, OCRNL,  !negated); return Ok(()); }
-        "onocr"  => { toggle_flag(&mut t.c_oflag, ONOCR,  !negated); return Ok(()); }
-        "onlret" => { toggle_flag(&mut t.c_oflag, ONLRET, !negated); return Ok(()); }
-        "ofill"  => { toggle_flag(&mut t.c_oflag, OFILL,  !negated); return Ok(()); }
-        "ofdel"  => { toggle_flag(&mut t.c_oflag, OFDEL,  !negated); return Ok(()); }
+        "opost" => {
+            toggle_flag(&mut t.c_oflag, OPOST, !negated);
+            return Ok(());
+        }
+        "olcuc" => {
+            toggle_flag(&mut t.c_oflag, OLCUC, !negated);
+            return Ok(());
+        }
+        "onlcr" => {
+            toggle_flag(&mut t.c_oflag, ONLCR, !negated);
+            return Ok(());
+        }
+        "ocrnl" => {
+            toggle_flag(&mut t.c_oflag, OCRNL, !negated);
+            return Ok(());
+        }
+        "onocr" => {
+            toggle_flag(&mut t.c_oflag, ONOCR, !negated);
+            return Ok(());
+        }
+        "onlret" => {
+            toggle_flag(&mut t.c_oflag, ONLRET, !negated);
+            return Ok(());
+        }
+        "ofill" => {
+            toggle_flag(&mut t.c_oflag, OFILL, !negated);
+            return Ok(());
+        }
+        "ofdel" => {
+            toggle_flag(&mut t.c_oflag, OFDEL, !negated);
+            return Ok(());
+        }
 
         // ---- control flags ----
-        "cs5"    => { t.c_cflag = (t.c_cflag & !CSIZE) | CS5;  return Ok(()); }
-        "cs6"    => { t.c_cflag = (t.c_cflag & !CSIZE) | CS6;  return Ok(()); }
-        "cs7"    => { t.c_cflag = (t.c_cflag & !CSIZE) | CS7;  return Ok(()); }
-        "cs8"    => { t.c_cflag = (t.c_cflag & !CSIZE) | CS8;  return Ok(()); }
-        "cstopb" => { toggle_flag(&mut t.c_cflag, CSTOPB, !negated); return Ok(()); }
-        "cread"  => { toggle_flag(&mut t.c_cflag, CREAD,  !negated); return Ok(()); }
-        "parenb" => { toggle_flag(&mut t.c_cflag, PARENB, !negated); return Ok(()); }
-        "parodd" => { toggle_flag(&mut t.c_cflag, PARODD, !negated); return Ok(()); }
-        "hupcl"  => { toggle_flag(&mut t.c_cflag, HUPCL,  !negated); return Ok(()); }
-        "clocal" => { toggle_flag(&mut t.c_cflag, CLOCAL, !negated); return Ok(()); }
-        "crtscts"=> { toggle_flag(&mut t.c_cflag, CRTSCTS,!negated); return Ok(()); }
+        "cs5" => {
+            t.c_cflag = (t.c_cflag & !CSIZE) | CS5;
+            return Ok(());
+        }
+        "cs6" => {
+            t.c_cflag = (t.c_cflag & !CSIZE) | CS6;
+            return Ok(());
+        }
+        "cs7" => {
+            t.c_cflag = (t.c_cflag & !CSIZE) | CS7;
+            return Ok(());
+        }
+        "cs8" => {
+            t.c_cflag = (t.c_cflag & !CSIZE) | CS8;
+            return Ok(());
+        }
+        "cstopb" => {
+            toggle_flag(&mut t.c_cflag, CSTOPB, !negated);
+            return Ok(());
+        }
+        "cread" => {
+            toggle_flag(&mut t.c_cflag, CREAD, !negated);
+            return Ok(());
+        }
+        "parenb" => {
+            toggle_flag(&mut t.c_cflag, PARENB, !negated);
+            return Ok(());
+        }
+        "parodd" => {
+            toggle_flag(&mut t.c_cflag, PARODD, !negated);
+            return Ok(());
+        }
+        "hupcl" => {
+            toggle_flag(&mut t.c_cflag, HUPCL, !negated);
+            return Ok(());
+        }
+        "clocal" => {
+            toggle_flag(&mut t.c_cflag, CLOCAL, !negated);
+            return Ok(());
+        }
+        "crtscts" => {
+            toggle_flag(&mut t.c_cflag, CRTSCTS, !negated);
+            return Ok(());
+        }
 
         // ---- local flags ----
-        "isig"   => { toggle_flag(&mut t.c_lflag, ISIG,   !negated); return Ok(()); }
-        "icanon" => { toggle_flag(&mut t.c_lflag, ICANON, !negated); return Ok(()); }
-        "xcase"  => { toggle_flag(&mut t.c_lflag, XCASE,  !negated); return Ok(()); }
-        "echo"   => { toggle_flag(&mut t.c_lflag, ECHO,   !negated); return Ok(()); }
-        "echoe"  => { toggle_flag(&mut t.c_lflag, ECHOE,  !negated); return Ok(()); }
-        "echok"  => { toggle_flag(&mut t.c_lflag, ECHOK,  !negated); return Ok(()); }
-        "echonl" => { toggle_flag(&mut t.c_lflag, ECHONL, !negated); return Ok(()); }
-        "noflsh" => { toggle_flag(&mut t.c_lflag, NOFLSH, !negated); return Ok(()); }
-        "tostop" => { toggle_flag(&mut t.c_lflag, TOSTOP, !negated); return Ok(()); }
-        "iexten" => { toggle_flag(&mut t.c_lflag, IEXTEN, !negated); return Ok(()); }
+        "isig" => {
+            toggle_flag(&mut t.c_lflag, ISIG, !negated);
+            return Ok(());
+        }
+        "icanon" => {
+            toggle_flag(&mut t.c_lflag, ICANON, !negated);
+            return Ok(());
+        }
+        "xcase" => {
+            toggle_flag(&mut t.c_lflag, XCASE, !negated);
+            return Ok(());
+        }
+        "echo" => {
+            toggle_flag(&mut t.c_lflag, ECHO, !negated);
+            return Ok(());
+        }
+        "echoe" => {
+            toggle_flag(&mut t.c_lflag, ECHOE, !negated);
+            return Ok(());
+        }
+        "echok" => {
+            toggle_flag(&mut t.c_lflag, ECHOK, !negated);
+            return Ok(());
+        }
+        "echonl" => {
+            toggle_flag(&mut t.c_lflag, ECHONL, !negated);
+            return Ok(());
+        }
+        "noflsh" => {
+            toggle_flag(&mut t.c_lflag, NOFLSH, !negated);
+            return Ok(());
+        }
+        "tostop" => {
+            toggle_flag(&mut t.c_lflag, TOSTOP, !negated);
+            return Ok(());
+        }
+        "iexten" => {
+            toggle_flag(&mut t.c_lflag, IEXTEN, !negated);
+            return Ok(());
+        }
 
         // ---- combo settings ----
         "raw" => {
             // Disable all input/output processing; raw mode.
-            t.c_iflag &= !(BRKINT | ICRNL | IGNBRK | IGNCR | IGNPAR | INLCR
-                | INPCK | ISTRIP | IXANY | IXOFF | IXON | PARMRK);
+            t.c_iflag &= !(BRKINT
+                | ICRNL
+                | IGNBRK
+                | IGNCR
+                | IGNPAR
+                | INLCR
+                | INPCK
+                | ISTRIP
+                | IXANY
+                | IXOFF
+                | IXON
+                | PARMRK);
             t.c_oflag &= !OPOST;
-            t.c_lflag &= !(ECHO | ECHOE | ECHOK | ECHONL | ICANON | IEXTEN | ISIG | NOFLSH | TOSTOP | XCASE);
+            t.c_lflag &=
+                !(ECHO | ECHOE | ECHOK | ECHONL | ICANON | IEXTEN | ISIG | NOFLSH | TOSTOP | XCASE);
             t.c_cflag &= !PARENB;
             t.c_cflag = (t.c_cflag & !CSIZE) | CS8;
             // VMIN=1, VTIME=0 for raw byte-at-a-time reads.
@@ -805,8 +962,7 @@ fn apply_setting(t: &mut Termios, setting: &str) -> Result<(), String> {
 
     // Bare numeric baud rate.
     if let Ok(rate) = setting.parse::<u32>() {
-        let enc = baud_encode(rate)
-            .ok_or_else(|| format!("unknown baud rate: {rate}"))?;
+        let enc = baud_encode(rate).ok_or_else(|| format!("unknown baud rate: {rate}"))?;
         t.c_ispeed = enc;
         t.c_ospeed = enc;
         return Ok(());
@@ -837,19 +993,19 @@ fn apply_sane(t: &mut Termios) {
 
     // Standard control characters.
     t.c_cc = [0u8; 32];
-    t.c_cc[VINTR] = 0x03;    // ^C
-    t.c_cc[VQUIT] = 0x1C;    // ^\
-    t.c_cc[VERASE] = 0x7F;   // DEL / ^?
-    t.c_cc[VKILL] = 0x15;    // ^U
-    t.c_cc[VEOF] = 0x04;     // ^D
-    t.c_cc[VSTART] = 0x11;   // ^Q
-    t.c_cc[VSTOP] = 0x13;    // ^S
-    t.c_cc[VSUSP] = 0x1A;    // ^Z
+    t.c_cc[VINTR] = 0x03; // ^C
+    t.c_cc[VQUIT] = 0x1C; // ^\
+    t.c_cc[VERASE] = 0x7F; // DEL / ^?
+    t.c_cc[VKILL] = 0x15; // ^U
+    t.c_cc[VEOF] = 0x04; // ^D
+    t.c_cc[VSTART] = 0x11; // ^Q
+    t.c_cc[VSTOP] = 0x13; // ^S
+    t.c_cc[VSUSP] = 0x1A; // ^Z
     t.c_cc[VEOL] = 0x00;
     t.c_cc[VREPRINT] = 0x12; // ^R
     t.c_cc[VDISCARD] = 0x0F; // ^O
-    t.c_cc[VWERASE] = 0x17;  // ^W
-    t.c_cc[VLNEXT] = 0x16;   // ^V
+    t.c_cc[VWERASE] = 0x17; // ^W
+    t.c_cc[VLNEXT] = 0x16; // ^V
     t.c_cc[VMIN] = 1;
     t.c_cc[VTIME] = 0;
 }
@@ -957,7 +1113,11 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     let remaining: &[String] = &args[i..];
 
     let action = parse_action(remaining)?;
-    Ok(Config { fd: 0, device, action })
+    Ok(Config {
+        fd: 0,
+        device,
+        action,
+    })
 }
 
 /// Parse the action from the remaining (post-device) arguments.
@@ -1018,8 +1178,8 @@ fn parse_action(args: &[String]) -> Result<Action, String> {
                     .ok_or("ispeed requires a baud rate")?
                     .parse()
                     .map_err(|_| "ispeed: invalid baud rate".to_string())?;
-                let enc = baud_encode(rate)
-                    .ok_or_else(|| format!("ispeed: unknown baud rate {rate}"))?;
+                let enc =
+                    baud_encode(rate).ok_or_else(|| format!("ispeed: unknown baud rate {rate}"))?;
                 tokens.push(Token::Ispeed(enc));
                 j += 1;
             }
@@ -1030,8 +1190,8 @@ fn parse_action(args: &[String]) -> Result<Action, String> {
                     .ok_or("ospeed requires a baud rate")?
                     .parse()
                     .map_err(|_| "ospeed: invalid baud rate".to_string())?;
-                let enc = baud_encode(rate)
-                    .ok_or_else(|| format!("ospeed: unknown baud rate {rate}"))?;
+                let enc =
+                    baud_encode(rate).ok_or_else(|| format!("ospeed: unknown baud rate {rate}"))?;
                 tokens.push(Token::Ospeed(enc));
                 j += 1;
             }
@@ -1042,7 +1202,10 @@ fn parse_action(args: &[String]) -> Result<Action, String> {
                         .get(j)
                         .ok_or_else(|| format!("{other} requires a value"))?;
                     let val = parse_cc(val_str)?;
-                    tokens.push(Token::CcAssign { index: idx, value: val });
+                    tokens.push(Token::CcAssign {
+                        index: idx,
+                        value: val,
+                    });
                     j += 1;
                 } else {
                     tokens.push(Token::Setting(other.to_string()));
@@ -1256,11 +1419,7 @@ mod tests {
     fn test_baud_roundtrip() {
         for &(rate, _) in BAUD_TABLE {
             let enc = baud_encode(rate).expect("all table rates must encode");
-            assert_eq!(
-                baud_decode(enc),
-                rate,
-                "roundtrip failed for rate {rate}"
-            );
+            assert_eq!(baud_decode(enc), rate, "roundtrip failed for rate {rate}");
         }
     }
 
@@ -1495,7 +1654,9 @@ mod tests {
     #[test]
     fn test_looks_like_saved_valid() {
         // A minimal string with 6+ colons and hex chars.
-        assert!(looks_like_saved("0000abcd:00000001:00000002:00000003:04:00001002:00001002"));
+        assert!(looks_like_saved(
+            "0000abcd:00000001:00000002:00000003:04:00001002:00001002"
+        ));
     }
 
     #[test]
@@ -1616,11 +1777,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_ispeed() {
-        let args = vec![
-            "stty".to_string(),
-            "ispeed".to_string(),
-            "9600".to_string(),
-        ];
+        let args = vec!["stty".to_string(), "ispeed".to_string(), "9600".to_string()];
         let cfg = parse_args(&args).unwrap();
         if let Action::Apply(tokens) = cfg.action {
             let enc = baud_encode(9600).unwrap();

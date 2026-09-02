@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_d365(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_d365(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microsoft Dynamics 365 (2024 Wave 2) + pac CLI 1.34 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Microsoft Dynamics 365 (2024 Wave 2) + pac CLI 1.34 (Slate OS)");
+        return 0;
+    }
     println!("Microsoft Dynamics 365 (2024 Wave 2) (Slate OS)");
     println!("  CRM apps: Sales, Customer Service, Field Service, Marketing, Project Ops");
     println!("  ERP apps: Finance, Supply Chain Mgmt, Commerce, HR, Project Operations");
@@ -41,7 +48,10 @@ fn run_d365(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "dynamics365".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "dynamics365".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_d365(&rest, &_prog);
     process::exit(code);
@@ -49,7 +59,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_d365};
+    use super::{basename, run_d365, strip_ext};
 
     #[test]
     fn basename_strips_path() {

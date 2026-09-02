@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("kit-cli 0.1.0 (creator-economy personality build)"); }
+fn print_version() {
+    println!("kit-cli 0.1.0 (creator-economy personality build)");
+}
 
 fn run_about() {
     println!("Kit (formerly ConvertKit, Inc.).");

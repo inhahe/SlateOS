@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("drip-cli 0.1.0 (ecommerce-CRM personality build)"); }
+fn print_version() {
+    println!("drip-cli 0.1.0 (ecommerce-CRM personality build)");
+}
 
 fn run_about() {
     println!("Drip (Drip Global, Inc.).");

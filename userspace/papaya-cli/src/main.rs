@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("papaya-cli 0.1.0 (global-payroll-orchestration personality build)"); }
+fn print_version() {
+    println!("papaya-cli 0.1.0 (global-payroll-orchestration personality build)");
+}
 
 fn run_about() {
     println!("Papaya Global Ltd.");

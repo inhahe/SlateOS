@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_wl_screenrec(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,11 +29,22 @@ fn run_wl_screenrec(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wl-screenrec v0.1 (Slate OS)"); return 0; }
-    let output = args.iter().skip_while(|a| a.as_str() != "-f").nth(1)
-        .map(|s| s.as_str()).unwrap_or("recording.mp4");
-    let codec = args.iter().skip_while(|a| a.as_str() != "--codec").nth(1)
-        .map(|s| s.as_str()).unwrap_or("h264");
+    if args.iter().any(|a| a == "--version") {
+        println!("wl-screenrec v0.1 (Slate OS)");
+        return 0;
+    }
+    let output = args
+        .iter()
+        .skip_while(|a| a.as_str() != "-f")
+        .nth(1)
+        .map(|s| s.as_str())
+        .unwrap_or("recording.mp4");
+    let codec = args
+        .iter()
+        .skip_while(|a| a.as_str() != "--codec")
+        .nth(1)
+        .map(|s| s.as_str())
+        .unwrap_or("h264");
     println!("wl-screenrec: recording to {} (codec={})", output, codec);
     println!("  Hardware encoding via VA-API");
     0
@@ -37,7 +52,10 @@ fn run_wl_screenrec(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "wl-screenrec".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "wl-screenrec".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_wl_screenrec(&rest, &prog);
     process::exit(code);
@@ -45,7 +63,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_wl_screenrec};
+    use super::{basename, run_wl_screenrec, strip_ext};
 
     #[test]
     fn basename_strips_path() {

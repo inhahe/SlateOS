@@ -36,35 +36,137 @@ fn _sample_chips() -> Vec<_ChipInfo> {
             name: "coretemp-isa-0000".to_string(),
             adapter: "ISA adapter".to_string(),
             readings: vec![
-                _SensorReading { label: "Package id 0".to_string(), value: 52.0, unit: "°C".to_string(), _high: Some(80.0), _crit: Some(100.0) },
-                _SensorReading { label: "Core 0".to_string(), value: 50.0, unit: "°C".to_string(), _high: Some(80.0), _crit: Some(100.0) },
-                _SensorReading { label: "Core 1".to_string(), value: 51.0, unit: "°C".to_string(), _high: Some(80.0), _crit: Some(100.0) },
-                _SensorReading { label: "Core 2".to_string(), value: 49.0, unit: "°C".to_string(), _high: Some(80.0), _crit: Some(100.0) },
-                _SensorReading { label: "Core 3".to_string(), value: 53.0, unit: "°C".to_string(), _high: Some(80.0), _crit: Some(100.0) },
+                _SensorReading {
+                    label: "Package id 0".to_string(),
+                    value: 52.0,
+                    unit: "°C".to_string(),
+                    _high: Some(80.0),
+                    _crit: Some(100.0),
+                },
+                _SensorReading {
+                    label: "Core 0".to_string(),
+                    value: 50.0,
+                    unit: "°C".to_string(),
+                    _high: Some(80.0),
+                    _crit: Some(100.0),
+                },
+                _SensorReading {
+                    label: "Core 1".to_string(),
+                    value: 51.0,
+                    unit: "°C".to_string(),
+                    _high: Some(80.0),
+                    _crit: Some(100.0),
+                },
+                _SensorReading {
+                    label: "Core 2".to_string(),
+                    value: 49.0,
+                    unit: "°C".to_string(),
+                    _high: Some(80.0),
+                    _crit: Some(100.0),
+                },
+                _SensorReading {
+                    label: "Core 3".to_string(),
+                    value: 53.0,
+                    unit: "°C".to_string(),
+                    _high: Some(80.0),
+                    _crit: Some(100.0),
+                },
             ],
         },
         _ChipInfo {
             name: "it8728-isa-0228".to_string(),
             adapter: "ISA adapter".to_string(),
             readings: vec![
-                _SensorReading { label: "Vcore".to_string(), value: 1.008, unit: "V".to_string(), _high: None, _crit: None },
-                _SensorReading { label: "+3.3V".to_string(), value: 3.312, unit: "V".to_string(), _high: None, _crit: None },
-                _SensorReading { label: "+5V".to_string(), value: 5.040, unit: "V".to_string(), _high: None, _crit: None },
-                _SensorReading { label: "+12V".to_string(), value: 12.096, unit: "V".to_string(), _high: None, _crit: None },
-                _SensorReading { label: "fan1".to_string(), value: 1200.0, unit: "RPM".to_string(), _high: None, _crit: None },
-                _SensorReading { label: "fan2".to_string(), value: 950.0, unit: "RPM".to_string(), _high: None, _crit: None },
-                _SensorReading { label: "temp1".to_string(), value: 38.0, unit: "°C".to_string(), _high: Some(85.0), _crit: Some(127.0) },
+                _SensorReading {
+                    label: "Vcore".to_string(),
+                    value: 1.008,
+                    unit: "V".to_string(),
+                    _high: None,
+                    _crit: None,
+                },
+                _SensorReading {
+                    label: "+3.3V".to_string(),
+                    value: 3.312,
+                    unit: "V".to_string(),
+                    _high: None,
+                    _crit: None,
+                },
+                _SensorReading {
+                    label: "+5V".to_string(),
+                    value: 5.040,
+                    unit: "V".to_string(),
+                    _high: None,
+                    _crit: None,
+                },
+                _SensorReading {
+                    label: "+12V".to_string(),
+                    value: 12.096,
+                    unit: "V".to_string(),
+                    _high: None,
+                    _crit: None,
+                },
+                _SensorReading {
+                    label: "fan1".to_string(),
+                    value: 1200.0,
+                    unit: "RPM".to_string(),
+                    _high: None,
+                    _crit: None,
+                },
+                _SensorReading {
+                    label: "fan2".to_string(),
+                    value: 950.0,
+                    unit: "RPM".to_string(),
+                    _high: None,
+                    _crit: None,
+                },
+                _SensorReading {
+                    label: "temp1".to_string(),
+                    value: 38.0,
+                    unit: "°C".to_string(),
+                    _high: Some(85.0),
+                    _crit: Some(127.0),
+                },
             ],
         },
         _ChipInfo {
             name: "amdgpu-pci-0100".to_string(),
             adapter: "PCI adapter".to_string(),
             readings: vec![
-                _SensorReading { label: "edge".to_string(), value: 45.0, unit: "°C".to_string(), _high: Some(100.0), _crit: Some(105.0) },
-                _SensorReading { label: "junction".to_string(), value: 47.0, unit: "°C".to_string(), _high: Some(110.0), _crit: Some(115.0) },
-                _SensorReading { label: "mem".to_string(), value: 42.0, unit: "°C".to_string(), _high: Some(100.0), _crit: Some(105.0) },
-                _SensorReading { label: "PPT".to_string(), value: 35.0, unit: "W".to_string(), _high: Some(203.0), _crit: None },
-                _SensorReading { label: "fan1".to_string(), value: 0.0, unit: "RPM".to_string(), _high: None, _crit: None },
+                _SensorReading {
+                    label: "edge".to_string(),
+                    value: 45.0,
+                    unit: "°C".to_string(),
+                    _high: Some(100.0),
+                    _crit: Some(105.0),
+                },
+                _SensorReading {
+                    label: "junction".to_string(),
+                    value: 47.0,
+                    unit: "°C".to_string(),
+                    _high: Some(110.0),
+                    _crit: Some(115.0),
+                },
+                _SensorReading {
+                    label: "mem".to_string(),
+                    value: 42.0,
+                    unit: "°C".to_string(),
+                    _high: Some(100.0),
+                    _crit: Some(105.0),
+                },
+                _SensorReading {
+                    label: "PPT".to_string(),
+                    value: 35.0,
+                    unit: "W".to_string(),
+                    _high: Some(203.0),
+                    _crit: None,
+                },
+                _SensorReading {
+                    label: "fan1".to_string(),
+                    value: 0.0,
+                    unit: "RPM".to_string(),
+                    _high: None,
+                    _crit: None,
+                },
             ],
         },
     ]
@@ -95,20 +197,38 @@ fn run_sensors(args: Vec<String>) -> i32 {
     let no_adapter = args.iter().any(|a| a == "-A" || a == "--no-adapter");
     let raw_mode = args.iter().any(|a| a == "-u");
 
-    let filter: Option<&str> = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let filter: Option<&str> = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     let chips = _sample_chips();
 
     if json_mode {
         println!("{{");
         for (ci, chip) in chips.iter().enumerate() {
             if let Some(f) = filter
-                && !chip.name.contains(f) { continue; }
+                && !chip.name.contains(f)
+            {
+                continue;
+            }
             println!("  \"{}\": {{", chip.name);
             println!("    \"Adapter\": \"{}\",", chip.adapter);
             for (ri, r) in chip.readings.iter().enumerate() {
-                let val = if fahrenheit && r.unit == "°C" { r.value * 9.0 / 5.0 + 32.0 } else { r.value };
-                println!("    \"{}\": {:.1}{}", r.label, val,
-                    if ri + 1 < chip.readings.len() { "," } else { "" });
+                let val = if fahrenheit && r.unit == "°C" {
+                    r.value * 9.0 / 5.0 + 32.0
+                } else {
+                    r.value
+                };
+                println!(
+                    "    \"{}\": {:.1}{}",
+                    r.label,
+                    val,
+                    if ri + 1 < chip.readings.len() {
+                        ","
+                    } else {
+                        ""
+                    }
+                );
             }
             println!("  }}{}", if ci + 1 < chips.len() { "," } else { "" });
         }
@@ -118,7 +238,10 @@ fn run_sensors(args: Vec<String>) -> i32 {
 
     for chip in &chips {
         if let Some(f) = filter
-            && !chip.name.contains(f) { continue; }
+            && !chip.name.contains(f)
+        {
+            continue;
+        }
         println!("{}", chip.name);
         if !no_adapter {
             println!("Adapter: {}", chip.adapter);
@@ -127,15 +250,23 @@ fn run_sensors(args: Vec<String>) -> i32 {
             if raw_mode {
                 println!("  {}:", r.label);
                 println!("    {}_input: {:.3}", r.label.replace(' ', "_"), r.value);
-                if let Some(h) = r._high { println!("    {}_max: {:.3}", r.label.replace(' ', "_"), h); }
-                if let Some(c) = r._crit { println!("    {}_crit: {:.3}", r.label.replace(' ', "_"), c); }
+                if let Some(h) = r._high {
+                    println!("    {}_max: {:.3}", r.label.replace(' ', "_"), h);
+                }
+                if let Some(c) = r._crit {
+                    println!("    {}_crit: {:.3}", r.label.replace(' ', "_"), c);
+                }
             } else {
                 let val = if fahrenheit && r.unit == "°C" {
                     r.value * 9.0 / 5.0 + 32.0
                 } else {
                     r.value
                 };
-                let unit = if fahrenheit && r.unit == "°C" { "°F" } else { r.unit.as_str() };
+                let unit = if fahrenheit && r.unit == "°C" {
+                    "°F"
+                } else {
+                    r.unit.as_str()
+                };
 
                 let extra = match (&r._high, &r._crit) {
                     (Some(h), Some(c)) => {
@@ -147,7 +278,11 @@ fn run_sensors(args: Vec<String>) -> i32 {
                         format!("  (high = {:.1}{}, crit = {:.1}{})", hv, unit, cv, unit)
                     }
                     (Some(h), None) => {
-                        let hv = if fahrenheit && r.unit == "°C" { h * 9.0 / 5.0 + 32.0 } else { *h };
+                        let hv = if fahrenheit && r.unit == "°C" {
+                            h * 9.0 / 5.0 + 32.0
+                        } else {
+                            *h
+                        };
                         format!("  (high = {:.1}{})", hv, unit)
                     }
                     _ => String::new(),
@@ -245,7 +380,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

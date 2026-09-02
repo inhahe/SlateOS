@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_pipedrive(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -26,7 +30,10 @@ fn run_pipedrive(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Pipedrive 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Pipedrive 2024 (Slate OS)");
+        return 0;
+    }
     println!("Pipedrive 2024 (Slate OS)");
     println!("  Vendor: Pipedrive OU (HQ Tallinn, Estonia + New York, NY)");
     println!("  Founders: Timo Rein, Urmas Purde, Ragnar Sass, Martin Henk, Martin Tajur (2010)");
@@ -68,13 +75,18 @@ fn run_pipedrive(args: &[String], _prog: &str) -> i32 {
     println!("           reporting/forecasting less powerful than Salesforce");
     println!("           Vista ownership has slowed product cadence vs founder era");
     println!("           add-on pricing nickel-and-dimes at smaller seat counts");
-    println!("  Differentiator: simplest, most beautiful sales-only pipeline tool — reps actually use it");
+    println!(
+        "  Differentiator: simplest, most beautiful sales-only pipeline tool — reps actually use it"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pipedrive".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pipedrive".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_pipedrive(&rest, &_prog);
     process::exit(code);
@@ -82,7 +94,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pipedrive};
+    use super::{basename, run_pipedrive, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -5,16 +5,24 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ibmcloud(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ibmcloud [OPTIONS]");
-        println!("IBM Cloud (Slate OS) — hybrid cloud + Red Hat OpenShift + watsonx AI (parent NYSE:IBM)");
+        println!(
+            "IBM Cloud (Slate OS) — hybrid cloud + Red Hat OpenShift + watsonx AI (parent NYSE:IBM)"
+        );
         println!();
         println!("Options:");
-        println!("  --openshift            Red Hat OpenShift on IBM Cloud (the strategic flagship)");
+        println!(
+            "  --openshift            Red Hat OpenShift on IBM Cloud (the strategic flagship)"
+        );
         println!("  --watsonx              watsonx AI platform (LLM training + governance)");
         println!("  --kubernetes           IBM Kubernetes Service (IKS)");
         println!("  --power-systems        Power Systems Virtual Server (POWER10 in cloud)");
@@ -22,10 +30,15 @@ fn run_ibmcloud(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("IBM Cloud 2024 (Slate OS) — ibmcloud CLI 2.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("IBM Cloud 2024 (Slate OS) — ibmcloud CLI 2.x");
+        return 0;
+    }
     println!("IBM Cloud 2024 (Slate OS) — Hybrid Cloud + Red Hat + watsonx AI");
     println!("  Vendor: IBM Corporation (Armonk, NY — NYSE:IBM since 1924, oldest IT company)");
-    println!("  Founder: Charles Ranlett Flint (CTR merger 1911) — renamed IBM 1924 by Thomas J. Watson Sr.");
+    println!(
+        "  Founder: Charles Ranlett Flint (CTR merger 1911) — renamed IBM 1924 by Thomas J. Watson Sr."
+    );
     println!("          Thomas J. Watson Sr.: CEO 1914-1956 — built IBM, motto 'THINK'");
     println!("          Thomas J. Watson Jr.: led System/360 mainframe revolution 1960s");
     println!("          Arvind Krishna: CEO 2020+ — engineer-CEO, hybrid cloud + AI bet");
@@ -38,12 +51,22 @@ fn run_ibmcloud(args: &[String], _prog: &str) -> i32 {
     println!("         IBM Cloud + Red Hat: ~$25B revenue (2024 estimate, Red Hat alone ~$7B+)");
     println!("         Dividend aristocrat (28+ years of increases)");
     println!("  Strategic position: 'hybrid + multi-cloud + AI — for enterprises':");
-    println!("                    pitch: 'open hybrid cloud + trusted AI — run anywhere, no lock-in'");
-    println!("                    target: large enterprise + regulated industries (finance + healthcare + government)");
-    println!("                    primary competitor: AWS, Azure, GCP (in hybrid; not pure public cloud anymore)");
+    println!(
+        "                    pitch: 'open hybrid cloud + trusted AI — run anywhere, no lock-in'"
+    );
+    println!(
+        "                    target: large enterprise + regulated industries (finance + healthcare + government)"
+    );
+    println!(
+        "                    primary competitor: AWS, Azure, GCP (in hybrid; not pure public cloud anymore)"
+    );
     println!("                    secondary: VMware (now Broadcom), Oracle Cloud");
-    println!("                    IBM Cloud's wedge: Red Hat OpenShift + mainframe heritage + regulated industries + watsonx");
-    println!("                    'IBM is not trying to be AWS' — focus on hybrid + enterprise + AI for governance-sensitive customers");
+    println!(
+        "                    IBM Cloud's wedge: Red Hat OpenShift + mainframe heritage + regulated industries + watsonx"
+    );
+    println!(
+        "                    'IBM is not trying to be AWS' — focus on hybrid + enterprise + AI for governance-sensitive customers"
+    );
     println!("                    'Cloud Pak' = OpenShift-based pre-packaged enterprise software");
     println!("  Pricing (transparent for cloud, custom for enterprise):");
     println!("    IBM Cloud VM: $0.04-$5/hr (various sizes)");
@@ -124,19 +147,25 @@ fn run_ibmcloud(args: &[String], _prog: &str) -> i32 {
     println!("    - Terraform + Ansible providers");
     println!("    - Kubernetes/OpenShift native");
     println!("    - SDKs: Java, JS/Node, Python, Go, Ruby, .NET, Swift");
-    println!("    - Strong enterprise consulting (IBM Consulting — formerly IGS — 100K+ consultants)");
+    println!(
+        "    - Strong enterprise consulting (IBM Consulting — formerly IGS — 100K+ consultants)"
+    );
     println!("    - Cloud Foundry (legacy Bluemix lineage) deprecation in progress");
     println!("    - watsonx.ai notebooks + Jupyter integration");
     println!("  IBM Cloud CLI usage:");
     println!("    ibmcloud login --sso                                     # SAML/SSO login");
     println!("    ibmcloud target -r us-south -g default");
     println!("    ibmcloud is instance-create my-vm us-south-1 cx2-2x4 vpc-id subnet-id image-id");
-    println!("    ibmcloud oc cluster create vpc-gen2 --name my-openshift --version 4.14_openshift");
+    println!(
+        "    ibmcloud oc cluster create vpc-gen2 --name my-openshift --version 4.14_openshift"
+    );
     println!("    ibmcloud ks cluster create vpc-gen2 --name my-iks --kube-version 1.28");
     println!("    ibmcloud cos bucket-create --bucket my-bucket --class smart");
     println!("    ibmcloud cdb create my-db --service postgresql --plan standard");
     println!("    ibmcloud pi instance create my-power --image AIX-72-1 --processors 1 --memory 4");
-    println!("    ibmcloud sl vs create --hostname my-vm --domain example.com --cpu 2 --memory 4096");
+    println!(
+        "    ibmcloud sl vs create --hostname my-vm --domain example.com --cpu 2 --memory 4096"
+    );
     println!("    ibmcloud cf push my-app                                  # legacy Cloud Foundry");
     println!("  Customers (enterprise + regulated industries):");
     println!("    - Major: Citi, BNP Paribas, HSBC, Deutsche Bank (banking)");
@@ -150,17 +179,24 @@ fn run_ibmcloud(args: &[String], _prog: &str) -> i32 {
     println!("           Cloud Foundry / legacy Bluemix in slow deprecation");
     println!("           watsonx is generation-2 AI bet — Watson Health (gen-1) divested 2022");
     println!("           POWER + Mainframe heritage limits modern developer mindshare");
-    println!("           IBM Consulting (formerly Global Services) creates services-vs-product tension");
+    println!(
+        "           IBM Consulting (formerly Global Services) creates services-vs-product tension"
+    );
     println!("           QRadar SIEM divested to Palo Alto 2024 = strategic narrowing");
     println!("           perception: 'enterprise-only, not for startups/devs'");
     println!("           pace of innovation slower than hyperscalers");
-    println!("  Differentiator: Red Hat OpenShift acquisition ($34B 2019 — largest software acq in history) + Power Systems + Z mainframe cloud (no one else has POWER10/z/OS in cloud) + watsonx AI platform with Granite open-source enterprise models + IBM Quantum (real quantum hardware) + IBM Consulting 100K+ consultants + Arvind Krishna engineer-CEO + Watson legacy + 95%+ of Fortune 500 customer relationships + hybrid + 'open hybrid cloud' messaging + 100+ year heritage — the enterprise hybrid cloud platform for regulated industries, mainframe migration paths, and AI governance — IBM is not trying to be AWS, it's trying to be the trusted hybrid AI platform");
+    println!(
+        "  Differentiator: Red Hat OpenShift acquisition ($34B 2019 — largest software acq in history) + Power Systems + Z mainframe cloud (no one else has POWER10/z/OS in cloud) + watsonx AI platform with Granite open-source enterprise models + IBM Quantum (real quantum hardware) + IBM Consulting 100K+ consultants + Arvind Krishna engineer-CEO + Watson legacy + 95%+ of Fortune 500 customer relationships + hybrid + 'open hybrid cloud' messaging + 100+ year heritage — the enterprise hybrid cloud platform for regulated industries, mainframe migration paths, and AI governance — IBM is not trying to be AWS, it's trying to be the trusted hybrid AI platform"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "ibmcloud".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "ibmcloud".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ibmcloud(&rest, &_prog);
     process::exit(code);
@@ -168,7 +204,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ibmcloud};
+    use super::{basename, run_ibmcloud, strip_ext};
 
     #[test]
     fn basename_strips_path() {

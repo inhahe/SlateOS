@@ -61,28 +61,46 @@ fn detect_personality(argv0: &[u8]) -> Personality {
         argv0
     };
 
-    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe") {
+    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe")
+    {
         &basename[..basename.len() - 4]
     } else {
         basename
     };
 
-    if name.eq_ignore_ascii_case(b"pvcreate") { Personality::Pvcreate }
-    else if name.eq_ignore_ascii_case(b"vgcreate") { Personality::Vgcreate }
-    else if name.eq_ignore_ascii_case(b"lvcreate") { Personality::Lvcreate }
-    else if name.eq_ignore_ascii_case(b"pvs") { Personality::Pvs }
-    else if name.eq_ignore_ascii_case(b"vgs") { Personality::Vgs }
-    else if name.eq_ignore_ascii_case(b"lvs") { Personality::Lvs }
-    else if name.eq_ignore_ascii_case(b"pvdisplay") { Personality::Pvdisplay }
-    else if name.eq_ignore_ascii_case(b"vgdisplay") { Personality::Vgdisplay }
-    else if name.eq_ignore_ascii_case(b"lvdisplay") { Personality::Lvdisplay }
-    else if name.eq_ignore_ascii_case(b"pvremove") { Personality::Pvremove }
-    else if name.eq_ignore_ascii_case(b"vgremove") { Personality::Vgremove }
-    else if name.eq_ignore_ascii_case(b"lvremove") { Personality::Lvremove }
-    else if name.eq_ignore_ascii_case(b"vgextend") { Personality::Vgextend }
-    else if name.eq_ignore_ascii_case(b"lvextend") { Personality::Lvextend }
-    else if name.eq_ignore_ascii_case(b"lvresize") { Personality::Lvresize }
-    else { Personality::Pvs } // Default to pvs
+    if name.eq_ignore_ascii_case(b"pvcreate") {
+        Personality::Pvcreate
+    } else if name.eq_ignore_ascii_case(b"vgcreate") {
+        Personality::Vgcreate
+    } else if name.eq_ignore_ascii_case(b"lvcreate") {
+        Personality::Lvcreate
+    } else if name.eq_ignore_ascii_case(b"pvs") {
+        Personality::Pvs
+    } else if name.eq_ignore_ascii_case(b"vgs") {
+        Personality::Vgs
+    } else if name.eq_ignore_ascii_case(b"lvs") {
+        Personality::Lvs
+    } else if name.eq_ignore_ascii_case(b"pvdisplay") {
+        Personality::Pvdisplay
+    } else if name.eq_ignore_ascii_case(b"vgdisplay") {
+        Personality::Vgdisplay
+    } else if name.eq_ignore_ascii_case(b"lvdisplay") {
+        Personality::Lvdisplay
+    } else if name.eq_ignore_ascii_case(b"pvremove") {
+        Personality::Pvremove
+    } else if name.eq_ignore_ascii_case(b"vgremove") {
+        Personality::Vgremove
+    } else if name.eq_ignore_ascii_case(b"lvremove") {
+        Personality::Lvremove
+    } else if name.eq_ignore_ascii_case(b"vgextend") {
+        Personality::Vgextend
+    } else if name.eq_ignore_ascii_case(b"lvextend") {
+        Personality::Lvextend
+    } else if name.eq_ignore_ascii_case(b"lvresize") {
+        Personality::Lvresize
+    } else {
+        Personality::Pvs
+    } // Default to pvs
 }
 
 // ── Data Structures ────────────────────────────────────────────────────
@@ -91,13 +109,13 @@ struct PhysicalVolume {
     device: Vec<u8>,
     uuid: Vec<u8>,
     vg_name: Vec<u8>,
-    pv_size: u64,       // bytes
-    pe_start: u64,      // offset where PEs begin
-    pe_count: u32,      // total PEs
-    pe_alloc: u32,      // allocated PEs
-    pe_size: u64,       // bytes per PE
-    format: Vec<u8>,    // "lvm2"
-    status: Vec<u8>,    // "allocatable"
+    pv_size: u64,    // bytes
+    pe_start: u64,   // offset where PEs begin
+    pe_count: u32,   // total PEs
+    pe_alloc: u32,   // allocated PEs
+    pe_size: u64,    // bytes per PE
+    format: Vec<u8>, // "lvm2"
+    status: Vec<u8>, // "allocatable"
 }
 
 struct VolumeGroup {
@@ -109,46 +127,46 @@ struct VolumeGroup {
     lv_count: u32,
     max_lv: u32,
     max_pv: u32,
-    pe_size: u64,       // bytes
+    pe_size: u64, // bytes
     pe_total: u32,
     pe_alloc: u32,
     pe_free: u32,
-    vg_size: u64,       // bytes
-    vg_free: u64,       // bytes
+    vg_size: u64, // bytes
+    vg_free: u64, // bytes
 }
 
 struct LogicalVolume {
     name: Vec<u8>,
     vg_name: Vec<u8>,
     uuid: Vec<u8>,
-    lv_size: u64,       // bytes
-    le_count: u32,      // logical extents
+    lv_size: u64,  // bytes
+    le_count: u32, // logical extents
     segments: u32,
-    status: Vec<u8>,    // "available"
-    lv_path: Vec<u8>,   // /dev/vg/lv
+    status: Vec<u8>,  // "available"
+    lv_path: Vec<u8>, // /dev/vg/lv
 }
 
 // ── Argument Parsing ───────────────────────────────────────────────────
 
 struct LvmArgs {
-    targets: Vec<Vec<u8>>,     // device paths, VG/LV names
-    name: Option<Vec<u8>>,     // -n, --name
-    size: Option<Vec<u8>>,     // -L, --size
-    extents: Option<Vec<u8>>,  // -l, --extents
-    pe_size: Option<Vec<u8>>,  // -s, --physicalextentsize
-    vg_name: Option<Vec<u8>>,  // for lvcreate: VG to create in
+    targets: Vec<Vec<u8>>,    // device paths, VG/LV names
+    name: Option<Vec<u8>>,    // -n, --name
+    size: Option<Vec<u8>>,    // -L, --size
+    extents: Option<Vec<u8>>, // -l, --extents
+    pe_size: Option<Vec<u8>>, // -s, --physicalextentsize
+    vg_name: Option<Vec<u8>>, // for lvcreate: VG to create in
     force: bool,
     yes: bool,
     verbose: bool,
     noheadings: bool,
     separator: Option<Vec<u8>>,
-    units: Option<u8>,         // b, k, m, g, t
+    units: Option<u8>, // b, k, m, g, t
     show_help: bool,
     show_version: bool,
     // lvextend/lvresize specific
     resizefs: bool,
     // lvcreate types
-    lv_type: Option<Vec<u8>>,  // linear, striped, mirror, raid1, etc.
+    lv_type: Option<Vec<u8>>, // linear, striped, mirror, raid1, etc.
     stripes: Option<u32>,
     stripe_size: Option<Vec<u8>>,
 }
@@ -260,12 +278,29 @@ fn parse_size_bytes(s: &[u8]) -> Option<u64> {
     // Check for suffix
     if let Some(&last) = s.last() {
         match last {
-            b'b' | b'B' => { num_end -= 1; multiplier = 1; }
-            b'k' | b'K' => { num_end -= 1; multiplier = 1024; }
-            b'm' | b'M' => { num_end -= 1; multiplier = 1024 * 1024; }
-            b'g' | b'G' => { num_end -= 1; multiplier = 1024 * 1024 * 1024; }
-            b't' | b'T' => { num_end -= 1; multiplier = 1024 * 1024 * 1024 * 1024; }
-            _ => { multiplier = 1024 * 1024; } // default to MiB if no suffix
+            b'b' | b'B' => {
+                num_end -= 1;
+                multiplier = 1;
+            }
+            b'k' | b'K' => {
+                num_end -= 1;
+                multiplier = 1024;
+            }
+            b'm' | b'M' => {
+                num_end -= 1;
+                multiplier = 1024 * 1024;
+            }
+            b'g' | b'G' => {
+                num_end -= 1;
+                multiplier = 1024 * 1024 * 1024;
+            }
+            b't' | b'T' => {
+                num_end -= 1;
+                multiplier = 1024 * 1024 * 1024 * 1024;
+            }
+            _ => {
+                multiplier = 1024 * 1024;
+            } // default to MiB if no suffix
         }
     }
 
@@ -335,7 +370,9 @@ fn cmd_pvcreate(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     if args.targets.is_empty() {
         print_err(b"pvcreate: no device specified\n");
@@ -371,7 +408,9 @@ fn cmd_pvs(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     let sep = args.separator.as_deref().unwrap_or(b"  ");
 
@@ -404,7 +443,9 @@ fn cmd_pvdisplay(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     if args.targets.is_empty() {
         // Display all PVs
@@ -439,7 +480,9 @@ fn cmd_pvremove(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     if args.targets.is_empty() {
         print_err(b"pvremove: no device specified\n");
@@ -468,7 +511,9 @@ fn cmd_vgcreate(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     if args.targets.len() < 2 {
         print_err(b"vgcreate: requires VG name and at least one PV\n");
@@ -512,7 +557,9 @@ fn cmd_vgs(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     let sep = args.separator.as_deref().unwrap_or(b"  ");
 
@@ -541,7 +588,9 @@ fn cmd_vgdisplay(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     if args.targets.is_empty() {
         print_out(b"  No volume groups found.\n");
@@ -578,7 +627,9 @@ fn cmd_vgremove(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     if args.targets.is_empty() {
         print_err(b"vgremove: no volume group specified\n");
@@ -600,7 +651,9 @@ fn cmd_vgextend(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     if args.targets.len() < 2 {
         print_err(b"vgextend: requires VG name and at least one PV\n");
@@ -633,7 +686,9 @@ fn cmd_lvcreate(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     if args.targets.is_empty() {
         print_err(b"lvcreate: no volume group specified\n");
@@ -665,7 +720,9 @@ fn cmd_lvs(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     let sep = args.separator.as_deref().unwrap_or(b"  ");
 
@@ -696,7 +753,9 @@ fn cmd_lvdisplay(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     if args.targets.is_empty() {
         print_out(b"  No logical volumes found.\n");
@@ -733,7 +792,9 @@ fn cmd_lvremove(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     if args.targets.is_empty() {
         print_err(b"lvremove: no logical volume specified\n");
@@ -760,7 +821,9 @@ fn cmd_lvextend(args: &LvmArgs) -> i32 {
         return 0;
     }
 
-    if args.show_version { return show_version(); }
+    if args.show_version {
+        return show_version();
+    }
 
     if args.targets.is_empty() {
         print_err(b"lvextend: no logical volume specified\n");
@@ -844,8 +907,13 @@ fn format_u64(mut n: u64) -> Vec<u8> {
 }
 
 fn trim_bytes(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n').unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+    let start = s
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+        .unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
         .map(|p| p + 1)
         .unwrap_or(start);
     if start >= end { &[] } else { &s[start..end] }
@@ -1033,11 +1101,23 @@ mod tests {
     fn test_pvcreate_no_device() {
         let args = LvmArgs {
             targets: Vec::new(),
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_pvcreate(&args), 1);
     }
@@ -1046,11 +1126,23 @@ mod tests {
     fn test_pvcreate_with_device() {
         let args = LvmArgs {
             targets: vec![b"/dev/sdb".to_vec()],
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_pvcreate(&args), 0);
     }
@@ -1059,11 +1151,23 @@ mod tests {
     fn test_pvs_ok() {
         let args = LvmArgs {
             targets: Vec::new(),
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_pvs(&args), 0);
     }
@@ -1072,11 +1176,23 @@ mod tests {
     fn test_pvremove_no_device() {
         let args = LvmArgs {
             targets: Vec::new(),
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_pvremove(&args), 1);
     }
@@ -1087,11 +1203,23 @@ mod tests {
     fn test_vgcreate_too_few_args() {
         let args = LvmArgs {
             targets: vec![b"myvg".to_vec()],
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_vgcreate(&args), 1);
     }
@@ -1100,11 +1228,23 @@ mod tests {
     fn test_vgcreate_ok() {
         let args = LvmArgs {
             targets: vec![b"myvg".to_vec(), b"/dev/sdb".to_vec()],
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_vgcreate(&args), 0);
     }
@@ -1113,11 +1253,23 @@ mod tests {
     fn test_vgremove_no_name() {
         let args = LvmArgs {
             targets: Vec::new(),
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_vgremove(&args), 1);
     }
@@ -1126,11 +1278,23 @@ mod tests {
     fn test_vgextend_too_few() {
         let args = LvmArgs {
             targets: vec![b"myvg".to_vec()],
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_vgextend(&args), 1);
     }
@@ -1141,11 +1305,23 @@ mod tests {
     fn test_lvcreate_no_vg() {
         let args = LvmArgs {
             targets: Vec::new(),
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_lvcreate(&args), 1);
     }
@@ -1154,11 +1330,23 @@ mod tests {
     fn test_lvcreate_no_size() {
         let args = LvmArgs {
             targets: vec![b"myvg".to_vec()],
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_lvcreate(&args), 1);
     }
@@ -1169,11 +1357,21 @@ mod tests {
             targets: vec![b"myvg".to_vec()],
             name: Some(b"mylv".to_vec()),
             size: Some(b"1G".to_vec()),
-            extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_lvcreate(&args), 0);
     }
@@ -1182,11 +1380,23 @@ mod tests {
     fn test_lvremove_no_lv() {
         let args = LvmArgs {
             targets: Vec::new(),
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_lvremove(&args), 1);
     }
@@ -1195,11 +1405,23 @@ mod tests {
     fn test_lvextend_no_lv() {
         let args = LvmArgs {
             targets: Vec::new(),
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_lvextend(&args), 1);
     }
@@ -1208,11 +1430,23 @@ mod tests {
     fn test_lvextend_no_size() {
         let args = LvmArgs {
             targets: vec![b"/dev/myvg/mylv".to_vec()],
-            name: None, size: None, extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            name: None,
+            size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_lvextend(&args), 1);
     }
@@ -1223,11 +1457,21 @@ mod tests {
             targets: vec![b"/dev/myvg/mylv".to_vec()],
             name: None,
             size: Some(b"+1G".to_vec()),
-            extents: None, pe_size: None,
-            vg_name: None, force: false, yes: false, verbose: false,
-            noheadings: false, separator: None, units: None,
-            show_help: false, show_version: false, resizefs: false,
-            lv_type: None, stripes: None, stripe_size: None,
+            extents: None,
+            pe_size: None,
+            vg_name: None,
+            force: false,
+            yes: false,
+            verbose: false,
+            noheadings: false,
+            separator: None,
+            units: None,
+            show_help: false,
+            show_version: false,
+            resizefs: false,
+            lv_type: None,
+            stripes: None,
+            stripe_size: None,
         };
         assert_eq!(cmd_lvextend(&args), 0);
     }
@@ -1242,7 +1486,13 @@ mod tests {
 
     #[test]
     fn test_parse_args_name_size() {
-        let args = parse_lvm_args(&[b"-n".to_vec(), b"test".to_vec(), b"-L".to_vec(), b"1G".to_vec(), b"myvg".to_vec()]);
+        let args = parse_lvm_args(&[
+            b"-n".to_vec(),
+            b"test".to_vec(),
+            b"-L".to_vec(),
+            b"1G".to_vec(),
+            b"myvg".to_vec(),
+        ]);
         assert_eq!(args.name.as_deref(), Some(b"test".as_slice()));
         assert_eq!(args.size.as_deref(), Some(b"1G".as_slice()));
         assert_eq!(&args.targets[0], b"myvg");

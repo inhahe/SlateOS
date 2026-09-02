@@ -67,10 +67,7 @@ fn parse_interrupts() -> (Vec<String>, Vec<IrqInfo>) {
     };
 
     // Parse CPU names from header.
-    let cpus: Vec<String> = header
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect();
+    let cpus: Vec<String> = header.split_whitespace().map(|s| s.to_string()).collect();
 
     let num_cpus = cpus.len();
     let mut irqs = Vec::new();
@@ -107,7 +104,9 @@ fn parse_interrupts() -> (Vec<String>, Vec<IrqInfo>) {
             let chip = parts[idx].to_string();
             idx += 1;
             // Skip optional hwirq field.
-            let hwirq = if idx < parts.len() && parts[idx].chars().all(|c| c.is_ascii_digit() || c == '-') {
+            let hwirq = if idx < parts.len()
+                && parts[idx].chars().all(|c| c.is_ascii_digit() || c == '-')
+            {
                 let h = parts[idx].to_string();
                 idx += 1;
                 h
@@ -146,10 +145,7 @@ fn parse_softirqs() -> (Vec<String>, Vec<IrqInfo>) {
         None => return (Vec::new(), Vec::new()),
     };
 
-    let cpus: Vec<String> = header
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect();
+    let cpus: Vec<String> = header.split_whitespace().map(|s| s.to_string()).collect();
 
     let num_cpus = cpus.len();
     let mut irqs = Vec::new();
@@ -210,7 +206,11 @@ fn column_value(irq: &IrqInfo, col: &str) -> String {
 }
 
 fn print_table(out: &mut io::StdoutLock<'_>, irqs: &[IrqInfo], opts: &LsirqOpts) {
-    let cols = if opts.columns.is_empty() { default_columns() } else { opts.columns.clone() };
+    let cols = if opts.columns.is_empty() {
+        default_columns()
+    } else {
+        opts.columns.clone()
+    };
 
     let mut widths: Vec<usize> = cols.iter().map(|c| c.len()).collect();
     for irq in irqs {
@@ -224,7 +224,9 @@ fn print_table(out: &mut io::StdoutLock<'_>, irqs: &[IrqInfo], opts: &LsirqOpts)
 
     if !opts.noheadings {
         for (i, col) in cols.iter().enumerate() {
-            if i > 0 { let _ = write!(out, " "); }
+            if i > 0 {
+                let _ = write!(out, " ");
+            }
             let _ = write!(out, "{:>width$}", col, width = widths[i]);
         }
         let _ = writeln!(out);
@@ -232,7 +234,9 @@ fn print_table(out: &mut io::StdoutLock<'_>, irqs: &[IrqInfo], opts: &LsirqOpts)
 
     for irq in irqs {
         for (i, col) in cols.iter().enumerate() {
-            if i > 0 { let _ = write!(out, " "); }
+            if i > 0 {
+                let _ = write!(out, " ");
+            }
             let val = column_value(irq, col);
             let _ = write!(out, "{:>width$}", val, width = widths[i]);
         }
@@ -245,7 +249,8 @@ fn print_json(out: &mut io::StdoutLock<'_>, irqs: &[IrqInfo]) {
     let _ = writeln!(out, "  \"interrupts\": [");
     for (i, irq) in irqs.iter().enumerate() {
         let comma = if i + 1 < irqs.len() { "," } else { "" };
-        let _ = writeln!(out,
+        let _ = writeln!(
+            out,
             "    {{\"irq\": \"{}\", \"total\": {}, \"chip_name\": \"{}\", \"name\": \"{}\"}}{comma}",
             irq.irq, irq.total, irq.chip_name, irq.name
         );
@@ -256,7 +261,8 @@ fn print_json(out: &mut io::StdoutLock<'_>, irqs: &[IrqInfo]) {
 
 fn print_pairs(out: &mut io::StdoutLock<'_>, irqs: &[IrqInfo]) {
     for irq in irqs {
-        let _ = writeln!(out,
+        let _ = writeln!(
+            out,
             "IRQ=\"{}\" TOTAL=\"{}\" CHIP=\"{}\" NAME=\"{}\"",
             irq.irq, irq.total, irq.chip_name, irq.name
         );
@@ -318,7 +324,10 @@ fn main() {
             "-o" | "--output" => {
                 i += 1;
                 if i < args.len() {
-                    opts.columns = args[i].split(',').map(|s| s.trim().to_uppercase()).collect();
+                    opts.columns = args[i]
+                        .split(',')
+                        .map(|s| s.trim().to_uppercase())
+                        .collect();
                 }
             }
             _ => {}

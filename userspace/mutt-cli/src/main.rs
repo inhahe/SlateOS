@@ -19,7 +19,10 @@ fn run_mutt(args: &[String], neo: bool) -> i32 {
     let name = if neo { "neomutt" } else { "mutt" };
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Usage: {} [OPTIONS] [-s subject] [-c cc] [-b bcc] [address ...]", name);
+        println!(
+            "Usage: {} [OPTIONS] [-s subject] [-c cc] [-b bcc] [address ...]",
+            name
+        );
         println!();
         println!("{} — text-based email client (Slate OS).", name);
         println!();
@@ -52,11 +55,13 @@ fn run_mutt(args: &[String], neo: bool) -> i32 {
     }
 
     // Check for -s (sending mode)
-    let subject = args.windows(2)
+    let subject = args
+        .windows(2)
         .find(|w| w[0] == "-s")
         .map(|w| w[1].as_str());
 
-    let addresses: Vec<&str> = args.iter()
+    let addresses: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-') && a.contains('@'))
         .map(|s| s.as_str())
         .collect();
@@ -66,7 +71,11 @@ fn run_mutt(args: &[String], neo: bool) -> i32 {
             eprintln!("{}: no recipients specified", name);
             return 1;
         }
-        println!("Sending mail to {} with subject \"{}\"...", addresses.join(", "), subj);
+        println!(
+            "Sending mail to {} with subject \"{}\"...",
+            addresses.join(", "),
+            subj
+        );
         println!("Message sent.");
     } else if let Some(pos) = args.iter().position(|a| a == "-f") {
         let mbox = args.get(pos + 1).map_or("INBOX", |s| s.as_str());
@@ -77,8 +86,11 @@ fn run_mutt(args: &[String], neo: bool) -> i32 {
         println!("  3     2024-01-14  friend@email.com     Re: Weekend plans");
         println!("  4     2024-01-13  news@list.org        Weekly digest #42");
     } else {
-        println!("{} version {} (Slate OS)", name,
-            if neo { "20240201" } else { "2.2.12" });
+        println!(
+            "{} version {} (Slate OS)",
+            name,
+            if neo { "20240201" } else { "2.2.12" }
+        );
         println!();
         println!("  1  N  2024-01-15  user@example.com     Hello");
         println!("  2     2024-01-14  admin@server.com     Notification");
@@ -89,7 +101,8 @@ fn run_mutt(args: &[String], neo: bool) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "mutt".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -103,7 +116,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mutt};
+    use super::{basename, run_mutt, strip_ext};
 
     #[test]
     fn basename_strips_path() {

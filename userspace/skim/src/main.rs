@@ -66,7 +66,13 @@ fn run_sk(args: Vec<String>) -> i32 {
     let filter_idx = args.iter().position(|a| a == "-f" || a == "--filter");
     if let Some(idx) = filter_idx {
         let query = args.get(idx + 1).map(|s| s.as_str()).unwrap_or("");
-        let items = ["src/main.rs", "src/lib.rs", "src/config.rs", "tests/test.rs", "Cargo.toml"];
+        let items = [
+            "src/main.rs",
+            "src/lib.rs",
+            "src/config.rs",
+            "tests/test.rs",
+            "Cargo.toml",
+        ];
         for item in &items {
             if item.contains(query) {
                 println!("{}", item);
@@ -118,7 +124,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sk};
+    use super::run_sk;
 
     #[test]
     fn help_exits_zero() {

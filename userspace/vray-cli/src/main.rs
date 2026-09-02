@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_vray(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_vray(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("V-Ray 6.20.05 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("V-Ray 6.20.05 (Slate OS)");
+        return 0;
+    }
     println!("V-Ray 6.20.05 (Slate OS)");
     println!("  Vendor: Chaos Software (Sofia, Bulgaria — founded 1997)");
     println!("  Founders: Peter Mitev, Vladimir Koylazov ('Vlado')");
@@ -34,8 +41,12 @@ fn run_vray(args: &[String], _prog: &str) -> i32 {
     println!("               Unreal Engine (V-Ray for UE), Blender (via plugin), Nuke");
     println!("  Pricing: V-Ray Solo $42.90/mo or $514.80/yr, V-Ray Premium $80.30/mo");
     println!("  Engines: hybrid CPU/GPU, biased (irradiance map) + unbiased (CUDA path tracing)");
-    println!("  V-Ray GPU: NVIDIA OptiX (RTX), NVIDIA CUDA fallback (multi-GPU scales near-linear)");
-    println!("  Materials: V-Ray Material (PBR), V-Ray ALSurface (skin), V-Ray Hair, V-Ray Fast SSS");
+    println!(
+        "  V-Ray GPU: NVIDIA OptiX (RTX), NVIDIA CUDA fallback (multi-GPU scales near-linear)"
+    );
+    println!(
+        "  Materials: V-Ray Material (PBR), V-Ray ALSurface (skin), V-Ray Hair, V-Ray Fast SSS"
+    );
     println!("  Geometry: V-Ray Proxy (.vrmesh, billions of polys), Displacement, V-Ray Fur");
     println!("  Lighting: V-Ray Sun/Sky, IES lights, dome HDRI, mesh lights, light cache");
     println!("  Awards: 2017 Academy Sci-Tech Award (Engineering Emmy) for V-Ray's impact on VFX");
@@ -47,7 +58,10 @@ fn run_vray(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "vray".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "vray".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_vray(&rest, &_prog);
     process::exit(code);
@@ -55,7 +69,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_vray};
+    use super::{basename, run_vray, strip_ext};
 
     #[test]
     fn basename_strips_path() {

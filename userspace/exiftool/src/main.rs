@@ -34,7 +34,11 @@ fn run_exiftool(args: Vec<String>) -> i32 {
 
     let json_mode = args.iter().any(|a| a == "-j" || a == "-json");
     let csv_mode = args.iter().any(|a| a == "-csv");
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-') || a.contains('=')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-') || a.contains('='))
+        .map(|s| s.as_str())
+        .collect();
 
     if files.is_empty() {
         eprintln!("No file specified. Use --help for usage.");
@@ -54,7 +58,10 @@ fn run_exiftool(args: Vec<String>) -> i32 {
 
     if json_mode {
         println!("[{{");
-        println!("  \"SourceFile\": \"{}\",", files.first().unwrap_or(&"photo.jpg"));
+        println!(
+            "  \"SourceFile\": \"{}\",",
+            files.first().unwrap_or(&"photo.jpg")
+        );
         println!("  \"FileName\": \"photo.jpg\",");
         println!("  \"FileSize\": \"4.2 MB\",");
         println!("  \"FileType\": \"JPEG\",");
@@ -76,7 +83,10 @@ fn run_exiftool(args: Vec<String>) -> i32 {
     if csv_mode {
         println!("SourceFile,FileName,FileSize,ImageWidth,ImageHeight,Make,Model");
         for f in &files {
-            println!("{},photo.jpg,4.2 MB,4032,3024,Slate OS Camera,Slate OS Phone 1", f);
+            println!(
+                "{},photo.jpg,4.2 MB,4032,3024,Slate OS Camera,Slate OS Phone 1",
+                f
+            );
         }
         return 0;
     }
@@ -117,7 +127,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_exiftool};
+    use super::run_exiftool;
 
     #[test]
     fn help_exits_zero() {

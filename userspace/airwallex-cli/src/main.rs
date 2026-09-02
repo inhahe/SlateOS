@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("airwallex-cli 0.1.0 (global-B2B-rails personality build)"); }
+fn print_version() {
+    println!("airwallex-cli 0.1.0 (global-B2B-rails personality build)");
+}
 
 fn run_about() {
     println!("Airwallex.");

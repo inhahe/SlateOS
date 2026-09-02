@@ -34,12 +34,20 @@ fn run_pg_dump(args: &[String]) -> i32 {
         return 0;
     }
 
-    let db = args.iter().rfind(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("mydb");
-    let output = args.windows(2).find(|w| w[0] == "-f" || w[0] == "--file")
+    let db = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("mydb");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-f" || w[0] == "--file")
         .map(|w| w[1].as_str());
-    let format = args.windows(2).find(|w| w[0] == "-F" || w[0] == "--format")
-        .map(|w| w[1].as_str()).unwrap_or("p");
+    let format = args
+        .windows(2)
+        .find(|w| w[0] == "-F" || w[0] == "--format")
+        .map(|w| w[1].as_str())
+        .unwrap_or("p");
 
     if let Some(f) = output {
         println!("pg_dump: dumping database \"{}\" to {}", db, f);
@@ -86,10 +94,16 @@ fn run_pg_restore(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter().rfind(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("dump.sql");
-    let db = args.windows(2).find(|w| w[0] == "-d" || w[0] == "--dbname")
-        .map(|w| w[1].as_str()).unwrap_or("mydb");
+    let file = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("dump.sql");
+    let db = args
+        .windows(2)
+        .find(|w| w[0] == "-d" || w[0] == "--dbname")
+        .map(|w| w[1].as_str())
+        .unwrap_or("mydb");
 
     println!("pg_restore: restoring {} to database {}", file, db);
     println!("pg_restore: done.");
@@ -119,7 +133,8 @@ fn run_pg_dumpall(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "pg_dump".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -134,7 +149,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pg_dump};
+    use super::{basename, run_pg_dump, strip_ext};
 
     #[test]
     fn basename_strips_path() {

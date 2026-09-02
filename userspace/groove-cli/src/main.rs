@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("groove-cli 0.1.0 (bootstrapped-help-desk personality build)"); }
+fn print_version() {
+    println!("groove-cli 0.1.0 (bootstrapped-help-desk personality build)");
+}
 
 fn run_about() {
     println!("Groove (GrooveHQ, Inc.).");

@@ -58,28 +58,138 @@ const EXT4_CASEFOLD_FL: u32 = 0x4000_0000;
 const EXT4_PROJINHERIT_FL: u32 = 0x2000_0000;
 
 const ATTR_DEFS: &[AttrDef] = &[
-    AttrDef { letter: 's', flag: EXT4_SECRM_FL, name: "Secure_Deletion", description: "secure deletion" },
-    AttrDef { letter: 'u', flag: EXT4_UNRM_FL, name: "Undelete", description: "undelete" },
-    AttrDef { letter: 'c', flag: EXT4_COMPR_FL, name: "Compression_Requested", description: "compress" },
-    AttrDef { letter: 'S', flag: EXT4_SYNC_FL, name: "Synchronous_Updates", description: "synchronous updates" },
-    AttrDef { letter: 'i', flag: EXT4_IMMUTABLE_FL, name: "Immutable", description: "immutable" },
-    AttrDef { letter: 'a', flag: EXT4_APPEND_FL, name: "Append_Only", description: "append only" },
-    AttrDef { letter: 'd', flag: EXT4_NODUMP_FL, name: "No_Dump", description: "no dump" },
-    AttrDef { letter: 'A', flag: EXT4_NOATIME_FL, name: "No_Atime", description: "no atime updates" },
-    AttrDef { letter: 'Z', flag: EXT4_DIRTY_FL, name: "Dirty", description: "dirty (compressed)" },
-    AttrDef { letter: 'B', flag: EXT4_COMPRBLK_FL, name: "Compressed_Dirty_File", description: "compressed dirty file" },
-    AttrDef { letter: 'X', flag: EXT4_NOCOMPR_FL, name: "Compression_Raw_Access", description: "raw access to compressed data" },
-    AttrDef { letter: 'E', flag: EXT4_ENCRYPT_FL, name: "Encrypted", description: "encrypted" },
-    AttrDef { letter: 'I', flag: EXT4_INDEX_FL, name: "Indexed_Directory", description: "indexed directory (htree)" },
-    AttrDef { letter: 'j', flag: EXT4_JOURNAL_DATA_FL, name: "Journal_Data", description: "journal data" },
-    AttrDef { letter: 't', flag: EXT4_NOTAIL_FL, name: "No_Tailmerging", description: "no tail-merging" },
-    AttrDef { letter: 'D', flag: EXT4_DIRSYNC_FL, name: "Synchronous_Directory_Updates", description: "synchronous directory updates" },
-    AttrDef { letter: 'T', flag: EXT4_TOPDIR_FL, name: "Top_of_Directory_Hierarchies", description: "top of directory hierarchy" },
-    AttrDef { letter: 'e', flag: EXT4_EXTENTS_FL, name: "Extents", description: "uses extents" },
-    AttrDef { letter: 'V', flag: EXT4_VERITY_FL, name: "Verity", description: "verity protected" },
-    AttrDef { letter: 'C', flag: EXT4_NOCOW_FL, name: "No_COW", description: "no copy on write" },
-    AttrDef { letter: 'F', flag: EXT4_CASEFOLD_FL, name: "Casefold", description: "casefolded directory" },
-    AttrDef { letter: 'P', flag: EXT4_PROJINHERIT_FL, name: "Project_Hierarchy", description: "project hierarchy" },
+    AttrDef {
+        letter: 's',
+        flag: EXT4_SECRM_FL,
+        name: "Secure_Deletion",
+        description: "secure deletion",
+    },
+    AttrDef {
+        letter: 'u',
+        flag: EXT4_UNRM_FL,
+        name: "Undelete",
+        description: "undelete",
+    },
+    AttrDef {
+        letter: 'c',
+        flag: EXT4_COMPR_FL,
+        name: "Compression_Requested",
+        description: "compress",
+    },
+    AttrDef {
+        letter: 'S',
+        flag: EXT4_SYNC_FL,
+        name: "Synchronous_Updates",
+        description: "synchronous updates",
+    },
+    AttrDef {
+        letter: 'i',
+        flag: EXT4_IMMUTABLE_FL,
+        name: "Immutable",
+        description: "immutable",
+    },
+    AttrDef {
+        letter: 'a',
+        flag: EXT4_APPEND_FL,
+        name: "Append_Only",
+        description: "append only",
+    },
+    AttrDef {
+        letter: 'd',
+        flag: EXT4_NODUMP_FL,
+        name: "No_Dump",
+        description: "no dump",
+    },
+    AttrDef {
+        letter: 'A',
+        flag: EXT4_NOATIME_FL,
+        name: "No_Atime",
+        description: "no atime updates",
+    },
+    AttrDef {
+        letter: 'Z',
+        flag: EXT4_DIRTY_FL,
+        name: "Dirty",
+        description: "dirty (compressed)",
+    },
+    AttrDef {
+        letter: 'B',
+        flag: EXT4_COMPRBLK_FL,
+        name: "Compressed_Dirty_File",
+        description: "compressed dirty file",
+    },
+    AttrDef {
+        letter: 'X',
+        flag: EXT4_NOCOMPR_FL,
+        name: "Compression_Raw_Access",
+        description: "raw access to compressed data",
+    },
+    AttrDef {
+        letter: 'E',
+        flag: EXT4_ENCRYPT_FL,
+        name: "Encrypted",
+        description: "encrypted",
+    },
+    AttrDef {
+        letter: 'I',
+        flag: EXT4_INDEX_FL,
+        name: "Indexed_Directory",
+        description: "indexed directory (htree)",
+    },
+    AttrDef {
+        letter: 'j',
+        flag: EXT4_JOURNAL_DATA_FL,
+        name: "Journal_Data",
+        description: "journal data",
+    },
+    AttrDef {
+        letter: 't',
+        flag: EXT4_NOTAIL_FL,
+        name: "No_Tailmerging",
+        description: "no tail-merging",
+    },
+    AttrDef {
+        letter: 'D',
+        flag: EXT4_DIRSYNC_FL,
+        name: "Synchronous_Directory_Updates",
+        description: "synchronous directory updates",
+    },
+    AttrDef {
+        letter: 'T',
+        flag: EXT4_TOPDIR_FL,
+        name: "Top_of_Directory_Hierarchies",
+        description: "top of directory hierarchy",
+    },
+    AttrDef {
+        letter: 'e',
+        flag: EXT4_EXTENTS_FL,
+        name: "Extents",
+        description: "uses extents",
+    },
+    AttrDef {
+        letter: 'V',
+        flag: EXT4_VERITY_FL,
+        name: "Verity",
+        description: "verity protected",
+    },
+    AttrDef {
+        letter: 'C',
+        flag: EXT4_NOCOW_FL,
+        name: "No_COW",
+        description: "no copy on write",
+    },
+    AttrDef {
+        letter: 'F',
+        flag: EXT4_CASEFOLD_FL,
+        name: "Casefold",
+        description: "casefolded directory",
+    },
+    AttrDef {
+        letter: 'P',
+        flag: EXT4_PROJINHERIT_FL,
+        name: "Project_Hierarchy",
+        description: "project hierarchy",
+    },
 ];
 
 // ============================================================================
@@ -143,9 +253,10 @@ fn attr_file_path(file: &str) -> String {
 fn read_attrs(file: &str) -> u32 {
     let attr_path = attr_file_path(file);
     if let Ok(content) = fs::read_to_string(&attr_path)
-        && let Ok(val) = u32::from_str_radix(content.trim(), 16) {
-            return val;
-        }
+        && let Ok(val) = u32::from_str_radix(content.trim(), 16)
+    {
+        return val;
+    }
     // Default: extents flag is commonly set on ext4.
     if fs::metadata(file).map(|m| m.is_file()).unwrap_or(false) {
         EXT4_EXTENTS_FL
@@ -265,10 +376,11 @@ fn list_attrs(out: &mut io::StdoutLock<'_>, path: &str, opts: &LsattrOpts, depth
                 print_file_attrs(out, entry_path, opts);
                 if opts.recursive
                     && let Ok(m) = fs::symlink_metadata(entry_path)
-                        && m.is_dir() {
-                            let _ = writeln!(out);
-                            list_attrs(out, entry_path, opts, depth + 1);
-                        }
+                    && m.is_dir()
+                {
+                    let _ = writeln!(out);
+                    list_attrs(out, entry_path, opts, depth + 1);
+                }
             }
         }
     } else {
@@ -442,13 +554,15 @@ fn apply_attrs(path: &str, add: u32, remove: u32, set: Option<u32>, opts: &Chatt
     }
 
     // Recurse into directories.
-    if opts.recursive && metadata.is_dir()
-        && let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let entry_path = entry.path().to_string_lossy().to_string();
-                apply_attrs(&entry_path, add, remove, set, opts);
-            }
+    if opts.recursive
+        && metadata.is_dir()
+        && let Ok(entries) = fs::read_dir(path)
+    {
+        for entry in entries.flatten() {
+            let entry_path = entry.path().to_string_lossy().to_string();
+            apply_attrs(&entry_path, add, remove, set, opts);
         }
+    }
 }
 
 // ============================================================================
@@ -582,10 +696,7 @@ mod tests {
     #[test]
     fn test_parse_attr_spec_multiple() {
         let (add, _, _) = parse_attr_spec("+iad").unwrap();
-        assert_eq!(
-            add,
-            EXT4_IMMUTABLE_FL | EXT4_APPEND_FL | EXT4_NODUMP_FL
-        );
+        assert_eq!(add, EXT4_IMMUTABLE_FL | EXT4_APPEND_FL | EXT4_NODUMP_FL);
     }
 
     #[test]

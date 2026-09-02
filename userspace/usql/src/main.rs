@@ -44,11 +44,14 @@ fn run_usql(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let dsn = args.iter().rfind(|a| !a.starts_with('-'))
+    let dsn = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("postgres://localhost/postgres");
 
-    let execute = args.windows(2)
+    let execute = args
+        .windows(2)
         .find(|w| w[0] == "-c" || w[0] == "--command")
         .map(|w| w[1].as_str());
 
@@ -90,7 +93,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_usql};
+    use super::run_usql;
 
     #[test]
     fn help_exits_zero() {

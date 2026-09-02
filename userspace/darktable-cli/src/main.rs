@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_dt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_dt(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("darktable 5.0.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("darktable 5.0.0 (Slate OS)");
+        return 0;
+    }
     println!("darktable 5.0.0 (Slate OS)");
     println!("  License: GPL-3.0-or-later (free software, openly developed on GitHub)");
     println!("  Origin: started 2009 by Henrik Andersson + Pascal de Bruijn — Linux RAW workflow");
@@ -31,7 +38,9 @@ fn run_dt(args: &[String], _prog: &str) -> i32 {
     println!("  Platforms: Linux (1st-class), macOS, Windows");
     println!("  Engine: non-destructive — operations stored as XMP sidecars + SQLite DB");
     println!("  Modules: 60+ image-operation modules — exposure, color balance, denoise, lens,");
-    println!("          retouch, defringe, filmic RGB (scene-referred tone mapping), diffuse/sharpen");
+    println!(
+        "          retouch, defringe, filmic RGB (scene-referred tone mapping), diffuse/sharpen"
+    );
     println!("  Camera support: 800+ camera models (read from libraw + custom RAW samples)");
     println!("  Pipeline: scene-referred (filmic RGB), allows HDR-style high dynamic range edits");
     println!("  Tethering: live capture from supported cameras via gphoto2");
@@ -44,7 +53,10 @@ fn run_dt(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "darktable".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "darktable".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_dt(&rest, &_prog);
     process::exit(code);
@@ -52,7 +64,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dt};
+    use super::{basename, run_dt, strip_ext};
 
     #[test]
     fn basename_strips_path() {

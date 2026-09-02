@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_tray(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,12 +25,17 @@ fn run_tray(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tray.io 2024 (Slate OS) — Merlin GPT 1.0"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Tray.io 2024 (Slate OS) — Merlin GPT 1.0");
+        return 0;
+    }
     println!("Tray.io 2024 (Slate OS) — General Automation Platform");
     println!("  Vendor: Tray.io, Inc. (San Francisco + London, private)");
     println!("  Founders: Rich Waldron + Alistair Russell + Dom Lewis, 2012");
     println!("          founded in London — early UK-founded iPaaS unicorn");
-    println!("          'general automation platform' positioning (vs 'integration platform' framing)");
+    println!(
+        "          'general automation platform' positioning (vs 'integration platform' framing)"
+    );
     println!("          Rich Waldron: long-time CEO");
     println!("          dual HQ (San Francisco + London); strong European presence");
     println!("  Private funding:");
@@ -35,12 +44,22 @@ fn run_tray(args: &[String], _prog: &str) -> i32 {
     println!("         Spark Capital, GGV, Salesforce Ventures, ServiceNow Ventures backers");
     println!("         valuation likely lower in 2023-2024 down rounds (private)");
     println!("         estimated $100M+ ARR (private)");
-    println!("  Strategic position: 'general automation — AI-driven, developer-friendly, embedded':");
-    println!("                    pitch: 'connect-everything platform built for the AI era + composability'");
+    println!(
+        "  Strategic position: 'general automation — AI-driven, developer-friendly, embedded':"
+    );
+    println!(
+        "                    pitch: 'connect-everything platform built for the AI era + composability'"
+    );
     println!("                    target: tech-forward enterprise + SaaS vendors (Embedded)");
-    println!("                    primary competitor: Workato, MuleSoft, Boomi, Zapier (upper-end)");
-    println!("                    secondary: Celigo, Jitterbit, n8n (open-source), Microsoft Power Automate");
-    println!("                    Tray's wedge: developer-friendly + Merlin AI (LLM-powered) + Embedded OEM business");
+    println!(
+        "                    primary competitor: Workato, MuleSoft, Boomi, Zapier (upper-end)"
+    );
+    println!(
+        "                    secondary: Celigo, Jitterbit, n8n (open-source), Microsoft Power Automate"
+    );
+    println!(
+        "                    Tray's wedge: developer-friendly + Merlin AI (LLM-powered) + Embedded OEM business"
+    );
     println!("                    pivot to 'GenAI-native' positioning 2023-2024 with Merlin");
     println!("  Pricing:");
     println!("    Starter: $25K-$50K/yr");
@@ -79,9 +98,13 @@ fn run_tray(args: &[String], _prog: &str) -> i32 {
     println!("    - Merlin = LLM agent platform that uses Tray workflows as 'tools'");
     println!("    - Natural-language workflow generation + AI-augmented business processes");
     println!("    - Aligned with the 'AI agents that do work' narrative");
-    println!("    - High-variance bet: success = category leadership; failure = lost focus on classic iPaaS");
+    println!(
+        "    - High-variance bet: success = category leadership; failure = lost focus on classic iPaaS"
+    );
     println!("  Integrations (700+ connectors):");
-    println!("    - SaaS: Salesforce, HubSpot, NetSuite, Workday, ServiceNow, Slack, Microsoft 365");
+    println!(
+        "    - SaaS: Salesforce, HubSpot, NetSuite, Workday, ServiceNow, Slack, Microsoft 365"
+    );
     println!("    - Marketing: Marketo, Eloqua, Mailchimp, Pardot, Iterable, Braze");
     println!("    - CRM: Salesforce (deep), HubSpot, Pipedrive, Close");
     println!("    - Database: PostgreSQL, MySQL, Snowflake, BigQuery, Redshift, MongoDB");
@@ -109,16 +132,25 @@ fn run_tray(args: &[String], _prog: &str) -> i32 {
     println!("           classic iPaaS feature parity not as strong as Workato");
     println!("           connector count (700) below Workato (1,000) and Zapier (7,000)");
     println!("           Embedded business material but margin profile uncertain");
-    println!("           valuation pressure private market: $1.3B unicorn likely needs to grow into");
-    println!("           AI/Merlin a follower-not-leader move — OpenAI + Anthropic own the LLM layer");
+    println!(
+        "           valuation pressure private market: $1.3B unicorn likely needs to grow into"
+    );
+    println!(
+        "           AI/Merlin a follower-not-leader move — OpenAI + Anthropic own the LLM layer"
+    );
     println!("           competition with Workato Embedded particularly intense");
-    println!("  Differentiator: 'general automation platform' positioning + Tray Embedded (large OEM business — SaaS vendors embed Tray for their integrations) + Tray Merlin (early GenAI-native iPaaS bet, 2024) + JavaScript steps for developer-friendly automation + 700+ connectors + UK + US dual HQ — the developer-friendly iPaaS that's betting on the AI-agent future and has carved out a material OEM business white-labeling integrations for SaaS vendors");
+    println!(
+        "  Differentiator: 'general automation platform' positioning + Tray Embedded (large OEM business — SaaS vendors embed Tray for their integrations) + Tray Merlin (early GenAI-native iPaaS bet, 2024) + JavaScript steps for developer-friendly automation + 700+ connectors + UK + US dual HQ — the developer-friendly iPaaS that's betting on the AI-agent future and has carved out a material OEM business white-labeling integrations for SaaS vendors"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "tray".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "tray".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_tray(&rest, &_prog);
     process::exit(code);
@@ -126,7 +158,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_tray};
+    use super::{basename, run_tray, strip_ext};
 
     #[test]
     fn basename_strips_path() {

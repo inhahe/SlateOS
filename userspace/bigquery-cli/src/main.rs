@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bq(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,11 +25,16 @@ fn run_bq(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("BigQuery 2024 (Slate OS) — bq CLI 2.x (gcloud bigquery)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("BigQuery 2024 (Slate OS) — bq CLI 2.x (gcloud bigquery)");
+        return 0;
+    }
     println!("BigQuery 2024 (Slate OS) — Serverless Petabyte-Scale Data Warehouse");
     println!("  Vendor: Google Cloud (part of Alphabet/Google — NASDAQ:GOOGL/GOOG since 2004)");
     println!("  Origins: Dremel internal paper (Google 2010) → BigQuery launched 2010 → GA 2012");
-    println!("          Dremel paper: 'Dremel: Interactive Analysis of Web-Scale Datasets' (Sergey Melnik et al, 2010)");
+    println!(
+        "          Dremel paper: 'Dremel: Interactive Analysis of Web-Scale Datasets' (Sergey Melnik et al, 2010)"
+    );
     println!("          One of the most influential database papers of the 2010s");
     println!("          Designed for: thousands of nodes scanning trillions of rows in seconds");
     println!("          Now part of Google Cloud Platform (GCP) — Thomas Kurian (CEO since 2018)");
@@ -36,23 +45,39 @@ fn run_bq(args: &[String], _prog: &str) -> i32 {
     println!("         BigQuery: estimated ~$5-10B annual revenue inside GCP");
     println!("         BigQuery is GCP's strongest/most-loved product");
     println!("         Alphabet market cap: ~$2T+ range");
-    println!("  Strategic position: 'serverless analytics — separation of storage + compute, scale to petabytes':");
-    println!("                    pitch: 'no clusters to manage, pay for what you scan, query petabytes in seconds'");
-    println!("                    target: enterprises + dev-teams running analytics workloads of any size");
-    println!("                    primary competitor: Snowflake, Databricks SQL, Redshift, Synapse");
+    println!(
+        "  Strategic position: 'serverless analytics — separation of storage + compute, scale to petabytes':"
+    );
+    println!(
+        "                    pitch: 'no clusters to manage, pay for what you scan, query petabytes in seconds'"
+    );
+    println!(
+        "                    target: enterprises + dev-teams running analytics workloads of any size"
+    );
+    println!(
+        "                    primary competitor: Snowflake, Databricks SQL, Redshift, Synapse"
+    );
     println!("                    secondary: Athena (AWS), Trino/Presto self-hosted");
-    println!("                    BigQuery's wedge: truly serverless (no warehouse sizing), built on Google's Borg + Colossus");
-    println!("                    'Dremel + Colossus' architectural foundation = hard for competitors to replicate");
+    println!(
+        "                    BigQuery's wedge: truly serverless (no warehouse sizing), built on Google's Borg + Colossus"
+    );
+    println!(
+        "                    'Dremel + Colossus' architectural foundation = hard for competitors to replicate"
+    );
     println!("                    GA4 Analytics adoption => widely-adopted BigQuery on-ramp");
     println!("  Pricing (on-demand or flat-rate):");
     println!("    On-demand: $5/TB scanned (first 1 TB/month free)");
     println!("    Storage: $0.02/GB-month (active) / $0.01/GB-month (long-term)");
-    println!("    Editions (flat-rate, 2023+): Standard $0.04/slot-hr, Enterprise $0.06, Enterprise Plus $0.10");
+    println!(
+        "    Editions (flat-rate, 2023+): Standard $0.04/slot-hr, Enterprise $0.06, Enterprise Plus $0.10"
+    );
     println!("    Streaming inserts: $0.01 per 200MB");
     println!("    BigQuery ML training: scanned bytes + slot consumption");
     println!("    BI Engine: $0.04/GB-hour");
     println!("    typically cheaper than Snowflake for sporadic/spiky workloads");
-    println!("    typically more expensive than Snowflake for sustained large workloads (without editions)");
+    println!(
+        "    typically more expensive than Snowflake for sustained large workloads (without editions)"
+    );
     println!("  Architecture (the Dremel inheritance):");
     println!("    - Columnar storage (Capacitor format)");
     println!("    - Storage on Colossus (Google's distributed file system)");
@@ -142,17 +167,24 @@ fn run_bq(args: &[String], _prog: &str) -> i32 {
     println!("           on-demand $5/TB pricing surprises customers on large scans");
     println!("           Editions model (2023) addressed cost predictability");
     println!("           lock-in concern: deeply tied to GCP, harder to migrate off");
-    println!("           Standard SQL transition (2018) was disruptive — legacy SQL still lingers in docs");
+    println!(
+        "           Standard SQL transition (2018) was disruptive — legacy SQL still lingers in docs"
+    );
     println!("           BI Engine limits per project can be restrictive");
     println!("           streaming insertion legacy expensive; Storage Write API addresses");
     println!("           Google's customer support reputation weaker than Snowflake's");
-    println!("  Differentiator: Dremel paper architecture (Google internal since 2006) + Colossus distributed storage + Jupiter petabit/s network = truly serverless petabyte-scale analytics + BigQuery ML (SQL-trained models) + Gemini/Duet AI integration + BigQuery Omni multi-cloud query + GA4 free export brought millions of marketing teams + BigLake open-format lakehouse + Vertex AI ML integration + part of GCP with $43B+ revenue +30-35% growth — the original serverless cloud data warehouse, built on the same infrastructure as Google Search, used at petabyte scale by Spotify/Twitter/NYTimes");
+    println!(
+        "  Differentiator: Dremel paper architecture (Google internal since 2006) + Colossus distributed storage + Jupiter petabit/s network = truly serverless petabyte-scale analytics + BigQuery ML (SQL-trained models) + Gemini/Duet AI integration + BigQuery Omni multi-cloud query + GA4 free export brought millions of marketing teams + BigLake open-format lakehouse + Vertex AI ML integration + part of GCP with $43B+ revenue +30-35% growth — the original serverless cloud data warehouse, built on the same infrastructure as Google Search, used at petabyte scale by Spotify/Twitter/NYTimes"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bigquery".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bigquery".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_bq(&rest, &_prog);
     process::exit(code);
@@ -160,7 +192,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bq};
+    use super::{basename, run_bq, strip_ext};
 
     #[test]
     fn basename_strips_path() {

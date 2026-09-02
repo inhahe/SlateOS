@@ -49,7 +49,8 @@ fn run_weechat(args: Vec<String>) -> i32 {
     let no_connect = args.iter().any(|a| a == "-a" || a == "--no-connect");
     let no_plugin = args.iter().any(|a| a == "-p" || a == "--no-plugin");
 
-    let run_cmd = args.windows(2)
+    let run_cmd = args
+        .windows(2)
         .find(|w| w[0] == "-r" || w[0] == "--run-command")
         .map(|w| w[1].as_str());
 
@@ -57,7 +58,9 @@ fn run_weechat(args: Vec<String>) -> i32 {
     println!();
 
     if !no_plugin {
-        println!("Loading plugins: irc, relay, python, perl, ruby, lua, tcl, guile, javascript, php, trigger, typing, charset, exec, fifo, fset, logger, spell, xfer");
+        println!(
+            "Loading plugins: irc, relay, python, perl, ruby, lua, tcl, guile, javascript, php, trigger, typing, charset, exec, fifo, fset, logger, spell, xfer"
+        );
         println!("Plugins loaded: 19");
     } else {
         println!("Plugins loading disabled.");
@@ -90,7 +93,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_weechat};
+    use super::run_weechat;
 
     #[test]
     fn help_exits_zero() {

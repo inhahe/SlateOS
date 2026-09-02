@@ -48,10 +48,7 @@ enum Personality {
 }
 
 fn detect_personality(argv0: &str) -> Personality {
-    let name = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     let lower = name.to_ascii_lowercase();
 
@@ -251,10 +248,22 @@ impl Uuid {
         format!(
             "{:02x}{:02x}{:02x}{:02x}:{:02x}{:02x}{:02x}{:02x}:\
              {:02x}{:02x}{:02x}{:02x}:{:02x}{:02x}{:02x}{:02x}",
-            self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
-            self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7],
-            self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11],
-            self.bytes[12], self.bytes[13], self.bytes[14], self.bytes[15],
+            self.bytes[0],
+            self.bytes[1],
+            self.bytes[2],
+            self.bytes[3],
+            self.bytes[4],
+            self.bytes[5],
+            self.bytes[6],
+            self.bytes[7],
+            self.bytes[8],
+            self.bytes[9],
+            self.bytes[10],
+            self.bytes[11],
+            self.bytes[12],
+            self.bytes[13],
+            self.bytes[14],
+            self.bytes[15],
         )
     }
 
@@ -320,7 +329,9 @@ impl Bitmap {
         }
         let byte_idx = (chunk / 8) as usize;
         let bit_idx = (chunk % 8) as u8;
-        self.bits.get(byte_idx).is_some_and(|b| (b >> bit_idx) & 1 == 1)
+        self.bits
+            .get(byte_idx)
+            .is_some_and(|b| (b >> bit_idx) & 1 == 1)
     }
 
     fn dirty_count(&self) -> u64 {
@@ -387,13 +398,7 @@ struct Superblock {
 }
 
 impl Superblock {
-    fn new(
-        level: RaidLevel,
-        raid_disks: u32,
-        name: &str,
-        size: u64,
-        chunk: u32,
-    ) -> Self {
+    fn new(level: RaidLevel, raid_disks: u32, name: &str, size: u64, chunk: u32) -> Self {
         let uuid = Uuid::from_seed(name);
         Self {
             magic: MD_SB_MAGIC,
@@ -439,10 +444,7 @@ impl Superblock {
             ));
         }
         if self.major_version != 1 {
-            return Err(format!(
-                "unsupported major version: {}",
-                self.major_version
-            ));
+            return Err(format!("unsupported major version: {}", self.major_version));
         }
         if self.raid_disks < self.level.min_devices() {
             return Err(format!(
@@ -595,11 +597,7 @@ impl ArrayDescriptor {
 
         let mut spares = Vec::new();
         for (i, path) in spare_paths.iter().enumerate() {
-            let mut rec = DeviceRecord::new(
-                path,
-                (device_paths.len() + i) as u32,
-                device_size,
-            );
+            let mut rec = DeviceRecord::new(path, (device_paths.len() + i) as u32, device_size);
             rec.role = DeviceRole::Spare;
             spares.push(rec);
         }
@@ -634,8 +632,16 @@ impl ArrayDescriptor {
     }
 
     fn working_devices(&self) -> u32 {
-        let active = self.devices.iter().filter(|d| d.role == DeviceRole::Active).count();
-        let spare = self.spare_devices.iter().filter(|d| d.role == DeviceRole::Spare).count();
+        let active = self
+            .devices
+            .iter()
+            .filter(|d| d.role == DeviceRole::Active)
+            .count();
+        let spare = self
+            .spare_devices
+            .iter()
+            .filter(|d| d.role == DeviceRole::Spare)
+            .count();
         (active + spare) as u32
     }
 
@@ -733,8 +739,7 @@ impl ArrayDescriptor {
                 ));
             }
         }
-        self.superblock.delta_disks =
-            (new_raid_disks as i32) - (self.superblock.raid_disks as i32);
+        self.superblock.delta_disks = (new_raid_disks as i32) - (self.superblock.raid_disks as i32);
         self.superblock.new_level = Some(self.superblock.level);
         self.superblock.raid_disks = new_raid_disks;
         self.state = ArrayState::Rebuilding;
@@ -754,9 +759,7 @@ struct RaidManager {
 
 impl RaidManager {
     fn new() -> Self {
-        Self {
-            arrays: Vec::new(),
-        }
+        Self { arrays: Vec::new() }
     }
 
     fn find_array(&self, md_device: &str) -> Option<&ArrayDescriptor> {
@@ -786,11 +789,7 @@ impl RaidManager {
         }
     }
 
-    fn assemble_array(
-        &mut self,
-        md_device: &str,
-        device_paths: &[&str],
-    ) -> Result<(), String> {
+    fn assemble_array(&mut self, md_device: &str, device_paths: &[&str]) -> Result<(), String> {
         if self.find_array(md_device).is_some() {
             return Err(format!("array {} already assembled", md_device));
         }
@@ -800,7 +799,11 @@ impl RaidManager {
         // In a real implementation we would read superblocks from the devices.
         // For simulation, create a default RAID1 array with the given devices.
         let n = device_paths.len() as u32;
-        let level = if n >= 3 { RaidLevel::Raid5 } else { RaidLevel::Raid1 };
+        let level = if n >= 3 {
+            RaidLevel::Raid5
+        } else {
+            RaidLevel::Raid1
+        };
         let arr = ArrayDescriptor::new(&ArraySpec {
             md_device,
             level,
@@ -845,7 +848,11 @@ fn format_size_human(kib: u64) -> String {
 fn format_detail(arr: &ArrayDescriptor, out: &mut Vec<u8>) {
     let sb = &arr.superblock;
     let _ = writeln!(out, "/dev/{}:", arr.md_device);
-    let _ = writeln!(out, "        Version : {}.{}", sb.major_version, sb.minor_version);
+    let _ = writeln!(
+        out,
+        "        Version : {}.{}",
+        sb.major_version, sb.minor_version
+    );
     let _ = writeln!(out, "  Creation Time : {}", sb.ctime);
     let _ = writeln!(out, "     Raid Level : {}", sb.level.name());
     let _ = writeln!(
@@ -866,7 +873,10 @@ fn format_detail(arr: &ArrayDescriptor, out: &mut Vec<u8>) {
     let _ = writeln!(
         out,
         "  Spare Devices : {}",
-        arr.spare_devices.iter().filter(|d| d.role == DeviceRole::Spare).count()
+        arr.spare_devices
+            .iter()
+            .filter(|d| d.role == DeviceRole::Spare)
+            .count()
     );
     if sb.level.has_parity() {
         let _ = writeln!(out, "         Layout : left-symmetric");
@@ -880,10 +890,7 @@ fn format_detail(arr: &ArrayDescriptor, out: &mut Vec<u8>) {
     let _ = writeln!(out, "         Events : {}", sb.events);
     let _ = writeln!(out);
 
-    let _ = writeln!(
-        out,
-        "    Number   Major   Minor   RaidDevice State"
-    );
+    let _ = writeln!(out, "    Number   Major   Minor   RaidDevice State");
     for (i, dev) in arr.devices.iter().enumerate() {
         let _ = writeln!(
             out,
@@ -915,7 +922,11 @@ fn format_detail(arr: &ArrayDescriptor, out: &mut Vec<u8>) {
 fn format_examine(dev_path: &str, sb: &Superblock, out: &mut Vec<u8>) {
     let _ = writeln!(out, "{}:", dev_path);
     let _ = writeln!(out, "          Magic : {:08x}", sb.magic);
-    let _ = writeln!(out, "        Version : {}.{}", sb.major_version, sb.minor_version);
+    let _ = writeln!(
+        out,
+        "        Version : {}.{}",
+        sb.major_version, sb.minor_version
+    );
     let _ = writeln!(out, "    Feature Map : 0x{:08x}", sb.feature_map);
     let _ = writeln!(out, "     Array UUID : {}", sb.set_uuid.format());
     let _ = writeln!(out, "           Name : {}", sb.set_name);
@@ -1126,10 +1137,9 @@ fn parse_mdadm_args(args: &[String]) -> Result<MdadmArgs, String> {
     while i < args.len() {
         let arg = &args[i];
         match arg.as_str() {
-            "--create" | "-C" | "--assemble" | "-A" | "--manage" | "--detail"
-            | "-D" | "--examine" | "-E" | "--grow" | "-G" | "--monitor"
-            | "-F" | "--stop" | "-S" | "--query" | "-Q" | "--misc"
-            | "--help" | "-h" | "--version" | "-V" => {
+            "--create" | "-C" | "--assemble" | "-A" | "--manage" | "--detail" | "-D"
+            | "--examine" | "-E" | "--grow" | "-G" | "--monitor" | "-F" | "--stop" | "-S"
+            | "--query" | "-Q" | "--misc" | "--help" | "-h" | "--version" | "-V" => {
                 // Mode args already handled; skip their argument if consumed.
                 i += 1;
                 if i < args.len() && !args[i].starts_with('-') {
@@ -1265,7 +1275,11 @@ fn run_mdadm(args: &[String], out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
             0
         }
         MdadmMode::Version => {
-            let _ = writeln!(out, "mdadm - v{} - Software Raid management for Slate OS", VERSION);
+            let _ = writeln!(
+                out,
+                "mdadm - v{} - Software Raid management for Slate OS",
+                VERSION
+            );
             0
         }
         MdadmMode::Create => run_create(&opts, out, err),
@@ -1326,20 +1340,28 @@ fn run_create(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
         return 1;
     }
 
-    let active_devs: Vec<&str> = device_strs.iter().take(raid_disks as usize).copied().collect();
-    let spare_devs: Vec<&str> = device_strs.iter().skip(raid_disks as usize).copied().collect();
+    let active_devs: Vec<&str> = device_strs
+        .iter()
+        .take(raid_disks as usize)
+        .copied()
+        .collect();
+    let spare_devs: Vec<&str> = device_strs
+        .iter()
+        .skip(raid_disks as usize)
+        .copied()
+        .collect();
 
     let mut mgr = RaidManager::new();
     match mgr.create_array(&ArraySpec {
-            md_device: &md_device,
-            level,
-            raid_disks,
-            device_paths: &active_devs,
-            spare_paths: &spare_devs,
-            chunk: opts.chunk,
-            name: opts.name.as_deref(),
-            bitmap_enabled: opts.bitmap,
-        }) {
+        md_device: &md_device,
+        level,
+        raid_disks,
+        device_paths: &active_devs,
+        spare_paths: &spare_devs,
+        chunk: opts.chunk,
+        name: opts.name.as_deref(),
+        bitmap_enabled: opts.bitmap,
+    }) {
         Ok(arr) => {
             let _ = writeln!(
                 out,
@@ -1368,7 +1390,10 @@ fn run_assemble(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
     };
 
     if opts.device_paths.is_empty() && !opts.scan {
-        let _ = writeln!(err, "mdadm: --assemble requires component devices or --scan");
+        let _ = writeln!(
+            err,
+            "mdadm: --assemble requires component devices or --scan"
+        );
         return 1;
     }
 
@@ -1400,15 +1425,15 @@ fn run_manage(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
     let mut mgr = RaidManager::new();
     let dummy_devs: Vec<&str> = vec!["/dev/sda1", "/dev/sdb1"];
     let _ = mgr.create_array(&ArraySpec {
-            md_device: &md_device,
-            level: RaidLevel::Raid1,
-            raid_disks: 2,
-            device_paths: &dummy_devs,
-            spare_paths: &[],
-            chunk: DEFAULT_CHUNK_KIB,
-            name: None,
-            bitmap_enabled: false,
-        });
+        md_device: &md_device,
+        level: RaidLevel::Raid1,
+        raid_disks: 2,
+        device_paths: &dummy_devs,
+        spare_paths: &[],
+        chunk: DEFAULT_CHUNK_KIB,
+        name: None,
+        bitmap_enabled: false,
+    });
 
     let mut exit_code = 0;
 
@@ -1486,15 +1511,15 @@ fn run_detail(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
     let mut mgr = RaidManager::new();
     let dummy_devs: Vec<&str> = vec!["/dev/sda1", "/dev/sdb1"];
     let _ = mgr.create_array(&ArraySpec {
-            md_device: &md_device,
-            level: RaidLevel::Raid1,
-            raid_disks: 2,
-            device_paths: &dummy_devs,
-            spare_paths: &[],
-            chunk: DEFAULT_CHUNK_KIB,
-            name: None,
-            bitmap_enabled: false,
-        });
+        md_device: &md_device,
+        level: RaidLevel::Raid1,
+        raid_disks: 2,
+        device_paths: &dummy_devs,
+        spare_paths: &[],
+        chunk: DEFAULT_CHUNK_KIB,
+        name: None,
+        bitmap_enabled: false,
+    });
 
     match mgr.find_array(&md_device) {
         Some(arr) => {
@@ -1549,15 +1574,15 @@ fn run_grow(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
     let mut mgr = RaidManager::new();
     let dummy_devs: Vec<&str> = vec!["/dev/sda1", "/dev/sdb1", "/dev/sdc1"];
     let _ = mgr.create_array(&ArraySpec {
-            md_device: &md_device,
-            level: RaidLevel::Raid5,
-            raid_disks: 3,
-            device_paths: &dummy_devs,
-            spare_paths: &[],
-            chunk: DEFAULT_CHUNK_KIB,
-            name: None,
-            bitmap_enabled: false,
-        });
+        md_device: &md_device,
+        level: RaidLevel::Raid5,
+        raid_disks: 3,
+        device_paths: &dummy_devs,
+        spare_paths: &[],
+        chunk: DEFAULT_CHUNK_KIB,
+        name: None,
+        bitmap_enabled: false,
+    });
 
     match mgr
         .find_array_mut(&md_device)
@@ -1616,15 +1641,15 @@ fn run_query(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
     let mut mgr = RaidManager::new();
     let dummy_devs: Vec<&str> = vec!["/dev/sda1", "/dev/sdb1"];
     let _ = mgr.create_array(&ArraySpec {
-            md_device: &md_device,
-            level: RaidLevel::Raid1,
-            raid_disks: 2,
-            device_paths: &dummy_devs,
-            spare_paths: &[],
-            chunk: DEFAULT_CHUNK_KIB,
-            name: None,
-            bitmap_enabled: false,
-        });
+        md_device: &md_device,
+        level: RaidLevel::Raid1,
+        raid_disks: 2,
+        device_paths: &dummy_devs,
+        spare_paths: &[],
+        chunk: DEFAULT_CHUNK_KIB,
+        name: None,
+        bitmap_enabled: false,
+    });
 
     match mgr.find_array(&md_device) {
         Some(arr) => {
@@ -1649,18 +1674,33 @@ fn run_misc(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
         }
         return 0;
     }
-    let _ = writeln!(err, "mdadm: --misc requires a sub-command (e.g. --zero-superblock)");
+    let _ = writeln!(
+        err,
+        "mdadm: --misc requires a sub-command (e.g. --zero-superblock)"
+    );
     1
 }
 
 fn print_mdadm_help(out: &mut Vec<u8>) {
-    let _ = writeln!(out, "Usage: mdadm [mode] <raiddevice> [options] <component-devices>");
+    let _ = writeln!(
+        out,
+        "Usage: mdadm [mode] <raiddevice> [options] <component-devices>"
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, " Modes:");
     let _ = writeln!(out, "  --create  -C   : Create a new array");
-    let _ = writeln!(out, "  --assemble -A  : Assemble a previously created array");
-    let _ = writeln!(out, "  --manage       : Manage an existing array (add/remove/fail)");
-    let _ = writeln!(out, "  --detail  -D   : Display detailed information about an array");
+    let _ = writeln!(
+        out,
+        "  --assemble -A  : Assemble a previously created array"
+    );
+    let _ = writeln!(
+        out,
+        "  --manage       : Manage an existing array (add/remove/fail)"
+    );
+    let _ = writeln!(
+        out,
+        "  --detail  -D   : Display detailed information about an array"
+    );
     let _ = writeln!(out, "  --examine -E   : Examine a device superblock");
     let _ = writeln!(out, "  --grow    -G   : Grow or reshape an array");
     let _ = writeln!(out, "  --monitor -F   : Monitor arrays for events");
@@ -1670,20 +1710,38 @@ fn print_mdadm_help(out: &mut Vec<u8>) {
     let _ = writeln!(out);
     let _ = writeln!(out, " Options:");
     let _ = writeln!(out, "  -l, --level          : RAID level (0, 1, 5, 6, 10)");
-    let _ = writeln!(out, "  -n, --raid-devices   : Number of active RAID devices");
+    let _ = writeln!(
+        out,
+        "  -n, --raid-devices   : Number of active RAID devices"
+    );
     let _ = writeln!(out, "  -x, --spare-devices  : Number of spare devices");
-    let _ = writeln!(out, "  -c, --chunk          : Chunk size in KiB (default 512)");
+    let _ = writeln!(
+        out,
+        "  -c, --chunk          : Chunk size in KiB (default 512)"
+    );
     let _ = writeln!(out, "      --bitmap         : Enable write-intent bitmap");
-    let _ = writeln!(out, "  -e, --metadata       : Metadata version (default 1.2)");
+    let _ = writeln!(
+        out,
+        "  -e, --metadata       : Metadata version (default 1.2)"
+    );
     let _ = writeln!(out, "      --name           : Array name");
     let _ = writeln!(out, "      --homehost       : Home host name");
     let _ = writeln!(out, "  -f, --force          : Force operation");
     let _ = writeln!(out, "  -R, --run            : Start array even if degraded");
     let _ = writeln!(out, "  -v, --verbose        : Be more verbose");
     let _ = writeln!(out, "  -s, --scan           : Scan for arrays");
-    let _ = writeln!(out, "      --add            : Add device to array (manage mode)");
-    let _ = writeln!(out, "      --remove         : Remove device from array (manage mode)");
-    let _ = writeln!(out, "      --fail           : Mark device as failed (manage mode)");
+    let _ = writeln!(
+        out,
+        "      --add            : Add device to array (manage mode)"
+    );
+    let _ = writeln!(
+        out,
+        "      --remove         : Remove device from array (manage mode)"
+    );
+    let _ = writeln!(
+        out,
+        "      --fail           : Mark device as failed (manage mode)"
+    );
     let _ = writeln!(out, "      --zero-superblock: Clear superblock (misc mode)");
     let _ = writeln!(out, "  -h, --help           : Display this help");
     let _ = writeln!(out, "  -V, --version        : Display version");
@@ -1742,7 +1800,10 @@ fn run_mdmon(args: &[String], out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
     }
 
     if opts.pids.is_empty() {
-        let _ = writeln!(err, "mdmon: no arrays specified; use --all or specify device(s)");
+        let _ = writeln!(
+            err,
+            "mdmon: no arrays specified; use --all or specify device(s)"
+        );
         return 1;
     }
 
@@ -1807,10 +1868,7 @@ mod tests {
 
     #[test]
     fn test_personality_mdadm_path() {
-        assert_eq!(
-            detect_personality("/usr/sbin/mdadm"),
-            Personality::Mdadm
-        );
+        assert_eq!(detect_personality("/usr/sbin/mdadm"), Personality::Mdadm);
     }
 
     #[test]
@@ -1825,10 +1883,7 @@ mod tests {
 
     #[test]
     fn test_personality_mdmon_path() {
-        assert_eq!(
-            detect_personality("/usr/sbin/mdmon"),
-            Personality::Mdmon
-        );
+        assert_eq!(detect_personality("/usr/sbin/mdmon"), Personality::Mdmon);
     }
 
     #[test]
@@ -1990,7 +2045,10 @@ mod tests {
     #[test]
     fn test_device_role_parse() {
         assert_eq!(DeviceRole::from_str("active"), Some(DeviceRole::Active));
-        assert_eq!(DeviceRole::from_str("active sync"), Some(DeviceRole::Active));
+        assert_eq!(
+            DeviceRole::from_str("active sync"),
+            Some(DeviceRole::Active)
+        );
         assert_eq!(DeviceRole::from_str("spare"), Some(DeviceRole::Spare));
         assert_eq!(DeviceRole::from_str("faulty"), Some(DeviceRole::Failed));
         assert_eq!(DeviceRole::from_str("failed"), Some(DeviceRole::Failed));
@@ -2614,18 +2672,19 @@ mod tests {
             bitmap_enabled: false,
         })
         .unwrap();
-        assert!(mgr
-            .create_array(&ArraySpec {
-            md_device: "md0",
-            level: RaidLevel::Raid1,
-            raid_disks: 2,
-            device_paths: &["/dev/sdc1", "/dev/sdd1"],
-            spare_paths: &[],
-            chunk: 512,
-            name: None,
-            bitmap_enabled: false,
-        })
-            .is_err());
+        assert!(
+            mgr.create_array(&ArraySpec {
+                md_device: "md0",
+                level: RaidLevel::Raid1,
+                raid_disks: 2,
+                device_paths: &["/dev/sdc1", "/dev/sdd1"],
+                spare_paths: &[],
+                chunk: 512,
+                name: None,
+                bitmap_enabled: false,
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -2655,9 +2714,10 @@ mod tests {
     #[test]
     fn test_manager_assemble() {
         let mut mgr = RaidManager::new();
-        assert!(mgr
-            .assemble_array("md0", &["/dev/sda1", "/dev/sdb1"])
-            .is_ok());
+        assert!(
+            mgr.assemble_array("md0", &["/dev/sda1", "/dev/sdb1"])
+                .is_ok()
+        );
         assert!(mgr.find_array("md0").is_some());
     }
 
@@ -2666,9 +2726,10 @@ mod tests {
         let mut mgr = RaidManager::new();
         mgr.assemble_array("md0", &["/dev/sda1", "/dev/sdb1"])
             .unwrap();
-        assert!(mgr
-            .assemble_array("md0", &["/dev/sda1", "/dev/sdb1"])
-            .is_err());
+        assert!(
+            mgr.assemble_array("md0", &["/dev/sda1", "/dev/sdb1"])
+                .is_err()
+        );
     }
 
     #[test]
@@ -2838,7 +2899,14 @@ mod tests {
     #[test]
     fn test_parse_create_basic() {
         let args: Vec<String> = vec![
-            "--create", "md0", "-l", "1", "-n", "2", "/dev/sda1", "/dev/sdb1",
+            "--create",
+            "md0",
+            "-l",
+            "1",
+            "-n",
+            "2",
+            "/dev/sda1",
+            "/dev/sdb1",
         ]
         .into_iter()
         .map(String::from)
@@ -3028,10 +3096,19 @@ mod tests {
 
     #[test]
     fn test_parse_homehost_flag() {
-        let args: Vec<String> = vec!["--create", "md0", "--homehost", "myhost", "-l", "1", "-n", "2"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let args: Vec<String> = vec![
+            "--create",
+            "md0",
+            "--homehost",
+            "myhost",
+            "-l",
+            "1",
+            "-n",
+            "2",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let opts = parse_mdadm_args(&args).unwrap();
         assert_eq!(opts.homehost, Some("myhost".to_string()));
     }
@@ -3079,7 +3156,14 @@ mod tests {
     #[test]
     fn test_run_create_success() {
         let args: Vec<String> = vec![
-            "--create", "md0", "-l", "1", "-n", "2", "/dev/sda1", "/dev/sdb1",
+            "--create",
+            "md0",
+            "-l",
+            "1",
+            "-n",
+            "2",
+            "/dev/sda1",
+            "/dev/sdb1",
         ]
         .into_iter()
         .map(String::from)
@@ -3118,12 +3202,10 @@ mod tests {
 
     #[test]
     fn test_run_create_insufficient_devices() {
-        let args: Vec<String> = vec![
-            "--create", "md0", "-l", "5", "-n", "3", "/dev/sda1",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let args: Vec<String> = vec!["--create", "md0", "-l", "5", "-n", "3", "/dev/sda1"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         let mut out = Vec::new();
         let mut err = Vec::new();
         let code = run_mdadm(&args, &mut out, &mut err);

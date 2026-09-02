@@ -50,7 +50,9 @@ fn run_xrandr(args: Vec<String>) -> i32 {
 
     if args.iter().any(|a| a == "--listproviders") {
         println!("Providers: number : 1");
-        println!("Provider 0: id: 0x45 cap: 0xb, Source Output, Sink Output, Sink Offload crtcs: 4 outputs: 3 associated providers: 0 name:modesetting");
+        println!(
+            "Provider 0: id: 0x45 cap: 0xb, Source Output, Sink Output, Sink Offload crtcs: 4 outputs: 3 associated providers: 0 name:modesetting"
+        );
         return 0;
     }
 
@@ -61,7 +63,9 @@ fn run_xrandr(args: Vec<String>) -> i32 {
 
     // Default: query mode
     println!("Screen 0: minimum 320 x 200, current 1920 x 1080, maximum 16384 x 16384");
-    println!("eDP-1 connected primary 1920x1080+0+0 (normal left inverted right x axis y axis) 344mm x 194mm");
+    println!(
+        "eDP-1 connected primary 1920x1080+0+0 (normal left inverted right x axis y axis) 344mm x 194mm"
+    );
     println!("   1920x1080     60.00*+  48.00");
     println!("   1680x1050     60.00");
     println!("   1280x1024     60.02");
@@ -83,7 +87,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_xrandr};
+    use super::run_xrandr;
 
     #[test]
     fn help_exits_zero() {

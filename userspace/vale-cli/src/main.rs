@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_vale(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -51,16 +55,24 @@ fn run_vale(args: &[String]) -> i32 {
             println!("ConfigDir:  /home/user/.config/vale");
         }
         _ => {
-            let output = args.windows(2).find(|w| w[0] == "--output")
-                .map(|w| w[1].as_str()).unwrap_or("CLI");
-            let path = args.iter().rfind(|a| !a.starts_with('-'))
-                .map(|s| s.as_str()).unwrap_or(".");
+            let output = args
+                .windows(2)
+                .find(|w| w[0] == "--output")
+                .map(|w| w[1].as_str())
+                .unwrap_or("CLI");
+            let path = args
+                .iter()
+                .rfind(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or(".");
 
             if output == "JSON" {
                 println!("[");
                 println!("  {{");
                 println!("    \"check\": \"Google.Passive\",");
-                println!("    \"message\": \"In general, use active voice instead of passive voice.\",");
+                println!(
+                    "    \"message\": \"In general, use active voice instead of passive voice.\","
+                );
                 println!("    \"severity\": \"warning\",");
                 println!("    \"line\": 5,");
                 println!("    \"span\": [10, 25],");
@@ -93,7 +105,10 @@ fn run_vale(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "vale".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "vale".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_vale(&rest);
     process::exit(code);
@@ -101,7 +116,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_vale};
+    use super::{basename, run_vale, strip_ext};
 
     #[test]
     fn basename_strips_path() {

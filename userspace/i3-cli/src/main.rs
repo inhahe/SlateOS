@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_i3(args: &[String], prog: &str) -> i32 {
     match prog {
@@ -20,8 +24,11 @@ fn run_i3(args: &[String], prog: &str) -> i32 {
                 println!("  -b LABEL CMD Button label and command");
                 return 0;
             }
-            let msg = args.windows(2).find(|w| w[0] == "-m")
-                .map(|w| w[1].as_str()).unwrap_or("Configuration error");
+            let msg = args
+                .windows(2)
+                .find(|w| w[0] == "-m")
+                .map(|w| w[1].as_str())
+                .unwrap_or("Configuration error");
             println!("i3-nagbar: {}", msg);
             return 0;
         }
@@ -50,21 +57,33 @@ fn run_i3(args: &[String], prog: &str) -> i32 {
         println!("  -q           Quiet mode");
         return 0;
     }
-    let msg_type = args.windows(2).find(|w| w[0] == "-t")
+    let msg_type = args
+        .windows(2)
+        .find(|w| w[0] == "-t")
         .map(|w| w[1].as_str());
-    let message = args.iter().rfind(|a| !a.starts_with('-') && *a != "command")
+    let message = args
+        .iter()
+        .rfind(|a| !a.starts_with('-') && *a != "command")
         .map(|s| s.as_str());
 
     match msg_type {
         Some("get_workspaces") => {
-            println!("[{{\"num\":1,\"name\":\"1\",\"focused\":true,\"visible\":true,\"output\":\"DP-1\"}},");
-            println!(" {{\"num\":2,\"name\":\"2\",\"focused\":false,\"visible\":false,\"output\":\"DP-1\"}}]");
+            println!(
+                "[{{\"num\":1,\"name\":\"1\",\"focused\":true,\"visible\":true,\"output\":\"DP-1\"}},"
+            );
+            println!(
+                " {{\"num\":2,\"name\":\"2\",\"focused\":false,\"visible\":false,\"output\":\"DP-1\"}}]"
+            );
         }
         Some("get_outputs") => {
-            println!("[{{\"name\":\"DP-1\",\"active\":true,\"primary\":true,\"rect\":{{\"x\":0,\"y\":0,\"width\":2560,\"height\":1440}}}}]");
+            println!(
+                "[{{\"name\":\"DP-1\",\"active\":true,\"primary\":true,\"rect\":{{\"x\":0,\"y\":0,\"width\":2560,\"height\":1440}}}}]"
+            );
         }
         Some("get_version") => {
-            println!("{{\"major\":4,\"minor\":23,\"patch\":0,\"human_readable\":\"4.23 (Slate OS)\"}}");
+            println!(
+                "{{\"major\":4,\"minor\":23,\"patch\":0,\"human_readable\":\"4.23 (Slate OS)\"}}"
+            );
         }
         _ => {
             if let Some(cmd) = message {
@@ -80,7 +99,10 @@ fn run_i3(args: &[String], prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "i3-msg".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "i3-msg".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_i3(&rest, &prog);
     process::exit(code);
@@ -88,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_i3};
+    use super::{basename, run_i3, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("wise-cli 0.1.0 (mid-market-rate personality build)"); }
+fn print_version() {
+    println!("wise-cli 0.1.0 (mid-market-rate personality build)");
+}
 
 fn run_about() {
     println!("Wise plc (formerly TransferWise Ltd).");

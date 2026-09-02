@@ -32,7 +32,7 @@ fn print_help(prog: &str) {
     println!("    about         Nayak + Mohan + Nandagopal 2019 Bengaluru; Apache 2.0");
     println!("    canvas        Drag-drop widget canvas + JS expressions");
     println!("    queries       Datasources + SQL + REST + GraphQL + Mongo + S3");
-    println!("    selfhost      Docker / Helm / Kubernetes self-host first")  ;
+    println!("    selfhost      Docker / Helm / Kubernetes self-host first");
     println!("    workflows     Server-side workflows + AI-agent recent additions");
     println!("    git           Git-versioned app sources");
     println!("    pricing       Free OSS + Business + Enterprise tiers");
@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("appsmith-cli 0.1.0 (open-source-internal-tools personality build)"); }
+fn print_version() {
+    println!("appsmith-cli 0.1.0 (open-source-internal-tools personality build)");
+}
 
 fn run_about() {
     println!("Appsmith, Inc.");

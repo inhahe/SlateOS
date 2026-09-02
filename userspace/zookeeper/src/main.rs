@@ -23,11 +23,21 @@ fn run_zk_server(args: Vec<String>) -> i32 {
         "start" => {
             println!("ZooKeeper JMX enabled by default");
             println!("Using config: /etc/zookeeper/zoo.cfg");
-            println!("2025-05-22 10:00:00,000 [myid:1] - INFO  [main:QuorumPeerConfig@175] - Reading configuration from: /etc/zookeeper/zoo.cfg");
-            println!("2025-05-22 10:00:00,100 [myid:1] - INFO  [main:DatadirCleanupManager@78] - autopurge.snapRetainCount set to 3");
-            println!("2025-05-22 10:00:00,200 [myid:1] - INFO  [main:DatadirCleanupManager@79] - autopurge.purgeInterval set to 0");
-            println!("2025-05-22 10:00:00,500 [myid:1] - INFO  [main:NIOServerCnxnFactory@111] - binding to port 0.0.0.0/0.0.0.0:2181");
-            println!("2025-05-22 10:00:01,000 [myid:1] - INFO  [main:ZooKeeperServer@123] - ZooKeeper server started");
+            println!(
+                "2025-05-22 10:00:00,000 [myid:1] - INFO  [main:QuorumPeerConfig@175] - Reading configuration from: /etc/zookeeper/zoo.cfg"
+            );
+            println!(
+                "2025-05-22 10:00:00,100 [myid:1] - INFO  [main:DatadirCleanupManager@78] - autopurge.snapRetainCount set to 3"
+            );
+            println!(
+                "2025-05-22 10:00:00,200 [myid:1] - INFO  [main:DatadirCleanupManager@79] - autopurge.purgeInterval set to 0"
+            );
+            println!(
+                "2025-05-22 10:00:00,500 [myid:1] - INFO  [main:NIOServerCnxnFactory@111] - binding to port 0.0.0.0/0.0.0.0:2181"
+            );
+            println!(
+                "2025-05-22 10:00:01,000 [myid:1] - INFO  [main:ZooKeeperServer@123] - ZooKeeper server started"
+            );
             0
         }
         "stop" => {
@@ -71,13 +81,18 @@ fn run_zk_cli(args: Vec<String>) -> i32 {
     }
 
     // Check for inline command mode
-    let cmd_idx = args.iter().position(|a| !a.starts_with('-') && a != "-server")
+    let cmd_idx = args
+        .iter()
+        .position(|a| !a.starts_with('-') && a != "-server")
         .or_else(|| {
-            args.iter().position(|a| a == "-server")
-                .and_then(|i| {
-                    // skip host:port after -server
-                    if i + 2 < args.len() { Some(i + 2) } else { None }
-                })
+            args.iter().position(|a| a == "-server").and_then(|i| {
+                // skip host:port after -server
+                if i + 2 < args.len() {
+                    Some(i + 2)
+                } else {
+                    None
+                }
+            })
         });
 
     if let Some(idx) = cmd_idx {
@@ -136,7 +151,9 @@ fn run_zk_cli(args: Vec<String>) -> i32 {
     }
 
     // Interactive mode
-    let server = args.iter().position(|a| a == "-server")
+    let server = args
+        .iter()
+        .position(|a| a == "-server")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("localhost:2181");
@@ -157,7 +174,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -172,7 +191,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_zk_server};
+    use super::run_zk_server;
 
     #[test]
     fn help_exits_zero() {

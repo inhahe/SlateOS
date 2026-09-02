@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_picotts(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -27,7 +31,10 @@ fn run_picotts(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("picotts v1.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("picotts v1.0 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "--list-voices") {
         println!("Available voices:");
         println!("  en-US    English (US)");
@@ -38,8 +45,16 @@ fn run_picotts(args: &[String], _prog: &str) -> i32 {
         println!("  it-IT    Italian");
         return 0;
     }
-    let lang = args.windows(2).find(|w| w[0] == "-l").map(|w| w[1].as_str()).unwrap_or("en-US");
-    let speed = args.windows(2).find(|w| w[0] == "-s").map(|w| w[1].as_str()).unwrap_or("1.0");
+    let lang = args
+        .windows(2)
+        .find(|w| w[0] == "-l")
+        .map(|w| w[1].as_str())
+        .unwrap_or("en-US");
+    let speed = args
+        .windows(2)
+        .find(|w| w[0] == "-s")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1.0");
     println!("picotts: synthesizing speech");
     println!("  Voice: {}", lang);
     println!("  Speed: {}x", speed);
@@ -52,7 +67,10 @@ fn run_picotts(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "picotts".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "picotts".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_picotts(&rest, &_prog);
     process::exit(code);
@@ -60,7 +78,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_picotts};
+    use super::{basename, run_picotts, strip_ext};
 
     #[test]
     fn basename_strips_path() {

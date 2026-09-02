@@ -40,13 +40,15 @@ fn run_minicom(args: &[String]) -> i32 {
     }
 
     let setup = args.iter().any(|a| a == "-s");
-    let device = args.iter()
+    let device = args
+        .iter()
         .find(|a| a.starts_with("/dev/") || a.starts_with("COM"))
         .or_else(|| args.windows(2).find(|w| w[0] == "-D").map(|w| &w[1]))
         .map(|s| s.as_str())
         .unwrap_or("/dev/ttyUSB0");
 
-    let baud = args.windows(2)
+    let baud = args
+        .windows(2)
         .find(|w| w[0] == "-b")
         .and_then(|w| w[1].parse::<u32>().ok())
         .unwrap_or(115200);
@@ -74,7 +76,8 @@ fn run_minicom(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first()
+    let _prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "minicom".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -85,7 +88,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_minicom};
+    use super::{basename, run_minicom, strip_ext};
 
     #[test]
     fn basename_strips_path() {

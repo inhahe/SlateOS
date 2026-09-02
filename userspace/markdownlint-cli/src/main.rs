@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_markdownlint(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -29,11 +33,16 @@ fn run_markdownlint(args: &[String]) -> i32 {
         return 0;
     }
     let fix_mode = args.iter().any(|a| a == "-f" || a == "--fix");
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-') && (a.ends_with(".md") || a.contains('*') || *a == "."))
         .map(|s| s.as_str())
         .collect();
-    let target = if files.is_empty() { "**/*.md" } else { files.first().copied().unwrap_or(".") };
+    let target = if files.is_empty() {
+        "**/*.md"
+    } else {
+        files.first().copied().unwrap_or(".")
+    };
 
     if fix_mode {
         println!("Fixing {}...", target);
@@ -43,11 +52,15 @@ fn run_markdownlint(args: &[String]) -> i32 {
     } else {
         println!("Linting {}...", target);
         println!();
-        println!("README.md:3 MD022/blanks-around-headings Headings should be surrounded by blank lines");
+        println!(
+            "README.md:3 MD022/blanks-around-headings Headings should be surrounded by blank lines"
+        );
         println!("README.md:15 MD009/no-trailing-spaces Trailing spaces");
         println!("README.md:22 MD012/no-multiple-blanks Multiple consecutive blank lines");
         println!("docs/guide.md:8 MD013/line-length Line length (expected: 80, actual: 95)");
-        println!("docs/guide.md:42 MD032/blanks-around-lists Lists should be surrounded by blank lines");
+        println!(
+            "docs/guide.md:42 MD032/blanks-around-lists Lists should be surrounded by blank lines"
+        );
         println!();
         println!("5 issues found in 2 files.");
     }
@@ -56,7 +69,10 @@ fn run_markdownlint(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "markdownlint".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "markdownlint".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_markdownlint(&rest);
     process::exit(code);
@@ -64,7 +80,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_markdownlint};
+    use super::{basename, run_markdownlint, strip_ext};
 
     #[test]
     fn basename_strips_path() {

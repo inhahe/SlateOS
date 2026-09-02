@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("affirm-cli 0.1.0 (transparent-BNPL personality build)"); }
+fn print_version() {
+    println!("affirm-cli 0.1.0 (transparent-BNPL personality build)");
+}
 
 fn run_about() {
     println!("Affirm Holdings, Inc.");

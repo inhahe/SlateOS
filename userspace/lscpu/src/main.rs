@@ -174,10 +174,7 @@ fn collect_cpu_info() -> CpuInfo {
             .get("cpu family")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        info.model = first
-            .get("model")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        info.model = first.get("model").and_then(|s| s.parse().ok()).unwrap_or(0);
         info.stepping = first
             .get("stepping")
             .and_then(|s| s.parse().ok())
@@ -192,20 +189,23 @@ fn collect_cpu_info() -> CpuInfo {
             .unwrap_or(0.0);
 
         if let Some(flags_str) = first.get("flags") {
-            info.flags = flags_str.split_whitespace().map(|s| s.to_string()).collect();
+            info.flags = flags_str
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
         }
     }
 
     // Topology from sysfs.
-    info.threads_per_core = read_sys_file("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list")
-        .map(|s| parse_cpu_range(&s))
-        .unwrap_or(1);
+    info.threads_per_core =
+        read_sys_file("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list")
+            .map(|s| parse_cpu_range(&s))
+            .unwrap_or(1);
 
-    info.cores_per_socket = read_sys_file("/sys/devices/system/cpu/cpu0/topology/core_siblings_list")
-        .map(|s| parse_cpu_range(&s) / info.threads_per_core.max(1))
-        .unwrap_or_else(|| {
-            if info.cpus > 0 { info.cpus } else { 1 }
-        });
+    info.cores_per_socket =
+        read_sys_file("/sys/devices/system/cpu/cpu0/topology/core_siblings_list")
+            .map(|s| parse_cpu_range(&s) / info.threads_per_core.max(1))
+            .unwrap_or_else(|| if info.cpus > 0 { info.cpus } else { 1 });
 
     info.sockets = if info.cores_per_socket > 0 && info.threads_per_core > 0 {
         info.cpus / (info.cores_per_socket * info.threads_per_core)
@@ -248,7 +248,9 @@ fn collect_cpu_info() -> CpuInfo {
             // No more cache indices.
             break;
         };
-        let Ok(level) = level_s.parse::<u8>() else { continue };
+        let Ok(level) = level_s.parse::<u8>() else {
+            continue;
+        };
         let ways = read_sys_file(&format!("{base}/ways_of_associativity"))
             .and_then(|s| s.parse::<u32>().ok());
 
@@ -259,7 +261,12 @@ fn collect_cpu_info() -> CpuInfo {
             (3, _) => info.l3_cache = size.clone(),
             _ => {}
         }
-        info.caches.push(CacheRecord { level, cache_type, size, ways });
+        info.caches.push(CacheRecord {
+            level,
+            cache_type,
+            size,
+            ways,
+        });
     }
 
     // Hypervisor detection.
@@ -401,7 +408,10 @@ fn print_json(out: &mut io::StdoutLock<'_>, info: &CpuInfo) {
     let total = entries.len();
     for (idx, (key, val)) in entries.iter().enumerate() {
         let comma = if idx + 1 < total { "," } else { "" };
-        let _ = writeln!(out, "    {{\"field\": \"{key}\", \"data\": \"{val}\"}}{comma}");
+        let _ = writeln!(
+            out,
+            "    {{\"field\": \"{key}\", \"data\": \"{val}\"}}{comma}"
+        );
     }
 
     let _ = writeln!(out, "  ]");
@@ -570,7 +580,9 @@ mod tests {
         // may only exist when a matching sysfs-sourced record is present.
         let info = collect_cpu_info();
         let has = |level: u8, ty: &str| {
-            info.caches.iter().any(|c| c.level == level && c.cache_type == ty)
+            info.caches
+                .iter()
+                .any(|c| c.level == level && c.cache_type == ty)
         };
         if !info.l1d_cache.is_empty() {
             assert!(has(1, "Data"), "L1d size with no sourced record");

@@ -34,8 +34,11 @@ fn run_fstrim(args: &[String]) -> i32 {
             println!("/boot/efi: 512 MiB (536870912 bytes) trimmed on /dev/sda1");
         }
     } else {
-        let mp = args.iter().find(|a| !a.starts_with('-'))
-            .map(|s| s.as_str()).unwrap_or("/");
+        let mp = args
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .unwrap_or("/");
         if verbose {
             println!("{}: 12.3 GiB (13209067520 bytes) trimmed", mp);
         }
@@ -60,9 +63,15 @@ fn run_lsblk(args: &[String]) -> i32 {
     if json {
         println!("{{\"blockdevices\": [");
         println!("  {{\"name\": \"sda\", \"size\": \"500G\", \"type\": \"disk\", \"children\": [");
-        println!("    {{\"name\": \"sda1\", \"size\": \"512M\", \"type\": \"part\", \"mountpoint\": \"/boot/efi\"}},");
-        println!("    {{\"name\": \"sda2\", \"size\": \"50G\", \"type\": \"part\", \"mountpoint\": \"/\"}},");
-        println!("    {{\"name\": \"sda3\", \"size\": \"449.5G\", \"type\": \"part\", \"mountpoint\": \"/home\"}}");
+        println!(
+            "    {{\"name\": \"sda1\", \"size\": \"512M\", \"type\": \"part\", \"mountpoint\": \"/boot/efi\"}},"
+        );
+        println!(
+            "    {{\"name\": \"sda2\", \"size\": \"50G\", \"type\": \"part\", \"mountpoint\": \"/\"}},"
+        );
+        println!(
+            "    {{\"name\": \"sda3\", \"size\": \"449.5G\", \"type\": \"part\", \"mountpoint\": \"/home\"}}"
+        );
         println!("  ]}}");
         println!("]}}");
     } else if fs {
@@ -89,15 +98,22 @@ fn run_blkid(args: &[String]) -> i32 {
         return 0;
     }
 
-    let device = args.iter().find(|a| !a.starts_with('-'))
+    let device = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
     if let Some(dev) = device {
-        println!("{}: UUID=\"abcdef12-3456-7890-abcd-ef1234567890\" TYPE=\"ext4\"", dev);
+        println!(
+            "{}: UUID=\"abcdef12-3456-7890-abcd-ef1234567890\" TYPE=\"ext4\"",
+            dev
+        );
     } else {
         println!("/dev/sda1: UUID=\"AAAA-BBBB\" TYPE=\"vfat\" PARTLABEL=\"EFI System Partition\"");
         println!("/dev/sda2: UUID=\"abcdef12-3456-7890-abcd-ef1234567890\" TYPE=\"ext4\"");
-        println!("/dev/sda3: UUID=\"12345678-abcd-efgh-ijkl-123456789012\" LABEL=\"home\" TYPE=\"ext4\"");
+        println!(
+            "/dev/sda3: UUID=\"12345678-abcd-efgh-ijkl-123456789012\" LABEL=\"home\" TYPE=\"ext4\""
+        );
     }
     0
 }
@@ -110,15 +126,19 @@ fn run_blkdiscard(args: &[String]) -> i32 {
         println!("  -z, --zeroout  Zero-fill instead");
         return 0;
     }
-    let dev = args.iter().find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("/dev/sdb");
+    let dev = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/dev/sdb");
     println!("blkdiscard: {}: discarded", dev);
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "fstrim".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -134,7 +154,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fstrim};
+    use super::{basename, run_fstrim, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -57,9 +57,9 @@ struct Config {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MesgAction {
-    Allow,   // y
-    Deny,    // n
-    Status,  // no arg — show current status
+    Allow,  // y
+    Deny,   // n
+    Status, // no arg — show current status
 }
 
 impl Default for Config {
@@ -281,10 +281,7 @@ fn run_write(
 
     // Check if target user accepts messages
     if !check_user_mesg(target_user) {
-        writeln!(
-            err_writer,
-            "write: {target_user} has messages disabled"
-        )?;
+        writeln!(err_writer, "write: {target_user} has messages disabled")?;
         return Ok(1);
     }
 
@@ -358,10 +355,7 @@ fn run_talk(
 
     // Check if target user is available
     if !check_user_mesg(target_user) {
-        writeln!(
-            err_writer,
-            "talk: {target_user} has messages disabled"
-        )?;
+        writeln!(err_writer, "talk: {target_user} has messages disabled")?;
         return Ok(1);
     }
 
@@ -617,11 +611,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_write_user_tty() {
-        let args = vec![
-            "write".to_string(),
-            "john".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = vec!["write".to_string(), "john".to_string(), "tty1".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.target_user, Some("john".to_string()));
         assert_eq!(cfg.target_tty, Some("tty1".to_string()));

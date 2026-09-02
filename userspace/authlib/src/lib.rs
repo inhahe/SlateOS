@@ -1129,8 +1129,7 @@ mod tests {
         FAKE_NOW_ISOLATED.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    static FAKE_NOW_PAIR: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(13_000);
+    static FAKE_NOW_PAIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(13_000);
 
     fn fake_now_pair() -> u64 {
         FAKE_NOW_PAIR.load(std::sync::atomic::Ordering::Relaxed)

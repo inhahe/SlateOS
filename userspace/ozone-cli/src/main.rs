@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ozone(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_ozone(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("iZotope Ozone 11.1.0 Advanced (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("iZotope Ozone 11.1.0 Advanced (Slate OS)");
+        return 0;
+    }
     println!("iZotope Ozone 11.1.0 Advanced (Slate OS)");
     println!("  Modules: Master Assistant, Maximizer, Imager, Stabilizer, Match EQ");
     println!("  AI: Assistant View 2.0 (instrument-aware mastering)");
@@ -35,7 +42,10 @@ fn run_ozone(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "ozone".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "ozone".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ozone(&rest, &_prog);
     process::exit(code);
@@ -43,7 +53,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ozone};
+    use super::{basename, run_ozone, strip_ext};
 
     #[test]
     fn basename_strips_path() {

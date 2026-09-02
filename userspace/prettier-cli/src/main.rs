@@ -35,7 +35,8 @@ fn run_prettier(args: Vec<String>) -> i32 {
     let check = args.iter().any(|a| a == "--check");
     let list_diff = args.iter().any(|a| a == "--list-different" || a == "-l");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -86,7 +87,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_prettier};
+    use super::run_prettier;
 
     #[test]
     fn help_exits_zero() {

@@ -24,9 +24,16 @@ fn run_lmms(args: &[String]) -> i32 {
         return 0;
     }
     let render = args.iter().any(|a| a == "-r" || a == "--render");
-    let file = args.iter().find(|a| a.ends_with(".mmp") || a.ends_with(".mmpz")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".mmp") || a.ends_with(".mmpz"))
+        .map(|s| s.as_str());
     if render {
-        let output = args.windows(2).find(|w| w[0] == "-r" || w[0] == "--render").map(|w| w[1].as_str()).unwrap_or("output.wav");
+        let output = args
+            .windows(2)
+            .find(|w| w[0] == "-r" || w[0] == "--render")
+            .map(|w| w[1].as_str())
+            .unwrap_or("output.wav");
         let input = file.unwrap_or("project.mmp");
         println!("LMMS 1.2.2 — rendering: {}", input);
         println!("  Output: {}", output);
@@ -52,7 +59,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_lmms};
+    use super::run_lmms;
 
     #[test]
     fn help_exits_zero() {

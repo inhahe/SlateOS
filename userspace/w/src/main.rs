@@ -220,17 +220,18 @@ fn read_utmp_entries() -> Vec<UtmpEntry> {
 
     // If no utmp entries, try to show current user
     if entries.is_empty()
-        && let Ok(user) = env::var("USER") {
-            entries.push(UtmpEntry {
-                user,
-                tty: "console".to_string(),
-                host: String::new(),
-                login_time: 0,
-                pid: std::process::id(),
-                idle_secs: 0,
-                what: "-".to_string(),
-            });
-        }
+        && let Ok(user) = env::var("USER")
+    {
+        entries.push(UtmpEntry {
+            user,
+            tty: "console".to_string(),
+            host: String::new(),
+            login_time: 0,
+            pid: std::process::id(),
+            idle_secs: 0,
+            what: "-".to_string(),
+        });
+    }
 
     entries
 }
@@ -321,17 +322,18 @@ fn get_user_info(username: &str) -> UserInfo {
 fn get_uptime_str() -> String {
     if let Ok(content) = std::fs::read_to_string("/proc/uptime")
         && let Some(secs_str) = content.split_whitespace().next()
-            && let Ok(secs) = secs_str.parse::<f64>() {
-                let total_secs = secs as u64;
-                let days = total_secs / 86400;
-                let hours = (total_secs % 86400) / 3600;
-                let mins = (total_secs % 3600) / 60;
+        && let Ok(secs) = secs_str.parse::<f64>()
+    {
+        let total_secs = secs as u64;
+        let days = total_secs / 86400;
+        let hours = (total_secs % 86400) / 3600;
+        let mins = (total_secs % 3600) / 60;
 
-                if days > 0 {
-                    return format!("up {days} day(s), {hours:2}:{mins:02}");
-                }
-                return format!("up {hours:2}:{mins:02}");
-            }
+        if days > 0 {
+            return format!("up {days} day(s), {hours:2}:{mins:02}");
+        }
+        return format!("up {hours:2}:{mins:02}");
+    }
     "up  0:00".to_string()
 }
 
@@ -402,10 +404,7 @@ fn run_w(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
         let uptime = get_uptime_str();
         let loadavg = get_load_avg();
         let nusers = entries.len();
-        writeln!(
-            writer,
-            " {time} {uptime},  {nusers} user(s),  {loadavg}"
-        )?;
+        writeln!(writer, " {time} {uptime},  {nusers} user(s),  {loadavg}")?;
 
         if cfg.short_format {
             writeln!(writer, "USER     TTY        IDLE  WHAT")?;
@@ -544,9 +543,10 @@ fn run_finger(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
             // Plan/project
             if !cfg.no_plan {
                 if !cfg.no_project
-                    && let Some(ref project) = info.project {
-                        writeln!(writer, "Project: {}", project.trim())?;
-                    }
+                    && let Some(ref project) = info.project
+                {
+                    writeln!(writer, "Project: {}", project.trim())?;
+                }
                 if let Some(ref plan) = info.plan {
                     writeln!(writer, "Plan:")?;
                     write!(writer, "{plan}")?;
@@ -601,7 +601,11 @@ fn run_pinky(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
                 "Login name: {:<28} In real life: {}",
                 info.username, info.real_name
             )?;
-            writeln!(writer, "Directory: {:<29} Shell: {}", info.home_dir, info.shell)?;
+            writeln!(
+                writer,
+                "Directory: {:<29} Shell: {}",
+                info.home_dir, info.shell
+            )?;
             if info.login_sessions.is_empty() {
                 writeln!(writer, "Never logged in.")?;
             } else {

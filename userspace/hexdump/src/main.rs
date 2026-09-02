@@ -145,8 +145,7 @@ Options:
 /// Parse a numeric argument that may be decimal or hex (0x prefix).
 fn parse_number(s: &str) -> Result<u64, String> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u64::from_str_radix(hex, 16)
-            .map_err(|_| format!("invalid hex number: '{s}'"))
+        u64::from_str_radix(hex, 16).map_err(|_| format!("invalid hex number: '{s}'"))
     } else {
         s.parse::<u64>()
             .map_err(|_| format!("invalid number: '{s}'"))
@@ -338,10 +337,7 @@ fn parse_args_xxd(args: &[String]) -> Result<Options, String> {
 /// Detect whether we were invoked as `xxd` (by checking argv[0]).
 fn is_xxd_invocation() -> bool {
     let argv0 = env::args().next().unwrap_or_default();
-    let basename = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&argv0);
+    let basename = argv0.rsplit(['/', '\\']).next().unwrap_or(&argv0);
     // Strip .exe suffix on Windows-like platforms.
     let name = basename.strip_suffix(".exe").unwrap_or(basename);
     name == "xxd"
@@ -438,11 +434,7 @@ fn open_input(opts: &Options, path: Option<&str>) -> Result<(Box<dyn Read>, u64)
 /// Format and write a canonical hex+ASCII line.
 ///
 /// Format: `XXXXXXXX  HH HH HH HH HH HH HH HH  HH HH HH HH HH HH HH HH  |................|`
-fn write_canonical_line(
-    out: &mut impl Write,
-    offset: u64,
-    data: &[u8],
-) -> io::Result<()> {
+fn write_canonical_line(out: &mut impl Write, offset: u64, data: &[u8]) -> io::Result<()> {
     // Offset.
     write!(out, "{offset:08x}  ")?;
 
@@ -510,15 +502,17 @@ fn dump_canonical(
                 // Check for duplicate line squeezing.
                 if !no_squeeze
                     && let Some(ref prev) = prev_line
-                        && prev_line_len == DEFAULT_LINE_WIDTH && &line_buf == prev {
-                            if !squeezed {
-                                writeln!(out, "*")?;
-                                squeezed = true;
-                            }
-                            offset = offset.wrapping_add(DEFAULT_LINE_WIDTH as u64);
-                            line_len = 0;
-                            continue;
-                        }
+                    && prev_line_len == DEFAULT_LINE_WIDTH
+                    && &line_buf == prev
+                {
+                    if !squeezed {
+                        writeln!(out, "*")?;
+                        squeezed = true;
+                    }
+                    offset = offset.wrapping_add(DEFAULT_LINE_WIDTH as u64);
+                    line_len = 0;
+                    continue;
+                }
 
                 write_canonical_line(out, offset, &line_buf)?;
                 squeezed = false;
@@ -632,22 +626,21 @@ fn dump_two_byte_generic(
             if line_len == DEFAULT_LINE_WIDTH {
                 if !no_squeeze
                     && let Some(ref prev) = prev_line
-                        && prev_line_len == DEFAULT_LINE_WIDTH && &line_buf == prev {
-                            if !squeezed {
-                                writeln!(out, "*")?;
-                                squeezed = true;
-                            }
-                            offset = offset.wrapping_add(DEFAULT_LINE_WIDTH as u64);
-                            line_len = 0;
-                            continue;
-                        }
+                    && prev_line_len == DEFAULT_LINE_WIDTH
+                    && &line_buf == prev
+                {
+                    if !squeezed {
+                        writeln!(out, "*")?;
+                        squeezed = true;
+                    }
+                    offset = offset.wrapping_add(DEFAULT_LINE_WIDTH as u64);
+                    line_len = 0;
+                    continue;
+                }
 
                 write!(out, "{offset:07x}")?;
                 for i in 0..8 {
-                    let word = u16::from_le_bytes([
-                        line_buf[i * 2],
-                        line_buf[i * 2 + 1],
-                    ]);
+                    let word = u16::from_le_bytes([line_buf[i * 2], line_buf[i * 2 + 1]]);
                     format_word(out, word)?;
                 }
                 writeln!(out)?;
@@ -689,15 +682,13 @@ fn dump_char_display(
     start_offset: u64,
     no_squeeze: bool,
 ) -> io::Result<()> {
-    dump_one_byte_generic(reader, out, start_offset, no_squeeze, |out, b| {
-        match b {
-            b'\0' => write!(out, "  \\0"),
-            b'\t' => write!(out, "  \\t"),
-            b'\n' => write!(out, "  \\n"),
-            b'\r' => write!(out, "  \\r"),
-            0x20..=0x7E => write!(out, "   {}", b as char),
-            _ => write!(out, " {:03o}", b),
-        }
+    dump_one_byte_generic(reader, out, start_offset, no_squeeze, |out, b| match b {
+        b'\0' => write!(out, "  \\0"),
+        b'\t' => write!(out, "  \\t"),
+        b'\n' => write!(out, "  \\n"),
+        b'\r' => write!(out, "  \\r"),
+        0x20..=0x7E => write!(out, "   {}", b as char),
+        _ => write!(out, " {:03o}", b),
     })
 }
 
@@ -744,15 +735,17 @@ fn dump_one_byte_generic(
             if line_len == DEFAULT_LINE_WIDTH {
                 if !no_squeeze
                     && let Some(ref prev) = prev_line
-                        && prev_line_len == DEFAULT_LINE_WIDTH && &line_buf == prev {
-                            if !squeezed {
-                                writeln!(out, "*")?;
-                                squeezed = true;
-                            }
-                            offset = offset.wrapping_add(DEFAULT_LINE_WIDTH as u64);
-                            line_len = 0;
-                            continue;
-                        }
+                    && prev_line_len == DEFAULT_LINE_WIDTH
+                    && &line_buf == prev
+                {
+                    if !squeezed {
+                        writeln!(out, "*")?;
+                        squeezed = true;
+                    }
+                    offset = offset.wrapping_add(DEFAULT_LINE_WIDTH as u64);
+                    line_len = 0;
+                    continue;
+                }
 
                 write!(out, "{offset:07x}")?;
                 for &b in &line_buf[..DEFAULT_LINE_WIDTH] {
@@ -776,11 +769,7 @@ fn dump_one_byte_generic(
 // JSON output (--json)
 // ============================================================================
 
-fn dump_json(
-    reader: &mut dyn Read,
-    out: &mut impl Write,
-    start_offset: u64,
-) -> io::Result<()> {
+fn dump_json(reader: &mut dyn Read, out: &mut impl Write, start_offset: u64) -> io::Result<()> {
     let mut buf = [0u8; BUF_SIZE];
     let mut line_buf = [0u8; DEFAULT_LINE_WIDTH];
     let mut line_len = 0usize;
@@ -824,11 +813,7 @@ fn dump_json(
     writeln!(out, "\n]")
 }
 
-fn write_json_line(
-    out: &mut impl Write,
-    offset: u64,
-    data: &[u8],
-) -> io::Result<()> {
+fn write_json_line(out: &mut impl Write, offset: u64, data: &[u8]) -> io::Result<()> {
     write!(out, "  {{\"offset\":{offset},\"hex\":[")?;
     for (i, &b) in data.iter().enumerate() {
         if i > 0 {
@@ -981,10 +966,7 @@ fn dump_xxd_c_include(
 
 /// Convert a filename to a valid C identifier.
 fn make_c_identifier(name: &str) -> String {
-    let basename = name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(name);
+    let basename = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let mut result = String::with_capacity(basename.len());
     for (i, ch) in basename.chars().enumerate() {
         if ch.is_ascii_alphanumeric() || ch == '_' {
@@ -1006,11 +988,7 @@ fn make_c_identifier(name: &str) -> String {
 // xxd plain hex only (-p)
 // ============================================================================
 
-fn dump_xxd_plain_hex(
-    reader: &mut dyn Read,
-    out: &mut impl Write,
-    cols: usize,
-) -> io::Result<()> {
+fn dump_xxd_plain_hex(reader: &mut dyn Read, out: &mut impl Write, cols: usize) -> io::Result<()> {
     let mut buf = [0u8; BUF_SIZE];
     let mut col = 0;
 
@@ -1045,10 +1023,7 @@ fn dump_xxd_plain_hex(
 ///
 /// Expected input format per line: `OFFSET: HH HH HH ...  ASCII`
 /// Also handles plain hex lines (no offset).
-fn dump_xxd_reverse(
-    reader: &mut dyn Read,
-    out: &mut impl Write,
-) -> io::Result<()> {
+fn dump_xxd_reverse(reader: &mut dyn Read, out: &mut impl Write) -> io::Result<()> {
     let buf_reader = BufReader::new(reader);
 
     for line_result in buf_reader.lines() {
@@ -1086,10 +1061,7 @@ fn dump_xxd_reverse(
         };
 
         // Parse hex characters, ignoring spaces.
-        let hex_chars: Vec<u8> = hex_data
-            .bytes()
-            .filter(|&b| b != b' ')
-            .collect();
+        let hex_chars: Vec<u8> = hex_data.bytes().filter(|&b| b != b' ').collect();
 
         let mut i = 0;
         while i + 1 < hex_chars.len() {
@@ -1120,18 +1092,12 @@ fn hex_digit_value(b: u8) -> Option<u8> {
 // ============================================================================
 
 /// Run the selected display mode on a single input source.
-fn process_input(
-    opts: &Options,
-    path: Option<&str>,
-    out: &mut impl Write,
-) -> Result<(), String> {
+fn process_input(opts: &Options, path: Option<&str>, out: &mut impl Write) -> Result<(), String> {
     // xxd reverse reads hex text, not binary -- handle separately.
     if opts.mode == DisplayMode::XxdReverse {
         let reader: Box<dyn Read> = match path {
             Some("-") | None => Box::new(io::stdin()),
-            Some(p) => Box::new(
-                File::open(p).map_err(|e| format!("{p}: {e}"))?
-            ),
+            Some(p) => Box::new(File::open(p).map_err(|e| format!("{p}: {e}"))?),
         };
         let mut reader = reader;
         return dump_xxd_reverse(&mut reader, out)
@@ -1141,9 +1107,7 @@ fn process_input(
     let (mut reader, start_offset) = open_input(opts, path)?;
 
     let result = match opts.mode {
-        DisplayMode::Canonical => {
-            dump_canonical(&mut reader, out, start_offset, opts.no_squeeze)
-        }
+        DisplayMode::Canonical => dump_canonical(&mut reader, out, start_offset, opts.no_squeeze),
         DisplayMode::TwoByteHex => {
             dump_two_byte_hex(&mut reader, out, start_offset, opts.no_squeeze)
         }
@@ -1159,18 +1123,12 @@ fn process_input(
         DisplayMode::CharDisplay => {
             dump_char_display(&mut reader, out, start_offset, opts.no_squeeze)
         }
-        DisplayMode::Json => {
-            dump_json(&mut reader, out, start_offset)
-        }
+        DisplayMode::Json => dump_json(&mut reader, out, start_offset),
         DisplayMode::XxdPlain => {
             dump_xxd_plain(&mut reader, out, start_offset, opts.cols, opts.group)
         }
-        DisplayMode::XxdCInclude => {
-            dump_xxd_c_include(&mut reader, out, path)
-        }
-        DisplayMode::XxdPlainHex => {
-            dump_xxd_plain_hex(&mut reader, out, opts.cols)
-        }
+        DisplayMode::XxdCInclude => dump_xxd_c_include(&mut reader, out, path),
+        DisplayMode::XxdPlainHex => dump_xxd_plain_hex(&mut reader, out, opts.cols),
         DisplayMode::XxdReverse => {
             // Already handled above; unreachable.
             Ok(())
@@ -1193,7 +1151,11 @@ fn run() -> Result<(), String> {
         process_input(&opts, None, &mut out)?;
     } else {
         for path in &opts.files {
-            let p = if path == "-" { None } else { Some(path.as_str()) };
+            let p = if path == "-" {
+                None
+            } else {
+                Some(path.as_str())
+            };
             process_input(&opts, p, &mut out)?;
         }
     }
@@ -1204,7 +1166,11 @@ fn run() -> Result<(), String> {
 
 fn main() {
     if let Err(msg) = run() {
-        let name = if is_xxd_invocation() { "xxd" } else { "hexdump" };
+        let name = if is_xxd_invocation() {
+            "xxd"
+        } else {
+            "hexdump"
+        };
         eprintln!("{name}: {msg}");
         process::exit(1);
     }

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_osm2pgsql(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -30,7 +34,10 @@ fn run_osm2pgsql(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("osm2pgsql v1.10.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("osm2pgsql v1.10.0 (Slate OS)");
+        return 0;
+    }
     println!("osm2pgsql v1.10.0 (Slate OS)");
     println!("  Input: planet-latest.osm.pbf");
     println!("  Database: gis");
@@ -46,7 +53,10 @@ fn run_osm2pgsql(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "osm2pgsql".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "osm2pgsql".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_osm2pgsql(&rest, &_prog);
     process::exit(code);
@@ -54,7 +64,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_osm2pgsql};
+    use super::{basename, run_osm2pgsql, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_nutshell(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_nutshell(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Nutshell 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Nutshell 2024 (Slate OS)");
+        return 0;
+    }
     println!("Nutshell 2024 (Slate OS)");
     println!("  Vendor: Nutshell, Inc. (Ann Arbor, MI — private)");
     println!("  Founders: Guy Suter, Andy Fowler, Ian Berry (2010)");
@@ -76,13 +83,18 @@ fn run_nutshell(args: &[String], _prog: &str) -> i32 {
     println!("  Critique: less brand awareness vs HubSpot/Pipedrive");
     println!("           marketing automation thinner than HubSpot's Marketing Hub");
     println!("           reporting good but not Salesforce-deep");
-    println!("  Differentiator: opinionated, fast, light CRM with possibly the friendliest support team in the category");
+    println!(
+        "  Differentiator: opinionated, fast, light CRM with possibly the friendliest support team in the category"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "nutshell".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "nutshell".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_nutshell(&rest, &_prog);
     process::exit(code);
@@ -90,7 +102,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_nutshell};
+    use super::{basename, run_nutshell, strip_ext};
 
     #[test]
     fn basename_strips_path() {

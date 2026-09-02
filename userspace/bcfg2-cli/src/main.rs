@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bcfg2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_bcfg2(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("bcfg2 v1.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("bcfg2 v1.4 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "-n") {
         println!("bcfg2: dry run — no changes applied");
         println!("  Correct entries: 42");
@@ -47,7 +54,10 @@ fn run_bcfg2_server(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("bcfg2-server v1.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("bcfg2-server v1.4 (Slate OS)");
+        return 0;
+    }
     println!("bcfg2-server: started on port 6789");
     println!("  Plugins: Bundler, Cfg, Metadata, Packages, SSHbase");
     println!("  Clients registered: 5");
@@ -70,7 +80,10 @@ fn run_bcfg2_info(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bcfg2".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bcfg2".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "bcfg2-server" => run_bcfg2_server(&rest, &prog),
@@ -82,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bcfg2};
+    use super::{basename, run_bcfg2, strip_ext};
 
     #[test]
     fn basename_strips_path() {

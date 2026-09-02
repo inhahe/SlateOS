@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ibmmq(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ibmmq [OPTIONS]");
-        println!("IBM MQ (Slate OS) — the original enterprise messaging system (formerly MQSeries, 1993+)");
+        println!(
+            "IBM MQ (Slate OS) — the original enterprise messaging system (formerly MQSeries, 1993+)"
+        );
         println!();
         println!("Options:");
         println!("  --queue-manager        Queue manager (the broker) management");
@@ -22,8 +28,13 @@ fn run_ibmmq(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("IBM MQ 2024 (Slate OS) — ibmmq CLI (runmqsc + dmpmqcfg)"); return 0; }
-    println!("IBM MQ 2024 (Slate OS) — Enterprise Messaging (formerly MQSeries, the original since 1993)");
+    if args.iter().any(|a| a == "--version") {
+        println!("IBM MQ 2024 (Slate OS) — ibmmq CLI (runmqsc + dmpmqcfg)");
+        return 0;
+    }
+    println!(
+        "IBM MQ 2024 (Slate OS) — Enterprise Messaging (formerly MQSeries, the original since 1993)"
+    );
     println!("  Vendor: IBM Corporation (Armonk, NY — NYSE: IBM)");
     println!("  History (the granddaddy of messaging):");
     println!("    - Announced Mar 1992, GA Dec 1993 as MQSeries v1");
@@ -37,15 +48,27 @@ fn run_ibmmq(args: &[String], _prog: &str) -> i32 {
     println!("    - JMS 2.0 + 3.0 compliance (Jakarta Messaging)");
     println!("    - IBM MQ on Cloud Pak for Integration (containers, 2018+)");
     println!("  Strategic position: 'enterprise messaging — assured delivery on every platform':");
-    println!("                    pitch: 'guaranteed delivery + transactional + every-platform broker for big enterprises'");
-    println!("                    target: Fortune 500, banks, insurance, government, mainframe shops");
-    println!("                    primary competitor: TIBCO EMS, Solace, RabbitMQ (open-source), Kafka/Confluent");
-    println!("                    secondary: Azure Service Bus, AWS MQ (managed IBM MQ rival), MuleSoft");
-    println!("                    IBM MQ wedge: most platforms supported (z/OS + AIX + Windows + Linux + iSeries + macOS + Solaris + cloud)");
+    println!(
+        "                    pitch: 'guaranteed delivery + transactional + every-platform broker for big enterprises'"
+    );
+    println!(
+        "                    target: Fortune 500, banks, insurance, government, mainframe shops"
+    );
+    println!(
+        "                    primary competitor: TIBCO EMS, Solace, RabbitMQ (open-source), Kafka/Confluent"
+    );
+    println!(
+        "                    secondary: Azure Service Bus, AWS MQ (managed IBM MQ rival), MuleSoft"
+    );
+    println!(
+        "                    IBM MQ wedge: most platforms supported (z/OS + AIX + Windows + Linux + iSeries + macOS + Solaris + cloud)"
+    );
     println!("                    + transactional integrity (XA + 2PC support)");
     println!("                    + JMS 2.0 + 3.0 compliance");
     println!("                    + 30+ years of bank-grade reliability");
-    println!("                    'AWS MQ literally hosts IBM MQ for you' — that's market dominance");
+    println!(
+        "                    'AWS MQ literally hosts IBM MQ for you' — that's market dominance"
+    );
     println!("  Pricing (enterprise IBM-style):");
     println!("    IBM MQ Advanced for Developers: free (non-production)");
     println!("    IBM MQ Standard: per-PVU (Processor Value Unit) licensing");
@@ -120,7 +143,9 @@ fn run_ibmmq(args: &[String], _prog: &str) -> i32 {
     println!("    - Insurance, government, retail mainframes — all MQ");
     println!("    - 'Where there's a mainframe, there's MQ'");
     println!("  The 'every platform' angle:");
-    println!("    - Supports z/OS, AIX, Linux (x86 + Power + s390x + ARM64), Windows, iSeries (i5/OS), macOS, Solaris");
+    println!(
+        "    - Supports z/OS, AIX, Linux (x86 + Power + s390x + ARM64), Windows, iSeries (i5/OS), macOS, Solaris"
+    );
     println!("    - HP-UX still supported until recently");
     println!("    - No other broker spans this many platforms");
     println!("    - Critical for hybrid: mainframe ↔ AIX ↔ Linux ↔ cloud");
@@ -178,13 +203,18 @@ fn run_ibmmq(args: &[String], _prog: &str) -> i32 {
     println!("           mainframe-centric architecture concepts confusing for cloud-native devs");
     println!("           IBM acquisition activity churns product strategy");
     println!("           CICS + IMS dependencies for older patterns");
-    println!("  Differentiator: 30+ years (MQSeries 1993 → WebSphere MQ 2002 → IBM MQ 2014) + the granddaddy of message queuing (IBM coined 'MQ' terminology) + every-platform broker (z/OS + AIX + Linux x86/Power/s390x/ARM64 + Windows + iSeries + macOS + Solaris) + Queue Manager + Queues + Topics + Channels + Clusters + persistent + transactional (XA + 2PC) + JMS 2.0 + 3.0 compliance + IBM MQ Advanced (AMS app-level encryption + RDQM replication + MFT managed file transfer) + IBM MQ Appliance (DataPower hardware) + AWS MQ for IBM MQ (Amazon hosts IBM MQ, 2022+) + Cloud Pak for Integration (OpenShift containerized) + Kafka Connect bidirectional bridge + mainframe gold standard (z/OS MQ on virtually every Fortune 500 mainframe) + JPMorgan/Citi/BofA/Wells/Goldman/Barclays/HSBC/SWIFT/IRS/SSA-proven + CICS + IMS tight integration + ~95% of Fortune 500 have IBM MQ somewhere + DataPower + IBM App Connect ecosystem + the architecture term 'MQ' itself was coined by this product — the bank-grade transactional messaging system that powers Fortune 500 financial services + insurance + government IT and underlies SWIFT interbank messaging, the most platform-spanning broker in existence");
+    println!(
+        "  Differentiator: 30+ years (MQSeries 1993 → WebSphere MQ 2002 → IBM MQ 2014) + the granddaddy of message queuing (IBM coined 'MQ' terminology) + every-platform broker (z/OS + AIX + Linux x86/Power/s390x/ARM64 + Windows + iSeries + macOS + Solaris) + Queue Manager + Queues + Topics + Channels + Clusters + persistent + transactional (XA + 2PC) + JMS 2.0 + 3.0 compliance + IBM MQ Advanced (AMS app-level encryption + RDQM replication + MFT managed file transfer) + IBM MQ Appliance (DataPower hardware) + AWS MQ for IBM MQ (Amazon hosts IBM MQ, 2022+) + Cloud Pak for Integration (OpenShift containerized) + Kafka Connect bidirectional bridge + mainframe gold standard (z/OS MQ on virtually every Fortune 500 mainframe) + JPMorgan/Citi/BofA/Wells/Goldman/Barclays/HSBC/SWIFT/IRS/SSA-proven + CICS + IMS tight integration + ~95% of Fortune 500 have IBM MQ somewhere + DataPower + IBM App Connect ecosystem + the architecture term 'MQ' itself was coined by this product — the bank-grade transactional messaging system that powers Fortune 500 financial services + insurance + government IT and underlies SWIFT interbank messaging, the most platform-spanning broker in existence"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "ibmmq".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "ibmmq".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ibmmq(&rest, &_prog);
     process::exit(code);
@@ -192,7 +222,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ibmmq};
+    use super::{basename, run_ibmmq, strip_ext};
 
     #[test]
     fn basename_strips_path() {

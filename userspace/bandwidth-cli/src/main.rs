@@ -37,7 +37,9 @@ fn print_help(prog: &str) {
     println!("    version     Show version");
 }
 
-fn print_version() { println!("bandwidth-cli 0.1.0 (BAND-on-NASDAQ personality build)"); }
+fn print_version() {
+    println!("bandwidth-cli 0.1.0 (BAND-on-NASDAQ personality build)");
+}
 
 fn run_about() {
     println!("Bandwidth Inc. (NASDAQ: BAND)");

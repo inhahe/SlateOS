@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_signoz(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_signoz(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SigNoz 2024 (Slate OS) — v0.45 community + cloud"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("SigNoz 2024 (Slate OS) — v0.45 community + cloud");
+        return 0;
+    }
     println!("SigNoz 2024 (Slate OS) — Open-Source OpenTelemetry-Native Observability");
     println!("  Vendor: SigNoz, Inc. (Bangalore + San Francisco — private, YC W21)");
     println!("  Founders: Pranay Prateek + Ankit Anand, 2021 (Y Combinator W21)");
@@ -38,13 +45,25 @@ fn run_signoz(args: &[String], _prog: &str) -> i32 {
     println!("         Nexus Venture Partners, Bessemer, Y Combinator backers");
     println!("         estimated $5-15M ARR (private — early stage, growing fast)");
     println!("         GitHub: 18K+ stars (one of the most-starred observability OSS projects)");
-    println!("  Strategic position: 'OpenTelemetry-native observability — open-source, self-hosted, no lock-in':");
-    println!("                    pitch: 'one tool for logs + metrics + traces — built on the OTel spec'");
-    println!("                    target: developers + cost-conscious teams + open-source-aligned shops");
-    println!("                    primary competitor: Datadog (sticker shock alternative), Grafana, Jaeger + Prometheus");
+    println!(
+        "  Strategic position: 'OpenTelemetry-native observability — open-source, self-hosted, no lock-in':"
+    );
+    println!(
+        "                    pitch: 'one tool for logs + metrics + traces — built on the OTel spec'"
+    );
+    println!(
+        "                    target: developers + cost-conscious teams + open-source-aligned shops"
+    );
+    println!(
+        "                    primary competitor: Datadog (sticker shock alternative), Grafana, Jaeger + Prometheus"
+    );
     println!("                    secondary: New Relic, Honeycomb, Logz.io, Elastic APM");
-    println!("                    SigNoz's wedge: 100% open-source + OpenTelemetry-native + ClickHouse backend = self-hostable");
-    println!("                    'OSS-first' = mirrors Grafana's growth strategy at younger stage");
+    println!(
+        "                    SigNoz's wedge: 100% open-source + OpenTelemetry-native + ClickHouse backend = self-hostable"
+    );
+    println!(
+        "                    'OSS-first' = mirrors Grafana's growth strategy at younger stage"
+    );
     println!("  Pricing:");
     println!("    Community (self-hosted): FREE forever, full features");
     println!("    Cloud Standard: $20-$200/month per host or per-GB ingestion");
@@ -94,7 +113,9 @@ fn run_signoz(args: &[String], _prog: &str) -> i32 {
     println!("    - 200+ contributors");
     println!("    - Active Slack community (10K+ members)");
     println!("    - Docker pulls + Helm installs growing rapidly");
-    println!("    - Strategy mirrors successful OSS observability vendors (Grafana, Elastic in early days)");
+    println!(
+        "    - Strategy mirrors successful OSS observability vendors (Grafana, Elastic in early days)"
+    );
     println!("  OpenTelemetry champion:");
     println!("    - All ingestion through OTel Collector or OTLP protocol");
     println!("    - No proprietary agent or SDK");
@@ -116,7 +137,9 @@ fn run_signoz(args: &[String], _prog: &str) -> i32 {
     println!("    signoz metrics query 'avg(latency)' --service checkout --range 1h");
     println!("    signoz logs query --service checkout --level error --from -30m");
     println!("    signoz dashboard import --file dashboard.json");
-    println!("    signoz alert create --name 'High Error Rate' --query @query.signoz --threshold 100");
+    println!(
+        "    signoz alert create --name 'High Error Rate' --query @query.signoz --threshold 100"
+    );
     println!("    signoz install --self-hosted --target docker-compose");
     println!("    signoz install --self-hosted --target kubernetes --namespace signoz");
     println!("  Customers (community + paid):");
@@ -127,20 +150,29 @@ fn run_signoz(args: &[String], _prog: &str) -> i32 {
     println!("    - Growing US + Europe presence");
     println!("    - Sweet spot: technical teams that want OTel without Datadog cost");
     println!("  Critique: young company (founded 2021) — battle-tested at scale less than peers");
-    println!("           ClickHouse self-hosting ops burden non-trivial (no managed open-source ClickHouse)");
+    println!(
+        "           ClickHouse self-hosting ops burden non-trivial (no managed open-source ClickHouse)"
+    );
     println!("           feature parity with Datadog still maturing (especially RUM + synthetics)");
     println!("           community-to-paid conversion rate uncertain");
     println!("           Grafana Cloud's OSS-friendly bundling competes for similar buyers");
     println!("           AI features minimal vs leading vendors");
     println!("           sales engine + brand awareness modest vs Datadog/Splunk");
-    println!("           dual HQ Bangalore + SF good for talent but less Western enterprise muscle");
-    println!("  Differentiator: 100% open-source MIT-licensed + OpenTelemetry-native (no proprietary protocols or agents) + ClickHouse backend (sub-second queries on logs/metrics/traces) + 18K+ GitHub stars (one of the most-starred OSS observability projects) + self-hostable for full data sovereignty + 50-80% cheaper than Datadog Cloud + Y Combinator W21 + Indian + US dual HQ + early bet on OTel as the future standard — the open-source observability platform for developers who want OpenTelemetry without vendor lock-in and Datadog without the enterprise bill");
+    println!(
+        "           dual HQ Bangalore + SF good for talent but less Western enterprise muscle"
+    );
+    println!(
+        "  Differentiator: 100% open-source MIT-licensed + OpenTelemetry-native (no proprietary protocols or agents) + ClickHouse backend (sub-second queries on logs/metrics/traces) + 18K+ GitHub stars (one of the most-starred OSS observability projects) + self-hostable for full data sovereignty + 50-80% cheaper than Datadog Cloud + Y Combinator W21 + Indian + US dual HQ + early bet on OTel as the future standard — the open-source observability platform for developers who want OpenTelemetry without vendor lock-in and Datadog without the enterprise bill"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "signoz".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "signoz".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_signoz(&rest, &_prog);
     process::exit(code);
@@ -148,7 +180,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_signoz};
+    use super::{basename, run_signoz, strip_ext};
 
     #[test]
     fn basename_strips_path() {

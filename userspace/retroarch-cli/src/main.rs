@@ -47,9 +47,18 @@ fn run_retroarch(args: &[String]) -> i32 {
         return 0;
     }
 
-    let core = args.windows(2).find(|w| w[0] == "-L" || w[0] == "--libretro")
+    let core = args
+        .windows(2)
+        .find(|w| w[0] == "-L" || w[0] == "--libretro")
         .map(|w| w[1].as_str());
-    let rom = args.iter().find(|a| !a.starts_with('-') && !args.windows(2).any(|w| &w[1] == *a && (w[0] == "-L" || w[0] == "-c")))
+    let rom = args
+        .iter()
+        .find(|a| {
+            !a.starts_with('-')
+                && !args
+                    .windows(2)
+                    .any(|w| &w[1] == *a && (w[0] == "-L" || w[0] == "-c"))
+        })
         .map(|s| s.as_str());
 
     if let Some(c) = core {
@@ -77,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_retroarch};
+    use super::run_retroarch;
 
     #[test]
     fn help_exits_zero() {

@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("aweber-cli 0.1.0 (founding-cohort autoresponder personality build)"); }
+fn print_version() {
+    println!("aweber-cli 0.1.0 (founding-cohort autoresponder personality build)");
+}
 
 fn run_about() {
     println!("AWeber Communications, Inc.");

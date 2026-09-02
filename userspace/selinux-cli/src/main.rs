@@ -76,8 +76,12 @@ fn run_semanage(args: &[String]) -> i32 {
         }
         "fcontext" => {
             println!("SELinux fcontext               type              Context");
-            println!("/var/www(/.*)?                  all files         system_u:object_r:httpd_sys_content_t:s0");
-            println!("/etc/httpd(/.*)?                all files         system_u:object_r:httpd_config_t:s0");
+            println!(
+                "/var/www(/.*)?                  all files         system_u:object_r:httpd_sys_content_t:s0"
+            );
+            println!(
+                "/etc/httpd(/.*)?                all files         system_u:object_r:httpd_config_t:s0"
+            );
         }
         _ => println!("semanage: listing {} objects", object),
     }
@@ -90,7 +94,11 @@ fn run_setsebool(args: &[String]) -> i32 {
         return 1;
     }
     let persistent = args.iter().any(|a| a == "-P");
-    let bools: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let bools: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     if bools.len() >= 2 {
         let msg = if persistent { " (persistent)" } else { "" };
         println!("setsebool: {} -> {}{}", bools[0], bools[1], msg);
@@ -119,10 +127,17 @@ fn run_restorecon(args: &[String]) -> i32 {
         return 0;
     }
     let verbose = args.iter().any(|a| a == "-v");
-    let paths: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let paths: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     for path in &paths {
         if verbose {
-            println!("Relabeled {} from unconfined_u:object_r:default_t:s0 to system_u:object_r:httpd_sys_content_t:s0", path);
+            println!(
+                "Relabeled {} from unconfined_u:object_r:default_t:s0 to system_u:object_r:httpd_sys_content_t:s0",
+                path
+            );
         }
     }
     0
@@ -143,7 +158,8 @@ fn run_chcon(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "sestatus".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -163,7 +179,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_setenforce};
+    use super::{basename, run_setenforce, strip_ext};
 
     #[test]
     fn basename_strips_path() {

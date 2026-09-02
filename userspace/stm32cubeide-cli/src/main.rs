@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_cubeide(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_cubeide(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("STMicroelectronics STM32CubeIDE 1.16.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("STMicroelectronics STM32CubeIDE 1.16.0 (Slate OS)");
+        return 0;
+    }
     println!("STMicroelectronics STM32CubeIDE 1.16.0 (Slate OS)");
     println!("  Targets: STM32 Cortex-M0/M3/M4/M7/M33/M55, STM32MP1/MP2 (A7/A35)");
     println!("  Based on: Eclipse CDT + GNU MCU plugins + STM32CubeMX integration");
@@ -37,7 +44,10 @@ fn run_cubeide(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "stm32cubeide".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "stm32cubeide".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_cubeide(&rest, &_prog);
     process::exit(code);
@@ -45,7 +55,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cubeide};
+    use super::{basename, run_cubeide, strip_ext};
 
     #[test]
     fn basename_strips_path() {

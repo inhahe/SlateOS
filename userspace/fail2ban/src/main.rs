@@ -119,7 +119,9 @@ fn run_architecture() {
 
 fn run_jails() {
     println!("Notable built-in jails (a small sample of /etc/fail2ban/jail.d/).");
-    println!("  sshd               OpenSSH auth failures - the canonical reason to install fail2ban.");
+    println!(
+        "  sshd               OpenSSH auth failures - the canonical reason to install fail2ban."
+    );
     println!("  sshd-ddos          High-rate SSH connect attempts (pre-auth abuse).");
     println!("  apache-auth        Apache 401 Basic/Digest auth failures.");
     println!("  apache-badbots     Apache requests matching known scraper/bot UAs.");
@@ -201,7 +203,9 @@ fn run_backends() {
     println!("                plain-text log file. Required when the service does not");
     println!("                write to /var/log/auth.log but only to journald (most");
     println!("                modern systemd-only distros).");
-    println!("                Match journald fields via journalmatch = _SYSTEMD_UNIT=sshd.service.");
+    println!(
+        "                Match journald fields via journalmatch = _SYSTEMD_UNIT=sshd.service."
+    );
     println!("  Per-jail:    backend = systemd  (overrides the global default).");
 }
 

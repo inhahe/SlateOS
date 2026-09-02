@@ -28,7 +28,8 @@ fn run_mediainfo(args: Vec<String>) -> i32 {
 
     let full = args.iter().any(|a| a == "--Full" || a == "-f");
     let json_out = args.iter().any(|a| a == "--Output=JSON");
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -44,9 +45,15 @@ fn run_mediainfo(args: Vec<String>) -> i32 {
             println!("  \"media\": {{");
             println!("    \"@ref\": \"{}\",", file);
             println!("    \"track\": [");
-            println!("      {{\"@type\": \"General\", \"Format\": \"MPEG-4\", \"Duration\": \"6135.123\"}},");
-            println!("      {{\"@type\": \"Video\", \"Format\": \"AVC\", \"Width\": \"1920\", \"Height\": \"1080\"}},");
-            println!("      {{\"@type\": \"Audio\", \"Format\": \"AAC\", \"Channels\": \"2\", \"SamplingRate\": \"48000\"}}");
+            println!(
+                "      {{\"@type\": \"General\", \"Format\": \"MPEG-4\", \"Duration\": \"6135.123\"}},"
+            );
+            println!(
+                "      {{\"@type\": \"Video\", \"Format\": \"AVC\", \"Width\": \"1920\", \"Height\": \"1080\"}},"
+            );
+            println!(
+                "      {{\"@type\": \"Audio\", \"Format\": \"AAC\", \"Channels\": \"2\", \"SamplingRate\": \"48000\"}}"
+            );
             println!("    ]");
             println!("  }}");
             println!("}}");
@@ -116,7 +123,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mediainfo};
+    use super::run_mediainfo;
 
     #[test]
     fn help_exits_zero() {

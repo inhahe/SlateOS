@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_betterstack(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: betterstack [OPTIONS]");
-        println!("Better Stack (Slate OS) — beautifully designed observability + incident mgmt for devs");
+        println!(
+            "Better Stack (Slate OS) — beautifully designed observability + incident mgmt for devs"
+        );
         println!();
         println!("Options:");
         println!("  --uptime               Uptime monitoring (was Better Uptime)");
@@ -22,11 +28,16 @@ fn run_betterstack(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Better Stack 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Better Stack 2024 (Slate OS)");
+        return 0;
+    }
     println!("Better Stack 2024 (Slate OS) — Observability + Incident Management");
     println!("  Vendor: Better Stack (Tomáš Hromada + team — Prague, Czech Republic, private)");
     println!("  Founder: Tomáš Hromada, 2017 (started as 'Better Uptime')");
-    println!("          Originally: Better Uptime — uptime monitoring + incident mgmt + status pages");
+    println!(
+        "          Originally: Better Uptime — uptime monitoring + incident mgmt + status pages"
+    );
     println!("          Expanded into Logtail (log management on ClickHouse) — 2021");
     println!("          Rebranded to 'Better Stack' Jul 2022 to unify the products");
     println!("          Czech-founded, fully remote, EU-focused but global");
@@ -35,15 +46,31 @@ fn run_betterstack(args: &[String], _prog: &str) -> i32 {
     println!("  Private funding:");
     println!("         Seed Jun 2021: $2.5M (Reflex Capital)");
     println!("         Series A Apr 2023: $18M (Norwest Venture Partners)");
-    println!("         total raised: ~$22M (modest by observability standards — capital efficient)");
+    println!(
+        "         total raised: ~$22M (modest by observability standards — capital efficient)"
+    );
     println!("         estimated $15-30M ARR (private)");
-    println!("  Strategic position: 'observability tools that devs actually love — uptime + logs + on-call + incidents':");
-    println!("                    pitch: 'beautifully designed observability — pricing for everyone'");
-    println!("                    target: SMB to mid-market dev teams (sweet spot indie + scale-up + tech)");
-    println!("                    primary competitor: Pingdom + Pingdom (uptime), Datadog (full-stack), PagerDuty (on-call)");
-    println!("                    secondary: New Relic, Sentry, Bugsnag, StatusPage.io (Atlassian)");
-    println!("                    Better Stack's wedge: gorgeous UI + low price + all-in-one DevOps observability bundle");
-    println!("                    'The tool we wish we had at our last job' indie-startup aesthetic");
+    println!(
+        "  Strategic position: 'observability tools that devs actually love — uptime + logs + on-call + incidents':"
+    );
+    println!(
+        "                    pitch: 'beautifully designed observability — pricing for everyone'"
+    );
+    println!(
+        "                    target: SMB to mid-market dev teams (sweet spot indie + scale-up + tech)"
+    );
+    println!(
+        "                    primary competitor: Pingdom + Pingdom (uptime), Datadog (full-stack), PagerDuty (on-call)"
+    );
+    println!(
+        "                    secondary: New Relic, Sentry, Bugsnag, StatusPage.io (Atlassian)"
+    );
+    println!(
+        "                    Better Stack's wedge: gorgeous UI + low price + all-in-one DevOps observability bundle"
+    );
+    println!(
+        "                    'The tool we wish we had at our last job' indie-startup aesthetic"
+    );
     println!("  Pricing (notably cheap + transparent):");
     println!("    Free tier: 10 monitors, 1 log GB/day");
     println!("    Freelancer: $24/mo (50 monitors, 30 GB/month logs)");
@@ -88,7 +115,9 @@ fn run_betterstack(args: &[String], _prog: &str) -> i32 {
     println!("       - Real phone calls + SMS for critical alerts");
     println!("       - Global SMS routing (Twilio-backed)");
     println!("  Dev-first UX philosophy:");
-    println!("    - Visually polished UI (rare in observability — most tools look enterprise-cluttered)");
+    println!(
+        "    - Visually polished UI (rare in observability — most tools look enterprise-cluttered)"
+    );
     println!("    - Fast loading, snappy interactions");
     println!("    - Dark mode + thoughtful typography");
     println!("    - Real-time updates (no manual refresh)");
@@ -121,19 +150,26 @@ fn run_betterstack(args: &[String], _prog: &str) -> i32 {
     println!("    - Word-of-mouth + Twitter/HN-driven growth");
     println!("  Critique: enterprise governance lighter than PagerDuty/Datadog");
     println!("           features less deep than dedicated leaders in each category");
-    println!("           ClickHouse-based logs less mature than Splunk/Datadog for complex correlations");
+    println!(
+        "           ClickHouse-based logs less mature than Splunk/Datadog for complex correlations"
+    );
     println!("           AI/ML features minimal vs leading observability vendors");
     println!("           customer base modest vs Datadog 28K+ or PagerDuty 22K+");
     println!("           Twilio-backed SMS pricing pass-through can surprise high-volume teams");
     println!("           limited APM + tracing — competes at edges with full-stack vendors");
     println!("           European HQ may slow enterprise NAm wins");
-    println!("  Differentiator: gorgeous, dev-loved UI + uptime + logs + on-call + incidents + status pages in one bundle (rare combination) + 50-80% cheaper than Datadog + PagerDuty + Pingdom combined + ClickHouse-based log search (sub-second queries) + Czech-founded indie aesthetic + bootstrapped capital efficiency ($22M total raised) + 10K+ customers — the dev-first observability bundle that small teams choose because it's beautiful, affordable, and bundles the 5 things every team needs without enterprise complexity");
+    println!(
+        "  Differentiator: gorgeous, dev-loved UI + uptime + logs + on-call + incidents + status pages in one bundle (rare combination) + 50-80% cheaper than Datadog + PagerDuty + Pingdom combined + ClickHouse-based log search (sub-second queries) + Czech-founded indie aesthetic + bootstrapped capital efficiency ($22M total raised) + 10K+ customers — the dev-first observability bundle that small teams choose because it's beautiful, affordable, and bundles the 5 things every team needs without enterprise complexity"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "betterstack".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "betterstack".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_betterstack(&rest, &_prog);
     process::exit(code);
@@ -141,7 +177,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_betterstack};
+    use super::{basename, run_betterstack, strip_ext};
 
     #[test]
     fn basename_strips_path() {

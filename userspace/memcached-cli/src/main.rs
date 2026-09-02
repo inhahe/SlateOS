@@ -33,13 +33,26 @@ fn run_memcached(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let port = args.windows(2).find(|w| w[0] == "-p" || w[0] == "--port")
-        .map(|w| w[1].as_str()).unwrap_or("11211");
-    let memory = args.windows(2).find(|w| w[0] == "-m" || w[0] == "--memory")
-        .map(|w| w[1].as_str()).unwrap_or("64");
-    let threads = args.windows(2).find(|w| w[0] == "-t" || w[0] == "--threads")
-        .map(|w| w[1].as_str()).unwrap_or("4");
-    let verbose = args.iter().filter(|a| a.as_str() == "-v" || a.as_str() == "-vv" || a.as_str() == "-vvv").count() > 0;
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "-p" || w[0] == "--port")
+        .map(|w| w[1].as_str())
+        .unwrap_or("11211");
+    let memory = args
+        .windows(2)
+        .find(|w| w[0] == "-m" || w[0] == "--memory")
+        .map(|w| w[1].as_str())
+        .unwrap_or("64");
+    let threads = args
+        .windows(2)
+        .find(|w| w[0] == "-t" || w[0] == "--threads")
+        .map(|w| w[1].as_str())
+        .unwrap_or("4");
+    let verbose = args
+        .iter()
+        .filter(|a| a.as_str() == "-v" || a.as_str() == "-vv" || a.as_str() == "-vvv")
+        .count()
+        > 0;
 
     println!("memcached 1.6.22 (Slate OS)");
     println!("  Port: {}", port);
@@ -68,7 +81,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_memcached};
+    use super::run_memcached;
 
     #[test]
     fn help_exits_zero() {

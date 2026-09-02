@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_pico2wave(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,21 +25,43 @@ fn run_pico2wave(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pico2wave v1.0 (Slate OS, SVOX Pico engine)"); return 0; }
-    let output = args.windows(2).find(|w| w[0] == "-w").map(|w| w[1].as_str());
-    let lang = args.windows(2).find(|w| w[0] == "-l").map(|w| w[1].as_str()).unwrap_or("en-US");
+    if args.iter().any(|a| a == "--version") {
+        println!("pico2wave v1.0 (Slate OS, SVOX Pico engine)");
+        return 0;
+    }
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-w")
+        .map(|w| w[1].as_str());
+    let lang = args
+        .windows(2)
+        .find(|w| w[0] == "-l")
+        .map(|w| w[1].as_str())
+        .unwrap_or("en-US");
     if output.is_none() {
         eprintln!("pico2wave: error: output file required (-w)");
         return 1;
     }
-    let text: Vec<&String> = args.iter().filter(|a| !a.starts_with('-') && {
-        let idx = args.iter().position(|x| std::ptr::eq(x, *a)).unwrap_or(0);
-        idx == 0 || !matches!(args.get(idx.wrapping_sub(1)).map(|s| s.as_str()), Some("-w" | "-l"))
-    }).collect();
+    let text: Vec<&String> = args
+        .iter()
+        .filter(|a| {
+            !a.starts_with('-') && {
+                let idx = args.iter().position(|x| std::ptr::eq(x, *a)).unwrap_or(0);
+                idx == 0
+                    || !matches!(
+                        args.get(idx.wrapping_sub(1)).map(|s| s.as_str()),
+                        Some("-w" | "-l")
+                    )
+            }
+        })
+        .collect();
     println!("pico2wave: SVOX Pico TTS");
     println!("  Language: {}", lang);
     println!("  Output: {}", output.unwrap_or("output.wav"));
-    println!("  Text: {} characters", text.iter().map(|t| t.len()).sum::<usize>());
+    println!(
+        "  Text: {} characters",
+        text.iter().map(|t| t.len()).sum::<usize>()
+    );
     println!("  Format: 16000 Hz, 16-bit, mono PCM");
     println!("  Duration: 2.5s");
     println!("  Done");
@@ -44,7 +70,10 @@ fn run_pico2wave(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pico2wave".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pico2wave".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_pico2wave(&rest, &_prog);
     process::exit(code);
@@ -52,7 +81,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pico2wave};
+    use super::{basename, run_pico2wave, strip_ext};
 
     #[test]
     fn basename_strips_path() {

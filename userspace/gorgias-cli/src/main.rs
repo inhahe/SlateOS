@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_gorgias(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,18 +29,25 @@ fn run_gorgias(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Gorgias 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Gorgias 2024 (Slate OS)");
+        return 0;
+    }
     println!("Gorgias 2024 (Slate OS)");
     println!("  Vendor: Gorgias, Inc. (SF + Paris — fully remote-friendly)");
     println!("  Founders: Romain Lapeyre (CEO) + Alex Plugaru + Aasif Osmany, 2015");
     println!("          met at YC Demo Day after independent prior attempts at email tools");
-    println!("          name 'Gorgias' = Greek philosopher / rhetorician (ironic for support tool)");
+    println!(
+        "          name 'Gorgias' = Greek philosopher / rhetorician (ironic for support tool)"
+    );
     println!("  Founded: 2015 — YC W16 batch");
     println!("          original product was Gmail keyboard shortcuts → pivoted to helpdesk 2016");
     println!("  Funding: Series C 2022 $29M led by SaaStr Fund + Sapphire Ventures");
     println!("          Total ~$60M raised, ~$700M valuation 2022");
     println!("          ~$50M+ ARR (private)");
-    println!("  Strategy: dominate the Shopify ecosystem instead of being yet-another-generalist-helpdesk");
+    println!(
+        "  Strategy: dominate the Shopify ecosystem instead of being yet-another-generalist-helpdesk"
+    );
     println!("           'helpdesk that knows your customer's order history natively'");
     println!("  Pricing (volume-based, unusual in helpdesk):");
     println!("    Starter $10/mo — 50 tickets/mo, 3 users (built for tiny stores)");
@@ -58,12 +69,18 @@ fn run_gorgias(args: &[String], _prog: &str) -> i32 {
     println!("    - Reviews (Loox, Yotpo, Stamped) — escalate bad reviews into tickets");
     println!("    - Contact form widget for the storefront");
     println!("  Macros + Rules:");
-    println!("    - Rule engine: 'If email contains \"refund\" AND customer LTV > $500 → assign to senior agent'");
+    println!(
+        "    - Rule engine: 'If email contains \"refund\" AND customer LTV > $500 → assign to senior agent'"
+    );
     println!("    - Macros can include dynamic Shopify data (refund amount, tracking link)");
-    println!("    - One-click 'refund + reply' (executes Shopify refund and sends customer email together)");
+    println!(
+        "    - One-click 'refund + reply' (executes Shopify refund and sends customer email together)"
+    );
     println!("    - Snooze + assignment + tagging automations");
     println!("  Gorgias Automate (AI add-on):");
-    println!("    - Auto-respond to top intents (where is my order, refund, etc.) with personalized data");
+    println!(
+        "    - Auto-respond to top intents (where is my order, refund, etc.) with personalized data"
+    );
     println!("    - Pulls customer's actual tracking number + refund amount inline");
     println!("    - Pricing: based on % tickets auto-resolved (usage-based)");
     println!("    - Powered by OpenAI + Gorgias's own intent classifier");
@@ -72,23 +89,36 @@ fn run_gorgias(args: &[String], _prog: &str) -> i32 {
     println!("    - Pre-sales chat support (turn chat into checkout)");
     println!("    - Campaigns: outbound triggered messages (cart abandonment via support tool)");
     println!("  Integrations: 100+ apps focused on e-commerce stack");
-    println!("              Klaviyo (deep), Recharge, Loop Returns, Loox, Yotpo, Postscript, Attentive");
+    println!(
+        "              Klaviyo (deep), Recharge, Loop Returns, Loox, Yotpo, Postscript, Attentive"
+    );
     println!("              Slack, Aircall, Klaus (QA), Stripe");
     println!("  Customers: 14,000+ e-commerce brands");
-    println!("            Steve Madden, Olipop, Marine Layer, Princess Polly, Allbirds (parts), Decathlon (online)");
+    println!(
+        "            Steve Madden, Olipop, Marine Layer, Princess Polly, Allbirds (parts), Decathlon (online)"
+    );
     println!("            sweet spot: $1M-$500M GMV DTC brands");
     println!("            heavy DTC, beauty, apparel, food/beverage, supplements");
-    println!("  Critique: ticket-based pricing surprises growing stores — easy to blow through tier mid-month");
-    println!("           less useful outside e-commerce (Shopify-first design assumptions don't fit B2B SaaS)");
+    println!(
+        "  Critique: ticket-based pricing surprises growing stores — easy to blow through tier mid-month"
+    );
+    println!(
+        "           less useful outside e-commerce (Shopify-first design assumptions don't fit B2B SaaS)"
+    );
     println!("           reporting tools simpler than Zendesk Explore");
     println!("           Automate AI sometimes too eager — needs careful guardrails");
-    println!("  Differentiator: deepest Shopify+Magento integration of any helpdesk — turns support into revenue");
+    println!(
+        "  Differentiator: deepest Shopify+Magento integration of any helpdesk — turns support into revenue"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "gorgias".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "gorgias".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_gorgias(&rest, &_prog);
     process::exit(code);
@@ -96,7 +126,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gorgias};
+    use super::{basename, run_gorgias, strip_ext};
 
     #[test]
     fn basename_strips_path() {

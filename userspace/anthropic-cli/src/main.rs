@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("anthropic-cli 0.1.0 (Claude-family personality build)"); }
+fn print_version() {
+    println!("anthropic-cli 0.1.0 (Claude-family personality build)");
+}
 
 fn run_about() {
     println!("Anthropic PBC (Public Benefit Corporation).");

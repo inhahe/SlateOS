@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_collectd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_collectd(args: &[String], _prog: &str) -> i32 {
         println!("Plugins: cpu, memory, disk, interface, load, uptime, swap");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("collectd v5.12 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("collectd v5.12 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "-T") {
         println!("collectd: configuration test OK");
         return 0;
@@ -73,7 +80,10 @@ fn run_collectdmon(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "collectd".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "collectd".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "collectdctl" => run_collectdctl(&rest, &prog),
@@ -85,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_collectd};
+    use super::{basename, run_collectd, strip_ext};
 
     #[test]
     fn basename_strips_path() {

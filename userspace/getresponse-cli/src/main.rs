@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("getresponse-cli 0.1.0 (Polish SMB-suite personality build)"); }
+fn print_version() {
+    println!("getresponse-cli 0.1.0 (Polish SMB-suite personality build)");
+}
 
 fn run_about() {
     println!("GetResponse S.A.");

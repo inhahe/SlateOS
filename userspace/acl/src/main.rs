@@ -54,10 +54,12 @@ impl Perms {
     }
 
     fn to_rwx(self) -> String {
-        format!("{}{}{}",
+        format!(
+            "{}{}{}",
             if self.read { 'r' } else { '-' },
             if self.write { 'w' } else { '-' },
-            if self.execute { 'x' } else { '-' })
+            if self.execute { 'x' } else { '-' }
+        )
     }
 
     fn from_mode(mode: u32, shift: u32) -> Self {
@@ -140,9 +142,21 @@ fn read_file_acl(path: &str) -> FileAcl {
         // Default ACL from file mode.
         let mode = 0o755u32; // Default.
         let access = vec![
-            AclEntry { tag: AclTag::UserObj, perms: Perms::from_mode(mode, 6), _default: false },
-            AclEntry { tag: AclTag::GroupObj, perms: Perms::from_mode(mode, 3), _default: false },
-            AclEntry { tag: AclTag::Other, perms: Perms::from_mode(mode, 0), _default: false },
+            AclEntry {
+                tag: AclTag::UserObj,
+                perms: Perms::from_mode(mode, 6),
+                _default: false,
+            },
+            AclEntry {
+                tag: AclTag::GroupObj,
+                perms: Perms::from_mode(mode, 3),
+                _default: false,
+            },
+            AclEntry {
+                tag: AclTag::Other,
+                perms: Perms::from_mode(mode, 0),
+                _default: false,
+            },
         ];
         (owner, group, access)
     } else {
@@ -162,11 +176,51 @@ fn generate_default_acl() -> (String, String, Vec<AclEntry>) {
     let owner = "root".to_string();
     let group = "root".to_string();
     let access = vec![
-        AclEntry { tag: AclTag::UserObj, perms: Perms { read: true, write: true, execute: true }, _default: false },
-        AclEntry { tag: AclTag::User("www-data".to_string()), perms: Perms { read: true, write: false, execute: false }, _default: false },
-        AclEntry { tag: AclTag::GroupObj, perms: Perms { read: true, write: false, execute: true }, _default: false },
-        AclEntry { tag: AclTag::Mask, perms: Perms { read: true, write: false, execute: true }, _default: false },
-        AclEntry { tag: AclTag::Other, perms: Perms { read: true, write: false, execute: true }, _default: false },
+        AclEntry {
+            tag: AclTag::UserObj,
+            perms: Perms {
+                read: true,
+                write: true,
+                execute: true,
+            },
+            _default: false,
+        },
+        AclEntry {
+            tag: AclTag::User("www-data".to_string()),
+            perms: Perms {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            _default: false,
+        },
+        AclEntry {
+            tag: AclTag::GroupObj,
+            perms: Perms {
+                read: true,
+                write: false,
+                execute: true,
+            },
+            _default: false,
+        },
+        AclEntry {
+            tag: AclTag::Mask,
+            perms: Perms {
+                read: true,
+                write: false,
+                execute: true,
+            },
+            _default: false,
+        },
+        AclEntry {
+            tag: AclTag::Other,
+            perms: Perms {
+                read: true,
+                write: false,
+                execute: true,
+            },
+            _default: false,
+        },
     ];
     (owner, group, access)
 }
@@ -200,7 +254,13 @@ fn display_acl_path(path: &str, absolute: bool) -> &str {
     }
 }
 
-fn print_file_acl(out: &mut io::StdoutLock<'_>, acl: &FileAcl, omit_header: bool, absolute: bool, tabular: bool) {
+fn print_file_acl(
+    out: &mut io::StdoutLock<'_>,
+    acl: &FileAcl,
+    omit_header: bool,
+    absolute: bool,
+    tabular: bool,
+) {
     if !omit_header {
         let display_path = display_acl_path(acl.path.as_str(), absolute);
         let _ = writeln!(out, "# file: {display_path}");
@@ -210,21 +270,37 @@ fn print_file_acl(out: &mut io::StdoutLock<'_>, acl: &FileAcl, omit_header: bool
 
     for entry in &acl.access {
         if tabular {
-            let effective = if has_mask(&acl.access) && !matches!(entry.tag, AclTag::UserObj | AclTag::Other) {
-                let mask = get_mask_perms(&acl.access);
-                format!("\t#effective:{}", apply_mask(entry.perms, mask).to_rwx())
-            } else {
-                String::new()
-            };
-            let _ = writeln!(out, "{}{}{effective}", format_acl_tag(&entry.tag), entry.perms.to_rwx());
+            let effective =
+                if has_mask(&acl.access) && !matches!(entry.tag, AclTag::UserObj | AclTag::Other) {
+                    let mask = get_mask_perms(&acl.access);
+                    format!("\t#effective:{}", apply_mask(entry.perms, mask).to_rwx())
+                } else {
+                    String::new()
+                };
+            let _ = writeln!(
+                out,
+                "{}{}{effective}",
+                format_acl_tag(&entry.tag),
+                entry.perms.to_rwx()
+            );
         } else {
-            let _ = writeln!(out, "{}{}", format_acl_tag(&entry.tag), entry.perms.to_rwx());
+            let _ = writeln!(
+                out,
+                "{}{}",
+                format_acl_tag(&entry.tag),
+                entry.perms.to_rwx()
+            );
         }
     }
 
     if !acl.default.is_empty() {
         for entry in &acl.default {
-            let _ = writeln!(out, "default:{}{}", format_acl_tag(&entry.tag), entry.perms.to_rwx());
+            let _ = writeln!(
+                out,
+                "default:{}{}",
+                format_acl_tag(&entry.tag),
+                entry.perms.to_rwx()
+            );
         }
     }
 
@@ -236,10 +312,15 @@ fn has_mask(entries: &[AclEntry]) -> bool {
 }
 
 fn get_mask_perms(entries: &[AclEntry]) -> Perms {
-    entries.iter()
+    entries
+        .iter()
         .find(|e| e.tag == AclTag::Mask)
         .map(|e| e.perms)
-        .unwrap_or(Perms { read: true, write: true, execute: true })
+        .unwrap_or(Perms {
+            read: true,
+            write: true,
+            execute: true,
+        })
 }
 
 fn apply_mask(perms: Perms, mask: Perms) -> Perms {
@@ -306,14 +387,13 @@ fn cmd_getfacl(args: &[String]) {
         let acl = read_file_acl(path);
         print_file_acl(&mut out, &acl, omit_header, absolute, tabular);
 
-        if recursive
-            && let Ok(entries) = fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    let child = entry.path().to_string_lossy().to_string();
-                    let child_acl = read_file_acl(&child);
-                    print_file_acl(&mut out, &child_acl, omit_header, absolute, tabular);
-                }
+        if recursive && let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let child = entry.path().to_string_lossy().to_string();
+                let child_acl = read_file_acl(&child);
+                print_file_acl(&mut out, &child_acl, omit_header, absolute, tabular);
             }
+        }
     }
 }
 
@@ -357,17 +437,23 @@ fn cmd_setfacl(args: &[String]) {
             }
             "-m" | "--modify" => {
                 i += 1;
-                if i < args.len() { modify_entries.push(args[i].clone()); }
+                if i < args.len() {
+                    modify_entries.push(args[i].clone());
+                }
             }
             "-x" | "--remove" => {
                 i += 1;
-                if i < args.len() { remove_entries.push(args[i].clone()); }
+                if i < args.len() {
+                    remove_entries.push(args[i].clone());
+                }
             }
             "-b" | "--remove-all" => remove_all = true,
             "-k" | "--remove-default" => remove_default = true,
             "--set" => {
                 i += 1;
-                if i < args.len() { set_entries.push(args[i].clone()); }
+                if i < args.len() {
+                    set_entries.push(args[i].clone());
+                }
             }
             "-R" | "--recursive" => recursive = true,
             s if !s.starts_with('-') => paths.push(s.to_string()),
@@ -390,13 +476,21 @@ fn cmd_setfacl(args: &[String]) {
         }
         for entry_str in &set_entries {
             if let Some(entry) = parse_acl_entry(entry_str) {
-                eprintln!("setfacl: setting {} on {path}: {}{}", entry_str,
-                    format_acl_tag(&entry.tag), entry.perms.to_rwx());
+                eprintln!(
+                    "setfacl: setting {} on {path}: {}{}",
+                    entry_str,
+                    format_acl_tag(&entry.tag),
+                    entry.perms.to_rwx()
+                );
             }
         }
         for entry_str in &modify_entries {
             if let Some(entry) = parse_acl_entry(entry_str) {
-                eprintln!("setfacl: modifying {path}: {}{}", format_acl_tag(&entry.tag), entry.perms.to_rwx());
+                eprintln!(
+                    "setfacl: modifying {path}: {}{}",
+                    format_acl_tag(&entry.tag),
+                    entry.perms.to_rwx()
+                );
             }
         }
         for entry_str in &remove_entries {
@@ -466,13 +560,21 @@ mod tests {
 
     #[test]
     fn test_perms_to_rwx() {
-        let p = Perms { read: true, write: false, execute: true };
+        let p = Perms {
+            read: true,
+            write: false,
+            execute: true,
+        };
         assert_eq!(p.to_rwx(), "r-x");
     }
 
     #[test]
     fn test_perms_to_rwx_all() {
-        let p = Perms { read: true, write: true, execute: true };
+        let p = Perms {
+            read: true,
+            write: true,
+            execute: true,
+        };
         assert_eq!(p.to_rwx(), "rwx");
     }
 
@@ -547,7 +649,10 @@ mod tests {
     #[test]
     fn test_format_acl_tag() {
         assert_eq!(format_acl_tag(&AclTag::UserObj), "user::");
-        assert_eq!(format_acl_tag(&AclTag::User("bob".to_string())), "user:bob:");
+        assert_eq!(
+            format_acl_tag(&AclTag::User("bob".to_string())),
+            "user:bob:"
+        );
         assert_eq!(format_acl_tag(&AclTag::GroupObj), "group::");
         assert_eq!(format_acl_tag(&AclTag::Mask), "mask::");
         assert_eq!(format_acl_tag(&AclTag::Other), "other::");
@@ -555,8 +660,16 @@ mod tests {
 
     #[test]
     fn test_apply_mask() {
-        let perms = Perms { read: true, write: true, execute: true };
-        let mask = Perms { read: true, write: false, execute: true };
+        let perms = Perms {
+            read: true,
+            write: true,
+            execute: true,
+        };
+        let mask = Perms {
+            read: true,
+            write: false,
+            execute: true,
+        };
         let result = apply_mask(perms, mask);
         assert_eq!(result.to_rwx(), "r-x");
     }
@@ -564,25 +677,37 @@ mod tests {
     #[test]
     fn test_has_mask() {
         let entries = vec![
-            AclEntry { tag: AclTag::UserObj, perms: Perms::from_rwx("rwx"), _default: false },
-            AclEntry { tag: AclTag::Mask, perms: Perms::from_rwx("r-x"), _default: false },
+            AclEntry {
+                tag: AclTag::UserObj,
+                perms: Perms::from_rwx("rwx"),
+                _default: false,
+            },
+            AclEntry {
+                tag: AclTag::Mask,
+                perms: Perms::from_rwx("r-x"),
+                _default: false,
+            },
         ];
         assert!(has_mask(&entries));
     }
 
     #[test]
     fn test_has_no_mask() {
-        let entries = vec![
-            AclEntry { tag: AclTag::UserObj, perms: Perms::from_rwx("rwx"), _default: false },
-        ];
+        let entries = vec![AclEntry {
+            tag: AclTag::UserObj,
+            perms: Perms::from_rwx("rwx"),
+            _default: false,
+        }];
         assert!(!has_mask(&entries));
     }
 
     #[test]
     fn test_get_mask_perms() {
-        let entries = vec![
-            AclEntry { tag: AclTag::Mask, perms: Perms::from_rwx("r-x"), _default: false },
-        ];
+        let entries = vec![AclEntry {
+            tag: AclTag::Mask,
+            perms: Perms::from_rwx("r-x"),
+            _default: false,
+        }];
         let mask = get_mask_perms(&entries);
         assert_eq!(mask.to_rwx(), "r-x");
     }
@@ -601,7 +726,11 @@ mod tests {
             path: "/test".to_string(),
             owner: "root".to_string(),
             group: "root".to_string(),
-            access: vec![AclEntry { tag: AclTag::UserObj, perms: Perms::from_rwx("rwx"), _default: false }],
+            access: vec![AclEntry {
+                tag: AclTag::UserObj,
+                perms: Perms::from_rwx("rwx"),
+                _default: false,
+            }],
             default: Vec::new(),
         };
         let c = acl.clone();
@@ -610,8 +739,16 @@ mod tests {
 
     #[test]
     fn test_perms_equality() {
-        let a = Perms { read: true, write: false, execute: true };
-        let b = Perms { read: true, write: false, execute: true };
+        let a = Perms {
+            read: true,
+            write: false,
+            execute: true,
+        };
+        let b = Perms {
+            read: true,
+            write: false,
+            execute: true,
+        };
         assert_eq!(a, b);
     }
 

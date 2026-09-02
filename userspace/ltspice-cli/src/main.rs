@@ -21,7 +21,11 @@ fn run_ltspice(args: &[String]) -> i32 {
         return 0;
     }
     let batch = args.iter().any(|a| a == "-b");
-    let file = args.iter().find(|a| a.ends_with(".asc") || a.ends_with(".net")).map(|s| s.as_str()).unwrap_or("circuit.asc");
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".asc") || a.ends_with(".net"))
+        .map(|s| s.as_str())
+        .unwrap_or("circuit.asc");
     if batch {
         println!("LTspice XVII — batch mode");
         println!("Reading: {}", file);
@@ -50,7 +54,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ltspice};
+    use super::run_ltspice;
 
     #[test]
     fn help_exits_zero() {

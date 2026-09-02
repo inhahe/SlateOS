@@ -17,7 +17,9 @@ fn run_difft(args: Vec<String>) -> i32 {
         println!("Options:");
         println!("  --color <WHEN>           Color (auto/always/never)");
         println!("  --background <BG>        Background color (dark/light)");
-        println!("  --display <MODE>         Display mode (side-by-side/side-by-side-show-both/inline)");
+        println!(
+            "  --display <MODE>         Display mode (side-by-side/side-by-side-show-both/inline)"
+        );
         println!("  --tab-width <N>          Tab width (default: 4)");
         println!("  --syntax-highlight <ON>  Syntax highlighting (on/off)");
         println!("  --context <N>            Lines of context (default: 3)");
@@ -51,9 +53,12 @@ fn run_difft(args: Vec<String>) -> i32 {
     }
 
     let check_only = args.iter().any(|a| a == "--check-only");
-    let inline = args.windows(2).any(|w| w[0] == "--display" && w[1] == "inline");
+    let inline = args
+        .windows(2)
+        .any(|w| w[0] == "--display" && w[1] == "inline");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -103,7 +108,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_difft};
+    use super::run_difft;
 
     #[test]
     fn help_exits_zero() {

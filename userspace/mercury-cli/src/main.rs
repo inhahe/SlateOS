@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("mercury-cli 0.1.0 (startup-banking personality build)"); }
+fn print_version() {
+    println!("mercury-cli 0.1.0 (startup-banking personality build)");
+}
 
 fn run_about() {
     println!("Mercury Technologies, Inc.");

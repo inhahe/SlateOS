@@ -7,11 +7,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_javadoc(args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") || args.is_empty() {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+        || args.is_empty()
+    {
         println!("Usage: javadoc [OPTIONS] [PACKAGE_NAMES] [SOURCE_FILES] [@FILE]");
         println!("javadoc 21.0.2 (Slate OS)");
         println!();
@@ -41,11 +49,13 @@ fn run_javadoc(args: &[String]) -> i32 {
         println!("javadoc 21.0.2 (Slate OS)");
         return 0;
     }
-    let sources: Vec<&str> = args.iter()
+    let sources: Vec<&str> = args
+        .iter()
         .filter(|a| a.ends_with(".java") || (!a.starts_with('-') && !a.contains('=')))
         .map(|s| s.as_str())
         .collect();
-    let outdir = args.windows(2)
+    let outdir = args
+        .windows(2)
         .find(|w| w[0] == "-d")
         .map(|w| w[1].as_str())
         .unwrap_or("doc");
@@ -65,13 +75,21 @@ fn run_javadoc(args: &[String]) -> i32 {
     println!("Generating {}/allclasses-index.html...", outdir);
     println!("Generating {}/allpackages-index.html...", outdir);
     println!("Generating {}/overview-summary.html...", outdir);
-    let count = if sources.is_empty() { 15 } else { sources.len() * 5 };
+    let count = if sources.is_empty() {
+        15
+    } else {
+        sources.len() * 5
+    };
     println!("{} pages generated in {}/", count, outdir);
     0
 }
 
 fn run_scaladoc(args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") || args.is_empty() {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+        || args.is_empty()
+    {
         println!("Usage: scaladoc [OPTIONS] [SOURCE_FILES]");
         println!("Scaladoc 3.4.0 (Slate OS)");
         println!("  -d DIR         Output directory");
@@ -83,11 +101,13 @@ fn run_scaladoc(args: &[String]) -> i32 {
         println!("Scaladoc 3.4.0 (Slate OS)");
         return 0;
     }
-    let sources: Vec<&str> = args.iter()
+    let sources: Vec<&str> = args
+        .iter()
         .filter(|a| a.ends_with(".scala"))
         .map(|s| s.as_str())
         .collect();
-    let outdir = args.windows(2)
+    let outdir = args
+        .windows(2)
         .find(|w| w[0] == "-d")
         .map(|w| w[1].as_str())
         .unwrap_or("doc");
@@ -111,24 +131,33 @@ fn run_kotlindoc(args: &[String]) -> i32 {
         println!("Dokka 1.9.20 (Slate OS)");
         return 0;
     }
-    let sources: Vec<&str> = args.iter()
+    let sources: Vec<&str> = args
+        .iter()
         .filter(|a| a.ends_with(".kt") || a.ends_with(".kts"))
         .map(|s| s.as_str())
         .collect();
-    let outdir = args.windows(2)
+    let outdir = args
+        .windows(2)
         .find(|w| w[0] == "-output")
         .map(|w| w[1].as_str())
         .unwrap_or("doc");
     for s in &sources {
         println!("kotlindoc: processing {}", s);
     }
-    println!("kotlindoc: {} files processed, output in {}/", sources.len().max(5), outdir);
+    println!(
+        "kotlindoc: {} files processed, output in {}/",
+        sources.len().max(5),
+        outdir
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "javadoc".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "javadoc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "scaladoc" => run_scaladoc(&rest),
@@ -140,7 +169,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_javadoc};
+    use super::{basename, run_javadoc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

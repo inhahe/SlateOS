@@ -19,7 +19,9 @@ fn run_valgrind(args: Vec<String>) -> i32 {
         println!("usage: valgrind [options] prog-and-args");
         println!();
         println!("Tool selection:");
-        println!("  --tool=<name>           memcheck (default), callgrind, cachegrind, massif, helgrind, drd");
+        println!(
+            "  --tool=<name>           memcheck (default), callgrind, cachegrind, massif, helgrind, drd"
+        );
         println!();
         println!("Common options:");
         println!("  --leak-check=<yes|no|summary|full>  Search for memory leaks (default=summary)");
@@ -29,7 +31,9 @@ fn run_valgrind(args: Vec<String>) -> i32 {
         println!("  --xml=yes                            XML output");
         println!("  --xml-file=<file>                    XML output file");
         println!("  --trace-children=<yes|no>            Trace child processes");
-        println!("  --num-callers=<N>                    Number of callers in stack traces (default=12)");
+        println!(
+            "  --num-callers=<N>                    Number of callers in stack traces (default=12)"
+        );
         println!("  --suppressions=<file>                Read suppressions from file");
         println!("  -v, --verbose                        Be more verbose");
         println!("  -q, --quiet                          Only show errors");
@@ -42,15 +46,32 @@ fn run_valgrind(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let tool = args.iter().find(|a| a.starts_with("--tool="))
+    let tool = args
+        .iter()
+        .find(|a| a.starts_with("--tool="))
         .map(|a| a.split('=').nth(1).unwrap_or("memcheck"))
         .unwrap_or("memcheck");
 
-    let program = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("./a.out");
+    let program = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("./a.out");
 
-    println!("=={pid}== {tool}, a memory error detector", pid = 12345, tool = tool_name(tool));
-    println!("=={pid}== Copyright (C) SlateOS. Using Valgrind-0.1.0.", pid = 12345);
-    println!("=={pid}== Command: {program}", pid = 12345, program = program);
+    println!(
+        "=={pid}== {tool}, a memory error detector",
+        pid = 12345,
+        tool = tool_name(tool)
+    );
+    println!(
+        "=={pid}== Copyright (C) SlateOS. Using Valgrind-0.1.0.",
+        pid = 12345
+    );
+    println!(
+        "=={pid}== Command: {program}",
+        pid = 12345,
+        program = program
+    );
     println!("=={pid}==", pid = 12345);
 
     match tool {
@@ -244,7 +265,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

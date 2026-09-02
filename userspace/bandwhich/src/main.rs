@@ -11,7 +11,9 @@ fn run_bandwhich(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bandwhich [OPTIONS]");
         println!();
-        println!("Display current network utilization by process, connection, and remote IP/hostname.");
+        println!(
+            "Display current network utilization by process, connection, and remote IP/hostname."
+        );
         println!();
         println!("Options:");
         println!("  -i, --interface <INTERFACE>  Network interface to monitor");
@@ -23,7 +25,9 @@ fn run_bandwhich(args: Vec<String>) -> i32 {
         println!("  -p, --processes              Show process table only");
         println!("  -c, --connections             Show connection table only");
         println!("  -a, --addresses               Show remote address table only");
-        println!("  -u, --unit <UNIT>            Display unit (b/k/m/g for bytes, B/K/M/G for bits)");
+        println!(
+            "  -u, --unit <UNIT>            Display unit (b/k/m/g for bytes, B/K/M/G for bits)"
+        );
         println!("  -V, --version                Show version");
         return 0;
     }
@@ -114,7 +118,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_bandwhich};
+    use super::run_bandwhich;
 
     #[test]
     fn help_exits_zero() {

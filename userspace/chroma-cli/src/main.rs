@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_ch(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Chroma 2024 (Slate OS) — chromadb CLI 0.5.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Chroma 2024 (Slate OS) — chromadb CLI 0.5.x");
+        return 0;
+    }
     println!("Chroma 2024 (Slate OS) — Open-Source Embedding Database for AI Apps");
     println!("  Vendor: Chroma Inc. (San Francisco, CA — private)");
     println!("  Founders: Jeff Huber + Anton Troynikov, 2022");
@@ -34,16 +41,30 @@ fn run_ch(args: &[String], _prog: &str) -> i32 {
     println!("         Total raised: ~$38M");
     println!("         Seed Apr 2023: $18M (Quiet Capital + Naval Ravikant + others)");
     println!("         Series A Sep 2023: $20M");
-    println!("         Investors: Quiet Capital, Naval Ravikant, Astasia Myers, Index Ventures (B)");
+    println!(
+        "         Investors: Quiet Capital, Naval Ravikant, Astasia Myers, Index Ventures (B)"
+    );
     println!("         Revenue ramp dependent on Chroma Cloud (2024 GA)");
-    println!("  Strategic position: 'simplest vector DB to start with — pip install chromadb, done':");
-    println!("                    pitch: 'the AI-application database — beautiful Python API, embedded or hosted'");
-    println!("                    target: Python AI developers + LangChain users + RAG prototypers");
-    println!("                    primary competitor: Pinecone (managed), Weaviate, Qdrant, LanceDB, pgvector");
+    println!(
+        "  Strategic position: 'simplest vector DB to start with — pip install chromadb, done':"
+    );
+    println!(
+        "                    pitch: 'the AI-application database — beautiful Python API, embedded or hosted'"
+    );
+    println!(
+        "                    target: Python AI developers + LangChain users + RAG prototypers"
+    );
+    println!(
+        "                    primary competitor: Pinecone (managed), Weaviate, Qdrant, LanceDB, pgvector"
+    );
     println!("                    secondary: Postgres + pgvector, SQLite + sqlite-vec");
-    println!("                    Chroma's wedge: dev experience + 'pip install chromadb' instantly works");
+    println!(
+        "                    Chroma's wedge: dev experience + 'pip install chromadb' instantly works"
+    );
     println!("                    Famous in: every LangChain RAG tutorial uses Chroma as default");
-    println!("                    LangChain effect: huge install base from being default RAG store");
+    println!(
+        "                    LangChain effect: huge install base from being default RAG store"
+    );
     println!("                    'Single command to start, single command to scale' aspirational");
     println!("  Pricing (open-source + cloud):");
     println!("    Chroma Open Source: free, Apache 2.0 (embedded + self-hosted)");
@@ -58,7 +79,9 @@ fn run_ch(args: &[String], _prog: &str) -> i32 {
     println!("    - Collections: logical groupings of embeddings");
     println!("    - HNSW for ANN search");
     println!("    - Metadata filtering (where clauses with $eq, $gt, $lt, $in, etc.)");
-    println!("    - Embedding functions: pluggable (OpenAI, Cohere, sentence-transformers, custom)");
+    println!(
+        "    - Embedding functions: pluggable (OpenAI, Cohere, sentence-transformers, custom)"
+    );
     println!("    - 'AI-application database' positioning");
     println!("  Product portfolio:");
     println!("    1. Chroma Embedded (the DX win):");
@@ -140,7 +163,9 @@ fn run_ch(args: &[String], _prog: &str) -> i32 {
     println!("    chromadb run                                             # start server");
     println!("    chromadb run --path /data/chroma --port 8000");
     println!("    # Via Python client:");
-    println!("    # client.create_collection('my-coll', embedding_function=OpenAIEmbeddingFunction(api_key='...'))");
+    println!(
+        "    # client.create_collection('my-coll', embedding_function=OpenAIEmbeddingFunction(api_key='...'))"
+    );
     println!("    # collection.add(documents=['doc1', 'doc2'], ids=['1', '2'])");
     println!("    # collection.query(query_texts=['similar to doc1'], n_results=5)");
     println!("    # collection.update / collection.delete / collection.modify");
@@ -154,20 +179,27 @@ fn run_ch(args: &[String], _prog: &str) -> i32 {
     println!("    - 13K+ GitHub stars");
     println!("    - Chroma Cloud customer count private (early beta)");
     println!("  Critique: many users are tutorials/prototypes — production cohort smaller");
-    println!("           competition: every Postgres+pgvector, sqlite-vec, lancedb is 'simple too'");
+    println!(
+        "           competition: every Postgres+pgvector, sqlite-vec, lancedb is 'simple too'"
+    );
     println!("           Chroma Cloud late vs Pinecone Serverless");
     println!("           DX-first means production features (sharding, replication) lagged early");
     println!("           Anton Troynikov departure 2024 = co-founder transition risk");
     println!("           ecosystem of features behind Weaviate/Qdrant");
     println!("           pure DX moat vulnerable to ecosystem improvements elsewhere");
     println!("           closed-source Cloud creates dual-product complexity");
-    println!("  Differentiator: best Python DX of any vector DB ('pip install chromadb → working in 1 line') + default vector store in LangChain + LlamaIndex tutorials (massive install base) + 15M+ PyPI downloads/month + 13K+ GitHub stars + embedded + self-hosted + cloud modes share same API + auto-embedding (collection.add(documents) just works) + pluggable embedding functions (OpenAI/Cohere/HF) + Apache 2.0 open source + Jeff Huber + Anton Troynikov founders 2022 + Naval Ravikant investor + $38M raised + 2024 Rust distributed rewrite powering Chroma Cloud — the 'AI-application database' with the most beloved DX in vector DB land, riding the LangChain tutorial wave to dominate developer mindshare while building distributed production engine in Rust");
+    println!(
+        "  Differentiator: best Python DX of any vector DB ('pip install chromadb → working in 1 line') + default vector store in LangChain + LlamaIndex tutorials (massive install base) + 15M+ PyPI downloads/month + 13K+ GitHub stars + embedded + self-hosted + cloud modes share same API + auto-embedding (collection.add(documents) just works) + pluggable embedding functions (OpenAI/Cohere/HF) + Apache 2.0 open source + Jeff Huber + Anton Troynikov founders 2022 + Naval Ravikant investor + $38M raised + 2024 Rust distributed rewrite powering Chroma Cloud — the 'AI-application database' with the most beloved DX in vector DB land, riding the LangChain tutorial wave to dominate developer mindshare while building distributed production engine in Rust"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "chroma".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "chroma".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ch(&rest, &_prog);
     process::exit(code);
@@ -175,7 +207,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ch};
+    use super::{basename, run_ch, strip_ext};
 
     #[test]
     fn basename_strips_path() {

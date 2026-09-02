@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version      Show version");
 }
 
-fn print_version() { println!("messagebird-cli 0.1.0 (Bird-era personality build)"); }
+fn print_version() {
+    println!("messagebird-cli 0.1.0 (Bird-era personality build)");
+}
 
 fn run_about() {
     println!("MessageBird / Bird");

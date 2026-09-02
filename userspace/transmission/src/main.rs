@@ -22,12 +22,17 @@ fn run_daemon(args: Vec<String>) -> i32 {
         println!("transmission-daemon 4.0.5 (Slate OS)");
         return 0;
     }
-    let port = args.iter().position(|a| a == "-p" || a == "--port")
+    let port = args
+        .iter()
+        .position(|a| a == "-p" || a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(9091);
     println!("[2025-05-22 10:00:00.000] Transmission 4.0.5 (Slate OS) starting");
-    println!("[2025-05-22 10:00:00.100] RPC Server: listening on 0.0.0.0:{}", port);
+    println!(
+        "[2025-05-22 10:00:00.100] RPC Server: listening on 0.0.0.0:{}",
+        port
+    );
     println!("[2025-05-22 10:00:00.200] Loaded 3 torrents");
     0
 }
@@ -44,7 +49,11 @@ fn run_cli(args: Vec<String>) -> i32 {
         println!("transmission-cli 4.0.5 (Slate OS)");
         return 0;
     }
-    let torrent = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("example.torrent");
+    let torrent = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("example.torrent");
     println!("Transmission 4.0.5 (Slate OS)");
     println!("Opening torrent: {}", torrent);
     println!("Progress: 0.0%  DL: 0 kB/s  UL: 0 kB/s  Peers: 0");
@@ -73,8 +82,12 @@ fn run_remote(args: Vec<String>) -> i32 {
     }
     if args.iter().any(|a| a == "-l" || a == "--list") {
         println!("  ID   Done       Have  ETA           Up    Down  Ratio  Status       Name");
-        println!("   1   100%    4.2 GB  Done       256.0    0.0    1.20  Seeding      ubuntu-24.04.iso");
-        println!("   2    45%    1.8 GB  2h 30m     128.0  2500.0   0.05  Downloading  archlinux-2025.05.iso");
+        println!(
+            "   1   100%    4.2 GB  Done       256.0    0.0    1.20  Seeding      ubuntu-24.04.iso"
+        );
+        println!(
+            "   2    45%    1.8 GB  2h 30m     128.0  2500.0   0.05  Downloading  archlinux-2025.05.iso"
+        );
         println!("   3   100%  892.5 MB  Done         0.0    0.0    2.50  Idle         movie.mkv");
         println!("Sum:         6.89 GB              384.0  2500.0");
         return 0;
@@ -114,11 +127,16 @@ fn run_remote(args: Vec<String>) -> i32 {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("transmission-daemon");
+        let s = args
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("transmission-daemon");
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -134,7 +152,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_daemon};
+    use super::run_daemon;
 
     #[test]
     fn help_exits_zero() {

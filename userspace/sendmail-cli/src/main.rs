@@ -39,7 +39,8 @@ fn run_sendmail(args: &[String]) -> i32 {
     }
 
     let read_headers = args.iter().any(|a| a == "-t");
-    let addresses: Vec<&str> = args.iter()
+    let addresses: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-') && a.contains('@'))
         .map(|s| s.as_str())
         .collect();
@@ -87,7 +88,8 @@ fn run_msmtp(args: &[String]) -> i32 {
         return 0;
     }
 
-    let addresses: Vec<&str> = args.iter()
+    let addresses: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-') && a.contains('@'))
         .map(|s| s.as_str())
         .collect();
@@ -104,7 +106,8 @@ fn run_msmtp(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "sendmail".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -118,7 +121,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sendmail};
+    use super::{basename, run_sendmail, strip_ext};
 
     #[test]
     fn basename_strips_path() {

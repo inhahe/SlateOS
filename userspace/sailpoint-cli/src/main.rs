@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sailpoint(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -14,7 +18,9 @@ fn run_sailpoint(args: &[String], _prog: &str) -> i32 {
         println!("SailPoint (Slate OS) — Identity Governance & Administration (IGA) market leader");
         println!();
         println!("Options:");
-        println!("  --identitynow          IdentityNow (cloud IGA SaaS, now 'Identity Security Cloud')");
+        println!(
+            "  --identitynow          IdentityNow (cloud IGA SaaS, now 'Identity Security Cloud')"
+        );
         println!("  --identityiq           IdentityIQ (on-prem IGA, the heritage product)");
         println!("  --accessrisk           Access Risk Management (SAP / Oracle access analytics)");
         println!("  --filesecurity         File Access Manager (data access governance)");
@@ -22,9 +28,14 @@ fn run_sailpoint(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SailPoint 2024 (Slate OS) — sailpoint-cli (Identity Security Cloud admin)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("SailPoint 2024 (Slate OS) — sailpoint-cli (Identity Security Cloud admin)");
+        return 0;
+    }
     println!("SailPoint 2024 (Slate OS) — Identity Governance & Administration Market Leader");
-    println!("  Vendor: SailPoint Technologies Holdings (Austin, TX — NYSE: SAIL again, re-IPO'd Feb 2025)");
+    println!(
+        "  Vendor: SailPoint Technologies Holdings (Austin, TX — NYSE: SAIL again, re-IPO'd Feb 2025)"
+    );
     println!("  Founders: Mark McClain + Kevin Cunningham + Jackie Gilbert, 2005");
     println!("          Mark McClain: CEO 2005-present (20 years!), founder-led for two decades");
     println!("          Kevin Cunningham: CTO co-founder");
@@ -33,7 +44,9 @@ fn run_sailpoint(args: &[String], _prog: &str) -> i32 {
     println!("          'We left Sun + identity team behind to start SailPoint'");
     println!("          Austin TX based — Texas tech hub");
     println!("  History (the round-trip):");
-    println!("    - Founded 2005 in Austin TX after Sun's Waveset acquisition (founders disliked direction)");
+    println!(
+        "    - Founded 2005 in Austin TX after Sun's Waveset acquisition (founders disliked direction)"
+    );
     println!("    - First IPO Nov 2017 NYSE:SAIL at $12/share, raised $240M");
     println!("    - Stock peaked ~$70 during 2021 cybersecurity rally");
     println!("    - Acquired private by Thoma Bravo Aug 2022 for $6.9B ($65.25/share)");
@@ -42,16 +55,28 @@ fn run_sailpoint(args: &[String], _prog: &str) -> i32 {
     println!("    - 'IPO -> PE -> IPO' arc in 7 years — rare in software");
     println!("    - Thoma Bravo retained majority control post-re-IPO");
     println!("  Strategic position: 'IGA (Identity Governance & Administration) market leader':");
-    println!("                    pitch: 'who has access to what, why, and should they still have it?'");
-    println!("                    target: Fortune 1000, regulated industries (banks, pharma, healthcare, government)");
-    println!("                    primary competitor: Saviynt, Microsoft Entra ID Governance, Oracle IGA");
-    println!("                    secondary: IBM Security Verify Governance, Omada, Brainwave (now Radiant Logic)");
+    println!(
+        "                    pitch: 'who has access to what, why, and should they still have it?'"
+    );
+    println!(
+        "                    target: Fortune 1000, regulated industries (banks, pharma, healthcare, government)"
+    );
+    println!(
+        "                    primary competitor: Saviynt, Microsoft Entra ID Governance, Oracle IGA"
+    );
+    println!(
+        "                    secondary: IBM Security Verify Governance, Omada, Brainwave (now Radiant Logic)"
+    );
     println!("                    SailPoint wedge: IGA category leader (Gartner MQ #1 every year)");
-    println!("                    + the only pure-play IGA vendor at scale (others are part of bigger suites)");
+    println!(
+        "                    + the only pure-play IGA vendor at scale (others are part of bigger suites)"
+    );
     println!("                    + AI/ML-driven access review intelligence");
     println!("                    + Identity Security Cloud (IdentityNow) is dominant cloud IGA");
     println!("                    'IGA' as a category was largely defined by SailPoint");
-    println!("                    'Who should have access to what' — that's the SailPoint question");
+    println!(
+        "                    'Who should have access to what' — that's the SailPoint question"
+    );
     println!("  Public company finances (2024):");
     println!("    Revenue: ~$700M (FY 2024 estimate)");
     println!("    Subscription mix: ~70% (transitioning from license to SaaS)");
@@ -68,7 +93,9 @@ fn run_sailpoint(args: &[String], _prog: &str) -> i32 {
     println!("  Architecture (the IGA platform):");
     println!("    - Identity Security Cloud (cloud SaaS): multi-tenant on AWS");
     println!("    - IdentityIQ (on-prem): Java + Hibernate + MySQL/Oracle");
-    println!("    - 200+ connectors to source systems (AD, LDAP, SAP, Workday, ServiceNow, AWS, Azure, GCP, etc.)");
+    println!(
+        "    - 200+ connectors to source systems (AD, LDAP, SAP, Workday, ServiceNow, AWS, Azure, GCP, etc.)"
+    );
     println!("    - Connector framework: extensible Java SDK");
     println!("    - Workflow engine for approvals, certifications, requests");
     println!("    - Rule engine + policy engine");
@@ -139,9 +166,13 @@ fn run_sailpoint(args: &[String], _prog: &str) -> i32 {
     println!("  The Thoma Bravo round-trip:");
     println!("    - Aug 2022: TB acquired for $6.9B at $65.25/share");
     println!("    - 2022-2025: invested in product (Atlas, CIEM, SecZetta acq)");
-    println!("    - Feb 2025: re-IPO'd at $23/share (lower per-share but stock split + larger float)");
+    println!(
+        "    - Feb 2025: re-IPO'd at $23/share (lower per-share but stock split + larger float)"
+    );
     println!("    - TB returned to public market with stronger product + larger company");
-    println!("    - One of TB's identity vertical investments (alongside Ping + ForgeRock + SonicWall)");
+    println!(
+        "    - One of TB's identity vertical investments (alongside Ping + ForgeRock + SonicWall)"
+    );
     println!("  Integrations:");
     println!("    - 200+ source system connectors (AD, LDAP, SAP, Workday, ServiceNow, etc.)");
     println!("    - Cloud: AWS IAM, Azure AD/Entra, GCP IAM");
@@ -162,7 +193,9 @@ fn run_sailpoint(args: &[String], _prog: &str) -> i32 {
     println!("    sailpoint sources list                                    # data sources");
     println!("    sailpoint workflows list");
     println!("    # REST API (canonical):");
-    println!("    curl -H 'Authorization: Bearer <token>' https://<tenant>.api.identitynow.com/v3/identities");
+    println!(
+        "    curl -H 'Authorization: Bearer <token>' https://<tenant>.api.identitynow.com/v3/identities"
+    );
     println!("    # IdentityIQ console (on-prem):");
     println!("    iiq console");
     println!("    > run TaskDefinition 'Aggregate AD'");
@@ -188,13 +221,18 @@ fn run_sailpoint(args: &[String], _prog: &str) -> i32 {
     println!("           PE-owned pricing pressure post-2022");
     println!("           Atlas platform migration creates dual-architecture transition pain");
     println!("           AI features still maturing (Outliers + Modeling promise vs reality)");
-    println!("  Differentiator: IGA market leader since 2005 (founded Austin TX by Mark McClain + Kevin Cunningham + Jackie Gilbert ex-Sun/Waveset team, IPO 2017 $240M, Thoma Bravo $6.9B Aug 2022, re-IPO'd Feb 2025 $1.38B, NYSE:SAIL again) + Gartner MQ Leader every year + Identity Security Cloud (formerly IdentityNow, multi-tenant SaaS) + IdentityIQ on-prem (the 15+ year heritage Java product) + Access Risk Management (SAP/Oracle SoD analysis) + File Access Manager (data governance) + AI Identity Outliers (ML access pattern anomaly detection) + Access Modeling (role mining) + Cloud Infrastructure Entitlement Management (CIEM, cloud IAM analytics) + Non-Employee Risk Management (SecZetta acq 2024 $260M) + Customer Identity Governance + SailPoint Atlas platform + 200+ source system connectors + JPMorgan/Citi/Wells/Goldman/BNY/UnitedHealth/Pfizer/DoD/DHS/IRS-proven + 2000+ enterprise customers + the only pure-play IGA vendor at scale + IGA category creator (defined the Gartner category alongside Gartner) + 20 years of access certifications + SoD policy + JML workflows + compliance automation (SOX/GDPR/HIPAA/ISO 27001) + Mark McClain founder/CEO for 20 years + Texas tech success story + 6-12 month enterprise deployments + Thoma Bravo identity vertical play (with Ping + ForgeRock sister portfolio) — the IGA category-defining vendor that answers 'who has access to what, why, and should they still' at Fortune 500 scale");
+    println!(
+        "  Differentiator: IGA market leader since 2005 (founded Austin TX by Mark McClain + Kevin Cunningham + Jackie Gilbert ex-Sun/Waveset team, IPO 2017 $240M, Thoma Bravo $6.9B Aug 2022, re-IPO'd Feb 2025 $1.38B, NYSE:SAIL again) + Gartner MQ Leader every year + Identity Security Cloud (formerly IdentityNow, multi-tenant SaaS) + IdentityIQ on-prem (the 15+ year heritage Java product) + Access Risk Management (SAP/Oracle SoD analysis) + File Access Manager (data governance) + AI Identity Outliers (ML access pattern anomaly detection) + Access Modeling (role mining) + Cloud Infrastructure Entitlement Management (CIEM, cloud IAM analytics) + Non-Employee Risk Management (SecZetta acq 2024 $260M) + Customer Identity Governance + SailPoint Atlas platform + 200+ source system connectors + JPMorgan/Citi/Wells/Goldman/BNY/UnitedHealth/Pfizer/DoD/DHS/IRS-proven + 2000+ enterprise customers + the only pure-play IGA vendor at scale + IGA category creator (defined the Gartner category alongside Gartner) + 20 years of access certifications + SoD policy + JML workflows + compliance automation (SOX/GDPR/HIPAA/ISO 27001) + Mark McClain founder/CEO for 20 years + Texas tech success story + 6-12 month enterprise deployments + Thoma Bravo identity vertical play (with Ping + ForgeRock sister portfolio) — the IGA category-defining vendor that answers 'who has access to what, why, and should they still' at Fortune 500 scale"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sailpoint".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "sailpoint".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_sailpoint(&rest, &_prog);
     process::exit(code);
@@ -202,7 +240,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sailpoint};
+    use super::{basename, run_sailpoint, strip_ext};
 
     #[test]
     fn basename_strips_path() {

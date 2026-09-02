@@ -38,7 +38,8 @@ fn run_otelcol(args: Vec<String>) -> i32 {
             0
         }
         "validate" => {
-            let config = args.windows(2)
+            let config = args
+                .windows(2)
                 .find(|w| w[0] == "--config")
                 .map(|w| w[1].as_str())
                 .unwrap_or("otel-config.yaml");
@@ -81,7 +82,8 @@ fn run_otelcol(args: Vec<String>) -> i32 {
         }
         _ => {
             // Default: start collector
-            let config = args.windows(2)
+            let config = args
+                .windows(2)
                 .find(|w| w[0] == "--config")
                 .map(|w| w[1].as_str())
                 .unwrap_or("otel-config.yaml");
@@ -107,7 +109,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_otelcol};
+    use super::run_otelcol;
 
     #[test]
     fn help_exits_zero() {

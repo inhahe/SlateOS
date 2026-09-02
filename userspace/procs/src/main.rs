@@ -98,7 +98,8 @@ fn run_procs(args: Vec<String>) -> i32 {
 
     let tree = args.iter().any(|a| a == "-t" || a == "--tree");
 
-    let keywords: Vec<&str> = args.iter()
+    let keywords: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -144,7 +145,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_procs};
+    use super::run_procs;
 
     #[test]
     fn help_exits_zero() {

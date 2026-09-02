@@ -71,7 +71,11 @@ fn run_micro(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     if !files.is_empty() {
         for f in &files {
             println!("Opening: {}", f);
@@ -91,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_micro};
+    use super::run_micro;
 
     #[test]
     fn help_exits_zero() {

@@ -22,10 +22,14 @@ fn run_redis_server(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Redis server v=7.2.0 sha=abc12345:0 malloc=jemalloc bits=64 build=abc1234 (Slate OS)");
+        println!(
+            "Redis server v=7.2.0 sha=abc12345:0 malloc=jemalloc bits=64 build=abc1234 (Slate OS)"
+        );
         return 0;
     }
-    let port = args.iter().position(|a| a == "--port")
+    let port = args
+        .iter()
+        .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(6379);
@@ -67,7 +71,11 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
     }
 
     // Check for inline command
-    let commands: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let commands: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     if !commands.is_empty() {
         let cmd_upper = commands[0].to_uppercase();
         match cmd_upper.as_str() {
@@ -75,7 +83,11 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
             "SET" => println!("OK"),
             "GET" => println!("\"value\""),
             "DEL" => println!("(integer) 1"),
-            "KEYS" => { println!("1) \"key1\""); println!("2) \"key2\""); println!("3) \"session:abc\""); }
+            "KEYS" => {
+                println!("1) \"key1\"");
+                println!("2) \"key2\"");
+                println!("3) \"session:abc\"");
+            }
             "INFO" => {
                 println!("# Server");
                 println!("redis_version:7.2.0");
@@ -147,7 +159,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -163,7 +177,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_redis_server};
+    use super::run_redis_server;
 
     #[test]
     fn help_exits_zero() {

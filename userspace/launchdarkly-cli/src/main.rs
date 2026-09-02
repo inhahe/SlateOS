@@ -38,7 +38,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("launchdarkly-cli 0.1.0 (Feature Management personality build)"); }
+fn print_version() {
+    println!("launchdarkly-cli 0.1.0 (Feature Management personality build)");
+}
 
 fn run_about() {
     println!("LaunchDarkly, Inc.");

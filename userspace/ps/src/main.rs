@@ -261,17 +261,20 @@ fn read_process(pid: u32) -> Option<ProcessInfo> {
     if let Some(status_content) = read_file(&format!("/proc/{pid}/status")) {
         for line in status_content.lines() {
             if let Some(val) = line.strip_prefix("Uid:") {
-                uid = val.split_whitespace()
+                uid = val
+                    .split_whitespace()
                     .next()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             } else if let Some(val) = line.strip_prefix("Gid:") {
-                gid = val.split_whitespace()
+                gid = val
+                    .split_whitespace()
                     .next()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             } else if let Some(val) = line.strip_prefix("Groups:") {
-                groups = val.split_whitespace()
+                groups = val
+                    .split_whitespace()
                     .filter_map(|s| s.parse().ok())
                     .collect();
             } else if line.starts_with("VmSize:") {
@@ -314,9 +317,10 @@ fn enumerate_pids() -> Vec<u32> {
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && let Ok(pid) = name.parse::<u32>() {
-                    pids.push(pid);
-                }
+                && let Ok(pid) = name.parse::<u32>()
+            {
+                pids.push(pid);
+            }
         }
     }
 
@@ -395,8 +399,13 @@ fn mem_percent(proc_info: &ProcessInfo, mem_total_kb: u64) -> f64 {
 // Sorting
 // ============================================================================
 
-fn sort_processes(procs: &mut [ProcessInfo], field: SortField, reverse: bool,
-                  uptime_ticks: u64, mem_total_kb: u64) {
+fn sort_processes(
+    procs: &mut [ProcessInfo],
+    field: SortField,
+    reverse: bool,
+    uptime_ticks: u64,
+    mem_total_kb: u64,
+) {
     procs.sort_by(|a, b| {
         let cmp = match field {
             SortField::Pid => a.pid.cmp(&b.pid),
@@ -428,7 +437,10 @@ fn sort_processes(procs: &mut [ProcessInfo], field: SortField, reverse: bool,
 
 fn print_default(procs: &[ProcessInfo], no_header: bool) {
     if !no_header {
-        println!("{:>7}  {:<8}  {:<5}  {:>10}  CMD", "PID", "TTY", "STATE", "TIME");
+        println!(
+            "{:>7}  {:<8}  {:<5}  {:>10}  CMD",
+            "PID", "TTY", "STATE", "TIME"
+        );
     }
     for p in procs {
         println!(
@@ -517,8 +529,7 @@ fn print_long(procs: &[ProcessInfo], no_header: bool, uptime_ticks: u64) {
 // Output: User-oriented format (-u)
 // ============================================================================
 
-fn print_user(procs: &[ProcessInfo], no_header: bool, uptime_ticks: u64,
-              mem_total_kb: u64) {
+fn print_user(procs: &[ProcessInfo], no_header: bool, uptime_ticks: u64, mem_total_kb: u64) {
     if !no_header {
         println!(
             "{:>7}  {:>7}  {:>5}  {:>5}  {:>9}  {:>9}  {:<8}  {:<5}  {:>10}  COMMAND",
@@ -575,8 +586,9 @@ fn column_header(col: Column) -> &'static str {
 
 fn column_width(col: Column) -> usize {
     match col {
-        Column::Pid | Column::Ppid | Column::Uid | Column::Gid
-        | Column::Session | Column::Pgrp => 8,
+        Column::Pid | Column::Ppid | Column::Uid | Column::Gid | Column::Session | Column::Pgrp => {
+            8
+        }
         Column::State => 6,
         Column::Name => 20,
         Column::Nice | Column::Priority => 5,
@@ -589,8 +601,12 @@ fn column_width(col: Column) -> usize {
     }
 }
 
-fn format_column_value(col: Column, p: &ProcessInfo, uptime_ticks: u64,
-                       _mem_total_kb: u64) -> String {
+fn format_column_value(
+    col: Column,
+    p: &ProcessInfo,
+    uptime_ticks: u64,
+    _mem_total_kb: u64,
+) -> String {
     match col {
         Column::Pid => format!("{}", p.pid),
         Column::Ppid => format!("{}", p.ppid),
@@ -618,8 +634,13 @@ fn format_column_value(col: Column, p: &ProcessInfo, uptime_ticks: u64,
     }
 }
 
-fn print_custom(procs: &[ProcessInfo], columns: &[Column], no_header: bool,
-                uptime_ticks: u64, mem_total_kb: u64) {
+fn print_custom(
+    procs: &[ProcessInfo],
+    columns: &[Column],
+    no_header: bool,
+    uptime_ticks: u64,
+    mem_total_kb: u64,
+) {
     if !no_header {
         let mut header = String::new();
         for (i, col) in columns.iter().enumerate() {
@@ -673,15 +694,13 @@ fn print_tree(procs: &[ProcessInfo], no_header: bool) {
     }
 
     // Build a children map: ppid -> list of indices into procs.
-    let mut children: std::collections::HashMap<u32, Vec<usize>> =
-        std::collections::HashMap::new();
+    let mut children: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
     for (i, p) in procs.iter().enumerate() {
         children.entry(p.ppid).or_default().push(i);
     }
 
     // Find root processes (ppid == 0 or ppid not in our pid set).
-    let pid_set: std::collections::HashSet<u32> =
-        procs.iter().map(|p| p.pid).collect();
+    let pid_set: std::collections::HashSet<u32> = procs.iter().map(|p| p.pid).collect();
     let mut roots: Vec<usize> = Vec::new();
     for (i, p) in procs.iter().enumerate() {
         if p.ppid == 0 || !pid_set.contains(&p.ppid) {
@@ -763,15 +782,14 @@ fn print_json(procs: &[ProcessInfo], uptime_ticks: u64, mem_total_kb: u64) {
         let groups_json = groups_str.join(", ");
 
         // Escape the process name for JSON (handle quotes and backslashes).
-        let escaped_name = p.name
+        let escaped_name = p
+            .name
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('\n', "\\n")
             .replace('\r', "\\r")
             .replace('\t', "\\t");
-        let escaped_state = p.state_long
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
+        let escaped_state = p.state_long.replace('\\', "\\\\").replace('"', "\\\"");
 
         let comma = if i + 1 < procs.len() { "," } else { "" };
 
@@ -911,11 +929,12 @@ fn main() {
                 // Optional UID argument: if the next arg is a number, treat
                 // it as a UID filter.
                 if i + 1 < args.len()
-                    && let Ok(uid) = args[i + 1].parse::<u32>() {
-                        config.filter_uid = Some(uid);
-                        i += 2;
-                        continue;
-                    }
+                    && let Ok(uid) = args[i + 1].parse::<u32>()
+                {
+                    config.filter_uid = Some(uid);
+                    i += 2;
+                    continue;
+                }
                 i += 1;
             }
             "-p" => {
@@ -994,9 +1013,10 @@ fn main() {
                 process::exit(0);
             }
             // Handle combined short flags like "-ef", "-el", "-efl".
-            combined if combined.starts_with('-')
-                && combined.len() > 2
-                && !combined.starts_with("--") =>
+            combined
+                if combined.starts_with('-')
+                    && combined.len() > 2
+                    && !combined.starts_with("--") =>
             {
                 // Expand combined flags and reprocess.
                 let flags = &combined[1..];

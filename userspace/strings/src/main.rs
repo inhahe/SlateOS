@@ -269,9 +269,7 @@ fn parse_radix(s: &str) -> Result<RadixFormat, String> {
         "d" => Ok(RadixFormat::Decimal),
         "o" => Ok(RadixFormat::Octal),
         "x" => Ok(RadixFormat::Hex),
-        _ => Err(format!(
-            "invalid radix format '{s}': expected d, o, or x"
-        )),
+        _ => Err(format!("invalid radix format '{s}': expected d, o, or x")),
     }
 }
 
@@ -302,8 +300,8 @@ fn parse_encoding(s: &str) -> Result<Encoding, String> {
 #[inline]
 fn is_printable(b: u8, include_all_ws: bool) -> bool {
     match b {
-        0x20..=0x7E => true,  // space through tilde
-        0x09 => true,         // horizontal tab
+        0x20..=0x7E => true, // space through tilde
+        0x09 => true,        // horizontal tab
         0x0A..=0x0D if include_all_ws => true,
         _ => false,
     }
@@ -330,11 +328,7 @@ fn is_wide_printable(val: u32, include_all_ws: bool) -> bool {
 // ============================================================================
 
 /// Write the offset prefix for a found string.
-fn write_offset(
-    out: &mut impl Write,
-    offset: u64,
-    radix: RadixFormat,
-) -> io::Result<()> {
+fn write_offset(out: &mut impl Write, offset: u64, radix: RadixFormat) -> io::Result<()> {
     match radix {
         RadixFormat::Decimal => write!(out, "{offset:7} "),
         RadixFormat::Octal => write!(out, "{offset:7o} "),
@@ -351,9 +345,10 @@ fn emit_string(
     s: &str,
 ) -> io::Result<()> {
     if opts.print_filename
-        && let Some(name) = filename {
-            write!(out, "{name}: ")?;
-        }
+        && let Some(name) = filename
+    {
+        write!(out, "{name}: ")?;
+    }
     if let Some(radix) = opts.radix {
         write_offset(out, offset, radix)?;
     }
@@ -371,11 +366,12 @@ fn emit_json(
     // Build a JSON line manually to avoid pulling in serde.
     write!(out, "{{\"offset\":{offset}")?;
     if opts.print_filename
-        && let Some(name) = filename {
-            write!(out, ",\"file\":\"")?;
-            write_json_escaped(out, name)?;
-            write!(out, "\"")?;
-        }
+        && let Some(name) = filename
+    {
+        write!(out, ",\"file\":\"")?;
+        write_json_escaped(out, name)?;
+        write!(out, "\"")?;
+    }
     write!(out, ",\"string\":\"")?;
     write_json_escaped(out, s)?;
     writeln!(out, "\"}}")
@@ -629,18 +625,10 @@ fn scan(
     match opts.encoding {
         Encoding::Ascii7 => scan_bytes(reader, out, opts, filename, true),
         Encoding::Ascii8 => scan_bytes(reader, out, opts, filename, false),
-        Encoding::BigEndian16 => {
-            scan_wide(reader, out, opts, filename, 2, true)
-        }
-        Encoding::LittleEndian16 => {
-            scan_wide(reader, out, opts, filename, 2, false)
-        }
-        Encoding::BigEndian32 => {
-            scan_wide(reader, out, opts, filename, 4, true)
-        }
-        Encoding::LittleEndian32 => {
-            scan_wide(reader, out, opts, filename, 4, false)
-        }
+        Encoding::BigEndian16 => scan_wide(reader, out, opts, filename, 2, true),
+        Encoding::LittleEndian16 => scan_wide(reader, out, opts, filename, 2, false),
+        Encoding::BigEndian32 => scan_wide(reader, out, opts, filename, 4, true),
+        Encoding::LittleEndian32 => scan_wide(reader, out, opts, filename, 4, false),
     }
 }
 
@@ -656,8 +644,7 @@ fn run() -> Result<(), String> {
     if opts.files.is_empty() {
         // Read from stdin.
         let mut stdin = io::stdin().lock();
-        scan(&mut stdin, &mut out, &opts, None)
-            .map_err(|e| format!("stdin: {e}"))?;
+        scan(&mut stdin, &mut out, &opts, None).map_err(|e| format!("stdin: {e}"))?;
     } else {
         for path in &opts.files {
             if path == "-" {
@@ -667,18 +654,15 @@ fn run() -> Result<(), String> {
                 } else {
                     None
                 };
-                scan(&mut stdin, &mut out, &opts, name)
-                    .map_err(|e| format!("stdin: {e}"))?;
+                scan(&mut stdin, &mut out, &opts, name).map_err(|e| format!("stdin: {e}"))?;
             } else {
-                let mut file = File::open(path)
-                    .map_err(|e| format!("{path}: {e}"))?;
+                let mut file = File::open(path).map_err(|e| format!("{path}: {e}"))?;
                 let name = if opts.print_filename {
                     Some(path.as_str())
                 } else {
                     None
                 };
-                scan(&mut file, &mut out, &opts, name)
-                    .map_err(|e| format!("{path}: {e}"))?;
+                scan(&mut file, &mut out, &opts, name).map_err(|e| format!("{path}: {e}"))?;
             }
         }
     }

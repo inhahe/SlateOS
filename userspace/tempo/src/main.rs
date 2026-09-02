@@ -14,7 +14,9 @@ fn run_tempo(args: Vec<String>) -> i32 {
         println!("Flags:");
         println!("  --config.file <file>     Config file path");
         println!("  --config.expand-env      Expand env vars in config");
-        println!("  --target <target>        Module target (all, distributor, ingester, querier, compactor)");
+        println!(
+            "  --target <target>        Module target (all, distributor, ingester, querier, compactor)"
+        );
         println!("  --storage.trace.backend  Storage backend (local/gcs/s3/azure)");
         println!("  --server.http-listen-address <addr>  HTTP listen (default: :3200)");
         println!("  --server.grpc-listen-address <addr>  gRPC listen (default: :9095)");
@@ -29,16 +31,30 @@ fn run_tempo(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let config = args.iter().find_map(|a| a.strip_prefix("--config.file="))
+    let config = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--config.file="))
         .unwrap_or("tempo.yaml");
-    let target = args.iter().find_map(|a| a.strip_prefix("--target="))
+    let target = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--target="))
         .unwrap_or("all");
 
-    println!("level=info ts=2025-05-22T10:00:00.000Z msg=\"Starting Tempo\" version=\"2.5.0 (Slate OS)\"");
-    println!("level=info ts=2025-05-22T10:00:00.001Z msg=\"Loading configuration\" file=\"{}\"", config);
-    println!("level=info ts=2025-05-22T10:00:00.010Z msg=\"Initializing module\" target=\"{}\"", target);
+    println!(
+        "level=info ts=2025-05-22T10:00:00.000Z msg=\"Starting Tempo\" version=\"2.5.0 (Slate OS)\""
+    );
+    println!(
+        "level=info ts=2025-05-22T10:00:00.001Z msg=\"Loading configuration\" file=\"{}\"",
+        config
+    );
+    println!(
+        "level=info ts=2025-05-22T10:00:00.010Z msg=\"Initializing module\" target=\"{}\"",
+        target
+    );
     println!("level=info ts=2025-05-22T10:00:00.050Z msg=\"Tempo started\" http=:3200 grpc=:9095");
-    println!("level=info ts=2025-05-22T10:00:00.051Z msg=\"Accepting traces via OTLP gRPC and HTTP\"");
+    println!(
+        "level=info ts=2025-05-22T10:00:00.051Z msg=\"Accepting traces via OTLP gRPC and HTTP\""
+    );
     0
 }
 
@@ -51,7 +67,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_tempo};
+    use super::run_tempo;
 
     #[test]
     fn help_exits_zero() {

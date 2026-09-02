@@ -16,7 +16,10 @@ fn strip_ext(name: &str) -> &str {
 }
 
 fn run_djvu(prog: &str, args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+    {
         match prog {
             "djvused" => {
                 println!("Usage: djvused [OPTIONS] DJVUFILE");
@@ -34,7 +37,9 @@ fn run_djvu(prog: &str, args: &[String]) -> i32 {
                 println!("Usage: djvutxt [OPTIONS] DJVUFILE [TXTFILE]");
                 println!("djvutxt — extract text from DjVu (Slate OS).");
                 println!("  --page N     Extract specific page");
-                println!("  --detail L   Detail level (page, column, region, para, line, word, char)");
+                println!(
+                    "  --detail L   Detail level (page, column, region, para, line, word, char)"
+                );
             }
             "djvups" => {
                 println!("Usage: djvups [OPTIONS] DJVUFILE [PSFILE]");
@@ -70,7 +75,8 @@ fn run_djvu(prog: &str, args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -109,8 +115,11 @@ fn run_djvu(prog: &str, args: &[String]) -> i32 {
             println!("  Done (2 pages).");
         }
         "ddjvu" => {
-            let fmt = args.windows(2).find(|w| w[0] == "-format")
-                .map(|w| w[1].as_str()).unwrap_or("ppm");
+            let fmt = args
+                .windows(2)
+                .find(|w| w[0] == "-format")
+                .map(|w| w[1].as_str())
+                .unwrap_or("ppm");
             let default_out = format!("{}.{}", strip_ext(file), fmt);
             let output = files.get(1).copied().unwrap_or(&default_out);
             println!("Decoding {} -> {} (format: {})", file, output, fmt);
@@ -118,19 +127,28 @@ fn run_djvu(prog: &str, args: &[String]) -> i32 {
         "c44" => {
             let default_out = format!("{}.djvu", strip_ext(file));
             let output = files.get(1).copied().unwrap_or(&default_out);
-            let dpi = args.windows(2).find(|w| w[0] == "-dpi")
-                .map(|w| w[1].as_str()).unwrap_or("300");
+            let dpi = args
+                .windows(2)
+                .find(|w| w[0] == "-dpi")
+                .map(|w| w[1].as_str())
+                .unwrap_or("300");
             println!("Encoding {} -> {} (DjVu photo, {} dpi)", file, output, dpi);
         }
         "cjb2" => {
             let default_out = format!("{}.djvu", strip_ext(file));
             let output = files.get(1).copied().unwrap_or(&default_out);
             let lossy = args.iter().any(|a| a == "-lossy");
-            println!("Encoding {} -> {} (DjVu bitonal{})", file, output,
-                     if lossy { ", lossy" } else { "" });
+            println!(
+                "Encoding {} -> {} (DjVu bitonal{})",
+                file,
+                output,
+                if lossy { ", lossy" } else { "" }
+            );
         }
         "djvused" => {
-            let cmd = args.windows(2).find(|w| w[0] == "-e")
+            let cmd = args
+                .windows(2)
+                .find(|w| w[0] == "-e")
                 .map(|w| w[1].as_str());
             if let Some(c) = cmd {
                 match c {
@@ -153,7 +171,8 @@ fn run_djvu(prog: &str, args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "djvused".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -163,7 +182,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_djvu};
+    use super::{basename, run_djvu, strip_ext};
 
     #[test]
     fn basename_strips_path() {

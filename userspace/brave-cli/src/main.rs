@@ -7,13 +7,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_br(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: brave [URL] [OPTIONS]");
-        println!("Brave Browser (Slate OS) — Privacy-first Chromium browser with crypto/BAT rewards");
+        println!(
+            "Brave Browser (Slate OS) — Privacy-first Chromium browser with crypto/BAT rewards"
+        );
         println!();
         println!("Options:");
         println!("  --tor                  Private window with Tor routing");
@@ -25,7 +31,10 @@ fn run_br(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Brave 1.73.91 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Brave 1.73.91 (Slate OS)");
+        return 0;
+    }
     println!("Brave 1.73.91 Chromium: 131.0.6778.86 (Slate OS)");
     println!("  Vendor: Brave Software, Inc. (San Francisco, founded 2015)");
     println!("  Founders: Brendan Eich (creator of JavaScript, ex-Mozilla CEO), Brian Bondy");
@@ -40,13 +49,18 @@ fn run_br(args: &[String], _prog: &str) -> i32 {
     println!("  Talk: built-in Jitsi-based video calls");
     println!("  Leo: in-browser AI (Claude/Llama/Mistral options), Premium $14.99/mo");
     println!("  Wallet: native Eth/Sol/BTC wallet, no extension needed");
-    println!("  Controversies: 2020 affiliate-URL injection (resolved), Eich's 2014 Prop 8 donation");
+    println!(
+        "  Controversies: 2020 affiliate-URL injection (resolved), Eich's 2014 Prop 8 donation"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "brave".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "brave".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_br(&rest, &_prog);
     process::exit(code);
@@ -54,7 +68,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_br};
+    use super::{basename, run_br, strip_ext};
 
     #[test]
     fn basename_strips_path() {

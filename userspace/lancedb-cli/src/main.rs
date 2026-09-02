@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_lance(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_lance(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LanceDB 2024 (Slate OS) — lancedb CLI 0.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("LanceDB 2024 (Slate OS) — lancedb CLI 0.x");
+        return 0;
+    }
     println!("LanceDB 2024 (Slate OS) — Multi-Modal Vector Database on Lance Columnar Format");
     println!("  Vendor: LanceDB, Inc. (San Francisco, CA — private)");
     println!("  Founders: Chang She + Lei Xu, 2022");
@@ -35,12 +42,22 @@ fn run_lance(args: &[String], _prog: &str) -> i32 {
     println!("         Seed Aug 2023: $8M (Y Combinator + Essence VC + others)");
     println!("         Series A unannounced 2024");
     println!("         Smaller funding than competitors — lean engineering team");
-    println!("  Strategic position: 'multi-modal vector DB on open Lance format — embedded or serverless':");
-    println!("                    pitch: 'multi-modal AI data storage + vector search on open columnar format'");
-    println!("                    target: multi-modal AI workloads (text + image + video + audio embeddings)");
-    println!("                    primary competitor: Chroma (simplicity), Qdrant (Rust + perf), Pinecone, Weaviate");
+    println!(
+        "  Strategic position: 'multi-modal vector DB on open Lance format — embedded or serverless':"
+    );
+    println!(
+        "                    pitch: 'multi-modal AI data storage + vector search on open columnar format'"
+    );
+    println!(
+        "                    target: multi-modal AI workloads (text + image + video + audio embeddings)"
+    );
+    println!(
+        "                    primary competitor: Chroma (simplicity), Qdrant (Rust + perf), Pinecone, Weaviate"
+    );
     println!("                    secondary: pgvector, sqlite-vec");
-    println!("                    LanceDB's wedge: Lance columnar format + true multi-modal data + zero-copy + embedded mode");
+    println!(
+        "                    LanceDB's wedge: Lance columnar format + true multi-modal data + zero-copy + embedded mode"
+    );
     println!("                    'Postgres for AI' aspirational framing");
     println!("                    Chang She's pandas pedigree → high engineering credibility");
     println!("  Pricing (OSS + Cloud + Enterprise):");
@@ -137,7 +154,9 @@ fn run_lance(args: &[String], _prog: &str) -> i32 {
     println!("    lancedb create-table mydb my-coll --schema schema.json");
     println!("    lancedb upsert mydb my-coll --file data.parquet");
     println!("    lancedb search mydb my-coll --vector '[0.1,0.2,...]' --limit=10");
-    println!("    lancedb create-index mydb my-coll my_vec --type=IVF_PQ --num-partitions=256 --num-sub-vectors=96");
+    println!(
+        "    lancedb create-index mydb my-coll my_vec --type=IVF_PQ --num-partitions=256 --num-sub-vectors=96"
+    );
     println!("    lancedb version-history mydb my-coll                     # time-travel");
     println!("    lancedb restore mydb my-coll --version=5                 # rollback");
     println!("    lancedb fts-index mydb my-coll --field=text              # full-text index");
@@ -158,13 +177,18 @@ fn run_lance(args: &[String], _prog: &str) -> i32 {
     println!("           production features (replication, HA) less mature than Milvus/Qdrant");
     println!("           Apache Arrow + DuckDB dependencies = supply chain complexity");
     println!("           pure 'vector DB' framing competes against integrated approaches");
-    println!("  Differentiator: Lance columnar format (2-3x faster random access than Parquet, optimized for vector retrieval + ML training) + multi-modal data storage (vectors + binary blobs in one table) + built-in versioning + time-travel (Git-like) + Tantivy full-text search + DuckDB SQL integration + Apache Arrow zero-copy + Pandas/Polars native + Chang She founder (co-creator of pandas with Wes McKinney) + Lei Xu (ex-Cruise) + written in Rust + embedded + serverless + enterprise modes + LangChain/LlamaIndex first-class + Apache 2.0 open source + Cruise original use case + $11M raised — the multi-modal AI database built on the open Lance columnar format, with pandas co-creator credibility and the unique combination of vector + blob + SQL + full-text + versioning in one engine");
+    println!(
+        "  Differentiator: Lance columnar format (2-3x faster random access than Parquet, optimized for vector retrieval + ML training) + multi-modal data storage (vectors + binary blobs in one table) + built-in versioning + time-travel (Git-like) + Tantivy full-text search + DuckDB SQL integration + Apache Arrow zero-copy + Pandas/Polars native + Chang She founder (co-creator of pandas with Wes McKinney) + Lei Xu (ex-Cruise) + written in Rust + embedded + serverless + enterprise modes + LangChain/LlamaIndex first-class + Apache 2.0 open source + Cruise original use case + $11M raised — the multi-modal AI database built on the open Lance columnar format, with pandas co-creator credibility and the unique combination of vector + blob + SQL + full-text + versioning in one engine"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "lancedb".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "lancedb".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_lance(&rest, &_prog);
     process::exit(code);
@@ -172,7 +196,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lance};
+    use super::{basename, run_lance, strip_ext};
 
     #[test]
     fn basename_strips_path() {

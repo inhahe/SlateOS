@@ -44,7 +44,9 @@ fn run_cargo_bloat(args: Vec<String>) -> i32 {
 
     let crates_mode = subargs.iter().any(|a| a == "--crates");
     let time_mode = subargs.iter().any(|a| a == "--time");
-    let json = subargs.windows(2).any(|w| w[0] == "--message-format" && w[1] == "json");
+    let json = subargs
+        .windows(2)
+        .any(|w| w[0] == "--message-format" && w[1] == "json");
 
     if json {
         if crates_mode {
@@ -57,7 +59,9 @@ fn run_cargo_bloat(args: Vec<String>) -> i32 {
         } else {
             println!("[");
             println!("  {{\"name\":\"core::fmt::write\",\"size\":8192,\"percentage\":0.4}},");
-            println!("  {{\"name\":\"std::io::Write::write_fmt\",\"size\":4096,\"percentage\":0.2}}");
+            println!(
+                "  {{\"name\":\"std::io::Write::write_fmt\",\"size\":4096,\"percentage\":0.2}}"
+            );
             println!("]");
         }
         return 0;
@@ -122,7 +126,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cargo_bloat};
+    use super::run_cargo_bloat;
 
     #[test]
     fn help_exits_zero() {

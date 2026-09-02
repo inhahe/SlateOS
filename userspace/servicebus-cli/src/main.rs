@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,7 +26,10 @@ fn run_sb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Azure Service Bus 2024 (Slate OS) — servicebus CLI (az + Service Bus Explorer)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Azure Service Bus 2024 (Slate OS) — servicebus CLI (az + Service Bus Explorer)");
+        return 0;
+    }
     println!("Azure Service Bus 2024 (Slate OS) — Enterprise Messaging on Azure (AMQP 1.0-native)");
     println!("  Vendor: Microsoft Corporation (Redmond, WA — NASDAQ: MSFT)");
     println!("  History:");
@@ -35,17 +42,25 @@ fn run_sb(args: &[String], _prog: &str) -> i32 {
     println!("    - Designed for: enterprise integration, not just web-scale streaming");
     println!("    - Contrasts with Event Hubs (Azure's Kafka-like, log-based)");
     println!("  Strategic position: 'enterprise messaging on Azure with full broker semantics':");
-    println!("                    pitch: 'queues + topics + sessions + transactions + DLQ + scheduling — on Azure managed'");
+    println!(
+        "                    pitch: 'queues + topics + sessions + transactions + DLQ + scheduling — on Azure managed'"
+    );
     println!("                    target: enterprise .NET shops, Azure-native, JMS migrators");
     println!("                    primary competitor: AWS SQS+SNS, GCP Pub/Sub, IBM MQ");
     println!("                    secondary: RabbitMQ, ActiveMQ, Solace");
-    println!("                    Service Bus wedge: AMQP 1.0 native + advanced features (sessions, transactions, scheduling, DLQ)");
+    println!(
+        "                    Service Bus wedge: AMQP 1.0 native + advanced features (sessions, transactions, scheduling, DLQ)"
+    );
     println!("                    + Premium tier for dedicated isolation");
     println!("                    + JMS 2.0 for Java migration paths");
-    println!("                    + integration with all Azure services (Functions, Logic Apps, Event Grid)");
+    println!(
+        "                    + integration with all Azure services (Functions, Logic Apps, Event Grid)"
+    );
     println!("                    'For Azure shops what SQS+SNS+EventBridge are for AWS'");
     println!("  Pricing (multi-tier):");
-    println!("    Basic tier: $0.05 per million operations (queues only, no topics, smaller features)");
+    println!(
+        "    Basic tier: $0.05 per million operations (queues only, no topics, smaller features)"
+    );
     println!("    Standard tier: $9.81/month base + $0.80 per million operations (full features)");
     println!("    Premium tier: $0.667/hour per Messaging Unit (MU) — dedicated capacity");
     println!("        Premium Small: 1 MU = ~$486/month");
@@ -57,7 +72,9 @@ fn run_sb(args: &[String], _prog: &str) -> i32 {
     println!("    - Namespace = the logical container (DNS endpoint)");
     println!("    - Each namespace hosts queues + topics");
     println!("    - Queues: point-to-point");
-    println!("    - Topics + Subscriptions: pub/sub (subscription is a virtual queue with filters)");
+    println!(
+        "    - Topics + Subscriptions: pub/sub (subscription is a virtual queue with filters)"
+    );
     println!("    - AMQP 1.0 native protocol");
     println!("    - REST API for management + data plane");
     println!("    - Sessions: ordered FIFO grouped by SessionId");
@@ -78,7 +95,9 @@ fn run_sb(args: &[String], _prog: &str) -> i32 {
     println!("    2. Topics + Subscriptions (pub/sub):");
     println!("       - Topics publish; subscriptions consume");
     println!("       - Each subscription is a virtual queue with filters");
-    println!("       - SQL filters (SELECT-like): UserProperty='premium' AND Region IN ('US','EU')");
+    println!(
+        "       - SQL filters (SELECT-like): UserProperty='premium' AND Region IN ('US','EU')"
+    );
     println!("       - Correlation filters (exact match)");
     println!("       - True/False (no filter)");
     println!("       - SQL actions to transform messages on subscription");
@@ -130,7 +149,9 @@ fn run_sb(args: &[String], _prog: &str) -> i32 {
     println!("    - Event Hubs: log-style (Kafka-compatible partitioned stream)");
     println!("    - Service Bus: 'each message processed once, decoupled microservices'");
     println!("    - Event Hubs: 'all consumers see all events, log replay, streaming analytics'");
-    println!("    - Many Azure architectures use both (Event Hubs for telemetry + Service Bus for workflows)");
+    println!(
+        "    - Many Azure architectures use both (Event Hubs for telemetry + Service Bus for workflows)"
+    );
     println!("  Integrations:");
     println!("    - Azure CLI (az servicebus subcommands)");
     println!("    - Service Bus Explorer (community + Microsoft tool)");
@@ -145,15 +166,27 @@ fn run_sb(args: &[String], _prog: &str) -> i32 {
     println!("    - Confluent Kafka Connect (community)");
     println!("    - DataDog, New Relic, Application Insights for monitoring");
     println!("  Azure CLI usage:");
-    println!("    az servicebus namespace create --resource-group my-rg --name my-sb-ns --location eastus --sku Standard");
-    println!("    az servicebus queue create --resource-group my-rg --namespace-name my-sb-ns --name my-queue");
-    println!("    az servicebus queue create -g my-rg --namespace-name my-sb-ns --name my-q --requires-session true --enable-dead-lettering-on-message-expiration true");
+    println!(
+        "    az servicebus namespace create --resource-group my-rg --name my-sb-ns --location eastus --sku Standard"
+    );
+    println!(
+        "    az servicebus queue create --resource-group my-rg --namespace-name my-sb-ns --name my-queue"
+    );
+    println!(
+        "    az servicebus queue create -g my-rg --namespace-name my-sb-ns --name my-q --requires-session true --enable-dead-lettering-on-message-expiration true"
+    );
     println!("    az servicebus topic create -g my-rg --namespace-name my-sb-ns --name my-topic");
-    println!("    az servicebus topic subscription create -g my-rg --namespace-name my-sb-ns --topic-name my-topic --name my-sub");
-    println!("    az servicebus topic subscription rule create -g my-rg --namespace-name my-sb-ns --topic-name my-topic --subscription-name my-sub --name rule1 --filter-sql-expression \"priority='high'\"");
+    println!(
+        "    az servicebus topic subscription create -g my-rg --namespace-name my-sb-ns --topic-name my-topic --name my-sub"
+    );
+    println!(
+        "    az servicebus topic subscription rule create -g my-rg --namespace-name my-sb-ns --topic-name my-topic --subscription-name my-sub --name rule1 --filter-sql-expression \"priority='high'\""
+    );
     println!("    az servicebus namespace list-keys -g my-rg --name my-sb-ns");
     println!("    # Premium tier:");
-    println!("    az servicebus namespace create -g my-rg -n my-prem-ns --sku Premium --capacity 1");
+    println!(
+        "    az servicebus namespace create -g my-rg -n my-prem-ns --sku Premium --capacity 1"
+    );
     println!("    # Service Bus Explorer (GUI):");
     println!("    # Connect with connection string, browse + send + peek + dead-letter");
     println!("  Customers (Microsoft + Azure-heavy enterprises):");
@@ -175,13 +208,18 @@ fn run_sb(args: &[String], _prog: &str) -> i32 {
     println!("           connection string + SAS token sprawl vs IAM-style auth");
     println!("           geo-DR Premium-only locks small customers out of DR");
     println!("           az CLI service bus commands inconsistent verbosity");
-    println!("  Differentiator: Microsoft's enterprise broker for Azure (since 2010, originally 'AppFabric Service Bus' in .NET Services era) + AMQP 1.0 native protocol + Queues (point-to-point with DLQ sub-queue) + Topics + Subscriptions (pub/sub with SQL + correlation filters per subscription + SQL actions to transform on subscription) + Sessions (ordered FIFO by SessionId + per-session state + per-session lock) + Transactions (atomic send+receive across entities within namespace, rare in cloud brokers) + Scheduled enqueue (built-in delayed delivery) + Duplicate detection (MessageId-based dedup with configurable window) + Auto-forwarding (chain queues + topics without code) + Premium tier (dedicated Messaging Units, geo-DR active/passive replication, VNet integration, customer-managed key encryption, JMS 2.0 support) + JMS 2.0 over AMQP for Java migration paths + Azure Functions trigger + Logic Apps connector + Event Grid bridge + Mercedes/BMW/Bosch/GE Healthcare/Bayer/Walmart/HSBC/Allianz-proven + 'For Azure shops what SQS+SNS+EventBridge are for AWS' + Standard/Premium pricing tiers + Service Bus Explorer GUI tool + .NET SDK canonical + Microsoft's own Xbox Live + Azure DevOps + Office 365 backend uses it — the broker with the richest enterprise feature set in any major cloud (sessions + transactions + scheduling + dedup + auto-forward all built-in), the default messaging for Azure-native .NET enterprise applications");
+    println!(
+        "  Differentiator: Microsoft's enterprise broker for Azure (since 2010, originally 'AppFabric Service Bus' in .NET Services era) + AMQP 1.0 native protocol + Queues (point-to-point with DLQ sub-queue) + Topics + Subscriptions (pub/sub with SQL + correlation filters per subscription + SQL actions to transform on subscription) + Sessions (ordered FIFO by SessionId + per-session state + per-session lock) + Transactions (atomic send+receive across entities within namespace, rare in cloud brokers) + Scheduled enqueue (built-in delayed delivery) + Duplicate detection (MessageId-based dedup with configurable window) + Auto-forwarding (chain queues + topics without code) + Premium tier (dedicated Messaging Units, geo-DR active/passive replication, VNet integration, customer-managed key encryption, JMS 2.0 support) + JMS 2.0 over AMQP for Java migration paths + Azure Functions trigger + Logic Apps connector + Event Grid bridge + Mercedes/BMW/Bosch/GE Healthcare/Bayer/Walmart/HSBC/Allianz-proven + 'For Azure shops what SQS+SNS+EventBridge are for AWS' + Standard/Premium pricing tiers + Service Bus Explorer GUI tool + .NET SDK canonical + Microsoft's own Xbox Live + Azure DevOps + Office 365 backend uses it — the broker with the richest enterprise feature set in any major cloud (sessions + transactions + scheduling + dedup + auto-forward all built-in), the default messaging for Azure-native .NET enterprise applications"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "servicebus".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "servicebus".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_sb(&rest, &_prog);
     process::exit(code);
@@ -189,7 +227,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sb};
+    use super::{basename, run_sb, strip_ext};
 
     #[test]
     fn basename_strips_path() {

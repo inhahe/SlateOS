@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_daemon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_daemon(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnome-keyring-daemon v46.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("gnome-keyring-daemon v46.0 (Slate OS)");
+        return 0;
+    }
     println!("gnome-keyring-daemon: keyring service started");
     println!("  Components: secrets, ssh, pkcs11");
     println!("  Socket: /run/user/1000/keyring/control");
@@ -43,7 +50,10 @@ fn run_keyring(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "gnome-keyring-daemon".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "gnome-keyring-daemon".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "gnome-keyring-3" => run_keyring(&rest, &prog),
@@ -54,7 +64,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_daemon};
+    use super::{basename, run_daemon, strip_ext};
 
     #[test]
     fn basename_strips_path() {

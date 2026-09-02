@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_imply(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: imply [OPTIONS]");
-        println!("Imply (Slate OS) — Apache Druid commercial platform (real-time + sub-second analytics)");
+        println!(
+            "Imply (Slate OS) — Apache Druid commercial platform (real-time + sub-second analytics)"
+        );
         println!();
         println!("Options:");
         println!("  --polaris              Polaris (fully-managed Druid on AWS)");
@@ -20,28 +26,45 @@ fn run_imply(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Imply 2024 (Slate OS) — imply CLI 2.x + Druid 30.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Imply 2024 (Slate OS) — imply CLI 2.x + Druid 30.x");
+        return 0;
+    }
     println!("Imply 2024 (Slate OS) — Apache Druid Commercial (Real-Time Analytics)");
     println!("  Vendor: Imply Data, Inc. (Burlingame, CA — private)");
     println!("  Founders: Fangjin Yang + Gian Merlino + Vadim Ogievetsky, 2015");
     println!("          Fangjin Yang: co-creator of Druid at Metamarkets (2011)");
     println!("          Gian Merlino: co-creator of Druid, key contributor still active");
     println!("          Vadim Ogievetsky: co-creator of Druid + Plywood (visualization)");
-    println!("          'Imply' founded to commercialize Druid after Metamarkets acquired by Snap (2017)");
+    println!(
+        "          'Imply' founded to commercialize Druid after Metamarkets acquired by Snap (2017)"
+    );
     println!("          Apache Druid: open source database, ASF top-level project since 2018");
     println!("  Funding:");
     println!("         Total raised: ~$215M");
     println!("         Series D Jul 2022: $100M at $1.1B+ valuation (unicorn)");
     println!("         Investors: Andreessen Horowitz, Bessemer, Khosla Ventures");
     println!("         Layoffs 2023 (industry-wide cooling)");
-    println!("  Strategic position: 'real-time analytics database — interactive sub-second on streaming + historical':");
-    println!("                    pitch: 'sub-second queries on real-time + historical data — for observability, IoT, gaming, ads, security'");
+    println!(
+        "  Strategic position: 'real-time analytics database — interactive sub-second on streaming + historical':"
+    );
+    println!(
+        "                    pitch: 'sub-second queries on real-time + historical data — for observability, IoT, gaming, ads, security'"
+    );
     println!("                    target: real-time analytical apps (vs batch DWs like Snowflake)");
-    println!("                    primary competitor: ClickHouse, StarRocks, Pinot, Rockset, Firebolt");
+    println!(
+        "                    primary competitor: ClickHouse, StarRocks, Pinot, Rockset, Firebolt"
+    );
     println!("                    secondary: SingleStore, Snowflake Snowpipe Streaming");
-    println!("                    Imply's wedge: Druid open source + commercial Polaris cloud + Pivot BI");
-    println!("                    Druid sweet spot: time-series + dimensional analytics over high-cardinality data");
-    println!("                    used at: Netflix, Confluent, Salesforce, Lyft, Airbnb (all open-source Druid)");
+    println!(
+        "                    Imply's wedge: Druid open source + commercial Polaris cloud + Pivot BI"
+    );
+    println!(
+        "                    Druid sweet spot: time-series + dimensional analytics over high-cardinality data"
+    );
+    println!(
+        "                    used at: Netflix, Confluent, Salesforce, Lyft, Airbnb (all open-source Druid)"
+    );
     println!("  Pricing (cloud + enterprise tiers):");
     println!("    Polaris Free: free starter cluster");
     println!("    Polaris (managed): consumption-based by compute + storage");
@@ -128,17 +151,31 @@ fn run_imply(args: &[String], _prog: &str) -> i32 {
     println!("    imply auth login                                         # Polaris auth");
     println!("    imply polaris cluster create --name=my-cluster --tier=development");
     println!("    imply polaris ingestion-job submit --spec=ingestion.json");
-    println!("    imply polaris query --cluster=my-cluster --sql='SELECT COUNT(*) FROM events WHERE __time >= CURRENT_TIMESTAMP - INTERVAL 1 HOUR'");
+    println!(
+        "    imply polaris query --cluster=my-cluster --sql='SELECT COUNT(*) FROM events WHERE __time >= CURRENT_TIMESTAMP - INTERVAL 1 HOUR'"
+    );
     println!("    druid post-index-task --file ingestion-spec.json --url http://overlord:8090");
-    println!("    druid sql-cli                                            # interactive Druid SQL");
-    println!("    SELECT TIME_FLOOR(__time, 'PT1H') AS hr, COUNT(*) FROM events GROUP BY 1 ORDER BY 1;");
-    println!("    SELECT APPROX_COUNT_DISTINCT(user_id) FROM events WHERE __time >= CURRENT_TIMESTAMP - INTERVAL 1 DAY;");
-    println!("    INSERT INTO events SELECT * FROM TABLE(EXTERN('{{\"type\":\"s3\"...}}','{{...}}','...'));");
+    println!(
+        "    druid sql-cli                                            # interactive Druid SQL"
+    );
+    println!(
+        "    SELECT TIME_FLOOR(__time, 'PT1H') AS hr, COUNT(*) FROM events GROUP BY 1 ORDER BY 1;"
+    );
+    println!(
+        "    SELECT APPROX_COUNT_DISTINCT(user_id) FROM events WHERE __time >= CURRENT_TIMESTAMP - INTERVAL 1 DAY;"
+    );
+    println!(
+        "    INSERT INTO events SELECT * FROM TABLE(EXTERN('{{\"type\":\"s3\"...}}','{{...}}','...'));"
+    );
     println!("    imply pivot connect --url=druid-broker --user=admin");
     println!("  Customers (open-source Druid + Imply commercial):");
     println!("    - Open-source Druid: Netflix, Lyft, Airbnb, Confluent, Salesforce, Yahoo");
-    println!("    - Imply commercial: Reddit, Twitch, NTT Docomo, Visa (some), various ad networks");
-    println!("    - Use cases: ad analytics, observability, gaming telemetry, security analytics, IoT");
+    println!(
+        "    - Imply commercial: Reddit, Twitch, NTT Docomo, Visa (some), various ad networks"
+    );
+    println!(
+        "    - Use cases: ad analytics, observability, gaming telemetry, security analytics, IoT"
+    );
     println!("    - 100s of Imply commercial customers (private metrics)");
     println!("  Critique: ClickHouse + StarRocks open-source competition is fierce");
     println!("           Druid operational complexity (5 process types) intimidating");
@@ -147,15 +184,24 @@ fn run_imply(args: &[String], _prog: &str) -> i32 {
     println!("           Polaris cloud GA in 2022 — later than ClickHouse Cloud");
     println!("           limited multi-cloud (Polaris AWS-only initially)");
     println!("           Rockset acquired by OpenAI Jun 2024 = real-time analytics market signal");
-    println!("           pure 'real-time analytics' market overshadowed by Snowflake/BigQuery convergence");
-    println!("           need for separate BI tool (Pivot vs Superset/Looker) operational overhead");
-    println!("  Differentiator: Apache Druid commercial steward (Imply contributes ~70% of Druid commits) + Druid co-creators founded Imply (Fangjin Yang + Gian Merlino + Vadim Ogievetsky 2015) + sub-second queries on TB-PB datasets + high-cardinality + high-concurrency support (1000s QPS) + time-partitioned segments + bitmap indexes + Roaring bitmaps + streaming + historical unified queries + Pivot BI + Polaris managed cloud + Imply Enterprise self-managed + $215M raised + $1.1B+ valuation + Netflix/Lyft/Airbnb/Confluent open-source users + Reddit/Twitch commercial customers — the commercial backer of Apache Druid for real-time analytics workloads where sub-second response on streaming + historical data matters (observability, IoT, gaming, adtech, security)");
+    println!(
+        "           pure 'real-time analytics' market overshadowed by Snowflake/BigQuery convergence"
+    );
+    println!(
+        "           need for separate BI tool (Pivot vs Superset/Looker) operational overhead"
+    );
+    println!(
+        "  Differentiator: Apache Druid commercial steward (Imply contributes ~70% of Druid commits) + Druid co-creators founded Imply (Fangjin Yang + Gian Merlino + Vadim Ogievetsky 2015) + sub-second queries on TB-PB datasets + high-cardinality + high-concurrency support (1000s QPS) + time-partitioned segments + bitmap indexes + Roaring bitmaps + streaming + historical unified queries + Pivot BI + Polaris managed cloud + Imply Enterprise self-managed + $215M raised + $1.1B+ valuation + Netflix/Lyft/Airbnb/Confluent open-source users + Reddit/Twitch commercial customers — the commercial backer of Apache Druid for real-time analytics workloads where sub-second response on streaming + historical data matters (observability, IoT, gaming, adtech, security)"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "imply".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "imply".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_imply(&rest, &_prog);
     process::exit(code);
@@ -163,7 +209,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_imply};
+    use super::{basename, run_imply, strip_ext};
 
     #[test]
     fn basename_strips_path() {

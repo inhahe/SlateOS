@@ -49,7 +49,8 @@ fn run_flac(args: &[String]) -> i32 {
     let verify = args.iter().any(|a| a == "--verify");
     let silent = args.iter().any(|a| a == "-s" || a == "--silent");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -74,7 +75,9 @@ fn run_flac(args: &[String]) -> i32 {
             // Encoding
             if !silent {
                 print!("{}: ", file);
-                if verify { print!("verify "); }
+                if verify {
+                    print!("verify ");
+                }
                 println!("wrote 15234567 bytes, ratio=0.612");
             }
         }
@@ -105,7 +108,8 @@ fn run_metaflac(args: &[String]) -> i32 {
 
     let list = args.iter().any(|a| a == "--list");
 
-    let show_tags: Vec<&str> = args.iter()
+    let show_tags: Vec<&str> = args
+        .iter()
         .filter(|a| a.starts_with("--show-tag="))
         .map(|a| a.strip_prefix("--show-tag=").unwrap_or(""))
         .collect();
@@ -166,7 +170,9 @@ fn run_metaflac(args: &[String]) -> i32 {
     }
 
     // set-tag or remove operations
-    if args.iter().any(|a| a.starts_with("--set-tag=") || a.starts_with("--remove-tag=") || a == "--remove-all-tags") {
+    if args.iter().any(|a| {
+        a.starts_with("--set-tag=") || a.starts_with("--remove-tag=") || a == "--remove-all-tags"
+    }) {
         // Metadata modification — silent success
         return 0;
     }
@@ -177,7 +183,8 @@ fn run_metaflac(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "flac".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -191,7 +198,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_flac};
+    use super::{basename, run_flac, strip_ext};
 
     #[test]
     fn basename_strips_path() {

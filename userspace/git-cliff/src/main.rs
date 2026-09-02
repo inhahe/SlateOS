@@ -51,7 +51,9 @@ fn run_git_cliff(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--context") {
-        println!("[{{\"version\":\"1.0.0\",\"commits\":[{{\"id\":\"ab12cd3\",\"message\":\"feat: add config\"}},{{\"id\":\"ef45gh6\",\"message\":\"fix: memory leak\"}}]}}]");
+        println!(
+            "[{{\"version\":\"1.0.0\",\"commits\":[{{\"id\":\"ab12cd3\",\"message\":\"feat: add config\"}},{{\"id\":\"ef45gh6\",\"message\":\"fix: memory leak\"}}]}}]"
+        );
         return 0;
     }
 
@@ -99,7 +101,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_git_cliff};
+    use super::run_git_cliff;
 
     #[test]
     fn help_exits_zero() {

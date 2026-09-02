@@ -14,10 +14,14 @@ fn run_trip(args: Vec<String>) -> i32 {
         println!("A network diagnostic tool combining traceroute and ping.");
         println!();
         println!("Options:");
-        println!("  -m, --mode <MODE>           TUI mode (tui/stream/pretty/markdown/csv/json/dot)");
+        println!(
+            "  -m, --mode <MODE>           TUI mode (tui/stream/pretty/markdown/csv/json/dot)"
+        );
         println!("  -u, --unprivileged          Unprivileged mode (UDP)");
         println!("  -p, --protocol <PROTO>      Protocol (icmp/udp/tcp)");
-        println!("  -F, --addr-family <FAMILY>  Address family (ipv4/ipv6/ipv6-then-ipv4/ipv4-then-ipv6)");
+        println!(
+            "  -F, --addr-family <FAMILY>  Address family (ipv4/ipv6/ipv6-then-ipv4/ipv4-then-ipv6)"
+        );
         println!("  -P, --target-port <PORT>    Target port (default: 80)");
         println!("  -S, --source-port <PORT>    Source port");
         println!("  -A, --source-address <ADDR> Source address");
@@ -52,22 +56,33 @@ fn run_trip(args: Vec<String>) -> i32 {
     }
 
     // Find mode
-    let mode = args.windows(2)
+    let mode = args
+        .windows(2)
         .find(|w| w[0] == "-m" || w[0] == "--mode")
         .map(|w| w[1].as_str())
         .unwrap_or("tui");
 
-    let target = args.iter().rfind(|a| !a.starts_with('-'))
+    let target = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("example.com");
 
     match mode {
         "json" => {
             println!("[");
-            println!("  {{\"ttl\":1,\"host\":\"192.168.1.1\",\"loss\":0.0,\"sent\":10,\"recv\":10,\"last\":1.2,\"avg\":1.5,\"best\":0.8,\"worst\":3.2,\"stddev\":0.6}},");
-            println!("  {{\"ttl\":2,\"host\":\"10.0.0.1\",\"loss\":0.0,\"sent\":10,\"recv\":10,\"last\":5.4,\"avg\":5.8,\"best\":4.2,\"worst\":8.1,\"stddev\":1.1}},");
-            println!("  {{\"ttl\":3,\"host\":\"72.14.215.85\",\"loss\":0.0,\"sent\":10,\"recv\":10,\"last\":12.3,\"avg\":13.1,\"best\":11.0,\"worst\":16.2,\"stddev\":1.4}},");
-            println!("  {{\"ttl\":4,\"host\":\"93.184.216.34\",\"loss\":0.0,\"sent\":10,\"recv\":10,\"last\":18.5,\"avg\":19.2,\"best\":17.1,\"worst\":23.4,\"stddev\":1.8}}");
+            println!(
+                "  {{\"ttl\":1,\"host\":\"192.168.1.1\",\"loss\":0.0,\"sent\":10,\"recv\":10,\"last\":1.2,\"avg\":1.5,\"best\":0.8,\"worst\":3.2,\"stddev\":0.6}},"
+            );
+            println!(
+                "  {{\"ttl\":2,\"host\":\"10.0.0.1\",\"loss\":0.0,\"sent\":10,\"recv\":10,\"last\":5.4,\"avg\":5.8,\"best\":4.2,\"worst\":8.1,\"stddev\":1.1}},"
+            );
+            println!(
+                "  {{\"ttl\":3,\"host\":\"72.14.215.85\",\"loss\":0.0,\"sent\":10,\"recv\":10,\"last\":12.3,\"avg\":13.1,\"best\":11.0,\"worst\":16.2,\"stddev\":1.4}},"
+            );
+            println!(
+                "  {{\"ttl\":4,\"host\":\"93.184.216.34\",\"loss\":0.0,\"sent\":10,\"recv\":10,\"last\":18.5,\"avg\":19.2,\"best\":17.1,\"worst\":23.4,\"stddev\":1.8}}"
+            );
             println!("]");
         }
         "csv" => {
@@ -80,7 +95,9 @@ fn run_trip(args: Vec<String>) -> i32 {
         "pretty" | "stream" => {
             println!("Tracing route to {} ...", target);
             println!();
-            println!("  Hop  Host              Loss%  Sent  Recv  Last   Avg   Best  Worst  StdDev");
+            println!(
+                "  Hop  Host              Loss%  Sent  Recv  Last   Avg   Best  Worst  StdDev"
+            );
             println!("    1  192.168.1.1        0.0%    10    10   1.2   1.5   0.8    3.2     0.6");
             println!("    2  10.0.0.1           0.0%    10    10   5.4   5.8   4.2    8.1     1.1");
             println!("    3  72.14.215.85       0.0%    10    10  12.3  13.1  11.0   16.2     1.4");
@@ -99,7 +116,9 @@ fn run_trip(args: Vec<String>) -> i32 {
             println!("trippy 0.11.0 (Slate OS) — TUI launched");
             println!("Tracing route to {} ...", target);
             println!();
-            println!("  Hop  Host              Loss%  Sent  Recv  Last   Avg   Best  Worst  StdDev");
+            println!(
+                "  Hop  Host              Loss%  Sent  Recv  Last   Avg   Best  Worst  StdDev"
+            );
             println!("    1  192.168.1.1        0.0%    10    10   1.2   1.5   0.8    3.2     0.6");
             println!("    2  10.0.0.1           0.0%    10    10   5.4   5.8   4.2    8.1     1.1");
             println!("    3  72.14.215.85       0.0%    10    10  12.3  13.1  11.0   16.2     1.4");
@@ -125,7 +144,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_trip};
+    use super::run_trip;
 
     #[test]
     fn help_exits_zero() {

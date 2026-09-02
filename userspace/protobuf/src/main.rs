@@ -42,11 +42,13 @@ fn run_protoc(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let out_flags: Vec<&str> = args.iter()
+    let out_flags: Vec<&str> = args
+        .iter()
         .filter(|a| a.ends_with("_out") || a.contains("_out="))
         .map(|s| s.as_str())
         .collect();
-    let proto_files: Vec<&str> = args.iter()
+    let proto_files: Vec<&str> = args
+        .iter()
         .filter(|a| a.ends_with(".proto"))
         .map(|s| s.as_str())
         .collect();
@@ -71,14 +73,19 @@ fn run_protoc(args: Vec<String>) -> i32 {
 fn run_protoc_gen(args: Vec<String>, lang: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: protoc-gen-{} (invoked by protoc as a plugin)", lang);
-        println!("  Reads CodeGeneratorRequest from stdin, writes CodeGeneratorResponse to stdout.");
+        println!(
+            "  Reads CodeGeneratorRequest from stdin, writes CodeGeneratorResponse to stdout."
+        );
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
         println!("protoc-gen-{} 1.0.0 (Slate OS)", lang);
         return 0;
     }
-    println!("protoc-gen-{}: reading CodeGeneratorRequest from stdin...", lang);
+    println!(
+        "protoc-gen-{}: reading CodeGeneratorRequest from stdin...",
+        lang
+    );
     println!("(plugin mode — invoked by protoc, not directly)");
     0
 }
@@ -90,7 +97,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -106,7 +115,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_protoc_gen};
+    use super::run_protoc_gen;
 
     #[test]
     fn help_exits_zero() {

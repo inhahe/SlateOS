@@ -38,7 +38,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("growthbook-cli 0.1.0 (Warehouse-Native personality build)"); }
+fn print_version() {
+    println!("growthbook-cli 0.1.0 (Warehouse-Native personality build)");
+}
 
 fn run_about() {
     println!("GrowthBook (Growth Book, Inc.)");

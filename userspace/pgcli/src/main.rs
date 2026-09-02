@@ -48,17 +48,21 @@ fn run_pgcli(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let host = args.windows(2)
+    let host = args
+        .windows(2)
         .find(|w| w[0] == "-h" || w[0] == "--host")
         .map(|w| w[1].as_str())
         .unwrap_or("localhost");
 
-    let port = args.windows(2)
+    let port = args
+        .windows(2)
         .find(|w| w[0] == "-p" || w[0] == "--port")
         .map(|w| w[1].as_str())
         .unwrap_or("5432");
 
-    let dbname = args.iter().rfind(|a| !a.starts_with('-'))
+    let dbname = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("postgres");
 
@@ -81,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pgcli};
+    use super::run_pgcli;
 
     #[test]
     fn help_exits_zero() {

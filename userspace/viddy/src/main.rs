@@ -37,15 +37,23 @@ fn run_viddy(args: Vec<String>) -> i32 {
     let diff_mode = args.iter().any(|a| a == "-d" || a == "--differences");
 
     // Collect command after flags
-    let command: Vec<&str> = args.iter()
+    let command: Vec<&str> = args
+        .iter()
         .skip_while(|a| a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
 
-    let cmd_str = if command.is_empty() { "date" } else { command[0] };
+    let cmd_str = if command.is_empty() {
+        "date"
+    } else {
+        command[0]
+    };
 
     if !no_title {
-        println!("Every 2.0s: {}                          Thu May 22 10:00:00 2025", cmd_str);
+        println!(
+            "Every 2.0s: {}                          Thu May 22 10:00:00 2025",
+            cmd_str
+        );
         println!();
     }
 
@@ -77,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_viddy};
+    use super::run_viddy;
 
     #[test]
     fn help_exits_zero() {

@@ -60,11 +60,36 @@ fn run_sensors(args: &[String]) -> i32 {
 
     println!("coretemp-isa-0000");
     println!("Adapter: ISA adapter");
-    println!("Package id 0:  {}  (high = {}, crit = {})", temp(45.0), temp(100.0), temp(110.0));
-    println!("Core 0:        {}  (high = {}, crit = {})", temp(42.0), temp(100.0), temp(110.0));
-    println!("Core 1:        {}  (high = {}, crit = {})", temp(43.0), temp(100.0), temp(110.0));
-    println!("Core 2:        {}  (high = {}, crit = {})", temp(44.0), temp(100.0), temp(110.0));
-    println!("Core 3:        {}  (high = {}, crit = {})", temp(41.0), temp(100.0), temp(110.0));
+    println!(
+        "Package id 0:  {}  (high = {}, crit = {})",
+        temp(45.0),
+        temp(100.0),
+        temp(110.0)
+    );
+    println!(
+        "Core 0:        {}  (high = {}, crit = {})",
+        temp(42.0),
+        temp(100.0),
+        temp(110.0)
+    );
+    println!(
+        "Core 1:        {}  (high = {}, crit = {})",
+        temp(43.0),
+        temp(100.0),
+        temp(110.0)
+    );
+    println!(
+        "Core 2:        {}  (high = {}, crit = {})",
+        temp(44.0),
+        temp(100.0),
+        temp(110.0)
+    );
+    println!(
+        "Core 3:        {}  (high = {}, crit = {})",
+        temp(41.0),
+        temp(100.0),
+        temp(110.0)
+    );
     println!();
     println!("nct6798-isa-0290");
     println!("Adapter: ISA adapter");
@@ -75,12 +100,27 @@ fn run_sensors(args: &[String]) -> i32 {
     println!("fan1:          1200 RPM  (min = 200 RPM)");
     println!("fan2:           900 RPM  (min = 200 RPM)");
     println!("fan3:          1450 RPM  (min = 200 RPM)");
-    println!("SYSTIN:         {}  (high = {}, hyst = {})", temp(35.0), temp(80.0), temp(75.0));
-    println!("CPUTIN:         {}  (high = {}, hyst = {})", temp(45.0), temp(80.0), temp(75.0));
+    println!(
+        "SYSTIN:         {}  (high = {}, hyst = {})",
+        temp(35.0),
+        temp(80.0),
+        temp(75.0)
+    );
+    println!(
+        "CPUTIN:         {}  (high = {}, hyst = {})",
+        temp(45.0),
+        temp(80.0),
+        temp(75.0)
+    );
     println!();
     println!("nvme-pci-0400");
     println!("Adapter: PCI adapter");
-    println!("Composite:     {}  (low = {}, high = {})", temp(38.0), temp(-40.0), temp(83.0));
+    println!(
+        "Composite:     {}  (low = {}, high = {})",
+        temp(38.0),
+        temp(-40.0),
+        temp(83.0)
+    );
     0
 }
 
@@ -137,7 +177,8 @@ fn run_fancontrol(_args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "sensors".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -153,7 +194,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sensors};
+    use super::{basename, run_sensors, strip_ext};
 
     #[test]
     fn basename_strips_path() {

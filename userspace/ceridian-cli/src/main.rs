@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("ceridian-cli 0.1.0 (continuous-calculation HCM personality build)"); }
+fn print_version() {
+    println!("ceridian-cli 0.1.0 (continuous-calculation HCM personality build)");
+}
 
 fn run_about() {
     println!("Dayforce, Inc. (formerly Ceridian HCM Holding Inc., NYSE:DAY).");

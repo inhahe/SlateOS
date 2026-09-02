@@ -47,13 +47,16 @@ fn run_nc(args: Vec<String>) -> i32 {
     let scan = args.iter().any(|a| a == "-z");
     let udp = args.iter().any(|a| a == "-u");
 
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
 
     if listen {
-        let port = args.windows(2).find(|w| w[0] == "-p")
+        let port = args
+            .windows(2)
+            .find(|w| w[0] == "-p")
             .map(|w| w[1].as_str())
             .or_else(|| positional.first().copied())
             .unwrap_or("4444");
@@ -75,11 +78,17 @@ fn run_nc(args: Vec<String>) -> i32 {
                 if port == 22 || port == 80 || port == 443 {
                     println!("Connection to {} {} port [tcp/*] succeeded!", host, port);
                 } else if verbose {
-                    println!("nc: connect to {} port {} (tcp) failed: Connection refused", host, port);
+                    println!(
+                        "nc: connect to {} port {} (tcp) failed: Connection refused",
+                        host, port
+                    );
                 }
             }
         } else {
-            println!("Connection to {} {} port [tcp/*] succeeded!", host, port_spec);
+            println!(
+                "Connection to {} {} port [tcp/*] succeeded!",
+                host, port_spec
+            );
         }
     } else {
         let host = positional.first().copied().unwrap_or("localhost");
@@ -94,7 +103,8 @@ fn run_nc(args: Vec<String>) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first()
+    let _prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "nc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -104,7 +114,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_nc};
+    use super::{basename, run_nc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

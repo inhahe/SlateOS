@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_gatling(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -41,9 +45,15 @@ fn run_gatling(args: &[String], _prog: &str) -> i32 {
             println!("Report generated: target/gatling/results/index.html");
         }
         _ => {
-            println!("================================================================================");
-            println!("---- Global Information --------------------------------------------------------");
-            println!("================================================================================");
+            println!(
+                "================================================================================"
+            );
+            println!(
+                "---- Global Information --------------------------------------------------------"
+            );
+            println!(
+                "================================================================================"
+            );
             println!("> request count                    1000 (OK=985   KO=15  )");
             println!("> min response time                   2 (OK=2     KO=5001)");
             println!("> max response time                5120 (OK=312   KO=5120)");
@@ -54,12 +64,16 @@ fn run_gatling(args: &[String], _prog: &str) -> i32 {
             println!("> response time 95th percentile      78 (OK=78    KO=5100)");
             println!("> response time 99th percentile     152 (OK=152   KO=5110)");
             println!("> mean requests/sec                 200 (OK=197   KO=3   )");
-            println!("---- Response Time Distribution ------------------------------------------------");
+            println!(
+                "---- Response Time Distribution ------------------------------------------------"
+            );
             println!("> t < 800 ms                         985 ( 98.5%)");
             println!("> 800 ms < t < 1200 ms                 0 (  0.0%)");
             println!("> t > 1200 ms                         15 (  1.5%)");
             println!("> failed                               0 (  0.0%)");
-            println!("================================================================================");
+            println!(
+                "================================================================================"
+            );
             println!("Reports generated in target/gatling/results/");
         }
     }
@@ -68,7 +82,10 @@ fn run_gatling(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "gatling".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "gatling".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_gatling(&rest, &prog);
     process::exit(code);
@@ -76,7 +93,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gatling};
+    use super::{basename, run_gatling, strip_ext};
 
     #[test]
     fn basename_strips_path() {

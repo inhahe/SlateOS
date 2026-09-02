@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_m365(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_m365(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microsoft 365 Apps for Enterprise 2410 build 18227.20140 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Microsoft 365 Apps for Enterprise 2410 build 18227.20140 (Slate OS)");
+        return 0;
+    }
     println!("Microsoft 365 Apps for Enterprise 2410 (Slate OS)");
     println!("  Vendor: Microsoft (Redmond, Washington)");
     println!("  Rebrand: Office 365 → Microsoft 365 (Apr 2020), Office 2024 perpetual still sold");
@@ -43,7 +50,10 @@ fn run_m365(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "microsoft365".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "microsoft365".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_m365(&rest, &_prog);
     process::exit(code);
@@ -51,7 +61,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_m365};
+    use super::{basename, run_m365, strip_ext};
 
     #[test]
     fn basename_strips_path() {

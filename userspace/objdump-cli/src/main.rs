@@ -40,7 +40,11 @@ fn run_objdump(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("a.out");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("a.out");
     let headers = args.iter().any(|a| a == "-h" || a == "--section-headers");
     let disasm = args.iter().any(|a| a == "-d" || a == "--disassemble");
     let file_hdr = args.iter().any(|a| a == "-f" || a == "--file-headers");
@@ -115,7 +119,11 @@ fn run_size(args: &[String]) -> i32 {
         println!("Usage: size [OPTIONS] FILE...");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("a.out");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("a.out");
     println!("   text\t   data\t    bss\t    dec\t    hex\tfilename");
     println!("   4660\t    256\t    512\t   5428\t   1534\t{}", file);
     0
@@ -124,7 +132,9 @@ fn run_size(args: &[String]) -> i32 {
 fn run_strings(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: strings [OPTIONS] FILE...");
-        println!("Options: -n N (min length), -a (scan all), -t FORMAT (offset), -e ENC (encoding)");
+        println!(
+            "Options: -n N (min length), -a (scan all), -t FORMAT (offset), -e ENC (encoding)"
+        );
         return 0;
     }
     println!("Hello, World!");
@@ -142,18 +152,28 @@ fn run_strings(args: &[String]) -> i32 {
 fn run_addr2line(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: addr2line [OPTIONS] [ADDR...]");
-        println!("Options: -e FILE (executable), -f (show function names), -C (demangle), -i (inlines)");
+        println!(
+            "Options: -e FILE (executable), -f (show function names), -C (demangle), -i (inlines)"
+        );
         return 0;
     }
     let funcs = args.iter().any(|a| a == "-f");
-    let addrs: Vec<&str> = args.iter().filter(|a| a.starts_with("0x") || a.chars().all(|c| c.is_ascii_hexdigit())).map(|s| s.as_str()).collect();
+    let addrs: Vec<&str> = args
+        .iter()
+        .filter(|a| a.starts_with("0x") || a.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|s| s.as_str())
+        .collect();
     for addr in &addrs {
-        if funcs { println!("main"); }
+        if funcs {
+            println!("main");
+        }
         println!("main.c:10");
         let _ = addr;
     }
     if addrs.is_empty() {
-        if funcs { println!("??"); }
+        if funcs {
+            println!("??");
+        }
         println!("??:0");
     }
     0
@@ -161,7 +181,8 @@ fn run_addr2line(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "objdump".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -179,7 +200,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_objdump};
+    use super::{basename, run_objdump, strip_ext};
 
     #[test]
     fn basename_strips_path() {

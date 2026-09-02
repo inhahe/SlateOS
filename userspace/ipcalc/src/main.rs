@@ -406,7 +406,8 @@ fn format_ipv6_compressed(addr: u128) -> String {
     let mut used_double_colon = false;
     while i < 8 {
         if let Some(start) = best_start
-            && i == start && !used_double_colon
+            && i == start
+            && !used_double_colon
         {
             if i == 0 {
                 parts.push(String::new());
@@ -491,8 +492,8 @@ fn parse_address(input: &str, explicit_mask: Option<&str>) -> Result<ParsedAddr,
             (input, 128)
         };
 
-        let addr = parse_ipv6(addr_str)
-            .ok_or_else(|| format!("invalid IPv6 address: {}", addr_str))?;
+        let addr =
+            parse_ipv6(addr_str).ok_or_else(|| format!("invalid IPv6 address: {}", addr_str))?;
         return Ok(ParsedAddr::V6(Ipv6Info::new(addr, prefix)));
     }
 
@@ -510,14 +511,11 @@ fn parse_address(input: &str, explicit_mask: Option<&str>) -> Result<ParsedAddr,
         (input, None)
     };
 
-    let addr =
-        parse_ipv4(addr_str).ok_or_else(|| format!("invalid IPv4 address: {}", addr_str))?;
+    let addr = parse_ipv4(addr_str).ok_or_else(|| format!("invalid IPv4 address: {}", addr_str))?;
 
     let final_prefix = if let Some(mask_str) = explicit_mask {
-        let mask = parse_ipv4(mask_str)
-            .ok_or_else(|| format!("invalid netmask: {}", mask_str))?;
-        netmask_to_prefix(mask)
-            .ok_or_else(|| format!("netmask is not contiguous: {}", mask_str))?
+        let mask = parse_ipv4(mask_str).ok_or_else(|| format!("invalid netmask: {}", mask_str))?;
+        netmask_to_prefix(mask).ok_or_else(|| format!("netmask is not contiguous: {}", mask_str))?
     } else if let Some(p) = prefix {
         p
     } else {
@@ -567,9 +565,7 @@ fn split_ipv4(info: &Ipv4Info, min_hosts: u64) -> Result<Vec<Ipv4Info>, String> 
     }
 
     let net_start = info.network();
-    let sub_size: u32 = 1u32
-        .checked_shl(u32::from(32 - sub_prefix))
-        .unwrap_or(0);
+    let sub_size: u32 = 1u32.checked_shl(u32::from(32 - sub_prefix)).unwrap_or(0);
     let total_subs: u64 = 1u64 << (u32::from(sub_prefix) - u32::from(info.prefix));
 
     let mut result = Vec::new();
@@ -874,8 +870,19 @@ fn display_subnet_sizes() {
     let mut w = out.lock();
 
     let _ = writeln!(w, "\nIPv4 Subnet Reference Table:\n");
-    let _ = writeln!(w, "  {:>6}  {:>16}  {:>12}  {:>12}", "Prefix", "Netmask", "Addresses", "Usable Hosts");
-    let _ = writeln!(w, "  {}  {}  {}  {}", "-".repeat(6), "-".repeat(16), "-".repeat(12), "-".repeat(12));
+    let _ = writeln!(
+        w,
+        "  {:>6}  {:>16}  {:>12}  {:>12}",
+        "Prefix", "Netmask", "Addresses", "Usable Hosts"
+    );
+    let _ = writeln!(
+        w,
+        "  {}  {}  {}  {}",
+        "-".repeat(6),
+        "-".repeat(16),
+        "-".repeat(12),
+        "-".repeat(12)
+    );
 
     for prefix in 0..=32u8 {
         let mask = if prefix == 0 {
@@ -928,15 +935,24 @@ fn print_usage() {
     let _ = writeln!(w, "Options:");
     let _ = writeln!(w, "  -b, --binary          Show binary representations");
     let _ = writeln!(w, "  -n, --nocolor         Suppress colored output");
-    let _ = writeln!(w, "  -m, --netmask MASK    Specify netmask (e.g., 255.255.255.0)");
-    let _ = writeln!(w, "  -s, --split HOSTS     Split network into subnets of HOSTS size");
+    let _ = writeln!(
+        w,
+        "  -m, --netmask MASK    Specify netmask (e.g., 255.255.255.0)"
+    );
+    let _ = writeln!(
+        w,
+        "  -s, --split HOSTS     Split network into subnets of HOSTS size"
+    );
     let _ = writeln!(w, "      --minaddr         Print minimum host address only");
     let _ = writeln!(w, "      --maxaddr         Print maximum host address only");
     let _ = writeln!(w, "      --addresses       Print total address count only");
     let _ = writeln!(w, "      --network         Print network address only");
     let _ = writeln!(w, "      --broadcast       Print broadcast address only");
     let _ = writeln!(w, "      --class           Print address class only");
-    let _ = writeln!(w, "      --subnets         Show all subnet sizes reference table");
+    let _ = writeln!(
+        w,
+        "      --subnets         Show all subnet sizes reference table"
+    );
     let _ = writeln!(w, "  -h, --help            Show this help");
     let _ = writeln!(w);
     let _ = writeln!(w, "Examples:");
@@ -1554,7 +1570,10 @@ mod tests {
     #[test]
     fn test_ipv6_full_format() {
         let info = Ipv6Info::new(1, 128);
-        assert_eq!(info.format_full(), "0000:0000:0000:0000:0000:0000:0000:0001");
+        assert_eq!(
+            info.format_full(),
+            "0000:0000:0000:0000:0000:0000:0000:0001"
+        );
     }
 
     // --- Address parsing integration ---

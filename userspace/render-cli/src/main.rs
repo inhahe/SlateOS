@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn run_render(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: render <COMMAND> [OPTIONS]");
         println!();
         println!("Render CLI — manage Render services (Slate OS).");
@@ -45,30 +48,48 @@ fn run_render(args: Vec<String>) -> i32 {
         }
         "services" => match sub {
             "list" | "" => {
-                println!("ID                     NAME           TYPE          STATUS     REGION    URL");
-                println!("srv-abcdef1234567890   my-web-app     web_service   deployed   oregon    https://my-web-app.onrender.com");
-                println!("srv-bcdef12345678901   my-api         web_service   deployed   oregon    https://my-api.onrender.com");
-                println!("srv-cdef123456789012   worker         background    deployed   oregon    -");
-                println!("srv-def1234567890123   my-db          database      available  oregon    -");
+                println!(
+                    "ID                     NAME           TYPE          STATUS     REGION    URL"
+                );
+                println!(
+                    "srv-abcdef1234567890   my-web-app     web_service   deployed   oregon    https://my-web-app.onrender.com"
+                );
+                println!(
+                    "srv-bcdef12345678901   my-api         web_service   deployed   oregon    https://my-api.onrender.com"
+                );
+                println!(
+                    "srv-cdef123456789012   worker         background    deployed   oregon    -"
+                );
+                println!(
+                    "srv-def1234567890123   my-db          database      available  oregon    -"
+                );
             }
             "create" => {
                 println!("Service created successfully.");
                 println!("ID: srv-ef12345678901234");
                 println!("Dashboard: https://dashboard.render.com/web/srv-ef12345678901234");
             }
-            _ => { println!("render services {}: see --help.", sub); }
+            _ => {
+                println!("render services {}: see --help.", sub);
+            }
         },
         "deploys" => match sub {
             "list" | "" => {
                 println!("ID                     SERVICE              STATUS       CREATED AT");
-                println!("dep-abcdef1234567890   my-web-app           live         2024-01-15T12:00:00Z");
-                println!("dep-bcdef12345678901   my-web-app           deactivated  2024-01-14T08:00:00Z");
+                println!(
+                    "dep-abcdef1234567890   my-web-app           live         2024-01-15T12:00:00Z"
+                );
+                println!(
+                    "dep-bcdef12345678901   my-web-app           deactivated  2024-01-14T08:00:00Z"
+                );
             }
             "create" => {
                 println!("Deploy triggered for my-web-app.");
                 println!("Deploy ID: dep-cdef123456789012");
             }
-            _ => { println!("render deploys {}: see --help.", sub); }
+            _ => {
+                println!("render deploys {}: see --help.", sub);
+            }
         },
         "logs" => {
             println!("2024-01-15T12:00:01Z  ==> Starting service");
@@ -83,7 +104,9 @@ fn run_render(args: Vec<String>) -> i32 {
                 println!("  production    4 variables");
                 println!("  staging       4 variables");
             }
-            _ => { println!("render env {}: see --help.", sub); }
+            _ => {
+                println!("render env {}: see --help.", sub);
+            }
         },
         "blueprints" => match sub {
             "list" | "" => {
@@ -94,7 +117,9 @@ fn run_render(args: Vec<String>) -> i32 {
                 println!("Syncing blueprint my-blueprint...");
                 println!("Blueprint synced successfully.");
             }
-            _ => { println!("render blueprints {}: see --help.", sub); }
+            _ => {
+                println!("render blueprints {}: see --help.", sub);
+            }
         },
         "custom-domains" => {
             println!("DOMAIN                SERVICE        STATUS");
@@ -124,7 +149,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_render};
+    use super::run_render;
 
     #[test]
     fn help_exits_zero() {

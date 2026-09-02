@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ms(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_ms(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microchip Studio 7.0.2594 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Microchip Studio 7.0.2594 (Slate OS)");
+        return 0;
+    }
     println!("Microchip Studio 7.0.2594 (Slate OS)");
     println!("  Targets: 8-bit AVR (tiny/mega), 32-bit AVR, SAM (Cortex-M0+/M4/M7)");
     println!("  Based on: Visual Studio Isolated Shell");
@@ -38,7 +45,10 @@ fn run_ms(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "microchipstudio".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "microchipstudio".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ms(&rest, &_prog);
     process::exit(code);
@@ -46,12 +56,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ms};
+    use super::{basename, run_ms, strip_ext};
 
     #[test]
     fn basename_strips_path() {
         assert_eq!(basename("/usr/bin/microchipstudio"), "microchipstudio");
-        assert_eq!(basename(r"C:\bin\microchipstudio.exe"), "microchipstudio.exe");
+        assert_eq!(
+            basename(r"C:\bin\microchipstudio.exe"),
+            "microchipstudio.exe"
+        );
         assert_eq!(basename("plain"), "plain");
     }
 

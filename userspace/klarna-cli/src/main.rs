@@ -42,7 +42,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("klarna-cli 0.1.0 (BNPL-pioneer personality build)"); }
+fn print_version() {
+    println!("klarna-cli 0.1.0 (BNPL-pioneer personality build)");
+}
 
 fn run_about() {
     println!("Klarna Bank AB (publ).");

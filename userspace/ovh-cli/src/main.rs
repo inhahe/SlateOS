@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ovh(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ovh [OPTIONS]");
-        println!("OVHcloud (Slate OS) — European sovereign cloud (bare metal, VPS, public cloud, ENXTPA:OVH)");
+        println!(
+            "OVHcloud (Slate OS) — European sovereign cloud (bare metal, VPS, public cloud, ENXTPA:OVH)"
+        );
         println!();
         println!("Options:");
         println!("  --bare-metal           Bare Metal Servers (the iconic OVH offering)");
@@ -22,14 +28,19 @@ fn run_ovh(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("OVHcloud 2024 (Slate OS) — ovhai CLI 1.x + manager API"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("OVHcloud 2024 (Slate OS) — ovhai CLI 1.x + manager API");
+        return 0;
+    }
     println!("OVHcloud 2024 (Slate OS) — Sovereign European Cloud + Bare Metal");
     println!("  Vendor: OVH Groupe SA (Roubaix, France — Euronext Paris: ENXTPA:OVH since 2021)");
     println!("  Founders: Octave Klaba (CEO/Chairman/major shareholder), 1999");
     println!("          Polish-French entrepreneur, founded OVH at age 21");
     println!("          'OVH' = 'On Vous Héberge' (we host you) — humble origin");
     println!("          family-controlled (Klaba family ~60% of shares post-IPO)");
-    println!("          Octave: now Chairman (CEO transitions: Michel Paulin 2018-2023, Benjamin Revcolevschi 2023+)");
+    println!(
+        "          Octave: now Chairman (CEO transitions: Michel Paulin 2018-2023, Benjamin Revcolevschi 2023+)"
+    );
     println!("          Octave Klaba: still public face — tweets data center operations updates");
     println!("  Public market (ENXTPA:OVH):");
     println!("         IPO Oct 2021 on Euronext Paris at €18.50/share — raised €350M");
@@ -39,12 +50,22 @@ fn run_ovh(args: &[String], _prog: &str) -> i32 {
     println!("         Market cap: €1.5-2.5B range");
     println!("         Largest European cloud provider by revenue");
     println!("         March 2021: Strasbourg data center SBG2 fire destroyed ~12,000 servers");
-    println!("  Strategic position: 'European sovereign cloud — predictable pricing + GDPR-native':");
-    println!("                    pitch: 'Europe's largest cloud — data sovereignty, predictable pricing, no AWS lock-in'");
-    println!("                    target: European enterprises + governments + price-sensitive workloads globally");
+    println!(
+        "  Strategic position: 'European sovereign cloud — predictable pricing + GDPR-native':"
+    );
+    println!(
+        "                    pitch: 'Europe's largest cloud — data sovereignty, predictable pricing, no AWS lock-in'"
+    );
+    println!(
+        "                    target: European enterprises + governments + price-sensitive workloads globally"
+    );
     println!("                    primary competitor: AWS, Azure, GCP (for European customers)");
-    println!("                    secondary: Hetzner (Germany), Scaleway (France), IONOS (Germany)");
-    println!("                    OVHcloud's wedge: own fiber + own data centers + own server design = lower costs");
+    println!(
+        "                    secondary: Hetzner (Germany), Scaleway (France), IONOS (Germany)"
+    );
+    println!(
+        "                    OVHcloud's wedge: own fiber + own data centers + own server design = lower costs"
+    );
     println!("                    GAIA-X founding member: European cloud sovereignty initiative");
     println!("                    challenge: AWS/Azure trojan-horsing 'sovereign' offerings in EU");
     println!("  Pricing (notably aggressive — owns the stack):");
@@ -58,7 +79,9 @@ fn run_ovh(args: &[String], _prog: &str) -> i32 {
     println!("  Product portfolio:");
     println!("    1. Bare Metal Servers (the iconic offering):");
     println!("       - Dedicated physical servers (no virtualization)");
-    println!("       - Rise (entry), Advance (workhorse), Scale (heavy), High Grade (premium), Game (gaming)");
+    println!(
+        "       - Rise (entry), Advance (workhorse), Scale (heavy), High Grade (premium), Game (gaming)"
+    );
     println!("       - Custom server designs (in-house engineering)");
     println!("       - 30+ data centers in 13+ countries");
     println!("       - Anti-DDoS included on all servers (Octave's pet project)");
@@ -126,13 +149,23 @@ fn run_ovh(args: &[String], _prog: &str) -> i32 {
     println!("    - Mistral AI partnership for sovereign LLM hosting");
     println!("  OVHcloud CLI usage:");
     println!("    ovh-eu --init                                            # configure auth");
-    println!("    ovh-eu cloud project list                                # list public cloud projects");
-    println!("    ovh-eu cloud project SERVICE_NAME instance create --name=my-vm --flavorId=b2-7 --imageId=ubuntu-22-04 --region=GRA9");
-    println!("    ovh-eu dedicated server list                             # list bare metal servers");
+    println!(
+        "    ovh-eu cloud project list                                # list public cloud projects"
+    );
+    println!(
+        "    ovh-eu cloud project SERVICE_NAME instance create --name=my-vm --flavorId=b2-7 --imageId=ubuntu-22-04 --region=GRA9"
+    );
+    println!(
+        "    ovh-eu dedicated server list                             # list bare metal servers"
+    );
     println!("    ovh-eu dedicated server SERVICE_NAME boot list           # list boot options");
     println!("    ovh-eu cloud project SERVICE_NAME kube create --name=my-cluster --region=GRA9");
-    println!("    ovh-eu domain DOMAIN dnsRecord create --fieldType=A --subDomain=www --target=1.2.3.4");
-    println!("    ovh-eu cloud project SERVICE_NAME storage create --containerName=my-bucket --region=GRA");
+    println!(
+        "    ovh-eu domain DOMAIN dnsRecord create --fieldType=A --subDomain=www --target=1.2.3.4"
+    );
+    println!(
+        "    ovh-eu cloud project SERVICE_NAME storage create --containerName=my-bucket --region=GRA"
+    );
     println!("    ovh-eu license windows create --serverName=my-server --version=2022");
     println!("  Customers (European + global price-sensitive):");
     println!("    - 1.6M+ customers worldwide");
@@ -150,13 +183,18 @@ fn run_ovh(args: &[String], _prog: &str) -> i32 {
     println!("           AWS/Azure 'sovereign' offerings in EU eroding sovereignty pitch");
     println!("           IPO performance disappointing (-50% from IPO price)");
     println!("           lacks marquee AI offerings beyond Mistral partnership");
-    println!("  Differentiator: largest European cloud provider (€990M revenue) + own data centers + own server manufacturing (100K+/yr) + own fiber backbone (18+ Tbps) + 30+ DCs in 13+ countries + bare metal heritage + Octave Klaba founder (since 1999, age 21) + GAIA-X sovereign cloud founder + GDPR-native + free unlimited DDoS protection on all servers + 30-60% cheaper than AWS bare metal + Mistral AI partnership + recovering from SBG2 fire 2021 — the European sovereign cloud option for GDPR-conscious EU enterprises and price-sensitive bare metal workloads worldwide");
+    println!(
+        "  Differentiator: largest European cloud provider (€990M revenue) + own data centers + own server manufacturing (100K+/yr) + own fiber backbone (18+ Tbps) + 30+ DCs in 13+ countries + bare metal heritage + Octave Klaba founder (since 1999, age 21) + GAIA-X sovereign cloud founder + GDPR-native + free unlimited DDoS protection on all servers + 30-60% cheaper than AWS bare metal + Mistral AI partnership + recovering from SBG2 fire 2021 — the European sovereign cloud option for GDPR-conscious EU enterprises and price-sensitive bare metal workloads worldwide"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "ovh".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "ovh".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ovh(&rest, &_prog);
     process::exit(code);
@@ -164,7 +202,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ovh};
+    use super::{basename, run_ovh, strip_ext};
 
     #[test]
     fn basename_strips_path() {

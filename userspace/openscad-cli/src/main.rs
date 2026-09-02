@@ -32,8 +32,14 @@ fn run_openscad(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let output = args.windows(2).find(|w| w[0] == "-o").map(|w| w[1].as_str());
-    let file = args.iter().rfind(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o")
+        .map(|w| w[1].as_str());
+    let file = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     let quiet = args.iter().any(|a| a == "--quiet");
 
     if let Some(f) = file {
@@ -65,7 +71,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_openscad};
+    use super::run_openscad;
 
     #[test]
     fn help_exits_zero() {

@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sqs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sqs [OPTIONS]");
-        println!("AWS SQS (Slate OS) — Simple Queue Service, Amazon's first-ever cloud service (2004)");
+        println!(
+            "AWS SQS (Slate OS) — Simple Queue Service, Amazon's first-ever cloud service (2004)"
+        );
         println!();
         println!("Options:");
         println!("  --standard             Standard queue (at-least-once, best-effort ordering)");
@@ -21,7 +27,10 @@ fn run_sqs(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("AWS SQS 2024 (Slate OS) — sqs CLI (aws-cli v2)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("AWS SQS 2024 (Slate OS) — sqs CLI (aws-cli v2)");
+        return 0;
+    }
     println!("AWS SQS 2024 (Slate OS) — Simple Queue Service (the original cloud queue)");
     println!("  Vendor: Amazon Web Services (Seattle, WA — NASDAQ: AMZN)");
     println!("  History (the AWS origin story):");
@@ -35,8 +44,12 @@ fn run_sqs(args: &[String], _prog: &str) -> i32 {
     println!("    - 'If AWS has a founding service, it's SQS'");
     println!("  Strategic position: 'the simplest possible cloud queue at infinite scale':");
     println!("                    pitch: 'send/receive messages, no servers, infinite throughput'");
-    println!("                    target: any decoupled async workload, microservice architectures");
-    println!("                    primary competitor: RabbitMQ (self-managed), Azure Service Bus, GCP Pub/Sub");
+    println!(
+        "                    target: any decoupled async workload, microservice architectures"
+    );
+    println!(
+        "                    primary competitor: RabbitMQ (self-managed), Azure Service Bus, GCP Pub/Sub"
+    );
     println!("                    secondary: ActiveMQ, NATS, internal queue libs");
     println!("                    SQS wedge: simplest API in cloud queuing (4 main ops)");
     println!("                    pay-per-million-requests pricing");
@@ -125,13 +138,23 @@ fn run_sqs(args: &[String], _prog: &str) -> i32 {
     println!("    - DataDog, New Relic monitoring");
     println!("  AWS CLI usage:");
     println!("    aws sqs create-queue --queue-name my-queue");
-    println!("    aws sqs create-queue --queue-name my-fifo-queue.fifo --attributes FifoQueue=true,ContentBasedDeduplication=true");
-    println!("    aws sqs send-message --queue-url https://sqs.us-east-1.amazonaws.com/123/my-queue --message-body 'hello'");
-    println!("    aws sqs send-message-batch --queue-url <url> --entries '[{{\"Id\":\"1\",\"MessageBody\":\"a\"}}]'");
-    println!("    aws sqs receive-message --queue-url <url> --max-number-of-messages 10 --wait-time-seconds 20");
+    println!(
+        "    aws sqs create-queue --queue-name my-fifo-queue.fifo --attributes FifoQueue=true,ContentBasedDeduplication=true"
+    );
+    println!(
+        "    aws sqs send-message --queue-url https://sqs.us-east-1.amazonaws.com/123/my-queue --message-body 'hello'"
+    );
+    println!(
+        "    aws sqs send-message-batch --queue-url <url> --entries '[{{\"Id\":\"1\",\"MessageBody\":\"a\"}}]'"
+    );
+    println!(
+        "    aws sqs receive-message --queue-url <url> --max-number-of-messages 10 --wait-time-seconds 20"
+    );
     println!("    aws sqs delete-message --queue-url <url> --receipt-handle <rh>");
     println!("    aws sqs get-queue-attributes --queue-url <url> --attribute-names All");
-    println!("    aws sqs set-queue-attributes --queue-url <url> --attributes RedrivePolicy='{{\"deadLetterTargetArn\":\"<arn>\",\"maxReceiveCount\":\"5\"}}'");
+    println!(
+        "    aws sqs set-queue-attributes --queue-url <url> --attributes RedrivePolicy='{{\"deadLetterTargetArn\":\"<arn>\",\"maxReceiveCount\":\"5\"}}'"
+    );
     println!("    aws sqs purge-queue --queue-url <url>                  # nuke all messages");
     println!("  Customers (essentially everyone on AWS):");
     println!("    - Netflix (early adopter — internal service decoupling)");
@@ -149,13 +172,18 @@ fn run_sqs(args: &[String], _prog: &str) -> i32 {
     println!("           no scheduled messages (use DelaySeconds up to 15 min, or Step Functions)");
     println!("           AWS lock-in — migrating to RabbitMQ requires significant changes");
     println!("           visibility timeout debugging is tricky (long-running consumers)");
-    println!("  Differentiator: Amazon's FIRST-EVER cloud service (Nov 2004, predates S3 + EC2 + AWS brand) + 20+ years of continuous operation + trillions of requests/day across AWS + Standard queues (unlimited throughput, at-least-once, best-effort FIFO) + FIFO queues (exactly-once, strict ordering by MessageGroupId, 3000 msg/s/group) + Dead-Letter Queues + Lambda event source mapping (canonical serverless pattern) + SQS Extended Library (S3 for messages >256KB) + SSE-KMS encryption + VPC endpoints + 1M requests/month free forever tier + $0.40-$0.50/M requests beyond + cross-account resource policies + SNS fanout pattern + CloudWatch metrics (ApproximateAgeOfOldestMessage) + EventBridge integration + Netflix/Airbnb/Slack/Capital One/Goldman/NASDAQ-proven + simplest API in cloud queuing — the boring-by-design queue that powers most AWS-native architectures, the foundation under which the rest of AWS was built");
+    println!(
+        "  Differentiator: Amazon's FIRST-EVER cloud service (Nov 2004, predates S3 + EC2 + AWS brand) + 20+ years of continuous operation + trillions of requests/day across AWS + Standard queues (unlimited throughput, at-least-once, best-effort FIFO) + FIFO queues (exactly-once, strict ordering by MessageGroupId, 3000 msg/s/group) + Dead-Letter Queues + Lambda event source mapping (canonical serverless pattern) + SQS Extended Library (S3 for messages >256KB) + SSE-KMS encryption + VPC endpoints + 1M requests/month free forever tier + $0.40-$0.50/M requests beyond + cross-account resource policies + SNS fanout pattern + CloudWatch metrics (ApproximateAgeOfOldestMessage) + EventBridge integration + Netflix/Airbnb/Slack/Capital One/Goldman/NASDAQ-proven + simplest API in cloud queuing — the boring-by-design queue that powers most AWS-native architectures, the foundation under which the rest of AWS was built"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sqs".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "sqs".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_sqs(&rest, &_prog);
     process::exit(code);
@@ -163,7 +191,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sqs};
+    use super::{basename, run_sqs, strip_ext};
 
     #[test]
     fn basename_strips_path() {

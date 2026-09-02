@@ -94,12 +94,7 @@ impl Column {
 }
 
 /// Default columns for normal output.
-const DEFAULT_COLUMNS: &[Column] = &[
-    Column::Name,
-    Column::Size,
-    Column::Type,
-    Column::MountPoint,
-];
+const DEFAULT_COLUMNS: &[Column] = &[Column::Name, Column::Size, Column::Type, Column::MountPoint];
 
 /// Columns shown with -f (filesystem info).
 const FS_COLUMNS: &[Column] = &[
@@ -242,19 +237,22 @@ fn read_fsinfo(dev_name: &str, parent_name: Option<&str>) -> (String, String, St
     for base in &paths_to_try {
         if fstype.is_empty()
             && let Some(ft) = read_file(&format!("{base}/fstype"))
-                && !ft.is_empty() {
-                    fstype = ft;
-                }
+            && !ft.is_empty()
+        {
+            fstype = ft;
+        }
         if label.is_empty()
             && let Some(lb) = read_file(&format!("{base}/label"))
-                && !lb.is_empty() {
-                    label = lb;
-                }
+            && !lb.is_empty()
+        {
+            label = lb;
+        }
         if uuid.is_empty()
             && let Some(id) = read_file(&format!("{base}/uuid"))
-                && !id.is_empty() {
-                    uuid = id;
-                }
+            && !id.is_empty()
+        {
+            uuid = id;
+        }
     }
 
     // Also try /dev/disk/by-uuid/ and /dev/disk/by-label/ symlinks.
@@ -262,32 +260,29 @@ fn read_fsinfo(dev_name: &str, parent_name: Option<&str>) -> (String, String, St
         if let Ok(entries) = fs::read_dir("/dev/disk/by-uuid") {
             for entry in entries.flatten() {
                 if let Ok(target) = fs::read_link(entry.path()) {
-                    let target_name = target
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
+                    let target_name = target.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     if target_name == dev_name
-                        && let Some(u) = entry.file_name().to_str() {
-                            uuid = u.to_string();
-                        }
+                        && let Some(u) = entry.file_name().to_str()
+                    {
+                        uuid = u.to_string();
+                    }
                 }
             }
         }
         if label.is_empty()
-            && let Ok(entries) = fs::read_dir("/dev/disk/by-label") {
-                for entry in entries.flatten() {
-                    if let Ok(target) = fs::read_link(entry.path()) {
-                        let target_name = target
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("");
-                        if target_name == dev_name
-                            && let Some(l) = entry.file_name().to_str() {
-                                label = l.to_string();
-                            }
+            && let Ok(entries) = fs::read_dir("/dev/disk/by-label")
+        {
+            for entry in entries.flatten() {
+                if let Ok(target) = fs::read_link(entry.path()) {
+                    let target_name = target.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if target_name == dev_name
+                        && let Some(l) = entry.file_name().to_str()
+                    {
+                        label = l.to_string();
                     }
                 }
             }
+        }
     }
 
     (fstype, label, uuid)
@@ -582,10 +577,18 @@ fn column_value(dev: &BlockDevice, col: Column, bytes_mode: bool, prefix: &str) 
         Column::Model => dev.model.clone(),
         Column::Serial => dev.serial.clone(),
         Column::Ro => {
-            if dev.read_only { "1".to_string() } else { "0".to_string() }
+            if dev.read_only {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
         }
         Column::Rm => {
-            if dev.removable { "1".to_string() } else { "0".to_string() }
+            if dev.removable {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
         }
     }
 }
@@ -631,9 +634,9 @@ fn build_rows(
             for (idx, child) in dev.children.iter().enumerate() {
                 let is_last = idx == child_count - 1;
                 let tree_prefix = if is_last {
-                    "\u{2514}\u{2500}"  // "└─"
+                    "\u{2514}\u{2500}" // "└─"
                 } else {
-                    "\u{251C}\u{2500}"  // "├─"
+                    "\u{251C}\u{2500}" // "├─"
                 };
                 let values: Vec<String> = columns
                     .iter()
@@ -761,9 +764,9 @@ fn print_json(devices: &[BlockDevice], columns: &[Column], bytes_mode: bool) {
 
         if dev.children.is_empty() {
             if di < devices.len() - 1 {
-                println!("}},"  );
+                println!("}},");
             } else {
-                println!("}}"  );
+                println!("}}");
             }
         } else {
             println!(",");
@@ -1031,9 +1034,17 @@ mod tests {
     #[test]
     fn column_default_widths_are_positive() {
         for col in [
-            Column::Name, Column::Size, Column::Type, Column::FsType,
-            Column::MountPoint, Column::Label, Column::Uuid, Column::Model,
-            Column::Serial, Column::Ro, Column::Rm,
+            Column::Name,
+            Column::Size,
+            Column::Type,
+            Column::FsType,
+            Column::MountPoint,
+            Column::Label,
+            Column::Uuid,
+            Column::Model,
+            Column::Serial,
+            Column::Ro,
+            Column::Rm,
         ] {
             assert!(col.default_width() > 0, "{:?} width is 0", col.header());
         }
@@ -1269,7 +1280,9 @@ mod tests {
 
     #[test]
     fn compute_widths_uses_max_of_header_default_and_values() {
-        let row = Row { values: vec!["a-long-name-here".to_string()] };
+        let row = Row {
+            values: vec!["a-long-name-here".to_string()],
+        };
         let widths = compute_widths(&[Column::Name], std::slice::from_ref(&row));
         assert_eq!(widths.len(), 1);
         assert_eq!(widths[0], "a-long-name-here".len());
@@ -1277,7 +1290,9 @@ mod tests {
 
     #[test]
     fn compute_widths_falls_back_to_default_when_values_are_short() {
-        let row = Row { values: vec!["x".to_string()] };
+        let row = Row {
+            values: vec!["x".to_string()],
+        };
         let widths = compute_widths(&[Column::Uuid], std::slice::from_ref(&row));
         // UUID default width is 36; "x" doesn't push it higher.
         assert_eq!(widths[0], 36);

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_jsonnet(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -33,7 +37,9 @@ fn run_jsonnet(args: &[String]) -> i32 {
         return 0;
     }
 
-    let expr = args.windows(2).find(|w| w[0] == "-e")
+    let expr = args
+        .windows(2)
+        .find(|w| w[0] == "-e")
         .map(|w| w[1].as_str());
 
     if let Some(code) = expr {
@@ -42,8 +48,11 @@ fn run_jsonnet(args: &[String]) -> i32 {
         println!("  \"result\": \"evaluated\"");
         println!("}}");
     } else {
-        let file = args.iter().rfind(|a| !a.starts_with('-'))
-            .map(|s| s.as_str()).unwrap_or("main.jsonnet");
+        let file = args
+            .iter()
+            .rfind(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .unwrap_or("main.jsonnet");
         println!("// Rendered from: {}", file);
         println!("{{");
         println!("  \"apiVersion\": \"apps/v1\",");
@@ -68,8 +77,11 @@ fn run_jsonnetfmt(args: &[String]) -> i32 {
         println!("  -n INDENT        Indentation (default: 2)");
         return 0;
     }
-    let file = args.iter().rfind(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("main.jsonnet");
+    let file = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("main.jsonnet");
     let in_place = args.iter().any(|a| a == "-i" || a == "--in-place");
     let test = args.iter().any(|a| a == "--test");
 
@@ -95,15 +107,21 @@ fn run_jsonnet_lint(args: &[String]) -> i32 {
         println!("Lint Jsonnet files");
         return 0;
     }
-    let file = args.iter().rfind(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("main.jsonnet");
+    let file = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("main.jsonnet");
     println!("{}: no issues found", file);
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "jsonnet".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "jsonnet".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "jsonnetfmt" => run_jsonnetfmt(&rest),
@@ -115,7 +133,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_jsonnet};
+    use super::{basename, run_jsonnet, strip_ext};
 
     #[test]
     fn basename_strips_path() {

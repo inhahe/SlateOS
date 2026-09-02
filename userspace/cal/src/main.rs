@@ -25,7 +25,13 @@ fn is_leap_year(year: i32) -> bool {
 fn days_in_month(year: i32, month: u32) -> u32 {
     match month {
         1 => 31,
-        2 => if is_leap_year(year) { 29 } else { 28 },
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
         3 => 31,
         4 => 30,
         5 => 31,
@@ -141,7 +147,13 @@ fn iso_week_number(year: i32, month: u32, day: u32) -> u32 {
     // ISO: Monday=1, Sunday=7.
     let iso_dow = if dow == 0 { 7 } else { dow };
     let w = (doy + 10 - iso_dow) / 7;
-    if w < 1 { 52 } else if w > 52 { 1 } else { w }
+    if w < 1 {
+        52
+    } else if w > 52 {
+        1
+    } else {
+        w
+    }
 }
 
 // ============================================================================
@@ -160,7 +172,14 @@ struct CalOpts {
     columns: u32,
 }
 
-fn render_month(year: i32, month: u32, monday_first: bool, highlight_day: Option<u32>, julian: bool, week_numbers: bool) -> Vec<String> {
+fn render_month(
+    year: i32,
+    month: u32,
+    monday_first: bool,
+    highlight_day: Option<u32>,
+    julian: bool,
+    week_numbers: bool,
+) -> Vec<String> {
     let mut lines = Vec::new();
 
     // Header.
@@ -175,8 +194,16 @@ fn render_month(year: i32, month: u32, monday_first: bool, highlight_day: Option
 
     // Day headers.
     let day_header = if monday_first {
-        if julian { "Mon Tue Wed Thu Fri Sat Sun" } else { "Mo Tu We Th Fr Sa Su" }
-    } else if julian { "Sun Mon Tue Wed Thu Fri Sat" } else { "Su Mo Tu We Th Fr Sa" };
+        if julian {
+            "Mon Tue Wed Thu Fri Sat Sun"
+        } else {
+            "Mo Tu We Th Fr Sa Su"
+        }
+    } else if julian {
+        "Sun Mon Tue Wed Thu Fri Sat"
+    } else {
+        "Su Mo Tu We Th Fr Sa"
+    };
     let wk_prefix = if week_numbers { "Wk " } else { "" };
     lines.push(format!("{wk_prefix}{day_header}"));
 
@@ -247,31 +274,63 @@ fn render_month(year: i32, month: u32, monday_first: bool, highlight_day: Option
     lines
 }
 
-fn print_single_month(out: &mut io::StdoutLock<'_>, year: i32, month: u32, opts: &CalOpts, today: (i32, u32, u32)) {
+fn print_single_month(
+    out: &mut io::StdoutLock<'_>,
+    year: i32,
+    month: u32,
+    opts: &CalOpts,
+    today: (i32, u32, u32),
+) {
     let highlight = if opts.highlight_today && year == today.0 && month == today.1 {
         Some(today.2)
     } else {
         None
     };
-    let lines = render_month(year, month, opts.monday_first, highlight, opts.julian, opts.week_numbers);
+    let lines = render_month(
+        year,
+        month,
+        opts.monday_first,
+        highlight,
+        opts.julian,
+        opts.week_numbers,
+    );
     for line in &lines {
         let _ = writeln!(out, "{line}");
     }
 }
 
-fn print_three_months(out: &mut io::StdoutLock<'_>, year: i32, center_month: u32, opts: &CalOpts, today: (i32, u32, u32)) {
+fn print_three_months(
+    out: &mut io::StdoutLock<'_>,
+    year: i32,
+    center_month: u32,
+    opts: &CalOpts,
+    today: (i32, u32, u32),
+) {
     let mut months = Vec::new();
     for delta in [-1i32, 0, 1] {
         let mut m = center_month as i32 + delta;
         let mut y = year;
-        if m < 1 { m += 12; y -= 1; }
-        if m > 12 { m -= 12; y += 1; }
+        if m < 1 {
+            m += 12;
+            y -= 1;
+        }
+        if m > 12 {
+            m -= 12;
+            y += 1;
+        }
         let highlight = if opts.highlight_today && y == today.0 && m as u32 == today.1 {
             Some(today.2)
         } else {
             None
         };
-        months.push(render_month(y, m as u32, opts.monday_first, highlight, opts.julian, opts.week_numbers));
+        months.push(render_month(
+            y,
+            m as u32,
+            opts.monday_first,
+            highlight,
+            opts.julian,
+            opts.week_numbers,
+        ));
     }
 
     let width = if opts.julian { 27 } else { 22 };
@@ -290,7 +349,12 @@ fn print_three_months(out: &mut io::StdoutLock<'_>, year: i32, center_month: u32
     }
 }
 
-fn print_full_year(out: &mut io::StdoutLock<'_>, year: i32, opts: &CalOpts, today: (i32, u32, u32)) {
+fn print_full_year(
+    out: &mut io::StdoutLock<'_>,
+    year: i32,
+    opts: &CalOpts,
+    today: (i32, u32, u32),
+) {
     // Year header.
     let title = format!("{year}");
     let total_width = if opts.julian { 27 * 3 + 4 } else { 22 * 3 + 4 };
@@ -311,7 +375,14 @@ fn print_full_year(out: &mut io::StdoutLock<'_>, year: i32, opts: &CalOpts, toda
                 } else {
                     None
                 };
-                row_months.push(render_month(year, m, opts.monday_first, highlight, opts.julian, opts.week_numbers));
+                row_months.push(render_month(
+                    year,
+                    m,
+                    opts.monday_first,
+                    highlight,
+                    opts.julian,
+                    opts.week_numbers,
+                ));
             }
         }
 

@@ -196,7 +196,9 @@ fn run_examples() {
     println!("    socat TCP-LISTEN:1234,fork,reuseaddr TCP:host:80");
     println!();
     println!("  TLS-terminate to a plain backend (test server):");
-    println!("    socat OPENSSL-LISTEN:8443,fork,reuseaddr,cert=server.pem,key=server.key,verify=0 \\");
+    println!(
+        "    socat OPENSSL-LISTEN:8443,fork,reuseaddr,cert=server.pem,key=server.key,verify=0 \\"
+    );
     println!("          TCP:127.0.0.1:8080");
     println!();
     println!("  TLS-wrap a client (send TLS, get plain on stdio):");
@@ -215,13 +217,17 @@ fn run_examples() {
     println!("    socat -u TCP-LISTEN:5514,fork UDP-SENDTO:syslog.example.com:514");
     println!();
     println!("  Shell over a single TCP port (the danger zone - listen ONLY on localhost):");
-    println!("    socat TCP-LISTEN:6666,bind=127.0.0.1,reuseaddr EXEC:'/bin/sh',pty,stderr,setsid,ctty");
+    println!(
+        "    socat TCP-LISTEN:6666,bind=127.0.0.1,reuseaddr EXEC:'/bin/sh',pty,stderr,setsid,ctty"
+    );
     println!();
     println!("  Through a SOCKS5 jump:");
     println!("    socat - SOCKS5:jump.example.net:target.internal:22,socksport=1080");
     println!();
     println!("  Mirror traffic through a logger (tee with two destinations):");
-    println!("    socat -d -d -d TCP-LISTEN:8000,fork SYSTEM:'tee /tmp/in.log | nc backend 8000 | tee /tmp/out.log'");
+    println!(
+        "    socat -d -d -d TCP-LISTEN:8000,fork SYSTEM:'tee /tmp/in.log | nc backend 8000 | tee /tmp/out.log'"
+    );
 }
 
 fn run_tls() {

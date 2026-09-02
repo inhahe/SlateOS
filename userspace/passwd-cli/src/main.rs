@@ -30,8 +30,11 @@ fn run_passwd(args: &[String]) -> i32 {
         return 0;
     }
 
-    let user = args.iter().rfind(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("root");
+    let user = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("root");
 
     if args.iter().any(|a| a == "-S" || a == "--status") {
         println!("{} P 2024-01-15 0 99999 7 -1", user);
@@ -66,8 +69,11 @@ fn run_chage(args: &[String]) -> i32 {
         return 0;
     }
 
-    let user = args.iter().rfind(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("root");
+    let user = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("root");
 
     if args.iter().any(|a| a == "-l" || a == "--list") {
         println!("Last password change                    : Jan 15, 2024");
@@ -100,8 +106,11 @@ fn run_chsh(args: &[String]) -> i32 {
         println!("/usr/bin/nologin");
         return 0;
     }
-    let shell = args.windows(2).find(|w| w[0] == "-s" || w[0] == "--shell")
-        .map(|w| w[1].as_str()).unwrap_or("/bin/bash");
+    let shell = args
+        .windows(2)
+        .find(|w| w[0] == "-s" || w[0] == "--shell")
+        .map(|w| w[1].as_str())
+        .unwrap_or("/bin/bash");
     println!("Shell changed to {}", shell);
     0
 }
@@ -121,7 +130,8 @@ fn run_chfn(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "passwd".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -137,7 +147,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_passwd};
+    use super::{basename, run_passwd, strip_ext};
 
     #[test]
     fn basename_strips_path() {

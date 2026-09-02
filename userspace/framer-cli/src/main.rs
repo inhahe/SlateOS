@@ -43,7 +43,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("framer-cli 0.1.0 (designer-first-site-builder personality build)"); }
+fn print_version() {
+    println!("framer-cli 0.1.0 (designer-first-site-builder personality build)");
+}
 
 fn run_about() {
     println!("Framer (Motif Tech B.V.).");

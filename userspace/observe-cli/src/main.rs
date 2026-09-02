@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_observe(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: observe [OPTIONS]");
-        println!("Observe (Slate OS) — Snowflake-native observability cloud (private, Sutter Hill-backed)");
+        println!(
+            "Observe (Slate OS) — Snowflake-native observability cloud (private, Sutter Hill-backed)"
+        );
         println!();
         println!("Options:");
         println!("  --datastreams          Data Streams (logs, metrics, traces input)");
@@ -22,25 +28,46 @@ fn run_observe(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Observe 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Observe 2024 (Slate OS)");
+        return 0;
+    }
     println!("Observe 2024 (Slate OS) — Observability Cloud on Snowflake");
     println!("  Vendor: Observe, Inc. (San Mateo, CA — private)");
     println!("  Founders: Jeremy Burton (CEO) + Jon Watte (CTO) + Yvan Sukur, 2018");
-    println!("          Jeremy Burton: ex-Dell EMC CMO + ex-VMware EVP — enterprise marketing veteran");
-    println!("          Sutter Hill Ventures incubated — same firm that backed Snowflake from seed");
-    println!("          founded with thesis: 'observability is a data problem; use the best data platform (Snowflake)'");
+    println!(
+        "          Jeremy Burton: ex-Dell EMC CMO + ex-VMware EVP — enterprise marketing veteran"
+    );
+    println!(
+        "          Sutter Hill Ventures incubated — same firm that backed Snowflake from seed"
+    );
+    println!(
+        "          founded with thesis: 'observability is a data problem; use the best data platform (Snowflake)'"
+    );
     println!("  Private funding:");
-    println!("         Series B Aug 2022: $70M at ~$300M valuation (Snowflake Ventures, Sutter Hill)");
+    println!(
+        "         Series B Aug 2022: $70M at ~$300M valuation (Snowflake Ventures, Sutter Hill)"
+    );
     println!("         total raised: ~$112M");
     println!("         Sutter Hill, Snowflake Ventures, Capital One Ventures backers");
     println!("         estimated $20-40M ARR (private, growing)");
-    println!("  Strategic position: 'observability cloud built on Snowflake — separate compute + storage':");
-    println!("                    pitch: 'pay for what you query, not what you ingest — observability priced like Snowflake'");
+    println!(
+        "  Strategic position: 'observability cloud built on Snowflake — separate compute + storage':"
+    );
+    println!(
+        "                    pitch: 'pay for what you query, not what you ingest — observability priced like Snowflake'"
+    );
     println!("                    target: cloud-native + data-savvy enterprises");
-    println!("                    primary competitor: Datadog, Splunk, Sumo Logic, Logz.io, Honeycomb");
+    println!(
+        "                    primary competitor: Datadog, Splunk, Sumo Logic, Logz.io, Honeycomb"
+    );
     println!("                    secondary: Chronosphere, Mezmo, Edge Delta");
-    println!("                    Observe's wedge: Snowflake architecture (separate compute/storage) + unlimited retention + 'datasets' model");
-    println!("                    'Observability cloud' = Snowflake-pattern (warehouse for telemetry) applied to ops data");
+    println!(
+        "                    Observe's wedge: Snowflake architecture (separate compute/storage) + unlimited retention + 'datasets' model"
+    );
+    println!(
+        "                    'Observability cloud' = Snowflake-pattern (warehouse for telemetry) applied to ops data"
+    );
     println!("  Pricing (compute + storage decoupled — Snowflake-style):");
     println!("    Compute: $0.50/credit-hour starting (Snowflake compute pass-through)");
     println!("    Storage: $0.02/GB/month for active datasets ($0.005/GB for cold tier)");
@@ -106,7 +133,9 @@ fn run_observe(args: &[String], _prog: &str) -> i32 {
     println!("    observe app install --name kubernetes");
     println!("    observe dashboard import --file dashboard.json");
     println!("    observe monitor create --name 'High Error Rate' --query @alert.opal");
-    println!("    observe o11ai chat --dataset my-app-logs --query 'why is the checkout service slow today?'");
+    println!(
+        "    observe o11ai chat --dataset my-app-logs --query 'why is the checkout service slow today?'"
+    );
     println!("  Customers (~150+):");
     println!("    - Cloud-native + data-savvy enterprises");
     println!("    - DoorDash, Roblox, RingCentral, Atlassian (some teams)");
@@ -118,16 +147,25 @@ fn run_observe(args: &[String], _prog: &str) -> i32 {
     println!("           OPAL learning curve for teams without SPL/Kusto background");
     println!("           customer count modest vs Datadog's 28K+ paying base");
     println!("           Datadog brand awareness + sales engine huge advantage in deals");
-    println!("           O11.ai feels follower-not-leader vs Datadog Bits / Dynatrace Davis CoPilot");
-    println!("           dependent on Snowflake pricing + roadmap — not fully in control of cost basis");
+    println!(
+        "           O11.ai feels follower-not-leader vs Datadog Bits / Dynatrace Davis CoPilot"
+    );
+    println!(
+        "           dependent on Snowflake pricing + roadmap — not fully in control of cost basis"
+    );
     println!("           private funding modest ($112M) vs Datadog ($300M+ pre-IPO)");
-    println!("  Differentiator: Snowflake-native architecture (separate compute + storage = pay-per-query, not pay-per-ingest) + 'datasets + OPAL' typed observability model + Sutter Hill incubation (Snowflake's investor firm) + unlimited retention via cold tiers + O11.ai LLM copilot + GameDay incident management + Jeremy Burton's enterprise sales credibility — the observability cloud for teams that want Snowflake's elasticity applied to operational telemetry instead of Datadog's purpose-built but rigid pricing");
+    println!(
+        "  Differentiator: Snowflake-native architecture (separate compute + storage = pay-per-query, not pay-per-ingest) + 'datasets + OPAL' typed observability model + Sutter Hill incubation (Snowflake's investor firm) + unlimited retention via cold tiers + O11.ai LLM copilot + GameDay incident management + Jeremy Burton's enterprise sales credibility — the observability cloud for teams that want Snowflake's elasticity applied to operational telemetry instead of Datadog's purpose-built but rigid pricing"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "observe".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "observe".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_observe(&rest, &_prog);
     process::exit(code);
@@ -135,7 +173,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_observe};
+    use super::{basename, run_observe, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -37,15 +37,19 @@ fn run_opusenc(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
 
     let input = files.first().copied().unwrap_or("input.wav");
     let output = files.get(1).copied().unwrap_or("output.opus");
-    let bitrate = args.windows(2).find(|w| w[0] == "--bitrate")
-        .map(|w| w[1].as_str()).unwrap_or("128");
+    let bitrate = args
+        .windows(2)
+        .find(|w| w[0] == "--bitrate")
+        .map(|w| w[1].as_str())
+        .unwrap_or("128");
 
     println!("Encoding using libopus 1.4 (Slate OS)");
     println!("-----------------------------------------------------");
@@ -76,7 +80,8 @@ fn run_opusdec(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -103,7 +108,8 @@ fn run_opusinfo(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("input.opus");
@@ -125,7 +131,8 @@ fn run_opusinfo(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "opusenc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -140,7 +147,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_opusenc};
+    use super::{basename, run_opusenc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

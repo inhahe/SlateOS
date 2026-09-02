@@ -26,7 +26,8 @@ fn run_mprocs(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let commands: Vec<&str> = args.iter()
+    let commands: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -70,7 +71,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mprocs};
+    use super::run_mprocs;
 
     #[test]
     fn help_exits_zero() {

@@ -34,7 +34,9 @@ fn run_bc(args: &[String]) -> i32 {
         return 0;
     }
 
-    let expr = args.windows(2).find(|w| w[0] == "-e" || w[0] == "--expression")
+    let expr = args
+        .windows(2)
+        .find(|w| w[0] == "-e" || w[0] == "--expression")
         .map(|w| w[1].as_str());
     let quiet = args.iter().any(|a| a == "-q" || a == "--quiet");
 
@@ -70,7 +72,9 @@ fn run_dc(args: &[String]) -> i32 {
         return 0;
     }
 
-    let expr = args.windows(2).find(|w| w[0] == "-e" || w[0] == "--expression")
+    let expr = args
+        .windows(2)
+        .find(|w| w[0] == "-e" || w[0] == "--expression")
         .map(|w| w[1].as_str());
 
     if let Some(e) = expr {
@@ -85,7 +89,8 @@ fn run_dc(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "bc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -99,7 +104,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bc};
+    use super::{basename, run_bc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

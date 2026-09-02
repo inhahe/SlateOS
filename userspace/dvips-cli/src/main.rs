@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_dvips(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -32,12 +36,14 @@ fn run_dvips(args: &[String]) -> i32 {
         println!("dvips(k) 2024.1 (TeX Live 2024/SlateOS)");
         return 0;
     }
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| a.ends_with(".dvi"))
         .map(|s| s.as_str())
         .unwrap_or("document.dvi");
     let base = file.rsplit_once('.').map_or(file, |(b, _)| b);
-    let outfile = args.windows(2)
+    let outfile = args
+        .windows(2)
         .find(|w| w[0] == "-o")
         .map(|w| w[1].as_str());
     let out_default = format!("{}.ps", base);
@@ -68,13 +74,15 @@ fn run_dvipdfmx(args: &[String]) -> i32 {
         println!("dvipdfmx version 20240116 (Slate OS)");
         return 0;
     }
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| a.ends_with(".dvi") || a.ends_with(".xdv"))
         .map(|s| s.as_str())
         .unwrap_or("document.dvi");
     let base = file.rsplit_once('.').map_or(file, |(b, _)| b);
     let out_default = format!("{}.pdf", base);
-    let outfile = args.windows(2)
+    let outfile = args
+        .windows(2)
         .find(|w| w[0] == "-o")
         .map(|w| w[1].as_str());
     let out = outfile.unwrap_or(out_default.as_str());
@@ -103,7 +111,8 @@ fn run_dvisvgm(args: &[String]) -> i32 {
         println!("dvisvgm 3.2.2 (Slate OS)");
         return 0;
     }
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| a.ends_with(".dvi") || a.ends_with(".pdf"))
         .map(|s| s.as_str())
         .unwrap_or("document.dvi");
@@ -116,7 +125,10 @@ fn run_dvisvgm(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "dvips".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "dvips".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "dvipdfmx" | "xdvipdfmx" => run_dvipdfmx(&rest),
@@ -128,7 +140,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dvips};
+    use super::{basename, run_dvips, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_fastly(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fastly [OPTIONS]");
-        println!("Fastly (Slate OS) — edge cloud platform (CDN + Compute@Edge Wasm + security, NYSE:FSLY)");
+        println!(
+            "Fastly (Slate OS) — edge cloud platform (CDN + Compute@Edge Wasm + security, NYSE:FSLY)"
+        );
         println!();
         println!("Options:");
         println!("  --compute              Compute@Edge (WebAssembly serverless at edge)");
@@ -21,28 +27,51 @@ fn run_fastly(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Fastly 2024 (Slate OS) — fastly CLI 10.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Fastly 2024 (Slate OS) — fastly CLI 10.x");
+        return 0;
+    }
     println!("Fastly 2024 (Slate OS) — Edge Cloud Platform");
     println!("  Vendor: Fastly, Inc. (San Francisco, CA — NYSE:FSLY since 2019)");
     println!("  Founders: Artur Bergman (CEO/CTO until 2020), 2011");
-    println!("          Artur Bergman: ex-Wikia CTO, Perl hacker, beloved/eccentric founder figure");
+    println!(
+        "          Artur Bergman: ex-Wikia CTO, Perl hacker, beloved/eccentric founder figure"
+    );
     println!("          'Make the Internet faster' — original Varnish-based CDN bet");
-    println!("          Joshua Bixby: CEO 2020-2024, replaced by Todd Nightingale (former Cisco Meraki)");
+    println!(
+        "          Joshua Bixby: CEO 2020-2024, replaced by Todd Nightingale (former Cisco Meraki)"
+    );
     println!("  Public market (NYSE:FSLY):");
     println!("         IPO May 2019 at $16/share — raised $180M");
     println!("         peak ~$120 late 2020 (COVID work-from-home edge boom)");
     println!("         settled $4-12 range 2023-2024 (deep drawdown)");
     println!("         FY2024 revenue: ~$543M (+8% YoY — modest growth)");
     println!("         Market cap: $1-2B range");
-    println!("         June 2021: 1-hour global outage took down Reddit/Amazon/UK gov + caused stock pop ironically");
-    println!("  Strategic position: 'edge cloud + Wasm compute — programmable edge for developers':");
-    println!("                    pitch: 'a developer-first edge cloud — instant purge, Compute@Edge Wasm, real-time logs'");
-    println!("                    target: media + ecommerce + developer-heavy teams that need programmable CDN");
-    println!("                    primary competitor: Akamai (incumbent), Cloudflare (modern), AWS CloudFront");
+    println!(
+        "         June 2021: 1-hour global outage took down Reddit/Amazon/UK gov + caused stock pop ironically"
+    );
+    println!(
+        "  Strategic position: 'edge cloud + Wasm compute — programmable edge for developers':"
+    );
+    println!(
+        "                    pitch: 'a developer-first edge cloud — instant purge, Compute@Edge Wasm, real-time logs'"
+    );
+    println!(
+        "                    target: media + ecommerce + developer-heavy teams that need programmable CDN"
+    );
+    println!(
+        "                    primary competitor: Akamai (incumbent), Cloudflare (modern), AWS CloudFront"
+    );
     println!("                    secondary: Bunny.net, KeyCDN, StackPath");
-    println!("                    Fastly's wedge: real-time config push (~150ms), instant purge, VCL programmability, Wasm compute");
-    println!("                    longtime developer + ops favorite for high-control edge use cases");
-    println!("                    challenge: Cloudflare's bigger network + aggressive free tier squeezes the market");
+    println!(
+        "                    Fastly's wedge: real-time config push (~150ms), instant purge, VCL programmability, Wasm compute"
+    );
+    println!(
+        "                    longtime developer + ops favorite for high-control edge use cases"
+    );
+    println!(
+        "                    challenge: Cloudflare's bigger network + aggressive free tier squeezes the market"
+    );
     println!("  Pricing (usage-based, no free tier for production):");
     println!("    Free trial: $50 credit (developer accounts)");
     println!("    CDN: $0.12/GB North America/Europe traffic, $0.0075 per 10K requests");
@@ -92,12 +121,16 @@ fn run_fastly(args: &[String], _prog: &str) -> i32 {
     println!("    - Compiles ahead-of-time to native code = no JIT overhead");
     println!("    - ~35us cold start (vs ~5ms Cloudflare Workers, vs 100-500ms Lambda)");
     println!("    - Compute@Edge language SDK in Rust, JS, Go, AssemblyScript");
-    println!("    - Differs from Cloudflare's V8-isolate approach: more language flexibility, slightly slower bigger memory");
+    println!(
+        "    - Differs from Cloudflare's V8-isolate approach: more language flexibility, slightly slower bigger memory"
+    );
     println!("    - Open-source Lucet contributed to Bytecode Alliance");
     println!("  The June 8 2021 outage:");
     println!("    - A single customer config change triggered a bug → 1-hour global Fastly outage");
     println!("    - Reddit, Amazon, GitHub, NYTimes, UK gov sites went down");
-    println!("    - Stock paradoxically *rose* afterward — proved Fastly was infrastructure for half the internet");
+    println!(
+        "    - Stock paradoxically *rose* afterward — proved Fastly was infrastructure for half the internet"
+    );
     println!("    - Post-mortem widely praised for transparency");
     println!("  Signal Sciences acquisition (Sep 2020 $775M):");
     println!("    - Signal Sciences had built next-gen WAF (no rule tuning, behavioral analysis)");
@@ -115,14 +148,18 @@ fn run_fastly(args: &[String], _prog: &str) -> i32 {
     println!("  Fastly CLI usage:");
     println!("    fastly auth-token create                                # auth");
     println!("    fastly service create --name=my-cdn --type=vcl");
-    println!("    fastly compute init                                      # scaffold Compute@Edge project");
+    println!(
+        "    fastly compute init                                      # scaffold Compute@Edge project"
+    );
     println!("    fastly compute build                                     # compile Wasm");
     println!("    fastly compute deploy                                    # deploy to edge");
     println!("    fastly purge --service=SERVICE_ID --all                  # instant purge");
     println!("    fastly logging s3 create --service=ID --name=my-logs --bucket=my-bucket");
     println!("    fastly stats realtime --service=ID                       # real-time analytics");
     println!("  Customers (media + ecommerce + dev-heavy):");
-    println!("    - Major: Spotify, Stripe, GitHub, Shopify, NYTimes, Reddit (until 2021 outage), Etsy, Pinterest");
+    println!(
+        "    - Major: Spotify, Stripe, GitHub, Shopify, NYTimes, Reddit (until 2021 outage), Etsy, Pinterest"
+    );
     println!("    - Media: BBC, ESPN, Vox, BuzzFeed");
     println!("    - Ecommerce: Wayfair, Ticketmaster (some)");
     println!("    - Sweet spot: high-traffic media + dev-savvy ecommerce");
@@ -135,13 +172,18 @@ fn run_fastly(args: &[String], _prog: &str) -> i32 {
     println!("           June 2021 outage hurt brand among CDN risk-averse buyers");
     println!("           premium pricing vs free Cloudflare = uphill battle for new customers");
     println!("           net retention rate declining ($170M+ → $115M+ NRR over 3 years)");
-    println!("  Differentiator: ~35us Wasm cold start (Lucet) + 150ms global instant purge + VCL programmability (most powerful edge config language) + Signal Sciences Next-Gen WAF (RASP-style) + real-time logging + media-heavy customer base (Spotify, NYTimes, GitHub, Stripe) + open-source Lucet/Bytecode Alliance contributions + ~$543M revenue — the developer-first edge cloud that prioritizes programmability and Wasm-language flexibility over Cloudflare's V8-only Workers, used by media and ecommerce companies who need ultimate edge control");
+    println!(
+        "  Differentiator: ~35us Wasm cold start (Lucet) + 150ms global instant purge + VCL programmability (most powerful edge config language) + Signal Sciences Next-Gen WAF (RASP-style) + real-time logging + media-heavy customer base (Spotify, NYTimes, GitHub, Stripe) + open-source Lucet/Bytecode Alliance contributions + ~$543M revenue — the developer-first edge cloud that prioritizes programmability and Wasm-language flexibility over Cloudflare's V8-only Workers, used by media and ecommerce companies who need ultimate edge control"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "fastly".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "fastly".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_fastly(&rest, &_prog);
     process::exit(code);
@@ -149,7 +191,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fastly};
+    use super::{basename, run_fastly, strip_ext};
 
     #[test]
     fn basename_strips_path() {

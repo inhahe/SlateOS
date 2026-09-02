@@ -70,9 +70,10 @@ fn run_watchexec(args: Vec<String>) -> i32 {
         let mut iter = args.iter();
         while let Some(a) = iter.next() {
             if (a == "-w" || a == "--watch")
-                && let Some(p) = iter.next() {
-                    paths.push(p.as_str());
-                }
+                && let Some(p) = iter.next()
+            {
+                paths.push(p.as_str());
+            }
         }
         if paths.is_empty() {
             paths.push(".");
@@ -87,15 +88,36 @@ fn run_watchexec(args: Vec<String>) -> i32 {
     if clear {
         println!("[watchexec] clearing screen on each run");
     }
-    println!("[watchexec] running: {}", if command.is_empty() { "(no command)" } else { &command });
+    println!(
+        "[watchexec] running: {}",
+        if command.is_empty() {
+            "(no command)"
+        } else {
+            &command
+        }
+    );
     println!();
-    println!("[Running: {}]", if command.is_empty() { "echo hello" } else { &command });
+    println!(
+        "[Running: {}]",
+        if command.is_empty() {
+            "echo hello"
+        } else {
+            &command
+        }
+    );
     println!("(simulated command output)");
     println!();
     println!("[watchexec] waiting for changes...");
     println!("[watchexec] change detected: src/main.rs (modified)");
     println!();
-    println!("[Running: {}]", if command.is_empty() { "echo hello" } else { &command });
+    println!(
+        "[Running: {}]",
+        if command.is_empty() {
+            "echo hello"
+        } else {
+            &command
+        }
+    );
     println!("(simulated command output after change)");
     0
 }
@@ -109,7 +131,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_watchexec};
+    use super::run_watchexec;
 
     #[test]
     fn help_exits_zero() {

@@ -44,7 +44,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("fortinet-cli 0.1.0 (fortigate-security-fabric personality build)"); }
+fn print_version() {
+    println!("fortinet-cli 0.1.0 (fortigate-security-fabric personality build)");
+}
 
 fn run_about() {
     println!("Fortinet, Inc.");
@@ -69,7 +71,9 @@ fn run_fortigate() {
     println!("             and content inspection — competitive throughput at lower price.");
     println!("  Features: NGFW + IPS + SSL inspection + sandboxing + URL filtering +");
     println!("            anti-malware + DLP + SD-WAN + IPsec/SSL VPN + ZTNA — bundled.");
-    println!("  Pricing: substantially undercuts Palo Alto + Check Point at equivalent throughput.");
+    println!(
+        "  Pricing: substantially undercuts Palo Alto + Check Point at equivalent throughput."
+    );
 }
 
 fn run_fabric() {
@@ -95,13 +99,17 @@ fn run_fortios() {
     println!("  Major releases historically every 12-18 months; in-place upgradable.");
     println!("  Custom hardware drivers for the FortiASIC chip family — the OS knows how to");
     println!("  offload IPS, crypto, content inspection to the specialised processors.");
-    println!("  This OS-level consistency is a real differentiator for large multi-site customers.");
+    println!(
+        "  This OS-level consistency is a real differentiator for large multi-site customers."
+    );
 }
 
 fn run_sase() {
     println!("SASE + SD-WAN + ZTNA (the cloud + remote-work story).");
     println!("  FortiSASE:    Fortinet's cloud-delivered Secure Access Service Edge offering.");
-    println!("  FortiSD-WAN:  industry-leading SD-WAN typically delivered on FortiGate appliances.");
+    println!(
+        "  FortiSD-WAN:  industry-leading SD-WAN typically delivered on FortiGate appliances."
+    );
     println!("                Fortinet routinely tops Gartner's SD-WAN Magic Quadrant.");
     println!("  FortiClient:  endpoint agent providing VPN + ZTNA tunnel into the fabric.");
     println!("  FortiZTNA:    Zero-Trust Network Access bundled into FortiGate + FortiClient.");

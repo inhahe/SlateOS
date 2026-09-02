@@ -59,9 +59,10 @@ fn get_proc_value(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let line = line.trim();
         if let Some((k, v)) = line.split_once(':')
-            && k.trim() == key {
-                return Some(v.trim().to_string());
-            }
+            && k.trim() == key
+        {
+            return Some(v.trim().to_string());
+        }
     }
     None
 }
@@ -76,26 +77,28 @@ fn show_cpu() {
     if let Some(content) = read_proc("/proc/cpuinfo") {
         let kv = parse_proc_kv(&content);
 
-        let model = kv.iter()
+        let model = kv
+            .iter()
             .find(|(k, _)| k == "model name")
             .map(|(_, v)| v.as_str())
             .unwrap_or("Unknown");
 
-        let vendor = kv.iter()
+        let vendor = kv
+            .iter()
             .find(|(k, _)| k == "vendor_id")
             .map(|(_, v)| v.as_str())
             .unwrap_or("Unknown");
 
-        let cores = kv.iter()
-            .filter(|(k, _)| k == "processor")
-            .count();
+        let cores = kv.iter().filter(|(k, _)| k == "processor").count();
 
-        let mhz = kv.iter()
+        let mhz = kv
+            .iter()
             .find(|(k, _)| k == "cpu MHz")
             .map(|(_, v)| v.as_str())
             .unwrap_or("?");
 
-        let cache = kv.iter()
+        let cache = kv
+            .iter()
             .find(|(k, _)| k == "cache size")
             .map(|(_, v)| v.as_str())
             .unwrap_or("?");
@@ -123,16 +126,11 @@ fn show_memory() {
     println!("=== Memory ===");
 
     if let Some(content) = read_proc("/proc/meminfo") {
-        let total = get_proc_value(&content, "MemTotal")
-            .unwrap_or_else(|| "?".to_string());
-        let free = get_proc_value(&content, "MemFree")
-            .unwrap_or_else(|| "?".to_string());
-        let available = get_proc_value(&content, "MemAvailable")
-            .unwrap_or_else(|| "?".to_string());
-        let buffers = get_proc_value(&content, "Buffers")
-            .unwrap_or_else(|| "?".to_string());
-        let cached = get_proc_value(&content, "Cached")
-            .unwrap_or_else(|| "?".to_string());
+        let total = get_proc_value(&content, "MemTotal").unwrap_or_else(|| "?".to_string());
+        let free = get_proc_value(&content, "MemFree").unwrap_or_else(|| "?".to_string());
+        let available = get_proc_value(&content, "MemAvailable").unwrap_or_else(|| "?".to_string());
+        let buffers = get_proc_value(&content, "Buffers").unwrap_or_else(|| "?".to_string());
+        let cached = get_proc_value(&content, "Cached").unwrap_or_else(|| "?".to_string());
 
         println!("  Total:     {total}");
         println!("  Free:      {free}");
@@ -141,15 +139,13 @@ fn show_memory() {
         println!("  Cached:    {cached}");
 
         // Parse and compute usage percentage.
-        if let (Some(total_kb), Some(free_kb)) = (
-            parse_kb(&total),
-            parse_kb(&free),
-        )
-            && total_kb > 0 {
-                let used_kb = total_kb.saturating_sub(free_kb);
-                let pct = (used_kb as f64 / total_kb as f64) * 100.0;
-                println!("  Used:      {} kB ({:.1}%)", used_kb, pct);
-            }
+        if let (Some(total_kb), Some(free_kb)) = (parse_kb(&total), parse_kb(&free))
+            && total_kb > 0
+        {
+            let used_kb = total_kb.saturating_sub(free_kb);
+            let pct = (used_kb as f64 / total_kb as f64) * 100.0;
+            println!("  Used:      {} kB ({:.1}%)", used_kb, pct);
+        }
     } else {
         println!("  (meminfo not available)");
     }
@@ -211,8 +207,8 @@ fn show_network() {
     println!("=== Network ===");
 
     // Read hostname.
-    if let Some(hostname) = read_proc("/proc/sys/kernel/hostname")
-        .or_else(|| read_proc("/sys/kernel/hostname"))
+    if let Some(hostname) =
+        read_proc("/proc/sys/kernel/hostname").or_else(|| read_proc("/sys/kernel/hostname"))
     {
         println!("  Hostname:  {hostname}");
     }
@@ -222,7 +218,10 @@ fn show_network() {
         println!("\n  Interfaces:");
         let mut first = true;
         for line in content.lines() {
-            if first { first = false; continue; } // skip header
+            if first {
+                first = false;
+                continue;
+            } // skip header
             let line = line.trim();
             if line.starts_with("Inter") || line.starts_with("face") {
                 continue;
@@ -267,19 +266,21 @@ fn show_os() {
     if let Some(uptime_str) = read_proc("/proc/uptime") {
         let parts: Vec<&str> = uptime_str.split_whitespace().collect();
         if let Some(secs_str) = parts.first()
-            && let Ok(secs) = secs_str.parse::<f64>() {
-                let total_secs = secs as u64;
-                let days = total_secs / 86400;
-                let hours = (total_secs % 86400) / 3600;
-                let mins = (total_secs % 3600) / 60;
-                println!("  Uptime:    {}d {}h {}m", days, hours, mins);
-            }
+            && let Ok(secs) = secs_str.parse::<f64>()
+        {
+            let total_secs = secs as u64;
+            let days = total_secs / 86400;
+            let hours = (total_secs % 86400) / 3600;
+            let mins = (total_secs % 3600) / 60;
+            println!("  Uptime:    {}d {}h {}m", days, hours, mins);
+        }
     }
 
     if let Some(cmdline) = read_proc("/proc/cmdline")
-        && !cmdline.is_empty() {
-            println!("  Cmdline:   {cmdline}");
-        }
+        && !cmdline.is_empty()
+    {
+        println!("  Cmdline:   {cmdline}");
+    }
 
     // Date from /proc or system.
     println!("  Arch:      x86_64");
@@ -299,9 +300,10 @@ fn show_process() {
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && name.chars().all(|c| c.is_ascii_digit()) {
-                    process_count += 1;
-                }
+                && name.chars().all(|c| c.is_ascii_digit())
+            {
+                process_count += 1;
+            }
         }
         println!("  Running:   {process_count} processes");
     } else {
@@ -317,13 +319,15 @@ fn show_process() {
     if let Some(stat) = read_proc("/proc/stat") {
         for line in stat.lines() {
             if line.starts_with("procs_running")
-                && let Some((_, val)) = line.split_once(' ') {
-                    println!("  Running:   {}", val.trim());
-                }
+                && let Some((_, val)) = line.split_once(' ')
+            {
+                println!("  Running:   {}", val.trim());
+            }
             if line.starts_with("procs_blocked")
-                && let Some((_, val)) = line.split_once(' ') {
-                    println!("  Blocked:   {}", val.trim());
-                }
+                && let Some((_, val)) = line.split_once(' ')
+            {
+                println!("  Blocked:   {}", val.trim());
+            }
         }
     }
 }
@@ -338,25 +342,35 @@ fn show_json() {
     // OS.
     let version = read_proc("/proc/version").unwrap_or_default();
     let uptime = read_proc("/proc/uptime").unwrap_or_default();
-    parts.push(format!("\"os\":{{\"version\":\"{}\",\"uptime\":\"{}\",\"arch\":\"x86_64\",\"page_size\":16384}}",
-        json_escape(&version), json_escape(&uptime)));
+    parts.push(format!(
+        "\"os\":{{\"version\":\"{}\",\"uptime\":\"{}\",\"arch\":\"x86_64\",\"page_size\":16384}}",
+        json_escape(&version),
+        json_escape(&uptime)
+    ));
 
     // CPU.
     if let Some(content) = read_proc("/proc/cpuinfo") {
         let model = get_proc_value(&content, "model name").unwrap_or_default();
-        let cores = parse_proc_kv(&content).iter()
+        let cores = parse_proc_kv(&content)
+            .iter()
             .filter(|(k, _)| k == "processor")
             .count();
-        parts.push(format!("\"cpu\":{{\"model\":\"{}\",\"cores\":{}}}",
-            json_escape(&model), if cores > 0 { cores } else { 1 }));
+        parts.push(format!(
+            "\"cpu\":{{\"model\":\"{}\",\"cores\":{}}}",
+            json_escape(&model),
+            if cores > 0 { cores } else { 1 }
+        ));
     }
 
     // Memory.
     if let Some(content) = read_proc("/proc/meminfo") {
         let total = get_proc_value(&content, "MemTotal").unwrap_or_default();
         let free = get_proc_value(&content, "MemFree").unwrap_or_default();
-        parts.push(format!("\"memory\":{{\"total\":\"{}\",\"free\":\"{}\"}}",
-            json_escape(&total), json_escape(&free)));
+        parts.push(format!(
+            "\"memory\":{{\"total\":\"{}\",\"free\":\"{}\"}}",
+            json_escape(&total),
+            json_escape(&free)
+        ));
     }
 
     // Hostname.

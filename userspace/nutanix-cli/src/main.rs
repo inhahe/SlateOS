@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ntnx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -26,16 +30,23 @@ fn run_ntnx(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Nutanix AOS 7.0 / AHV 20230302.1019 / Prism Central pc.2024.3 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Nutanix AOS 7.0 / AHV 20230302.1019 / Prism Central pc.2024.3 (Slate OS)");
+        return 0;
+    }
     println!("Nutanix AOS 7.0 (Slate OS)");
     println!("  Vendor: Nutanix Inc. (San Jose, CA; founded 2009; NASDAQ:NTNX)");
     println!("  Founders: Dheeraj Pandey, Mohit Aron (also Cohesity founder), Ajeet Singh");
-    println!("  Category creator: hyperconverged infrastructure (HCI) — compute + storage in one node");
+    println!(
+        "  Category creator: hyperconverged infrastructure (HCI) — compute + storage in one node"
+    );
     println!("  Architecture: Controller VM (CVM) on each node, distributed storage fabric (DSF)");
     println!("  AHV: Nutanix's own hypervisor (KVM-based), free with AOS — no extra license");
     println!("  Multi-hypervisor: also runs on VMware ESXi, Microsoft Hyper-V");
     println!("  Storage: distributed shared-nothing — no SAN/NAS needed");
-    println!("  Software: Acropolis (clusterware), Prism (UI), Calm (automation), Flow (microseg),");
+    println!(
+        "  Software: Acropolis (clusterware), Prism (UI), Calm (automation), Flow (microseg),"
+    );
     println!("            Era (DBaaS), Files (NAS), Objects (S3), Move (migration), Karbon (K8s)");
     println!("  Editions: AOS Starter, Pro, Ultimate; per-CPU or per-VM");
     println!("  Cloud: Nutanix Cloud Clusters (NC2) — bare-metal AWS/Azure with Nutanix on top");
@@ -46,7 +57,10 @@ fn run_ntnx(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "nutanix".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "nutanix".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ntnx(&rest, &_prog);
     process::exit(code);
@@ -54,7 +68,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ntnx};
+    use super::{basename, run_ntnx, strip_ext};
 
     #[test]
     fn basename_strips_path() {

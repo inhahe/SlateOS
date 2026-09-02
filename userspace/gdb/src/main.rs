@@ -52,11 +52,7 @@
 // protocol packets, and machine memory. Arithmetic is on offsets bounded
 // by section sizes / packet lengths, indexing/slicing is gated by
 // length checks at the call site (errors return Err, not panic).
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    dead_code,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
 
 use std::io::{self, Write};
 
@@ -126,13 +122,8 @@ const REG_GS: usize = 23;
 const REG_COUNT: usize = 24;
 
 const REG_NAMES: [&[u8]; REG_COUNT] = [
-    b"rax", b"rbx", b"rcx", b"rdx",
-    b"rsi", b"rdi", b"rbp", b"rsp",
-    b"r8",  b"r9",  b"r10", b"r11",
-    b"r12", b"r13", b"r14", b"r15",
-    b"rip", b"rflags",
-    b"cs",  b"ss",  b"ds",  b"es",
-    b"fs",  b"gs",
+    b"rax", b"rbx", b"rcx", b"rdx", b"rsi", b"rdi", b"rbp", b"rsp", b"r8", b"r9", b"r10", b"r11",
+    b"r12", b"r13", b"r14", b"r15", b"rip", b"rflags", b"cs", b"ss", b"ds", b"es", b"fs", b"gs",
 ];
 
 // INT3 opcode for software breakpoints
@@ -352,7 +343,9 @@ fn trim_start(s: &[u8]) -> &[u8] {
 /// Skip trailing whitespace in a byte slice.
 fn trim_end(s: &[u8]) -> &[u8] {
     let mut end = s.len();
-    while end > 0 && (s[end - 1] == b' ' || s[end - 1] == b'\t' || s[end - 1] == b'\n' || s[end - 1] == b'\r') {
+    while end > 0
+        && (s[end - 1] == b' ' || s[end - 1] == b'\t' || s[end - 1] == b'\n' || s[end - 1] == b'\r')
+    {
         end -= 1;
     }
     &s[..end]
@@ -395,11 +388,7 @@ fn basename(path: &[u8]) -> &[u8] {
             found = true;
         }
     }
-    if found {
-        &path[last_sep + 1..]
-    } else {
-        path
-    }
+    if found { &path[last_sep + 1..] } else { path }
 }
 
 /// Read a little-endian u16 from a byte slice at offset.
@@ -416,7 +405,10 @@ fn read_u32_le(data: &[u8], off: usize) -> Option<u32> {
         return None;
     }
     Some(u32::from_le_bytes([
-        data[off], data[off + 1], data[off + 2], data[off + 3],
+        data[off],
+        data[off + 1],
+        data[off + 2],
+        data[off + 3],
     ]))
 }
 
@@ -426,8 +418,14 @@ fn read_u64_le(data: &[u8], off: usize) -> Option<u64> {
         return None;
     }
     Some(u64::from_le_bytes([
-        data[off], data[off + 1], data[off + 2], data[off + 3],
-        data[off + 4], data[off + 5], data[off + 6], data[off + 7],
+        data[off],
+        data[off + 1],
+        data[off + 2],
+        data[off + 3],
+        data[off + 4],
+        data[off + 5],
+        data[off + 6],
+        data[off + 7],
     ]))
 }
 
@@ -586,17 +584,17 @@ impl ElfInfo {
 
     /// Find section by name.
     fn find_section(&self, name: &[u8]) -> Option<&Section> {
-        self.sections.iter().find(|&sec| bytes_eq(sec.name_bytes(), name)).map(|v| v as _)
+        self.sections
+            .iter()
+            .find(|&sec| bytes_eq(sec.name_bytes(), name))
+            .map(|v| v as _)
     }
 
     /// Get bytes at a given virtual address for a given length.
     fn bytes_at_vaddr(&self, vaddr: u64, len: usize) -> Option<&[u8]> {
         // Search segments for one containing this address
         for seg in &self.segments {
-            if seg.p_type == PT_LOAD
-                && vaddr >= seg.p_vaddr
-                && vaddr < seg.p_vaddr + seg.p_filesz
-            {
+            if seg.p_type == PT_LOAD && vaddr >= seg.p_vaddr && vaddr < seg.p_vaddr + seg.p_filesz {
                 let offset_in_seg = (vaddr - seg.p_vaddr) as usize;
                 let file_offset = seg.p_offset as usize + offset_in_seg;
                 let avail = (seg.p_filesz as usize).saturating_sub(offset_in_seg);
@@ -608,10 +606,7 @@ impl ElfInfo {
         }
         // Fallback: search sections
         for sec in &self.sections {
-            if sec.sh_type == SHT_PROGBITS
-                && vaddr >= sec.addr
-                && vaddr < sec.addr + sec.size
-            {
+            if sec.sh_type == SHT_PROGBITS && vaddr >= sec.addr && vaddr < sec.addr + sec.size {
                 let offset_in_sec = (vaddr - sec.addr) as usize;
                 let file_offset = sec.offset as usize + offset_in_sec;
                 let avail = (sec.size as usize).saturating_sub(offset_in_sec);
@@ -632,7 +627,8 @@ fn parse_elf(data: &[u8]) -> Result<ElfInfo, &'static [u8]> {
     }
 
     // Check magic
-    if data[0] != ELFMAG[0] || data[1] != ELFMAG[1] || data[2] != ELFMAG[2] || data[3] != ELFMAG[3] {
+    if data[0] != ELFMAG[0] || data[1] != ELFMAG[1] || data[2] != ELFMAG[2] || data[3] != ELFMAG[3]
+    {
         return Err(b"Not an ELF file");
     }
 
@@ -752,10 +748,7 @@ fn parse_elf(data: &[u8]) -> Result<ElfInfo, &'static [u8]> {
         if shstr_offset > 0 && name_off < shstr_size {
             let name_start = shstr_offset + name_off;
             let mut nlen = 0;
-            while name_start + nlen < data.len()
-                && nlen < 63
-                && data[name_start + nlen] != 0
-            {
+            while name_start + nlen < data.len() && nlen < 63 && data[name_start + nlen] != 0 {
                 sec.name[nlen] = data[name_start + nlen];
                 nlen += 1;
             }
@@ -804,8 +797,16 @@ fn parse_elf(data: &[u8]) -> Result<ElfInfo, &'static [u8]> {
 
                     let elf_sym = Elf64Sym {
                         name_offset: read_u32_le(data, sbase).unwrap_or(0),
-                        info: if sbase + 4 < data.len() { data[sbase + 4] } else { 0 },
-                        other: if sbase + 5 < data.len() { data[sbase + 5] } else { 0 },
+                        info: if sbase + 4 < data.len() {
+                            data[sbase + 4]
+                        } else {
+                            0
+                        },
+                        other: if sbase + 5 < data.len() {
+                            data[sbase + 5]
+                        } else {
+                            0
+                        },
                         shndx: read_u16_le(data, sbase + 6).unwrap_or(0),
                         value: read_u64_le(data, sbase + 8).unwrap_or(0),
                         size: read_u64_le(data, sbase + 16).unwrap_or(0),
@@ -825,10 +826,7 @@ fn parse_elf(data: &[u8]) -> Result<ElfInfo, &'static [u8]> {
                     if strtab_offset > 0 && noff < strtab_size {
                         let nstart = strtab_offset + noff;
                         let mut nlen = 0;
-                        while nstart + nlen < data.len()
-                            && nlen < 127
-                            && data[nstart + nlen] != 0
-                        {
+                        while nstart + nlen < data.len() && nlen < 127 && data[nstart + nlen] != 0 {
                             sym.name[nlen] = data[nstart + nlen];
                             nlen += 1;
                         }
@@ -1032,18 +1030,53 @@ fn tokenize_expr(input: &[u8]) -> Vec<ExprToken> {
     let mut i = 0;
     while i < input.len() {
         match input[i] {
-            b' ' | b'\t' => { i += 1; }
-            b'+' => { tokens.push(ExprToken::Plus); i += 1; }
-            b'-' => { tokens.push(ExprToken::Minus); i += 1; }
-            b'*' => { tokens.push(ExprToken::Star); i += 1; }
-            b'/' => { tokens.push(ExprToken::Slash); i += 1; }
-            b'%' => { tokens.push(ExprToken::Percent); i += 1; }
-            b'&' => { tokens.push(ExprToken::Ampersand); i += 1; }
-            b'|' => { tokens.push(ExprToken::Pipe); i += 1; }
-            b'^' => { tokens.push(ExprToken::Caret); i += 1; }
-            b'~' => { tokens.push(ExprToken::Tilde); i += 1; }
-            b'(' => { tokens.push(ExprToken::LParen); i += 1; }
-            b')' => { tokens.push(ExprToken::RParen); i += 1; }
+            b' ' | b'\t' => {
+                i += 1;
+            }
+            b'+' => {
+                tokens.push(ExprToken::Plus);
+                i += 1;
+            }
+            b'-' => {
+                tokens.push(ExprToken::Minus);
+                i += 1;
+            }
+            b'*' => {
+                tokens.push(ExprToken::Star);
+                i += 1;
+            }
+            b'/' => {
+                tokens.push(ExprToken::Slash);
+                i += 1;
+            }
+            b'%' => {
+                tokens.push(ExprToken::Percent);
+                i += 1;
+            }
+            b'&' => {
+                tokens.push(ExprToken::Ampersand);
+                i += 1;
+            }
+            b'|' => {
+                tokens.push(ExprToken::Pipe);
+                i += 1;
+            }
+            b'^' => {
+                tokens.push(ExprToken::Caret);
+                i += 1;
+            }
+            b'~' => {
+                tokens.push(ExprToken::Tilde);
+                i += 1;
+            }
+            b'(' => {
+                tokens.push(ExprToken::LParen);
+                i += 1;
+            }
+            b')' => {
+                tokens.push(ExprToken::RParen);
+                i += 1;
+            }
             b'<' if i + 1 < input.len() && input[i + 1] == b'<' => {
                 tokens.push(ExprToken::ShiftLeft);
                 i += 2;
@@ -1055,7 +1088,8 @@ fn tokenize_expr(input: &[u8]) -> Vec<ExprToken> {
             b'0'..=b'9' => {
                 // Parse number (decimal or hex with 0x prefix)
                 let start = i;
-                if input[i] == b'0' && i + 1 < input.len()
+                if input[i] == b'0'
+                    && i + 1 < input.len()
                     && (input[i + 1] == b'x' || input[i + 1] == b'X')
                 {
                     i += 2;
@@ -1086,7 +1120,9 @@ fn tokenize_expr(input: &[u8]) -> Vec<ExprToken> {
                     tokens.push(ExprToken::Number(0));
                 }
             }
-            _ => { i += 1; } // Skip unknown characters
+            _ => {
+                i += 1;
+            } // Skip unknown characters
         }
     }
     tokens.push(ExprToken::End);
@@ -1277,18 +1313,53 @@ fn eval_expr(input: &[u8], regs: &[u64; REG_COUNT]) -> Result<i64, &'static [u8]
     let mut i = 0;
     while i < input.len() {
         match input[i] {
-            b' ' | b'\t' => { i += 1; }
-            b'+' => { tokens.push(ExprToken::Plus); i += 1; }
-            b'-' => { tokens.push(ExprToken::Minus); i += 1; }
-            b'*' => { tokens.push(ExprToken::Star); i += 1; }
-            b'/' => { tokens.push(ExprToken::Slash); i += 1; }
-            b'%' => { tokens.push(ExprToken::Percent); i += 1; }
-            b'&' => { tokens.push(ExprToken::Ampersand); i += 1; }
-            b'|' => { tokens.push(ExprToken::Pipe); i += 1; }
-            b'^' => { tokens.push(ExprToken::Caret); i += 1; }
-            b'~' => { tokens.push(ExprToken::Tilde); i += 1; }
-            b'(' => { tokens.push(ExprToken::LParen); i += 1; }
-            b')' => { tokens.push(ExprToken::RParen); i += 1; }
+            b' ' | b'\t' => {
+                i += 1;
+            }
+            b'+' => {
+                tokens.push(ExprToken::Plus);
+                i += 1;
+            }
+            b'-' => {
+                tokens.push(ExprToken::Minus);
+                i += 1;
+            }
+            b'*' => {
+                tokens.push(ExprToken::Star);
+                i += 1;
+            }
+            b'/' => {
+                tokens.push(ExprToken::Slash);
+                i += 1;
+            }
+            b'%' => {
+                tokens.push(ExprToken::Percent);
+                i += 1;
+            }
+            b'&' => {
+                tokens.push(ExprToken::Ampersand);
+                i += 1;
+            }
+            b'|' => {
+                tokens.push(ExprToken::Pipe);
+                i += 1;
+            }
+            b'^' => {
+                tokens.push(ExprToken::Caret);
+                i += 1;
+            }
+            b'~' => {
+                tokens.push(ExprToken::Tilde);
+                i += 1;
+            }
+            b'(' => {
+                tokens.push(ExprToken::LParen);
+                i += 1;
+            }
+            b')' => {
+                tokens.push(ExprToken::RParen);
+                i += 1;
+            }
             b'<' if i + 1 < input.len() && input[i + 1] == b'<' => {
                 tokens.push(ExprToken::ShiftLeft);
                 i += 2;
@@ -1299,7 +1370,8 @@ fn eval_expr(input: &[u8], regs: &[u64; REG_COUNT]) -> Result<i64, &'static [u8]
             }
             b'0'..=b'9' => {
                 let start = i;
-                if input[i] == b'0' && i + 1 < input.len()
+                if input[i] == b'0'
+                    && i + 1 < input.len()
                     && (input[i + 1] == b'x' || input[i + 1] == b'X')
                 {
                     i += 2;
@@ -1328,7 +1400,9 @@ fn eval_expr(input: &[u8], regs: &[u64; REG_COUNT]) -> Result<i64, &'static [u8]
                     tokens.push(ExprToken::Number(0));
                 }
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
     tokens.push(ExprToken::End);
@@ -1353,10 +1427,18 @@ struct DisasmInst {
 /// Simple x86_64 disassembler covering common instructions.
 fn disasm_one(code: &[u8], addr: u64) -> DisasmInst {
     if code.is_empty() {
-        return DisasmInst { len: 0, text: [0u8; 64], text_len: 0 };
+        return DisasmInst {
+            len: 0,
+            text: [0u8; 64],
+            text_len: 0,
+        };
     }
 
-    let mut inst = DisasmInst { len: 1, text: [0u8; 64], text_len: 0 };
+    let mut inst = DisasmInst {
+        len: 1,
+        text: [0u8; 64],
+        text_len: 0,
+    };
 
     // REX prefix detection
     let mut has_rex_w = false;
@@ -1375,14 +1457,38 @@ fn disasm_one(code: &[u8], addr: u64) -> DisasmInst {
     idx += 1;
 
     match opcode {
-        0x00..=0x05 => { write_inst(&mut inst, b"add"); inst.len = idx; }
-        0x08..=0x0d => { write_inst(&mut inst, b"or"); inst.len = idx; }
-        0x10..=0x15 => { write_inst(&mut inst, b"adc"); inst.len = idx; }
-        0x18..=0x1d => { write_inst(&mut inst, b"sbb"); inst.len = idx; }
-        0x20..=0x25 => { write_inst(&mut inst, b"and"); inst.len = idx; }
-        0x28..=0x2d => { write_inst(&mut inst, b"sub"); inst.len = idx; }
-        0x30..=0x35 => { write_inst(&mut inst, b"xor"); inst.len = idx; }
-        0x38..=0x3d => { write_inst(&mut inst, b"cmp"); inst.len = idx; }
+        0x00..=0x05 => {
+            write_inst(&mut inst, b"add");
+            inst.len = idx;
+        }
+        0x08..=0x0d => {
+            write_inst(&mut inst, b"or");
+            inst.len = idx;
+        }
+        0x10..=0x15 => {
+            write_inst(&mut inst, b"adc");
+            inst.len = idx;
+        }
+        0x18..=0x1d => {
+            write_inst(&mut inst, b"sbb");
+            inst.len = idx;
+        }
+        0x20..=0x25 => {
+            write_inst(&mut inst, b"and");
+            inst.len = idx;
+        }
+        0x28..=0x2d => {
+            write_inst(&mut inst, b"sub");
+            inst.len = idx;
+        }
+        0x30..=0x35 => {
+            write_inst(&mut inst, b"xor");
+            inst.len = idx;
+        }
+        0x38..=0x3d => {
+            write_inst(&mut inst, b"cmp");
+            inst.len = idx;
+        }
         0x50..=0x57 => {
             let reg = (opcode - 0x50) as usize;
             write_inst_reg(&mut inst, b"push", reg, has_rex_w);
@@ -1393,23 +1499,62 @@ fn disasm_one(code: &[u8], addr: u64) -> DisasmInst {
             write_inst_reg(&mut inst, b"pop", reg, has_rex_w);
             inst.len = idx;
         }
-        0x70 => { write_inst_branch(&mut inst, b"jo", code, idx, addr); }
-        0x71 => { write_inst_branch(&mut inst, b"jno", code, idx, addr); }
-        0x72 => { write_inst_branch(&mut inst, b"jb", code, idx, addr); }
-        0x73 => { write_inst_branch(&mut inst, b"jae", code, idx, addr); }
-        0x74 => { write_inst_branch(&mut inst, b"je", code, idx, addr); }
-        0x75 => { write_inst_branch(&mut inst, b"jne", code, idx, addr); }
-        0x76 => { write_inst_branch(&mut inst, b"jbe", code, idx, addr); }
-        0x77 => { write_inst_branch(&mut inst, b"ja", code, idx, addr); }
-        0x78 => { write_inst_branch(&mut inst, b"js", code, idx, addr); }
-        0x79 => { write_inst_branch(&mut inst, b"jns", code, idx, addr); }
-        0x7e => { write_inst_branch(&mut inst, b"jle", code, idx, addr); }
-        0x7f => { write_inst_branch(&mut inst, b"jg", code, idx, addr); }
-        0x89 => { write_inst(&mut inst, b"mov"); inst.len = idx + modrm_len(code, idx); }
-        0x8b => { write_inst(&mut inst, b"mov"); inst.len = idx + modrm_len(code, idx); }
-        0x8d => { write_inst(&mut inst, b"lea"); inst.len = idx + modrm_len(code, idx); }
-        0x90 => { write_inst(&mut inst, b"nop"); inst.len = idx; }
-        0xb0..=0xb7 => { write_inst(&mut inst, b"mov"); inst.len = idx + 1; }
+        0x70 => {
+            write_inst_branch(&mut inst, b"jo", code, idx, addr);
+        }
+        0x71 => {
+            write_inst_branch(&mut inst, b"jno", code, idx, addr);
+        }
+        0x72 => {
+            write_inst_branch(&mut inst, b"jb", code, idx, addr);
+        }
+        0x73 => {
+            write_inst_branch(&mut inst, b"jae", code, idx, addr);
+        }
+        0x74 => {
+            write_inst_branch(&mut inst, b"je", code, idx, addr);
+        }
+        0x75 => {
+            write_inst_branch(&mut inst, b"jne", code, idx, addr);
+        }
+        0x76 => {
+            write_inst_branch(&mut inst, b"jbe", code, idx, addr);
+        }
+        0x77 => {
+            write_inst_branch(&mut inst, b"ja", code, idx, addr);
+        }
+        0x78 => {
+            write_inst_branch(&mut inst, b"js", code, idx, addr);
+        }
+        0x79 => {
+            write_inst_branch(&mut inst, b"jns", code, idx, addr);
+        }
+        0x7e => {
+            write_inst_branch(&mut inst, b"jle", code, idx, addr);
+        }
+        0x7f => {
+            write_inst_branch(&mut inst, b"jg", code, idx, addr);
+        }
+        0x89 => {
+            write_inst(&mut inst, b"mov");
+            inst.len = idx + modrm_len(code, idx);
+        }
+        0x8b => {
+            write_inst(&mut inst, b"mov");
+            inst.len = idx + modrm_len(code, idx);
+        }
+        0x8d => {
+            write_inst(&mut inst, b"lea");
+            inst.len = idx + modrm_len(code, idx);
+        }
+        0x90 => {
+            write_inst(&mut inst, b"nop");
+            inst.len = idx;
+        }
+        0xb0..=0xb7 => {
+            write_inst(&mut inst, b"mov");
+            inst.len = idx + 1;
+        }
         0xb8..=0xbf => {
             if has_rex_w {
                 write_inst(&mut inst, b"movabs");
@@ -1419,16 +1564,27 @@ fn disasm_one(code: &[u8], addr: u64) -> DisasmInst {
                 inst.len = idx + 4;
             }
         }
-        0xc3 => { write_inst(&mut inst, b"ret"); inst.len = idx; }
-        0xc9 => { write_inst(&mut inst, b"leave"); inst.len = idx; }
-        0xcc => { write_inst(&mut inst, b"int3"); inst.len = idx; }
-        0xcd => { write_inst(&mut inst, b"int"); inst.len = idx + 1; }
+        0xc3 => {
+            write_inst(&mut inst, b"ret");
+            inst.len = idx;
+        }
+        0xc9 => {
+            write_inst(&mut inst, b"leave");
+            inst.len = idx;
+        }
+        0xcc => {
+            write_inst(&mut inst, b"int3");
+            inst.len = idx;
+        }
+        0xcd => {
+            write_inst(&mut inst, b"int");
+            inst.len = idx + 1;
+        }
         0xe8 => {
             // call rel32
             if idx + 4 <= code.len() {
-                let rel = i32::from_le_bytes([
-                    code[idx], code[idx + 1], code[idx + 2], code[idx + 3],
-                ]);
+                let rel =
+                    i32::from_le_bytes([code[idx], code[idx + 1], code[idx + 2], code[idx + 3]]);
                 let target = addr.wrapping_add((idx + 4) as u64).wrapping_add(rel as u64);
                 write_inst_addr(&mut inst, b"call", target);
                 inst.len = idx + 4;
@@ -1440,9 +1596,8 @@ fn disasm_one(code: &[u8], addr: u64) -> DisasmInst {
         0xe9 => {
             // jmp rel32
             if idx + 4 <= code.len() {
-                let rel = i32::from_le_bytes([
-                    code[idx], code[idx + 1], code[idx + 2], code[idx + 3],
-                ]);
+                let rel =
+                    i32::from_le_bytes([code[idx], code[idx + 1], code[idx + 2], code[idx + 3]]);
                 let target = addr.wrapping_add((idx + 4) as u64).wrapping_add(rel as u64);
                 write_inst_addr(&mut inst, b"jmp", target);
                 inst.len = idx + 4;
@@ -1463,8 +1618,14 @@ fn disasm_one(code: &[u8], addr: u64) -> DisasmInst {
                 inst.len = idx;
             }
         }
-        0xf4 => { write_inst(&mut inst, b"hlt"); inst.len = idx; }
-        0xf7 => { write_inst(&mut inst, b"test/not/neg/mul/div"); inst.len = idx + modrm_len(code, idx); }
+        0xf4 => {
+            write_inst(&mut inst, b"hlt");
+            inst.len = idx;
+        }
+        0xf7 => {
+            write_inst(&mut inst, b"test/not/neg/mul/div");
+            inst.len = idx + modrm_len(code, idx);
+        }
         0xff => {
             if idx < code.len() {
                 let modrm = code[idx];
@@ -1489,8 +1650,14 @@ fn disasm_one(code: &[u8], addr: u64) -> DisasmInst {
                 let op2 = code[idx];
                 idx += 1;
                 match op2 {
-                    0x05 => { write_inst(&mut inst, b"syscall"); inst.len = idx; }
-                    0x1f => { write_inst(&mut inst, b"nop"); inst.len = idx + modrm_len(code, idx); }
+                    0x05 => {
+                        write_inst(&mut inst, b"syscall");
+                        inst.len = idx;
+                    }
+                    0x1f => {
+                        write_inst(&mut inst, b"nop");
+                        inst.len = idx + modrm_len(code, idx);
+                    }
                     0x80..=0x8f => {
                         let cc_name = match op2 & 0x0f {
                             0x0 => b"jo" as &[u8],
@@ -1512,9 +1679,13 @@ fn disasm_one(code: &[u8], addr: u64) -> DisasmInst {
                         };
                         if idx + 4 <= code.len() {
                             let rel = i32::from_le_bytes([
-                                code[idx], code[idx + 1], code[idx + 2], code[idx + 3],
+                                code[idx],
+                                code[idx + 1],
+                                code[idx + 2],
+                                code[idx + 3],
                             ]);
-                            let target = addr.wrapping_add((idx + 4) as u64).wrapping_add(rel as u64);
+                            let target =
+                                addr.wrapping_add((idx + 4) as u64).wrapping_add(rel as u64);
                             write_inst_addr(&mut inst, cc_name, target);
                             inst.len = idx + 4;
                         } else {
@@ -1522,12 +1693,30 @@ fn disasm_one(code: &[u8], addr: u64) -> DisasmInst {
                             inst.len = idx;
                         }
                     }
-                    0xaf => { write_inst(&mut inst, b"imul"); inst.len = idx + modrm_len(code, idx); }
-                    0xb6 => { write_inst(&mut inst, b"movzx"); inst.len = idx + modrm_len(code, idx); }
-                    0xb7 => { write_inst(&mut inst, b"movzx"); inst.len = idx + modrm_len(code, idx); }
-                    0xbe => { write_inst(&mut inst, b"movsx"); inst.len = idx + modrm_len(code, idx); }
-                    0xbf => { write_inst(&mut inst, b"movsx"); inst.len = idx + modrm_len(code, idx); }
-                    _ => { write_inst(&mut inst, b"(two-byte)"); inst.len = idx; }
+                    0xaf => {
+                        write_inst(&mut inst, b"imul");
+                        inst.len = idx + modrm_len(code, idx);
+                    }
+                    0xb6 => {
+                        write_inst(&mut inst, b"movzx");
+                        inst.len = idx + modrm_len(code, idx);
+                    }
+                    0xb7 => {
+                        write_inst(&mut inst, b"movzx");
+                        inst.len = idx + modrm_len(code, idx);
+                    }
+                    0xbe => {
+                        write_inst(&mut inst, b"movsx");
+                        inst.len = idx + modrm_len(code, idx);
+                    }
+                    0xbf => {
+                        write_inst(&mut inst, b"movsx");
+                        inst.len = idx + modrm_len(code, idx);
+                    }
+                    _ => {
+                        write_inst(&mut inst, b"(two-byte)");
+                        inst.len = idx;
+                    }
                 }
             } else {
                 write_inst(&mut inst, b"(bad)");
@@ -1561,10 +1750,24 @@ fn write_inst(inst: &mut DisasmInst, text: &[u8]) {
 /// Write mnemonic + register operand.
 fn write_inst_reg(inst: &mut DisasmInst, mnemonic: &[u8], reg: usize, is_64: bool) {
     let reg_names_64 = [
-        b"rax" as &[u8], b"rcx", b"rdx", b"rbx", b"rsp", b"rbp", b"rsi", b"rdi",
+        b"rax" as &[u8],
+        b"rcx",
+        b"rdx",
+        b"rbx",
+        b"rsp",
+        b"rbp",
+        b"rsi",
+        b"rdi",
     ];
     let reg_names_32 = [
-        b"eax" as &[u8], b"ecx", b"edx", b"ebx", b"esp", b"ebp", b"esi", b"edi",
+        b"eax" as &[u8],
+        b"ecx",
+        b"edx",
+        b"ebx",
+        b"esp",
+        b"ebp",
+        b"esi",
+        b"edi",
     ];
     let rname = if is_64 {
         reg_names_64.get(reg).copied().unwrap_or(b"???")
@@ -1575,7 +1778,10 @@ fn write_inst_reg(inst: &mut DisasmInst, mnemonic: &[u8], reg: usize, is_64: boo
     let mn_len = mnemonic.len().min(32);
     inst.text[..mn_len].copy_from_slice(&mnemonic[..mn_len]);
     pos += mn_len;
-    if pos < 63 { inst.text[pos] = b' '; pos += 1; }
+    if pos < 63 {
+        inst.text[pos] = b' ';
+        pos += 1;
+    }
     let rn_len = rname.len().min(63 - pos);
     inst.text[pos..pos + rn_len].copy_from_slice(&rname[..rn_len]);
     pos += rn_len;
@@ -1588,7 +1794,10 @@ fn write_inst_addr(inst: &mut DisasmInst, mnemonic: &[u8], target: u64) {
     let mn_len = mnemonic.len().min(32);
     inst.text[..mn_len].copy_from_slice(&mnemonic[..mn_len]);
     pos += mn_len;
-    if pos < 63 { inst.text[pos] = b' '; pos += 1; }
+    if pos < 63 {
+        inst.text[pos] = b' ';
+        pos += 1;
+    }
     let mut hex_buf = [0u8; 20];
     let hex_len = format_hex(target, &mut hex_buf);
     let copy_len = hex_len.min(63 - pos);
@@ -1622,19 +1831,27 @@ fn modrm_len(code: &[u8], idx: usize) -> usize {
 
     match mod_field {
         0 => {
-            if rm == 4 { len += 1; } // SIB byte
-            if rm == 5 { len += 4; } // disp32 (RIP-relative)
+            if rm == 4 {
+                len += 1;
+            } // SIB byte
+            if rm == 5 {
+                len += 4;
+            } // disp32 (RIP-relative)
             // SIB with base=5 also adds disp32
             if rm == 4 && idx + 1 < code.len() && (code[idx + 1] & 7) == 5 {
                 len += 4;
             }
         }
         1 => {
-            if rm == 4 { len += 1; } // SIB
+            if rm == 4 {
+                len += 1;
+            } // SIB
             len += 1; // disp8
         }
         2 => {
-            if rm == 4 { len += 1; } // SIB
+            if rm == 4 {
+                len += 1;
+            } // SIB
             len += 4; // disp32
         }
         3 => { /* register direct, no extra bytes */ }
@@ -1650,12 +1867,12 @@ fn modrm_len(code: &[u8], idx: usize) -> usize {
 /// Format specifier for the `x` command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExamineFormat {
-    Byte,       // b - single byte
-    Halfword,   // h - 2 bytes
-    Word,       // w - 4 bytes
-    Giant,      // g - 8 bytes
-    StringZ,    // s - null-terminated string
-    Instruction,// i - disassemble
+    Byte,        // b - single byte
+    Halfword,    // h - 2 bytes
+    Word,        // w - 4 bytes
+    Giant,       // g - 8 bytes
+    StringZ,     // s - null-terminated string
+    Instruction, // i - disassemble
 }
 
 /// Parse the x/FMT string. Returns (count, format).
@@ -1667,22 +1884,46 @@ fn parse_examine_fmt(fmt: &[u8]) -> (usize, ExamineFormat) {
     let mut i = 0;
     // Parse optional count
     while i < fmt.len() && fmt[i] >= b'0' && fmt[i] <= b'9' {
-        count = count.saturating_mul(10).saturating_add((fmt[i] - b'0') as usize);
+        count = count
+            .saturating_mul(10)
+            .saturating_add((fmt[i] - b'0') as usize);
         found_digit = true;
         i += 1;
     }
-    if !found_digit || count == 0 { count = 1; }
+    if !found_digit || count == 0 {
+        count = 1;
+    }
 
     // Parse format character
     while i < fmt.len() {
         match fmt[i] {
-            b'b' => { format = ExamineFormat::Byte; break; }
-            b'h' => { format = ExamineFormat::Halfword; break; }
-            b'w' => { format = ExamineFormat::Word; break; }
-            b'g' => { format = ExamineFormat::Giant; break; }
-            b's' => { format = ExamineFormat::StringZ; break; }
-            b'i' => { format = ExamineFormat::Instruction; break; }
-            b'x' | b'd' | b'o' | b't' | b'a' | b'c' | b'f' => { i += 1; } // Skip display format letters
+            b'b' => {
+                format = ExamineFormat::Byte;
+                break;
+            }
+            b'h' => {
+                format = ExamineFormat::Halfword;
+                break;
+            }
+            b'w' => {
+                format = ExamineFormat::Word;
+                break;
+            }
+            b'g' => {
+                format = ExamineFormat::Giant;
+                break;
+            }
+            b's' => {
+                format = ExamineFormat::StringZ;
+                break;
+            }
+            b'i' => {
+                format = ExamineFormat::Instruction;
+                break;
+            }
+            b'x' | b'd' | b'o' | b't' | b'a' | b'c' | b'f' => {
+                i += 1;
+            } // Skip display format letters
             _ => break,
         }
     }
@@ -1747,7 +1988,10 @@ fn format_examine(
             ExamineFormat::Word => {
                 if offset + 4 <= data.len() {
                     let val = u32::from_le_bytes([
-                        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
                     ]);
                     let n = format_hex(val as u64, &mut hex_buf);
                     let _ = out.write_all(&hex_buf[..n]);
@@ -1760,8 +2004,14 @@ fn format_examine(
             ExamineFormat::Giant => {
                 if offset + 8 <= data.len() {
                     let val = u64::from_le_bytes([
-                        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-                        data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                        data[offset + 4],
+                        data[offset + 5],
+                        data[offset + 6],
+                        data[offset + 7],
                     ]);
                     let n = format_hex(val, &mut hex_buf);
                     let _ = out.write_all(&hex_buf[..n]);
@@ -1874,10 +2124,9 @@ fn gdb_encode_registers(regs: &[u64; REG_COUNT], buf: &mut [u8]) -> usize {
     // GDB expects registers in a specific order for x86_64:
     // rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8-r15, rip, rflags, cs, ss, ds, es, fs, gs
     let order = [
-        REG_RAX, REG_RBX, REG_RCX, REG_RDX, REG_RSI, REG_RDI,
-        REG_RBP, REG_RSP, REG_R8, REG_R9, REG_R10, REG_R11,
-        REG_R12, REG_R13, REG_R14, REG_R15, REG_RIP, REG_RFLAGS,
-        REG_CS, REG_SS, REG_DS, REG_ES, REG_FS, REG_GS,
+        REG_RAX, REG_RBX, REG_RCX, REG_RDX, REG_RSI, REG_RDI, REG_RBP, REG_RSP, REG_R8, REG_R9,
+        REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_RIP, REG_RFLAGS, REG_CS, REG_SS,
+        REG_DS, REG_ES, REG_FS, REG_GS,
     ];
 
     for &reg_idx in &order {
@@ -2274,8 +2523,12 @@ impl Debugger {
 
             // Type
             match bp.kind {
-                BreakpointKind::Software => { let _ = out.write_all(b"breakpoint     "); }
-                BreakpointKind::Hardware => { let _ = out.write_all(b"hw breakpoint  "); }
+                BreakpointKind::Software => {
+                    let _ = out.write_all(b"breakpoint     ");
+                }
+                BreakpointKind::Hardware => {
+                    let _ = out.write_all(b"hw breakpoint  ");
+                }
             }
 
             // Disposition
@@ -2357,9 +2610,15 @@ impl Debugger {
             }
 
             match thread.state {
-                ThreadState::Running => { let _ = out.write_all(b"Running  "); }
-                ThreadState::Stopped => { let _ = out.write_all(b"Stopped  "); }
-                ThreadState::Exited => { let _ = out.write_all(b"Exited   "); }
+                ThreadState::Running => {
+                    let _ = out.write_all(b"Running  ");
+                }
+                ThreadState::Stopped => {
+                    let _ = out.write_all(b"Stopped  ");
+                }
+                ThreadState::Exited => {
+                    let _ = out.write_all(b"Exited   ");
+                }
             }
 
             if thread.name_len > 0 {
@@ -2399,12 +2658,11 @@ impl Debugger {
                 // Read saved RBP and return address
                 if let Some(data) = elf.bytes_at_vaddr(current_rbp, 16) {
                     let saved_rbp = u64::from_le_bytes([
-                        data[0], data[1], data[2], data[3],
-                        data[4], data[5], data[6], data[7],
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                     ]);
                     let ret_addr = u64::from_le_bytes([
-                        data[8], data[9], data[10], data[11],
-                        data[12], data[13], data[14], data[15],
+                        data[8], data[9], data[10], data[11], data[12], data[13], data[14],
+                        data[15],
                     ]);
 
                     if ret_addr == 0 {
@@ -2968,7 +3226,9 @@ impl Debugger {
             let _ = out.write_all(b"  next (n, ni)     -- Step over one instruction\n");
             let _ = out.write_all(b"  break (b) LOC    -- Set breakpoint at LOC\n");
             let _ = out.write_all(b"  delete [NUM]     -- Delete breakpoint(s)\n");
-            let _ = out.write_all(b"  info WHAT        -- Show information (breakpoints, registers, threads)\n");
+            let _ = out.write_all(
+                b"  info WHAT        -- Show information (breakpoints, registers, threads)\n",
+            );
             let _ = out.write_all(b"  backtrace (bt)   -- Show call stack\n");
             let _ = out.write_all(b"  print (p) EXPR   -- Evaluate and print expression\n");
             let _ = out.write_all(b"  x/FMT ADDR       -- Examine memory\n");
@@ -2990,7 +3250,9 @@ impl Debugger {
         } else if bytes_eq(topic, b"x") {
             let _ = out.write_all(b"x/[COUNT][FORMAT] ADDRESS\n");
             let _ = out.write_all(b"  Examine memory at ADDRESS.\n");
-            let _ = out.write_all(b"  FORMAT: b=byte, h=halfword, w=word, g=giant, s=string, i=instruction\n");
+            let _ = out.write_all(
+                b"  FORMAT: b=byte, h=halfword, w=word, g=giant, s=string, i=instruction\n",
+            );
         } else {
             let _ = out.write_all(b"No help available for: ");
             let _ = out.write_all(topic);
@@ -3226,12 +3488,8 @@ impl Debugger {
                 // Send ack
                 let _ = out.write_all(b"+");
 
-                let resp_len = gdb_handle_command(
-                    payload,
-                    &self.regs,
-                    self.elf.as_ref(),
-                    &mut response,
-                );
+                let resp_len =
+                    gdb_handle_command(payload, &self.regs, self.elf.as_ref(), &mut response);
                 let _ = out.write_all(&response[..resp_len]);
                 let _ = out.flush();
 
@@ -3368,10 +3626,18 @@ fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
     while i < arg_ptrs.len() {
         let arg = arg_ptrs[i];
         match arg {
-            b"--help" | b"-h" => { args.show_help = true; }
-            b"--version" | b"-v" => { args.show_version = true; }
-            b"--quiet" | b"-q" => { args.quiet = true; }
-            b"--args" => { args.pass_args = true; }
+            b"--help" | b"-h" => {
+                args.show_help = true;
+            }
+            b"--version" | b"-v" => {
+                args.show_version = true;
+            }
+            b"--quiet" | b"-q" => {
+                args.quiet = true;
+            }
+            b"--args" => {
+                args.pass_args = true;
+            }
             b"-x" => {
                 i += 1;
                 if i < arg_ptrs.len() {
@@ -3420,8 +3686,12 @@ fn parse_args_server(argc: i32, argv: *const *const u8) -> Args {
     while i < arg_ptrs.len() {
         let arg = arg_ptrs[i];
         match arg {
-            b"--help" => { args.show_help = true; }
-            b"--version" => { args.show_version = true; }
+            b"--help" => {
+                args.show_help = true;
+            }
+            b"--version" => {
+                args.show_version = true;
+            }
             _ => {
                 // First non-flag arg is [host:]port
                 if arg[0] != b'-' && args.server_port == 1234 && args.binary_path.is_none() {
@@ -3801,11 +4071,16 @@ mod tests {
         data[EI_CLASS] = ELFCLASS64;
         data[EI_DATA] = ELFDATA2LSB;
         // e_type = ET_EXEC
-        data[16] = 2; data[17] = 0;
+        data[16] = 2;
+        data[17] = 0;
         // e_machine = EM_X86_64
-        data[18] = 62; data[19] = 0;
+        data[18] = 62;
+        data[19] = 0;
         // e_entry = 0x400000
-        data[24] = 0x00; data[25] = 0x00; data[26] = 0x40; data[27] = 0x00;
+        data[24] = 0x00;
+        data[25] = 0x00;
+        data[26] = 0x40;
+        data[27] = 0x00;
         // Leave phoff, shoff as 0 (no sections/segments)
 
         let result = parse_elf(&data);
@@ -3842,11 +4117,17 @@ mod tests {
     #[test]
     fn test_debugger_delete_breakpoint() {
         let mut dbg = Debugger::new();
-        let _ = capture(|out| { dbg.set_breakpoint(b"0x400000", out); });
-        let _ = capture(|out| { dbg.set_breakpoint(b"0x400100", out); });
+        let _ = capture(|out| {
+            dbg.set_breakpoint(b"0x400000", out);
+        });
+        let _ = capture(|out| {
+            dbg.set_breakpoint(b"0x400100", out);
+        });
         assert_eq!(dbg.breakpoints.len(), 2);
 
-        let _ = capture(|out| { dbg.delete_breakpoint(1, out); });
+        let _ = capture(|out| {
+            dbg.delete_breakpoint(1, out);
+        });
         assert_eq!(dbg.breakpoints.len(), 1);
         assert_eq!(dbg.breakpoints[0].id, 2);
     }
@@ -3854,10 +4135,16 @@ mod tests {
     #[test]
     fn test_debugger_delete_all_breakpoints() {
         let mut dbg = Debugger::new();
-        let _ = capture(|out| { dbg.set_breakpoint(b"0x400000", out); });
-        let _ = capture(|out| { dbg.set_breakpoint(b"0x400100", out); });
+        let _ = capture(|out| {
+            dbg.set_breakpoint(b"0x400000", out);
+        });
+        let _ = capture(|out| {
+            dbg.set_breakpoint(b"0x400100", out);
+        });
 
-        let out = capture(|out| { dbg.delete_breakpoint(0, out); });
+        let out = capture(|out| {
+            dbg.delete_breakpoint(0, out);
+        });
         assert!(dbg.breakpoints.is_empty());
         assert!(starts_with(&out, b"Deleted 2"));
     }
@@ -3865,15 +4152,21 @@ mod tests {
     #[test]
     fn test_debugger_info_breakpoints_empty() {
         let dbg = Debugger::new();
-        let out = capture(|out| { dbg.info_breakpoints(out); });
+        let out = capture(|out| {
+            dbg.info_breakpoints(out);
+        });
         assert_eq!(out, b"No breakpoints.\n");
     }
 
     #[test]
     fn test_debugger_info_breakpoints_with_entries() {
         let mut dbg = Debugger::new();
-        let _ = capture(|out| { dbg.set_breakpoint(b"0x400000", out); });
-        let out = capture(|out| { dbg.info_breakpoints(out); });
+        let _ = capture(|out| {
+            dbg.set_breakpoint(b"0x400000", out);
+        });
+        let out = capture(|out| {
+            dbg.info_breakpoints(out);
+        });
         assert!(starts_with(&out, b"Num"));
         // Should contain the breakpoint address
         assert!(out.windows(8).any(|w| w == b"00400000"));
@@ -3893,7 +4186,9 @@ mod tests {
     #[test]
     fn test_debugger_set_watchpoint() {
         let mut dbg = Debugger::new();
-        let out = capture(|out| { dbg.cmd_watch(b"0x600000", out); });
+        let out = capture(|out| {
+            dbg.cmd_watch(b"0x600000", out);
+        });
         assert!(!out.is_empty());
         assert_eq!(dbg.watchpoints.len(), 1);
     }
@@ -3914,7 +4209,9 @@ mod tests {
         let mut dbg = Debugger::new();
         dbg.regs[REG_RAX] = 0xdeadbeef;
         dbg.regs[REG_RIP] = 0x400000;
-        let out = capture(|out| { dbg.info_registers(out); });
+        let out = capture(|out| {
+            dbg.info_registers(out);
+        });
         // Should contain "rax" and "rip"
         assert!(out.windows(3).any(|w| w == b"rax"));
         assert!(out.windows(3).any(|w| w == b"rip"));
@@ -3932,7 +4229,9 @@ mod tests {
     #[test]
     fn test_debugger_info_threads_empty() {
         let dbg = Debugger::new();
-        let out = capture(|out| { dbg.info_threads(out); });
+        let out = capture(|out| {
+            dbg.info_threads(out);
+        });
         assert_eq!(out, b"No threads.\n");
     }
 
@@ -3940,7 +4239,9 @@ mod tests {
     fn test_debugger_info_threads_with_entries() {
         let mut dbg = Debugger::new();
         dbg.threads.push(ThreadInfo::new(1));
-        let out = capture(|out| { dbg.info_threads(out); });
+        let out = capture(|out| {
+            dbg.info_threads(out);
+        });
         assert!(starts_with(&out, b"  Id"));
     }
 
@@ -4347,7 +4648,10 @@ mod tests {
 
     #[test]
     fn test_detect_personality_gdbserver() {
-        assert_eq!(detect_personality(b"/usr/bin/gdbserver"), Personality::GdbServer);
+        assert_eq!(
+            detect_personality(b"/usr/bin/gdbserver"),
+            Personality::GdbServer
+        );
         assert_eq!(detect_personality(b"gdbserver"), Personality::GdbServer);
         assert_eq!(detect_personality(b"gdbserver.exe"), Personality::GdbServer);
     }

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ado(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_ado(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Azure DevOps Services (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Azure DevOps Services (Slate OS)");
+        return 0;
+    }
     println!("Azure DevOps Services (Slate OS)");
     println!("  Vendor: Microsoft Corporation (Redmond, WA — NASDAQ:MSFT)");
     println!("  History: started as Visual Studio Team System 2005");
@@ -37,30 +44,49 @@ fn run_ado(args: &[String], _prog: &str) -> i32 {
     println!("          Pipeline minutes: 1,800 free/mo MS-hosted, unlimited self-hosted");
     println!("  Five services:");
     println!("    1. Azure Boards — work items, kanban, sprints, queries (Jira competitor)");
-    println!("    2. Azure Repos — Git + TFVC (centralized version control still supported for legacy)");
-    println!("    3. Azure Pipelines — YAML or Classic — Windows/Linux/Mac agents, 'release pipelines'");
+    println!(
+        "    2. Azure Repos — Git + TFVC (centralized version control still supported for legacy)"
+    );
+    println!(
+        "    3. Azure Pipelines — YAML or Classic — Windows/Linux/Mac agents, 'release pipelines'"
+    );
     println!("    4. Azure Test Plans — exploratory testing, manual test cases, parameter-driven");
-    println!("    5. Azure Artifacts — feed-based package management (npm, NuGet, Maven, Python, Universal)");
+    println!(
+        "    5. Azure Artifacts — feed-based package management (npm, NuGet, Maven, Python, Universal)"
+    );
     println!("  Editions: Azure DevOps Services (SaaS at dev.azure.com)");
     println!("           Azure DevOps Server (on-prem, formerly TFS — 2022 release)");
     println!("  Features:");
-    println!("    - Work item types: Epic, Feature, User Story/PBI, Task, Bug — fully customizable process templates");
-    println!("    - Pipeline integration with every Azure service (App Service, AKS, Functions, etc.)");
+    println!(
+        "    - Work item types: Epic, Feature, User Story/PBI, Task, Bug — fully customizable process templates"
+    );
+    println!(
+        "    - Pipeline integration with every Azure service (App Service, AKS, Functions, etc.)"
+    );
     println!("    - Variable groups + Azure Key Vault integration for secrets");
     println!("    - Deployment groups, approvals, gates, environments");
     println!("    - GitHub Advanced Security for Azure DevOps (CodeQL, secret scanning)");
     println!("    - Wiki per project, dashboards, analytics views");
-    println!("  Strategy: Microsoft positions GitHub as cloud-first, Azure DevOps as enterprise/on-prem-friendly");
-    println!("           After GitHub acquisition (2018, $7.5B), some Microsoft teams migrating to GitHub Enterprise");
+    println!(
+        "  Strategy: Microsoft positions GitHub as cloud-first, Azure DevOps as enterprise/on-prem-friendly"
+    );
+    println!(
+        "           After GitHub acquisition (2018, $7.5B), some Microsoft teams migrating to GitHub Enterprise"
+    );
     println!("  Critique: aging UI compared to GitHub, classic pipelines feel dated");
     println!("           still THE choice for large Microsoft-stack enterprises");
-    println!("  Differentiator: tightest integration with Visual Studio + .NET tooling, mature work tracking");
+    println!(
+        "  Differentiator: tightest integration with Visual Studio + .NET tooling, mature work tracking"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "azuredevops".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "azuredevops".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ado(&rest, &_prog);
     process::exit(code);
@@ -68,7 +94,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ado};
+    use super::{basename, run_ado, strip_ext};
 
     #[test]
     fn basename_strips_path() {

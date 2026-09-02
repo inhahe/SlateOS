@@ -49,8 +49,12 @@ fn run_dosbox(args: &[String], extended: bool) -> i32 {
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
-    let commands: Vec<&str> = args.windows(2)
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
+    let commands: Vec<&str> = args
+        .windows(2)
         .filter(|w| w[0] == "-c")
         .map(|w| w[1].as_str())
         .collect();
@@ -90,7 +94,8 @@ fn run_dosbox(args: &[String], extended: bool) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "dosbox".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -104,7 +109,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dosbox};
+    use super::{basename, run_dosbox, strip_ext};
 
     #[test]
     fn basename_strips_path() {

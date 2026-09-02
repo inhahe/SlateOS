@@ -101,7 +101,9 @@ fn run_borgmatic(args: Vec<String>) -> i32 {
             0
         }
         "validate-config" => {
-            let config = args.iter().position(|a| a == "-c" || a == "--config")
+            let config = args
+                .iter()
+                .position(|a| a == "-c" || a == "--config")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("/etc/borgmatic/config.yaml");
@@ -133,7 +135,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_borgmatic};
+    use super::run_borgmatic;
 
     #[test]
     fn help_exits_zero() {

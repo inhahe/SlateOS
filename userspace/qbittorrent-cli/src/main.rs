@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_qbittorrent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_qbittorrent(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qbittorrent v4.6 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("qbittorrent v4.6 (Slate OS)");
+        return 0;
+    }
     println!("qbittorrent: desktop client started");
     println!("  libtorrent version: 2.0.9");
     println!("  Web UI: http://localhost:8080");
@@ -39,7 +46,10 @@ fn run_nox(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qbittorrent-nox v4.6 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("qbittorrent-nox v4.6 (Slate OS)");
+        return 0;
+    }
     println!("qbittorrent-nox: headless client started");
     println!("  Web UI: http://localhost:8080");
     println!("  Default credentials: admin/adminadmin");
@@ -48,7 +58,10 @@ fn run_nox(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "qbittorrent".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "qbittorrent".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "qbittorrent-nox" => run_nox(&rest, &prog),
@@ -59,7 +72,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_qbittorrent};
+    use super::{basename, run_qbittorrent, strip_ext};
 
     #[test]
     fn basename_strips_path() {

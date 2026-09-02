@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_pubsub(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pubsub [OPTIONS]");
-        println!("Google Cloud Pub/Sub (Slate OS) — planet-scale managed pub/sub (built on Google Borg)");
+        println!(
+            "Google Cloud Pub/Sub (Slate OS) — planet-scale managed pub/sub (built on Google Borg)"
+        );
         println!();
         println!("Options:");
         println!("  --topic                Topic management (publisher side)");
@@ -22,11 +28,18 @@ fn run_pubsub(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Google Cloud Pub/Sub 2024 (Slate OS) — gcloud pubsub CLI"); return 0; }
-    println!("Google Cloud Pub/Sub 2024 (Slate OS) — Planet-Scale Managed Messaging (Google heritage)");
+    if args.iter().any(|a| a == "--version") {
+        println!("Google Cloud Pub/Sub 2024 (Slate OS) — gcloud pubsub CLI");
+        return 0;
+    }
+    println!(
+        "Google Cloud Pub/Sub 2024 (Slate OS) — Planet-Scale Managed Messaging (Google heritage)"
+    );
     println!("  Vendor: Google LLC, a subsidiary of Alphabet (Mountain View, CA — NASDAQ: GOOG)");
     println!("  History (the Google internal heritage):");
-    println!("    - Internal predecessor: Google's PubSub2 (PubSub v2) — used internally for years");
+    println!(
+        "    - Internal predecessor: Google's PubSub2 (PubSub v2) — used internally for years"
+    );
     println!("    - Used internally for: Gmail event fanout, Search index updates, Ads pipelines");
     println!("    - Externalized as GCP Pub/Sub Mar 2015");
     println!("    - Built on Google's Borg + Spanner + Colossus infrastructure");
@@ -36,10 +49,16 @@ fn run_pubsub(args: &[String], _prog: &str) -> i32 {
     println!("    - 'The Google-scale pub/sub' positioning");
     println!("  Strategic position: 'planet-scale pub/sub with exactly-once + global topics':");
     println!("                    pitch: 'one topic, global delivery, exactly-once semantics'");
-    println!("                    target: real-time analytics, event-driven architectures, IoT, GCP-shop");
-    println!("                    primary competitor: AWS SNS+SQS, AWS Kinesis, Azure Event Hubs, Confluent");
+    println!(
+        "                    target: real-time analytics, event-driven architectures, IoT, GCP-shop"
+    );
+    println!(
+        "                    primary competitor: AWS SNS+SQS, AWS Kinesis, Azure Event Hubs, Confluent"
+    );
     println!("                    secondary: Apache Kafka (self-managed), RabbitMQ");
-    println!("                    Pub/Sub wedge: global topics by default (single endpoint, multi-region)");
+    println!(
+        "                    Pub/Sub wedge: global topics by default (single endpoint, multi-region)"
+    );
     println!("                    GCP-native (deep BigQuery, Dataflow, GCS integration)");
     println!("                    exactly-once delivery option (2021+)");
     println!("                    'The pub/sub Google uses internally for Gmail + Search'");
@@ -90,7 +109,9 @@ fn run_pubsub(args: &[String], _prog: &str) -> i32 {
     println!("    5. BigQuery subscriptions (2022+):");
     println!("       - Pub/Sub → BigQuery direct (no Dataflow needed)");
     println!("       - Schema-aware writes");
-    println!("       - Eliminates the canonical Pub/Sub → Dataflow → BigQuery pipeline for simple cases");
+    println!(
+        "       - Eliminates the canonical Pub/Sub → Dataflow → BigQuery pipeline for simple cases"
+    );
     println!("    6. Cloud Storage subscriptions (2023+):");
     println!("       - Pub/Sub → GCS object writes");
     println!("       - Time + size based batching");
@@ -117,13 +138,17 @@ fn run_pubsub(args: &[String], _prog: &str) -> i32 {
     println!("    - Publish anywhere, deliver anywhere");
     println!("    - No region selection in topic ARN — Google handles");
     println!("    - Critical for multi-region apps + DR");
-    println!("    - Trade-off: pricing per-byte vs per-message means high-fanout workloads cost more");
+    println!(
+        "    - Trade-off: pricing per-byte vs per-message means high-fanout workloads cost more"
+    );
     println!("  The Gmail heritage:");
     println!("    - Pub/Sub's internal twin processes Gmail's billions of events/day");
     println!("    - Search index updates flow through internal Pub/Sub");
     println!("    - Ads serving fanout uses it");
     println!("    - 'Same system that runs Google itself'");
-    println!("    - Comparable scale claim: 'planet-scale, multi-trillion messages/day internally'");
+    println!(
+        "    - Comparable scale claim: 'planet-scale, multi-trillion messages/day internally'"
+    );
     println!("  Integrations:");
     println!("    - gcloud CLI (primary)");
     println!("    - Client libraries: Python, Java, Go, Node, C#, Ruby, PHP, C++");
@@ -140,12 +165,18 @@ fn run_pubsub(args: &[String], _prog: &str) -> i32 {
     println!("    gcloud pubsub topics create my-topic");
     println!("    gcloud pubsub topics list");
     println!("    gcloud pubsub subscriptions create my-sub --topic=my-topic");
-    println!("    gcloud pubsub subscriptions create my-push-sub --topic=my-topic --push-endpoint=https://example.com/webhook");
+    println!(
+        "    gcloud pubsub subscriptions create my-push-sub --topic=my-topic --push-endpoint=https://example.com/webhook"
+    );
     println!("    gcloud pubsub topics publish my-topic --message='hello'");
     println!("    gcloud pubsub topics publish my-topic --message='hello' --ordering-key=user-123");
     println!("    gcloud pubsub subscriptions pull my-sub --auto-ack --limit=10");
-    println!("    gcloud pubsub subscriptions create my-bq-sub --topic=my-topic --bigquery-table=project:dataset.table");
-    println!("    gcloud pubsub subscriptions create my-gcs-sub --topic=my-topic --cloud-storage-bucket=my-bucket");
+    println!(
+        "    gcloud pubsub subscriptions create my-bq-sub --topic=my-topic --bigquery-table=project:dataset.table"
+    );
+    println!(
+        "    gcloud pubsub subscriptions create my-gcs-sub --topic=my-topic --cloud-storage-bucket=my-bucket"
+    );
     println!("    gcloud pubsub snapshots create my-snap --subscription=my-sub");
     println!("    gcloud pubsub subscriptions seek my-sub --snapshot=my-snap");
     println!("  Customers (GCP-native event-driven architectures):");
@@ -161,18 +192,25 @@ fn run_pubsub(args: &[String], _prog: &str) -> i32 {
     println!("           exactly-once is opt-in + 1.5x latency vs at-least-once");
     println!("           Pub/Sub Lite zonal = no automatic multi-region failover");
     println!("           push subscriptions retry behavior tricky (HTTP 5xx + 4xx handling)");
-    println!("           pull subscriber complexity (StreamingPull, flow control, ack deadline mgmt)");
+    println!(
+        "           pull subscriber complexity (StreamingPull, flow control, ack deadline mgmt)"
+    );
     println!("           GCP lock-in — migrating to Kafka requires significant rework");
     println!("           no message-level priority");
     println!("           7-31 day retention max (use Pub/Sub Lite for longer log-style)");
     println!("           Kafka API on Pub/Sub Lite is partial (not 100% Kafka surface)");
-    println!("  Differentiator: Google Cloud planet-scale pub/sub (March 2015 externalization of internal Google system used for Gmail + Search + Ads + Analytics for years prior) + global topics by default (single endpoint, automatic multi-region failover, no region selection needed) + at-least-once + exactly-once delivery modes (exactly-once opt-in 2021+) + Pub/Sub Lite (10x cheaper zonal partitioned variant with Kafka API compatibility 2022+) + push subscriptions (HTTP webhook with OIDC auth, Cloud Run/Functions/App Engine integration) + pull + StreamingPull subscriptions + BigQuery direct subscriptions (2022, no Dataflow needed) + Cloud Storage subscriptions (2023) + schema registry (Avro + Protobuf) + ordering keys + message filtering + dead-letter topics + snapshots + seek for replay + 7-31 day retention + Eventarc event routing + Dataflow canonical processor + Cloud Functions trigger + Spotify/PayPal/Snap/Niantic-proven + 'planet-scale, multi-trillion messages/day internally at Google' + $40/TiB pricing + Borg + Spanner + Colossus backbone — the planet-scale managed messaging service backed by the same infrastructure that runs Gmail and Google Search, the default pub/sub for GCP-native architectures");
+    println!(
+        "  Differentiator: Google Cloud planet-scale pub/sub (March 2015 externalization of internal Google system used for Gmail + Search + Ads + Analytics for years prior) + global topics by default (single endpoint, automatic multi-region failover, no region selection needed) + at-least-once + exactly-once delivery modes (exactly-once opt-in 2021+) + Pub/Sub Lite (10x cheaper zonal partitioned variant with Kafka API compatibility 2022+) + push subscriptions (HTTP webhook with OIDC auth, Cloud Run/Functions/App Engine integration) + pull + StreamingPull subscriptions + BigQuery direct subscriptions (2022, no Dataflow needed) + Cloud Storage subscriptions (2023) + schema registry (Avro + Protobuf) + ordering keys + message filtering + dead-letter topics + snapshots + seek for replay + 7-31 day retention + Eventarc event routing + Dataflow canonical processor + Cloud Functions trigger + Spotify/PayPal/Snap/Niantic-proven + 'planet-scale, multi-trillion messages/day internally at Google' + $40/TiB pricing + Borg + Spanner + Colossus backbone — the planet-scale managed messaging service backed by the same infrastructure that runs Gmail and Google Search, the default pub/sub for GCP-native architectures"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pubsub".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pubsub".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_pubsub(&rest, &_prog);
     process::exit(code);
@@ -180,7 +218,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pubsub};
+    use super::{basename, run_pubsub, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -147,21 +147,23 @@ fn parse_ld_so_conf() -> Vec<String> {
                 // Glob include (e.g., include /etc/ld.so.conf.d/*.conf).
                 let include_path = include_path.trim();
                 if let Some(parent) = Path::new(include_path).parent()
-                    && let Ok(entries) = fs::read_dir(parent) {
-                        for entry in entries.flatten() {
-                            let entry_path = entry.path();
-                            if let Some(ext) = entry_path.extension()
-                                && ext == "conf"
-                                    && let Ok(sub_content) = fs::read_to_string(&entry_path) {
-                                        for sub_line in sub_content.lines() {
-                                            let sub_line = sub_line.trim();
-                                            if !sub_line.is_empty() && !sub_line.starts_with('#') {
-                                                dirs.push(sub_line.to_string());
-                                            }
-                                        }
-                                    }
+                    && let Ok(entries) = fs::read_dir(parent)
+                {
+                    for entry in entries.flatten() {
+                        let entry_path = entry.path();
+                        if let Some(ext) = entry_path.extension()
+                            && ext == "conf"
+                            && let Ok(sub_content) = fs::read_to_string(&entry_path)
+                        {
+                            for sub_line in sub_content.lines() {
+                                let sub_line = sub_line.trim();
+                                if !sub_line.is_empty() && !sub_line.starts_with('#') {
+                                    dirs.push(sub_line.to_string());
+                                }
+                            }
                         }
                     }
+                }
             } else {
                 dirs.push(line.to_string());
             }
@@ -173,14 +175,18 @@ fn parse_ld_so_conf() -> Vec<String> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map(|e| e == "conf").unwrap_or(false)
-                && let Ok(content) = fs::read_to_string(&path) {
-                    for line in content.lines() {
-                        let line = line.trim();
-                        if !line.is_empty() && !line.starts_with('#') && !dirs.contains(&line.to_string()) {
-                            dirs.push(line.to_string());
-                        }
+                && let Ok(content) = fs::read_to_string(&path)
+            {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if !line.is_empty()
+                        && !line.starts_with('#')
+                        && !dirs.contains(&line.to_string())
+                    {
+                        dirs.push(line.to_string());
                     }
                 }
+            }
         }
     }
 
@@ -390,20 +396,23 @@ fn cmd_ldconfig(args: &[String]) {
 
     // Deduplicate: keep first occurrence of each soname (per arch).
     let mut seen: HashMap<(String, String), bool> = HashMap::new();
-    let deduped: Vec<LibEntry> = entries.into_iter().filter(|e| {
-        let arch_key = match e.lib_type {
-            LibType::Elf64 => "64",
-            LibType::Elf32 => "32",
-            LibType::Unknown => "?",
-        };
-        let key = (e.soname.clone(), arch_key.to_string());
-        if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(key) {
-            e.insert(true);
-            true
-        } else {
-            false
-        }
-    }).collect();
+    let deduped: Vec<LibEntry> = entries
+        .into_iter()
+        .filter(|e| {
+            let arch_key = match e.lib_type {
+                LibType::Elf64 => "64",
+                LibType::Elf32 => "32",
+                LibType::Unknown => "?",
+            };
+            let key = (e.soname.clone(), arch_key.to_string());
+            if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(key) {
+                e.insert(true);
+                true
+            } else {
+                false
+            }
+        })
+        .collect();
 
     if verbose {
         eprintln!("Found {} libraries", deduped.len());
@@ -440,14 +449,26 @@ mod tests {
 
     #[test]
     fn test_extract_soname_versioned() {
-        assert_eq!(extract_soname("/usr/lib/libfoo.so.1.2.3"), Some("libfoo.so.1".to_string()));
-        assert_eq!(extract_soname("/usr/lib/libbar.so.2"), Some("libbar.so.2".to_string()));
-        assert_eq!(extract_soname("/lib/libc.so.6"), Some("libc.so.6".to_string()));
+        assert_eq!(
+            extract_soname("/usr/lib/libfoo.so.1.2.3"),
+            Some("libfoo.so.1".to_string())
+        );
+        assert_eq!(
+            extract_soname("/usr/lib/libbar.so.2"),
+            Some("libbar.so.2".to_string())
+        );
+        assert_eq!(
+            extract_soname("/lib/libc.so.6"),
+            Some("libc.so.6".to_string())
+        );
     }
 
     #[test]
     fn test_extract_soname_bare() {
-        assert_eq!(extract_soname("/usr/lib/libfoo.so"), Some("libfoo.so".to_string()));
+        assert_eq!(
+            extract_soname("/usr/lib/libfoo.so"),
+            Some("libfoo.so".to_string())
+        );
     }
 
     #[test]
@@ -458,7 +479,10 @@ mod tests {
 
     #[test]
     fn test_extract_soname_complex() {
-        assert_eq!(extract_soname("/lib/x86_64-linux-gnu/libpthread.so.0"), Some("libpthread.so.0".to_string()));
+        assert_eq!(
+            extract_soname("/lib/x86_64-linux-gnu/libpthread.so.0"),
+            Some("libpthread.so.0".to_string())
+        );
     }
 
     #[test]

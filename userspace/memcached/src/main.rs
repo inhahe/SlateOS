@@ -28,15 +28,21 @@ fn run_memcached(args: Vec<String>) -> i32 {
         println!("memcached 1.6.24 (Slate OS)");
         return 0;
     }
-    let port = args.iter().position(|a| a == "-p")
+    let port = args
+        .iter()
+        .position(|a| a == "-p")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(11211);
-    let mem = args.iter().position(|a| a == "-m")
+    let mem = args
+        .iter()
+        .position(|a| a == "-m")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(64);
-    let threads = args.iter().position(|a| a == "-t")
+    let threads = args
+        .iter()
+        .position(|a| a == "-t")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4);
@@ -63,7 +69,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_memcached};
+    use super::run_memcached;
 
     #[test]
     fn help_exits_zero() {

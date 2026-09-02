@@ -40,7 +40,8 @@ fn run_oathtool(args: &[String]) -> i32 {
 
     let verbose = args.iter().any(|a| a == "-v");
     let hotp = args.iter().any(|a| a == "--hotp");
-    let digits = args.windows(2)
+    let digits = args
+        .windows(2)
         .find(|w| w[0] == "-d")
         .and_then(|w| w[1].parse::<usize>().ok())
         .unwrap_or(6);
@@ -147,18 +148,23 @@ fn run_pamu2fcfg(args: &[String]) -> i32 {
         return 0;
     }
 
-    let user = args.windows(2)
+    let user = args
+        .windows(2)
         .find(|w| w[0] == "-u")
         .map(|w| w[1].as_str())
         .unwrap_or("user");
 
-    println!("{}:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-,0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-,es256,+presence", user);
+    println!(
+        "{}:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-,0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-,es256,+presence",
+        user
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "oathtool".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -173,7 +179,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_oathtool};
+    use super::{basename, run_oathtool, strip_ext};
 
     #[test]
     fn basename_strips_path() {

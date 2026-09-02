@@ -90,14 +90,8 @@ fn probe_cpu() -> Vec<HwDevice> {
         if line.is_empty() {
             if !current_props.is_empty() {
                 let mut dev = HwDevice::new("cpu");
-                dev.vendor = current_props
-                    .get("vendor_id")
-                    .cloned()
-                    .unwrap_or_default();
-                dev.model = current_props
-                    .get("model name")
-                    .cloned()
-                    .unwrap_or_default();
+                dev.vendor = current_props.get("vendor_id").cloned().unwrap_or_default();
+                dev.model = current_props.get("model name").cloned().unwrap_or_default();
                 dev.description = format!("CPU #{cpu_count}");
                 dev.properties = current_props.clone();
                 devices.push(dev);
@@ -107,24 +101,15 @@ fn probe_cpu() -> Vec<HwDevice> {
             continue;
         }
         if let Some((key, value)) = line.split_once(':') {
-            current_props.insert(
-                key.trim().to_string(),
-                value.trim().to_string(),
-            );
+            current_props.insert(key.trim().to_string(), value.trim().to_string());
         }
     }
 
     // Handle last entry.
     if !current_props.is_empty() {
         let mut dev = HwDevice::new("cpu");
-        dev.vendor = current_props
-            .get("vendor_id")
-            .cloned()
-            .unwrap_or_default();
-        dev.model = current_props
-            .get("model name")
-            .cloned()
-            .unwrap_or_default();
+        dev.vendor = current_props.get("vendor_id").cloned().unwrap_or_default();
+        dev.model = current_props.get("model name").cloned().unwrap_or_default();
         dev.description = format!("CPU #{cpu_count}");
         dev.properties = current_props;
         devices.push(dev);
@@ -320,7 +305,8 @@ fn probe_network() -> Vec<HwDevice> {
             dev.properties.insert("mtu".to_string(), mtu);
             dev.properties.insert("speed".to_string(), speed);
             dev.properties.insert("operstate".to_string(), operstate);
-            dev.properties.insert("type".to_string(), net_type.to_string());
+            dev.properties
+                .insert("type".to_string(), net_type.to_string());
 
             devices.push(dev);
         }
@@ -353,20 +339,21 @@ fn probe_display() -> Vec<HwDevice> {
 
     // Framebuffer fallback.
     if devices.is_empty()
-        && let Ok(entries) = fs::read_dir("/sys/class/graphics") {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("fb") {
-                    let path = entry.path();
-                    let fb_name = read_sysfs_trim(&path.join("name"));
+        && let Ok(entries) = fs::read_dir("/sys/class/graphics")
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("fb") {
+                let path = entry.path();
+                let fb_name = read_sysfs_trim(&path.join("name"));
 
-                    let mut dev = HwDevice::new("display");
-                    dev.description = format!("Framebuffer: {fb_name}");
-                    dev.model = fb_name;
-                    devices.push(dev);
-                }
+                let mut dev = HwDevice::new("display");
+                dev.description = format!("Framebuffer: {fb_name}");
+                dev.model = fb_name;
+                devices.push(dev);
             }
         }
+    }
 
     devices
 }
@@ -379,7 +366,13 @@ fn probe_audio() -> Vec<HwDevice> {
         for line in content.lines() {
             let line = line.trim();
             // Lines like: " 0 [Intel          ]: HDA-Intel - HDA Intel PCH"
-            if line.is_empty() || !line.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            if line.is_empty()
+                || !line
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+            {
                 continue;
             }
             let mut dev = HwDevice::new("sound");
@@ -451,9 +444,7 @@ fn read_sysfs_link_name(path: &Path) -> String {
 
 fn classify_pci_device(class_code: &str) -> String {
     // PCI class codes (first two hex digits).
-    let code = class_code
-        .strip_prefix("0x")
-        .unwrap_or(class_code);
+    let code = class_code.strip_prefix("0x").unwrap_or(class_code);
     if code.len() >= 4 {
         match &code[..4] {
             "0300" | "0301" | "0302" => "display".to_string(),
@@ -536,7 +527,10 @@ fn print_devices_json(devices: &[HwDevice]) {
     for (i, dev) in devices.iter().enumerate() {
         println!("  {{");
         println!("    \"class\": \"{}\",", dev.class);
-        println!("    \"description\": \"{}\",", escape_json(&dev.description));
+        println!(
+            "    \"description\": \"{}\",",
+            escape_json(&dev.description)
+        );
         println!("    \"vendor\": \"{}\",", escape_json(&dev.vendor));
         println!("    \"model\": \"{}\",", escape_json(&dev.model));
         println!("    \"driver\": \"{}\"", escape_json(&dev.driver));
@@ -710,10 +704,7 @@ fn lshw_main(args: &[String]) -> i32 {
 
     match format {
         OutputFormat::Short => {
-            println!(
-                "{:<20} {:<16} {:<30}",
-                "H/W path", "Class", "Description"
-            );
+            println!("{:<20} {:<16} {:<30}", "H/W path", "Class", "Description");
             println!("{}", "=".repeat(66));
             for (i, dev) in devices.iter().enumerate() {
                 println!(

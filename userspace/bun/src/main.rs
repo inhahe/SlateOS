@@ -112,7 +112,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -127,7 +129,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_bun};
+    use super::run_bun;
 
     #[test]
     fn help_exits_zero() {

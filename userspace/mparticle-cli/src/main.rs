@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -16,12 +20,17 @@ fn run_mp(args: &[String], _prog: &str) -> i32 {
         println!("Options:");
         println!("  --inputs               300+ inputs (mobile/web SDKs + server + feeds)");
         println!("  --outputs              350+ outputs (warehouses, ads, ESPs, BI)");
-        println!("  --idsync               IDSync identity resolution (deterministic + probabilistic)");
+        println!(
+            "  --idsync               IDSync identity resolution (deterministic + probabilistic)"
+        );
         println!("  --audiences            Real-time audiences");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mParticle 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("mParticle 2024 (Slate OS)");
+        return 0;
+    }
     println!("mParticle 2024 (Slate OS) — Enterprise CDP");
     println!("  Vendor: mParticle, Inc. (NYC) — ACQUIRED by Rokt Jul 2024 for ~$300-400M");
     println!("  Founders: Michael Katz (CEO) + Andy Katz + Dave Myers, 2013");
@@ -34,14 +43,26 @@ fn run_mp(args: &[String], _prog: &str) -> i32 {
     println!("         total of ~$305M raised before exit");
     println!("  Acquisition Jul 2024:");
     println!("         Rokt acquired mParticle for reported ~$300-400M");
-    println!("         strategic: Rokt's commerce media + mParticle's CDP = full marketing data stack");
+    println!(
+        "         strategic: Rokt's commerce media + mParticle's CDP = full marketing data stack"
+    );
     println!("         Michael Katz transitioned to advisor; ~600 mParticle employees joined Rokt");
-    println!("         Rokt is Australian e-commerce-media co (formerly NASDAQ:ROKT trajectory, then private)");
+    println!(
+        "         Rokt is Australian e-commerce-media co (formerly NASDAQ:ROKT trajectory, then private)"
+    );
     println!("  Strategic position: 'enterprise CDP with mobile DNA':");
-    println!("                    pitch: 'real-time customer data infrastructure for mobile-first brands'");
-    println!("                    target: large enterprise + Fortune 500 (sweet spot vs Segment's startup base)");
-    println!("                    primary competitor: Segment, Tealium, Adobe Experience Platform, Salesforce CDP");
-    println!("                    mParticle's wedge: better mobile SDK depth + enterprise governance + IDSync");
+    println!(
+        "                    pitch: 'real-time customer data infrastructure for mobile-first brands'"
+    );
+    println!(
+        "                    target: large enterprise + Fortune 500 (sweet spot vs Segment's startup base)"
+    );
+    println!(
+        "                    primary competitor: Segment, Tealium, Adobe Experience Platform, Salesforce CDP"
+    );
+    println!(
+        "                    mParticle's wedge: better mobile SDK depth + enterprise governance + IDSync"
+    );
     println!("                    historically closed bigger enterprise deals than Segment");
     println!("  Pricing (enterprise sales-led):");
     println!("    no free tier — minimum ~$50K/yr typical");
@@ -49,7 +70,9 @@ fn run_mp(args: &[String], _prog: &str) -> i32 {
     println!("    pricing pegged to MAUs (monthly active users) + outputs + data volume");
     println!("    typically more expensive than Segment for large enterprise");
     println!("  Core architecture:");
-    println!("    - Inputs: 300+ (deep mobile SDKs, web JS, server REST, batch feeds, cloud sources)");
+    println!(
+        "    - Inputs: 300+ (deep mobile SDKs, web JS, server REST, batch feeds, cloud sources)"
+    );
     println!("    - Outputs: 350+ (analytics, marketing, ads, attribution, BI, warehouses)");
     println!("    - Server-side rules: filter, sample, transform events before forwarding");
     println!("    - Privacy + Consent management built-in (GDPR/CCPA frameworks)");
@@ -89,20 +112,27 @@ fn run_mp(args: &[String], _prog: &str) -> i32 {
     println!("    - sweet spot: large enterprise + mobile-first brands");
     println!("    - heavy in: media/streaming, retail, travel, restaurants/QSR");
     println!("  Critique (legacy + acquisition era):");
-    println!("           Rokt acquisition: future depends on integration with Rokt's media platform");
+    println!(
+        "           Rokt acquisition: future depends on integration with Rokt's media platform"
+    );
     println!("           layoffs in 2023 prior to acquisition (typical post-2022 zirp adjustment)");
     println!("           expensive — locks out mid-market vs Segment/RudderStack alternatives");
     println!("           composable CDP (Hightouch + Snowflake) erodes packaged CDP value");
     println!("           Segment more developer-friendly + larger ecosystem");
     println!("           Adobe + Salesforce CDPs threaten via CRM bundling");
     println!("           mobile-first DNA less unique as Segment built up mobile SDKs");
-    println!("  Differentiator: enterprise-grade IDSync identity resolution + deepest mobile SDK suite + real-time audiences + privacy/consent depth + Fortune 500 install base — now backed by Rokt's commerce media for full marketing data stack");
+    println!(
+        "  Differentiator: enterprise-grade IDSync identity resolution + deepest mobile SDK suite + real-time audiences + privacy/consent depth + Fortune 500 install base — now backed by Rokt's commerce media for full marketing data stack"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mparticle".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mparticle".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mp(&rest, &_prog);
     process::exit(code);
@@ -110,7 +140,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mp};
+    use super::{basename, run_mp, strip_ext};
 
     #[test]
     fn basename_strips_path() {

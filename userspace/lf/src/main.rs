@@ -63,7 +63,8 @@ fn run_lf(args: Vec<String>) -> i32 {
     }
 
     let single = args.iter().any(|a| a == "-single");
-    let path = args.iter()
+    let path = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(".");
@@ -104,7 +105,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_lf};
+    use super::run_lf;
 
     #[test]
     fn help_exits_zero() {

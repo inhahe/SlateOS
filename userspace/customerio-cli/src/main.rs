@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_customerio(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,13 +28,20 @@ fn run_customerio(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Customer.io 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Customer.io 2024 (Slate OS)");
+        return 0;
+    }
     println!("Customer.io 2024 (Slate OS)");
-    println!("  Vendor: Peaberry Software, Inc. dba Customer.io (Portland, OR — fully remote, bootstrapped+VC mix)");
+    println!(
+        "  Vendor: Peaberry Software, Inc. dba Customer.io (Portland, OR — fully remote, bootstrapped+VC mix)"
+    );
     println!("  Founders: Colin Nederkoorn (CEO), John Allison (CTO), 2012");
     println!("          Nederkoorn famously runs an open-book + radical-transparency culture");
     println!("          'Customer.io' built originally inside a Heroku app");
-    println!("          fully remote since FOUNDING — 12 years before pandemic, very early on remote work");
+    println!(
+        "          fully remote since FOUNDING — 12 years before pandemic, very early on remote work"
+    );
     println!("  Founded: 2012 — bootstrapped to profitability before raising");
     println!("          first outside funding 2021 ($35M Series A — Hand Capital, Bonfire)");
     println!("          ~$50M+ ARR (estimated, transparent partially)");
@@ -93,21 +104,32 @@ fn run_customerio(args: &[String], _prog: &str) -> i32 {
     println!("              Snowflake/BigQuery exports");
     println!("              REST API + webhooks + iOS/Android/JS SDKs");
     println!("  Customers: ~7,000+ paying companies");
-    println!("            Notion (flagship case study), Linear, Loom, ConvertKit, Buffer (early), Webflow");
+    println!(
+        "            Notion (flagship case study), Linear, Loom, ConvertKit, Buffer (early), Webflow"
+    );
     println!("            Sentry, Algolia, Vercel — heavy PLG SaaS adoption");
     println!("            sweet spot: 5-500 person teams running event-driven product marketing");
-    println!("  Critique: less out-of-the-box than HubSpot/Braze — requires engineering to wire well");
+    println!(
+        "  Critique: less out-of-the-box than HubSpot/Braze — requires engineering to wire well"
+    );
     println!("           UI dated compared to Iterable/Braze (improving)");
     println!("           reporting tools simpler than competitors at higher tiers");
     println!("           power users love Liquid; novice marketers find it intimidating");
-    println!("           less B2C consumer brand awareness than Braze (intentional — they target PLG SaaS)");
-    println!("  Differentiator: devtool-quality event-driven messaging — best Liquid templating + open culture + remote-first since 2012");
+    println!(
+        "           less B2C consumer brand awareness than Braze (intentional — they target PLG SaaS)"
+    );
+    println!(
+        "  Differentiator: devtool-quality event-driven messaging — best Liquid templating + open culture + remote-first since 2012"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "customerio".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "customerio".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_customerio(&rest, &_prog);
     process::exit(code);
@@ -115,7 +137,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_customerio};
+    use super::{basename, run_customerio, strip_ext};
 
     #[test]
     fn basename_strips_path() {

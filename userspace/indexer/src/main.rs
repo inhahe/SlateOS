@@ -136,16 +136,32 @@ impl Config {
                         }
                     }
                     "paths" => {
-                        config.paths = val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                        config.paths = val
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
                     }
                     "extensions" => {
-                        config.extensions = val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                        config.extensions = val
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
                     }
                     "exclude_extensions" => {
-                        config.exclude_extensions = val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                        config.exclude_extensions = val
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
                     }
                     "exclude_dirs" => {
-                        config.exclude_dirs = val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                        config.exclude_dirs = val
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
                     }
                     _ => {}
                 }
@@ -168,8 +184,14 @@ impl Config {
         out.push_str(&format!("max_depth = {}\n", self.max_depth));
         out.push_str(&format!("paths = {}\n", self.paths.join(", ")));
         out.push_str(&format!("extensions = {}\n", self.extensions.join(", ")));
-        out.push_str(&format!("exclude_extensions = {}\n", self.exclude_extensions.join(", ")));
-        out.push_str(&format!("exclude_dirs = {}\n", self.exclude_dirs.join(", ")));
+        out.push_str(&format!(
+            "exclude_extensions = {}\n",
+            self.exclude_extensions.join(", ")
+        ));
+        out.push_str(&format!(
+            "exclude_dirs = {}\n",
+            self.exclude_dirs.join(", ")
+        ));
 
         fs::write(path, &out).map_err(|e| format!("write config: {e}"))
     }
@@ -197,7 +219,10 @@ struct IndexEntry {
 impl IndexEntry {
     fn serialize(&self) -> String {
         let kind = if self.is_dir { "D" } else { "F" };
-        format!("{}\t{}\t{}\t{}\t{}", kind, self.size, self.mtime, self.extension, self.path)
+        format!(
+            "{}\t{}\t{}\t{}\t{}",
+            kind, self.size, self.mtime, self.extension, self.path
+        )
     }
 
     fn parse(line: &str) -> Option<Self> {
@@ -212,7 +237,13 @@ impl IndexEntry {
         let extension = parts[3].to_string();
         let path = parts[4].to_string();
 
-        Some(IndexEntry { path, size, mtime, extension, is_dir })
+        Some(IndexEntry {
+            path,
+            size,
+            mtime,
+            extension,
+            is_dir,
+        })
     }
 
     fn filename(&self) -> &str {
@@ -261,10 +292,11 @@ impl IndexDb {
 
         // Parse header.
         if let Some(header) = lines.next()
-            && !header.starts_with("# indexer-db v") {
-                eprintln!("warning: index file has unknown format, rebuilding");
-                return db;
-            }
+            && !header.starts_with("# indexer-db v")
+        {
+            eprintln!("warning: index file has unknown format, rebuilding");
+            return db;
+        }
 
         // Parse metadata lines (start with #).
         for line in lines.by_ref() {
@@ -416,7 +448,14 @@ fn scan_directory(
             });
 
             // Recurse.
-            scan_directory(&path, config, entries, dirs_scanned, files_skipped, depth + 1);
+            scan_directory(
+                &path,
+                config,
+                entries,
+                dirs_scanned,
+                files_skipped,
+                depth + 1,
+            );
             continue;
         }
 
@@ -484,7 +523,14 @@ fn build_index(config: &Config) -> IndexDb {
             continue;
         }
         println!("  scanning: {path_str}");
-        scan_directory(path, config, &mut db.entries, &mut dirs_scanned, &mut files_skipped, 0);
+        scan_directory(
+            path,
+            config,
+            &mut db.entries,
+            &mut dirs_scanned,
+            &mut files_skipped,
+            0,
+        );
     }
 
     let end = now_secs();
@@ -524,7 +570,14 @@ fn incremental_update(config: &Config, existing: &IndexDb) -> IndexDb {
         if !path.exists() {
             continue;
         }
-        scan_directory(path, config, &mut db.entries, &mut dirs_scanned, &mut files_skipped, 0);
+        scan_directory(
+            path,
+            config,
+            &mut db.entries,
+            &mut dirs_scanned,
+            &mut files_skipped,
+            0,
+        );
     }
 
     let end = now_secs();
@@ -577,7 +630,12 @@ fn search_pattern<'a>(db: &'a IndexDb, pattern: &str) -> Vec<&'a IndexEntry> {
         .collect()
 }
 
-fn matches_glob_segments(name: &str, segments: &[&str], starts_wild: bool, ends_wild: bool) -> bool {
+fn matches_glob_segments(
+    name: &str,
+    segments: &[&str],
+    starts_wild: bool,
+    ends_wild: bool,
+) -> bool {
     if segments.is_empty() {
         return true;
     }
@@ -784,49 +842,87 @@ fn cmd_config_show(config: &Config) {
     println!("  interval:           {}s", config.interval_secs);
     println!("  index_dir:          {}", config.index_dir);
     println!("  follow_symlinks:    {}", config.follow_symlinks);
-    println!("  max_depth:          {}", if config.max_depth == 0 { "unlimited".to_string() } else { config.max_depth.to_string() });
-    println!("  max_file_size:      {}", if config.max_file_size == 0 { "unlimited".to_string() } else { format_size(config.max_file_size) });
-    println!("  paths:              {}", if config.paths.is_empty() { "(none)".to_string() } else { config.paths.join(", ") });
-    println!("  extensions:         {}", if config.extensions.is_empty() { "(all)".to_string() } else { config.extensions.join(", ") });
-    println!("  exclude_extensions: {}", if config.exclude_extensions.is_empty() { "(none)".to_string() } else { config.exclude_extensions.join(", ") });
-    println!("  exclude_dirs:       {}", if config.exclude_dirs.is_empty() { "(none)".to_string() } else { config.exclude_dirs.join(", ") });
+    println!(
+        "  max_depth:          {}",
+        if config.max_depth == 0 {
+            "unlimited".to_string()
+        } else {
+            config.max_depth.to_string()
+        }
+    );
+    println!(
+        "  max_file_size:      {}",
+        if config.max_file_size == 0 {
+            "unlimited".to_string()
+        } else {
+            format_size(config.max_file_size)
+        }
+    );
+    println!(
+        "  paths:              {}",
+        if config.paths.is_empty() {
+            "(none)".to_string()
+        } else {
+            config.paths.join(", ")
+        }
+    );
+    println!(
+        "  extensions:         {}",
+        if config.extensions.is_empty() {
+            "(all)".to_string()
+        } else {
+            config.extensions.join(", ")
+        }
+    );
+    println!(
+        "  exclude_extensions: {}",
+        if config.exclude_extensions.is_empty() {
+            "(none)".to_string()
+        } else {
+            config.exclude_extensions.join(", ")
+        }
+    );
+    println!(
+        "  exclude_dirs:       {}",
+        if config.exclude_dirs.is_empty() {
+            "(none)".to_string()
+        } else {
+            config.exclude_dirs.join(", ")
+        }
+    );
 }
 
 fn cmd_config_set(config: &mut Config, key: &str, value: &str, config_path: &str) {
     match key {
         "enabled" => config.enabled = value == "true" || value == "1",
-        "interval" => {
-            match value.parse::<u64>() {
-                Ok(n) => config.interval_secs = n,
-                Err(_) => {
-                    eprintln!("error: invalid number: {value}");
-                    process::exit(1);
-                }
+        "interval" => match value.parse::<u64>() {
+            Ok(n) => config.interval_secs = n,
+            Err(_) => {
+                eprintln!("error: invalid number: {value}");
+                process::exit(1);
             }
-        }
-        "max_file_size" => {
-            match value.parse::<u64>() {
-                Ok(n) => config.max_file_size = n,
-                Err(_) => {
-                    eprintln!("error: invalid number: {value}");
-                    process::exit(1);
-                }
+        },
+        "max_file_size" => match value.parse::<u64>() {
+            Ok(n) => config.max_file_size = n,
+            Err(_) => {
+                eprintln!("error: invalid number: {value}");
+                process::exit(1);
             }
-        }
+        },
         "index_dir" => config.index_dir = value.to_string(),
         "follow_symlinks" => config.follow_symlinks = value == "true" || value == "1",
-        "max_depth" => {
-            match value.parse::<u32>() {
-                Ok(n) => config.max_depth = n,
-                Err(_) => {
-                    eprintln!("error: invalid number: {value}");
-                    process::exit(1);
-                }
+        "max_depth" => match value.parse::<u32>() {
+            Ok(n) => config.max_depth = n,
+            Err(_) => {
+                eprintln!("error: invalid number: {value}");
+                process::exit(1);
             }
-        }
+        },
         _ => {
             eprintln!("error: unknown config key: {key}");
-            eprintln!("  valid keys: enabled, interval, max_file_size, index_dir, follow_symlinks, max_depth");
+            eprintln!(
+                "  valid keys: enabled, interval, max_file_size, index_dir, follow_symlinks, max_depth"
+            );
             process::exit(1);
         }
     }
@@ -855,7 +951,14 @@ fn cmd_rebuild(config: &Config) {
 
 fn cmd_status(config: &Config) {
     println!("=== Indexer Status ===");
-    println!("  Service: {}", if config.enabled { "enabled" } else { "disabled" });
+    println!(
+        "  Service: {}",
+        if config.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
 
     let state = load_state(&config.index_dir);
     if let Some((built_at, entry_count)) = state {
@@ -868,7 +971,11 @@ fn cmd_status(config: &Config) {
         } else if age_secs < 3600 {
             println!("  Age:          {}m ago", age_secs / 60);
         } else {
-            println!("  Age:          {}h {}m ago", age_secs / 3600, (age_secs % 3600) / 60);
+            println!(
+                "  Age:          {}h {}m ago",
+                age_secs / 3600,
+                (age_secs % 3600) / 60
+            );
         }
     } else {
         println!("  Last indexed: never");
@@ -1051,7 +1158,12 @@ fn print_results(results: &[&IndexEntry], label: &str) {
         if entry.is_dir {
             println!("  [dir] {}", entry.path);
         } else {
-            println!("  {:>10}  {}  {}", format_size(entry.size), format_timestamp(entry.mtime), entry.path);
+            println!(
+                "  {:>10}  {}  {}",
+                format_size(entry.size),
+                format_timestamp(entry.mtime),
+                entry.path
+            );
         }
     }
 
@@ -1132,8 +1244,8 @@ fn main() {
         process::exit(0);
     }
 
-    let config_path = env::var("INDEXER_CONFIG")
-        .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
+    let config_path =
+        env::var("INDEXER_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
 
     let mut config = Config::load(&config_path);
 

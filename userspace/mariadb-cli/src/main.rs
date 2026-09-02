@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mariadb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_mariadb(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mariadb v11.2 (Slate OS, MariaDB)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("mariadb v11.2 (Slate OS, MariaDB)");
+        return 0;
+    }
     println!("mariadb: connected to MariaDB 11.2");
     println!("Server version: 11.2.1-MariaDB");
     0
@@ -36,7 +43,10 @@ fn run_mariadb_dump(args: &[String], _prog: &str) -> i32 {
         println!("mariadb-dump v11.2 (Slate OS) — Dump MariaDB databases");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mariadb-dump v11.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("mariadb-dump v11.2 (Slate OS)");
+        return 0;
+    }
     println!("mariadb-dump: dumping database...");
     println!("-- MariaDB dump 11.2");
     0
@@ -52,7 +62,10 @@ fn run_mariadb_admin(args: &[String], _prog: &str) -> i32 {
         println!("  flush-tables Flush all tables");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mariadb-admin v11.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("mariadb-admin v11.2 (Slate OS)");
+        return 0;
+    }
     match args.first().map(|s| s.as_str()) {
         Some("ping") => println!("mysqld is alive"),
         Some("status") => {
@@ -70,7 +83,10 @@ fn run_mariadb_check(args: &[String], _prog: &str) -> i32 {
         println!("mariadb-check v11.2 (Slate OS) — Check/repair tables");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mariadb-check v11.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("mariadb-check v11.2 (Slate OS)");
+        return 0;
+    }
     println!("mariadb-check: checking tables...");
     println!("  testdb.users    OK");
     println!("  testdb.orders   OK");
@@ -79,7 +95,10 @@ fn run_mariadb_check(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mariadb".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mariadb".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "mariadb-dump" => run_mariadb_dump(&rest, &prog),
@@ -92,7 +111,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mariadb};
+    use super::{basename, run_mariadb, strip_ext};
 
     #[test]
     fn basename_strips_path() {

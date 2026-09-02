@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_gradle(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") || args.is_empty() {
@@ -64,7 +68,8 @@ fn run_gradle(args: &[String]) -> i32 {
         return 0;
     }
     let quiet = args.iter().any(|a| a == "-q" || a == "--quiet");
-    let tasks: Vec<&str> = args.iter()
+    let tasks: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -86,29 +91,57 @@ fn run_gradle(args: &[String]) -> i32 {
     for task in &tasks {
         match *task {
             "build" => {
-                if !quiet { println!("> Task :compileJava"); }
-                if !quiet { println!("> Task :processResources NO-SOURCE"); }
-                if !quiet { println!("> Task :classes"); }
-                if !quiet { println!("> Task :jar"); }
-                if !quiet { println!("> Task :assemble"); }
-                if !quiet { println!("> Task :compileTestJava"); }
-                if !quiet { println!("> Task :testClasses"); }
-                if !quiet { println!("> Task :test"); }
-                if !quiet { println!("> Task :check"); }
-                if !quiet { println!("> Task :build"); }
+                if !quiet {
+                    println!("> Task :compileJava");
+                }
+                if !quiet {
+                    println!("> Task :processResources NO-SOURCE");
+                }
+                if !quiet {
+                    println!("> Task :classes");
+                }
+                if !quiet {
+                    println!("> Task :jar");
+                }
+                if !quiet {
+                    println!("> Task :assemble");
+                }
+                if !quiet {
+                    println!("> Task :compileTestJava");
+                }
+                if !quiet {
+                    println!("> Task :testClasses");
+                }
+                if !quiet {
+                    println!("> Task :test");
+                }
+                if !quiet {
+                    println!("> Task :check");
+                }
+                if !quiet {
+                    println!("> Task :build");
+                }
                 println!();
                 println!("BUILD SUCCESSFUL in 12s");
                 println!("7 actionable tasks: 7 executed");
             }
             "clean" => {
-                if !quiet { println!("> Task :clean"); }
+                if !quiet {
+                    println!("> Task :clean");
+                }
                 println!("BUILD SUCCESSFUL in 1s");
                 println!("1 actionable task: 1 executed");
             }
             "test" => {
-                if !quiet { println!("> Task :compileJava UP-TO-DATE"); }
-                if !quiet { println!("> Task :compileTestJava"); }
-                if !quiet { println!("> Task :test"); }
+                if !quiet {
+                    println!("> Task :compileJava UP-TO-DATE");
+                }
+                if !quiet {
+                    println!("> Task :compileTestJava");
+                }
+                if !quiet {
+                    println!("> Task :test");
+                }
                 println!();
                 println!("BUILD SUCCESSFUL in 8s");
                 println!("3 actionable tasks: 2 executed, 1 up-to-date");
@@ -128,7 +161,9 @@ fn run_gradle(args: &[String]) -> i32 {
                 println!("Project generated in ./");
             }
             _ => {
-                if !quiet { println!("> Task :{}", task); }
+                if !quiet {
+                    println!("> Task :{}", task);
+                }
                 println!("BUILD SUCCESSFUL in 2s");
             }
         }
@@ -138,7 +173,10 @@ fn run_gradle(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "gradle".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "gradle".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_gradle(&rest);
     process::exit(code);
@@ -146,7 +184,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gradle};
+    use super::{basename, run_gradle, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mailcow(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -31,7 +35,10 @@ fn run_mailcow(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Mailcow v2024.04 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Mailcow v2024.04 (Slate OS)");
+        return 0;
+    }
     println!("Mailcow v2024.04 (Slate OS) Status:");
     println!("  Postfix (MTA): running");
     println!("  Dovecot (IMAP/POP3): running");
@@ -47,7 +54,10 @@ fn run_mailcow(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mailcow".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mailcow".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mailcow(&rest, &_prog);
     process::exit(code);
@@ -55,7 +65,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mailcow};
+    use super::{basename, run_mailcow, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -38,7 +38,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("fusionauth-cli 0.1.0 (self-host personality build)"); }
+fn print_version() {
+    println!("fusionauth-cli 0.1.0 (self-host personality build)");
+}
 
 fn run_about() {
     println!("FusionAuth (Inversoft, Inc.)");

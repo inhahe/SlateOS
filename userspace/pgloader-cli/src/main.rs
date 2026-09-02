@@ -33,10 +33,17 @@ fn run_pgloader(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let source = args.iter().find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("data.csv");
-    let target = args.iter().filter(|a| !a.starts_with('-'))
-        .nth(1).map(|s| s.as_str()).unwrap_or("postgresql://localhost/mydb");
+    let source = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("data.csv");
+    let target = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .nth(1)
+        .map(|s| s.as_str())
+        .unwrap_or("postgresql://localhost/mydb");
 
     println!("LOG pgloader version 3.6.10 (Slate OS)");
     println!("LOG Parsing commands from {}", source);
@@ -67,7 +74,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pgloader};
+    use super::run_pgloader;
 
     #[test]
     fn help_exits_zero() {

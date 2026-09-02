@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_adobe(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,29 +29,50 @@ fn run_adobe(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe Experience Platform 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Adobe Experience Platform 2024 (Slate OS)");
+        return 0;
+    }
     println!("Adobe Experience Platform 2024 (Slate OS) — Enterprise Experience Cloud");
     println!("  Vendor: Adobe, Inc. (San Jose, CA — NASDAQ:ADBE)");
     println!("  Founded: 1982 by John Warnock + Charles Geschke (PARC veterans)");
-    println!("          original product: PostScript (page description language) — desktop publishing revolution");
+    println!(
+        "          original product: PostScript (page description language) — desktop publishing revolution"
+    );
     println!("          1980s: PostScript + Illustrator + Photoshop");
     println!("          1990s: Acrobat + PDF (open standard 2008) + InDesign");
     println!("          2009: Acquired Omniture for $1.8B — beginning of marketing cloud");
     println!("          2018: Acquired Magento ($1.7B) + Marketo ($4.75B) — full martech stack");
-    println!("          2024: Failed Figma acquisition ($20B) blocked by UK + EU regulators (Dec 2023)");
+    println!(
+        "          2024: Failed Figma acquisition ($20B) blocked by UK + EU regulators (Dec 2023)"
+    );
     println!("  Financials (NASDAQ:ADBE):");
     println!("    FY2024 revenue: $21.5B+ (Creative Cloud + Document Cloud + Digital Experience)");
     println!("    Digital Experience segment: ~$5B+ (the experience cloud + marketing cloud)");
     println!("    Market cap: ~$200B+");
     println!("    Operating margin: ~35%+");
     println!("    One of the most profitable software companies");
-    println!("  Strategic position: 'the experience-cloud incumbent — bundled CDP + analytics + marketing':");
-    println!("                    pitch: 'every customer experience touchpoint, powered by one Adobe stack'");
-    println!("                    target: Fortune 500 enterprises with global brand + complex martech");
-    println!("                    primary competitor: Salesforce Marketing Cloud + Data Cloud, Oracle, SAP CX");
-    println!("                    secondary: pure-play CDPs (Segment, Tealium, mParticle), Bloomreach");
-    println!("                    Adobe's wedge: end-to-end suite (creative + content + analytics + CDP + marketing)");
-    println!("                    moat: 40+ years brand + Creative Cloud cross-sell + Fortune 500 footprint");
+    println!(
+        "  Strategic position: 'the experience-cloud incumbent — bundled CDP + analytics + marketing':"
+    );
+    println!(
+        "                    pitch: 'every customer experience touchpoint, powered by one Adobe stack'"
+    );
+    println!(
+        "                    target: Fortune 500 enterprises with global brand + complex martech"
+    );
+    println!(
+        "                    primary competitor: Salesforce Marketing Cloud + Data Cloud, Oracle, SAP CX"
+    );
+    println!(
+        "                    secondary: pure-play CDPs (Segment, Tealium, mParticle), Bloomreach"
+    );
+    println!(
+        "                    Adobe's wedge: end-to-end suite (creative + content + analytics + CDP + marketing)"
+    );
+    println!(
+        "                    moat: 40+ years brand + Creative Cloud cross-sell + Fortune 500 footprint"
+    );
     println!("  Pricing (enterprise sales-led — opaque):");
     println!("    Adobe Analytics — starts ~$30K/yr, large deals $500K-$2M+/yr");
     println!("    Adobe Target — $50K-500K+/yr");
@@ -93,7 +118,9 @@ fn run_adobe(args: &[String], _prog: &str) -> i32 {
     println!("    - Firefly: GenAI for image + design generation (2023)");
     println!("    - Firefly Services: programmatic GenAI APIs");
     println!("    - AEM Assets + Photoshop + Illustrator GenAI features");
-    println!("    - Compete with: OpenAI DALL-E, Midjourney, Stability AI (Adobe's commercial-safe twist: trained on licensed/owned content)");
+    println!(
+        "    - Compete with: OpenAI DALL-E, Midjourney, Stability AI (Adobe's commercial-safe twist: trained on licensed/owned content)"
+    );
     println!("  XDM (Experience Data Model):");
     println!("    - Adobe's customer-data schema standard");
     println!("    - Open source: github.com/adobe/xdm");
@@ -116,17 +143,30 @@ fn run_adobe(args: &[String], _prog: &str) -> i32 {
     println!("           Adobe sales motion notorious for high-pressure + multi-year contracts");
     println!("           AEP technical depth gap vs Snowflake/Databricks for raw data workloads");
     println!("           composable CDP (Hightouch + warehouse) erodes packaged Adobe CDP value");
-    println!("           Salesforce Marketing Cloud + Data Cloud competing head-on for big enterprise");
-    println!("           Figma blocked acquisition (2023) = strategic blow to design + product strategy");
-    println!("           Creative Cloud + AI features face new competition (Canva, Figma, Midjourney)");
-    println!("           regulatory scrutiny: EU + UK + US blocked Figma; Acrobat now under EU CSP review");
-    println!("  Differentiator: 40+ years brand + Creative Cloud cross-sell + most-complete enterprise experience suite (analytics + CDP + content + marketing + commerce + workflow) + Sensei/Firefly AI + 95% Fortune 100 footprint — the experience-cloud incumbent that owns the enterprise marketer's desktop");
+    println!(
+        "           Salesforce Marketing Cloud + Data Cloud competing head-on for big enterprise"
+    );
+    println!(
+        "           Figma blocked acquisition (2023) = strategic blow to design + product strategy"
+    );
+    println!(
+        "           Creative Cloud + AI features face new competition (Canva, Figma, Midjourney)"
+    );
+    println!(
+        "           regulatory scrutiny: EU + UK + US blocked Figma; Acrobat now under EU CSP review"
+    );
+    println!(
+        "  Differentiator: 40+ years brand + Creative Cloud cross-sell + most-complete enterprise experience suite (analytics + CDP + content + marketing + commerce + workflow) + Sensei/Firefly AI + 95% Fortune 100 footprint — the experience-cloud incumbent that owns the enterprise marketer's desktop"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "adobe".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "adobe".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_adobe(&rest, &_prog);
     process::exit(code);
@@ -134,7 +174,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_adobe};
+    use super::{basename, run_adobe, strip_ext};
 
     #[test]
     fn basename_strips_path() {

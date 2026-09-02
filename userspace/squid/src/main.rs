@@ -9,11 +9,15 @@ use std::process;
 
 fn run_squid(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Usage: squid [-dhvzCDFNRYX] [-f config-file] [-[au] port] [-s | -l file] [-k signal]");
+        println!(
+            "Usage: squid [-dhvzCDFNRYX] [-f config-file] [-[au] port] [-s | -l file] [-k signal]"
+        );
         println!();
         println!("Options:");
         println!("  -f <file>    Use given config-file instead of /etc/squid/squid.conf");
-        println!("  -k <signal>  Send signal: reconfigure|rotate|shutdown|restart|interrupt|kill|check|parse");
+        println!(
+            "  -k <signal>  Send signal: reconfigure|rotate|shutdown|restart|interrupt|kill|check|parse"
+        );
         println!("  -z           Initialize cache directories");
         println!("  -N           Run in foreground (no daemon mode)");
         println!("  -d <level>   Write debugging to stderr");
@@ -38,7 +42,9 @@ fn run_squid(args: Vec<String>) -> i32 {
             "rotate" => println!("Sending rotate signal to Squid... done."),
             "shutdown" => println!("Sending shutdown signal to Squid... done."),
             "check" | "parse" => {
-                let config = args.iter().position(|a| a == "-f")
+                let config = args
+                    .iter()
+                    .position(|a| a == "-f")
                     .and_then(|i| args.get(i + 1))
                     .map(|s| s.as_str())
                     .unwrap_or("/etc/squid/squid.conf");
@@ -56,7 +62,9 @@ fn run_squid(args: Vec<String>) -> i32 {
     println!("2025/05/22 10:00:00| Process ID 12345");
     println!("2025/05/22 10:00:00| Process Roles: master worker");
     println!("2025/05/22 10:00:00| With 65535 file descriptors available");
-    println!("2025/05/22 10:00:00| Accepting HTTP Socket connections at local=0.0.0.0:3128 remote=[::] FD 12");
+    println!(
+        "2025/05/22 10:00:00| Accepting HTTP Socket connections at local=0.0.0.0:3128 remote=[::] FD 12"
+    );
     println!("2025/05/22 10:00:00| HTCP Disabled.");
     println!("2025/05/22 10:00:00| Squid plugin modules loaded: 0");
     println!("2025/05/22 10:00:00| Adaptation support is off.");
@@ -75,7 +83,11 @@ fn run_squidclient(args: Vec<String>) -> i32 {
         println!("  -H 'string'   Extra headers");
         return 0;
     }
-    let url = args.iter().find(|a| a.starts_with("http")).map(|s| s.as_str()).unwrap_or("http://example.com/");
+    let url = args
+        .iter()
+        .find(|a| a.starts_with("http"))
+        .map(|s| s.as_str())
+        .unwrap_or("http://example.com/");
     println!("HTTP/1.1 200 OK");
     println!("Server: squid/6.9");
     println!("Date: Thu, 22 May 2025 10:00:00 GMT");
@@ -96,7 +108,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -111,7 +125,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_squid};
+    use super::run_squid;
 
     #[test]
     fn help_exits_zero() {

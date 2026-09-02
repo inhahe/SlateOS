@@ -65,7 +65,10 @@ fn run_choose(args: Vec<String>) -> i32 {
                 i += 1;
                 continue;
             }
-            s if s.starts_with('-') && s.len() > 1 && !s.chars().nth(1).unwrap_or('x').is_ascii_digit() => {
+            s if s.starts_with('-')
+                && s.len() > 1
+                && !s.chars().nth(1).unwrap_or('x').is_ascii_digit() =>
+            {
                 i += 1;
                 continue;
             }
@@ -154,7 +157,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_choose};
+    use super::run_choose;
 
     #[test]
     fn help_exits_zero() {

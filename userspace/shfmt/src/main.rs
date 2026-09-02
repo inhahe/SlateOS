@@ -96,7 +96,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_shfmt};
+    use super::run_shfmt;
 
     #[test]
     fn help_exits_zero() {

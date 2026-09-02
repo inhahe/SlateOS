@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_presta(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -18,11 +22,16 @@ fn run_presta(args: &[String], _prog: &str) -> i32 {
         println!("  --hummingbird          Hummingbird (modern reference theme, 1.7+)");
         println!("  --modules              Modules marketplace (paid + free addons)");
         println!("  --account              PrestaShop Account (managed SaaS option, 2023+)");
-        println!("  --multistore           Multi-store mode (run multiple shops from one back-office)");
+        println!(
+            "  --multistore           Multi-store mode (run multiple shops from one back-office)"
+        );
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("PrestaShop 8.x (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("PrestaShop 8.x (Slate OS)");
+        return 0;
+    }
     println!("PrestaShop 8.x (Slate OS)");
     println!("  Vendor: PrestaShop SA (Paris, France — private, ex-Igil/MBO Partenaires backed)");
     println!("  Founders: Igor Schlumberger + Bruno Lévêque, 2005-2007");
@@ -33,19 +42,33 @@ fn run_presta(args: &[String], _prog: &str) -> i32 {
     println!("          Sold majority stake to MBO Partenaires 2021 (French PE)");
     println!("          ~$30M+ ARR rough estimate (private, not disclosed)");
     println!("          ~200 employees");
-    println!("          monetization shifted post-2021: more push on PrestaShop Account (SaaS) and Modules");
-    println!("  Strategic position: 'European Magento' — open-source self-hosted commerce strong in EU + LATAM:");
-    println!("                    primary competitor: Magento / Adobe Commerce (larger, more enterprise)");
+    println!(
+        "          monetization shifted post-2021: more push on PrestaShop Account (SaaS) and Modules"
+    );
+    println!(
+        "  Strategic position: 'European Magento' — open-source self-hosted commerce strong in EU + LATAM:"
+    );
+    println!(
+        "                    primary competitor: Magento / Adobe Commerce (larger, more enterprise)"
+    );
     println!("                    competitor: WooCommerce (much larger globally), Shopify (SaaS)");
-    println!("                    French-language + European focus: native VAT, GDPR, EU shipping integrations");
-    println!("                    estimated 300K+ live stores, ~80% in Europe + LATAM (France, Spain, Italy especially)");
-    println!("                    pitch: 'free, open-source, French-engineered alternative to Shopify'");
+    println!(
+        "                    French-language + European focus: native VAT, GDPR, EU shipping integrations"
+    );
+    println!(
+        "                    estimated 300K+ live stores, ~80% in Europe + LATAM (France, Spain, Italy especially)"
+    );
+    println!(
+        "                    pitch: 'free, open-source, French-engineered alternative to Shopify'"
+    );
     println!("  Pricing:");
     println!("    Core platform — FREE, self-hosted, OSL 3.0 (Open Software License)");
     println!("    Hosting — your choice, $5-200+/mo (PrestaHosting, OVHcloud, IONOS, Hostinger)");
     println!("    Modules — $50-$500 each, several free");
     println!("    Themes — typically $80-300 (most stores use a custom theme)");
-    println!("    PrestaShop Account (managed SaaS) — pricing varies, launching 2023+ for SMB ease");
+    println!(
+        "    PrestaShop Account (managed SaaS) — pricing varies, launching 2023+ for SMB ease"
+    );
     println!("  Architecture (PHP + MySQL, classical LAMP):");
     println!("    - PHP 8.1+ + Symfony components + MySQL/MariaDB");
     println!("    - Smarty templating (legacy) + Symfony Twig (newer back-office)");
@@ -54,7 +77,9 @@ fn run_presta(args: &[String], _prog: &str) -> i32 {
     println!("    - Composer-based dep management (modern PrestaShop)");
     println!("    - much lighter than Magento — runs comfortably on €5/mo shared hosting");
     println!("  Core features (impressive for free):");
-    println!("    - Multi-store mode from one back-office (run multiple brands, languages, currencies)");
+    println!(
+        "    - Multi-store mode from one back-office (run multiple brands, languages, currencies)"
+    );
     println!("    - Multi-currency + multi-language native");
     println!("    - Catalog: simple/virtual/packs/customizable products + variants + combinations");
     println!("    - Native VAT/tax management (heavy EU focus)");
@@ -83,28 +108,45 @@ fn run_presta(args: &[String], _prog: &str) -> i32 {
     println!("    - Native EU VAT handling + EU One-Stop-Shop");
     println!("    - GDPR-compliant by default");
     println!("    - Carriers: Mondial Relay, Chronopost, Colissimo, DPD, GLS, DHL");
-    println!("    - Payment: SEPA, Klarna, Apple Pay/Google Pay via PrestaShop Payments (Stripe-powered)");
+    println!(
+        "    - Payment: SEPA, Klarna, Apple Pay/Google Pay via PrestaShop Payments (Stripe-powered)"
+    );
     println!("    - Multi-lingual EU language packs all maintained");
     println!("    - French government uses PrestaShop for several public e-commerce projects");
     println!("  Customers: ~300,000 active stores worldwide");
-    println!("            Le Slip Français, Toupargel, Smood, Krys (French), Galeries Lafayette (some lines)");
+    println!(
+        "            Le Slip Français, Toupargel, Smood, Krys (French), Galeries Lafayette (some lines)"
+    );
     println!("            many EU regional retailers, fashion boutiques, food/wine producers");
-    println!("            sweet spot: EU SMB/mid-market wanting open-source + free + local features");
-    println!("            very weak in: North America (Shopify dominates), enterprise (Magento/SFCC win)");
+    println!(
+        "            sweet spot: EU SMB/mid-market wanting open-source + free + local features"
+    );
+    println!(
+        "            very weak in: North America (Shopify dominates), enterprise (Magento/SFCC win)"
+    );
     println!("  Critique: smaller community than Magento or WooCommerce globally");
     println!("           module quality varies — combining many modules often causes conflicts");
     println!("           upgrade pain similar to Magento — breaks themes/modules");
-    println!("           less attractive to North American merchants (brand recognition + ecosystem)");
-    println!("           PrestaShop Account (SaaS) still early — Shopify has 17-year head start on SaaS UX");
+    println!(
+        "           less attractive to North American merchants (brand recognition + ecosystem)"
+    );
+    println!(
+        "           PrestaShop Account (SaaS) still early — Shopify has 17-year head start on SaaS UX"
+    );
     println!("           AI features lag US competitors significantly");
     println!("           perceived as 'French-centric' — less polished for English-speaking SMBs");
-    println!("  Differentiator: free + open source + native EU features (VAT, GDPR, carriers, languages) + multi-store from day one — the default platform for European SMB e-commerce");
+    println!(
+        "  Differentiator: free + open source + native EU features (VAT, GDPR, carriers, languages) + multi-store from day one — the default platform for European SMB e-commerce"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "prestashop".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "prestashop".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_presta(&rest, &_prog);
     process::exit(code);
@@ -112,7 +154,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_presta};
+    use super::{basename, run_presta, strip_ext};
 
     #[test]
     fn basename_strips_path() {

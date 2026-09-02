@@ -237,34 +237,41 @@ fn parse_fstab() -> Vec<FstabEntry> {
 // ============================================================================
 
 fn apply_filters(entries: &[MountEntry], opts: &Options) -> Vec<MountEntry> {
-    entries.iter().filter(|e| {
-        // Source filter.
-        if let Some(ref src) = opts.source_filter
-            && e.source != *src {
+    entries
+        .iter()
+        .filter(|e| {
+            // Source filter.
+            if let Some(ref src) = opts.source_filter
+                && e.source != *src
+            {
                 return false;
             }
-        // Target filter.
-        if let Some(ref tgt) = opts.target_filter {
-            if opts.submounts {
-                if !e.target.starts_with(tgt.as_str()) {
+            // Target filter.
+            if let Some(ref tgt) = opts.target_filter {
+                if opts.submounts {
+                    if !e.target.starts_with(tgt.as_str()) {
+                        return false;
+                    }
+                } else if e.target != *tgt {
                     return false;
                 }
-            } else if e.target != *tgt {
-                return false;
             }
-        }
-        // Type filter.
-        if let Some(ref ft) = opts.type_filter {
-            let types: Vec<&str> = ft.split(',').collect();
-            let matches = types.iter().any(|t| e.fstype == *t);
-            if opts.type_invert {
-                if matches { return false; }
-            } else if !matches {
-                return false;
+            // Type filter.
+            if let Some(ref ft) = opts.type_filter {
+                let types: Vec<&str> = ft.split(',').collect();
+                let matches = types.iter().any(|t| e.fstype == *t);
+                if opts.type_invert {
+                    if matches {
+                        return false;
+                    }
+                } else if !matches {
+                    return false;
+                }
             }
-        }
-        true
-    }).cloned().collect()
+            true
+        })
+        .cloned()
+        .collect()
 }
 
 // ============================================================================
@@ -317,7 +324,9 @@ fn print_table(out: &mut io::StdoutLock<'_>, entries: &[MountEntry], opts: &Opti
     // Print header.
     if !opts.no_header {
         for (i, col) in cols.iter().enumerate() {
-            if i > 0 { let _ = write!(out, " "); }
+            if i > 0 {
+                let _ = write!(out, " ");
+            }
             let _ = write!(out, "{:<width$}", col, width = widths[i]);
         }
         let _ = writeln!(out);
@@ -326,7 +335,9 @@ fn print_table(out: &mut io::StdoutLock<'_>, entries: &[MountEntry], opts: &Opti
     // Print rows.
     for entry in entries {
         for (i, col) in cols.iter().enumerate() {
-            if i > 0 { let _ = write!(out, " "); }
+            if i > 0 {
+                let _ = write!(out, " ");
+            }
             let val = column_value(entry, col);
             let _ = write!(out, "{:<width$}", val, width = widths[i]);
         }
@@ -359,7 +370,8 @@ fn print_pairs(out: &mut io::StdoutLock<'_>, entries: &[MountEntry], opts: &Opti
     };
 
     for entry in entries {
-        let pairs: Vec<String> = cols.iter()
+        let pairs: Vec<String> = cols
+            .iter()
             .map(|c| format!("{}=\"{}\"", c, column_value(entry, c)))
             .collect();
         let _ = writeln!(out, "{}", pairs.join(" "));
@@ -394,7 +406,12 @@ fn print_json(out: &mut io::StdoutLock<'_>, entries: &[MountEntry], opts: &Optio
         for (j, col) in cols.iter().enumerate() {
             let c = if j + 1 < cols.len() { "," } else { "" };
             let val = column_value(entry, col);
-            let _ = write!(out, "\"{}\": \"{}\"{c}", col.to_lowercase(), json_escape(&val));
+            let _ = write!(
+                out,
+                "\"{}\": \"{}\"{c}",
+                col.to_lowercase(),
+                json_escape(&val)
+            );
         }
         let _ = writeln!(out, "}}{comma}");
     }
@@ -453,7 +470,9 @@ fn print_tree_node(
         format!("{prefix}├─")
     };
 
-    let extra_cols: Vec<String> = cols.iter().skip(1)
+    let extra_cols: Vec<String> = cols
+        .iter()
+        .skip(1)
         .map(|c| column_value(entry, c))
         .collect();
 
@@ -469,7 +488,10 @@ fn print_tree_node(
     let _ = writeln!(out);
 
     // Print children.
-    let kids = children_map.get(&entry.mount_id).cloned().unwrap_or_default();
+    let kids = children_map
+        .get(&entry.mount_id)
+        .cloned()
+        .unwrap_or_default();
     let child_prefix = if prefix.is_empty() {
         String::new()
     } else if is_last {
@@ -480,7 +502,15 @@ fn print_tree_node(
 
     for (i, &kid_idx) in kids.iter().enumerate() {
         let kid_is_last = i + 1 == kids.len();
-        print_tree_node(out, entries, children_map, cols, kid_idx, &child_prefix, kid_is_last);
+        print_tree_node(
+            out,
+            entries,
+            children_map,
+            cols,
+            kid_idx,
+            &child_prefix,
+            kid_is_last,
+        );
     }
 }
 
@@ -590,10 +620,22 @@ fn cmd_findmnt(args: &[String]) {
                 println!("findmnt {VERSION}");
                 process::exit(0);
             }
-            "-l" | "--list" => { opts.list = true; opts.tree = false; }
-            "-J" | "--json" => { opts.json = true; opts.tree = false; }
-            "-r" | "--raw" => { opts.raw = true; opts.tree = false; }
-            "-P" | "--pairs" => { opts.pairs = true; opts.tree = false; }
+            "-l" | "--list" => {
+                opts.list = true;
+                opts.tree = false;
+            }
+            "-J" | "--json" => {
+                opts.json = true;
+                opts.tree = false;
+            }
+            "-r" | "--raw" => {
+                opts.raw = true;
+                opts.tree = false;
+            }
+            "-P" | "--pairs" => {
+                opts.pairs = true;
+                opts.tree = false;
+            }
             "-n" | "--noheadings" => opts.no_header = true,
             "-f" | "--first-only" => opts.first_only = true,
             "-s" | "--fstab" => opts.fstab_mode = true,
@@ -601,11 +643,15 @@ fn cmd_findmnt(args: &[String]) {
             "-R" | "--submounts" => opts.submounts = true,
             "-S" | "--source" => {
                 i += 1;
-                if i < args.len() { opts.source_filter = Some(args[i].clone()); }
+                if i < args.len() {
+                    opts.source_filter = Some(args[i].clone());
+                }
             }
             "-T" | "--target" => {
                 i += 1;
-                if i < args.len() { opts.target_filter = Some(args[i].clone()); }
+                if i < args.len() {
+                    opts.target_filter = Some(args[i].clone());
+                }
             }
             "-t" | "--type" => {
                 i += 1;
@@ -622,7 +668,10 @@ fn cmd_findmnt(args: &[String]) {
             "-o" | "--output" => {
                 i += 1;
                 if i < args.len() {
-                    opts.columns = args[i].split(',').map(|s| s.trim().to_uppercase()).collect();
+                    opts.columns = args[i]
+                        .split(',')
+                        .map(|s| s.trim().to_uppercase())
+                        .collect();
                 }
             }
             s if !s.starts_with('-') => {
@@ -644,17 +693,21 @@ fn cmd_findmnt(args: &[String]) {
     // Get mount entries.
     let mut entries = if opts.fstab_mode {
         let fstab = parse_fstab();
-        fstab.into_iter().enumerate().map(|(i, e)| MountEntry {
-            mount_id: i as u32 + 1,
-            parent_id: 0,
-            source: e.source,
-            target: e.target,
-            fstype: e.fstype,
-            options: e.options,
-            maj_min: String::new(),
-            fs_root: "/".to_string(),
-            optional: String::new(),
-        }).collect()
+        fstab
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| MountEntry {
+                mount_id: i as u32 + 1,
+                parent_id: 0,
+                source: e.source,
+                target: e.target,
+                fstype: e.fstype,
+                options: e.options,
+                maj_min: String::new(),
+                fs_root: "/".to_string(),
+                optional: String::new(),
+            })
+            .collect()
     } else {
         parse_mountinfo()
     };
@@ -815,11 +868,21 @@ mod tests {
             make_mount(2, 1, "tmpfs", "/tmp", "tmpfs"),
         ];
         let opts = Options {
-            tree: false, list: true, json: false, raw: false, pairs: false,
-            columns: Vec::new(), source_filter: Some("/dev/sda1".to_string()),
-            target_filter: None, type_filter: None, type_invert: false,
-            fstab_mode: false, verify_mode: false, first_only: false,
-            no_header: false, submounts: false,
+            tree: false,
+            list: true,
+            json: false,
+            raw: false,
+            pairs: false,
+            columns: Vec::new(),
+            source_filter: Some("/dev/sda1".to_string()),
+            target_filter: None,
+            type_filter: None,
+            type_invert: false,
+            fstab_mode: false,
+            verify_mode: false,
+            first_only: false,
+            no_header: false,
+            submounts: false,
         };
         let filtered = apply_filters(&entries, &opts);
         assert_eq!(filtered.len(), 1);
@@ -834,11 +897,21 @@ mod tests {
             make_mount(3, 1, "proc", "/proc", "proc"),
         ];
         let opts = Options {
-            tree: false, list: true, json: false, raw: false, pairs: false,
-            columns: Vec::new(), source_filter: None,
-            target_filter: None, type_filter: Some("ext4".to_string()),
-            type_invert: false, fstab_mode: false, verify_mode: false,
-            first_only: false, no_header: false, submounts: false,
+            tree: false,
+            list: true,
+            json: false,
+            raw: false,
+            pairs: false,
+            columns: Vec::new(),
+            source_filter: None,
+            target_filter: None,
+            type_filter: Some("ext4".to_string()),
+            type_invert: false,
+            fstab_mode: false,
+            verify_mode: false,
+            first_only: false,
+            no_header: false,
+            submounts: false,
         };
         let filtered = apply_filters(&entries, &opts);
         assert_eq!(filtered.len(), 1);
@@ -853,11 +926,21 @@ mod tests {
             make_mount(3, 1, "proc", "/proc", "proc"),
         ];
         let opts = Options {
-            tree: false, list: true, json: false, raw: false, pairs: false,
-            columns: Vec::new(), source_filter: None,
-            target_filter: None, type_filter: Some("tmpfs,proc".to_string()),
-            type_invert: true, fstab_mode: false, verify_mode: false,
-            first_only: false, no_header: false, submounts: false,
+            tree: false,
+            list: true,
+            json: false,
+            raw: false,
+            pairs: false,
+            columns: Vec::new(),
+            source_filter: None,
+            target_filter: None,
+            type_filter: Some("tmpfs,proc".to_string()),
+            type_invert: true,
+            fstab_mode: false,
+            verify_mode: false,
+            first_only: false,
+            no_header: false,
+            submounts: false,
         };
         let filtered = apply_filters(&entries, &opts);
         assert_eq!(filtered.len(), 1);
@@ -871,11 +954,21 @@ mod tests {
             make_mount(2, 1, "tmpfs", "/tmp", "tmpfs"),
         ];
         let opts = Options {
-            tree: false, list: true, json: false, raw: false, pairs: false,
-            columns: Vec::new(), source_filter: None,
-            target_filter: Some("/tmp".to_string()), type_filter: None,
-            type_invert: false, fstab_mode: false, verify_mode: false,
-            first_only: false, no_header: false, submounts: false,
+            tree: false,
+            list: true,
+            json: false,
+            raw: false,
+            pairs: false,
+            columns: Vec::new(),
+            source_filter: None,
+            target_filter: Some("/tmp".to_string()),
+            type_filter: None,
+            type_invert: false,
+            fstab_mode: false,
+            verify_mode: false,
+            first_only: false,
+            no_header: false,
+            submounts: false,
         };
         let filtered = apply_filters(&entries, &opts);
         assert_eq!(filtered.len(), 1);
@@ -890,11 +983,21 @@ mod tests {
             make_mount(3, 2, "cgroup2", "/sys/fs/cgroup", "cgroup2"),
         ];
         let opts = Options {
-            tree: false, list: true, json: false, raw: false, pairs: false,
-            columns: Vec::new(), source_filter: None,
-            target_filter: Some("/sys".to_string()), type_filter: None,
-            type_invert: false, fstab_mode: false, verify_mode: false,
-            first_only: false, no_header: false, submounts: true,
+            tree: false,
+            list: true,
+            json: false,
+            raw: false,
+            pairs: false,
+            columns: Vec::new(),
+            source_filter: None,
+            target_filter: Some("/sys".to_string()),
+            type_filter: None,
+            type_invert: false,
+            fstab_mode: false,
+            verify_mode: false,
+            first_only: false,
+            no_header: false,
+            submounts: true,
         };
         let filtered = apply_filters(&entries, &opts);
         assert_eq!(filtered.len(), 2);

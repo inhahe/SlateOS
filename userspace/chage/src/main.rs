@@ -25,12 +25,12 @@ const SHADOW_FILE: &str = "/etc/shadow";
 struct ShadowEntry {
     username: String,
     _password_hash: String,
-    last_changed: i64,    // Days since epoch of last password change.
-    min_days: i64,        // Minimum days between changes.
-    max_days: i64,        // Maximum days between changes.
-    warn_days: i64,       // Days before expiry to warn.
-    inactive_days: i64,   // Days after expiry before account is disabled (-1 = never).
-    expire_date: i64,     // Days since epoch when account expires (-1 = never).
+    last_changed: i64,  // Days since epoch of last password change.
+    min_days: i64,      // Minimum days between changes.
+    max_days: i64,      // Maximum days between changes.
+    warn_days: i64,     // Days before expiry to warn.
+    inactive_days: i64, // Days after expiry before account is disabled (-1 = never).
+    expire_date: i64,   // Days since epoch when account expires (-1 = never).
     _reserved: String,
 }
 
@@ -64,10 +64,18 @@ impl ShadowEntry {
         } else {
             self.expire_date.to_string()
         };
-        format!("{}:{}:{}:{}:{}:{}:{}:{}:{}",
-            self.username, self._password_hash,
-            self.last_changed, self.min_days, self.max_days,
-            self.warn_days, inactive, expire, self._reserved)
+        format!(
+            "{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            self.username,
+            self._password_hash,
+            self.last_changed,
+            self.min_days,
+            self.max_days,
+            self.warn_days,
+            inactive,
+            expire,
+            self._reserved
+        )
     }
 }
 
@@ -118,8 +126,9 @@ fn days_to_date_string(days: i64) -> String {
     }
 
     let day = (remaining / 86400) + 1;
-    let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month_names = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let mname = month_names.get((month - 1) as usize).unwrap_or(&"???");
     format!("{mname} {day:02}, {year}")
 }
@@ -158,9 +167,24 @@ fn is_leap_year(year: i32) -> bool {
 
 fn days_in_month(year: i32, month: u32) -> u32 {
     match month {
-        1 => 31, 2 => if is_leap_year(year) { 29 } else { 28 },
-        3 => 31, 4 => 30, 5 => 31, 6 => 30,
-        7 => 31, 8 => 31, 9 => 30, 10 => 31, 11 => 30, 12 => 31,
+        1 => 31,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        3 => 31,
+        4 => 30,
+        5 => 31,
+        6 => 30,
+        7 => 31,
+        8 => 31,
+        9 => 30,
+        10 => 31,
+        11 => 30,
+        12 => 31,
         _ => 0,
     }
 }
@@ -228,17 +252,49 @@ fn generate_default_entries() -> Vec<ShadowEntry> {
 // ============================================================================
 
 fn display_aging_info(out: &mut io::StdoutLock<'_>, entry: &ShadowEntry) {
-    let _ = writeln!(out, "Last password change\t\t\t\t: {}", days_to_date_string(entry.last_changed));
-    let _ = writeln!(out, "Password expires\t\t\t\t: {}",
-        if entry.max_days >= 99999 { "never".to_string() }
-        else { days_to_date_string(entry.last_changed + entry.max_days) });
-    let _ = writeln!(out, "Password inactive\t\t\t\t: {}",
-        if entry.inactive_days < 0 { "never".to_string() }
-        else { days_to_date_string(entry.last_changed + entry.max_days + entry.inactive_days) });
-    let _ = writeln!(out, "Account expires\t\t\t\t\t: {}", days_to_date_string(entry.expire_date));
-    let _ = writeln!(out, "Minimum number of days between password change\t: {}", entry.min_days);
-    let _ = writeln!(out, "Maximum number of days between password change\t: {}", entry.max_days);
-    let _ = writeln!(out, "Number of days of warning before password expires\t: {}", entry.warn_days);
+    let _ = writeln!(
+        out,
+        "Last password change\t\t\t\t: {}",
+        days_to_date_string(entry.last_changed)
+    );
+    let _ = writeln!(
+        out,
+        "Password expires\t\t\t\t: {}",
+        if entry.max_days >= 99999 {
+            "never".to_string()
+        } else {
+            days_to_date_string(entry.last_changed + entry.max_days)
+        }
+    );
+    let _ = writeln!(
+        out,
+        "Password inactive\t\t\t\t: {}",
+        if entry.inactive_days < 0 {
+            "never".to_string()
+        } else {
+            days_to_date_string(entry.last_changed + entry.max_days + entry.inactive_days)
+        }
+    );
+    let _ = writeln!(
+        out,
+        "Account expires\t\t\t\t\t: {}",
+        days_to_date_string(entry.expire_date)
+    );
+    let _ = writeln!(
+        out,
+        "Minimum number of days between password change\t: {}",
+        entry.min_days
+    );
+    let _ = writeln!(
+        out,
+        "Maximum number of days between password change\t: {}",
+        entry.max_days
+    );
+    let _ = writeln!(
+        out,
+        "Number of days of warning before password expires\t: {}",
+        entry.warn_days
+    );
 }
 
 fn list_all_aging(out: &mut io::StdoutLock<'_>) {
@@ -299,27 +355,39 @@ fn cmd_chage(args: &[String]) {
             "-l" | "--list" => list_mode = true,
             "-m" | "--mindays" => {
                 i += 1;
-                if i < args.len() { min_days = args[i].parse().ok(); }
+                if i < args.len() {
+                    min_days = args[i].parse().ok();
+                }
             }
             "-M" | "--maxdays" => {
                 i += 1;
-                if i < args.len() { max_days = args[i].parse().ok(); }
+                if i < args.len() {
+                    max_days = args[i].parse().ok();
+                }
             }
             "-W" | "--warndays" => {
                 i += 1;
-                if i < args.len() { warn_days = args[i].parse().ok(); }
+                if i < args.len() {
+                    warn_days = args[i].parse().ok();
+                }
             }
             "-I" | "--inactive" => {
                 i += 1;
-                if i < args.len() { inactive_days = args[i].parse().ok(); }
+                if i < args.len() {
+                    inactive_days = args[i].parse().ok();
+                }
             }
             "-E" | "--expiredate" => {
                 i += 1;
-                if i < args.len() { expire_date = Some(args[i].clone()); }
+                if i < args.len() {
+                    expire_date = Some(args[i].clone());
+                }
             }
             "-d" | "--lastday" => {
                 i += 1;
-                if i < args.len() { last_day = Some(args[i].clone()); }
+                if i < args.len() {
+                    last_day = Some(args[i].clone());
+                }
             }
             s if !s.starts_with('-') => {
                 username = Some(s.to_string());
@@ -477,8 +545,11 @@ mod tests {
             username: "user".to_string(),
             _password_hash: "!".to_string(),
             last_changed: 0,
-            min_days: 0, max_days: 99999, warn_days: 7,
-            inactive_days: -1, expire_date: -1,
+            min_days: 0,
+            max_days: 99999,
+            warn_days: 7,
+            inactive_days: -1,
+            expire_date: -1,
             _reserved: String::new(),
         };
         let c = entry.clone();
@@ -577,8 +648,12 @@ mod tests {
         let entry = ShadowEntry {
             username: "test".to_string(),
             _password_hash: "!".to_string(),
-            last_changed: 0, min_days: 0, max_days: 99999,
-            warn_days: 7, inactive_days: -1, expire_date: -1,
+            last_changed: 0,
+            min_days: 0,
+            max_days: 99999,
+            warn_days: 7,
+            inactive_days: -1,
+            expire_date: -1,
             _reserved: String::new(),
         };
         let line = entry.to_shadow_line();

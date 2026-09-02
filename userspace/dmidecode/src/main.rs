@@ -234,7 +234,11 @@ fn get_string(entry: &DmiEntry, idx: usize) -> String {
 
 fn print_entry(out: &mut io::StdoutLock<'_>, entry: &DmiEntry) {
     let name = type_name(entry.entry_type);
-    let _ = writeln!(out, "Handle 0x{:04X}, DMI type {}, {} bytes", entry.handle, entry.entry_type, entry.length);
+    let _ = writeln!(
+        out,
+        "Handle 0x{:04X}, DMI type {}, {} bytes",
+        entry.handle, entry.entry_type, entry.length
+    );
     let _ = writeln!(out, "{name}");
 
     match entry.entry_type {
@@ -293,9 +297,18 @@ fn print_json(out: &mut io::StdoutLock<'_>, entries: &[DmiEntry]) {
     for (i, entry) in entries.iter().enumerate() {
         let comma = if i + 1 < entries.len() { "," } else { "" };
         let name = type_name(entry.entry_type);
-        let _ = writeln!(out, "    {{\"handle\": {}, \"type\": {}, \"type_name\": \"{name}\", \"length\": {}, \"strings\": [{}]}}{comma}",
-            entry.handle, entry.entry_type, entry.length,
-            entry.strings.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(", ")
+        let _ = writeln!(
+            out,
+            "    {{\"handle\": {}, \"type\": {}, \"type_name\": \"{name}\", \"length\": {}, \"strings\": [{}]}}{comma}",
+            entry.handle,
+            entry.entry_type,
+            entry.length,
+            entry
+                .strings
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
     let _ = writeln!(out, "  ]");
@@ -387,7 +400,9 @@ fn cmd_dmidecode(args: &[String]) {
                 println!();
                 println!("Options:");
                 println!("  -t, --type TYPE      Only show entries of TYPE (0-127 or keyword)");
-                println!("  -s, --string KEYWORD Show specific string (bios-vendor, system-product-name, etc.)");
+                println!(
+                    "  -s, --string KEYWORD Show specific string (bios-vendor, system-product-name, etc.)"
+                );
                 println!("  -H, --handle HANDLE  Show entry by handle");
                 println!("  -u, --dump           Show raw hex dump");
                 println!("  -j, --json           JSON output");
@@ -395,7 +410,9 @@ fn cmd_dmidecode(args: &[String]) {
                 println!("  -h, --help           Show help");
                 println!("  -V, --version        Show version");
                 println!();
-                println!("Type keywords: bios, system, baseboard, chassis, processor, memory, cache, slot");
+                println!(
+                    "Type keywords: bios, system, baseboard, chassis, processor, memory, cache, slot"
+                );
                 process::exit(0);
             }
             "-V" | "--version" => {
@@ -474,13 +491,22 @@ fn cmd_dmidecode(args: &[String]) {
     if !opts.quiet {
         let _ = writeln!(out, "# dmidecode {VERSION}");
         let _ = writeln!(out, "SMBIOS present.");
-        let _ = writeln!(out, "{} structures occupying {} bytes.", entries.len(), entries.iter().map(|e| e.length as usize).sum::<usize>());
+        let _ = writeln!(
+            out,
+            "{} structures occupying {} bytes.",
+            entries.len(),
+            entries.iter().map(|e| e.length as usize).sum::<usize>()
+        );
         let _ = writeln!(out);
     }
 
     for entry in &filtered {
         if opts.dump {
-            let _ = writeln!(out, "Handle 0x{:04X}, DMI type {}, {} bytes", entry.handle, entry.entry_type, entry.length);
+            let _ = writeln!(
+                out,
+                "Handle 0x{:04X}, DMI type {}, {} bytes",
+                entry.handle, entry.entry_type, entry.length
+            );
             // Hex dump.
             for (j, chunk) in entry.data.chunks(16).enumerate() {
                 let _ = write!(out, "\t{:04x}: ", j * 16);
@@ -518,19 +544,67 @@ fn parse_type_filter(s: &str) -> Vec<u8> {
 
 fn lookup_string(entries: &[DmiEntry], keyword: &str) -> String {
     match keyword {
-        "bios-vendor" => entries.iter().find(|e| e.entry_type == TYPE_BIOS).map(|e| get_string(e, 1)).unwrap_or_default(),
-        "bios-version" => entries.iter().find(|e| e.entry_type == TYPE_BIOS).map(|e| get_string(e, 2)).unwrap_or_default(),
-        "bios-release-date" => entries.iter().find(|e| e.entry_type == TYPE_BIOS).map(|e| get_string(e, 3)).unwrap_or_default(),
-        "system-manufacturer" => entries.iter().find(|e| e.entry_type == TYPE_SYSTEM).map(|e| get_string(e, 1)).unwrap_or_default(),
-        "system-product-name" => entries.iter().find(|e| e.entry_type == TYPE_SYSTEM).map(|e| get_string(e, 2)).unwrap_or_default(),
-        "system-version" => entries.iter().find(|e| e.entry_type == TYPE_SYSTEM).map(|e| get_string(e, 3)).unwrap_or_default(),
-        "system-serial-number" => entries.iter().find(|e| e.entry_type == TYPE_SYSTEM).map(|e| get_string(e, 4)).unwrap_or_default(),
-        "baseboard-manufacturer" => entries.iter().find(|e| e.entry_type == TYPE_BASEBOARD).map(|e| get_string(e, 1)).unwrap_or_default(),
-        "baseboard-product-name" => entries.iter().find(|e| e.entry_type == TYPE_BASEBOARD).map(|e| get_string(e, 2)).unwrap_or_default(),
-        "chassis-manufacturer" => entries.iter().find(|e| e.entry_type == TYPE_CHASSIS).map(|e| get_string(e, 1)).unwrap_or_default(),
-        "chassis-type" => entries.iter().find(|e| e.entry_type == TYPE_CHASSIS).map(|e| get_string(e, 2)).unwrap_or_default(),
+        "bios-vendor" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_BIOS)
+            .map(|e| get_string(e, 1))
+            .unwrap_or_default(),
+        "bios-version" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_BIOS)
+            .map(|e| get_string(e, 2))
+            .unwrap_or_default(),
+        "bios-release-date" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_BIOS)
+            .map(|e| get_string(e, 3))
+            .unwrap_or_default(),
+        "system-manufacturer" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_SYSTEM)
+            .map(|e| get_string(e, 1))
+            .unwrap_or_default(),
+        "system-product-name" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_SYSTEM)
+            .map(|e| get_string(e, 2))
+            .unwrap_or_default(),
+        "system-version" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_SYSTEM)
+            .map(|e| get_string(e, 3))
+            .unwrap_or_default(),
+        "system-serial-number" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_SYSTEM)
+            .map(|e| get_string(e, 4))
+            .unwrap_or_default(),
+        "baseboard-manufacturer" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_BASEBOARD)
+            .map(|e| get_string(e, 1))
+            .unwrap_or_default(),
+        "baseboard-product-name" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_BASEBOARD)
+            .map(|e| get_string(e, 2))
+            .unwrap_or_default(),
+        "chassis-manufacturer" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_CHASSIS)
+            .map(|e| get_string(e, 1))
+            .unwrap_or_default(),
+        "chassis-type" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_CHASSIS)
+            .map(|e| get_string(e, 2))
+            .unwrap_or_default(),
         "processor-family" => "x86_64".to_string(),
-        "processor-manufacturer" => entries.iter().find(|e| e.entry_type == TYPE_PROCESSOR).map(|e| get_string(e, 2)).unwrap_or_default(),
+        "processor-manufacturer" => entries
+            .iter()
+            .find(|e| e.entry_type == TYPE_PROCESSOR)
+            .map(|e| get_string(e, 2))
+            .unwrap_or_default(),
         _ => "Unknown".to_string(),
     }
 }
@@ -557,7 +631,10 @@ mod tests {
     fn test_parse_type_filter_keyword() {
         assert_eq!(parse_type_filter("bios"), vec![TYPE_BIOS]);
         assert_eq!(parse_type_filter("system"), vec![TYPE_SYSTEM]);
-        assert_eq!(parse_type_filter("memory"), vec![TYPE_PHYS_MEMORY, TYPE_MEMORY_DEVICE]);
+        assert_eq!(
+            parse_type_filter("memory"),
+            vec![TYPE_PHYS_MEMORY, TYPE_MEMORY_DEVICE]
+        );
     }
 
     #[test]
@@ -569,7 +646,9 @@ mod tests {
     #[test]
     fn test_get_string_valid() {
         let entry = DmiEntry {
-            entry_type: 0, handle: 0, length: 4,
+            entry_type: 0,
+            handle: 0,
+            length: 4,
             data: Vec::new(),
             strings: vec!["Vendor".to_string(), "Version".to_string()],
         };
@@ -580,8 +659,11 @@ mod tests {
     #[test]
     fn test_get_string_out_of_range() {
         let entry = DmiEntry {
-            entry_type: 0, handle: 0, length: 4,
-            data: Vec::new(), strings: vec!["Test".to_string()],
+            entry_type: 0,
+            handle: 0,
+            length: 4,
+            data: Vec::new(),
+            strings: vec!["Test".to_string()],
         };
         assert_eq!(get_string(&entry, 0), "Not Specified");
         assert_eq!(get_string(&entry, 5), "Not Specified");
@@ -623,8 +705,11 @@ mod tests {
     #[test]
     fn test_dmi_entry_clone() {
         let entry = DmiEntry {
-            entry_type: TYPE_BIOS, handle: 0, length: 4,
-            data: vec![0, 4, 0, 0], strings: vec!["Test".to_string()],
+            entry_type: TYPE_BIOS,
+            handle: 0,
+            length: 4,
+            data: vec![0, 4, 0, 0],
+            strings: vec!["Test".to_string()],
         };
         let cloned = entry.clone();
         assert_eq!(cloned.entry_type, TYPE_BIOS);

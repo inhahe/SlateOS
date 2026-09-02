@@ -165,7 +165,10 @@ fn read_topology() -> NumaTopology {
         // Read distances
         let dist_path = node_path.join("distance");
         let distances = match std::fs::read_to_string(&dist_path) {
-            Ok(s) => s.split_whitespace().filter_map(|v| v.parse::<u32>().ok()).collect(),
+            Ok(s) => s
+                .split_whitespace()
+                .filter_map(|v| v.parse::<u32>().ok())
+                .collect(),
             Err(_) => Vec::new(),
         };
 
@@ -235,9 +238,10 @@ fn parse_node_meminfo(s: &str) -> (u64, u64) {
                 total = parse_meminfo_kb(&line[pos + 9..]);
             }
         } else if line.contains("MemFree:")
-            && let Some(pos) = line.find("MemFree:") {
-                free = parse_meminfo_kb(&line[pos + 8..]);
-            }
+            && let Some(pos) = line.find("MemFree:")
+        {
+            free = parse_meminfo_kb(&line[pos + 8..]);
+        }
     }
     (total, free)
 }
@@ -271,8 +275,11 @@ fn format_bytes(bytes: u64) -> String {
 fn cmd_hardware() {
     let topo = read_topology();
 
-    println!("available: {} nodes (0-{})", topo.nodes.len(),
-        topo.nodes.len().saturating_sub(1));
+    println!(
+        "available: {} nodes (0-{})",
+        topo.nodes.len(),
+        topo.nodes.len().saturating_sub(1)
+    );
 
     for node in &topo.nodes {
         println!("node {} cpus: {}", node.id, format_nodelist(&node.cpus));
@@ -309,7 +316,11 @@ fn cmd_show() {
     println!("preferred node: current");
 
     let all_nodes: Vec<u32> = topo.nodes.iter().map(|n| n.id).collect();
-    let all_cpus: Vec<u32> = topo.nodes.iter().flat_map(|n| n.cpus.iter().copied()).collect();
+    let all_cpus: Vec<u32> = topo
+        .nodes
+        .iter()
+        .flat_map(|n| n.cpus.iter().copied())
+        .collect();
 
     println!("physcpubind: {}", format_nodelist(&all_cpus));
     println!("cpubind: {}", format_nodelist(&all_nodes));
@@ -412,7 +423,8 @@ fn cmd_numastat(args: &[String]) {
     let topo = read_topology();
     let per_node = args.iter().any(|a| a == "-n");
     let show_all = args.iter().any(|a| a == "-m");
-    let pid_filter: Option<u32> = args.iter()
+    let pid_filter: Option<u32> = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .and_then(|a| a.parse().ok());
 
@@ -446,8 +458,12 @@ fn cmd_numastat(args: &[String]) {
     } else if per_node || pid_filter.is_some() {
         // Per-node memory stats
         let stat_names = [
-            "numa_hit", "numa_miss", "numa_foreign",
-            "interleave_hit", "local_node", "other_node",
+            "numa_hit",
+            "numa_miss",
+            "numa_foreign",
+            "interleave_hit",
+            "local_node",
+            "other_node",
         ];
 
         print!("{:<24}", "");
@@ -472,8 +488,12 @@ fn cmd_numastat(args: &[String]) {
     } else {
         // Default summary
         let stat_names = [
-            "numa_hit", "numa_miss", "numa_foreign",
-            "interleave_hit", "local_node", "other_node",
+            "numa_hit",
+            "numa_miss",
+            "numa_foreign",
+            "interleave_hit",
+            "local_node",
+            "other_node",
         ];
 
         print!("{:<24}", "");
@@ -501,9 +521,10 @@ fn read_numa_stat(path: &str, key: &str) -> u64 {
     };
     for line in content.lines() {
         if let Some((k, v)) = line.split_once(char::is_whitespace)
-            && k.trim() == key {
-                return v.trim().parse().unwrap_or(0);
-            }
+            && k.trim() == key
+        {
+            return v.trim().parse().unwrap_or(0);
+        }
     }
     0
 }
@@ -523,10 +544,9 @@ fn cmd_memhog(args: &[String]) {
                     node = args[i].parse().ok();
                 }
             }
-            _ if !args[i].starts_with('-')
-                && size_mb == 0 => {
-                    size_mb = parse_memhog_size(&args[i]);
-                }
+            _ if !args[i].starts_with('-') && size_mb == 0 => {
+                size_mb = parse_memhog_size(&args[i]);
+            }
             _ => {}
         }
         i += 1;
@@ -549,7 +569,9 @@ fn cmd_memhog(args: &[String]) {
 fn parse_memhog_size(s: &str) -> u64 {
     let s = s.trim().to_lowercase();
     if let Some(n) = s.strip_suffix('g') {
-        n.parse::<u64>().unwrap_or(0).saturating_mul(1024 * 1024 * 1024)
+        n.parse::<u64>()
+            .unwrap_or(0)
+            .saturating_mul(1024 * 1024 * 1024)
     } else if let Some(n) = s.strip_suffix('m') {
         n.parse::<u64>().unwrap_or(0).saturating_mul(1024 * 1024)
     } else if let Some(n) = s.strip_suffix('k') {
@@ -577,7 +599,11 @@ fn cmd_numademo(args: &[String]) {
     // Simulate benchmark results for each policy
     let policies = ["local", "interleave", "membind node0"];
     for policy in &policies {
-        println!("  {}: simulated ~{:.1} MB/s", policy, 8000.0 + (policy.len() as f64 * 100.0));
+        println!(
+            "  {}: simulated ~{:.1} MB/s",
+            policy,
+            8000.0 + (policy.len() as f64 * 100.0)
+        );
     }
 }
 
@@ -754,7 +780,10 @@ mod tests {
     fn test_mem_policy_display() {
         assert_eq!(format!("{}", MemPolicy::Default), "default");
         assert_eq!(format!("{}", MemPolicy::Bind(vec![0, 1])), "bind:0-1");
-        assert_eq!(format!("{}", MemPolicy::Interleave(vec![0, 2])), "interleave:0,2");
+        assert_eq!(
+            format!("{}", MemPolicy::Interleave(vec![0, 2])),
+            "interleave:0,2"
+        );
         assert_eq!(format!("{}", MemPolicy::Preferred(1)), "preferred:1");
         assert_eq!(format!("{}", MemPolicy::Local), "local");
     }

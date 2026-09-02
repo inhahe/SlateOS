@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_pastel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -43,12 +47,19 @@ fn run_pastel(args: &[String], _prog: &str) -> i32 {
         println!("pastel 0.9.0 (Slate OS)");
         return 0;
     }
-    let cmd = args.iter().find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("list");
+    let cmd = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("list");
     match cmd {
         "color" => {
-            let color = args.iter().skip_while(|a| a.as_str() != "color").nth(1)
-                .map(|s| s.as_str()).unwrap_or("#ff0000");
+            let color = args
+                .iter()
+                .skip_while(|a| a.as_str() != "color")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("#ff0000");
             println!("Color: {}", color);
             println!("  RGB: (255, 0, 0)");
             println!("  HSL: (0.0, 100.0%, 50.0%)");
@@ -64,14 +75,22 @@ fn run_pastel(args: &[String], _prog: &str) -> i32 {
         }
         "random" => println!("#a3c4f2"),
         "distinct" => {
-            let n = args.iter().skip_while(|a| a.as_str() != "distinct").nth(1)
-                .map(|s| s.as_str()).unwrap_or("5");
+            let n = args
+                .iter()
+                .skip_while(|a| a.as_str() != "distinct")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("5");
             println!("pastel: Generating {} distinct colors:", n);
             println!("#e41a1c  #377eb8  #4daf4a  #984ea3  #ff7f00");
         }
         "complement" => {
-            let color = args.iter().skip_while(|a| a.as_str() != "complement").nth(1)
-                .map(|s| s.as_str()).unwrap_or("#ff0000");
+            let color = args
+                .iter()
+                .skip_while(|a| a.as_str() != "complement")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("#ff0000");
             println!("Complement of {}: #00ffff", color);
         }
         "mix" => println!("pastel mix: #808080"),
@@ -83,7 +102,10 @@ fn run_pastel(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pastel".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pastel".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_pastel(&rest, &prog);
     process::exit(code);
@@ -91,7 +113,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pastel};
+    use super::{basename, run_pastel, strip_ext};
 
     #[test]
     fn basename_strips_path() {

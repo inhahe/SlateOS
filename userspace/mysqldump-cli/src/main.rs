@@ -37,7 +37,9 @@ fn run_mysqldump(args: Vec<String>) -> i32 {
     let all_db = args.iter().any(|a| a == "--all-databases" || a == "-A");
     let no_data = args.iter().any(|a| a == "--no-data" || a == "-d");
 
-    let db = args.iter().find(|a| !a.starts_with('-'))
+    let db = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
     println!("-- MySQL dump 8.0.35 (Slate OS)");
@@ -84,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mysqldump};
+    use super::run_mysqldump;
 
     #[test]
     fn help_exits_zero() {

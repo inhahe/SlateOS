@@ -43,7 +43,10 @@ fn run_go(args: Vec<String>) -> i32 {
             println!("  vet         Report likely mistakes in packages");
             0
         }
-        "version" => { println!("go version go1.22.0 slateos/amd64"); 0 }
+        "version" => {
+            println!("go version go1.22.0 slateos/amd64");
+            0
+        }
         "env" => {
             println!("GO111MODULE=\"\"");
             println!("GOARCH=\"amd64\"");
@@ -55,7 +58,9 @@ fn run_go(args: Vec<String>) -> i32 {
             0
         }
         "build" => {
-            let output = cmd_args.iter().position(|a| a == "-o")
+            let output = cmd_args
+                .iter()
+                .position(|a| a == "-o")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str());
             match output {
@@ -119,15 +124,24 @@ fn run_go(args: Vec<String>) -> i32 {
             0
         }
         "fmt" => {
-            let files: Vec<&str> = cmd_args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+            let files: Vec<&str> = cmd_args
+                .iter()
+                .filter(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .collect();
             if files.is_empty() {
                 println!("(formatting ./... — simulated)");
             } else {
-                for f in &files { println!("(formatted {} — simulated)", f); }
+                for f in &files {
+                    println!("(formatted {} — simulated)", f);
+                }
             }
             0
         }
-        "vet" => { println!("(go vet ./... — no issues found, simulated)"); 0 }
+        "vet" => {
+            println!("(go vet ./... — no issues found, simulated)");
+            0
+        }
         "install" => {
             let pkg = cmd_args.first().map(|s| s.as_str()).unwrap_or("./...");
             println!("(installing {} — simulated)", pkg);
@@ -168,9 +182,18 @@ fn run_go(args: Vec<String>) -> i32 {
             }
             0
         }
-        "generate" => { println!("(go generate ./... — simulated)"); 0 }
-        "work" => { println!("(go work — simulated)"); 0 }
-        other => { eprintln!("go: unknown command \"{}\"", other); 1 }
+        "generate" => {
+            println!("(go generate ./... — simulated)");
+            0
+        }
+        "work" => {
+            println!("(go work — simulated)");
+            0
+        }
+        other => {
+            eprintln!("go: unknown command \"{}\"", other);
+            1
+        }
     }
 }
 
@@ -184,11 +207,17 @@ fn run_gofmt(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     for f in &files {
         println!("(formatted: {} — simulated)", f);
     }
-    if files.is_empty() { println!("(reading from stdin — simulated)"); }
+    if files.is_empty() {
+        println!("(reading from stdin — simulated)");
+    }
     0
 }
 
@@ -202,7 +231,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -223,7 +254,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_go};
+    use super::run_go;
 
     #[test]
     fn help_exits_zero() {

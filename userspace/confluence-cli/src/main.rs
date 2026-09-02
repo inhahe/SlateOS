@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_conf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -20,16 +24,27 @@ fn run_conf(args: &[String], _prog: &str) -> i32 {
         println!("  --enterprise           Enterprise — custom (SAML, audit logs, residency)");
         println!("  --data-center          Data Center (self-hosted, $42K+/yr for 500 users)");
         println!("  --whiteboards          Confluence Whiteboards (Miro-like, 2023+)");
-        println!("  --databases            Confluence Databases (Notion-like structured data, 2024)");
+        println!(
+            "  --databases            Confluence Databases (Notion-like structured data, 2024)"
+        );
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Confluence 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Confluence 2024 (Slate OS)");
+        return 0;
+    }
     println!("Confluence 2024 (Slate OS)");
     println!("  Vendor: Atlassian Corporation Plc (Sydney, Australia / SF, CA — NASDAQ:TEAM)");
-    println!("  Founders: Mike Cannon-Brookes + Scott Farquhar, 2002 (Atlassian); Confluence shipped 2004");
-    println!("          University of New South Wales graduates, started Atlassian on $10K credit card debt");
-    println!("          Cannon-Brookes co-CEO + Farquhar co-CEO until Farquhar stepped down Aug 2024");
+    println!(
+        "  Founders: Mike Cannon-Brookes + Scott Farquhar, 2002 (Atlassian); Confluence shipped 2004"
+    );
+    println!(
+        "          University of New South Wales graduates, started Atlassian on $10K credit card debt"
+    );
+    println!(
+        "          Cannon-Brookes co-CEO + Farquhar co-CEO until Farquhar stepped down Aug 2024"
+    );
     println!("          billionaire founders, prominent in Australian tech + climate activism");
     println!("          built Atlassian without venture funding until 2010 (Accel growth equity)");
     println!("  Founded: 2004 (Confluence product), Atlassian 2002");
@@ -39,24 +54,42 @@ fn run_conf(args: &[String], _prog: &str) -> i32 {
     println!("          Confluence: ~85K+ paying customers, ~$1B+ ARR estimated");
     println!("          ~12,000 employees Atlassian-wide");
     println!("  Strategic position: 'enterprise team workspace, often paired with Jira':");
-    println!("                    primary competitor: Notion (newer + flashier), Microsoft Loop, Coda, Slab");
-    println!("                    wiki competitor: SharePoint, GitBook, BookStack, Obsidian (personal)");
-    println!("                    Notion has been eating Confluence for ~5 years — Confluence response: Whiteboards, Databases, Rovo AI");
-    println!("                    legacy strength: deep Jira integration (Jira + Confluence = Atlassian PM stack)");
-    println!("                    Data Center (self-hosted) retired Cloud is replacement for Server (EOL 2024)");
+    println!(
+        "                    primary competitor: Notion (newer + flashier), Microsoft Loop, Coda, Slab"
+    );
+    println!(
+        "                    wiki competitor: SharePoint, GitBook, BookStack, Obsidian (personal)"
+    );
+    println!(
+        "                    Notion has been eating Confluence for ~5 years — Confluence response: Whiteboards, Databases, Rovo AI"
+    );
+    println!(
+        "                    legacy strength: deep Jira integration (Jira + Confluence = Atlassian PM stack)"
+    );
+    println!(
+        "                    Data Center (self-hosted) retired Cloud is replacement for Server (EOL 2024)"
+    );
     println!("                    'Atlassian Cloud' migration is the big company push 2020-2025");
     println!("  Pricing (per user, transparent):");
     println!("    Free — 10 users, 2GB storage");
     println!("    Standard — $6.05/user/mo (up to 50K users, unlimited storage)");
-    println!("    Premium — $11.55/user/mo (analytics, automations, archive, sandbox, premium support)");
+    println!(
+        "    Premium — $11.55/user/mo (analytics, automations, archive, sandbox, premium support)"
+    );
     println!("    Enterprise — custom (SSO, SCIM, audit, data residency, 24/7 support)");
     println!("    Data Center — annual license: ~$42K/yr starting at 500 users, scales up");
-    println!("    bundled with Atlassian Premium suite (Jira + Confluence + Bitbucket) — typical enterprise deals $100K-$2M+/yr");
+    println!(
+        "    bundled with Atlassian Premium suite (Jira + Confluence + Bitbucket) — typical enterprise deals $100K-$2M+/yr"
+    );
     println!("  Core architecture (page-based wiki + structured editor):");
     println!("    - Spaces (top-level workspaces, e.g. Engineering, Marketing, Personal)");
     println!("    - Pages (hierarchical tree, infinite nesting)");
-    println!("    - Editor: rich text (paragraphs, headings, tables, lists, code blocks, callouts)");
-    println!("    - Macros: extensible inline widgets (Jira issue list, status, decision, date, mentions, Loom embed)");
+    println!(
+        "    - Editor: rich text (paragraphs, headings, tables, lists, code blocks, callouts)"
+    );
+    println!(
+        "    - Macros: extensible inline widgets (Jira issue list, status, decision, date, mentions, Loom embed)"
+    );
     println!("    - Templates: page templates per use case (meeting notes, OKRs, decisions, PRDs)");
     println!("    - Comments: page-level + inline (highlight text + comment, like Google Docs)");
     println!("    - Version history + restore");
@@ -70,7 +103,9 @@ fn run_conf(args: &[String], _prog: &str) -> i32 {
     println!("  Confluence Whiteboards (2023 GA):");
     println!("    - Embedded whiteboards inside pages");
     println!("    - Direct competitor: Miro, Mural, FigJam, Loom Boards");
-    println!("    - Atlassian's response to Notion's free-form canvas + Miro's category leadership");
+    println!(
+        "    - Atlassian's response to Notion's free-form canvas + Miro's category leadership"
+    );
     println!("    - Convert sticky notes → Jira issues directly");
     println!("  Confluence Databases (2024):");
     println!("    - Notion-like structured tables embedded in pages");
@@ -92,23 +127,46 @@ fn run_conf(args: &[String], _prog: &str) -> i32 {
     println!("  Customers: ~85,000+ paying customers");
     println!("            Spotify, NASA, Visa, Bayer, Verizon, eBay, Adobe (yes, uses Confluence)");
     println!("            DocuSign, Robinhood, Twilio, Square, AirBnB (some teams)");
-    println!("            sweet spot: 100-100,000 employee enterprises, especially with engineering teams using Jira");
-    println!("            historically WEAK in: marketing teams (Notion + Asana win), non-tech departments");
-    println!("  Critique: Notion has been eating mid-market for years — younger teams prefer Notion's modern UX");
-    println!("           Confluence's editor is slower + less polished than Notion (still improving)");
-    println!("           Cloud migration painful for legacy on-prem customers — many delays, breakages");
-    println!("           Atlassian Server EOL Feb 2024 forced customers to Cloud OR Data Center (expensive)");
-    println!("           Marketplace app ecosystem has compatibility issues between Server/DC/Cloud editions");
-    println!("           AI features behind Notion AI in adoption + behind Microsoft Copilot in enterprise");
+    println!(
+        "            sweet spot: 100-100,000 employee enterprises, especially with engineering teams using Jira"
+    );
+    println!(
+        "            historically WEAK in: marketing teams (Notion + Asana win), non-tech departments"
+    );
+    println!(
+        "  Critique: Notion has been eating mid-market for years — younger teams prefer Notion's modern UX"
+    );
+    println!(
+        "           Confluence's editor is slower + less polished than Notion (still improving)"
+    );
+    println!(
+        "           Cloud migration painful for legacy on-prem customers — many delays, breakages"
+    );
+    println!(
+        "           Atlassian Server EOL Feb 2024 forced customers to Cloud OR Data Center (expensive)"
+    );
+    println!(
+        "           Marketplace app ecosystem has compatibility issues between Server/DC/Cloud editions"
+    );
+    println!(
+        "           AI features behind Notion AI in adoption + behind Microsoft Copilot in enterprise"
+    );
     println!("           perceived as 'enterprise stodgy' vs Notion's design-driven appeal");
-    println!("           cost adds up: Confluence + Jira + Bitbucket + Loom + Trello + Marketplace apps = $$$");
-    println!("  Differentiator: deepest Jira integration + 85K+ enterprise install base + Whiteboards + Databases + Rovo AI — for engineering-led enterprises that already live in Atlassian");
+    println!(
+        "           cost adds up: Confluence + Jira + Bitbucket + Loom + Trello + Marketplace apps = $$$"
+    );
+    println!(
+        "  Differentiator: deepest Jira integration + 85K+ enterprise install base + Whiteboards + Databases + Rovo AI — for engineering-led enterprises that already live in Atlassian"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "confluence".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "confluence".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_conf(&rest, &_prog);
     process::exit(code);
@@ -116,7 +174,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_conf};
+    use super::{basename, run_conf, strip_ext};
 
     #[test]
     fn basename_strips_path() {

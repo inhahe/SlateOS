@@ -35,18 +35,26 @@ fn run_rubocop(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let auto_correct = args.iter().any(|a| a == "-a" || a == "--auto-correct" || a == "-A" || a == "--auto-correct-all");
+    let auto_correct = args
+        .iter()
+        .any(|a| a == "-a" || a == "--auto-correct" || a == "-A" || a == "--auto-correct-all");
 
     println!("Inspecting 5 files");
     println!("..C.W");
     println!();
     println!("Offenses:");
     println!();
-    println!("app/models/user.rb:3:3: C: Style/StringLiterals: Prefer single-quoted strings when you don't need interpolation.");
+    println!(
+        "app/models/user.rb:3:3: C: Style/StringLiterals: Prefer single-quoted strings when you don't need interpolation."
+    );
     println!("  name = \"Alice\"");
     println!("        ^^^^^^^");
-    println!("app/models/user.rb:12:1: C: Layout/TrailingWhitespace: Trailing whitespace detected.");
-    println!("app/controllers/users_controller.rb:8:5: W: Lint/UselessAssignment: Useless assignment to variable - result.");
+    println!(
+        "app/models/user.rb:12:1: C: Layout/TrailingWhitespace: Trailing whitespace detected."
+    );
+    println!(
+        "app/controllers/users_controller.rb:8:5: W: Lint/UselessAssignment: Useless assignment to variable - result."
+    );
     println!("  result = User.find(params[:id])");
     println!("  ^^^^^^");
 
@@ -69,7 +77,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_rubocop};
+    use super::run_rubocop;
 
     #[test]
     fn help_exits_zero() {

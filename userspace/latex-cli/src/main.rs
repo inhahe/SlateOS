@@ -16,7 +16,10 @@ fn strip_ext(name: &str) -> &str {
 }
 
 fn run_latex(prog: &str, args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-help" || a == "-h") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-help" || a == "-h")
+    {
         println!("Usage: {} [OPTIONS] FILE.tex", prog);
         println!();
         println!("{} — TeX/LaTeX typesetter (Slate OS).", prog);
@@ -24,7 +27,9 @@ fn run_latex(prog: &str, args: &[String]) -> i32 {
         println!("Options:");
         println!("  -output-directory DIR  Output directory");
         println!("  -jobname NAME          Output file base name");
-        println!("  -interaction MODE      Interaction mode (batchmode, nonstopmode, scrollmode, errorstopmode)");
+        println!(
+            "  -interaction MODE      Interaction mode (batchmode, nonstopmode, scrollmode, errorstopmode)"
+        );
         println!("  -halt-on-error         Stop on first error");
         println!("  -file-line-error       Show file:line:error format");
         println!("  -shell-escape          Enable \\write18");
@@ -42,7 +47,8 @@ fn run_latex(prog: &str, args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter()
+    let file = args
+        .iter()
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("document.tex");
@@ -53,7 +59,7 @@ fn run_latex(prog: &str, args: &[String]) -> i32 {
     println!("This is {} (Slate OS)", prog);
     println!("entering extended mode");
     println!(" restricted \\write18 enabled.");
-    println!("({}",  file);
+    println!("({}", file);
     println!("LaTeX2e <2023-11-01> patch level 1");
     println!(" L3 programming layer <2024-01-04>");
     println!("(/usr/share/texlive/texmf-dist/tex/latex/base/article.cls");
@@ -78,7 +84,8 @@ fn run_latex(prog: &str, args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "pdflatex".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -88,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_latex};
+    use super::{basename, run_latex, strip_ext};
 
     #[test]
     fn basename_strips_path() {

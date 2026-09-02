@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("trinet-cli 0.1.0 (established-PEO personality build)"); }
+fn print_version() {
+    println!("trinet-cli 0.1.0 (established-PEO personality build)");
+}
 
 fn run_about() {
     println!("TriNet Group, Inc. (NYSE:TNET).");

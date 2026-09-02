@@ -52,7 +52,10 @@ fn run_ddog(args: Vec<String>) -> i32 {
             0
         }
         ("metric", "query") => {
-            let query = args.get(2).map(|s| s.as_str()).unwrap_or("avg:system.cpu.user{*}");
+            let query = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("avg:system.cpu.user{*}");
             println!("Query: {} (last 1h)", query);
             println!("  14:00  45.2%");
             println!("  14:05  47.8%");
@@ -129,7 +132,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ddog};
+    use super::run_ddog;
 
     #[test]
     fn help_exits_zero() {

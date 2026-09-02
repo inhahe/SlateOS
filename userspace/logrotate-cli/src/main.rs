@@ -31,7 +31,8 @@ fn run_logrotate(args: Vec<String>) -> i32 {
     let force = args.iter().any(|a| a == "-f" || a == "--force");
     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose") || debug;
 
-    let configs: Vec<&str> = args.iter()
+    let configs: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -60,8 +61,12 @@ fn run_logrotate(args: Vec<String>) -> i32 {
             println!("  log needs rotating");
         }
         println!("  (dry run) rotating /var/log/nginx/access.log");
-        println!("  (dry run) renaming /var/log/nginx/access.log.6.gz -> /var/log/nginx/access.log.7.gz");
-        println!("  (dry run) compressing /var/log/nginx/access.log.1 -> /var/log/nginx/access.log.1.gz");
+        println!(
+            "  (dry run) renaming /var/log/nginx/access.log.6.gz -> /var/log/nginx/access.log.7.gz"
+        );
+        println!(
+            "  (dry run) compressing /var/log/nginx/access.log.1 -> /var/log/nginx/access.log.1.gz"
+        );
         println!("  (dry run) postrotate: /usr/sbin/nginx -s reload");
     } else {
         if verbose {
@@ -85,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_logrotate};
+    use super::run_logrotate;
 
     #[test]
     fn help_exits_zero() {

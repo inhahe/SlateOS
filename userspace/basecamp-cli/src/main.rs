@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -15,7 +19,9 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
         println!();
         println!("Options:");
         println!("  --plus                 Basecamp Plus — $15/user/mo (per-user pricing)");
-        println!("  --pro-unlimited        Basecamp Pro Unlimited — $349/mo flat (unlimited users)");
+        println!(
+            "  --pro-unlimited        Basecamp Pro Unlimited — $349/mo flat (unlimited users)"
+        );
         println!("  --hill-charts          Hill Charts (Shape Up methodology visualization)");
         println!("  --campfire             Campfire (group chat — separate one-time license)");
         println!("  --hey                  HEY email service (separate product, 37signals)");
@@ -23,27 +29,50 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Basecamp 4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Basecamp 4 (Slate OS)");
+        return 0;
+    }
     println!("Basecamp 4 (Slate OS)");
     println!("  Vendor: 37signals LLC (Chicago, IL — private, founder-owned)");
-    println!("  Founders: Jason Fried (CEO), David Heinemeier Hansson (CTO, 'DHH'), Ernest Kim, 2003");
+    println!(
+        "  Founders: Jason Fried (CEO), David Heinemeier Hansson (CTO, 'DHH'), Ernest Kim, 2003"
+    );
     println!("          37signals started 1999 as a web design consultancy");
     println!("          built Basecamp as an internal PM tool, opened to public Feb 2004");
-    println!("          while building Basecamp, DHH extracted Ruby on Rails (open-sourced Jul 2004)");
-    println!("          'Getting Real' (2006), 'Rework' (2010), 'It Doesn't Have to Be Crazy at Work' (2018)");
-    println!("          legendary opinionated tech-culture voice — anti-VC, pro-calm, work-fewer-hours");
-    println!("          DHH famously moves the company from cloud → on-prem ('Leaving the cloud' 2023, Hey + Basecamp)");
+    println!(
+        "          while building Basecamp, DHH extracted Ruby on Rails (open-sourced Jul 2004)"
+    );
+    println!(
+        "          'Getting Real' (2006), 'Rework' (2010), 'It Doesn't Have to Be Crazy at Work' (2018)"
+    );
+    println!(
+        "          legendary opinionated tech-culture voice — anti-VC, pro-calm, work-fewer-hours"
+    );
+    println!(
+        "          DHH famously moves the company from cloud → on-prem ('Leaving the cloud' 2023, Hey + Basecamp)"
+    );
     println!("  Founded: 2003 as Basecamp (the product), 1999 as 37signals (the company)");
     println!("          bootstrapped — Jeff Bezos personal investment 2006 only liquidity event");
     println!("          renamed Basecamp Inc. 2014, then back to 37signals 2022");
     println!("          ~80 employees, fully remote since founding");
     println!("          private + profitable + no funding pressure");
     println!("  Strategic position: 'opinionated PM for calm companies':");
-    println!("                    primary competitor: Asana, Trello, ClickUp, Monday — none with the philosophy");
-    println!("                    not chasing enterprise — explicitly anti-enterprise sales motion");
-    println!("                    pitches against feature-creep: 'no, you don't need Gantt charts'");
-    println!("                    sweet spot: small businesses, agencies, indie teams that share 37signals values");
-    println!("                    influence outsized vs market share (~$80M+ ARR, 100K paying companies)");
+    println!(
+        "                    primary competitor: Asana, Trello, ClickUp, Monday — none with the philosophy"
+    );
+    println!(
+        "                    not chasing enterprise — explicitly anti-enterprise sales motion"
+    );
+    println!(
+        "                    pitches against feature-creep: 'no, you don't need Gantt charts'"
+    );
+    println!(
+        "                    sweet spot: small businesses, agencies, indie teams that share 37signals values"
+    );
+    println!(
+        "                    influence outsized vs market share (~$80M+ ARR, 100K paying companies)"
+    );
     println!("  Pricing (radically simple):");
     println!("    Basecamp Plus — $15/user/mo (per-seat, like everyone else)");
     println!("    Basecamp Pro Unlimited — $349/mo flat (unlimited users — the famous flat rate)");
@@ -53,13 +82,17 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
     println!("    HEY email — separate $99/yr personal, $30/user/mo business");
     println!("    ONCE products — one-time payment, no subscription");
     println!("  Core architecture (intentionally minimal):");
-    println!("    - Projects contain Tools (Message Board, To-dos, Schedule, Docs & Files, Campfire chat, Automatic Check-ins, Card Table)");
+    println!(
+        "    - Projects contain Tools (Message Board, To-dos, Schedule, Docs & Files, Campfire chat, Automatic Check-ins, Card Table)"
+    );
     println!("    - Every project has the same six tools by default");
     println!("    - HQ for company-wide announcements");
     println!("    - Teams for ongoing work without project boundaries");
     println!("    - Lineup (Pro): see all active projects in a single timeline view");
     println!("    - Hill Charts: visualize project status as 'climbing/cresting/descending'");
-    println!("    - NO: Gantt charts, dependencies, time tracking, resource management, custom fields, custom workflows");
+    println!(
+        "    - NO: Gantt charts, dependencies, time tracking, resource management, custom fields, custom workflows"
+    );
     println!("    - explicit feature absence is the product philosophy");
     println!("  Shape Up methodology (their PM philosophy):");
     println!("    - 6-week cycles + 2-week cooldown");
@@ -70,7 +103,9 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
     println!("    - free book at basecamp.com/shapeup");
     println!("    - influenced thousands of teams (often without using Basecamp itself)");
     println!("  Automatic Check-ins:");
-    println!("    - Recurring questions to teams ('What did you work on today?', 'Wins this week?')");
+    println!(
+        "    - Recurring questions to teams ('What did you work on today?', 'Wins this week?')"
+    );
     println!("    - Answers thread under each question — async standups");
     println!("    - Distinctive Basecamp feature — most competitors copied this");
     println!("  Card Table:");
@@ -100,23 +135,36 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
     println!("              REST API + webhooks");
     println!("              37signals philosophy: minimize external dependencies");
     println!("  Customers: ~100,000 paying companies");
-    println!("            indie agencies, small consultancies, family businesses, freelancer teams");
+    println!(
+        "            indie agencies, small consultancies, family businesses, freelancer teams"
+    );
     println!("            no F1000 trophy customers — by design");
     println!("            avoids prominent customer logos pages (anti-marketing-theater)");
-    println!("            sweet spot: 5-50 person small businesses + agencies who like 37signals' philosophy");
-    println!("  Critique: feature absence is the product — frustrating if you need Gantt, dependencies, tracking");
+    println!(
+        "            sweet spot: 5-50 person small businesses + agencies who like 37signals' philosophy"
+    );
+    println!(
+        "  Critique: feature absence is the product — frustrating if you need Gantt, dependencies, tracking"
+    );
     println!("           no time tracking, no resource management, no formal milestones");
     println!("           reporting basic (intentional)");
     println!("           customization minimal — workflows are Basecamp's way or no way");
-    println!("           controversial 2021 'no political discussions at work' policy caused ~1/3 staff departure");
+    println!(
+        "           controversial 2021 'no political discussions at work' policy caused ~1/3 staff departure"
+    );
     println!("           niche by choice — Basecamp 4 (2024) still ~$80M ARR despite age");
-    println!("  Differentiator: opinionated radical simplicity + flat unlimited-user pricing + 37signals philosophy/methodology + influence outsized vs scale — for teams who want the OPPOSITE of enterprise PM");
+    println!(
+        "  Differentiator: opinionated radical simplicity + flat unlimited-user pricing + 37signals philosophy/methodology + influence outsized vs scale — for teams who want the OPPOSITE of enterprise PM"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "basecamp".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "basecamp".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_bc(&rest, &_prog);
     process::exit(code);
@@ -124,7 +172,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bc};
+    use super::{basename, run_bc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

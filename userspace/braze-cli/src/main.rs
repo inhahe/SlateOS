@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_braze(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -26,23 +30,36 @@ fn run_braze(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Braze 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Braze 2024 (Slate OS)");
+        return 0;
+    }
     println!("Braze 2024 (Slate OS)");
     println!("  Vendor: Braze, Inc. (NYC, NY — NASDAQ:BRZE)");
     println!("  Founders: Bill Magnuson (CEO), Jon Hyman (CTO), Mark Ghermezian (left 2018), 2011");
     println!("          all three were ex-Bridgewater Associates engineers");
     println!("          originally called 'Appboy' until rebrand to Braze 2017");
-    println!("          rebrand happened because 'Appboy' implied mobile-only (they'd expanded to web + omnichannel)");
+    println!(
+        "          rebrand happened because 'Appboy' implied mobile-only (they'd expanded to web + omnichannel)"
+    );
     println!("  Founded: 2011 in NYC");
-    println!("  IPO: Nov 2021 NASDAQ:BRZE at $65 (popped to $103) — one of last 'normal' tech IPOs of zero-rate era");
+    println!(
+        "  IPO: Nov 2021 NASDAQ:BRZE at $65 (popped to $103) — one of last 'normal' tech IPOs of zero-rate era"
+    );
     println!("       now ~$40-50 (compressed but better than many peers)");
     println!("       FY2024 revenue ~$590M (+33% YoY), guiding to $1B+ FY2026");
     println!("       ~2,000+ employees, ~2,400 paying customers");
     println!("  Strategic position: 'modern customer engagement platform' for B2C brands at scale");
-    println!("                    primary head-to-head competitor: Iterable (similar pitch, NYC vs SF)");
-    println!("                    pitches against Salesforce Marketing Cloud + Adobe Campaign + Oracle Responsys");
+    println!(
+        "                    primary head-to-head competitor: Iterable (similar pitch, NYC vs SF)"
+    );
+    println!(
+        "                    pitches against Salesforce Marketing Cloud + Adobe Campaign + Oracle Responsys"
+    );
     println!("                    leader in Gartner MQ for Multichannel Marketing Hubs");
-    println!("                    differentiator vs legacy: real-time event-driven (legacy = list-batch)");
+    println!(
+        "                    differentiator vs legacy: real-time event-driven (legacy = list-batch)"
+    );
     println!("  Pricing (very opaque — typically 6-7 figure deals):");
     println!("    Essential — custom (typically $50K-150K/yr starter)");
     println!("    Pro — custom (typically $200K-500K/yr mid-market)");
@@ -70,7 +87,9 @@ fn run_braze(args: &[String], _prog: &str) -> i32 {
     println!("    - Audience Sync nodes (push cohorts to ad platforms in middle of journey)");
     println!("  Personalization:");
     println!("    - Liquid templating (similar to Customer.io)");
-    println!("    - Connected Content (call external APIs during render — weather, inventory, ML APIs)");
+    println!(
+        "    - Connected Content (call external APIs during render — weather, inventory, ML APIs)"
+    );
     println!("    - Catalogs — sync product catalog data and reference in messages");
     println!("    - Recommendations — collaborative filtering on catalog items");
     println!("  BrazeAI Suite:");
@@ -102,16 +121,23 @@ fn run_braze(args: &[String], _prog: &str) -> i32 {
     println!("            sweet spot: $500M-$50B revenue B2C consumer brands");
     println!("  Critique: enterprise-priced — not approachable for SMB/mid-market");
     println!("           UI/setup complexity requires dedicated marketing ops + engineering");
-    println!("           seat-based admin pricing layered on top of MAU base — total cost confusing");
+    println!(
+        "           seat-based admin pricing layered on top of MAU base — total cost confusing"
+    );
     println!("           AI features competitive but Salesforce + Adobe have larger AI budgets");
     println!("           some customer pushback on price hikes at renewals");
-    println!("  Differentiator: broadest in-app + mobile channel set + real-time architecture + largest deployed B2C brand reference list");
+    println!(
+        "  Differentiator: broadest in-app + mobile channel set + real-time architecture + largest deployed B2C brand reference list"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "braze".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "braze".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_braze(&rest, &_prog);
     process::exit(code);
@@ -119,7 +145,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_braze};
+    use super::{basename, run_braze, strip_ext};
 
     #[test]
     fn basename_strips_path() {

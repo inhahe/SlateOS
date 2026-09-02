@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_milvus(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: milvus [OPTIONS]");
-        println!("Milvus (Slate OS) — open-source cloud-native vector DB (LF AI), Zilliz commercial");
+        println!(
+            "Milvus (Slate OS) — open-source cloud-native vector DB (LF AI), Zilliz commercial"
+        );
         println!();
         println!("Options:");
         println!("  --lite                 Milvus Lite (embedded in Python)");
@@ -21,7 +27,10 @@ fn run_milvus(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Milvus 2024 (Slate OS) — milvus_cli 2.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Milvus 2024 (Slate OS) — milvus_cli 2.x");
+        return 0;
+    }
     println!("Milvus 2024 (Slate OS) — Open-Source Cloud-Native Vector Database (LF AI)");
     println!("  Vendor: Zilliz, Inc. (Redwood City + Shanghai — private, commercial backer)");
     println!("          Project: Milvus (LF AI Foundation graduated project, since 2020)");
@@ -33,16 +42,30 @@ fn run_milvus(args: &[String], _prog: &str) -> i32 {
     println!("  Funding (Zilliz):");
     println!("         Total raised: ~$113M");
     println!("         Series B Aug 2022: $60M");
-    println!("         Investors: Hillhouse Capital, Pavilion Capital, Yunqi Partners, Prosperity7");
+    println!(
+        "         Investors: Hillhouse Capital, Pavilion Capital, Yunqi Partners, Prosperity7"
+    );
     println!("         Revenue private — Zilliz Cloud growing on RAG wave");
-    println!("  Strategic position: 'cloud-native vector DB at billion-scale + LF AI open source':");
-    println!("                    pitch: 'production-grade open-source vector DB for billion-scale workloads + multi-modal'");
-    println!("                    target: enterprises with very large vector datasets + multi-cloud needs");
+    println!(
+        "  Strategic position: 'cloud-native vector DB at billion-scale + LF AI open source':"
+    );
+    println!(
+        "                    pitch: 'production-grade open-source vector DB for billion-scale workloads + multi-modal'"
+    );
+    println!(
+        "                    target: enterprises with very large vector datasets + multi-cloud needs"
+    );
     println!("                    primary competitor: Pinecone, Weaviate, Qdrant, Chroma");
     println!("                    secondary: pgvector, Elasticsearch, MongoDB Atlas vector search");
-    println!("                    Milvus's wedge: scalability + LF AI governance + GPU support + index diversity");
-    println!("                    challenge: complexity vs Chroma/Qdrant simplicity for small/medium use");
-    println!("                    counter: Milvus Lite (2024) for embedded simplicity, Distributed for scale");
+    println!(
+        "                    Milvus's wedge: scalability + LF AI governance + GPU support + index diversity"
+    );
+    println!(
+        "                    challenge: complexity vs Chroma/Qdrant simplicity for small/medium use"
+    );
+    println!(
+        "                    counter: Milvus Lite (2024) for embedded simplicity, Distributed for scale"
+    );
     println!("  Pricing (Milvus OSS + Zilliz Cloud):");
     println!("    Milvus OSS: free (Apache 2.0)");
     println!("    Zilliz Cloud Free: 2GB cluster (always free)");
@@ -53,7 +76,9 @@ fn run_milvus(args: &[String], _prog: &str) -> i32 {
     println!("  Architecture (cloud-native + storage/compute separation):");
     println!("    - Written primarily in Go + C++ (perf-critical index code C++)");
     println!("    - Storage on object store (S3, MinIO, GCS, Azure Blob)");
-    println!("    - Compute: query nodes (read), data nodes (write), index nodes (build), coord nodes (control)");
+    println!(
+        "    - Compute: query nodes (read), data nodes (write), index nodes (build), coord nodes (control)"
+    );
     println!("    - Meta on etcd, message broker on Pulsar/Kafka/RocksMQ");
     println!("    - K8s-native distributed deployment");
     println!("    - 10+ index types (HNSW, IVF_FLAT, IVF_PQ, DiskANN, SCANN, GPU_IVF_FLAT, etc.)");
@@ -134,12 +159,18 @@ fn run_milvus(args: &[String], _prog: &str) -> i32 {
     println!("    - Attu (open-source GUI)");
     println!("    - Birdwatcher (Milvus debugging tool)");
     println!("  Milvus CLI usage:");
-    println!("    docker run -d --name milvus -p 19530:19530 -p 9091:9091 milvusdb/milvus:latest standalone");
+    println!(
+        "    docker run -d --name milvus -p 19530:19530 -p 9091:9091 milvusdb/milvus:latest standalone"
+    );
     println!("    # Via Python:");
-    println!("    # from pymilvus import MilvusClient; client = MilvusClient('http://localhost:19530')");
+    println!(
+        "    # from pymilvus import MilvusClient; client = MilvusClient('http://localhost:19530')"
+    );
     println!("    milvus_cli connect -uri http://localhost:19530");
     println!("    milvus_cli create collection my-coll -p schema.yaml");
-    println!("    milvus_cli create index my-coll my_vec_field -t HNSW -m COSINE -p 'M:16, efConstruction:200'");
+    println!(
+        "    milvus_cli create index my-coll my_vec_field -t HNSW -m COSINE -p 'M:16, efConstruction:200'"
+    );
     println!("    milvus_cli load -c my-coll");
     println!("    milvus_cli search -c my-coll -d 'my_vec_field' -v '[0.1,0.2,...]' -k 10");
     println!("    milvus_cli show collections");
@@ -153,7 +184,9 @@ fn run_milvus(args: &[String], _prog: &str) -> i32 {
     println!("    - Salesforce, Tencent, Bilibili");
     println!("    - NVIDIA, Bosch, Reno (industry research)");
     println!("    - 5,000+ enterprise organizations using Milvus (cumulative)");
-    println!("    - Use cases: image/video search, recommendation, drug discovery, fraud detection");
+    println!(
+        "    - Use cases: image/video search, recommendation, drug discovery, fraud detection"
+    );
     println!("    - 28K+ GitHub stars, 50M+ Docker pulls cumulative");
     println!("  Critique: complexity intimidating (multiple node types, etcd, pulsar)");
     println!("           Milvus Lite is recent (2024) — Chroma had simplicity earlier");
@@ -161,15 +194,22 @@ fn run_milvus(args: &[String], _prog: &str) -> i32 {
     println!("           operating distributed Milvus requires K8s expertise");
     println!("           Postgres + pgvector + sqlite-vec erode small-scale use case");
     println!("           index choice (10+ options) requires expertise to pick");
-    println!("           Asian engineering origin (Shanghai) less brand recognition in US enterprise (improving)");
+    println!(
+        "           Asian engineering origin (Shanghai) less brand recognition in US enterprise (improving)"
+    );
     println!("           feature-rich = sometimes overwhelming for simple use cases");
-    println!("  Differentiator: LF AI Foundation top-level project (governance-neutral, graduated 2021) + 28K+ GitHub stars (highest of any vector DB) + 50M+ Docker pulls + cloud-native architecture (storage/compute separation on S3/MinIO/GCS) + 10+ index types (HNSW + IVF + DiskANN + SCANN + GPU variants) + NVIDIA RAFT GPU acceleration + Walmart/Roblox/ebay billion-scale customers + Charles Xie founder (ex-Oracle DB engineer 11 years) + Milvus Lite (2024 embedded simplicity) + Standalone (single binary) + Distributed (K8s billion-scale) + Zilliz Cloud managed (multi-cloud) + Attu visualization GUI + Apache 2.0 + $113M raised — the most scalable open-source vector database with the broadest index type diversity, governed by LF AI Foundation, used at billion-scale by Walmart and Roblox");
+    println!(
+        "  Differentiator: LF AI Foundation top-level project (governance-neutral, graduated 2021) + 28K+ GitHub stars (highest of any vector DB) + 50M+ Docker pulls + cloud-native architecture (storage/compute separation on S3/MinIO/GCS) + 10+ index types (HNSW + IVF + DiskANN + SCANN + GPU variants) + NVIDIA RAFT GPU acceleration + Walmart/Roblox/ebay billion-scale customers + Charles Xie founder (ex-Oracle DB engineer 11 years) + Milvus Lite (2024 embedded simplicity) + Standalone (single binary) + Distributed (K8s billion-scale) + Zilliz Cloud managed (multi-cloud) + Attu visualization GUI + Apache 2.0 + $113M raised — the most scalable open-source vector database with the broadest index type diversity, governed by LF AI Foundation, used at billion-scale by Walmart and Roblox"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "milvus".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "milvus".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_milvus(&rest, &_prog);
     process::exit(code);
@@ -177,7 +217,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_milvus};
+    use super::{basename, run_milvus, strip_ext};
 
     #[test]
     fn basename_strips_path() {

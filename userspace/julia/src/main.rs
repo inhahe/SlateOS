@@ -31,7 +31,9 @@ fn run_julia(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let exec_expr = args.iter().position(|a| a == "-e" || a == "-E")
+    let exec_expr = args
+        .iter()
+        .position(|a| a == "-e" || a == "-E")
         .and_then(|i| args.get(i + 1));
     if let Some(expr) = exec_expr {
         println!("{}", expr);
@@ -39,7 +41,10 @@ fn run_julia(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let script = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let script = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(f) = script {
         println!("(running {})", f);
     } else {
@@ -68,7 +73,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_julia};
+    use super::run_julia;
 
     #[test]
     fn help_exits_zero() {

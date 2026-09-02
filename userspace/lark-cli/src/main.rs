@@ -5,52 +5,85 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_lark(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lark [OPTIONS]");
-        println!("Lark (Slate OS) — ByteDance's all-in-one work super-app (chat + docs + meetings + email + base)");
+        println!(
+            "Lark (Slate OS) — ByteDance's all-in-one work super-app (chat + docs + meetings + email + base)"
+        );
         println!();
         println!("Options:");
         println!("  --starter              Starter — free for up to 50 users");
         println!("  --pro                  Pro — $12/user/mo");
         println!("  --enterprise           Enterprise — custom ($25+/user/mo typical)");
-        println!("  --feishu               Feishu — China-mainland version (same product, separate cloud)");
+        println!(
+            "  --feishu               Feishu — China-mainland version (same product, separate cloud)"
+        );
         println!("  --base                 Lark Base (Airtable-like database)");
         println!("  --minutes              Lark Minutes (auto-transcription + AI meeting notes)");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Lark 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Lark 2024 (Slate OS)");
+        return 0;
+    }
     println!("Lark 2024 (Slate OS)");
     println!("  Vendor: ByteDance Ltd. (Beijing, China — private)");
-    println!("  Original: Feishu, launched 2017 inside ByteDance to manage its own ~150K employees globally");
-    println!("           ByteDance + Toutiao + Douyin + TikTok grew so fast Zhang Yiming wanted custom tooling");
+    println!(
+        "  Original: Feishu, launched 2017 inside ByteDance to manage its own ~150K employees globally"
+    );
+    println!(
+        "           ByteDance + Toutiao + Douyin + TikTok grew so fast Zhang Yiming wanted custom tooling"
+    );
     println!("           Lark = international version (different cloud, no PRC routing)");
     println!("  Founders: ByteDance (Zhang Yiming + early team), 2017 internally");
     println!("          spun out as standalone product to market internationally 2019");
-    println!("          rebranded 'Feishu' for China, 'Lark' for international (especially APAC, SEA, EU)");
-    println!("          run by Xie Xin (President of Lark / Feishu), reports up to ByteDance leadership");
+    println!(
+        "          rebranded 'Feishu' for China, 'Lark' for international (especially APAC, SEA, EU)"
+    );
+    println!(
+        "          run by Xie Xin (President of Lark / Feishu), reports up to ByteDance leadership"
+    );
     println!("  Founded: 2017 internally, 2019 commercially");
-    println!("          part of ByteDance — no separate disclosed revenue, est. $100M+ ARR international + 10x in China");
+    println!(
+        "          part of ByteDance — no separate disclosed revenue, est. $100M+ ARR international + 10x in China"
+    );
     println!("          50M+ users on Lark + Feishu combined");
     println!("          tens of millions of users on Feishu in China alone");
     println!("  Strategic position: 'work super-app from the company that made TikTok':");
-    println!("                    primary competitor: Slack + Microsoft 365 + Google Workspace + Zoom (each)");
+    println!(
+        "                    primary competitor: Slack + Microsoft 365 + Google Workspace + Zoom (each)"
+    );
     println!("                    aggressive in: SE Asia, India, Japan, Singapore, EU SMB");
     println!("                    in China: Feishu vs DingTalk (Alibaba) + WeCom (Tencent)");
-    println!("                    pitch: 'one app for chat + docs + meetings + email + spreadsheets + database'");
-    println!("                    enterprise IT geopolitical risk: ByteDance ownership creates concerns in US gov + defense");
-    println!("                    distancing strategy: separate Lark Cloud (Singapore), no China data routing for international");
+    println!(
+        "                    pitch: 'one app for chat + docs + meetings + email + spreadsheets + database'"
+    );
+    println!(
+        "                    enterprise IT geopolitical risk: ByteDance ownership creates concerns in US gov + defense"
+    );
+    println!(
+        "                    distancing strategy: separate Lark Cloud (Singapore), no China data routing for international"
+    );
     println!("  Pricing (very aggressive — free 50-user tier, cheap Pro):");
-    println!("    Starter — FREE for up to 50 users, includes ALL Lark features (Pro-tier features included on Starter)");
+    println!(
+        "    Starter — FREE for up to 50 users, includes ALL Lark features (Pro-tier features included on Starter)"
+    );
     println!("       this is unusually generous — most competitors free tier severely limited");
     println!("    Pro — $12/user/mo (50-500 users)");
     println!("    Enterprise — custom (>500 users, ~$25+/user/mo with full add-ons)");
     println!("       Approve add-on, OKR add-on, Field Service, Email custom domain extra");
-    println!("    Lark is famously 'land-grab' priced — feature-rich free tier is the customer acquisition strategy");
+    println!(
+        "    Lark is famously 'land-grab' priced — feature-rich free tier is the customer acquisition strategy"
+    );
     println!("  Core modules (the super-app pitch):");
     println!("    - Messenger (chat, channels, threads, 1:1 + group)");
     println!("    - Docs (Notion-like rich docs, collaborative)");
@@ -71,7 +104,9 @@ fn run_lark(args: &[String], _prog: &str) -> i32 {
     println!("    - Automations (when row added/changed → trigger)");
     println!("    - Custom forms → auto-populate Base");
     println!("    - Often used as: project trackers, CRM, asset trackers, HR pipelines");
-    println!("    - Same UX as Airtable but bundled FREE with Lark Starter — undercuts Airtable's $$$ pricing");
+    println!(
+        "    - Same UX as Airtable but bundled FREE with Lark Starter — undercuts Airtable's $$$ pricing"
+    );
     println!("  Lark Minutes (the AI killer):");
     println!("    - Auto-record + transcribe Lark Meetings in real time");
     println!("    - Generate AI meeting summary + action items in chat after meeting");
@@ -101,24 +136,39 @@ fn run_lark(args: &[String], _prog: &str) -> i32 {
     println!("              Custom apps via Lark Open Platform (REST + webhooks)");
     println!("              Webhooks + Lark Bot Framework");
     println!("  Customers: 50M+ users on Lark + Feishu");
-    println!("            Lark (international): NetEase, Soul (app), Rivian, Sokos, Lazada parts, ASEAN startups");
-    println!("            Feishu (China-mainland): Xiaomi, ByteDance internal, OPPO, Vivo, Meituan");
-    println!("            sweet spot: APAC + LATAM + EU mid-market SMB, especially companies seeking China alt");
-    println!("            weak in: US enterprise (geopolitical concerns), US gov/defense (banned in some)");
+    println!(
+        "            Lark (international): NetEase, Soul (app), Rivian, Sokos, Lazada parts, ASEAN startups"
+    );
+    println!(
+        "            Feishu (China-mainland): Xiaomi, ByteDance internal, OPPO, Vivo, Meituan"
+    );
+    println!(
+        "            sweet spot: APAC + LATAM + EU mid-market SMB, especially companies seeking China alt"
+    );
+    println!(
+        "            weak in: US enterprise (geopolitical concerns), US gov/defense (banned in some)"
+    );
     println!("  Critique: ByteDance ownership = US enterprise + government adoption blocked");
     println!("           perception of CCP data risk (despite separate Lark Cloud in Singapore)");
     println!("           feature breadth means UI density — learning curve for new users");
     println!("           AI features released slower internationally than in Feishu (China)");
     println!("           ecosystem (third-party apps) smaller than Slack or Microsoft 365");
     println!("           support for English+European hours sometimes lags Asia hours");
-    println!("           rapid feature changes (no stable LTS — moves like a Chinese consumer app)");
-    println!("  Differentiator: most-featured work super-app + extremely generous free tier (50 users, all features) + Lark Base bundled + Lark Minutes AI meeting transcription — the platform Asian unicorns + ByteDance-adjacent companies pick");
+    println!(
+        "           rapid feature changes (no stable LTS — moves like a Chinese consumer app)"
+    );
+    println!(
+        "  Differentiator: most-featured work super-app + extremely generous free tier (50 users, all features) + Lark Base bundled + Lark Minutes AI meeting transcription — the platform Asian unicorns + ByteDance-adjacent companies pick"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "lark".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "lark".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_lark(&rest, &_prog);
     process::exit(code);
@@ -126,7 +176,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lark};
+    use super::{basename, run_lark, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_akamai(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: akamai [OPTIONS]");
-        println!("Akamai (Slate OS) — original CDN, security, edge compute, Linode cloud (NASDAQ:AKAM)");
+        println!(
+            "Akamai (Slate OS) — original CDN, security, edge compute, Linode cloud (NASDAQ:AKAM)"
+        );
         println!();
         println!("Options:");
         println!("  --cdn                  Akamai CDN (original 1998, 4000+ POPs)");
@@ -22,13 +28,22 @@ fn run_akamai(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Akamai 2024 (Slate OS) — akamai CLI 2.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Akamai 2024 (Slate OS) — akamai CLI 2.x");
+        return 0;
+    }
     println!("Akamai 2024 (Slate OS) — Cloud Computing, Security, and Content Delivery");
     println!("  Vendor: Akamai Technologies, Inc. (Cambridge, MA — NASDAQ:AKAM since 1999)");
-    println!("  Founders: Tom Leighton (MIT prof) + Daniel Lewin (MIT student, killed on AA Flight 11 9/11/2001) + Jonathan Seelig, 1998");
+    println!(
+        "  Founders: Tom Leighton (MIT prof) + Daniel Lewin (MIT student, killed on AA Flight 11 9/11/2001) + Jonathan Seelig, 1998"
+    );
     println!("          MIT spin-off — Leighton's research on consistent hashing");
-    println!("          Daniel Lewin: brilliant co-founder, age 31 — Israeli special forces, killed by hijackers stopping them on 9/11");
-    println!("          Tom Leighton: still CEO 2024 (one of longest-running founder-CEOs in tech)");
+    println!(
+        "          Daniel Lewin: brilliant co-founder, age 31 — Israeli special forces, killed by hijackers stopping them on 9/11"
+    );
+    println!(
+        "          Tom Leighton: still CEO 2024 (one of longest-running founder-CEOs in tech)"
+    );
     println!("          'Akamai' = Hawaiian for 'clever/smart'");
     println!("          The original CDN — coined many CDN concepts that became industry standard");
     println!("  Public market (NASDAQ:AKAM):");
@@ -39,18 +54,32 @@ fn run_akamai(args: &[String], _prog: &str) -> i32 {
     println!("         Market cap: $14-18B range");
     println!("         Stable, profitable, mature CDN incumbent");
     println!("         Security + Cloud = growth engines (CDN is mature/declining)");
-    println!("  Strategic position: 'world's most distributed compute + security + delivery platform':");
-    println!("                    pitch: 'we secure and deliver more of the internet than anyone else'");
-    println!("                    target: Fortune 500 enterprises + government + media + financial");
+    println!(
+        "  Strategic position: 'world's most distributed compute + security + delivery platform':"
+    );
+    println!(
+        "                    pitch: 'we secure and deliver more of the internet than anyone else'"
+    );
+    println!(
+        "                    target: Fortune 500 enterprises + government + media + financial"
+    );
     println!("                    primary competitor: Cloudflare (modern), AWS CloudFront, Fastly");
     println!("                    secondary: Imperva, Zscaler (security), Linode-tier IaaS");
-    println!("                    Akamai's wedge: 4000+ POPs (largest in the world by site count) + enterprise relationships");
-    println!("                    diversifying CDN-mono to compute + security + cloud — 'Connected Cloud' branding");
-    println!("                    Q4 2024: 67% revenue from security + cloud (vs 33% CDN) — successful pivot");
+    println!(
+        "                    Akamai's wedge: 4000+ POPs (largest in the world by site count) + enterprise relationships"
+    );
+    println!(
+        "                    diversifying CDN-mono to compute + security + cloud — 'Connected Cloud' branding"
+    );
+    println!(
+        "                    Q4 2024: 67% revenue from security + cloud (vs 33% CDN) — successful pivot"
+    );
     println!("  Pricing (enterprise-only, custom):");
     println!("    CDN: custom enterprise contracts (typically $50K-$10M+/yr)");
     println!("    Security: Kona + Bot Manager + AAP custom pricing");
-    println!("    Linode Connected Cloud: published SKU pricing ($5/mo Nanode → $1000+/mo dedicated)");
+    println!(
+        "    Linode Connected Cloud: published SKU pricing ($5/mo Nanode → $1000+/mo dedicated)"
+    );
     println!("    EdgeWorkers: $0.50 per 1M invocations + compute");
     println!("    Guardicore: per-host microsegmentation licensing");
     println!("    no free tier outside Linode + dev accounts");
@@ -107,7 +136,9 @@ fn run_akamai(args: &[String], _prog: &str) -> i32 {
     println!("    - Cheaper IaaS than AWS for many SMB/dev workloads");
     println!("    - 'Akamai Connected Cloud' branding 2023+");
     println!("    - Compete with: DigitalOcean, Vultr, Hetzner, OVH");
-    println!("    - Strategic challenge: convince enterprise to use Akamai as primary cloud, not just CDN");
+    println!(
+        "    - Strategic challenge: convince enterprise to use Akamai as primary cloud, not just CDN"
+    );
     println!("  Integrations:");
     println!("    - Akamai CLI (Go-based, plugin architecture)");
     println!("    - Terraform + Pulumi providers");
@@ -118,12 +149,18 @@ fn run_akamai(args: &[String], _prog: &str) -> i32 {
     println!("  Akamai CLI usage:");
     println!("    akamai install property                                 # install plugin");
     println!("    akamai property-manager list-properties");
-    println!("    akamai property-manager activate-property --propertyId=PRP_123 --network=staging");
+    println!(
+        "    akamai property-manager activate-property --propertyId=PRP_123 --network=staging"
+    );
     println!("    akamai purge invalidate --staging /assets/css/main.css");
     println!("    akamai edgeworkers list-ids");
     println!("    akamai edgeworkers register MY_WORKER");
-    println!("    akamai linode-cli linodes create --type g6-nanode-1 --region us-east --image linode/ubuntu22.04");
-    println!("    akamai linode-cli lke cluster-create --label my-cluster --region us-east --k8s_version 1.28");
+    println!(
+        "    akamai linode-cli linodes create --type g6-nanode-1 --region us-east --image linode/ubuntu22.04"
+    );
+    println!(
+        "    akamai linode-cli lke cluster-create --label my-cluster --region us-east --k8s_version 1.28"
+    );
     println!("    akamai botman list-categories");
     println!("    akamai jsonnet apply --config network-config.jsonnet     # IaC");
     println!("  Customers (Fortune 500 + government):");
@@ -140,15 +177,22 @@ fn run_akamai(args: &[String], _prog: &str) -> i32 {
     println!("           legacy enterprise UX (Property Manager + Luna control center are dated)");
     println!("           expensive: 5-10x cost of Cloudflare for equivalent");
     println!("           dev/SMB segment has largely abandoned Akamai for Cloudflare/Vercel");
-    println!("           growth modest 5% — mature/declining CDN partially offset by security growth");
+    println!(
+        "           growth modest 5% — mature/declining CDN partially offset by security growth"
+    );
     println!("           Tom Leighton (CEO since 1998) succession question looms");
-    println!("  Differentiator: 4,000+ POPs (largest CDN footprint by sites) + 350K+ edge servers + Fortune 500/government enterprise base (30%+ Fortune 500, DoD, financial) + Linode Connected Cloud ($900M acq distributed cloud play) + Guardicore microsegmentation ($600M) + Noname API security ($450M 2024) + Tom Leighton co-founder/CEO since 1998 (MIT consistent-hashing research) + Daniel Lewin legacy (killed 9/11) + $3.99B revenue with profitable margins — the original CDN that quietly delivers a huge fraction of the world's internet traffic and is pivoting from CDN-mono to security + distributed cloud");
+    println!(
+        "  Differentiator: 4,000+ POPs (largest CDN footprint by sites) + 350K+ edge servers + Fortune 500/government enterprise base (30%+ Fortune 500, DoD, financial) + Linode Connected Cloud ($900M acq distributed cloud play) + Guardicore microsegmentation ($600M) + Noname API security ($450M 2024) + Tom Leighton co-founder/CEO since 1998 (MIT consistent-hashing research) + Daniel Lewin legacy (killed 9/11) + $3.99B revenue with profitable margins — the original CDN that quietly delivers a huge fraction of the world's internet traffic and is pivoting from CDN-mono to security + distributed cloud"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "akamai".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "akamai".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_akamai(&rest, &_prog);
     process::exit(code);
@@ -156,7 +200,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_akamai};
+    use super::{basename, run_akamai, strip_ext};
 
     #[test]
     fn basename_strips_path() {

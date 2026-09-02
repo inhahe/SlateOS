@@ -138,7 +138,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sentry_cli};
+    use super::run_sentry_cli;
 
     #[test]
     fn help_exits_zero() {

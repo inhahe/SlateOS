@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_iterable(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_iterable(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Iterable 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Iterable 2024 (Slate OS)");
+        return 0;
+    }
     println!("Iterable 2024 (Slate OS)");
     println!("  Vendor: Iterable, Inc. (San Francisco, CA — private)");
     println!("  Founders: Justin Zhu (CEO until 2021), Andrew Boni (CTO, now CEO from 2021), 2013");
@@ -37,8 +44,12 @@ fn run_iterable(args: &[String], _prog: &str) -> i32 {
     println!("          revenue rumored ~$200M ARR");
     println!("  Strategic position: 'modern' cross-channel MAP for B2C + growth teams");
     println!("                    competes with Braze (head-to-head) + Customer.io + Iterable");
-    println!("                    pitches against legacy ESPs (Salesforce Marketing Cloud, Adobe Campaign)");
-    println!("                    designed for high-event-volume consumer products (streaming, marketplace, finance)");
+    println!(
+        "                    pitches against legacy ESPs (Salesforce Marketing Cloud, Adobe Campaign)"
+    );
+    println!(
+        "                    designed for high-event-volume consumer products (streaming, marketplace, finance)"
+    );
     println!("  Channels (true cross-channel — not email-first):");
     println!("    - Email (transactional + marketing) with deliverability infrastructure");
     println!("    - SMS (built-in)");
@@ -62,7 +73,9 @@ fn run_iterable(args: &[String], _prog: &str) -> i32 {
     println!("    - Dynamic content insertion in emails/push");
     println!("    - 'Smart Send' uses catalog data for personalization");
     println!("  Iterable AI Suite (the recent flagship):");
-    println!("    - Brand Affinity™ — predicts each user's affinity score to dynamic content/products");
+    println!(
+        "    - Brand Affinity™ — predicts each user's affinity score to dynamic content/products"
+    );
     println!("    - Send Time Optimization (per-user best send time)");
     println!("    - Predictive Goals (multi-channel optimization toward an outcome)");
     println!("    - Generative AI Copy Assist (subject lines, body, push copy)");
@@ -85,21 +98,32 @@ fn run_iterable(args: &[String], _prog: &str) -> i32 {
     println!("              Twilio (for SMS infra under the hood)");
     println!("              REST API + webhooks + Catalog API + Events API");
     println!("  Customers: 1,000+ paying customers, heavy B2C consumer brands");
-    println!("            DoorDash, Bumble, Calm, Strava, Fender, ESPN, NBA, Madison Square Garden");
+    println!(
+        "            DoorDash, Bumble, Calm, Strava, Fender, ESPN, NBA, Madison Square Garden"
+    );
     println!("            sweet spot: $100M-$10B revenue consumer brands w/ high event volume");
     println!("            verticals: streaming, marketplaces, fintech, food delivery, gaming");
-    println!("  Critique: enterprise-priced — not approachable for SMB (typically $50K+/yr starter)");
+    println!(
+        "  Critique: enterprise-priced — not approachable for SMB (typically $50K+/yr starter)"
+    );
     println!("           AI features competitive but Braze + Salesforce moved fast in 2023-2024");
     println!("           UI complex for marketers without engineering support");
-    println!("           data warehouse-native architecture lags Hightouch/Census + emerging RT-CDP rivals");
+    println!(
+        "           data warehouse-native architecture lags Hightouch/Census + emerging RT-CDP rivals"
+    );
     println!("           CEO transition 2021 lawsuit hurt brand temporarily");
-    println!("  Differentiator: deepest true cross-channel orchestration (email+SMS+push+in-app+WhatsApp in one workflow) for high-volume B2C");
+    println!(
+        "  Differentiator: deepest true cross-channel orchestration (email+SMS+push+in-app+WhatsApp in one workflow) for high-volume B2C"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "iterable".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "iterable".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_iterable(&rest, &_prog);
     process::exit(code);
@@ -107,7 +131,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_iterable};
+    use super::{basename, run_iterable, strip_ext};
 
     #[test]
     fn basename_strips_path() {

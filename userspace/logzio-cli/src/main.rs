@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_logzio(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,26 +26,39 @@ fn run_logzio(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Logz.io 2024 (Slate OS) — Open 360 Platform"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Logz.io 2024 (Slate OS) — Open 360 Platform");
+        return 0;
+    }
     println!("Logz.io 2024 (Slate OS) — Open 360 Observability Platform");
     println!("  Vendor: Logz.io, Inc. (Tel Aviv, Israel + Boston, MA — private)");
     println!("  Founders: Tomer Levy + Asaf Yigal, 2014");
-    println!("          founded with thesis: 'managed open-source observability — ELK + Prometheus + Jaeger as SaaS'");
+    println!(
+        "          founded with thesis: 'managed open-source observability — ELK + Prometheus + Jaeger as SaaS'"
+    );
     println!("          Tomer Levy: long-time CEO + ex-Intel/Sears Israel security veteran");
     println!("          Asaf Yigal: VP Product, technical co-founder");
     println!("          early open-source champion — major contributor to Logstash + Beats");
     println!("  Private funding:");
-    println!("         Series D Dec 2020: $52M at ~$300M valuation (OpenView, 83North, Giza Venture)");
+    println!(
+        "         Series D Dec 2020: $52M at ~$300M valuation (OpenView, 83North, Giza Venture)"
+    );
     println!("         total raised: ~$120M");
     println!("         OpenView, Vintage, 83North, Giza Venture, Greenfield backers");
     println!("         estimated $60-80M ARR (private)");
     println!("         IPO discussed but not imminent");
     println!("  Strategic position: 'open-source-based observability — no vendor lock-in':");
-    println!("                    pitch: 'unified ELK + Prometheus + Jaeger + SIEM — managed, scaled, integrated'");
+    println!(
+        "                    pitch: 'unified ELK + Prometheus + Jaeger + SIEM — managed, scaled, integrated'"
+    );
     println!("                    target: cloud-native + DevOps teams who like open standards");
-    println!("                    primary competitor: Datadog, New Relic, Elastic Cloud, Splunk, Sumo Logic");
+    println!(
+        "                    primary competitor: Datadog, New Relic, Elastic Cloud, Splunk, Sumo Logic"
+    );
     println!("                    secondary: Grafana Cloud, Chronosphere, Mezmo, Honeycomb");
-    println!("                    Logz.io's wedge: 100% open-source-based + no proprietary agent lock-in");
+    println!(
+        "                    Logz.io's wedge: 100% open-source-based + no proprietary agent lock-in"
+    );
     println!("                    Migration story: 'come from ELK, stay on ELK, but managed'");
     println!("  Pricing (per-GB ingestion):");
     println!("    Build: free trial / starter");
@@ -107,19 +124,28 @@ fn run_logzio(args: &[String], _prog: &str) -> i32 {
     println!("    - International: significant European + Israeli enterprise");
     println!("    - Strong in: SaaS startups, gaming, fintech, cloud-native infra teams");
     println!("  Critique: Datadog's marketing + acquisitions dominate share growth");
-    println!("           per-GB pricing can still surprise at scale (vs Chronosphere's metric-cost focus)");
+    println!(
+        "           per-GB pricing can still surprise at scale (vs Chronosphere's metric-cost focus)"
+    );
     println!("           App 360 (APM) less mature than Datadog APM in distributed-trace UX");
-    println!("           Elastic Cloud (vendor of ELK) competes head-to-head with marketing budget");
+    println!(
+        "           Elastic Cloud (vendor of ELK) competes head-to-head with marketing budget"
+    );
     println!("           Grafana Cloud's all-OSS bundling attracts similar 'no lock-in' buyers");
     println!("           Cloud SIEM relatively young vs Splunk + Sumo Logic in enterprise SOC");
     println!("           growth slower than top-tier observability vendors in 2023-2024");
-    println!("  Differentiator: 100% open-source-based observability platform (ELK + Prometheus + Jaeger + OpenTelemetry) + Cloud SIEM on same stack + 'Open 360' unified UI + managed OpenSearch (post-Elastic-license-drama) + 'Cognitive Insights' ML log analysis + 10K+ customers in cloud-native + Israeli + Boston dual HQ — the no-lock-in observability platform for teams that want managed ELK/Prometheus/Jaeger without running it themselves");
+    println!(
+        "  Differentiator: 100% open-source-based observability platform (ELK + Prometheus + Jaeger + OpenTelemetry) + Cloud SIEM on same stack + 'Open 360' unified UI + managed OpenSearch (post-Elastic-license-drama) + 'Cognitive Insights' ML log analysis + 10K+ customers in cloud-native + Israeli + Boston dual HQ — the no-lock-in observability platform for teams that want managed ELK/Prometheus/Jaeger without running it themselves"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "logzio".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "logzio".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_logzio(&rest, &_prog);
     process::exit(code);
@@ -127,7 +153,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_logzio};
+    use super::{basename, run_logzio, strip_ext};
 
     #[test]
     fn basename_strips_path() {

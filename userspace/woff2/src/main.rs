@@ -33,11 +33,14 @@ fn run_compress(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-'))
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("font.ttf");
 
-    let quality: u8 = args.windows(2)
+    let quality: u8 = args
+        .windows(2)
         .find(|w| w[0] == "--brotli-quality")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(11);
@@ -66,7 +69,9 @@ fn run_decompress(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-'))
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("font.woff2");
 
@@ -90,7 +95,9 @@ fn run_info(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-'))
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("font.woff2");
 
@@ -129,7 +136,10 @@ fn run_info(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("woff2_compress"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("woff2_compress"));
     let p = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
@@ -149,7 +159,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_compress};
+    use super::run_compress;
 
     #[test]
     fn help_exits_zero() {

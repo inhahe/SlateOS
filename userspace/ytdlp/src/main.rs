@@ -66,7 +66,8 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
     let list_formats = args.iter().any(|a| a == "-F" || a == "--list-formats");
     let extract_audio = args.iter().any(|a| a == "-x" || a == "--extract-audio");
 
-    let urls: Vec<&str> = args.iter()
+    let urls: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -126,7 +127,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ytdlp};
+    use super::run_ytdlp;
 
     #[test]
     fn help_exits_zero() {

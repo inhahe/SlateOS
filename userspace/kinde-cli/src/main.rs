@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("kinde-cli 0.1.0 (Melbourne 'business OS' personality build)"); }
+fn print_version() {
+    println!("kinde-cli 0.1.0 (Melbourne 'business OS' personality build)");
+}
 
 fn run_about() {
     println!("Kinde (Kinde Pty Ltd)");

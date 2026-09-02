@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_hubspot(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -26,11 +30,16 @@ fn run_hubspot(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("HubSpot 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("HubSpot 2024 (Slate OS)");
+        return 0;
+    }
     println!("HubSpot 2024 (Slate OS)");
     println!("  Vendor: HubSpot, Inc. (Cambridge, MA — NYSE:HUBS)");
     println!("  Founders: Brian Halligan + Dharmesh Shah (MIT Sloan grads, 2006)");
-    println!("          Halligan: coined 'inbound marketing' — antithesis of cold-calling outbound");
+    println!(
+        "          Halligan: coined 'inbound marketing' — antithesis of cold-calling outbound"
+    );
     println!("          Shah: started OnStartups blog, became HubSpot's CTO + Culture Code author");
     println!("  Founded: 2006 — IPO'd 2014 at $25/share");
     println!("          2024 market cap ~$30-35B, stock around $600+");
@@ -47,7 +56,9 @@ fn run_hubspot(args: &[String], _prog: &str) -> i32 {
     println!("    - Landing page + form builder (no-code)");
     println!("    - Marketing automation workflows (drip campaigns, lead scoring, nurture)");
     println!("    - SEO recommendations + content strategy tool");
-    println!("    - Social media scheduling + monitoring (Twitter/X, LinkedIn, Facebook, Instagram)");
+    println!(
+        "    - Social media scheduling + monitoring (Twitter/X, LinkedIn, Facebook, Instagram)"
+    );
     println!("    - ABM (Account-Based Marketing) at Enterprise tier");
     println!("  Sales Hub features:");
     println!("    - Deal pipeline with drag-and-drop stages");
@@ -81,7 +92,10 @@ fn run_hubspot(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "hubspot".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "hubspot".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_hubspot(&rest, &_prog);
     process::exit(code);
@@ -89,7 +103,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_hubspot};
+    use super::{basename, run_hubspot, strip_ext};
 
     #[test]
     fn basename_strips_path() {

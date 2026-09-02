@@ -13,12 +13,16 @@ fn run_hashcat(args: Vec<String>) -> i32 {
         println!();
         println!("Options:");
         println!("  -m, --hash-type <n>      Hash type (e.g., 0=MD5, 100=SHA1, 1400=SHA256)");
-        println!("  -a, --attack-mode <n>    Attack mode (0=dict, 1=combo, 3=brute, 6=hybrid, 7=hybrid)");
+        println!(
+            "  -a, --attack-mode <n>    Attack mode (0=dict, 1=combo, 3=brute, 6=hybrid, 7=hybrid)"
+        );
         println!("  -o, --outfile <file>     Output file for recovered hashes");
         println!("  --show                   Show cracked passwords");
         println!("  --left                   Show uncracked hashes");
         println!("  -r, --rules-file <file>  Rules file");
-        println!("  -w, --workload-profile   Workload profile (1=low, 2=default, 3=high, 4=nightmare)");
+        println!(
+            "  -w, --workload-profile   Workload profile (1=low, 2=default, 3=high, 4=nightmare)"
+        );
         println!("  -O, --optimized-kernel   Enable optimized kernels");
         println!("  --force                  Ignore warnings");
         println!("  --session <name>         Session name");
@@ -88,7 +92,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_hashcat};
+    use super::run_hashcat;
 
     #[test]
     fn help_exits_zero() {

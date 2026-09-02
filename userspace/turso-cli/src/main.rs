@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("turso-cli 0.1.0 (libSQL-edge personality build)"); }
+fn print_version() {
+    println!("turso-cli 0.1.0 (libSQL-edge personality build)");
+}
 
 fn run_about() {
     println!("Turso (ChiselStrike, Inc.)");

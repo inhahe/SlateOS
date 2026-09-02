@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_vmw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_vmw(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("VMware Workstation 17.6.2 build-24409262 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("VMware Workstation 17.6.2 build-24409262 (Slate OS)");
+        return 0;
+    }
     println!("VMware Workstation Pro 17.6.2 build-24409262 (Slate OS)");
     println!("  Vendor: VMware LLC (Palo Alto, CA), founded 1998");
     println!("  History: Acquired by Dell-EMC 2016; Broadcom acquired VMware Nov 2023 ($61B)");
@@ -34,7 +41,9 @@ fn run_vmw(args: &[String], _prog: &str) -> i32 {
     println!("  Products: Workstation Pro (Win/Linux), Fusion (macOS), Player, ESXi (bare metal),");
     println!("            vSphere, vCenter, NSX (SDN), vSAN (HCI storage), Aria (cloud mgmt),");
     println!("            Horizon (VDI), Tanzu (Kubernetes)");
-    println!("  Engines: ESXi (proprietary VMkernel), Workstation/Fusion (paravirt + hardware HVM)");
+    println!(
+        "  Engines: ESXi (proprietary VMkernel), Workstation/Fusion (paravirt + hardware HVM)"
+    );
     println!("  Formats: .vmx (VM config), .vmdk (disk), .ovf/.ova (open virt format)");
     println!("  Strengths: enterprise hypervisor king, mature ecosystem, hardware compat");
     println!("  Concern: Broadcom price hikes triggered Proxmox/Nutanix migration wave 2024");
@@ -44,7 +53,10 @@ fn run_vmw(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "vmware".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "vmware".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_vmw(&rest, &_prog);
     process::exit(code);
@@ -52,7 +64,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_vmw};
+    use super::{basename, run_vmw, strip_ext};
 
     #[test]
     fn basename_strips_path() {

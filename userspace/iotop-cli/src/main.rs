@@ -61,7 +61,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_iotop};
+    use super::run_iotop;
 
     #[test]
     fn help_exits_zero() {

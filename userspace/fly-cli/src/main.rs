@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_fly(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,11 +26,16 @@ fn run_fly(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Fly.io 2024 (Slate OS) — flyctl"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Fly.io 2024 (Slate OS) — flyctl");
+        return 0;
+    }
     println!("Fly.io 2024 (Slate OS) — Global App Platform");
     println!("  Vendor: Fly.io, Inc. (Chicago, IL — private)");
     println!("  Founders: Kurt Mackey + Thomas Ptacek + Steve Berryman, 2017");
-    println!("          founded as 'Fly Edge' for serverless edge compute, pivoted to general PaaS 2020");
+    println!(
+        "          founded as 'Fly Edge' for serverless edge compute, pivoted to general PaaS 2020"
+    );
     println!("          Kurt Mackey: CEO, ex-Crowdmob + Compose.io");
     println!("          Thomas Ptacek: famously prolific writer + security veteran (ex-Matasano)");
     println!("          Strong cult-following in indie dev + tech-Twitter community");
@@ -35,13 +44,25 @@ fn run_fly(args: &[String], _prog: &str) -> i32 {
     println!("         total raised: ~$110M");
     println!("         a16z, Intel Capital, Dell Technologies Capital backers");
     println!("         estimated $40-80M ARR (private — growing rapidly with AI workloads)");
-    println!("  Strategic position: 'run your Docker app close to users globally — Heroku for the Docker era':");
+    println!(
+        "  Strategic position: 'run your Docker app close to users globally — Heroku for the Docker era':"
+    );
     println!("                    pitch: 'fly deploy and your app runs in 35 regions worldwide'");
-    println!("                    target: developers + scale-ups who care about latency + dev experience");
-    println!("                    primary competitor: Heroku (Salesforce), Render, Railway, Vercel (different model)");
-    println!("                    secondary: AWS (App Runner), Cloudflare Workers, DigitalOcean App Platform");
-    println!("                    Fly's wedge: anycast routing + Firecracker VMs + 35+ regions + great DX");
-    println!("                    'Distributed by default' = move workload to user via Fly's anycast network");
+    println!(
+        "                    target: developers + scale-ups who care about latency + dev experience"
+    );
+    println!(
+        "                    primary competitor: Heroku (Salesforce), Render, Railway, Vercel (different model)"
+    );
+    println!(
+        "                    secondary: AWS (App Runner), Cloudflare Workers, DigitalOcean App Platform"
+    );
+    println!(
+        "                    Fly's wedge: anycast routing + Firecracker VMs + 35+ regions + great DX"
+    );
+    println!(
+        "                    'Distributed by default' = move workload to user via Fly's anycast network"
+    );
     println!("  Pricing (per-second billing — generous free tier):");
     println!("    Free tier: 3 small VMs always-free (256MB shared-cpu-1x in any 2 regions)");
     println!("    Shared CPU: $0.0000022/sec (~$5.70/mo for shared-cpu-1x)");
@@ -98,7 +119,9 @@ fn run_fly(args: &[String], _prog: &str) -> i32 {
     println!("    - Fly uses Firecracker on its own bare-metal hardware (not AWS)");
     println!("  Integrations:");
     println!("    - Docker images (anything that builds to OCI)");
-    println!("    - Most popular frameworks: Rails, Django, FastAPI, Next.js, Phoenix, Elixir, Go, Rust");
+    println!(
+        "    - Most popular frameworks: Rails, Django, FastAPI, Next.js, Phoenix, Elixir, Go, Rust"
+    );
     println!("    - Postgres: native Fly Postgres + external connections");
     println!("    - Redis: Upstash partnership");
     println!("    - Object storage: Tigris, S3, R2 (external)");
@@ -125,22 +148,31 @@ fn run_fly(args: &[String], _prog: &str) -> i32 {
     println!("    - Many YC startups choose Fly for early production");
     println!("    - Tech-Twitter community amplification (Thomas Ptacek's writing)");
     println!("    - International: significant European + global use");
-    println!("    - sweet spot: developers who want Heroku-style DX with edge + container flexibility");
+    println!(
+        "    - sweet spot: developers who want Heroku-style DX with edge + container flexibility"
+    );
     println!("  Critique: outages have been more frequent than enterprise customers prefer");
     println!("           Postgres HA reliability issues publicly acknowledged (2022-2023)");
     println!("           less mature enterprise security/compliance vs AWS/GCP");
     println!("           geo-distribution sounds great but most apps don't need it");
     println!("           competing with Cloudflare Workers, Vercel, Render for similar buyers");
-    println!("           pricing can balloon for high-CPU sustained workloads vs reserved instances on AWS");
+    println!(
+        "           pricing can balloon for high-CPU sustained workloads vs reserved instances on AWS"
+    );
     println!("           support quality variable (community-first model has limits)");
     println!("           AI workloads (GPU) require capacity planning across regions");
-    println!("  Differentiator: anycast routing + Firecracker microVMs across 35+ regions + per-second billing + best-in-class flyctl CX + LiteFS (distributed SQLite for edge apps) + GPU support for AI inference + Thomas Ptacek's writing-driven brand + 'fly launch' instant DX for Docker apps + dev-cult-following — the global app platform that lets indie devs deploy distributed apps with a single command and per-second billing");
+    println!(
+        "  Differentiator: anycast routing + Firecracker microVMs across 35+ regions + per-second billing + best-in-class flyctl CX + LiteFS (distributed SQLite for edge apps) + GPU support for AI inference + Thomas Ptacek's writing-driven brand + 'fly launch' instant DX for Docker apps + dev-cult-following — the global app platform that lets indie devs deploy distributed apps with a single command and per-second billing"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "fly".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "fly".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_fly(&rest, &_prog);
     process::exit(code);
@@ -148,7 +180,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fly};
+    use super::{basename, run_fly, strip_ext};
 
     #[test]
     fn basename_strips_path() {

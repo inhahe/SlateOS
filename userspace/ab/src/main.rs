@@ -38,12 +38,20 @@ fn run_ab(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let url = args.iter().rfind(|a| a.starts_with("http")).map(|s| s.as_str()).unwrap_or("http://localhost/");
-    let n = args.iter().position(|a| a == "-n")
+    let url = args
+        .iter()
+        .rfind(|a| a.starts_with("http"))
+        .map(|s| s.as_str())
+        .unwrap_or("http://localhost/");
+    let n = args
+        .iter()
+        .position(|a| a == "-n")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("1");
-    let c = args.iter().position(|a| a == "-c")
+    let c = args
+        .iter()
+        .position(|a| a == "-c")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("1");
@@ -115,8 +123,14 @@ fn run_siege(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let url = args.iter().rfind(|a| a.starts_with("http")).map(|s| s.as_str()).unwrap_or("http://localhost/");
-    let concurrent = args.iter().position(|a| a == "-c" || a == "--concurrent")
+    let url = args
+        .iter()
+        .rfind(|a| a.starts_with("http"))
+        .map(|s| s.as_str())
+        .unwrap_or("http://localhost/");
+    let concurrent = args
+        .iter()
+        .position(|a| a == "-c" || a == "--concurrent")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("25");
@@ -148,7 +162,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -163,7 +179,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ab};
+    use super::run_ab;
 
     #[test]
     fn help_exits_zero() {

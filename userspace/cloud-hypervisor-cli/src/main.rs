@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_cloud_hypervisor(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -29,7 +33,10 @@ fn run_cloud_hypervisor(args: &[String], _prog: &str) -> i32 {
         println!("  -V / --version    Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "-V" || a == "--version") { println!("cloud-hypervisor v39.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("cloud-hypervisor v39.0 (Slate OS)");
+        return 0;
+    }
     println!("Cloud Hypervisor v39.0");
     println!("  vCPUs: 2");
     println!("  Memory: 2048 MiB");
@@ -42,7 +49,10 @@ fn run_cloud_hypervisor(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "cloud-hypervisor".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "cloud-hypervisor".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_cloud_hypervisor(&rest, &prog);
     process::exit(code);
@@ -50,12 +60,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cloud_hypervisor};
+    use super::{basename, run_cloud_hypervisor, strip_ext};
 
     #[test]
     fn basename_strips_path() {
         assert_eq!(basename("/usr/bin/cloud-hypervisor"), "cloud-hypervisor");
-        assert_eq!(basename(r"C:\bin\cloud-hypervisor.exe"), "cloud-hypervisor.exe");
+        assert_eq!(
+            basename(r"C:\bin\cloud-hypervisor.exe"),
+            "cloud-hypervisor.exe"
+        );
         assert_eq!(basename("plain"), "plain");
     }
 
@@ -67,8 +80,14 @@ mod tests {
 
     #[test]
     fn help_exits_zero() {
-        assert_eq!(run_cloud_hypervisor(&["--help".to_string()], "cloud-hypervisor"), 0);
-        assert_eq!(run_cloud_hypervisor(&["-h".to_string()], "cloud-hypervisor"), 0);
+        assert_eq!(
+            run_cloud_hypervisor(&["--help".to_string()], "cloud-hypervisor"),
+            0
+        );
+        assert_eq!(
+            run_cloud_hypervisor(&["-h".to_string()], "cloud-hypervisor"),
+            0
+        );
         let _ = run_cloud_hypervisor(&["--version".to_string()], "cloud-hypervisor");
     }
 

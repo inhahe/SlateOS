@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_arc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -20,11 +24,16 @@ fn run_arc(args: &[String], _prog: &str) -> i32 {
         println!("  --little-arc           Little Arc (pop-out single-tab window)");
         println!("  --easels               Easels (browser-canvas mixed-media)");
         println!("  --boost                Boost (per-site CSS/JS overrides)");
-        println!("  --max                  Arc Max (AI features: instant links, summarize, rename)");
+        println!(
+            "  --max                  Arc Max (AI features: instant links, summarize, rename)"
+        );
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Arc 1.78.0 (62012) (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Arc 1.78.0 (62012) (Slate OS)");
+        return 0;
+    }
     println!("Arc 1.78.0 (62012) (Slate OS)");
     println!("  Vendor: The Browser Company of New York (founded 2019)");
     println!("  Founder: Josh Miller (ex-White House), Hursh Agrawal");
@@ -45,7 +54,10 @@ fn run_arc(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "arc".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "arc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_arc(&rest, &_prog);
     process::exit(code);
@@ -53,7 +65,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_arc};
+    use super::{basename, run_arc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

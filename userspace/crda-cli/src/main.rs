@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_crda(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,7 +26,10 @@ fn run_crda(args: &[String], _prog: &str) -> i32 {
         println!("Called by the kernel via udev when regulatory info needed.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("crda v4.15 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("crda v4.15 (Slate OS)");
+        return 0;
+    }
     println!("crda: regulatory domain agent");
     println!("  Country: US");
     println!("  2.4 GHz: channels 1-11");
@@ -48,7 +55,10 @@ fn run_regdbdump(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "crda".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "crda".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "regdbdump" => run_regdbdump(&rest, &prog),
@@ -59,7 +69,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_crda};
+    use super::{basename, run_crda, strip_ext};
 
     #[test]
     fn basename_strips_path() {

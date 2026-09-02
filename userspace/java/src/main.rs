@@ -19,7 +19,10 @@ use std::process;
 // ── Main logic ────────────────────────────────────────────────────────
 
 fn run_java(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-help" || a == "-h") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-help" || a == "-h")
+    {
         println!("Usage: java [options] <mainclass> [args...]");
         println!("       java [options] -jar <jarfile> [args...]");
         println!();
@@ -54,7 +57,10 @@ fn run_java(args: Vec<String>) -> i32 {
     }
 
     // Main class
-    let main_class = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let main_class = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(cls) = main_class {
         println!("Executing class: {} (simulated)", cls);
         return 0;
@@ -65,7 +71,10 @@ fn run_java(args: Vec<String>) -> i32 {
 }
 
 fn run_javac(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-help" || a == "-h") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-help" || a == "-h")
+    {
         println!("Usage: javac <options> <source files>");
         println!();
         println!("Options:");
@@ -86,7 +95,11 @@ fn run_javac(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let sources: Vec<&str> = args.iter().filter(|a| a.ends_with(".java")).map(|s| s.as_str()).collect();
+    let sources: Vec<&str> = args
+        .iter()
+        .filter(|a| a.ends_with(".java"))
+        .map(|s| s.as_str())
+        .collect();
     if sources.is_empty() {
         eprintln!("error: no source files");
         return 1;
@@ -119,13 +132,22 @@ fn run_jar(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    if args.iter().any(|a| a.contains('c') && !a.starts_with('-') || a == "--create" || a == "-c") {
+    if args
+        .iter()
+        .any(|a| a.contains('c') && !a.starts_with('-') || a == "--create" || a == "-c")
+    {
         println!("Creating archive (simulated)");
-    } else if args.iter().any(|a| a.contains('t') && !a.starts_with('-') || a == "--list" || a == "-t") {
+    } else if args
+        .iter()
+        .any(|a| a.contains('t') && !a.starts_with('-') || a == "--list" || a == "-t")
+    {
         println!("META-INF/");
         println!("META-INF/MANIFEST.MF");
         println!("com/example/Main.class");
-    } else if args.iter().any(|a| a.contains('x') && !a.starts_with('-') || a == "--extract" || a == "-x") {
+    } else if args
+        .iter()
+        .any(|a| a.contains('x') && !a.starts_with('-') || a == "--extract" || a == "-x")
+    {
         println!("Extracting archive (simulated)");
     }
     0
@@ -149,7 +171,10 @@ fn run_jstack(args: Vec<String>) -> i32 {
     let pid = args.first().map(|s| s.as_str()).unwrap_or("12345");
     println!("Full thread dump OpenJDK 64-Bit Server VM (21.0.2+13):");
     println!();
-    println!("\"main\" #1 prio=5 os_prio=0 tid=0x00007f4c00001800 nid=0x{} runnable", pid);
+    println!(
+        "\"main\" #1 prio=5 os_prio=0 tid=0x00007f4c00001800 nid=0x{} runnable",
+        pid
+    );
     println!("   java.lang.Thread.State: RUNNABLE");
     println!("\tat com.example.Main.processData(Main.java:42)");
     println!("\tat com.example.Main.main(Main.java:15)");
@@ -160,7 +185,11 @@ fn run_jstack(args: Vec<String>) -> i32 {
 }
 
 fn run_jmap(args: Vec<String>) -> i32 {
-    let pid = args.first().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("12345");
+    let pid = args
+        .first()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("12345");
     let heap = args.iter().any(|a| a == "-heap");
 
     if heap {
@@ -196,7 +225,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -211,8 +242,14 @@ fn main() {
         "jps" => run_jps(rest),
         "jstack" => run_jstack(rest),
         "jmap" => run_jmap(rest),
-        "javadoc" => { println!("Generating Javadoc... done (simulated)"); 0 }
-        "jconsole" => { println!("JConsole: monitoring (simulated)"); 0 }
+        "javadoc" => {
+            println!("Generating Javadoc... done (simulated)");
+            0
+        }
+        "jconsole" => {
+            println!("JConsole: monitoring (simulated)");
+            0
+        }
         _ => run_java(rest),
     };
 
@@ -223,7 +260,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_java};
+    use super::run_java;
 
     #[test]
     fn help_exits_zero() {

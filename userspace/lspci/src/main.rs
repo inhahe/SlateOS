@@ -231,27 +231,21 @@ fn scan_sysfs() -> Vec<PciDevice> {
             None => continue,
         };
 
-        let vendor_id = read_hex_file(&format!("{dev_path}/vendor"))
-            .unwrap_or(0) as u16;
-        let device_id = read_hex_file(&format!("{dev_path}/device"))
-            .unwrap_or(0) as u16;
-        let class_val = read_hex_file(&format!("{dev_path}/class"))
-            .unwrap_or(0) as u32;
-        let revision = read_hex_file(&format!("{dev_path}/revision"))
-            .unwrap_or(0) as u8;
-        let subsys_vendor = read_hex_file(&format!("{dev_path}/subsystem_vendor"))
-            .unwrap_or(0) as u16;
-        let subsys_device = read_hex_file(&format!("{dev_path}/subsystem_device"))
-            .unwrap_or(0) as u16;
-        let irq = read_hex_file(&format!("{dev_path}/irq"))
-            .unwrap_or(0) as u8;
+        let vendor_id = read_hex_file(&format!("{dev_path}/vendor")).unwrap_or(0) as u16;
+        let device_id = read_hex_file(&format!("{dev_path}/device")).unwrap_or(0) as u16;
+        let class_val = read_hex_file(&format!("{dev_path}/class")).unwrap_or(0) as u32;
+        let revision = read_hex_file(&format!("{dev_path}/revision")).unwrap_or(0) as u8;
+        let subsys_vendor =
+            read_hex_file(&format!("{dev_path}/subsystem_vendor")).unwrap_or(0) as u16;
+        let subsys_device =
+            read_hex_file(&format!("{dev_path}/subsystem_device")).unwrap_or(0) as u16;
+        let irq = read_hex_file(&format!("{dev_path}/irq")).unwrap_or(0) as u8;
 
         let class_code = ((class_val >> 16) & 0xFF) as u8;
         let subclass = ((class_val >> 8) & 0xFF) as u8;
         let prog_if = (class_val & 0xFF) as u8;
 
-        let driver = read_file(&format!("{dev_path}/driver/name"))
-            .unwrap_or_default();
+        let driver = read_file(&format!("{dev_path}/driver/name")).unwrap_or_default();
 
         // Read BARs.
         let bars = read_bars(&dev_path);
@@ -275,9 +269,7 @@ fn scan_sysfs() -> Vec<PciDevice> {
     }
 
     // Sort by BDF.
-    devices.sort_by(|a, b| {
-        (a.bus, a.device, a.function).cmp(&(b.bus, b.device, b.function))
-    });
+    devices.sort_by(|a, b| (a.bus, a.device, a.function).cmp(&(b.bus, b.device, b.function)));
 
     devices
 }
@@ -406,18 +398,9 @@ fn read_bars(dev_path: &str) -> Vec<BarInfo> {
 
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 3 {
-            let start = u64::from_str_radix(
-                parts[0].trim_start_matches("0x"),
-                16,
-            ).unwrap_or(0);
-            let end = u64::from_str_radix(
-                parts[1].trim_start_matches("0x"),
-                16,
-            ).unwrap_or(0);
-            let flags = u64::from_str_radix(
-                parts[2].trim_start_matches("0x"),
-                16,
-            ).unwrap_or(0);
+            let start = u64::from_str_radix(parts[0].trim_start_matches("0x"), 16).unwrap_or(0);
+            let end = u64::from_str_radix(parts[1].trim_start_matches("0x"), 16).unwrap_or(0);
+            let flags = u64::from_str_radix(parts[2].trim_start_matches("0x"), 16).unwrap_or(0);
 
             if start == 0 && end == 0 {
                 continue;
@@ -445,8 +428,8 @@ fn read_bars(dev_path: &str) -> Vec<BarInfo> {
 // ============================================================================
 
 struct Config {
-    verbose: u8,     // 0=summary, 1=verbose, 2=very verbose
-    numeric: u8,     // 0=names, 1=numeric, 2=both
+    verbose: u8, // 0=summary, 1=verbose, 2=very verbose
+    numeric: u8, // 0=names, 1=numeric, 2=both
     show_driver: bool,
     tree: bool,
     json: bool,
@@ -479,8 +462,7 @@ fn display_device_summary(dev: &PciDevice, config: &Config) {
             // Numeric only.
             println!(
                 "{slot} Class {:02x}{:02x}: {:04x}:{:04x}",
-                dev.class_code, dev.subclass,
-                dev.vendor_id, dev.device_id,
+                dev.class_code, dev.subclass, dev.vendor_id, dev.device_id,
             );
         }
         2 => {
@@ -495,8 +477,10 @@ fn display_device_summary(dev: &PciDevice, config: &Config) {
             } else {
                 format!("{device_str} [{:04x}]", dev.device_id)
             };
-            println!("{slot} {class_str} [{:02x}{:02x}]: {vname} {dname}",
-                dev.class_code, dev.subclass);
+            println!(
+                "{slot} {class_str} [{:02x}{:02x}]: {vname} {dname}",
+                dev.class_code, dev.subclass
+            );
         }
         _ => {
             // Names only (default).
@@ -518,7 +502,10 @@ fn display_device_summary(dev: &PciDevice, config: &Config) {
 fn display_device_verbose(dev: &PciDevice, config: &Config) {
     display_device_summary(dev, config);
 
-    println!("\tSubsystem: {:04x}:{:04x}", dev.subsys_vendor, dev.subsys_device);
+    println!(
+        "\tSubsystem: {:04x}:{:04x}",
+        dev.subsys_vendor, dev.subsys_device
+    );
     println!("\tRevision:  {:02x}", dev.revision);
 
     if dev.prog_if != 0 {
@@ -536,10 +523,18 @@ fn display_device_verbose(dev: &PciDevice, config: &Config) {
     // BARs.
     for bar in &dev.bars {
         let bar_type = if bar.is_io { "I/O" } else { "Memory" };
-        let prefetch = if bar.is_prefetchable { " [prefetchable]" } else { "" };
+        let prefetch = if bar.is_prefetchable {
+            " [prefetchable]"
+        } else {
+            ""
+        };
         println!(
             "\tBAR{}: {} at {:#010x} [size={}]{}",
-            bar.index, bar_type, bar.base, format_size(bar.size), prefetch,
+            bar.index,
+            bar_type,
+            bar.base,
+            format_size(bar.size),
+            prefetch,
         );
     }
 
@@ -554,12 +549,14 @@ fn display_tree(devices: &[PciDevice]) {
 
     for bus in &buses {
         println!("Bus {:02x}", bus);
-        let bus_devs: Vec<&PciDevice> = devices.iter()
-            .filter(|d| d.bus == *bus)
-            .collect();
+        let bus_devs: Vec<&PciDevice> = devices.iter().filter(|d| d.bus == *bus).collect();
 
         for (i, dev) in bus_devs.iter().enumerate() {
-            let prefix = if i == bus_devs.len() - 1 { "└──" } else { "├──" };
+            let prefix = if i == bus_devs.len() - 1 {
+                "└──"
+            } else {
+                "├──"
+            };
             let vname = vendor_name(dev.vendor_id);
             let dname = device_name(dev.vendor_id, dev.device_id);
             let name = if !dname.is_empty() {
@@ -586,9 +583,14 @@ fn display_json(devices: &[PciDevice]) {
              \"vendor\":\"{vname}\",\"device\":\"{dname}\",\
              \"class\":\"{:02x}{:02x}\",\"class_name\":\"{cname}\",\
              \"revision\":\"{:02x}\",\"driver\":\"{}\",\"irq\":{}}}{comma}",
-            dev.slot_str(), dev.vendor_id, dev.device_id,
-            dev.class_code, dev.subclass,
-            dev.revision, dev.driver, dev.irq,
+            dev.slot_str(),
+            dev.vendor_id,
+            dev.device_id,
+            dev.class_code,
+            dev.subclass,
+            dev.revision,
+            dev.driver,
+            dev.irq,
         );
     }
     println!("]");
@@ -636,13 +638,34 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-v" => { config.verbose = 1; i += 1; }
-            "-vv" => { config.verbose = 2; i += 1; }
-            "-n" => { config.numeric = 1; i += 1; }
-            "-nn" => { config.numeric = 2; i += 1; }
-            "-k" => { config.show_driver = true; i += 1; }
-            "-t" | "--tree" => { config.tree = true; i += 1; }
-            "--json" => { config.json = true; i += 1; }
+            "-v" => {
+                config.verbose = 1;
+                i += 1;
+            }
+            "-vv" => {
+                config.verbose = 2;
+                i += 1;
+            }
+            "-n" => {
+                config.numeric = 1;
+                i += 1;
+            }
+            "-nn" => {
+                config.numeric = 2;
+                i += 1;
+            }
+            "-k" => {
+                config.show_driver = true;
+                i += 1;
+            }
+            "-t" | "--tree" => {
+                config.tree = true;
+                i += 1;
+            }
+            "--json" => {
+                config.json = true;
+                i += 1;
+            }
             "-s" => {
                 if i + 1 >= args.len() {
                     eprintln!("error: -s requires a slot (BB:DD.F)");

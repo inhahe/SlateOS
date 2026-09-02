@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_kp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,16 +29,23 @@ fn run_kp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("KeePass 2.57 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("KeePass 2.57 (Slate OS)");
+        return 0;
+    }
     println!("KeePass 2.57 (Slate OS)");
     println!("  Vendor: Dominik Reichl (single author, KeePass Password Safe Foundation)");
     println!("  License: GPL-2.0-or-later (free, open source)");
     println!("  Stack: .NET (KeePass 2.x), C++ (KeePass 1.x classic)");
     println!("  Database: .kdbx file (KeePass Database eXtended) — local file, you own storage");
     println!("  Crypto: AES-256 (default), ChaCha20 (option); KDFs: AES-KDF, Argon2id");
-    println!("  Key composition: master password, key file, Windows User Account, YubiKey HMAC-SHA1");
+    println!(
+        "  Key composition: master password, key file, Windows User Account, YubiKey HMAC-SHA1"
+    );
     println!("  No cloud: sync is your responsibility (Dropbox/Nextcloud/Syncthing/USB)");
-    println!("  Features: Auto-Type (send creds to any window), groups, attachments, custom icons,");
+    println!(
+        "  Features: Auto-Type (send creds to any window), groups, attachments, custom icons,"
+    );
     println!("            triggers, plugins (KeeAnywhere, KeePassNatMsg, KeePassRPC for browsers)");
     println!("  Forks: KeePassXC (cross-platform Qt rewrite), KeePassDX (Android),");
     println!("         KeeWeb (web-based), MacPass (macOS), Strongbox (iOS/macOS)");
@@ -46,7 +57,10 @@ fn run_kp(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "keepass".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "keepass".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_kp(&rest, &_prog);
     process::exit(code);
@@ -54,7 +68,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_kp};
+    use super::{basename, run_kp, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("split-cli 0.1.0 (Feature Data Platform personality build)"); }
+fn print_version() {
+    println!("split-cli 0.1.0 (Feature Data Platform personality build)");
+}
 
 fn run_about() {
     println!("Split Software, Inc. (a Harness company since 2024)");

@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("neon-cli 0.1.0 (Databricks-era serverless Postgres build)"); }
+fn print_version() {
+    println!("neon-cli 0.1.0 (Databricks-era serverless Postgres build)");
+}
 
 fn run_about() {
     println!("Neon (Neon Inc., now part of Databricks)");

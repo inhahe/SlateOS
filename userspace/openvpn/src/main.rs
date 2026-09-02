@@ -51,7 +51,9 @@ fn run_openvpn(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("OpenVPN 2.6.10 (Slate OS) x86_64 [SSL (OpenSSL)] [LZO] [LZ4] [EPOLL] [MH/PKTINFO] [AEAD]");
+        println!(
+            "OpenVPN 2.6.10 (Slate OS) x86_64 [SSL (OpenSSL)] [LZO] [LZ4] [EPOLL] [MH/PKTINFO] [AEAD]"
+        );
         println!("library versions: OpenSSL 3.2.1, LZO 2.10");
         println!("Originally developed by James Yonan");
         println!("Copyright (C) 2002-2024 OpenVPN Inc <sales@openvpn.net>");
@@ -102,15 +104,21 @@ fn run_openvpn(args: Vec<String>) -> i32 {
     // Start server/client
     let is_server = args.iter().any(|a| a == "--server");
     let is_client = args.iter().any(|a| a == "--client");
-    let proto = args.iter().position(|a| a == "--proto")
+    let proto = args
+        .iter()
+        .position(|a| a == "--proto")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("udp");
-    let port = args.iter().position(|a| a == "--port")
+    let port = args
+        .iter()
+        .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(1194);
-    let dev = args.iter().position(|a| a == "--dev")
+    let dev = args
+        .iter()
+        .position(|a| a == "--dev")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("tun0");
@@ -121,23 +129,58 @@ fn run_openvpn(args: Vec<String>) -> i32 {
     if is_server {
         println!("2025-05-22 10:00:00 Diffie-Hellman initialized with 2048 bit key");
         println!("2025-05-22 10:00:00 TUN/TAP device {} opened", dev);
-        println!("2025-05-22 10:00:00 /sbin/ip link set dev {} up mtu 1500", dev);
-        println!("2025-05-22 10:00:00 /sbin/ip addr add dev {} 10.8.0.1/24 broadcast 10.8.0.255", dev);
-        println!("2025-05-22 10:00:00 {} link remote: [AF_INET]0.0.0.0:{}", proto.to_uppercase(), port);
+        println!(
+            "2025-05-22 10:00:00 /sbin/ip link set dev {} up mtu 1500",
+            dev
+        );
+        println!(
+            "2025-05-22 10:00:00 /sbin/ip addr add dev {} 10.8.0.1/24 broadcast 10.8.0.255",
+            dev
+        );
+        println!(
+            "2025-05-22 10:00:00 {} link remote: [AF_INET]0.0.0.0:{}",
+            proto.to_uppercase(),
+            port
+        );
         println!("2025-05-22 10:00:01 Initialization Sequence Completed");
-        println!("2025-05-22 10:00:01 Listening for incoming connections on {}:{}", proto, port);
+        println!(
+            "2025-05-22 10:00:01 Listening for incoming connections on {}:{}",
+            proto, port
+        );
     } else if is_client {
-        let remote = args.iter().position(|a| a == "--remote")
+        let remote = args
+            .iter()
+            .position(|a| a == "--remote")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("server.example.com");
-        println!("2025-05-22 10:00:00 TCP/UDP: Preserving recently used remote address: [AF_INET]{}:{}", remote, port);
-        println!("2025-05-22 10:00:00 {} link local: (not bound)", proto.to_uppercase());
-        println!("2025-05-22 10:00:00 {} link remote: [AF_INET]{}:{}", proto.to_uppercase(), remote, port);
-        println!("2025-05-22 10:00:01 TLS: Initial packet from [AF_INET]{}:{}", remote, port);
-        println!("2025-05-22 10:00:01 Peer Connection Initiated with [AF_INET]{}:{}", remote, port);
+        println!(
+            "2025-05-22 10:00:00 TCP/UDP: Preserving recently used remote address: [AF_INET]{}:{}",
+            remote, port
+        );
+        println!(
+            "2025-05-22 10:00:00 {} link local: (not bound)",
+            proto.to_uppercase()
+        );
+        println!(
+            "2025-05-22 10:00:00 {} link remote: [AF_INET]{}:{}",
+            proto.to_uppercase(),
+            remote,
+            port
+        );
+        println!(
+            "2025-05-22 10:00:01 TLS: Initial packet from [AF_INET]{}:{}",
+            remote, port
+        );
+        println!(
+            "2025-05-22 10:00:01 Peer Connection Initiated with [AF_INET]{}:{}",
+            remote, port
+        );
         println!("2025-05-22 10:00:02 TUN/TAP device {} opened", dev);
-        println!("2025-05-22 10:00:02 /sbin/ip addr add dev {} 10.8.0.2/24 broadcast 10.8.0.255", dev);
+        println!(
+            "2025-05-22 10:00:02 /sbin/ip addr add dev {} 10.8.0.2/24 broadcast 10.8.0.255",
+            dev
+        );
         println!("2025-05-22 10:00:02 Initialization Sequence Completed");
     } else {
         println!("2025-05-22 10:00:00 NOTE: --server or --client must be specified");
@@ -155,7 +198,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_openvpn};
+    use super::run_openvpn;
 
     #[test]
     fn help_exits_zero() {

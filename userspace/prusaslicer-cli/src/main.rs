@@ -28,7 +28,11 @@ fn run_prusaslicer(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--info") {
-        let file = args.windows(2).find(|w| w[0] == "--info").map(|w| w[1].as_str()).unwrap_or("model.stl");
+        let file = args
+            .windows(2)
+            .find(|w| w[0] == "--info")
+            .map(|w| w[1].as_str())
+            .unwrap_or("model.stl");
         println!("Model info: {}", file);
         println!("  Format: STL (binary)");
         println!("  Triangles: 12,456");
@@ -39,14 +43,21 @@ fn run_prusaslicer(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--repair") {
-        let file = args.windows(2).find(|w| w[0] == "--repair").map(|w| w[1].as_str()).unwrap_or("model.stl");
+        let file = args
+            .windows(2)
+            .find(|w| w[0] == "--repair")
+            .map(|w| w[1].as_str())
+            .unwrap_or("model.stl");
         println!("Repairing: {}", file);
         println!("  Fixed 3 degenerate facets");
         println!("  Fixed 1 non-manifold edge");
         println!("  Repaired mesh saved.");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".stl") || a.ends_with(".3mf")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".stl") || a.ends_with(".3mf"))
+        .map(|s| s.as_str());
     if let Some(f) = file {
         if args.iter().any(|a| a == "--slice" || a == "--export-gcode") {
             println!("PrusaSlicer 2.7.1 — slicing: {}", f);
@@ -76,7 +87,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_prusaslicer};
+    use super::run_prusaslicer;
 
     #[test]
     fn help_exits_zero() {

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_dasher(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_dasher(args: &[String], _prog: &str) -> i32 {
         println!("  joystick, head tracker, breath sensor");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dasher v6.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("dasher v6.0 (Slate OS)");
+        return 0;
+    }
     println!("dasher: predictive text input started");
     println!("  Language model: English");
     println!("  Input: mouse pointer");
@@ -35,7 +42,10 @@ fn run_dasher(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "dasher".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "dasher".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_dasher(&rest, &prog);
     process::exit(code);
@@ -43,7 +53,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dasher};
+    use super::{basename, run_dasher, strip_ext};
 
     #[test]
     fn basename_strips_path() {

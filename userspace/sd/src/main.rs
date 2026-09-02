@@ -65,7 +65,10 @@ fn run_sd(args: Vec<String>) -> i32 {
         // Stdin mode
         println!("(reading from stdin)");
         println!("Before: The quick brown fox jumps over the lazy {}.", find);
-        println!("After:  The quick brown fox jumps over the lazy {}.", replace);
+        println!(
+            "After:  The quick brown fox jumps over the lazy {}.",
+            replace
+        );
     } else {
         for file in &files {
             println!("{}", file);
@@ -90,7 +93,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sd};
+    use super::run_sd;
 
     #[test]
     fn help_exits_zero() {

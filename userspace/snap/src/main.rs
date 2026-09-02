@@ -517,7 +517,11 @@ impl SnapState {
             publisher: "canonical".to_string(),
             summary: "Chromium web browser".to_string(),
             snap_type: SnapType::App,
-            channels: vec!["stable".to_string(), "candidate".to_string(), "beta".to_string()],
+            channels: vec![
+                "stable".to_string(),
+                "candidate".to_string(),
+                "beta".to_string(),
+            ],
             confinement: Confinement::Strict,
         });
         self.store_catalog.push(StoreResult {
@@ -543,9 +547,8 @@ impl SnapState {
         self.interfaces.push(Interface::new(
             "network", "core", "network", "core22", "network",
         ));
-        self.interfaces.push(Interface::new(
-            "home", "core", "home", "core22", "home",
-        ));
+        self.interfaces
+            .push(Interface::new("home", "core", "home", "core22", "home"));
 
         // Completed change
         self.changes.push(Change {
@@ -614,7 +617,12 @@ impl SnapState {
     // Install
     // ========================================================================
 
-    fn install_snap(&mut self, name: &str, channel: Option<&str>, confinement: Option<Confinement>) -> Result<String, String> {
+    fn install_snap(
+        &mut self,
+        name: &str,
+        channel: Option<&str>,
+        confinement: Option<Confinement>,
+    ) -> Result<String, String> {
         if self.snaps.contains_key(name) {
             return Err(format!("snap \"{}\" is already installed", name));
         }
@@ -639,7 +647,10 @@ impl SnapState {
         snap.revision = 100;
         snap.size = 52_428_800;
         snap.status = SnapStatus::Active;
-        let msg = format!("{} {} from '{}' ({}) installed", name, snap.version, snap.developer, ch);
+        let msg = format!(
+            "{} {} from '{}' ({}) installed",
+            name, snap.version, snap.developer, ch
+        );
         self.snaps.insert(name.to_string(), snap);
 
         let summary_str = format!("Install snap \"{}\"", name);
@@ -667,10 +678,14 @@ impl SnapState {
         // Remove associated aliases
         self.aliases.retain(|a| a.snap_name != name);
         let summary_str = format!("Remove snap \"{}\"", name);
-        self.add_change("remove-snap", &summary_str, &[
-            &format!("Remove data for snap {}", name),
-            &format!("Discard snap {}", name),
-        ]);
+        self.add_change(
+            "remove-snap",
+            &summary_str,
+            &[
+                &format!("Remove data for snap {}", name),
+                &format!("Discard snap {}", name),
+            ],
+        );
         Ok(format!("{} removed", name))
     }
 
@@ -679,7 +694,9 @@ impl SnapState {
     // ========================================================================
 
     fn refresh_snap(&mut self, name: &str, channel: Option<&str>) -> Result<String, String> {
-        let snap = self.snaps.get_mut(name)
+        let snap = self
+            .snaps
+            .get_mut(name)
             .ok_or_else(|| format!("snap \"{}\" is not installed", name))?;
         if let Some(ch) = channel {
             if !CHANNELS.contains(&ch) {
@@ -692,10 +709,14 @@ impl SnapState {
         let ver = snap.version.clone();
         let ch = snap.channel.clone();
         let summary_str = format!("Refresh snap \"{}\"", name);
-        self.add_change("refresh-snap", &summary_str, &[
-            &format!("Download snap {} from channel {}", name, ch),
-            &format!("Mount snap {} ({})", name, rev),
-        ]);
+        self.add_change(
+            "refresh-snap",
+            &summary_str,
+            &[
+                &format!("Download snap {} from channel {}", name, ch),
+                &format!("Mount snap {} ({})", name, rev),
+            ],
+        );
         Ok(format!("{} refreshed to {} (rev {})", name, ver, rev))
     }
 
@@ -718,17 +739,24 @@ impl SnapState {
     // ========================================================================
 
     fn revert_snap(&mut self, name: &str) -> Result<String, String> {
-        let snap = self.snaps.get_mut(name)
+        let snap = self
+            .snaps
+            .get_mut(name)
             .ok_or_else(|| format!("snap \"{}\" is not installed", name))?;
         if snap.revision <= 1 {
-            return Err(format!("snap \"{}\" has no earlier revision to revert to", name));
+            return Err(format!(
+                "snap \"{}\" has no earlier revision to revert to",
+                name
+            ));
         }
         snap.revision -= 1;
         let rev = snap.revision;
         let summary_str = format!("Revert snap \"{}\"", name);
-        self.add_change("revert-snap", &summary_str, &[
-            &format!("Revert snap {} to revision {}", name, rev),
-        ]);
+        self.add_change(
+            "revert-snap",
+            &summary_str,
+            &[&format!("Revert snap {} to revision {}", name, rev)],
+        );
         Ok(format!("{} reverted to revision {}", name, rev))
     }
 
@@ -746,8 +774,13 @@ impl SnapState {
             let notes = snap.confinement.as_str();
             lines.push(format!(
                 "{:<20} {:<12} {:<8} {:<12} {:<12} {:<10} {}",
-                snap.name, snap.version, snap.revision, snap.channel,
-                snap.developer, snap.status.as_str(), notes
+                snap.name,
+                snap.version,
+                snap.revision,
+                snap.channel,
+                snap.developer,
+                snap.status.as_str(),
+                notes
             ));
         }
         lines
@@ -764,13 +797,17 @@ impl SnapState {
             "Name", "Version", "Publisher", "Confinement"
         ));
         for entry in &self.store_catalog {
-            let name_match = entry.name.contains(query) || entry.summary.to_lowercase().contains(&query.to_lowercase());
+            let name_match = entry.name.contains(query)
+                || entry.summary.to_lowercase().contains(&query.to_lowercase());
             let section_match = section.is_none_or(|_s| true);
             if name_match && section_match {
                 lines.push(format!(
                     "{:<20} {:<12} {:<15} {:<10} {}",
-                    entry.name, entry.version, entry.publisher,
-                    entry.confinement.as_str(), entry.summary
+                    entry.name,
+                    entry.version,
+                    entry.publisher,
+                    entry.confinement.as_str(),
+                    entry.summary
                 ));
             }
         }
@@ -793,13 +830,25 @@ impl SnapState {
             lines.push(format!("publisher:    {}", snap.developer));
             lines.push(format!("store-url:    https://snapcraft.io/{}", snap.name));
             lines.push("license:      unset".to_string());
-            lines.push(format!("description:  {}", if snap.description.is_empty() { &snap.summary } else { &snap.description }));
+            lines.push(format!(
+                "description:  {}",
+                if snap.description.is_empty() {
+                    &snap.summary
+                } else {
+                    &snap.description
+                }
+            ));
             lines.push(format!("type:         {}", snap.snap_type.as_str()));
             lines.push(format!("snap-id:      {}", make_snap_id(&snap.name)));
             lines.push(format!("tracking:     {}", snap.channel));
             lines.push(format!("refresh-date: {}", snap.install_date));
-            lines.push(format!("installed:    {} (rev {}) {} {}", snap.version, snap.revision,
-                format_size(snap.size), snap.confinement.as_str()));
+            lines.push(format!(
+                "installed:    {} (rev {}) {} {}",
+                snap.version,
+                snap.revision,
+                format_size(snap.size),
+                snap.confinement.as_str()
+            ));
             return Ok(lines);
         }
         // Check store
@@ -823,7 +872,9 @@ impl SnapState {
     // ========================================================================
 
     fn run_snap(&self, name: &str, args: &[String]) -> Result<String, String> {
-        let snap = self.snaps.get(name)
+        let snap = self
+            .snaps
+            .get(name)
             .ok_or_else(|| format!("snap \"{}\" is not installed", name))?;
         if snap.status == SnapStatus::Disabled {
             return Err(format!("snap \"{}\" is disabled", name));
@@ -833,21 +884,34 @@ impl SnapState {
         } else {
             format!(" {}", args.join(" "))
         };
-        Ok(format!("Running {}{} (confinement: {})", name, args_str, snap.confinement.as_str()))
+        Ok(format!(
+            "Running {}{} (confinement: {})",
+            name,
+            args_str,
+            snap.confinement.as_str()
+        ))
     }
 
     // ========================================================================
     // Connect / disconnect interfaces
     // ========================================================================
 
-    fn connect_interface(&mut self, plug_snap: &str, plug_name: &str, slot_snap: &str, slot_name: &str) -> Result<String, String> {
+    fn connect_interface(
+        &mut self,
+        plug_snap: &str,
+        plug_name: &str,
+        slot_snap: &str,
+        slot_name: &str,
+    ) -> Result<String, String> {
         if !self.snaps.contains_key(plug_snap) && plug_snap != "core" {
             return Err(format!("snap \"{}\" is not installed", plug_snap));
         }
         // Check for duplicate
         for iface in &self.interfaces {
-            if iface.plug_snap == plug_snap && iface.plug_name == plug_name
-                && iface.slot_snap == slot_snap && iface.slot_name == slot_name
+            if iface.plug_snap == plug_snap
+                && iface.plug_name == plug_name
+                && iface.slot_snap == slot_snap
+                && iface.slot_name == slot_name
             {
                 return Err("interface already connected".to_string());
             }
@@ -860,26 +924,39 @@ impl SnapState {
             plug_name: plug_name.to_string(),
             auto_connect: false,
         });
-        Ok(format!("Connected {}:{} to {}:{}", plug_snap, plug_name, slot_snap, slot_name))
+        Ok(format!(
+            "Connected {}:{} to {}:{}",
+            plug_snap, plug_name, slot_snap, slot_name
+        ))
     }
 
     fn disconnect_interface(&mut self, plug_snap: &str, plug_name: &str) -> Result<String, String> {
         let before = self.interfaces.len();
-        self.interfaces.retain(|i| !(i.plug_snap == plug_snap && i.plug_name == plug_name));
+        self.interfaces
+            .retain(|i| !(i.plug_snap == plug_snap && i.plug_name == plug_name));
         if self.interfaces.len() == before {
-            return Err(format!("no connection found for {}:{}", plug_snap, plug_name));
+            return Err(format!(
+                "no connection found for {}:{}",
+                plug_snap, plug_name
+            ));
         }
         Ok(format!("Disconnected {}:{}", plug_snap, plug_name))
     }
 
     fn list_interfaces(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        lines.push(format!("{:<20} {:<25} {:<25} {:<8}", "Interface", "Slot", "Plug", "Auto"));
+        lines.push(format!(
+            "{:<20} {:<25} {:<25} {:<8}",
+            "Interface", "Slot", "Plug", "Auto"
+        ));
         for iface in &self.interfaces {
             let slot = format!("{}:{}", iface.slot_snap, iface.slot_name);
             let plug = format!("{}:{}", iface.plug_snap, iface.plug_name);
             let auto_str = if iface.auto_connect { "yes" } else { "no" };
-            lines.push(format!("{:<20} {:<25} {:<25} {:<8}", iface.name, slot, plug, auto_str));
+            lines.push(format!(
+                "{:<20} {:<25} {:<25} {:<8}",
+                iface.name, slot, plug, auto_str
+            ));
         }
         lines
     }
@@ -928,7 +1005,11 @@ impl SnapState {
         Err(format!("service {}.{} not found", snap_name, sn))
     }
 
-    fn service_restart(&mut self, snap_name: &str, svc_name: Option<&str>) -> Result<String, String> {
+    fn service_restart(
+        &mut self,
+        snap_name: &str,
+        svc_name: Option<&str>,
+    ) -> Result<String, String> {
         if !self.snaps.contains_key(snap_name) {
             return Err(format!("snap \"{}\" is not installed", snap_name));
         }
@@ -947,7 +1028,10 @@ impl SnapState {
             return Err(format!("snap \"{}\" is not installed", snap_name));
         }
         let sn = svc_name.unwrap_or("default");
-        let exists = self.services.iter().any(|s| s.snap_name == snap_name && s.service_name == sn);
+        let exists = self
+            .services
+            .iter()
+            .any(|s| s.snap_name == snap_name && s.service_name == sn);
         if !exists {
             return Err(format!("service {}.{} not found", snap_name, sn));
         }
@@ -960,11 +1044,15 @@ impl SnapState {
 
     fn list_services(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        lines.push(format!("{:<20} {:<20} {:<10} {:<8}", "Snap", "Service", "Status", "Enabled"));
+        lines.push(format!(
+            "{:<20} {:<20} {:<10} {:<8}",
+            "Snap", "Service", "Status", "Enabled"
+        ));
         for svc in &self.services {
             lines.push(format!(
                 "{:<20} {:<20} {:<10} {:<8}",
-                svc.snap_name, svc.service_name,
+                svc.snap_name,
+                svc.service_name,
                 svc.status.as_str(),
                 if svc.enabled { "yes" } else { "no" }
             ));
@@ -993,12 +1081,13 @@ impl SnapState {
         }
         let conf = self.config.get(snap_name);
         match (conf, key) {
-            (Some(map), Some(k)) => {
-                match map.get(k) {
-                    Some(v) => Ok(vec![format!("{}: {}", k, v)]),
-                    None => Err(format!("key \"{}\" not found for snap \"{}\"", k, snap_name)),
-                }
-            }
+            (Some(map), Some(k)) => match map.get(k) {
+                Some(v) => Ok(vec![format!("{}: {}", k, v)]),
+                None => Err(format!(
+                    "key \"{}\" not found for snap \"{}\"",
+                    k, snap_name
+                )),
+            },
             (Some(map), None) => {
                 let mut lines = Vec::new();
                 for (k, v) in map {
@@ -1017,7 +1106,12 @@ impl SnapState {
     // Aliases
     // ========================================================================
 
-    fn add_alias(&mut self, snap_name: &str, alias_name: &str, command: &str) -> Result<String, String> {
+    fn add_alias(
+        &mut self,
+        snap_name: &str,
+        alias_name: &str,
+        command: &str,
+    ) -> Result<String, String> {
         if !self.snaps.contains_key(snap_name) {
             return Err(format!("snap \"{}\" is not installed", snap_name));
         }
@@ -1032,7 +1126,10 @@ impl SnapState {
             command: command.to_string(),
             status: AliasStatus::Manual,
         });
-        Ok(format!("Added alias {} -> {}.{}", alias_name, snap_name, command))
+        Ok(format!(
+            "Added alias {} -> {}.{}",
+            alias_name, snap_name, command
+        ))
     }
 
     fn remove_alias(&mut self, alias_name: &str) -> Result<String, String> {
@@ -1056,16 +1153,25 @@ impl SnapState {
                 count += 1;
             }
         }
-        Ok(format!("Preferred snap {} ({} aliases updated)", snap_name, count))
+        Ok(format!(
+            "Preferred snap {} ({} aliases updated)",
+            snap_name, count
+        ))
     }
 
     fn list_aliases(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        lines.push(format!("{:<15} {:<15} {:<20} {:<10}", "Snap", "Alias", "Command", "Status"));
+        lines.push(format!(
+            "{:<15} {:<15} {:<20} {:<10}",
+            "Snap", "Alias", "Command", "Status"
+        ));
         for a in &self.aliases {
             lines.push(format!(
                 "{:<15} {:<15} {:<20} {:<10}",
-                a.snap_name, a.alias_name, a.command, a.status.as_str()
+                a.snap_name,
+                a.alias_name,
+                a.command,
+                a.status.as_str()
             ));
         }
         lines
@@ -1077,26 +1183,44 @@ impl SnapState {
 
     fn list_changes(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        lines.push(format!("{:<5} {:<10} {:<25} {}", "ID", "Status", "Spawn", "Summary"));
+        lines.push(format!(
+            "{:<5} {:<10} {:<25} {}",
+            "ID", "Status", "Spawn", "Summary"
+        ));
         for c in &self.changes {
             lines.push(format!(
                 "{:<5} {:<10} {:<25} {}",
-                c.id, c.status.as_str(), c.spawn_time, c.summary
+                c.id,
+                c.status.as_str(),
+                c.spawn_time,
+                c.summary
             ));
         }
         lines
     }
 
     fn list_tasks(&self, change_id: u64) -> Result<Vec<String>, String> {
-        let change = self.changes.iter().find(|c| c.id == change_id)
+        let change = self
+            .changes
+            .iter()
+            .find(|c| c.id == change_id)
             .ok_or_else(|| format!("change {} not found", change_id))?;
         let mut lines = Vec::new();
-        lines.push(format!("Change {}: {} ({})", change.id, change.summary, change.status.as_str()));
-        lines.push(format!("{:<5} {:<10} {:<15} {}", "ID", "Status", "Progress", "Summary"));
+        lines.push(format!(
+            "Change {}: {} ({})",
+            change.id,
+            change.summary,
+            change.status.as_str()
+        ));
+        lines.push(format!(
+            "{:<5} {:<10} {:<15} {}",
+            "ID", "Status", "Progress", "Summary"
+        ));
         for t in &change.tasks {
             lines.push(format!(
                 "{:<5} {:<10} {:<15} {}",
-                t.id, t.status.as_str(),
+                t.id,
+                t.status.as_str(),
                 format!("{}/{}", t.progress_done, t.progress_total),
                 t.summary
             ));
@@ -1105,7 +1229,10 @@ impl SnapState {
     }
 
     fn abort_change(&mut self, change_id: u64) -> Result<String, String> {
-        let change = self.changes.iter_mut().find(|c| c.id == change_id)
+        let change = self
+            .changes
+            .iter_mut()
+            .find(|c| c.id == change_id)
             .ok_or_else(|| format!("change {} not found", change_id))?;
         if change.status == ChangeStatus::Done {
             return Err(format!("change {} is already done", change_id));
@@ -1123,17 +1250,29 @@ impl SnapState {
     }
 
     fn watch_change(&self, change_id: u64) -> Result<Vec<String>, String> {
-        let change = self.changes.iter().find(|c| c.id == change_id)
+        let change = self
+            .changes
+            .iter()
+            .find(|c| c.id == change_id)
             .ok_or_else(|| format!("change {} not found", change_id))?;
         let mut lines = Vec::new();
         lines.push(format!("Watching change {}...", change_id));
         lines.push(format!("Status: {}", change.status.as_str()));
         for t in &change.tasks {
-            lines.push(format!("  Task {}: {} ({}/{})",
-                t.id, t.summary, t.progress_done, t.progress_total));
+            lines.push(format!(
+                "  Task {}: {} ({}/{})",
+                t.id, t.summary, t.progress_done, t.progress_total
+            ));
         }
-        if change.status == ChangeStatus::Done || change.status == ChangeStatus::Aborted || change.status == ChangeStatus::Error {
-            lines.push(format!("Change {} finished: {}", change_id, change.status.as_str()));
+        if change.status == ChangeStatus::Done
+            || change.status == ChangeStatus::Aborted
+            || change.status == ChangeStatus::Error
+        {
+            lines.push(format!(
+                "Change {} finished: {}",
+                change_id,
+                change.status.as_str()
+            ));
         }
         Ok(lines)
     }
@@ -1143,7 +1282,9 @@ impl SnapState {
     // ========================================================================
 
     fn save_snapshot(&mut self, name: &str) -> Result<String, String> {
-        let snap = self.snaps.get(name)
+        let snap = self
+            .snaps
+            .get(name)
             .ok_or_else(|| format!("snap \"{}\" is not installed", name))?;
         let sid = self.next_snapshot_id;
         self.next_snapshot_id += 1;
@@ -1155,13 +1296,22 @@ impl SnapState {
             size: snap.size,
             timestamp: "2025-01-01T00:10:00Z".to_string(),
         });
-        Ok(format!("Saved snapshot {} for {} (rev {})", sid, name, snap.revision))
+        Ok(format!(
+            "Saved snapshot {} for {} (rev {})",
+            sid, name, snap.revision
+        ))
     }
 
     fn restore_snapshot(&self, snapshot_id: u64) -> Result<String, String> {
-        let snapshot = self.snapshots.iter().find(|s| s.id == snapshot_id)
+        let snapshot = self
+            .snapshots
+            .iter()
+            .find(|s| s.id == snapshot_id)
             .ok_or_else(|| format!("snapshot {} not found", snapshot_id))?;
-        Ok(format!("Restored snapshot {} for {} (rev {})", snapshot_id, snapshot.snap_name, snapshot.revision))
+        Ok(format!(
+            "Restored snapshot {} for {} (rev {})",
+            snapshot_id, snapshot.snap_name, snapshot.revision
+        ))
     }
 
     fn forget_snapshot(&mut self, snapshot_id: u64) -> Result<String, String> {
@@ -1181,9 +1331,10 @@ impl SnapState {
         let mut lines = Vec::new();
         for a in &self.assertions {
             if let Some(at) = assertion_type
-                && a.assertion_type != at {
-                    continue;
-                }
+                && a.assertion_type != at
+            {
+                continue;
+            }
             lines.push(format!("type: {}", a.assertion_type));
             for (k, v) in &a.headers {
                 lines.push(format!("  {}: {}", k, v));
@@ -1199,7 +1350,12 @@ impl SnapState {
         lines
     }
 
-    fn ack_assertion(&mut self, assertion_type: &str, key: &str, value: &str) -> Result<String, String> {
+    fn ack_assertion(
+        &mut self,
+        assertion_type: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<String, String> {
         let mut headers = BTreeMap::new();
         headers.insert(key.to_string(), value.to_string());
         self.assertions.push(Assertion {
@@ -1218,7 +1374,10 @@ impl SnapState {
         let ch = channel.unwrap_or("stable");
         let entry = self.store_catalog.iter().find(|e| e.name == name);
         match entry {
-            Some(e) => Ok(format!("Downloaded {}_{}_{}.snap from channel {}", name, e.version, ch, ch)),
+            Some(e) => Ok(format!(
+                "Downloaded {}_{}_{}.snap from channel {}",
+                name, e.version, ch, ch
+            )),
             None => Err(format!("snap \"{}\" not found in store", name)),
         }
     }
@@ -1247,7 +1406,12 @@ impl SnapState {
         let mut lines = Vec::new();
         lines.push("Recent operation timings:".to_string());
         for c in self.changes.iter().rev().take(5) {
-            lines.push(format!("  Change {}: {} ({})", c.id, c.summary, c.status.as_str()));
+            lines.push(format!(
+                "  Change {}: {} ({})",
+                c.id,
+                c.summary,
+                c.status.as_str()
+            ));
         }
         lines
     }
@@ -1256,7 +1420,12 @@ impl SnapState {
         let mut lines = Vec::new();
         lines.push("State changes:".to_string());
         for c in &self.changes {
-            lines.push(format!("  {} -> {} at {}", c.summary, c.status.as_str(), c.spawn_time));
+            lines.push(format!(
+                "  {} -> {} at {}",
+                c.summary,
+                c.status.as_str(),
+                c.spawn_time
+            ));
         }
         if self.changes.is_empty() {
             lines.push("  (none)".to_string());
@@ -1322,7 +1491,9 @@ impl SnapState {
 // ============================================================================
 
 fn make_snap_id(name: &str) -> String {
-    let hash: u64 = name.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(u64::from(b)));
+    let hash: u64 = name.bytes().fold(0u64, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(u64::from(b))
+    });
     format!("{:016x}", hash)
 }
 
@@ -1408,7 +1579,10 @@ fn run_snap(args: &[String]) -> i32 {
         "download" => cmd_download(&state, sub_args),
         "pack" => cmd_pack(&state, sub_args),
         "debug" => cmd_debug(&state, sub_args),
-        "help" | "--help" | "-h" => { print_snap_usage(); 0 }
+        "help" | "--help" | "-h" => {
+            print_snap_usage();
+            0
+        }
         _ => {
             print_err(&format!("unknown command: {}", subcmd));
             1
@@ -1439,7 +1613,10 @@ fn print_snap_usage() {
     let _ = writeln!(out, "  interfaces  List all interfaces");
     let _ = writeln!(out);
     let _ = writeln!(out, "Service commands:");
-    let _ = writeln!(out, "  services    Manage snap services (start/stop/restart/logs)");
+    let _ = writeln!(
+        out,
+        "  services    Manage snap services (start/stop/restart/logs)"
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Configuration commands:");
     let _ = writeln!(out, "  set         Set snap configuration");
@@ -1471,7 +1648,10 @@ fn print_snap_usage() {
     let _ = writeln!(out, "  ack         Acknowledge an assertion");
     let _ = writeln!(out);
     let _ = writeln!(out, "Debug commands:");
-    let _ = writeln!(out, "  debug       Debug subcommands (connectivity/timings/state-changes/ensure-state-soon)");
+    let _ = writeln!(
+        out,
+        "  debug       Debug subcommands (connectivity/timings/state-changes/ensure-state-soon)"
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "  version     Show version information");
     let _ = writeln!(out, "  help        Show this help");
@@ -1510,14 +1690,23 @@ fn cmd_install(state: &mut SnapState, args: &[String]) -> i32 {
     }
     let snap_name = match name {
         Some(n) => n,
-        None => { print_err("snap name required"); return 1; }
+        None => {
+            print_err("snap name required");
+            return 1;
+        }
     };
     // Rebind channel to an owned string so it lives long enough
     let channel_owned: Option<String> = channel.map(|c| c.to_string());
     let channel_ref = channel_owned.as_deref();
     match state.install_snap(snap_name, channel_ref, confinement) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1527,8 +1716,14 @@ fn cmd_remove(state: &mut SnapState, args: &[String]) -> i32 {
         return 1;
     }
     match state.remove_snap(&args[0]) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1561,8 +1756,14 @@ fn cmd_refresh(state: &mut SnapState, args: &[String]) -> i32 {
         let channel_owned: Option<String> = channel.map(|c| c.to_string());
         let channel_ref = channel_owned.as_deref();
         match state.refresh_snap(n, channel_ref) {
-            Ok(msg) => { println!("{}", msg); 0 }
-            Err(e) => { print_err(&e); 1 }
+            Ok(msg) => {
+                println!("{}", msg);
+                0
+            }
+            Err(e) => {
+                print_err(&e);
+                1
+            }
         }
     } else {
         let results = state.refresh_all();
@@ -1577,8 +1778,14 @@ fn cmd_revert(state: &mut SnapState, args: &[String]) -> i32 {
         return 1;
     }
     match state.revert_snap(&args[0]) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1619,8 +1826,14 @@ fn cmd_info(state: &SnapState, args: &[String]) -> i32 {
         return 1;
     }
     match state.snap_info(&args[0]) {
-        Ok(lines) => { print_lines(&lines); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(lines) => {
+            print_lines(&lines);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1632,8 +1845,14 @@ fn cmd_run(state: &SnapState, args: &[String]) -> i32 {
     let name = &args[0];
     let run_args = if args.len() > 1 { &args[1..] } else { &[] };
     match state.run_snap(name, run_args) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1645,8 +1864,14 @@ fn cmd_connect(state: &mut SnapState, args: &[String]) -> i32 {
     let (plug_snap, plug_name) = parse_snap_colon(&args[0]);
     let (slot_snap, slot_name) = parse_snap_colon(&args[1]);
     match state.connect_interface(plug_snap, plug_name, slot_snap, slot_name) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1657,8 +1882,14 @@ fn cmd_disconnect(state: &mut SnapState, args: &[String]) -> i32 {
     }
     let (plug_snap, plug_name) = parse_snap_colon(&args[0]);
     match state.disconnect_interface(plug_snap, plug_name) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1683,8 +1914,14 @@ fn cmd_services(state: &mut SnapState, args: &[String]) -> i32 {
             let (snap_name, svc) = parse_snap_colon(&svc_args[0]);
             let svc_name = if svc == snap_name { None } else { Some(svc) };
             match state.service_start(snap_name, svc_name) {
-                Ok(msg) => { println!("{}", msg); 0 }
-                Err(e) => { print_err(&e); 1 }
+                Ok(msg) => {
+                    println!("{}", msg);
+                    0
+                }
+                Err(e) => {
+                    print_err(&e);
+                    1
+                }
             }
         }
         "stop" => {
@@ -1695,8 +1932,14 @@ fn cmd_services(state: &mut SnapState, args: &[String]) -> i32 {
             let (snap_name, svc) = parse_snap_colon(&svc_args[0]);
             let svc_name = if svc == snap_name { None } else { Some(svc) };
             match state.service_stop(snap_name, svc_name) {
-                Ok(msg) => { println!("{}", msg); 0 }
-                Err(e) => { print_err(&e); 1 }
+                Ok(msg) => {
+                    println!("{}", msg);
+                    0
+                }
+                Err(e) => {
+                    print_err(&e);
+                    1
+                }
             }
         }
         "restart" => {
@@ -1707,8 +1950,14 @@ fn cmd_services(state: &mut SnapState, args: &[String]) -> i32 {
             let (snap_name, svc) = parse_snap_colon(&svc_args[0]);
             let svc_name = if svc == snap_name { None } else { Some(svc) };
             match state.service_restart(snap_name, svc_name) {
-                Ok(msg) => { println!("{}", msg); 0 }
-                Err(e) => { print_err(&e); 1 }
+                Ok(msg) => {
+                    println!("{}", msg);
+                    0
+                }
+                Err(e) => {
+                    print_err(&e);
+                    1
+                }
             }
         }
         "logs" => {
@@ -1719,8 +1968,14 @@ fn cmd_services(state: &mut SnapState, args: &[String]) -> i32 {
             let (snap_name, svc) = parse_snap_colon(&svc_args[0]);
             let svc_name = if svc == snap_name { None } else { Some(svc) };
             match state.service_logs(snap_name, svc_name) {
-                Ok(lines) => { print_lines(&lines); 0 }
-                Err(e) => { print_err(&e); 1 }
+                Ok(lines) => {
+                    print_lines(&lines);
+                    0
+                }
+                Err(e) => {
+                    print_err(&e);
+                    1
+                }
             }
         }
         _ => {
@@ -1742,8 +1997,14 @@ fn cmd_set(state: &mut SnapState, args: &[String]) -> i32 {
             let key = &kv[..i];
             let value = &kv[i + 1..];
             match state.set_config(snap_name, key, value) {
-                Ok(msg) => { println!("{}", msg); 0 }
-                Err(e) => { print_err(&e); 1 }
+                Ok(msg) => {
+                    println!("{}", msg);
+                    0
+                }
+                Err(e) => {
+                    print_err(&e);
+                    1
+                }
             }
         }
         None => {
@@ -1759,10 +2020,20 @@ fn cmd_get(state: &SnapState, args: &[String]) -> i32 {
         return 1;
     }
     let snap_name = &args[0];
-    let key = if args.len() > 1 { Some(args[1].as_str()) } else { None };
+    let key = if args.len() > 1 {
+        Some(args[1].as_str())
+    } else {
+        None
+    };
     match state.get_config(snap_name, key) {
-        Ok(lines) => { print_lines(&lines); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(lines) => {
+            print_lines(&lines);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1777,8 +2048,14 @@ fn cmd_alias(state: &mut SnapState, args: &[String]) -> i32 {
         return 1;
     }
     match state.add_alias(&args[0], &args[1], &args[2]) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1788,8 +2065,14 @@ fn cmd_unalias(state: &mut SnapState, args: &[String]) -> i32 {
         return 1;
     }
     match state.remove_alias(&args[0]) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1799,8 +2082,14 @@ fn cmd_prefer(state: &mut SnapState, args: &[String]) -> i32 {
         return 1;
     }
     match state.prefer(&args[0]) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1816,11 +2105,20 @@ fn cmd_tasks(state: &SnapState, args: &[String]) -> i32 {
     }
     let id: u64 = match args[0].parse() {
         Ok(v) => v,
-        Err(_) => { print_err("invalid change ID"); return 1; }
+        Err(_) => {
+            print_err("invalid change ID");
+            return 1;
+        }
     };
     match state.list_tasks(id) {
-        Ok(lines) => { print_lines(&lines); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(lines) => {
+            print_lines(&lines);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1831,11 +2129,20 @@ fn cmd_abort(state: &mut SnapState, args: &[String]) -> i32 {
     }
     let id: u64 = match args[0].parse() {
         Ok(v) => v,
-        Err(_) => { print_err("invalid change ID"); return 1; }
+        Err(_) => {
+            print_err("invalid change ID");
+            return 1;
+        }
     };
     match state.abort_change(id) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1846,11 +2153,20 @@ fn cmd_watch(state: &SnapState, args: &[String]) -> i32 {
     }
     let id: u64 = match args[0].parse() {
         Ok(v) => v,
-        Err(_) => { print_err("invalid change ID"); return 1; }
+        Err(_) => {
+            print_err("invalid change ID");
+            return 1;
+        }
     };
     match state.watch_change(id) {
-        Ok(lines) => { print_lines(&lines); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(lines) => {
+            print_lines(&lines);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1870,15 +2186,27 @@ fn cmd_login(state: &mut SnapState, args: &[String]) -> i32 {
         return 1;
     }
     match state.login(&args[0]) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
 fn cmd_logout(state: &mut SnapState) -> i32 {
     match state.logout() {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1888,8 +2216,14 @@ fn cmd_save(state: &mut SnapState, args: &[String]) -> i32 {
         return 1;
     }
     match state.save_snapshot(&args[0]) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1900,11 +2234,20 @@ fn cmd_restore(state: &SnapState, args: &[String]) -> i32 {
     }
     let id: u64 = match args[0].parse() {
         Ok(v) => v,
-        Err(_) => { print_err("invalid snapshot ID"); return 1; }
+        Err(_) => {
+            print_err("invalid snapshot ID");
+            return 1;
+        }
     };
     match state.restore_snapshot(id) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1915,16 +2258,29 @@ fn cmd_forget(state: &mut SnapState, args: &[String]) -> i32 {
     }
     let id: u64 = match args[0].parse() {
         Ok(v) => v,
-        Err(_) => { print_err("invalid snapshot ID"); return 1; }
+        Err(_) => {
+            print_err("invalid snapshot ID");
+            return 1;
+        }
     };
     match state.forget_snapshot(id) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
 fn cmd_known(state: &SnapState, args: &[String]) -> i32 {
-    let atype = if args.is_empty() { None } else { Some(args[0].as_str()) };
+    let atype = if args.is_empty() {
+        None
+    } else {
+        Some(args[0].as_str())
+    };
     print_lines(&state.known_assertions(atype));
     0
 }
@@ -1935,8 +2291,14 @@ fn cmd_ack(state: &mut SnapState, args: &[String]) -> i32 {
         return 1;
     }
     match state.ack_assertion(&args[0], &args[1], &args[2]) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1962,13 +2324,22 @@ fn cmd_download(state: &SnapState, args: &[String]) -> i32 {
     }
     let snap_name = match name {
         Some(n) => n,
-        None => { print_err("snap name required"); return 1; }
+        None => {
+            print_err("snap name required");
+            return 1;
+        }
     };
     let channel_owned: Option<String> = channel.map(|c| c.to_string());
     let channel_ref = channel_owned.as_deref();
     match state.download_snap(snap_name, channel_ref) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1978,8 +2349,14 @@ fn cmd_pack(state: &SnapState, args: &[String]) -> i32 {
         return 1;
     }
     match state.pack_snap(&args[0]) {
-        Ok(msg) => { println!("{}", msg); 0 }
-        Err(e) => { print_err(&e); 1 }
+        Ok(msg) => {
+            println!("{}", msg);
+            0
+        }
+        Err(e) => {
+            print_err(&e);
+            1
+        }
     }
 }
 
@@ -1993,10 +2370,22 @@ fn cmd_debug(state: &SnapState, args: &[String]) -> i32 {
         return 0;
     }
     match args[0].as_str() {
-        "connectivity" => { print_lines(&state.debug_connectivity()); 0 }
-        "timings" => { print_lines(&state.debug_timings()); 0 }
-        "state-changes" => { print_lines(&state.debug_state_changes()); 0 }
-        "ensure-state-soon" => { println!("{}", state.debug_ensure_state_soon()); 0 }
+        "connectivity" => {
+            print_lines(&state.debug_connectivity());
+            0
+        }
+        "timings" => {
+            print_lines(&state.debug_timings());
+            0
+        }
+        "state-changes" => {
+            print_lines(&state.debug_state_changes());
+            0
+        }
+        "ensure-state-soon" => {
+            println!("{}", state.debug_ensure_state_soon());
+            0
+        }
         _ => {
             print_err(&format!("unknown debug subcommand: {}", args[0]));
             1
@@ -2065,8 +2454,14 @@ fn run_snap_confine(args: &[String]) -> i32 {
     for arg in args {
         if !past_flags {
             match arg.as_str() {
-                "--classic" => { mode = Confinement::Classic; continue; }
-                "--devmode" => { mode = Confinement::Devmode; continue; }
+                "--classic" => {
+                    mode = Confinement::Classic;
+                    continue;
+                }
+                "--devmode" => {
+                    mode = Confinement::Devmode;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -2082,11 +2477,17 @@ fn run_snap_confine(args: &[String]) -> i32 {
 
     let snap_name = match snap_name {
         Some(n) => n,
-        None => { print_err("snap name required"); return 1; }
+        None => {
+            print_err("snap name required");
+            return 1;
+        }
     };
     let command = match command {
         Some(c) => c,
-        None => { print_err("command required"); return 1; }
+        None => {
+            print_err("command required");
+            return 1;
+        }
     };
 
     println!("snap-confine: setting up confinement for {}", snap_name);
@@ -2094,8 +2495,15 @@ fn run_snap_confine(args: &[String]) -> i32 {
     println!("  mounting snap filesystem...");
     println!("  setting up security profiles...");
     println!("  setting up cgroups...");
-    println!("  executing: {}{}", command,
-        if cmd_args.is_empty() { String::new() } else { format!(" {}", cmd_args.join(" ")) });
+    println!(
+        "  executing: {}{}",
+        command,
+        if cmd_args.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", cmd_args.join(" "))
+        }
+    );
     0
 }
 
@@ -2150,7 +2558,10 @@ mod tests {
 
     #[test]
     fn test_personality_snapd_with_path() {
-        assert_eq!(detect_personality("/usr/lib/snapd/snapd"), Personality::Snapd);
+        assert_eq!(
+            detect_personality("/usr/lib/snapd/snapd"),
+            Personality::Snapd
+        );
     }
 
     #[test]
@@ -2165,12 +2576,18 @@ mod tests {
 
     #[test]
     fn test_personality_snap_confine_with_path() {
-        assert_eq!(detect_personality("/usr/lib/snapd/snap-confine"), Personality::SnapConfine);
+        assert_eq!(
+            detect_personality("/usr/lib/snapd/snap-confine"),
+            Personality::SnapConfine
+        );
     }
 
     #[test]
     fn test_personality_snap_confine_exe() {
-        assert_eq!(detect_personality("C:\\snap\\snap-confine.exe"), Personality::SnapConfine);
+        assert_eq!(
+            detect_personality("C:\\snap\\snap-confine.exe"),
+            Personality::SnapConfine
+        );
     }
 
     #[test]
@@ -2432,7 +2849,10 @@ mod tests {
         let mut state = SnapState::new();
         let result = state.install_snap("firefox", None, Some(Confinement::Classic));
         assert!(result.is_ok());
-        assert_eq!(state.snaps.get("firefox").unwrap().confinement, Confinement::Classic);
+        assert_eq!(
+            state.snaps.get("firefox").unwrap().confinement,
+            Confinement::Classic
+        );
     }
 
     #[test]
@@ -3317,7 +3737,10 @@ mod tests {
         let mut state = SnapState::new();
         let result = state.install_snap("firefox", None, Some(Confinement::Devmode));
         assert!(result.is_ok());
-        assert_eq!(state.snaps.get("firefox").unwrap().confinement, Confinement::Devmode);
+        assert_eq!(
+            state.snaps.get("firefox").unwrap().confinement,
+            Confinement::Devmode
+        );
     }
 
     // === Refresh bumps revision ===
@@ -3344,8 +3767,22 @@ mod tests {
             kind: "test".to_string(),
             summary: "Test".to_string(),
             tasks: vec![
-                Task { id: 100, kind: "t".to_string(), summary: "s".to_string(), status: ChangeStatus::Doing, progress_done: 0, progress_total: 1 },
-                Task { id: 101, kind: "t".to_string(), summary: "s".to_string(), status: ChangeStatus::Done, progress_done: 1, progress_total: 1 },
+                Task {
+                    id: 100,
+                    kind: "t".to_string(),
+                    summary: "s".to_string(),
+                    status: ChangeStatus::Doing,
+                    progress_done: 0,
+                    progress_total: 1,
+                },
+                Task {
+                    id: 101,
+                    kind: "t".to_string(),
+                    summary: "s".to_string(),
+                    status: ChangeStatus::Done,
+                    progress_done: 1,
+                    progress_total: 1,
+                },
             ],
             ready_time: None,
             spawn_time: "2025-01-01T00:00:00Z".to_string(),

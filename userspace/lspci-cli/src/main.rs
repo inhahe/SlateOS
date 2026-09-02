@@ -60,25 +60,124 @@ fn run_lspci(args: &[String]) -> i32 {
     }
 
     let devices = [
-        ("00:00.0", "Host bridge", "Intel Corporation", "12th/13th Gen Core Processor Host Bridge", "0600", "8086:4668", ""),
-        ("00:02.0", "VGA compatible controller", "Intel Corporation", "UHD Graphics 770", "0300", "8086:4680", "i915"),
-        ("00:14.0", "USB controller", "Intel Corporation", "Alder Lake USB 3.2 xHCI", "0c03", "8086:7ae0", "xhci_hcd"),
-        ("00:17.0", "SATA controller", "Intel Corporation", "Alder Lake SATA AHCI", "0106", "8086:7ae8", "ahci"),
-        ("00:1f.0", "ISA bridge", "Intel Corporation", "Z690 Chipset LPC/eSPI", "0601", "8086:7a04", ""),
-        ("00:1f.3", "Audio device", "Intel Corporation", "Alder Lake HD Audio", "0403", "8086:7ad0", "snd_hda_intel"),
-        ("00:1f.4", "SMBus", "Intel Corporation", "Alder Lake SMBus", "0c05", "8086:7aa3", "i801_smbus"),
-        ("00:1f.5", "Serial bus controller", "Intel Corporation", "Alder Lake SPI Controller", "0c80", "8086:7ae4", "intel-spi"),
-        ("01:00.0", "VGA compatible controller", "NVIDIA Corporation", "GeForce RTX 4090", "0300", "10de:2684", "nvidia"),
-        ("02:00.0", "Network controller", "Intel Corporation", "Wi-Fi 6E AX211", "0280", "8086:51f0", "iwlwifi"),
-        ("03:00.0", "Ethernet controller", "Intel Corporation", "I225-V 2.5GbE", "0200", "8086:15f3", "igc"),
-        ("04:00.0", "Non-Volatile memory controller", "Samsung Electronics", "980 PRO NVMe SSD", "0108", "144d:a80a", "nvme"),
+        (
+            "00:00.0",
+            "Host bridge",
+            "Intel Corporation",
+            "12th/13th Gen Core Processor Host Bridge",
+            "0600",
+            "8086:4668",
+            "",
+        ),
+        (
+            "00:02.0",
+            "VGA compatible controller",
+            "Intel Corporation",
+            "UHD Graphics 770",
+            "0300",
+            "8086:4680",
+            "i915",
+        ),
+        (
+            "00:14.0",
+            "USB controller",
+            "Intel Corporation",
+            "Alder Lake USB 3.2 xHCI",
+            "0c03",
+            "8086:7ae0",
+            "xhci_hcd",
+        ),
+        (
+            "00:17.0",
+            "SATA controller",
+            "Intel Corporation",
+            "Alder Lake SATA AHCI",
+            "0106",
+            "8086:7ae8",
+            "ahci",
+        ),
+        (
+            "00:1f.0",
+            "ISA bridge",
+            "Intel Corporation",
+            "Z690 Chipset LPC/eSPI",
+            "0601",
+            "8086:7a04",
+            "",
+        ),
+        (
+            "00:1f.3",
+            "Audio device",
+            "Intel Corporation",
+            "Alder Lake HD Audio",
+            "0403",
+            "8086:7ad0",
+            "snd_hda_intel",
+        ),
+        (
+            "00:1f.4",
+            "SMBus",
+            "Intel Corporation",
+            "Alder Lake SMBus",
+            "0c05",
+            "8086:7aa3",
+            "i801_smbus",
+        ),
+        (
+            "00:1f.5",
+            "Serial bus controller",
+            "Intel Corporation",
+            "Alder Lake SPI Controller",
+            "0c80",
+            "8086:7ae4",
+            "intel-spi",
+        ),
+        (
+            "01:00.0",
+            "VGA compatible controller",
+            "NVIDIA Corporation",
+            "GeForce RTX 4090",
+            "0300",
+            "10de:2684",
+            "nvidia",
+        ),
+        (
+            "02:00.0",
+            "Network controller",
+            "Intel Corporation",
+            "Wi-Fi 6E AX211",
+            "0280",
+            "8086:51f0",
+            "iwlwifi",
+        ),
+        (
+            "03:00.0",
+            "Ethernet controller",
+            "Intel Corporation",
+            "I225-V 2.5GbE",
+            "0200",
+            "8086:15f3",
+            "igc",
+        ),
+        (
+            "04:00.0",
+            "Non-Volatile memory controller",
+            "Samsung Electronics",
+            "980 PRO NVMe SSD",
+            "0108",
+            "144d:a80a",
+            "nvme",
+        ),
     ];
 
     for (addr, class, vendor, name, class_id, ids, driver) in &devices {
         if numeric {
             println!("{} {} [{}]: {} [{}]", addr, class, class_id, ids, ids);
         } else if both {
-            println!("{} {} [{}]: {} {} [{}]", addr, class, class_id, vendor, name, ids);
+            println!(
+                "{} {} [{}]: {} {} [{}]",
+                addr, class, class_id, vendor, name, ids
+            );
         } else {
             println!("{} {}: {} {}", addr, class, vendor, name);
         }
@@ -118,7 +217,8 @@ fn run_setpci(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "lspci".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -132,7 +232,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lspci};
+    use super::{basename, run_lspci, strip_ext};
 
     #[test]
     fn basename_strips_path() {

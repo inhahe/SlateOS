@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_seqkit(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -35,7 +39,10 @@ fn run_seqkit(args: &[String], _prog: &str) -> i32 {
         "stats" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("sequences.fasta");
             println!("file    format  type  num_seqs  sum_len    min_len  avg_len  max_len");
-            println!("{}  FASTA   DNA   10,000    15,000,000  500     1,500    5,000", file);
+            println!(
+                "{}  FASTA   DNA   10,000    15,000,000  500     1,500    5,000",
+                file
+            );
         }
         "grep" => {
             println!("Matching sequences: 42");
@@ -55,7 +62,10 @@ fn run_seqkit(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "seqkit".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "seqkit".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_seqkit(&rest, &prog);
     process::exit(code);
@@ -63,7 +73,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_seqkit};
+    use super::{basename, run_seqkit, strip_ext};
 
     #[test]
     fn basename_strips_path() {

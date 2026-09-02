@@ -18,7 +18,10 @@ fn run_nfsd(args: Vec<String>) -> i32 {
         println!("nfsd (Slate OS nfs-utils 2.6.4)");
         return 0;
     }
-    let nprocs = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(8);
+    let nprocs = args
+        .first()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(8);
     println!("Starting NFS daemon with {} threads", nprocs);
     println!("NFS server running (Slate OS nfs-utils 2.6.4)");
     0
@@ -61,7 +64,11 @@ fn run_showmount(args: Vec<String>) -> i32 {
         println!("  -e    Show the NFS server's export list");
         return 0;
     }
-    let host = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("localhost");
+    let host = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("localhost");
     if args.iter().any(|a| a.contains('e')) {
         println!("Export list for {}:", host);
         println!("/srv/nfs/public  *");
@@ -89,7 +96,9 @@ fn run_rpcinfo(args: Vec<String>) -> i32 {
         println!("Usage: rpcinfo [-p host] [-s host]");
         return 0;
     }
-    let host = args.iter().position(|a| a == "-p" || a == "-s")
+    let host = args
+        .iter()
+        .position(|a| a == "-p" || a == "-s")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("localhost");
@@ -145,7 +154,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -163,7 +174,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_nfsd};
+    use super::run_nfsd;
 
     #[test]
     fn help_exits_zero() {

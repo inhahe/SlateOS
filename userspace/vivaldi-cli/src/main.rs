@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_vv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,15 +29,22 @@ fn run_vv(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Vivaldi 7.0.3495.29 (Stable channel) (Slate OS, 64-bit)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Vivaldi 7.0.3495.29 (Stable channel) (Slate OS, 64-bit)");
+        return 0;
+    }
     println!("Vivaldi 7.0.3495.29 (Slate OS)");
     println!("  Vendor: Vivaldi Technologies (Oslo, Norway, founded 2014)");
     println!("  Founder: Jon Stephenson von Tetzchner (co-founder of Opera)");
     println!("  Origin: built by ex-Opera engineers after Presto-era Opera died (2013)");
     println!("  Engine: Blink + V8 (Chromium), UI in React/HTML/CSS (not native Chromium UI)");
     println!("  Philosophy: 'Browser made for our friends' — power users, no compromise UI");
-    println!("  Customization: ~3000 settings, panels, themes, keyboard shortcuts, mouse gestures,");
-    println!("                 command chains, tab stacking, tab tiling, web panels, status bar widgets");
+    println!(
+        "  Customization: ~3000 settings, panels, themes, keyboard shortcuts, mouse gestures,"
+    );
+    println!(
+        "                 command chains, tab stacking, tab tiling, web panels, status bar widgets"
+    );
     println!("  Built-in apps: Mail (IMAP/POP3/SMTP), Calendar (CalDAV), Feeds (RSS), Notes,");
     println!("                 Translate (Lingvanex backend, on-device option)");
     println!("  Sync: Vivaldi Sync (end-to-end encrypted, hosted in Iceland)");
@@ -46,7 +57,10 @@ fn run_vv(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "vivaldi".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "vivaldi".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_vv(&rest, &_prog);
     process::exit(code);
@@ -54,7 +68,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_vv};
+    use super::{basename, run_vv, strip_ext};
 
     #[test]
     fn basename_strips_path() {

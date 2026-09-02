@@ -33,7 +33,8 @@ fn run_black(args: Vec<String>) -> i32 {
     let diff = args.iter().any(|a| a == "--diff");
     let quiet = args.iter().any(|a| a == "--quiet" || a == "-q");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -78,7 +79,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_black};
+    use super::run_black;
 
     #[test]
     fn help_exits_zero() {

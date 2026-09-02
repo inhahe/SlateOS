@@ -40,24 +40,34 @@ fn run_smartctl(args: &[String]) -> i32 {
         return 0;
     }
 
-    let device = args.iter()
+    let device = args
+        .iter()
         .find(|a| a.starts_with('/') || a.starts_with("\\\\"))
         .map(|s| s.as_str())
         .unwrap_or("/dev/sda");
 
     let info = args.iter().any(|a| a == "-i" || a == "--info");
-    let all = args.iter().any(|a| a == "-a" || a == "--all" || a == "-x" || a == "--xall");
+    let all = args
+        .iter()
+        .any(|a| a == "-a" || a == "--all" || a == "-x" || a == "--xall");
     let health = args.iter().any(|a| a == "-H" || a == "--health");
     let attrs = args.iter().any(|a| a == "-A" || a == "--attributes");
     let json = args.iter().any(|a| a == "-j" || a == "--json");
-    let test = args.windows(2).find(|w| w[0] == "-t").map(|w| w[1].as_str());
+    let test = args
+        .windows(2)
+        .find(|w| w[0] == "-t")
+        .map(|w| w[1].as_str());
 
     if let Some(test_type) = test {
         println!("smartctl 7.4 (Slate OS)");
         println!("=== START OF OFFLINE IMMEDIATE AND SELF-TEST SECTION ===");
         match test_type {
-            "short" => println!("Sending command: \"Execute SMART Short self-test routine immediately in off-line mode\"."),
-            "long" => println!("Sending command: \"Execute SMART Extended self-test routine immediately in off-line mode\"."),
+            "short" => println!(
+                "Sending command: \"Execute SMART Short self-test routine immediately in off-line mode\"."
+            ),
+            "long" => println!(
+                "Sending command: \"Execute SMART Extended self-test routine immediately in off-line mode\"."
+            ),
             _ => println!("Sending command: \"Execute SMART {} test\".", test_type),
         }
         println!("Drive command \"Execute SMART self-test\" successful.");
@@ -68,7 +78,10 @@ fn run_smartctl(args: &[String]) -> i32 {
     if json {
         println!("{{");
         println!("  \"smartctl\": {{\"version\": [7,4]}},");
-        println!("  \"device\": {{\"name\": \"{}\", \"type\": \"ata\"}},", device);
+        println!(
+            "  \"device\": {{\"name\": \"{}\", \"type\": \"ata\"}},",
+            device
+        );
         println!("  \"model_name\": \"Samsung SSD 870 EVO 1TB\",");
         println!("  \"serial_number\": \"S1234567890\",");
         println!("  \"firmware_version\": \"SVT01B6Q\",");
@@ -113,20 +126,48 @@ fn run_smartctl(args: &[String]) -> i32 {
         println!("=== START OF READ SMART DATA SECTION ===");
         println!("SMART Attributes Data Structure revision number: 1");
         println!("Vendor Specific SMART Attributes with Thresholds:");
-        println!("ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE");
-        println!("  5 Reallocated_Sector_Ct   0x0033   100   100   010    Pre-fail  Always       -       0");
-        println!("  9 Power_On_Hours          0x0032   099   099   000    Old_age   Always       -       1234");
-        println!(" 12 Power_Cycle_Count       0x0032   099   099   000    Old_age   Always       -       456");
-        println!("177 Wear_Leveling_Count     0x0013   099   099   000    Pre-fail  Always       -       1");
-        println!("179 Used_Rsvd_Blk_Cnt_Tot   0x0013   100   100   010    Pre-fail  Always       -       0");
-        println!("181 Program_Fail_Cnt_Total  0x0032   100   100   010    Old_age   Always       -       0");
-        println!("182 Erase_Fail_Count_Total  0x0032   100   100   010    Old_age   Always       -       0");
-        println!("187 Uncorrectable_Error_Cnt 0x0032   100   100   000    Old_age   Always       -       0");
-        println!("190 Airflow_Temperature_Cel 0x0032   065   048   000    Old_age   Always       -       35");
-        println!("194 Temperature_Celsius     0x0022   065   048   000    Old_age   Always       -       35");
-        println!("199 CRC_Error_Count         0x003e   100   100   000    Old_age   Always       -       0");
-        println!("235 POR_Recovery_Count      0x0012   099   099   000    Old_age   Always       -       5");
-        println!("241 Total_LBAs_Written      0x0032   099   099   000    Old_age   Always       -       12345678");
+        println!(
+            "ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE"
+        );
+        println!(
+            "  5 Reallocated_Sector_Ct   0x0033   100   100   010    Pre-fail  Always       -       0"
+        );
+        println!(
+            "  9 Power_On_Hours          0x0032   099   099   000    Old_age   Always       -       1234"
+        );
+        println!(
+            " 12 Power_Cycle_Count       0x0032   099   099   000    Old_age   Always       -       456"
+        );
+        println!(
+            "177 Wear_Leveling_Count     0x0013   099   099   000    Pre-fail  Always       -       1"
+        );
+        println!(
+            "179 Used_Rsvd_Blk_Cnt_Tot   0x0013   100   100   010    Pre-fail  Always       -       0"
+        );
+        println!(
+            "181 Program_Fail_Cnt_Total  0x0032   100   100   010    Old_age   Always       -       0"
+        );
+        println!(
+            "182 Erase_Fail_Count_Total  0x0032   100   100   010    Old_age   Always       -       0"
+        );
+        println!(
+            "187 Uncorrectable_Error_Cnt 0x0032   100   100   000    Old_age   Always       -       0"
+        );
+        println!(
+            "190 Airflow_Temperature_Cel 0x0032   065   048   000    Old_age   Always       -       35"
+        );
+        println!(
+            "194 Temperature_Celsius     0x0022   065   048   000    Old_age   Always       -       35"
+        );
+        println!(
+            "199 CRC_Error_Count         0x003e   100   100   000    Old_age   Always       -       0"
+        );
+        println!(
+            "235 POR_Recovery_Count      0x0012   099   099   000    Old_age   Always       -       5"
+        );
+        println!(
+            "241 Total_LBAs_Written      0x0032   099   099   000    Old_age   Always       -       12345678"
+        );
     }
     0
 }
@@ -149,7 +190,9 @@ fn run_smartd(args: &[String]) -> i32 {
     println!("smartd: starting daemon (Slate OS)");
     println!("smartd: reading config file /etc/smartd.conf");
     println!("smartd: monitoring 2 devices");
-    println!("smartd: /dev/sda [SAT]: Samsung SSD 870 EVO 1TB, S/N:S1234567890, FW:SVT01B6Q, 1.00 TB");
+    println!(
+        "smartd: /dev/sda [SAT]: Samsung SSD 870 EVO 1TB, S/N:S1234567890, FW:SVT01B6Q, 1.00 TB"
+    );
     println!("smartd: /dev/nvme0: Samsung 980 PRO 2TB, S/N:S9876543210, FW:5B2QGXA7, 2.00 TB");
     println!("smartd: checking interval is 1800 seconds");
     0
@@ -157,7 +200,8 @@ fn run_smartd(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "smartctl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -171,7 +215,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_smartctl};
+    use super::{basename, run_smartctl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

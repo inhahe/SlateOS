@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_wayvnc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -26,8 +30,15 @@ fn run_wayvnc(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wayvnc v0.8 (Slate OS)"); return 0; }
-    let addr = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("0.0.0.0");
+    if args.iter().any(|a| a == "--version") {
+        println!("wayvnc v0.8 (Slate OS)");
+        return 0;
+    }
+    let addr = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("0.0.0.0");
     println!("wayvnc: VNC server listening on {}:5900", addr);
     0
 }
@@ -60,7 +71,10 @@ fn run_wayvncctl(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "wayvnc".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "wayvnc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "wayvncctl" => run_wayvncctl(&rest, &prog),
@@ -71,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_wayvnc};
+    use super::{basename, run_wayvnc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

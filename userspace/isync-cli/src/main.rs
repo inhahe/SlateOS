@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mbsync(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -25,7 +29,10 @@ fn run_mbsync(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mbsync v1.5 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("mbsync v1.5 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "-l") {
         println!("Channels:");
         println!("  work-inbox");
@@ -38,7 +45,10 @@ fn run_mbsync(args: &[String], _prog: &str) -> i32 {
     let channel = if args.iter().any(|a| a == "-a") {
         "all"
     } else {
-        args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("all")
+        args.iter()
+            .find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .unwrap_or("all")
     };
     println!("Syncing: {}", channel);
     println!("  C: 3/3  B: 0/0  M: +3/3 *0/0 #0/0  S: +0/0 *0/0 #0/0");
@@ -47,7 +57,10 @@ fn run_mbsync(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mbsync".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mbsync".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mbsync(&rest, &prog);
     process::exit(code);
@@ -55,7 +68,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mbsync};
+    use super::{basename, run_mbsync, strip_ext};
 
     #[test]
     fn basename_strips_path() {

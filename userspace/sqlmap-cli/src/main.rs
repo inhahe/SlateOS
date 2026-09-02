@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn run_sqlmap(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-hh") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-hh")
+    {
         println!("Usage: sqlmap [OPTIONS]");
         println!();
         println!("sqlmap — SQL injection detection and exploitation (Slate OS).");
@@ -48,8 +51,11 @@ fn run_sqlmap(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let url = args.windows(2).find(|w| w[0] == "-u" || w[0] == "--url")
-        .map(|w| w[1].as_str()).unwrap_or("http://example.com/page?id=1");
+    let url = args
+        .windows(2)
+        .find(|w| w[0] == "-u" || w[0] == "--url")
+        .map(|w| w[1].as_str())
+        .unwrap_or("http://example.com/page?id=1");
     let dbs = args.iter().any(|a| a == "--dbs");
     let tables = args.iter().any(|a| a == "--tables");
     let dump = args.iter().any(|a| a == "--dump");
@@ -69,7 +75,9 @@ fn run_sqlmap(args: Vec<String>) -> i32 {
     println!("[12:00:02] [INFO] target URL content is stable");
     println!("[12:00:03] [INFO] testing if GET parameter 'id' is dynamic");
     println!("[12:00:03] [INFO] GET parameter 'id' appears to be dynamic");
-    println!("[12:00:04] [INFO] heuristic (basic) test shows that GET parameter 'id' might be injectable");
+    println!(
+        "[12:00:04] [INFO] heuristic (basic) test shows that GET parameter 'id' might be injectable"
+    );
     println!("[12:00:05] [INFO] GET parameter 'id' is 'MySQL >= 5.0 AND error-based' injectable");
 
     if dbs {
@@ -116,7 +124,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sqlmap};
+    use super::run_sqlmap;
 
     #[test]
     fn help_exits_zero() {

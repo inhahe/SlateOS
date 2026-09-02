@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_alation(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,27 +26,44 @@ fn run_alation(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Alation 2024.3 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Alation 2024.3 (Slate OS)");
+        return 0;
+    }
     println!("Alation 2024.3 (Slate OS) — Enterprise Data Catalog");
     println!("  Vendor: Alation, Inc. (Redwood City, CA)");
     println!("  Founders: Satyen Sangani (CEO) + Aaron Kalb + Feng Niu + Venky Ganti, 2012");
     println!("          Satyen: ex-Oracle, ex-McKinsey + Stanford CS + Goldman Sachs analyst");
     println!("          Aaron: ex-Apple Siri team");
     println!("          credit for popularizing the term 'data catalog' as a software category");
-    println!("          Stanford research roots: machine learning on query logs to surface relevant data");
+    println!(
+        "          Stanford research roots: machine learning on query logs to surface relevant data"
+    );
     println!("  Funding: ~$340M total through Series E (2022)");
-    println!("         Series E Aug 2022: $123M led by Thoma Bravo + Sanabil + Riverwood + Costanoa");
+    println!(
+        "         Series E Aug 2022: $123M led by Thoma Bravo + Sanabil + Riverwood + Costanoa"
+    );
     println!("         valuation ~$1.7B post-Series E");
     println!("         Series D Jun 2019: $50M led by Salesforce Ventures");
-    println!("         earlier: Costanoa, Icon Ventures, Sapphire Ventures, Andreessen Horowitz, Data Collective");
+    println!(
+        "         earlier: Costanoa, Icon Ventures, Sapphire Ventures, Andreessen Horowitz, Data Collective"
+    );
     println!("  ARR: estimated $150M+ (private)");
     println!("  Strategic position: 'data catalog 2.0 — query-log-driven' (Alation's wedge):");
     println!("                    pitch: 'people use data they trust — Alation builds trust'");
     println!("                    contrast: 1st-gen Informatica/IBM (top-down, manual)");
-    println!("                                              Alation (query-log-driven, learns from usage)");
-    println!("                    primary competitor: Collibra (more governance-heavy), Atlan (modern stack)");
-    println!("                    secondary: data.world, Microsoft Purview, Google Dataplex, AWS DataZone");
-    println!("                    Gartner Magic Quadrant: consistently in the Leader quadrant for catalogs");
+    println!(
+        "                                              Alation (query-log-driven, learns from usage)"
+    );
+    println!(
+        "                    primary competitor: Collibra (more governance-heavy), Atlan (modern stack)"
+    );
+    println!(
+        "                    secondary: data.world, Microsoft Purview, Google Dataplex, AWS DataZone"
+    );
+    println!(
+        "                    Gartner Magic Quadrant: consistently in the Leader quadrant for catalogs"
+    );
     println!("                    Forrester Wave Leader for data governance solutions");
     println!("  Pricing (enterprise sales-led, no free tier):");
     println!("    Starter — ~$50K/yr (small enterprise, limited sources)");
@@ -76,7 +97,9 @@ fn run_alation(args: &[String], _prog: &str) -> i32 {
     println!("    - Compete with Monte Carlo + Anomalo + Soda");
     println!("    - Acquired some quality tech, building rest in-house");
     println!("  Connectors (100+):");
-    println!("    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Oracle, Teradata, Netezza");
+    println!(
+        "    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Oracle, Teradata, Netezza"
+    );
     println!("    - BI: Tableau, Power BI, Looker, Qlik, MicroStrategy, Cognos");
     println!("    - Hadoop: Cloudera, Hortonworks (still has banking customers on these)");
     println!("    - Streaming: Kafka, Confluent (limited)");
@@ -102,18 +125,25 @@ fn run_alation(args: &[String], _prog: &str) -> i32 {
     println!("  Critique: slow, heavy enterprise software — months to deploy");
     println!("           UX dated vs modern catalogs (Atlan, Select Star, Castor)");
     println!("           Atlan winning modern-data-stack greenfield deals");
-    println!("           Snowflake Horizon + Databricks Unity Catalog + cloud-native catalogs threaten from below");
+    println!(
+        "           Snowflake Horizon + Databricks Unity Catalog + cloud-native catalogs threaten from below"
+    );
     println!("           pricing high ($100K+ floor) — locks out mid-market");
     println!("           on-prem deployments require significant infrastructure");
     println!("           GenAI race: Alation Anywhere good but Atlan AI + Collibra AI competing");
     println!("           IPO repeatedly delayed — private valuation under pressure post-2022");
-    println!("  Differentiator: original 'data catalog' category creator + query-log-driven trust scoring + Compose SQL editor + Fortune 500 install base + Alation Anywhere AI — the enterprise catalog of choice for regulated industries");
+    println!(
+        "  Differentiator: original 'data catalog' category creator + query-log-driven trust scoring + Compose SQL editor + Fortune 500 install base + Alation Anywhere AI — the enterprise catalog of choice for regulated industries"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "alation".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "alation".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_alation(&rest, &_prog);
     process::exit(code);
@@ -121,7 +151,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_alation};
+    use super::{basename, run_alation, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -33,8 +33,16 @@ fn run_lighthouse(args: Vec<String>) -> i32 {
         return 1;
     }
 
-    let preset = args.windows(2).find(|w| w[0] == "--preset").map(|w| w[1].as_str()).unwrap_or("mobile");
-    let output = args.windows(2).find(|w| w[0] == "--output").map(|w| w[1].as_str()).unwrap_or("html");
+    let preset = args
+        .windows(2)
+        .find(|w| w[0] == "--preset")
+        .map(|w| w[1].as_str())
+        .unwrap_or("mobile");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "--output")
+        .map(|w| w[1].as_str())
+        .unwrap_or("html");
 
     println!("Running Lighthouse on {} ({})", url, preset);
     println!();
@@ -81,7 +89,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_lighthouse};
+    use super::run_lighthouse;
 
     #[test]
     fn help_exits_zero() {

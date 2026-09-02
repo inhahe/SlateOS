@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_agrind(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -31,8 +35,15 @@ fn run_agrind(args: &[String], _prog: &str) -> i32 {
         println!("  * | limit N       Limit output rows");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("agrind v0.19 (Slate OS)"); return 0; }
-    let query = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("* | count");
+    if args.iter().any(|a| a == "--version") {
+        println!("agrind v0.19 (Slate OS)");
+        return 0;
+    }
+    let query = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("* | count");
     println!("Query: {}", query);
     println!();
     println!("_count   level    host");
@@ -46,7 +57,10 @@ fn run_agrind(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "agrind".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "agrind".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_agrind(&rest, &prog);
     process::exit(code);
@@ -54,7 +68,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_agrind};
+    use super::{basename, run_agrind, strip_ext};
 
     #[test]
     fn basename_strips_path() {

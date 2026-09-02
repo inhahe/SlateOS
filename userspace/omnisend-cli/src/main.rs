@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("omnisend-cli 0.1.0 (multichannel-ecom personality build)"); }
+fn print_version() {
+    println!("omnisend-cli 0.1.0 (multichannel-ecom personality build)");
+}
 
 fn run_about() {
     println!("Omnisend (Omnisend Ltd).");

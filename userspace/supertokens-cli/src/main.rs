@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("supertokens-cli 0.1.0 (Apache-2.0 auth core personality build)"); }
+fn print_version() {
+    println!("supertokens-cli 0.1.0 (Apache-2.0 auth core personality build)");
+}
 
 fn run_about() {
     println!("SuperTokens (SuperTokens Inc.)");

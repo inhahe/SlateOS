@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_listplugins(_args: &[String]) -> i32 {
     println!("/usr/lib/ladspa/amp.so:");
@@ -69,7 +73,10 @@ fn run_lv2info(args: &[String]) -> i32 {
         println!("Usage: lv2info PLUGIN_URI");
         return 0;
     }
-    let uri = args.first().map(|s| s.as_str()).unwrap_or("http://calf.sourceforge.net/plugins/Compressor");
+    let uri = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("http://calf.sourceforge.net/plugins/Compressor");
     println!("URI: {}", uri);
     println!("Name: Calf Compressor");
     println!("Class: Compressor");
@@ -91,7 +98,10 @@ fn run_lv2info(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "listplugins".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "listplugins".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "analyseplugin" => run_analyseplugin(&rest),
@@ -104,7 +114,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_analyseplugin};
+    use super::{basename, run_analyseplugin, strip_ext};
 
     #[test]
     fn basename_strips_path() {

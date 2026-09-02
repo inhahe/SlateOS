@@ -322,7 +322,10 @@ impl ResolverStats {
     fn new() -> Self {
         Self {
             cache: CacheStats::new(),
-            transactions: TransactionStats { current: 0, total: 0 },
+            transactions: TransactionStats {
+                current: 0,
+                total: 0,
+            },
             dnssec_verdicts: DnssecVerdicts {
                 secure: 0,
                 insecure: 0,
@@ -350,9 +353,7 @@ struct GlobalConfig {
 impl GlobalConfig {
     fn default_config() -> Self {
         Self {
-            dns_servers: vec![
-                DnsServer::new("127.0.0.53"),
-            ],
+            dns_servers: vec![DnsServer::new("127.0.0.53")],
             fallback_servers: vec![
                 DnsServer::new("9.9.9.10").with_role(ServerRole::Fallback),
                 DnsServer::new("8.8.8.8").with_role(ServerRole::Fallback),
@@ -403,8 +404,12 @@ impl ResolverState {
 
         let mut wlan0 = LinkConfig::new(3, "wlan0");
         wlan0.dns_servers = vec![
-            DnsServer::new("1.1.1.1").with_interface("wlan0").with_protocol(DnsProtocol::Dot),
-            DnsServer::new("1.0.0.1").with_interface("wlan0").with_protocol(DnsProtocol::Dot),
+            DnsServer::new("1.1.1.1")
+                .with_interface("wlan0")
+                .with_protocol(DnsProtocol::Dot),
+            DnsServer::new("1.0.0.1")
+                .with_interface("wlan0")
+                .with_protocol(DnsProtocol::Dot),
         ];
         wlan0.search_domains = vec!["home.lan".to_string()];
         wlan0.dns_over_tls = DnsOverTlsMode::Opportunistic;
@@ -510,16 +515,20 @@ fn cmd_query(state: &ResolverState, args: &[String]) {
 
         // Check if it is an IP (reverse lookup).
         if (name.contains(':') || name.chars().all(|c| c.is_ascii_digit() || c == '.'))
-            && let Some(host) = reverse_lookup(name) {
-                let _ = writeln!(out, "{name} -- {host}");
-                let _ = writeln!(out);
-                let _ = writeln!(out, "-- Information acquired via protocol DNS in 0.3ms.");
-                continue;
-            }
+            && let Some(host) = reverse_lookup(name)
+        {
+            let _ = writeln!(out, "{name} -- {host}");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "-- Information acquired via protocol DNS in 0.3ms.");
+            continue;
+        }
 
         let ips = resolve_hostname(name);
         if ips.is_empty() {
-            let _ = writeln!(out, "{name}: resolve call failed: No address associated with hostname");
+            let _ = writeln!(
+                out,
+                "{name}: resolve call failed: No address associated with hostname"
+            );
         } else {
             for ip in &ips {
                 let _ = writeln!(out, "{name} -- {ip}");
@@ -538,25 +547,29 @@ fn cmd_status(state: &ResolverState, args: &[String]) {
 
     // If a specific link is requested, show only that link.
     if let Some(link_id) = args.first()
-        && !link_id.starts_with('-') {
-            if let Some(link) = state.find_link(link_id) {
-                print_link_status(&mut out, link);
-                return;
-            }
-            eprintln!("resolvectl status: unknown interface: {link_id}");
-            process::exit(1);
+        && !link_id.starts_with('-')
+    {
+        if let Some(link) = state.find_link(link_id) {
+            print_link_status(&mut out, link);
+            return;
         }
+        eprintln!("resolvectl status: unknown interface: {link_id}");
+        process::exit(1);
+    }
 
     // Global status.
     let _ = writeln!(out, "Global");
-    let llmnr_flag = format_protocol_flag(
-        state.global.llmnr != LinkProtocolMode::No, "LLMNR");
-    let mdns_flag = format_protocol_flag(
-        state.global.mdns != LinkProtocolMode::No, "mDNS");
+    let llmnr_flag = format_protocol_flag(state.global.llmnr != LinkProtocolMode::No, "LLMNR");
+    let mdns_flag = format_protocol_flag(state.global.mdns != LinkProtocolMode::No, "mDNS");
     let dot_flag = format_protocol_flag(
-        state.global.dns_over_tls != DnsOverTlsMode::No, "DNSOverTLS");
-    let _ = writeln!(out, "       Protocols: {llmnr_flag} {mdns_flag} {dot_flag} DNSSEC={}",
-        state.global.dnssec);
+        state.global.dns_over_tls != DnsOverTlsMode::No,
+        "DNSOverTLS",
+    );
+    let _ = writeln!(
+        out,
+        "       Protocols: {llmnr_flag} {mdns_flag} {dot_flag} DNSSEC={}",
+        state.global.dnssec
+    );
     let _ = writeln!(out, "resolv.conf mode: stub");
 
     if let Some(first) = state.global.dns_servers.first() {
@@ -616,12 +629,18 @@ fn print_link_status(out: &mut impl Write, link: &LinkConfig) {
 
     let llmnr = format_link_protocol(link.llmnr);
     let mdns = format_link_protocol(link.mdns);
-    let dot = if link.dns_over_tls != DnsOverTlsMode::No { "+" } else { "-" };
+    let dot = if link.dns_over_tls != DnsOverTlsMode::No {
+        "+"
+    } else {
+        "-"
+    };
     let default_route = format_bool_flag(link.default_route);
 
-    let _ = writeln!(out,
+    let _ = writeln!(
+        out,
         "         Protocols: DefaultRoute={default_route} {llmnr}LLMNR {mdns}mDNS {dot}DNSOverTLS({}) DNSSEC={}",
-        link.dns_over_tls, link.dnssec);
+        link.dns_over_tls, link.dnssec
+    );
 
     if let Some(first) = link.dns_servers.first() {
         let _ = writeln!(out, "Current DNS Server: {}", first.address);
@@ -649,23 +668,42 @@ fn cmd_statistics(state: &ResolverState) {
     let mut out = stdout.lock();
     let stats = &state.stats;
 
-    let _ = writeln!(out, "DNSSEC Supported: {}",
-        format_bool_flag(stats.dnssec_supported));
+    let _ = writeln!(
+        out,
+        "DNSSEC Supported: {}",
+        format_bool_flag(stats.dnssec_supported)
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Transactions");
     let _ = writeln!(out, "Current Transactions: {}", stats.transactions.current);
     let _ = writeln!(out, "  Total Transactions: {}", stats.transactions.total);
     let _ = writeln!(out);
     let _ = writeln!(out, "Cache");
-    let _ = writeln!(out, "  Current Cache Size: {}/{}", stats.cache.size, stats.cache.capacity);
+    let _ = writeln!(
+        out,
+        "  Current Cache Size: {}/{}",
+        stats.cache.size, stats.cache.capacity
+    );
     let _ = writeln!(out, "          Cache Hits: {}", stats.cache.hits);
     let _ = writeln!(out, "        Cache Misses: {}", stats.cache.misses);
     let _ = writeln!(out);
     let _ = writeln!(out, "DNSSEC Verdicts");
-    let _ = writeln!(out, "              Secure: {}", stats.dnssec_verdicts.secure);
-    let _ = writeln!(out, "            Insecure: {}", stats.dnssec_verdicts.insecure);
+    let _ = writeln!(
+        out,
+        "              Secure: {}",
+        stats.dnssec_verdicts.secure
+    );
+    let _ = writeln!(
+        out,
+        "            Insecure: {}",
+        stats.dnssec_verdicts.insecure
+    );
     let _ = writeln!(out, "               Bogus: {}", stats.dnssec_verdicts.bogus);
-    let _ = writeln!(out, "       Indeterminate: {}", stats.dnssec_verdicts.indeterminate);
+    let _ = writeln!(
+        out,
+        "       Indeterminate: {}",
+        stats.dnssec_verdicts.indeterminate
+    );
 }
 
 fn cmd_reset_statistics() {
@@ -708,7 +746,8 @@ fn cmd_dns(state: &ResolverState, args: &[String]) {
 
     // First arg is the link identifier, rest are servers to set.
     let link_id = &args[0];
-    let servers: Vec<&str> = args[1..].iter()
+    let servers: Vec<&str> = args[1..]
+        .iter()
         .filter(|s| !s.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -759,7 +798,8 @@ fn cmd_domain(state: &ResolverState, args: &[String]) {
     }
 
     let link_id = &args[0];
-    let domains: Vec<&str> = args[1..].iter()
+    let domains: Vec<&str> = args[1..]
+        .iter()
         .filter(|s| !s.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -780,7 +820,11 @@ fn cmd_domain(state: &ResolverState, args: &[String]) {
             process::exit(1);
         }
     } else {
-        let _ = writeln!(out, "Set search domains for {link_id}: {}", domains.join(", "));
+        let _ = writeln!(
+            out,
+            "Set search domains for {link_id}: {}",
+            domains.join(", ")
+        );
     }
 }
 
@@ -791,7 +835,11 @@ fn cmd_dnssec(state: &ResolverState, args: &[String]) {
     if args.is_empty() {
         let _ = writeln!(out, "Global DNSSEC setting: {}", state.global.dnssec);
         for link in state.links.values() {
-            let _ = writeln!(out, "Link {} ({}): DNSSEC={}", link.index, link.name, link.dnssec);
+            let _ = writeln!(
+                out,
+                "Link {} ({}): DNSSEC={}",
+                link.index, link.name, link.dnssec
+            );
         }
         return;
     }
@@ -802,7 +850,11 @@ fn cmd_dnssec(state: &ResolverState, args: &[String]) {
         if let Some(mode) = DnssecMode::parse(val) {
             let _ = writeln!(out, "Global DNSSEC mode set to: {mode}");
         } else if let Some(link) = state.find_link(val) {
-            let _ = writeln!(out, "Link {} ({}): DNSSEC={}", link.index, link.name, link.dnssec);
+            let _ = writeln!(
+                out,
+                "Link {} ({}): DNSSEC={}",
+                link.index, link.name, link.dnssec
+            );
         } else {
             eprintln!("resolvectl dnssec: invalid mode or unknown interface: {val}");
             process::exit(1);
@@ -826,10 +878,17 @@ fn cmd_dnsovertls(state: &ResolverState, args: &[String]) {
     let mut out = stdout.lock();
 
     if args.is_empty() {
-        let _ = writeln!(out, "Global DNS-over-TLS setting: {}", state.global.dns_over_tls);
+        let _ = writeln!(
+            out,
+            "Global DNS-over-TLS setting: {}",
+            state.global.dns_over_tls
+        );
         for link in state.links.values() {
-            let _ = writeln!(out, "Link {} ({}): DNSOverTLS={}",
-                link.index, link.name, link.dns_over_tls);
+            let _ = writeln!(
+                out,
+                "Link {} ({}): DNSOverTLS={}",
+                link.index, link.name, link.dns_over_tls
+            );
         }
         return;
     }
@@ -839,8 +898,11 @@ fn cmd_dnsovertls(state: &ResolverState, args: &[String]) {
         if let Some(mode) = DnsOverTlsMode::parse(val) {
             let _ = writeln!(out, "Global DNS-over-TLS mode set to: {mode}");
         } else if let Some(link) = state.find_link(val) {
-            let _ = writeln!(out, "Link {} ({}): DNSOverTLS={}",
-                link.index, link.name, link.dns_over_tls);
+            let _ = writeln!(
+                out,
+                "Link {} ({}): DNSOverTLS={}",
+                link.index, link.name, link.dns_over_tls
+            );
         } else {
             eprintln!("resolvectl dnsovertls: invalid mode or unknown interface: {val}");
             process::exit(1);
@@ -876,13 +938,17 @@ fn cmd_nta(state: &ResolverState, args: &[String]) {
 
     // First arg could be a link, rest are NTA domains.
     let link_id = &args[0];
-    let domains: Vec<&str> = args[1..].iter()
+    let domains: Vec<&str> = args[1..]
+        .iter()
         .filter(|s| !s.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
 
     if domains.is_empty() {
-        let _ = writeln!(out, "Negative Trust Anchors for {link_id}: (showing global)");
+        let _ = writeln!(
+            out,
+            "Negative Trust Anchors for {link_id}: (showing global)"
+        );
         for nta in &state.global.nta {
             let _ = writeln!(out, "  {nta}");
         }
@@ -901,7 +967,10 @@ fn cmd_revert(args: &[String]) {
     }
 
     let link_id = &args[0];
-    let _ = writeln!(out, "Link {link_id}: DNS configuration reverted to defaults.");
+    let _ = writeln!(
+        out,
+        "Link {link_id}: DNS configuration reverted to defaults."
+    );
 }
 
 fn cmd_log_level(args: &[String]) {
@@ -914,7 +983,9 @@ fn cmd_log_level(args: &[String]) {
     }
 
     let level = &args[0];
-    let valid_levels = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"];
+    let valid_levels = [
+        "emerg", "alert", "crit", "err", "warning", "notice", "info", "debug",
+    ];
     if valid_levels.contains(&level.as_str()) {
         let _ = writeln!(out, "Log level set to: {level}");
     } else {
@@ -1044,8 +1115,14 @@ fn run_daemon(args: &[String]) {
     let mut out = stdout.lock();
     let _ = writeln!(out, "systemd-resolved: starting DNS resolver daemon...");
     let _ = writeln!(out, "systemd-resolved: listening on 127.0.0.53:53");
-    let _ = writeln!(out, "systemd-resolved: using stub resolver at {RUN_RESOLVED}/stub-resolv.conf");
-    let _ = writeln!(out, "systemd-resolved: DNSSEC=allow-downgrade DNSOverTLS=no");
+    let _ = writeln!(
+        out,
+        "systemd-resolved: using stub resolver at {RUN_RESOLVED}/stub-resolv.conf"
+    );
+    let _ = writeln!(
+        out,
+        "systemd-resolved: DNSSEC=allow-downgrade DNSOverTLS=no"
+    );
     let _ = writeln!(out, "systemd-resolved: ready.");
 }
 
@@ -1084,47 +1161,74 @@ mod tests {
 
     #[test]
     fn test_detect_resolvectl_from_path() {
-        assert_eq!(detect_personality("/usr/bin/resolvectl"), Personality::Resolvectl);
+        assert_eq!(
+            detect_personality("/usr/bin/resolvectl"),
+            Personality::Resolvectl
+        );
     }
 
     #[test]
     fn test_detect_resolvectl_windows_path() {
-        assert_eq!(detect_personality("C:\\bin\\resolvectl.exe"), Personality::Resolvectl);
+        assert_eq!(
+            detect_personality("C:\\bin\\resolvectl.exe"),
+            Personality::Resolvectl
+        );
     }
 
     #[test]
     fn test_detect_systemd_resolve() {
-        assert_eq!(detect_personality("systemd-resolve"), Personality::SystemdResolve);
+        assert_eq!(
+            detect_personality("systemd-resolve"),
+            Personality::SystemdResolve
+        );
     }
 
     #[test]
     fn test_detect_systemd_resolve_from_path() {
-        assert_eq!(detect_personality("/usr/bin/systemd-resolve"), Personality::SystemdResolve);
+        assert_eq!(
+            detect_personality("/usr/bin/systemd-resolve"),
+            Personality::SystemdResolve
+        );
     }
 
     #[test]
     fn test_detect_systemd_resolve_exe() {
-        assert_eq!(detect_personality("systemd-resolve.exe"), Personality::SystemdResolve);
+        assert_eq!(
+            detect_personality("systemd-resolve.exe"),
+            Personality::SystemdResolve
+        );
     }
 
     #[test]
     fn test_detect_systemd_resolved() {
-        assert_eq!(detect_personality("systemd-resolved"), Personality::SystemdResolved);
+        assert_eq!(
+            detect_personality("systemd-resolved"),
+            Personality::SystemdResolved
+        );
     }
 
     #[test]
     fn test_detect_systemd_resolved_from_path() {
-        assert_eq!(detect_personality("/usr/lib/systemd/systemd-resolved"), Personality::SystemdResolved);
+        assert_eq!(
+            detect_personality("/usr/lib/systemd/systemd-resolved"),
+            Personality::SystemdResolved
+        );
     }
 
     #[test]
     fn test_detect_systemd_resolved_exe() {
-        assert_eq!(detect_personality("systemd-resolved.exe"), Personality::SystemdResolved);
+        assert_eq!(
+            detect_personality("systemd-resolved.exe"),
+            Personality::SystemdResolved
+        );
     }
 
     #[test]
     fn test_detect_unknown_defaults_to_resolvectl() {
-        assert_eq!(detect_personality("unknown-binary"), Personality::Resolvectl);
+        assert_eq!(
+            detect_personality("unknown-binary"),
+            Personality::Resolvectl
+        );
     }
 
     #[test]
@@ -1263,7 +1367,10 @@ mod tests {
 
     #[test]
     fn test_dnssec_parse_allow_downgrade() {
-        assert_eq!(DnssecMode::parse("allow-downgrade"), Some(DnssecMode::AllowDowngrade));
+        assert_eq!(
+            DnssecMode::parse("allow-downgrade"),
+            Some(DnssecMode::AllowDowngrade)
+        );
     }
 
     #[test]
@@ -1308,7 +1415,10 @@ mod tests {
 
     #[test]
     fn test_dot_display_opportunistic() {
-        assert_eq!(format!("{}", DnsOverTlsMode::Opportunistic), "opportunistic");
+        assert_eq!(
+            format!("{}", DnsOverTlsMode::Opportunistic),
+            "opportunistic"
+        );
     }
 
     #[test]
@@ -1328,7 +1438,10 @@ mod tests {
 
     #[test]
     fn test_dot_parse_opportunistic() {
-        assert_eq!(DnsOverTlsMode::parse("opportunistic"), Some(DnsOverTlsMode::Opportunistic));
+        assert_eq!(
+            DnsOverTlsMode::parse("opportunistic"),
+            Some(DnsOverTlsMode::Opportunistic)
+        );
     }
 
     #[test]
@@ -1353,7 +1466,10 @@ mod tests {
 
     #[test]
     fn test_dot_parse_case_insensitive() {
-        assert_eq!(DnsOverTlsMode::parse("OPPORTUNISTIC"), Some(DnsOverTlsMode::Opportunistic));
+        assert_eq!(
+            DnsOverTlsMode::parse("OPPORTUNISTIC"),
+            Some(DnsOverTlsMode::Opportunistic)
+        );
     }
 
     // -- LinkProtocolMode -----------------------------------------------------
@@ -1524,7 +1640,10 @@ mod tests {
 
     #[test]
     fn test_transaction_stats_clone() {
-        let t = TransactionStats { current: 3, total: 100 };
+        let t = TransactionStats {
+            current: 3,
+            total: 100,
+        };
         let c = t.clone();
         assert_eq!(c.current, 3);
         assert_eq!(c.total, 100);
@@ -1534,7 +1653,12 @@ mod tests {
 
     #[test]
     fn test_dnssec_verdicts_clone() {
-        let v = DnssecVerdicts { secure: 10, insecure: 20, bogus: 1, indeterminate: 5 };
+        let v = DnssecVerdicts {
+            secure: 10,
+            insecure: 20,
+            bogus: 1,
+            indeterminate: 5,
+        };
         let c = v.clone();
         assert_eq!(c.secure, 10);
         assert_eq!(c.insecure, 20);
@@ -1576,7 +1700,11 @@ mod tests {
     #[test]
     fn test_global_config_fallback_servers() {
         let g = GlobalConfig::default_config();
-        let addrs: Vec<&str> = g.fallback_servers.iter().map(|s| s.address.as_str()).collect();
+        let addrs: Vec<&str> = g
+            .fallback_servers
+            .iter()
+            .map(|s| s.address.as_str())
+            .collect();
         assert!(addrs.contains(&"9.9.9.10"));
         assert!(addrs.contains(&"8.8.8.8"));
         assert!(addrs.contains(&"1.1.1.1"));
@@ -1775,7 +1903,10 @@ mod tests {
 
     #[test]
     fn test_format_link_protocol_resolve() {
-        assert_eq!(format_link_protocol(LinkProtocolMode::_ResolveOnly), "resolve");
+        assert_eq!(
+            format_link_protocol(LinkProtocolMode::_ResolveOnly),
+            "resolve"
+        );
     }
 
     // -- Constants ------------------------------------------------------------
@@ -1806,7 +1937,11 @@ mod tests {
     fn test_eth0_dns_server_addresses() {
         let s = ResolverState::new();
         let eth0 = s.links.get(&2).unwrap();
-        let addrs: Vec<&str> = eth0.dns_servers.iter().map(|d| d.address.as_str()).collect();
+        let addrs: Vec<&str> = eth0
+            .dns_servers
+            .iter()
+            .map(|d| d.address.as_str())
+            .collect();
         assert_eq!(addrs, vec!["8.8.8.8", "8.8.4.4"]);
     }
 
@@ -1844,7 +1979,11 @@ mod tests {
     fn test_wlan0_dns_server_addresses() {
         let s = ResolverState::new();
         let wlan0 = s.links.get(&3).unwrap();
-        let addrs: Vec<&str> = wlan0.dns_servers.iter().map(|d| d.address.as_str()).collect();
+        let addrs: Vec<&str> = wlan0
+            .dns_servers
+            .iter()
+            .map(|d| d.address.as_str())
+            .collect();
         assert_eq!(addrs, vec!["1.1.1.1", "1.0.0.1"]);
     }
 

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_freshsales(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,15 +25,22 @@ fn run_freshsales(args: &[String], _prog: &str) -> i32 {
         println!("  --pro                  Pro $39/user/mo");
         println!("  --enterprise           Enterprise $59/user/mo");
         println!("  --freddy               Freddy AI Copilot — contact scoring + next-best-action");
-        println!("  --suite                Customer-for-Life Cloud (Freshsales + Freshmarketer bundle)");
+        println!(
+            "  --suite                Customer-for-Life Cloud (Freshsales + Freshmarketer bundle)"
+        );
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Freshsales 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Freshsales 2024 (Slate OS)");
+        return 0;
+    }
     println!("Freshsales 2024 (Slate OS)");
     println!("  Vendor: Freshworks Inc. (San Mateo, CA + Chennai, India — NASDAQ:FRSH)");
     println!("  Founder: Girish Mathrubootham (CEO) + Shan Krishnasamy (CTO), 2010");
-    println!("          founded as Freshdesk after Girish read Hacker News post about Zendesk price hike");
+    println!(
+        "          founded as Freshdesk after Girish read Hacker News post about Zendesk price hike"
+    );
     println!("          built in Chennai, India — one of largest SaaS IPOs out of India");
     println!("  Freshsales launched: 2016 as 'a CRM that doesn't suck' for inside sales");
     println!("                     part of broader Freshworks suite");
@@ -64,22 +75,33 @@ fn run_freshsales(args: &[String], _prog: &str) -> i32 {
     println!("    - $29/user/mo Growth tier for bundle");
     println!("  Integrations: 100+ Freshworks Marketplace apps");
     println!("              Slack, Zoom, Mailchimp, DocuSign, QuickBooks, Xero, Microsoft Teams");
-    println!("              native: Freshdesk (helpdesk), Freshchat, Freshcaller — same vendor stack");
+    println!(
+        "              native: Freshdesk (helpdesk), Freshchat, Freshcaller — same vendor stack"
+    );
     println!("              public REST API + webhooks + Zapier");
     println!("  Customers: SMB + mid-market, strong in APAC + Europe");
     println!("            Bridgestone, Klarna (early), PharmEasy, Decathlon, Pearson");
     println!("            ~12,000+ paying Freshsales customers (subset of Freshworks' 67K)");
-    println!("  Critique: AI features feel partially shipped — Freddy Copilot lags ChatGPT-integrated rivals");
+    println!(
+        "  Critique: AI features feel partially shipped — Freddy Copilot lags ChatGPT-integrated rivals"
+    );
     println!("           upsell pressure can feel heavy from sales team");
     println!("           reporting customization less powerful than Salesforce");
-    println!("           Freshworks split-personality — Freshdesk strong, Freshsales still proving itself");
-    println!("  Differentiator: best free tier in CRM + native phone/chat/email under one vendor + Freddy AI suite");
+    println!(
+        "           Freshworks split-personality — Freshdesk strong, Freshsales still proving itself"
+    );
+    println!(
+        "  Differentiator: best free tier in CRM + native phone/chat/email under one vendor + Freddy AI suite"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "freshsales".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "freshsales".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_freshsales(&rest, &_prog);
     process::exit(code);
@@ -87,7 +109,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_freshsales};
+    use super::{basename, run_freshsales, strip_ext};
 
     #[test]
     fn basename_strips_path() {

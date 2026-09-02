@@ -61,7 +61,8 @@ fn run_groff(prog: &str, args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -85,13 +86,19 @@ fn run_groff(prog: &str, args: &[String]) -> i32 {
             println!("       example [options] [file...]");
             println!();
             println!("DESCRIPTION");
-            println!("       This is an example manual page formatted by {}.", prog);
+            println!(
+                "       This is an example manual page formatted by {}.",
+                prog
+            );
             let _ = file;
         }
         _ => {
             // groff / troff
-            let device = args.windows(2).find(|w| w[0] == "-T")
-                .map(|w| w[1].as_str()).unwrap_or("utf8");
+            let device = args
+                .windows(2)
+                .find(|w| w[0] == "-T")
+                .map(|w| w[1].as_str())
+                .unwrap_or("utf8");
             let file = files.first().copied().unwrap_or("document");
 
             println!("{}: processing {} (device: {})", prog, file, device);
@@ -108,7 +115,8 @@ fn run_groff(prog: &str, args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "groff".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -118,7 +126,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_groff};
+    use super::{basename, run_groff, strip_ext};
 
     #[test]
     fn basename_strips_path() {

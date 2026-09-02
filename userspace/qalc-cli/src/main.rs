@@ -33,7 +33,8 @@ fn run_qalc(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let expr: Vec<&str> = args.iter()
+    let expr: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -67,7 +68,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_qalc};
+    use super::run_qalc;
 
     #[test]
     fn help_exits_zero() {

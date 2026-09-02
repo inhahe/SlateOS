@@ -303,9 +303,8 @@ fn read_disk_stats() -> Vec<DiskStats> {
         let name = fields[2].to_string();
         let sector_size = read_sector_size(&name);
 
-        let parse_u64 = |idx: usize| -> u64 {
-            fields.get(idx).and_then(|s| s.parse().ok()).unwrap_or(0)
-        };
+        let parse_u64 =
+            |idx: usize| -> u64 { fields.get(idx).and_then(|s| s.parse().ok()).unwrap_or(0) };
 
         devices.push(DiskStats {
             name,
@@ -392,48 +391,52 @@ fn compute_basic(
 }
 
 /// Compute extended I/O metrics from a delta between two snapshots.
-fn compute_extended(
-    current: &DiskStats,
-    prev: Option<&DiskStats>,
-    interval: f64,
-) -> DiskExtended {
-    let (d_rd_ios, d_wr_ios, d_rd_merges, d_wr_merges, d_rd_sectors, d_wr_sectors, d_rd_ticks, d_wr_ticks, d_io_ticks, d_io_aveq) =
-        match prev {
-            Some(p) => (
-                current.rd_ios.saturating_sub(p.rd_ios),
-                current.wr_ios.saturating_sub(p.wr_ios),
-                current.rd_merges.saturating_sub(p.rd_merges),
-                current.wr_merges.saturating_sub(p.wr_merges),
-                current.rd_sectors.saturating_sub(p.rd_sectors),
-                current.wr_sectors.saturating_sub(p.wr_sectors),
-                current.rd_ticks.saturating_sub(p.rd_ticks),
-                current.wr_ticks.saturating_sub(p.wr_ticks),
-                current.io_ticks.saturating_sub(p.io_ticks),
-                current.io_aveq.saturating_sub(p.io_aveq),
-            ),
-            None => (
-                current.rd_ios,
-                current.wr_ios,
-                current.rd_merges,
-                current.wr_merges,
-                current.rd_sectors,
-                current.wr_sectors,
-                current.rd_ticks,
-                current.wr_ticks,
-                current.io_ticks,
-                current.io_aveq,
-            ),
-        };
+fn compute_extended(current: &DiskStats, prev: Option<&DiskStats>, interval: f64) -> DiskExtended {
+    let (
+        d_rd_ios,
+        d_wr_ios,
+        d_rd_merges,
+        d_wr_merges,
+        d_rd_sectors,
+        d_wr_sectors,
+        d_rd_ticks,
+        d_wr_ticks,
+        d_io_ticks,
+        d_io_aveq,
+    ) = match prev {
+        Some(p) => (
+            current.rd_ios.saturating_sub(p.rd_ios),
+            current.wr_ios.saturating_sub(p.wr_ios),
+            current.rd_merges.saturating_sub(p.rd_merges),
+            current.wr_merges.saturating_sub(p.wr_merges),
+            current.rd_sectors.saturating_sub(p.rd_sectors),
+            current.wr_sectors.saturating_sub(p.wr_sectors),
+            current.rd_ticks.saturating_sub(p.rd_ticks),
+            current.wr_ticks.saturating_sub(p.wr_ticks),
+            current.io_ticks.saturating_sub(p.io_ticks),
+            current.io_aveq.saturating_sub(p.io_aveq),
+        ),
+        None => (
+            current.rd_ios,
+            current.wr_ios,
+            current.rd_merges,
+            current.wr_merges,
+            current.rd_sectors,
+            current.wr_sectors,
+            current.rd_ticks,
+            current.wr_ticks,
+            current.io_ticks,
+            current.io_aveq,
+        ),
+    };
 
     let r_per_s = d_rd_ios as f64 / interval;
     let w_per_s = d_wr_ios as f64 / interval;
     let rrqm_per_s = d_rd_merges as f64 / interval;
     let wrqm_per_s = d_wr_merges as f64 / interval;
 
-    let r_mb_per_s =
-        (d_rd_sectors * current.sector_size) as f64 / 1_048_576.0 / interval;
-    let w_mb_per_s =
-        (d_wr_sectors * current.sector_size) as f64 / 1_048_576.0 / interval;
+    let r_mb_per_s = (d_rd_sectors * current.sector_size) as f64 / 1_048_576.0 / interval;
+    let w_mb_per_s = (d_wr_sectors * current.sector_size) as f64 / 1_048_576.0 / interval;
 
     // Merge percentages: what fraction of I/Os were merged.
     let total_rd = d_rd_ios + d_rd_merges;
@@ -533,9 +536,7 @@ fn format_human(kb: u64) -> String {
 
 /// Print the CPU statistics header and values.
 fn print_cpu(pct: &CpuPct) {
-    println!(
-        "avg-cpu:  %user   %nice %system %iowait  %steal   %idle"
-    );
+    println!("avg-cpu:  %user   %nice %system %iowait  %steal   %idle");
     println!(
         "       {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2}",
         pct.user, pct.nice, pct.system, pct.iowait, pct.steal, pct.idle,
@@ -575,12 +576,7 @@ fn print_basic_row(d: &DiskBasic, unit: DisplayUnit) {
         _ => {
             println!(
                 "{:<16} {:>8.2} {:>12.2} {:>12.2} {:>10} {:>10}",
-                d.name,
-                d.tps,
-                d.read_rate,
-                d.write_rate,
-                d.read_total,
-                d.write_total,
+                d.name, d.tps, d.read_rate, d.write_rate, d.read_total, d.write_total,
             );
         }
     }
@@ -640,13 +636,14 @@ fn maybe_print_timestamp(config: &Config) {
     // On a real system we would use clock_gettime; here we approximate.
     if let Some(uptime) = read_file("/proc/uptime")
         && let Some(secs_str) = uptime.split_whitespace().next()
-            && let Ok(secs) = secs_str.parse::<f64>() {
-                let s = secs as u64;
-                let h = (s / 3600) % 24;
-                let m = (s % 3600) / 60;
-                let sec = s % 60;
-                println!("Timestamp: {:02}:{:02}:{:02} (uptime)", h, m, sec);
-            }
+        && let Ok(secs) = secs_str.parse::<f64>()
+    {
+        let s = secs as u64;
+        let h = (s / 3600) % 24;
+        let m = (s % 3600) / 60;
+        let sec = s % 60;
+        println!("Timestamp: {:02}:{:02}:{:02} (uptime)", h, m, sec);
+    }
 }
 
 // ============================================================================
@@ -665,9 +662,10 @@ fn print_json_report(
     // Timestamp (uptime seconds).
     if config.show_timestamp
         && let Some(uptime) = read_file("/proc/uptime")
-            && let Some(secs_str) = uptime.split_whitespace().next() {
-                print!("\"timestamp\":{secs_str},");
-            }
+        && let Some(secs_str) = uptime.split_whitespace().next()
+    {
+        print!("\"timestamp\":{secs_str},");
+    }
 
     // CPU section.
     if let Some(c) = cpu_pct {
@@ -704,14 +702,21 @@ fn print_json_report(
             print!(
                 "{{\"name\":\"{}\",\"r_s\":{:.2},\"w_s\":{:.2},\"rMB_s\":{:.4},\"wMB_s\":{:.4},\"rrqm_s\":{:.2},\"wrqm_s\":{:.2},\"pct_rrqm\":{:.2},\"pct_wrqm\":{:.2},\"r_await\":{:.2},\"w_await\":{:.2},\"aqu_sz\":{:.2},\"rareq_sz\":{:.2},\"wareq_sz\":{:.2},\"svctm\":{:.2},\"pct_util\":{:.2}}}",
                 d.name,
-                d.r_per_s, d.w_per_s,
-                d.r_mb_per_s, d.w_mb_per_s,
-                d.rrqm_per_s, d.wrqm_per_s,
-                d.pct_rrqm, d.pct_wrqm,
-                d.r_await, d.w_await,
+                d.r_per_s,
+                d.w_per_s,
+                d.r_mb_per_s,
+                d.w_mb_per_s,
+                d.rrqm_per_s,
+                d.wrqm_per_s,
+                d.pct_rrqm,
+                d.pct_wrqm,
+                d.r_await,
+                d.w_await,
                 d.aqu_sz,
-                d.rareq_sz, d.wareq_sz,
-                d.svctm, d.pct_util,
+                d.rareq_sz,
+                d.wareq_sz,
+                d.svctm,
+                d.pct_util,
             );
         }
         print!("]");
@@ -756,7 +761,11 @@ fn filter_devices(devices: &[DiskStats], config: &Config) -> Vec<DiskStats> {
 /// Read system uptime in seconds from `/proc/uptime`.
 fn read_uptime_secs() -> f64 {
     read_file("/proc/uptime")
-        .and_then(|s| s.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()))
+        .and_then(|s| {
+            s.split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<f64>().ok())
+        })
         .unwrap_or(1.0)
 }
 
@@ -789,7 +798,14 @@ fn display_report(
         if show_disk && !config.extended {
             basics = current_disks
                 .iter()
-                .map(|d| compute_basic(d, find_prev_disk(prev_disks, &d.name), interval, config.unit))
+                .map(|d| {
+                    compute_basic(
+                        d,
+                        find_prev_disk(prev_disks, &d.name),
+                        interval,
+                        config.unit,
+                    )
+                })
                 .collect();
             extended_stats = Vec::new();
         } else if show_disk {
@@ -873,9 +889,10 @@ fn run(config: &Config) {
     loop {
         // Check count limit before sleeping.
         if let Some(max) = config.count
-            && iteration >= max {
-                break;
-            }
+            && iteration >= max
+        {
+            break;
+        }
 
         std::thread::sleep(std::time::Duration::from_secs_f64(interval));
 

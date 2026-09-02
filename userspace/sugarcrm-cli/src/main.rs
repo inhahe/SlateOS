@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sugar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_sugar(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SugarCRM 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("SugarCRM 2024 (Slate OS)");
+        return 0;
+    }
     println!("SugarCRM 2024 (Slate OS)");
     println!("  Vendor: SugarCRM Inc. (Cupertino, CA — private)");
     println!("  Founders: Clint Oram, John Roberts, Jacob Taylor (2004)");
@@ -40,7 +47,9 @@ fn run_sugar(args: &[String], _prog: &str) -> i32 {
     println!("    - Node (predictive AI) Mar 2020 → embedded as 'SugarPredict'");
     println!("    - Augmento.ai (BI + analytics) Mar 2022 → embedded as 'SugarLive' insights");
     println!("  Strategy: 'time-aware' CRM — uses historical data + AI to predict outcomes");
-    println!("           pivoted hard from open-source roots toward AI-first enterprise positioning");
+    println!(
+        "           pivoted hard from open-source roots toward AI-first enterprise positioning"
+    );
     println!("  Pricing: Essentials $49/user/mo (3-user min)");
     println!("          Professional $80/user/mo");
     println!("          Advanced $135/user/mo (3-year contract typical)");
@@ -63,11 +72,15 @@ fn run_sugar(args: &[String], _prog: &str) -> i32 {
     println!("    - Marketing analytics with multi-touch attribution");
     println!("  Distinctive points:");
     println!("    - Still offers on-premise deployment (rare among modern CRMs)");
-    println!("    - Sugar Community Edition (GPL) discontinued 2018, but Sugar still ships installer for on-prem");
+    println!(
+        "    - Sugar Community Edition (GPL) discontinued 2018, but Sugar still ships installer for on-prem"
+    );
     println!("    - Heavy investment in process automation (SugarBPM workflows)");
     println!("    - 'No-touch information management' — auto-fill records from email/calendar");
     println!("  Integrations: 100+ marketplace apps");
-    println!("              QuickBooks, Slack, Office 365, Gmail, DocuSign, Mailchimp, RingCentral");
+    println!(
+        "              QuickBooks, Slack, Office 365, Gmail, DocuSign, Mailchimp, RingCentral"
+    );
     println!("              SugarOutfitters partner ecosystem (legacy from open-source days)");
     println!("  Customers: mid-market enterprises (mostly 200-5000 employees)");
     println!("            biotech, manufacturing, financial services strong verticals");
@@ -76,13 +89,18 @@ fn run_sugar(args: &[String], _prog: &str) -> i32 {
     println!("           AI features lag Salesforce Einstein in maturity");
     println!("           UI feels enterprise-heavy — not pretty");
     println!("           the 'open source CRM' legacy is mostly gone");
-    println!("  Differentiator: only major CRM still offering true on-prem + heavy process automation focus");
+    println!(
+        "  Differentiator: only major CRM still offering true on-prem + heavy process automation focus"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sugar".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "sugar".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_sugar(&rest, &_prog);
     process::exit(code);
@@ -90,7 +108,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sugar};
+    use super::{basename, run_sugar, strip_ext};
 
     #[test]
     fn basename_strips_path() {

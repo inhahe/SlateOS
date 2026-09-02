@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("budibase-cli 0.1.0 (open-source-with-builtin-db personality build)"); }
+fn print_version() {
+    println!("budibase-cli 0.1.0 (open-source-with-builtin-db personality build)");
+}
 
 fn run_about() {
     println!("Budibase Ltd.");

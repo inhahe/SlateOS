@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("tigris-cli 0.1.0 (post-DB-sunset object-storage build)"); }
+fn print_version() {
+    println!("tigris-cli 0.1.0 (post-DB-sunset object-storage build)");
+}
 
 fn run_about() {
     println!("Tigris Data, Inc.");

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_checkov(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -32,10 +36,16 @@ fn run_checkov(args: &[String]) -> i32 {
         println!("checkov 3.2.0");
         return 0;
     }
-    let dir = args.windows(2).find(|w| w[0] == "-d" || w[0] == "--directory")
-        .map(|w| w[1].as_str()).unwrap_or(".");
-    let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output")
-        .map(|w| w[1].as_str()).unwrap_or("cli");
+    let dir = args
+        .windows(2)
+        .find(|w| w[0] == "-d" || w[0] == "--directory")
+        .map(|w| w[1].as_str())
+        .unwrap_or(".");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o" || w[0] == "--output")
+        .map(|w| w[1].as_str())
+        .unwrap_or("cli");
     let soft_fail = args.iter().any(|a| a == "--soft-fail");
 
     match output {
@@ -49,7 +59,9 @@ fn run_checkov(args: &[String]) -> i32 {
             println!("    \"failed_checks\": [");
             println!("      {{");
             println!("        \"check_id\": \"CKV_AWS_18\",");
-            println!("        \"check_name\": \"Ensure the S3 bucket has access logging enabled\",");
+            println!(
+                "        \"check_name\": \"Ensure the S3 bucket has access logging enabled\","
+            );
             println!("        \"file_path\": \"/main.tf\",");
             println!("        \"resource\": \"aws_s3_bucket.data\"");
             println!("      }}");
@@ -89,7 +101,10 @@ fn run_checkov(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "checkov".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "checkov".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_checkov(&rest);
     process::exit(code);
@@ -97,7 +112,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_checkov};
+    use super::{basename, run_checkov, strip_ext};
 
     #[test]
     fn basename_strips_path() {

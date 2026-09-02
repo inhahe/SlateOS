@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_adp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,11 +27,16 @@ fn run_adp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ADP Workforce Now 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("ADP Workforce Now 2024 (Slate OS)");
+        return 0;
+    }
     println!("ADP Workforce Now 2024 (Slate OS)");
     println!("  Vendor: Automatic Data Processing, Inc. (Roseland, NJ — NASDAQ:ADP)");
     println!("  Founded: 1949 by Henry Taub as 'Automatic Payrolls, Inc.'");
-    println!("          one of the OLDEST surviving SaaS-adjacent businesses (pre-computer payroll service bureau)");
+    println!(
+        "          one of the OLDEST surviving SaaS-adjacent businesses (pre-computer payroll service bureau)"
+    );
     println!("  Scale: pays 1 in 6 US workers (~26 million Americans)");
     println!("         ~60,000 employees, $18B annual revenue (FY2024)");
     println!("         processes ~$2 trillion in client payrolls annually");
@@ -44,7 +53,9 @@ fn run_adp(args: &[String], _prog: &str) -> i32 {
     println!("    - ADP TotalSource (PEO — co-employment service for SMBs)");
     println!("    - DataCloud (anonymized labor market analytics)");
     println!("  Features:");
-    println!("    - Multi-jurisdiction payroll (federal/state/local US, Canada provinces, EU, APAC)");
+    println!(
+        "    - Multi-jurisdiction payroll (federal/state/local US, Canada provinces, EU, APAC)"
+    );
     println!("    - Direct deposit + paycards (ADP Aline Card)");
     println!("    - Tax filing (federal/state/local, ~80 million W-2/1099 per year)");
     println!("    - Benefits administration (health, 401k, FSA, HSA, COBRA)");
@@ -53,13 +64,18 @@ fn run_adp(args: &[String], _prog: &str) -> i32 {
     println!("  ADP Marketplace: 600+ integrated apps (Slack, Microsoft, Concur, etc.)");
     println!("  Critique: legacy UI, complex pricing, sales-led friction");
     println!("           still THE incumbent — switching cost is high");
-    println!("  Differentiator: scale + tax filing + 75-year track record — 'no one got fired for choosing ADP'");
+    println!(
+        "  Differentiator: scale + tax filing + 75-year track record — 'no one got fired for choosing ADP'"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "adp".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "adp".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_adp(&rest, &_prog);
     process::exit(code);
@@ -67,7 +83,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_adp};
+    use super::{basename, run_adp, strip_ext};
 
     #[test]
     fn basename_strips_path() {

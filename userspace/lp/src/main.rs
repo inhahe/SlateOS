@@ -20,9 +20,9 @@
 
 #[cfg(not(test))]
 use std::env;
-use std::io::{self, Write};
 #[cfg(not(test))]
 use std::io::Read;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -198,11 +198,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             Personality::Lp | Personality::Lpr => match arg.as_str() {
                 "-d" | "-P" => {
                     i += 1;
-                    cfg.printer = Some(
-                        args.get(i)
-                            .ok_or("-d requires a printer name")?
-                            .clone(),
-                    );
+                    cfg.printer = Some(args.get(i).ok_or("-d requires a printer name")?.clone());
                 }
                 "-n" | "--copies" => {
                     i += 1;
@@ -214,11 +210,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 }
                 "-t" | "-T" | "-J" => {
                     i += 1;
-                    cfg.title = Some(
-                        args.get(i)
-                            .ok_or("-t requires a title")?
-                            .clone(),
-                    );
+                    cfg.title = Some(args.get(i).ok_or("-t requires a title")?.clone());
                 }
                 "-q" => {
                     i += 1;
@@ -256,11 +248,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 "-x" => cfg.cancel_purge = true,
                 "-P" => {
                     i += 1;
-                    cfg.printer = Some(
-                        args.get(i)
-                            .ok_or("-P requires a printer name")?
-                            .clone(),
-                    );
+                    cfg.printer = Some(args.get(i).ok_or("-P requires a printer name")?.clone());
                 }
                 "-h" | "--help" => cfg.show_help = true,
                 "-V" | "--version" => cfg.show_version = true,
@@ -330,7 +318,11 @@ fn read_printers() -> Vec<PrinterInfo> {
             // Simple format: name|description:options
             let parts: Vec<&str> = line.split('|').collect();
             let name = parts[0].trim_end_matches(':').to_string();
-            let desc = parts.get(1).unwrap_or(&"").trim_end_matches(':').to_string();
+            let desc = parts
+                .get(1)
+                .unwrap_or(&"")
+                .trim_end_matches(':')
+                .to_string();
 
             printers.push(PrinterInfo {
                 name: name.clone(),
@@ -373,9 +365,10 @@ fn read_jobs() -> Vec<PrintJob> {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("job")
                 && let Ok(content) = std::fs::read_to_string(&path)
-                    && let Some(job) = parse_job_file(&content) {
-                        jobs.push(job);
-                    }
+                && let Some(job) = parse_job_file(&content)
+            {
+                jobs.push(job);
+            }
         }
     }
 
@@ -436,10 +429,7 @@ fn parse_job_file(content: &str) -> Option<PrintJob> {
 #[cfg(not(test))]
 fn run_lp(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
     let username = env::var("USER").unwrap_or_else(|_| "root".to_string());
-    let printer = cfg
-        .printer
-        .clone()
-        .unwrap_or_else(get_default_printer);
+    let printer = cfg.printer.clone().unwrap_or_else(get_default_printer);
 
     for file_path in &cfg.files {
         let (title, size) = if file_path.as_os_str() == "-" {
@@ -466,15 +456,9 @@ fn run_lp(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
         );
 
         let _ = std::fs::create_dir_all(SPOOL_DIR);
-        let _ = std::fs::write(
-            format!("{SPOOL_DIR}/{job_id}.job"),
-            job_content,
-        );
+        let _ = std::fs::write(format!("{SPOOL_DIR}/{job_id}.job"), job_content);
 
-        writeln!(
-            writer,
-            "request id is {printer}-{job_id} ({size} bytes)"
-        )?;
+        writeln!(writer, "request id is {printer}-{job_id} ({size} bytes)")?;
     }
 
     Ok(0)
@@ -496,11 +480,7 @@ fn run_lpstat(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
 
         // Accepting
         for p in &printers {
-            writeln!(
-                writer,
-                "{} accepting requests since startup",
-                p.name
-            )?;
+            writeln!(writer, "{} accepting requests since startup", p.name)?;
         }
 
         // Printers
@@ -536,7 +516,12 @@ fn run_lpstat(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
     if cfg.show_printers {
         for p in &printers {
             if cfg.show_long {
-                writeln!(writer, "printer {} is {}. enabled since startup", p.name, p.state.as_str())?;
+                writeln!(
+                    writer,
+                    "printer {} is {}. enabled since startup",
+                    p.name,
+                    p.state.as_str()
+                )?;
                 if !p.description.is_empty() {
                     writeln!(writer, "\tDescription: {}", p.description)?;
                 }
@@ -925,7 +910,8 @@ mod tests {
 
     #[test]
     fn test_parse_job_file() {
-        let content = "id=1\nuser=root\ntitle=test\nprinter=default\nsize=1024\ncopies=2\nstatus=pending\n";
+        let content =
+            "id=1\nuser=root\ntitle=test\nprinter=default\nsize=1024\ncopies=2\nstatus=pending\n";
         let job = parse_job_file(content).unwrap();
         assert_eq!(job.job_id, 1);
         assert_eq!(job.username, "root");

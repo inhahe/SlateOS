@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ff(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_ff(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Mozilla Firefox 133.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Mozilla Firefox 133.0 (Slate OS)");
+        return 0;
+    }
     println!("Mozilla Firefox 133.0 (Slate OS)");
     println!("  Vendor: Mozilla Corporation (subsidiary of Mozilla Foundation 501(c)(3))");
     println!("  Engine: Gecko (HTML/CSS), SpiderMonkey (JS), Servo components (Stylo, WebRender)");
@@ -33,7 +40,9 @@ fn run_ff(args: &[String], _prog: &str) -> i32 {
     println!("  Channels: Release (4 wk), Beta, Developer Edition, Nightly, ESR (yearly)");
     println!("  Rust adoption: Gecko increasingly Rust (Stylo CSS engine, WebRender compositor)");
     println!("  Manifest V3: Firefox keeps MV2 support indefinitely (uBlock Origin full power)");
-    println!("  Privacy: Total Cookie Protection, Enhanced Tracking Protection, no telemetry default-off (some)");
+    println!(
+        "  Privacy: Total Cookie Protection, Enhanced Tracking Protection, no telemetry default-off (some)"
+    );
     println!("  Containers: Multi-Account Containers, Facebook Container, Temporary Containers");
     println!("  Sync: Firefox Sync (end-to-end encrypted)");
     println!("  Add-ons: AMO (addons.mozilla.org), reviewed extensions");
@@ -44,7 +53,10 @@ fn run_ff(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "firefox".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "firefox".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ff(&rest, &_prog);
     process::exit(code);
@@ -52,7 +64,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ff};
+    use super::{basename, run_ff, strip_ext};
 
     #[test]
     fn basename_strips_path() {

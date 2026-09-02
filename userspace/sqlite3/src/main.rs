@@ -29,20 +29,60 @@ fn sample_tables() -> Vec<_TableInfo> {
         _TableInfo {
             name: "users".to_string(),
             columns: vec![
-                ColumnInfo { name: "id".to_string(), col_type: "INTEGER".to_string(), _notnull: true, _pk: true },
-                ColumnInfo { name: "name".to_string(), col_type: "TEXT".to_string(), _notnull: true, _pk: false },
-                ColumnInfo { name: "email".to_string(), col_type: "TEXT".to_string(), _notnull: false, _pk: false },
-                ColumnInfo { name: "created_at".to_string(), col_type: "DATETIME".to_string(), _notnull: false, _pk: false },
+                ColumnInfo {
+                    name: "id".to_string(),
+                    col_type: "INTEGER".to_string(),
+                    _notnull: true,
+                    _pk: true,
+                },
+                ColumnInfo {
+                    name: "name".to_string(),
+                    col_type: "TEXT".to_string(),
+                    _notnull: true,
+                    _pk: false,
+                },
+                ColumnInfo {
+                    name: "email".to_string(),
+                    col_type: "TEXT".to_string(),
+                    _notnull: false,
+                    _pk: false,
+                },
+                ColumnInfo {
+                    name: "created_at".to_string(),
+                    col_type: "DATETIME".to_string(),
+                    _notnull: false,
+                    _pk: false,
+                },
             ],
             _row_count: 42,
         },
         _TableInfo {
             name: "posts".to_string(),
             columns: vec![
-                ColumnInfo { name: "id".to_string(), col_type: "INTEGER".to_string(), _notnull: true, _pk: true },
-                ColumnInfo { name: "user_id".to_string(), col_type: "INTEGER".to_string(), _notnull: true, _pk: false },
-                ColumnInfo { name: "title".to_string(), col_type: "TEXT".to_string(), _notnull: true, _pk: false },
-                ColumnInfo { name: "body".to_string(), col_type: "TEXT".to_string(), _notnull: false, _pk: false },
+                ColumnInfo {
+                    name: "id".to_string(),
+                    col_type: "INTEGER".to_string(),
+                    _notnull: true,
+                    _pk: true,
+                },
+                ColumnInfo {
+                    name: "user_id".to_string(),
+                    col_type: "INTEGER".to_string(),
+                    _notnull: true,
+                    _pk: false,
+                },
+                ColumnInfo {
+                    name: "title".to_string(),
+                    col_type: "TEXT".to_string(),
+                    _notnull: true,
+                    _pk: false,
+                },
+                ColumnInfo {
+                    name: "body".to_string(),
+                    col_type: "TEXT".to_string(),
+                    _notnull: false,
+                    _pk: false,
+                },
             ],
             _row_count: 156,
         },
@@ -83,7 +123,9 @@ fn run_sqlite3(args: Vec<String>) -> i32 {
             }
             "-cmd" => {
                 i += 1;
-                if i < args.len() { commands.push(args[i].clone()); }
+                if i < args.len() {
+                    commands.push(args[i].clone());
+                }
             }
             s if !s.starts_with('-') && db_path.is_none() => {
                 db_path = Some(s.to_string());
@@ -148,10 +190,16 @@ fn run_dot_schema() {
     for t in &tables {
         print!("CREATE TABLE {} (", t.name);
         for (i, c) in t.columns.iter().enumerate() {
-            if i > 0 { print!(", "); }
+            if i > 0 {
+                print!(", ");
+            }
             print!("{} {}", c.name, c.col_type);
-            if c._pk { print!(" PRIMARY KEY"); }
-            if c._notnull && !c._pk { print!(" NOT NULL"); }
+            if c._pk {
+                print!(" PRIMARY KEY");
+            }
+            if c._notnull && !c._pk {
+                print!(" NOT NULL");
+            }
         }
         println!(");");
     }

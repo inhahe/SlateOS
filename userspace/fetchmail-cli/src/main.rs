@@ -50,7 +50,8 @@ fn run_fetchmail(args: &[String]) -> i32 {
     }
 
     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
-    let servers: Vec<&str> = args.iter()
+    let servers: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -65,9 +66,18 @@ fn run_fetchmail(args: &[String]) -> i32 {
     }
     println!("fetchmail: querying {} (protocol IMAP)", server);
     println!("3 messages for user at {} (12450 octets).", server);
-    println!("reading message user@{}:1 of 3 (4150 octets) . flushed", server);
-    println!("reading message user@{}:2 of 3 (3800 octets) . flushed", server);
-    println!("reading message user@{}:3 of 3 (4500 octets) . flushed", server);
+    println!(
+        "reading message user@{}:1 of 3 (4150 octets) . flushed",
+        server
+    );
+    println!(
+        "reading message user@{}:2 of 3 (3800 octets) . flushed",
+        server
+    );
+    println!(
+        "reading message user@{}:3 of 3 (4500 octets) . flushed",
+        server
+    );
     0
 }
 
@@ -108,7 +118,8 @@ fn run_getmail(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "fetchmail".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -122,7 +133,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fetchmail};
+    use super::{basename, run_fetchmail, strip_ext};
 
     #[test]
     fn basename_strips_path() {

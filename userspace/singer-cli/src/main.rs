@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_singer(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -54,9 +58,15 @@ fn run_singer(args: &[String], prog: &str) -> i32 {
         println!("  ]");
         println!("}}");
     } else {
-        println!("{{\"type\": \"SCHEMA\", \"stream\": \"users\", \"schema\": {{\"type\": \"object\"}}, \"key_properties\": [\"id\"]}}");
-        println!("{{\"type\": \"RECORD\", \"stream\": \"users\", \"record\": {{\"id\": 1, \"name\": \"Alice\", \"email\": \"alice@example.com\"}}}}");
-        println!("{{\"type\": \"RECORD\", \"stream\": \"users\", \"record\": {{\"id\": 2, \"name\": \"Bob\", \"email\": \"bob@example.com\"}}}}");
+        println!(
+            "{{\"type\": \"SCHEMA\", \"stream\": \"users\", \"schema\": {{\"type\": \"object\"}}, \"key_properties\": [\"id\"]}}"
+        );
+        println!(
+            "{{\"type\": \"RECORD\", \"stream\": \"users\", \"record\": {{\"id\": 1, \"name\": \"Alice\", \"email\": \"alice@example.com\"}}}}"
+        );
+        println!(
+            "{{\"type\": \"RECORD\", \"stream\": \"users\", \"record\": {{\"id\": 2, \"name\": \"Bob\", \"email\": \"bob@example.com\"}}}}"
+        );
         println!("{{\"type\": \"STATE\", \"value\": {{\"position\": 2}}}}");
         println!("INFO: 2 records synced from stream 'users'");
     }
@@ -65,7 +75,10 @@ fn run_singer(args: &[String], prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "tap".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "tap".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_singer(&rest, &prog);
     process::exit(code);
@@ -73,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_singer};
+    use super::{basename, run_singer, strip_ext};
 
     #[test]
     fn basename_strips_path() {

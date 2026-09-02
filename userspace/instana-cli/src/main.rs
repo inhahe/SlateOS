@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_instana(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,26 +27,45 @@ fn run_instana(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("IBM Instana 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("IBM Instana 2024 (Slate OS)");
+        return 0;
+    }
     println!("IBM Instana 2024 (Slate OS) — Enterprise Observability");
-    println!("  Vendor: IBM Corporation, via Instana (Solingen Germany + Chicago — IBM subsidiary since 2020)");
+    println!(
+        "  Vendor: IBM Corporation, via Instana (Solingen Germany + Chicago — IBM subsidiary since 2020)"
+    );
     println!("  Founders: Mirko Novakovic + Pavlo Baron + Pete Abrams + Fabian Lange, 2015");
     println!("          founded in Solingen, Germany (technical depth + DACH enterprise focus)");
     println!("          'Instana' name = 'instant' + Latin '-ana' (instant analytics)");
-    println!("          Mirko Novakovic: long-time CEO + ex-Codecentric founder (German consulting house)");
-    println!("          Differentiator from day one: 'automatic discovery + zero-config APM' for microservices");
+    println!(
+        "          Mirko Novakovic: long-time CEO + ex-Codecentric founder (German consulting house)"
+    );
+    println!(
+        "          Differentiator from day one: 'automatic discovery + zero-config APM' for microservices"
+    );
     println!("  Acquisition: IBM bought Instana Nov 2020 for ~$500M");
     println!("              Strategic for IBM hybrid cloud / OpenShift / Watson AIOps platform");
     println!("              Integrated with IBM Cloud Pak for Watson AIOps");
     println!("              Mirko Novakovic stayed as IBM observability leader (left 2023)");
     println!("              Now part of IBM Software 'Automation' portfolio");
-    println!("  Strategic position: 'automatic APM — zero-config, full-stack, every-request tracing':");
-    println!("                    pitch: 'observability without instrumentation drudgery — automatic + complete'");
+    println!(
+        "  Strategic position: 'automatic APM — zero-config, full-stack, every-request tracing':"
+    );
+    println!(
+        "                    pitch: 'observability without instrumentation drudgery — automatic + complete'"
+    );
     println!("                    target: enterprise + IBM Cloud Pak customers (hybrid cloud)");
-    println!("                    primary competitor: Dynatrace, Datadog APM, New Relic, AppDynamics (Splunk)");
+    println!(
+        "                    primary competitor: Dynatrace, Datadog APM, New Relic, AppDynamics (Splunk)"
+    );
     println!("                    secondary: Honeycomb, Lightstep (acq Splunk), Elastic APM");
-    println!("                    Instana's wedge: automatic discovery + every-request tracing + IBM ecosystem distribution");
-    println!("                    'No sampling' = full fidelity (vs Datadog's stochastic sampling)");
+    println!(
+        "                    Instana's wedge: automatic discovery + every-request tracing + IBM ecosystem distribution"
+    );
+    println!(
+        "                    'No sampling' = full fidelity (vs Datadog's stochastic sampling)"
+    );
     println!("  Pricing:");
     println!("    Self-hosted on-prem: $50K-$1M+/yr");
     println!("    SaaS (Instana Cloud): per-host based, $50-200/host/month");
@@ -82,7 +105,9 @@ fn run_instana(args: &[String], _prog: &str) -> i32 {
     println!("  Auto-discovery (the differentiator):");
     println!("    - Instana agent identifies all running tech stack components automatically");
     println!("    - Java agent attaches via JVMTI without config changes");
-    println!("    - 250+ sensor types (Java, .NET, Node, Python, Ruby, PHP, Go, Erlang, Crystal, etc.)");
+    println!(
+        "    - 250+ sensor types (Java, .NET, Node, Python, Ruby, PHP, Go, Erlang, Crystal, etc.)"
+    );
     println!("    - 'Plug it in and it works' demo a key sales mechanic");
     println!("  Every-request tracing (the architectural bet):");
     println!("    - No sampling = every request fully traced");
@@ -117,16 +142,25 @@ fn run_instana(args: &[String], _prog: &str) -> i32 {
     println!("           Datadog + Dynatrace marketing budgets dominate top-of-funnel");
     println!("           every-request tracing = higher cost than head-sampled competitors");
     println!("           less brand awareness outside IBM-aligned shops");
-    println!("           OpenTelemetry-native but slower to add OTel features vs Honeycomb/Lightstep");
-    println!("           'Stan' AI assistant features behind Datadog Bits AI + Dynatrace Davis CoPilot");
+    println!(
+        "           OpenTelemetry-native but slower to add OTel features vs Honeycomb/Lightstep"
+    );
+    println!(
+        "           'Stan' AI assistant features behind Datadog Bits AI + Dynatrace Davis CoPilot"
+    );
     println!("           DACH regional concentration limits NAm enterprise wins");
-    println!("  Differentiator: automatic discovery (zero-config APM) + every-request tracing (no sampling) + 250+ auto-detected sensor types + IBM Cloud Pak / Watson AIOps integration + 'Stan' AI assistant + strong DACH enterprise footprint (Sky, Allianz, Deutsche Bank, ING) + Mirko Novakovic's technical credibility — the German-founded APM platform that auto-discovers your stack and traces every request, distributed by IBM to its global enterprise base");
+    println!(
+        "  Differentiator: automatic discovery (zero-config APM) + every-request tracing (no sampling) + 250+ auto-detected sensor types + IBM Cloud Pak / Watson AIOps integration + 'Stan' AI assistant + strong DACH enterprise footprint (Sky, Allianz, Deutsche Bank, ING) + Mirko Novakovic's technical credibility — the German-founded APM platform that auto-discovers your stack and traces every request, distributed by IBM to its global enterprise base"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "instana".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "instana".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_instana(&rest, &_prog);
     process::exit(code);
@@ -134,7 +168,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_instana};
+    use super::{basename, run_instana, strip_ext};
 
     #[test]
     fn basename_strips_path() {

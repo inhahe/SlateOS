@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_clonezilla(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_clonezilla(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("clonezilla v3.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("clonezilla v3.1 (Slate OS)");
+        return 0;
+    }
     println!("clonezilla: disk cloning system");
     println!("  Mode: device-image");
     println!("  Select: savedisk / restoredisk / saveparts / restoreparts");
@@ -48,7 +55,10 @@ fn run_ocs_sr(args: &[String], _prog: &str) -> i32 {
         println!("  -j2            Clone hidden data");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ocs-sr v3.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("ocs-sr v3.1 (Slate OS)");
+        return 0;
+    }
     println!("ocs-sr: clonezilla save/restore");
     println!("  Image repository: /home/partimag");
     0
@@ -60,14 +70,20 @@ fn run_ocs_onthefly(args: &[String], _prog: &str) -> i32 {
         println!("ocs-onthefly v3.1 (Slate OS) — Direct disk-to-disk clone");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ocs-onthefly v3.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("ocs-onthefly v3.1 (Slate OS)");
+        return 0;
+    }
     println!("ocs-onthefly: direct disk-to-disk clone");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "clonezilla".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "clonezilla".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "ocs-sr" => run_ocs_sr(&rest, &prog),
@@ -79,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_clonezilla};
+    use super::{basename, run_clonezilla, strip_ext};
 
     #[test]
     fn basename_strips_path() {

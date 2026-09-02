@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_lyx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,7 +26,10 @@ fn run_lyx(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("lyx v2.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("lyx v2.4 (Slate OS)");
+        return 0;
+    }
     println!("lyx: document processor started");
     println!("  LaTeX backend: pdflatex");
     println!("  BibTeX: available");
@@ -36,14 +43,20 @@ fn run_lyxclient(args: &[String], _prog: &str) -> i32 {
         println!("lyxclient v2.4 (Slate OS) — LyX remote client");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("lyxclient v2.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("lyxclient v2.4 (Slate OS)");
+        return 0;
+    }
     println!("lyxclient: connected to LyX server");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "lyx".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "lyx".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "lyxclient" => run_lyxclient(&rest, &prog),
@@ -54,7 +67,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lyx};
+    use super::{basename, run_lyx, strip_ext};
 
     #[test]
     fn basename_strips_path() {

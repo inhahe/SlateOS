@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_marqo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -20,7 +24,10 @@ fn run_marqo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Marqo 2024 (Slate OS) — marqo CLI 2.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Marqo 2024 (Slate OS) — marqo CLI 2.x");
+        return 0;
+    }
     println!("Marqo 2024 (Slate OS) — Open-Source Multi-Modal Vector Search Engine");
     println!("  Vendor: Marqo AI, Pty Ltd (Sydney, Australia — private)");
     println!("  Founders: Tom Hamer + Jesse Clark, 2021");
@@ -32,15 +39,27 @@ fn run_marqo(args: &[String], _prog: &str) -> i32 {
     println!("          Open-source first (Apache 2.0)");
     println!("  Funding:");
     println!("         Total raised: ~$5.4M");
-    println!("         Seed Jun 2022: $5.4M (Blackbird Ventures lead, Black Sheep Capital, individuals)");
+    println!(
+        "         Seed Jun 2022: $5.4M (Blackbird Ventures lead, Black Sheep Capital, individuals)"
+    );
     println!("         Smaller funding than US competitors — Australian capital-efficient");
     println!("         Series A unannounced — bootstrapping Marqo Cloud growth");
-    println!("  Strategic position: 'multi-modal search engine with built-in embedding generation':");
-    println!("                    pitch: 'one engine for text + image + audio + video search, no separate embedder needed'");
-    println!("                    target: e-commerce search, content moderation, image/video retrieval, RAG");
-    println!("                    primary competitor: Weaviate (multi-modal), Vespa (search + vector), Pinecone");
+    println!(
+        "  Strategic position: 'multi-modal search engine with built-in embedding generation':"
+    );
+    println!(
+        "                    pitch: 'one engine for text + image + audio + video search, no separate embedder needed'"
+    );
+    println!(
+        "                    target: e-commerce search, content moderation, image/video retrieval, RAG"
+    );
+    println!(
+        "                    primary competitor: Weaviate (multi-modal), Vespa (search + vector), Pinecone"
+    );
     println!("                    secondary: Chroma, Qdrant, OpenSearch + embedding pipeline");
-    println!("                    Marqo's wedge: built-in inference (no need for separate embedding service)");
+    println!(
+        "                    Marqo's wedge: built-in inference (no need for separate embedding service)"
+    );
     println!("                    'Tensor-native search — multi-vector by default'");
     println!("                    Ex-Amazon SageMaker founders → strong ML credibility");
     println!("  Pricing (OSS + Cloud):");
@@ -51,7 +70,9 @@ fn run_marqo(args: &[String], _prog: &str) -> i32 {
     println!("    Marqo Cloud Enterprise: dedicated infra, custom");
     println!("    notably GPU pricing tier — image/video embed at scale needs GPUs");
     println!("  Architecture (the integrated stack):");
-    println!("    - Written in Python (orchestration) + integrates OpenSearch/Vespa-like vector engine");
+    println!(
+        "    - Written in Python (orchestration) + integrates OpenSearch/Vespa-like vector engine"
+    );
     println!("    - Embedding generation: HuggingFace models in-process (no separate service)");
     println!("    - GPU support: PyTorch backend for CLIP, SBERT, custom models");
     println!("    - Tensor storage: per-document multi-vector (e.g. patches of an image)");
@@ -130,7 +151,9 @@ fn run_marqo(args: &[String], _prog: &str) -> i32 {
     println!("    # Via Python client:");
     println!("    # import marqo; mq = marqo.Client(url='http://localhost:8882')");
     println!("    # mq.create_index('my-coll', model='ViT-L/14')");
-    println!("    # mq.index('my-coll').add_documents([{{'title': 'foo', 'image': 'http://...'}}])");
+    println!(
+        "    # mq.index('my-coll').add_documents([{{'title': 'foo', 'image': 'http://...'}}])"
+    );
     println!("    # mq.index('my-coll').search('red shoes')");
     println!("    marqo create-index my-coll --model=ViT-L/14");
     println!("    marqo add-docs my-coll --file=docs.jsonl");
@@ -156,13 +179,18 @@ fn run_marqo(args: &[String], _prog: &str) -> i32 {
     println!("           competing with Vespa (more mature search engine)");
     println!("           Australian timezone = harder for US enterprise sales coverage");
     println!("           small engineering team (~15-20 people)");
-    println!("  Differentiator: built-in embedding generation in the engine (no separate inference service needed) + multi-modal native (text + image + audio + video in one index, CLIP-based) + tensor search (multi-vector per doc, chunk-level retrieval with doc-level results) + Marqtune custom fine-tuning + GPU-backed cloud tier for image/video at scale + e-commerce vertical focus (Redbubble, Australia Post) + ex-Amazon SageMaker founders + Sydney AU deep-tech + single Docker container OSS deploy + Apache 2.0 + LangChain/LlamaIndex first-class + auto-chunking + hybrid lexical + vector — the multi-modal-first vector search engine that bundles embedding inference, eliminating the need for a separate embedding pipeline");
+    println!(
+        "  Differentiator: built-in embedding generation in the engine (no separate inference service needed) + multi-modal native (text + image + audio + video in one index, CLIP-based) + tensor search (multi-vector per doc, chunk-level retrieval with doc-level results) + Marqtune custom fine-tuning + GPU-backed cloud tier for image/video at scale + e-commerce vertical focus (Redbubble, Australia Post) + ex-Amazon SageMaker founders + Sydney AU deep-tech + single Docker container OSS deploy + Apache 2.0 + LangChain/LlamaIndex first-class + auto-chunking + hybrid lexical + vector — the multi-modal-first vector search engine that bundles embedding inference, eliminating the need for a separate embedding pipeline"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "marqo".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "marqo".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_marqo(&rest, &_prog);
     process::exit(code);
@@ -170,7 +198,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_marqo};
+    use super::{basename, run_marqo, strip_ext};
 
     #[test]
     fn basename_strips_path() {

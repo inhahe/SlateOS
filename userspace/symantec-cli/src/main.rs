@@ -39,14 +39,18 @@ fn print_help(prog: &str) {
     println!("    broadcom      Broadcom acquires enterprise business 2019 \\$10.7B");
     println!("    norton        Norton consumer business -> NortonLifeLock -> Gen Digital 2022");
     println!("    endpoint      Symantec Endpoint Protection + Endpoint Security Complete");
-    println!("    dlp           Symantec DLP — the enterprise data-loss-prevention category leader");
+    println!(
+        "    dlp           Symantec DLP — the enterprise data-loss-prevention category leader"
+    );
     println!("    veritas       Veritas Software 2005 merger + 2016 demerger");
     println!("    customers     Fortune 500 + government + the long-tail of legacy SEP installs");
     println!("    help          Show this help");
     println!("    version       Show version");
 }
 
-fn print_version() { println!("symantec-cli 0.1.0 (enterprise-security-pioneer personality build)"); }
+fn print_version() {
+    println!("symantec-cli 0.1.0 (enterprise-security-pioneer personality build)");
+}
 
 fn run_about() {
     println!("Symantec / Broadcom Symantec Enterprise.");
@@ -68,9 +72,13 @@ fn run_history() {
     println!("  1984:  Q&A natural-language database query product ships.");
     println!("  1989:  IPO on NASDAQ:SYMC.");
     println!("  1990:  acquires Peter Norton Computing — Norton consumer brand enters portfolio.");
-    println!("  1990s: rolls up Central Point, Fifth Generation, Delrina, IBM ANYTIME, Quarterdeck.");
+    println!(
+        "  1990s: rolls up Central Point, Fifth Generation, Delrina, IBM ANYTIME, Quarterdeck."
+    );
     println!("  2005:  \\$13.5B merger with Veritas Software (storage management).");
-    println!("  2016:  Veritas demerged + sold to Carlyle for \\$8B; Symantec becomes pure security.");
+    println!(
+        "  2016:  Veritas demerged + sold to Carlyle for \\$8B; Symantec becomes pure security."
+    );
     println!("  2016:  Symantec acquires Blue Coat Systems for \\$4.65B (web + cloud security).");
     println!("  2017:  acquires LifeLock for \\$2.3B (identity-theft protection).");
     println!("  2019:  Broadcom buys Symantec enterprise for \\$10.7B; consumer half spun off.");
@@ -121,12 +129,18 @@ fn run_dlp() {
     println!("  Symantec DLP is widely regarded as the category-defining + market-leading");
     println!("  enterprise data-loss-prevention product, originally the Vontu acquisition (2007).");
     println!("  Coverage: endpoint DLP, network DLP, storage DLP, email DLP, cloud + CASB DLP.");
-    println!("  Detection: fingerprinting, exact-data-match, vector machine learning, dictionaries.");
-    println!("  Discovery: scan endpoints + file shares + SharePoint + cloud storage for sensitive");
+    println!(
+        "  Detection: fingerprinting, exact-data-match, vector machine learning, dictionaries."
+    );
+    println!(
+        "  Discovery: scan endpoints + file shares + SharePoint + cloud storage for sensitive"
+    );
     println!("  data at rest; classify + remediate.");
     println!("  Information-Centric Encryption + Tagging: data-protection-by-classification flow.");
     println!("  Common in financial services + healthcare + government compliance programmes.");
-    println!("  Inside Broadcom: continues as the enterprise DLP standard for the strategic top accounts.");
+    println!(
+        "  Inside Broadcom: continues as the enterprise DLP standard for the strategic top accounts."
+    );
 }
 
 fn run_veritas() {
@@ -137,7 +151,9 @@ fn run_veritas() {
     println!("  Outcome: cross-sell never materialised at the level the deal premise required;");
     println!("           operational + cultural integration was difficult through the late 2000s.");
     println!("  2016:  Symantec demerges Veritas, selling to a Carlyle Group-led consortium for");
-    println!("         ~\\$8B. Veritas continues as a private-equity-owned storage + backup vendor.");
+    println!(
+        "         ~\\$8B. Veritas continues as a private-equity-owned storage + backup vendor."
+    );
     println!("  Symantec post-2016: refocuses on pure security via Blue Coat acq + LifeLock acq.");
     println!("  A canonical case study in the 'mega-merger of two adjacent enterprise categories'");
     println!("  pattern that the software industry has tried + mostly abandoned since.");

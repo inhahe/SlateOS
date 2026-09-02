@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_dt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,14 +26,19 @@ fn run_dt(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Dynatrace SaaS 2024.11 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Dynatrace SaaS 2024.11 (Slate OS)");
+        return 0;
+    }
     println!("Dynatrace SaaS 2024.11 (Slate OS)");
     println!("  Vendor: Dynatrace Inc. (Waltham, MA + Linz, Austria — NYSE:DT)");
     println!("  Founders: Bernd Greifeneder + team (Linz, Austria, 2005)");
     println!("           originally 'dynaTrace Software' — Java APM");
     println!("  History: acquired by Compuware 2011");
     println!("          spun out via Thoma Bravo PE 2014");
-    println!("          rebooted SaaS platform 'Dynatrace' (capital D) 2016 — full re-architecture");
+    println!(
+        "          rebooted SaaS platform 'Dynatrace' (capital D) 2016 — full re-architecture"
+    );
     println!("          IPO NYSE 2019");
     println!("  Pricing: usage-based (Davis Data Units + Host Units + others)");
     println!("          enterprise-only — typically $50K-$1M+/yr deployments");
@@ -50,16 +59,25 @@ fn run_dt(args: &[String], _prog: &str) -> i32 {
     println!("    - DQL (Dynatrace Query Language — SPL-style pipe queries on Grail)");
     println!("    - Synthetic Monitoring, Real User Monitoring (RUM), Session Replay");
     println!("    - Application Security (RASP — runtime detect+block CVE exploitation)");
-    println!("  Vs competitors: Davis AI > Datadog Watchdog (more deterministic), OneAgent > APM agents per language");
+    println!(
+        "  Vs competitors: Davis AI > Datadog Watchdog (more deterministic), OneAgent > APM agents per language"
+    );
     println!("                  but pricier per host than Datadog");
-    println!("  Customers: SAP, Lufthansa, BMW, Mercedes — large European enterprises (Austrian roots)");
-    println!("  Differentiator: AI-driven RCA + zero-config full-stack OneAgent — minimal manual setup");
+    println!(
+        "  Customers: SAP, Lufthansa, BMW, Mercedes — large European enterprises (Austrian roots)"
+    );
+    println!(
+        "  Differentiator: AI-driven RCA + zero-config full-stack OneAgent — minimal manual setup"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "dynatrace".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "dynatrace".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_dt(&rest, &_prog);
     process::exit(code);
@@ -67,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dt};
+    use super::{basename, run_dt, strip_ext};
 
     #[test]
     fn basename_strips_path() {

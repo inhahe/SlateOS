@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_uim_xim(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -20,7 +24,10 @@ fn run_uim_xim(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("uim-xim v1.8 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("uim-xim v1.8 (Slate OS)");
+        return 0;
+    }
     println!("uim-xim: XIM input method bridge started");
     println!("  Engines: anthy, pinyin, hangul, m17n, skk");
     0
@@ -32,7 +39,10 @@ fn run_toolbar(args: &[String], _prog: &str) -> i32 {
         println!("uim-toolbar v1.8 (Slate OS) — uim input method toolbar");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("uim-toolbar v1.8 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("uim-toolbar v1.8 (Slate OS)");
+        return 0;
+    }
     println!("uim-toolbar: input method toolbar started");
     0
 }
@@ -43,14 +53,20 @@ fn run_pref(args: &[String], _prog: &str) -> i32 {
         println!("uim-pref v1.8 (Slate OS) — uim preferences");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("uim-pref v1.8 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("uim-pref v1.8 (Slate OS)");
+        return 0;
+    }
     println!("uim-pref: preferences dialog opened");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "uim-xim".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "uim-xim".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "uim-toolbar" => run_toolbar(&rest, &prog),
@@ -62,7 +78,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_uim_xim};
+    use super::{basename, run_uim_xim, strip_ext};
 
     #[test]
     fn basename_strips_path() {

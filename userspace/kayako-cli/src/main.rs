@@ -42,7 +42,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("kayako-cli 0.1.0 (veteran-help-desk personality build)"); }
+fn print_version() {
+    println!("kayako-cli 0.1.0 (veteran-help-desk personality build)");
+}
 
 fn run_about() {
     println!("Kayako (Kayako, Inc., now ESW Capital portfolio).");

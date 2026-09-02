@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_pendo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,12 +25,17 @@ fn run_pendo(args: &[String], _prog: &str) -> i32 {
         println!("  --core                 Core tier (most popular for SaaS)");
         println!("  --pulse                Pulse tier (enterprise)");
         println!("  --ultimate             Ultimate (largest deals, ~$200K+/yr)");
-        println!("  --listen               Pendo Listen — voice of customer (ex-Mind the Product acquisition)");
+        println!(
+            "  --listen               Pendo Listen — voice of customer (ex-Mind the Product acquisition)"
+        );
         println!("  --roadmaps             Pendo Roadmaps (ex-receptive.io)");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Pendo 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Pendo 2024 (Slate OS)");
+        return 0;
+    }
     println!("Pendo 2024 (Slate OS)");
     println!("  Vendor: Pendo.io, Inc. (Raleigh, NC — private)");
     println!("  Founders: Todd Olson (CEO), Eric Boduch, Erik Troan, Rahul Jain, 2013");
@@ -64,7 +73,9 @@ fn run_pendo(args: &[String], _prog: &str) -> i32 {
     println!("    - A/B test different guide variants");
     println!("    - Guide analytics (views, clicks, dismisses, completion)");
     println!("    - Multi-language localization");
-    println!("    - Resource Center (in-app help hub with KB articles + guides + onboarding checklist)");
+    println!(
+        "    - Resource Center (in-app help hub with KB articles + guides + onboarding checklist)"
+    );
     println!("  Feedback:");
     println!("    - In-app NPS surveys (with segmentation + targeting)");
     println!("    - Polls + intercepts (PMs collect feature feedback inline)");
@@ -91,17 +102,24 @@ fn run_pendo(args: &[String], _prog: &str) -> i32 {
     println!("            Workday (some teams), Box, MongoDB, OpenText, Henry Schein");
     println!("            sweet spot: B2B SaaS with 'enable users in-app' use case");
     println!("  Critique: opaque pricing — frustrating to evaluate without sales call");
-    println!("           three-pillars story sometimes loses to best-of-breed competitors per pillar");
+    println!(
+        "           three-pillars story sometimes loses to best-of-breed competitors per pillar"
+    );
     println!("           UI somewhat complex compared to Amplitude's polish");
     println!("           guide UX historically dated (improving with recent redesigns)");
     println!("           IPO delays signal challenging public-market environment");
-    println!("  Differentiator: only platform unifying analytics + in-app guides + feedback as integrated motion");
+    println!(
+        "  Differentiator: only platform unifying analytics + in-app guides + feedback as integrated motion"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pendo".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pendo".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_pendo(&rest, &_prog);
     process::exit(code);
@@ -109,7 +127,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pendo};
+    use super::{basename, run_pendo, strip_ext};
 
     #[test]
     fn basename_strips_path() {

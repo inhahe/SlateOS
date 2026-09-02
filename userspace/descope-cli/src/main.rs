@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("descope-cli 0.1.0 (Flows-first personality build)"); }
+fn print_version() {
+    println!("descope-cli 0.1.0 (Flows-first personality build)");
+}
 
 fn run_about() {
     println!("Descope, Inc.");

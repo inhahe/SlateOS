@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_tealium(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,11 +26,16 @@ fn run_tealium(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tealium 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Tealium 2024 (Slate OS)");
+        return 0;
+    }
     println!("Tealium 2024 (Slate OS) — CDP + Tag Management");
     println!("  Vendor: Tealium, Inc. (San Diego, CA)");
     println!("  Founders: Mike Anderson (CEO until 2024) + Ali Behnam + others, 2008");
-    println!("          Mike Anderson: founder of WebSideStory (web analytics, sold to Visual Sciences/Adobe)");
+    println!(
+        "          Mike Anderson: founder of WebSideStory (web analytics, sold to Visual Sciences/Adobe)"
+    );
     println!("          Tealium founded post-Visual Sciences exit — Mike's second act");
     println!("          Jeff Lunsford joined as CEO 2024 (ex-Tealium board, Tableau)");
     println!("          original product was Tealium iQ — tag management system (pre-CDP era)");
@@ -38,10 +47,18 @@ fn run_tealium(args: &[String], _prog: &str) -> i32 {
     println!("         unicorn at last round; private since");
     println!("  ARR: estimated $100M-200M+ (mature, growing slower)");
     println!("  Strategic position: 'turnkey enterprise CDP — privacy + governance first':");
-    println!("                    pitch: 'data privacy, identity, and activation in one trusted platform'");
-    println!("                    target: enterprise + regulated industries (financial, healthcare, retail)");
-    println!("                    primary competitor: Segment, mParticle, Adobe Experience Platform, Salesforce CDP");
-    println!("                    Tealium's wedge: long-standing tag management heritage + consent depth + EU-ready");
+    println!(
+        "                    pitch: 'data privacy, identity, and activation in one trusted platform'"
+    );
+    println!(
+        "                    target: enterprise + regulated industries (financial, healthcare, retail)"
+    );
+    println!(
+        "                    primary competitor: Segment, mParticle, Adobe Experience Platform, Salesforce CDP"
+    );
+    println!(
+        "                    Tealium's wedge: long-standing tag management heritage + consent depth + EU-ready"
+    );
     println!("                    more 'IT-friendly' positioning than developer-first Segment");
     println!("                    sales motion: enterprise direct + heavy partner channel");
     println!("  Pricing:");
@@ -91,7 +108,9 @@ fn run_tealium(args: &[String], _prog: &str) -> i32 {
     println!("    - Hertz, Lufthansa, IHG (Intercontinental Hotels), United Airlines");
     println!("    - Bank of America, T-Mobile, BMW, Subaru, Cathay Pacific");
     println!("    - Mercedes-Benz, Wells Fargo, Estée Lauder, Lego");
-    println!("    - sweet spot: large enterprise — financial services, travel/hospitality, retail, automotive");
+    println!(
+        "    - sweet spot: large enterprise — financial services, travel/hospitality, retail, automotive"
+    );
     println!("    - heavily international (strong EU + APAC presence vs Segment's US tilt)");
     println!("  Critique: complex platform — long onboarding (weeks-months)");
     println!("           UX dated vs Segment / RudderStack");
@@ -101,13 +120,18 @@ fn run_tealium(args: &[String], _prog: &str) -> i32 {
     println!("           Adobe + Salesforce CDPs threaten via CRM bundling");
     println!("           growth slowing — late-stage CDP market consolidation");
     println!("           CEO change 2024 = uncertainty in product direction");
-    println!("  Differentiator: 1,300+ destination catalog (largest in market) + tag management heritage + enterprise consent depth + AudienceStream real-time + strong international presence — the enterprise CDP choice for regulated industries and global brands");
+    println!(
+        "  Differentiator: 1,300+ destination catalog (largest in market) + tag management heritage + enterprise consent depth + AudienceStream real-time + strong international presence — the enterprise CDP choice for regulated industries and global brands"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "tealium".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "tealium".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_tealium(&rest, &_prog);
     process::exit(code);
@@ -115,7 +139,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_tealium};
+    use super::{basename, run_tealium, strip_ext};
 
     #[test]
     fn basename_strips_path() {

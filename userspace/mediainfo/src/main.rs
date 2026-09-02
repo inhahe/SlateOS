@@ -24,15 +24,23 @@ fn run_mediainfo(args: Vec<String>) -> i32 {
         println!("  --Version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--Version" || a == "--version" || a == "-V") {
+    if args
+        .iter()
+        .any(|a| a == "--Version" || a == "--version" || a == "-V")
+    {
         println!("MediaInfo 24.01 (Slate OS)");
         return 0;
     }
 
-    let json = args.iter().any(|a| a == "--Output=JSON" || a == "--output=json");
-    let full = args.iter().any(|a| a == "--Full" || a == "--full" || a == "-f");
+    let json = args
+        .iter()
+        .any(|a| a == "--Output=JSON" || a == "--output=json");
+    let full = args
+        .iter()
+        .any(|a| a == "--Full" || a == "--full" || a == "-f");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -48,9 +56,15 @@ fn run_mediainfo(args: Vec<String>) -> i32 {
             println!("  \"media\": {{");
             println!("    \"@ref\": \"{}\",", file);
             println!("    \"track\": [");
-            println!("      {{\"@type\":\"General\", \"Format\":\"MPEG-4\", \"FileSize\":\"345678901\", \"Duration\":\"323.450\", \"OverallBitRate\":\"8543210\"}},");
-            println!("      {{\"@type\":\"Video\", \"Format\":\"AVC\", \"Width\":\"1920\", \"Height\":\"1080\", \"FrameRate\":\"30.000\", \"BitRate\":\"8000000\"}},");
-            println!("      {{\"@type\":\"Audio\", \"Format\":\"AAC\", \"SamplingRate\":\"48000\", \"Channels\":\"2\", \"BitRate\":\"192000\"}}");
+            println!(
+                "      {{\"@type\":\"General\", \"Format\":\"MPEG-4\", \"FileSize\":\"345678901\", \"Duration\":\"323.450\", \"OverallBitRate\":\"8543210\"}},"
+            );
+            println!(
+                "      {{\"@type\":\"Video\", \"Format\":\"AVC\", \"Width\":\"1920\", \"Height\":\"1080\", \"FrameRate\":\"30.000\", \"BitRate\":\"8000000\"}},"
+            );
+            println!(
+                "      {{\"@type\":\"Audio\", \"Format\":\"AAC\", \"SamplingRate\":\"48000\", \"Channels\":\"2\", \"BitRate\":\"192000\"}}"
+            );
             println!("    ]");
             println!("  }}");
             println!("}}");
@@ -82,7 +96,9 @@ fn run_mediainfo(args: Vec<String>) -> i32 {
             println!("Bit depth                        : 8 bits");
             println!("Scan type                        : Progressive");
             if full {
-                println!("Encoding settings                : cabac=1 / ref=4 / deblock=1:0:0 / analyse=0x3:0x113");
+                println!(
+                    "Encoding settings                : cabac=1 / ref=4 / deblock=1:0:0 / analyse=0x3:0x113"
+                );
                 println!("Codec configuration box          : avcC");
             }
             println!();
@@ -114,7 +130,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mediainfo};
+    use super::run_mediainfo;
 
     #[test]
     fn help_exits_zero() {

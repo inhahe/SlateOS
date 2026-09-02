@@ -106,7 +106,8 @@ fn run_delta(args: Vec<String>) -> i32 {
     let line_nums = args.iter().any(|a| a == "-n" || a == "--line-numbers");
 
     // Simulate processing diff input
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -147,7 +148,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_delta};
+    use super::run_delta;
 
     #[test]
     fn help_exits_zero() {

@@ -318,9 +318,7 @@ fn detect_elf(buf: &[u8]) -> Option<FileType> {
     };
 
     Some(FileType {
-        description: format!(
-            "ELF {class} {endian} {type_str}, {machine_str}"
-        ),
+        description: format!("ELF {class} {endian} {type_str}, {machine_str}"),
         mime: match etype {
             2 => "application/x-executable".into(),
             3 => "application/x-sharedlib".into(),
@@ -409,8 +407,7 @@ fn detect_shebang(buf: &[u8]) -> Option<FileType> {
         "ruby" => "text/x-ruby",
         "perl" => "text/x-perl",
         "node" | "nodejs" => "application/javascript",
-        "bash" | "sh" | "zsh" | "fish" | "dash" | "ksh" | "csh"
-        | "tcsh" => "text/x-shellscript",
+        "bash" | "sh" | "zsh" | "fish" | "dash" | "ksh" | "csh" | "tcsh" => "text/x-shellscript",
         _ => "text/x-script",
     };
 
@@ -442,11 +439,9 @@ fn detect_archive(buf: &[u8]) -> Option<FileType> {
                         mime: "application/java-archive".into(),
                     });
                 }
-                if name == b"[Content_Types].xml" || name.starts_with(b"word/")
-                {
+                if name == b"[Content_Types].xml" || name.starts_with(b"word/") {
                     return Some(FileType {
-                        description: "Microsoft Office Open XML document"
-                            .into(),
+                        description: "Microsoft Office Open XML document".into(),
                         mime: "application/vnd.openxmlformats-officedocument\
                             .wordprocessingml.document"
                             .into(),
@@ -512,12 +507,12 @@ fn detect_image(buf: &[u8]) -> Option<FileType> {
         let mut desc = String::from("PNG image data");
         // IHDR chunk starts at offset 8 (4-byte length + 4-byte type), data
         // at offset 16: width(4) + height(4).
-        if buf.len() >= 24 && has_at(buf, 12, b"IHDR")
-            && let (Some(w), Some(h)) =
-                (read_u32_be(buf, 16), read_u32_be(buf, 20))
-            {
-                desc = format!("PNG image data, {w} x {h}");
-            }
+        if buf.len() >= 24
+            && has_at(buf, 12, b"IHDR")
+            && let (Some(w), Some(h)) = (read_u32_be(buf, 16), read_u32_be(buf, 20))
+        {
+            desc = format!("PNG image data, {w} x {h}");
+        }
         return Some(FileType {
             description: desc,
             mime: "image/png".into(),
@@ -534,11 +529,10 @@ fn detect_image(buf: &[u8]) -> Option<FileType> {
     if starts_with(buf, b"GIF87a") || starts_with(buf, b"GIF89a") {
         let mut desc = String::from("GIF image data");
         if buf.len() >= 10
-            && let (Some(w), Some(h)) =
-                (read_u16_le(buf, 6), read_u16_le(buf, 8))
-            {
-                desc = format!("GIF image data, {w} x {h}");
-            }
+            && let (Some(w), Some(h)) = (read_u16_le(buf, 6), read_u16_le(buf, 8))
+        {
+            desc = format!("GIF image data, {w} x {h}");
+        }
         return Some(FileType {
             description: desc,
             mime: "image/gif".into(),
@@ -608,14 +602,15 @@ fn detect_document(buf: &[u8]) -> Option<FileType> {
         // Try to extract version from "%PDF-X.Y".
         if buf.len() >= 8
             && let Ok(header) = core::str::from_utf8(&buf[..buf.len().min(16)])
-                && let Some(ver) = header.strip_prefix("%PDF-") {
-                    let ver_end = ver
-                        .find(|c: char| !c.is_ascii_digit() && c != '.')
-                        .unwrap_or(ver.len());
-                    if ver_end > 0 {
-                        desc = format!("PDF document, version {}", &ver[..ver_end]);
-                    }
-                }
+            && let Some(ver) = header.strip_prefix("%PDF-")
+        {
+            let ver_end = ver
+                .find(|c: char| !c.is_ascii_digit() && c != '.')
+                .unwrap_or(ver.len());
+            if ver_end > 0 {
+                desc = format!("PDF document, version {}", &ver[..ver_end]);
+            }
+        }
         return Some(FileType {
             description: desc,
             mime: "application/pdf".into(),
@@ -897,10 +892,7 @@ fn classify_text(buf: &[u8]) -> TextKind {
         }
 
         // Control characters that are not typical in text files.
-        if b < 0x08
-            || (b > 0x0D && b < 0x1B)
-            || (b > 0x1B && b < 0x20)
-        {
+        if b < 0x08 || (b > 0x0D && b < 0x1B) || (b > 0x1B && b < 0x20) {
             // Allow BEL(7), BS(8), HT(9), LF(10), VT(11), FF(12), CR(13),
             // ESC(27), and printable range. Everything else is suspicious.
             return TextKind::Binary;
@@ -1172,11 +1164,7 @@ fn emit_result(
 // ============================================================================
 
 /// Process a single file path and emit its type.
-fn process_file(
-    out: &mut impl Write,
-    opts: &Options,
-    path: &str,
-) -> io::Result<()> {
+fn process_file(out: &mut impl Write, opts: &Options, path: &str) -> io::Result<()> {
     // Check for special files first (directory, symlink, device, etc.).
     if let Some(ft) = identify_special(path, opts.dereference) {
         emit_result(out, opts, path, &[ft])?;
@@ -1209,8 +1197,7 @@ fn run() -> Result<(), String> {
     let mut out = io::BufWriter::new(stdout.lock());
 
     for path in &opts.files {
-        process_file(&mut out, &opts, path)
-            .map_err(|e| format!("{path}: {e}"))?;
+        process_file(&mut out, &opts, path).map_err(|e| format!("{path}: {e}"))?;
     }
 
     out.flush().map_err(|e| format!("write error: {e}"))?;

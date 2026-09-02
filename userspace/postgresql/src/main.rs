@@ -25,16 +25,33 @@ fn run_postgres(args: Vec<String>) -> i32 {
         println!("postgres (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
-    let port = args.iter().position(|a| a == "-p")
+    let port = args
+        .iter()
+        .position(|a| a == "-p")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(5432);
-    println!("2025-05-22 10:00:00.000 UTC [12345] LOG:  starting PostgreSQL 16.3 (Slate OS) on x86_64");
-    println!("2025-05-22 10:00:00.001 UTC [12345] LOG:  listening on IPv4 address \"0.0.0.0\", port {}", port);
-    println!("2025-05-22 10:00:00.002 UTC [12345] LOG:  listening on IPv6 address \"::\", port {}", port);
-    println!("2025-05-22 10:00:00.010 UTC [12345] LOG:  listening on Unix socket \"/tmp/.s.PGSQL.{}\"", port);
-    println!("2025-05-22 10:00:00.100 UTC [12346] LOG:  database system was shut down at 2025-05-22 09:59:50 UTC");
-    println!("2025-05-22 10:00:00.200 UTC [12345] LOG:  database system is ready to accept connections");
+    println!(
+        "2025-05-22 10:00:00.000 UTC [12345] LOG:  starting PostgreSQL 16.3 (Slate OS) on x86_64"
+    );
+    println!(
+        "2025-05-22 10:00:00.001 UTC [12345] LOG:  listening on IPv4 address \"0.0.0.0\", port {}",
+        port
+    );
+    println!(
+        "2025-05-22 10:00:00.002 UTC [12345] LOG:  listening on IPv6 address \"::\", port {}",
+        port
+    );
+    println!(
+        "2025-05-22 10:00:00.010 UTC [12345] LOG:  listening on Unix socket \"/tmp/.s.PGSQL.{}\"",
+        port
+    );
+    println!(
+        "2025-05-22 10:00:00.100 UTC [12346] LOG:  database system was shut down at 2025-05-22 09:59:50 UTC"
+    );
+    println!(
+        "2025-05-22 10:00:00.200 UTC [12345] LOG:  database system is ready to accept connections"
+    );
     0
 }
 
@@ -68,7 +85,9 @@ fn run_psql(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let exec_cmd = args.iter().position(|a| a == "-c" || a == "--command")
+    let exec_cmd = args
+        .iter()
+        .position(|a| a == "-c" || a == "--command")
         .and_then(|i| args.get(i + 1));
 
     if let Some(cmd) = exec_cmd {
@@ -125,7 +144,11 @@ fn run_pg_dump(args: Vec<String>) -> i32 {
         println!("pg_dump (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
-    let db = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("myapp");
+    let db = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("myapp");
     println!("--");
     println!("-- PostgreSQL database dump");
     println!("--");
@@ -138,7 +161,10 @@ fn run_pg_dump(args: Vec<String>) -> i32 {
     println!("SET standard_conforming_strings = on;");
     println!();
     println!("--");
-    println!("-- Name: {}; Type: DATABASE; Schema: -; Owner: postgres", db);
+    println!(
+        "-- Name: {}; Type: DATABASE; Schema: -; Owner: postgres",
+        db
+    );
     println!("--");
     println!();
     println!("CREATE TABLE public.users (");
@@ -182,7 +208,11 @@ fn run_createdb(args: Vec<String>) -> i32 {
         println!("createdb (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
-    let db = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("newdb");
+    let db = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("newdb");
     println!("CREATE DATABASE");
     let _ = db;
     0
@@ -215,11 +245,15 @@ fn run_pg_isready(args: Vec<String>) -> i32 {
         println!("pg_isready (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
-    let host = args.iter().position(|a| a == "-h" || a == "--host")
+    let host = args
+        .iter()
+        .position(|a| a == "-h" || a == "--host")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("localhost");
-    let port = args.iter().position(|a| a == "-p" || a == "--port")
+    let port = args
+        .iter()
+        .position(|a| a == "-p" || a == "--port")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("5432");
@@ -242,10 +276,16 @@ fn run_initdb(args: Vec<String>) -> i32 {
         println!("initdb (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
-    let datadir = args.iter().position(|a| a == "-D" || a == "--pgdata")
+    let datadir = args
+        .iter()
+        .position(|a| a == "-D" || a == "--pgdata")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
-        .or_else(|| args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()))
+        .or_else(|| {
+            args.iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+        })
         .unwrap_or("/var/lib/postgresql/16/data");
     println!("The files belonging to this database system will be owned by user \"postgres\".");
     println!("This user must also own the server process.");
@@ -278,7 +318,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -299,7 +341,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_postgres};
+    use super::run_postgres;
 
     #[test]
     fn help_exits_zero() {

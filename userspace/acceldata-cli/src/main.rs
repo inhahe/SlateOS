@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_accel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: acceldata [OPTIONS]");
-        println!("Acceldata (Slate OS) — multi-layered data observability (data + pipeline + cost)");
+        println!(
+            "Acceldata (Slate OS) — multi-layered data observability (data + pipeline + cost)"
+        );
         println!();
         println!("Options:");
         println!("  --torch                Torch — data reliability + quality monitoring");
@@ -21,24 +27,39 @@ fn run_accel(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Acceldata 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Acceldata 2024 (Slate OS)");
+        return 0;
+    }
     println!("Acceldata 2024 (Slate OS) — Multi-layered Data Observability");
     println!("  Vendor: Acceldata Inc. (Campbell, CA + Bangalore, India)");
     println!("  Founders: Rohit Choudhary (CEO) + Ashwin Rajeeva (CTO), 2018");
     println!("          Rohit: ex-Hortonworks (Hadoop distribution co, sold to Cloudera 2019)");
     println!("          Ashwin: ex-Hortonworks engineering");
-    println!("          founded by Hadoop ecosystem veterans who saw operational cost+performance issues at scale");
+    println!(
+        "          founded by Hadoop ecosystem veterans who saw operational cost+performance issues at scale"
+    );
     println!("  Funding: ~$95M total through Series C (2022)");
     println!("         Series C Sep 2022: $50M led by March Capital + Insight Partners");
     println!("         Series B Aug 2021: $35M led by Insight Partners");
     println!("         seed/A: Lightspeed Venture Partners, Sorenson");
     println!("  Strategic position: 'data + compute + cost observability in one platform':");
-    println!("                    pitch: 'three observability layers for the data lake/warehouse era'");
-    println!("                    contrast: Monte Carlo only watches data; Acceldata also watches compute + cost");
-    println!("                    target: large enterprises with Snowflake + Databricks + on-prem Hadoop");
-    println!("                    primary competitor: Monte Carlo, Bigeye (narrower scope), Unravel Data (compute-only)");
+    println!(
+        "                    pitch: 'three observability layers for the data lake/warehouse era'"
+    );
+    println!(
+        "                    contrast: Monte Carlo only watches data; Acceldata also watches compute + cost"
+    );
+    println!(
+        "                    target: large enterprises with Snowflake + Databricks + on-prem Hadoop"
+    );
+    println!(
+        "                    primary competitor: Monte Carlo, Bigeye (narrower scope), Unravel Data (compute-only)"
+    );
     println!("                    Indian heritage = strong APAC enterprise distribution");
-    println!("                    bet: data observability + FinOps converge — Acceldata covers both");
+    println!(
+        "                    bet: data observability + FinOps converge — Acceldata covers both"
+    );
     println!("  Pricing: enterprise sales-led, $100K-$2M+/yr typical");
     println!("         Indian customers get lower-tier pricing; US enterprise full sticker");
     println!("         priced per data source + node count");
@@ -85,23 +106,34 @@ fn run_accel(args: &[String], _prog: &str) -> i32 {
     println!("    acceldata finops query-cost --warehouse snowflake-analytics --top 50");
     println!("  Customers (~150+ paying):");
     println!("    - PubMatic, Phonepe, Oracle, HPE");
-    println!("    - Verisk, True Digital, T-Mobile (heavy Acceldata customer for Hadoop migration)");
+    println!(
+        "    - Verisk, True Digital, T-Mobile (heavy Acceldata customer for Hadoop migration)"
+    );
     println!("    - Many Indian banks + telco (Reliance Jio, ICICI, HDFC)");
-    println!("    - sweet spot: enterprises with Hadoop + Snowflake or Databricks (hybrid environments)");
+    println!(
+        "    - sweet spot: enterprises with Hadoop + Snowflake or Databricks (hybrid environments)"
+    );
     println!("    - heavy in: financial services, telco, retail (especially APAC + India)");
     println!("  Critique: multi-pillar = complex to deploy, longer sales cycles");
     println!("           Hadoop strength = legacy positioning (Hadoop is shrinking)");
-    println!("           Monte Carlo + Anomalo more focused = often quicker to value for pure data obs");
+    println!(
+        "           Monte Carlo + Anomalo more focused = often quicker to value for pure data obs"
+    );
     println!("           FinOps story competes with Snowflake's own Account Usage views (free)");
     println!("           pricing high for mid-market");
     println!("           less prominent in US tech-startup buyers than competitors");
-    println!("  Differentiator: only platform combining data + compute + cost observability + deep Hadoop heritage + APAC enterprise distribution — the data observability choice for hybrid (cloud + on-prem) enterprises and cost-conscious data orgs");
+    println!(
+        "  Differentiator: only platform combining data + compute + cost observability + deep Hadoop heritage + APAC enterprise distribution — the data observability choice for hybrid (cloud + on-prem) enterprises and cost-conscious data orgs"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "acceldata".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "acceldata".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_accel(&rest, &_prog);
     process::exit(code);
@@ -109,7 +141,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_accel};
+    use super::{basename, run_accel, strip_ext};
 
     #[test]
     fn basename_strips_path() {

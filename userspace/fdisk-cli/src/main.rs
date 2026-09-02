@@ -31,11 +31,17 @@ fn run_fdisk(args: &[String]) -> i32 {
     }
 
     let list = args.iter().any(|a| a == "-l" || a == "--list");
-    let device = args.iter().rfind(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("/dev/sda");
+    let device = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/dev/sda");
 
     if list {
-        println!("Disk {}: 500 GiB, 536870912000 bytes, 1048576000 sectors", device);
+        println!(
+            "Disk {}: 500 GiB, 536870912000 bytes, 1048576000 sectors",
+            device
+        );
         println!("Disk model: Samsung SSD 870");
         println!("Units: sectors of 1 * 512 = 512 bytes");
         println!("Sector size (logical/physical): 512 bytes / 512 bytes");
@@ -43,9 +49,18 @@ fn run_fdisk(args: &[String]) -> i32 {
         println!("Disk identifier: ABCDEF12-3456-7890-ABCD-EF1234567890");
         println!();
         println!("Device         Start        End    Sectors   Size Type");
-        println!("{}1       2048    1050623    1048576   512M EFI System", device);
-        println!("{}2    1050624  105908223  104857600    50G Linux filesystem", device);
-        println!("{}3  105908224 1048575966  942667743 449.5G Linux filesystem", device);
+        println!(
+            "{}1       2048    1050623    1048576   512M EFI System",
+            device
+        );
+        println!(
+            "{}2    1050624  105908223  104857600    50G Linux filesystem",
+            device
+        );
+        println!(
+            "{}3  105908224 1048575966  942667743 449.5G Linux filesystem",
+            device
+        );
     } else {
         println!("Welcome to fdisk (Slate OS).");
         println!("Changes will remain in memory only, until you decide to write them.");
@@ -65,20 +80,38 @@ fn run_sfdisk(args: &[String]) -> i32 {
         return 0;
     }
 
-    let device = args.iter().rfind(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("/dev/sda");
+    let device = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/dev/sda");
 
     if args.iter().any(|a| a == "-J" || a == "--json") {
-        println!("{{\"partitiontable\": {{\"device\": \"{}\", \"label\": \"gpt\", \"partitions\": [", device);
-        println!("  {{\"node\": \"{}1\", \"start\": 2048, \"size\": 1048576, \"type\": \"EFI System\"}},", device);
-        println!("  {{\"node\": \"{}2\", \"start\": 1050624, \"size\": 104857600, \"type\": \"Linux filesystem\"}}", device);
+        println!(
+            "{{\"partitiontable\": {{\"device\": \"{}\", \"label\": \"gpt\", \"partitions\": [",
+            device
+        );
+        println!(
+            "  {{\"node\": \"{}1\", \"start\": 2048, \"size\": 1048576, \"type\": \"EFI System\"}},",
+            device
+        );
+        println!(
+            "  {{\"node\": \"{}2\", \"start\": 1050624, \"size\": 104857600, \"type\": \"Linux filesystem\"}}",
+            device
+        );
         println!("]}}}}");
     } else if args.iter().any(|a| a == "-d" || a == "--dump") {
         println!("label: gpt");
         println!("device: {}", device);
         println!("unit: sectors");
-        println!("{}1 : start=2048, size=1048576, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B", device);
-        println!("{}2 : start=1050624, size=104857600, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4", device);
+        println!(
+            "{}1 : start=2048, size=1048576, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+            device
+        );
+        println!(
+            "{}2 : start=1050624, size=104857600, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+            device
+        );
     } else {
         println!("sfdisk: {}", device);
     }
@@ -87,7 +120,8 @@ fn run_sfdisk(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "fdisk".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -106,7 +140,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fdisk};
+    use super::{basename, run_fdisk, strip_ext};
 
     #[test]
     fn basename_strips_path() {

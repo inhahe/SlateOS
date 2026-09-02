@@ -109,15 +109,17 @@ fn read_trimmed(path: &str) -> Result<String, String> {
 fn read_hostname() -> Result<String, String> {
     // Try live kernel value first.
     if let Ok(name) = read_trimmed(PROC_HOSTNAME)
-        && !name.is_empty() {
-            return Ok(name);
-        }
+        && !name.is_empty()
+    {
+        return Ok(name);
+    }
 
     // Fall back to /etc/hostname.
     if let Ok(name) = read_trimmed(ETC_HOSTNAME)
-        && !name.is_empty() {
-            return Ok(name);
-        }
+        && !name.is_empty()
+    {
+        return Ok(name);
+    }
 
     Err("unable to determine hostname: neither /proc/sys/kernel/hostname nor /etc/hostname are readable".to_string())
 }
@@ -157,12 +159,13 @@ fn parse_resolv_conf(content: &str) -> Option<String> {
 
         // "search" directive is the fallback — take the first entry.
         if search_domain.is_none()
-            && let Some(rest) = line.strip_prefix("search") {
-                let rest = rest.trim();
-                if let Some(first) = rest.split_whitespace().next() {
-                    search_domain = Some(first.to_string());
-                }
+            && let Some(rest) = line.strip_prefix("search")
+        {
+            let rest = rest.trim();
+            if let Some(first) = rest.split_whitespace().next() {
+                search_domain = Some(first.to_string());
             }
+        }
     }
 
     search_domain
@@ -319,7 +322,9 @@ fn validate_hostname(name: &str) -> Result<(), String> {
 
     for label in name.split('.') {
         if label.is_empty() {
-            return Err("hostname contains an empty label (double dot or leading/trailing dot)".to_string());
+            return Err(
+                "hostname contains an empty label (double dot or leading/trailing dot)".to_string(),
+            );
         }
 
         if label.len() > MAX_LABEL_LEN {
@@ -331,7 +336,9 @@ fn validate_hostname(name: &str) -> Result<(), String> {
         }
 
         if label.starts_with('-') || label.ends_with('-') {
-            return Err(format!("label '{label}' must not start or end with a hyphen"));
+            return Err(format!(
+                "label '{label}' must not start or end with a hyphen"
+            ));
         }
 
         for ch in label.chars() {
@@ -378,12 +385,14 @@ fn set_hostname(name: &str) -> Result<(), String> {
     fs::write(&tmp_path, &content)
         .map_err(|e| format!("cannot write {}: {e}", tmp_path.display()))?;
 
-    fs::rename(&tmp_path, ETC_HOSTNAME)
-        .map_err(|e| {
-            // Best-effort cleanup of the temp file.
-            let _ = fs::remove_file(&tmp_path);
-            format!("cannot rename {} to {ETC_HOSTNAME}: {e}", tmp_path.display())
-        })?;
+    fs::rename(&tmp_path, ETC_HOSTNAME).map_err(|e| {
+        // Best-effort cleanup of the temp file.
+        let _ = fs::remove_file(&tmp_path);
+        format!(
+            "cannot rename {} to {ETC_HOSTNAME}: {e}",
+            tmp_path.display()
+        )
+    })?;
 
     Ok(())
 }
@@ -392,8 +401,7 @@ fn set_hostname(name: &str) -> Result<(), String> {
 ///
 /// Reads the first non-empty, non-comment line from the file.
 fn read_hostname_from_file(path: &str) -> Result<String, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {path}: {e}"))?;
+    let content = fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
 
     pick_first_meaningful_line(&content)
         .ok_or_else(|| format!("no hostname found in {path} (file is empty or all comments)"))
@@ -490,7 +498,9 @@ fn parse_args(args: &[String], domainname_mode: bool) -> Result<Action, String> 
                     return Err("-F/--file requires a filename argument".to_string());
                 }
                 i += 1;
-                return Ok(Action::SetFromFile { path: args[i].clone() });
+                return Ok(Action::SetFromFile {
+                    path: args[i].clone(),
+                });
             }
 
             "-b" | "--boot" => {
@@ -508,9 +518,13 @@ fn parse_args(args: &[String], domainname_mode: bool) -> Result<Action, String> 
                 }
 
                 if boot_mode {
-                    return Ok(Action::BootSet { name: arg.to_string() });
+                    return Ok(Action::BootSet {
+                        name: arg.to_string(),
+                    });
                 }
-                return Ok(Action::Set { name: arg.to_string() });
+                return Ok(Action::Set {
+                    name: arg.to_string(),
+                });
             }
         }
     }
@@ -595,7 +609,11 @@ fn main() {
     let action = match parse_args(&args, domainname_mode) {
         Ok(a) => a,
         Err(msg) => {
-            let prog = if domainname_mode { "domainname" } else { "hostname" };
+            let prog = if domainname_mode {
+                "domainname"
+            } else {
+                "hostname"
+            };
             eprintln!("{prog}: {msg}");
             process::exit(1);
         }
@@ -614,36 +632,36 @@ fn run(action: Action, domainname_mode: bool) -> i32 {
         }
 
         Action::Version => {
-            let name = if domainname_mode { "domainname" } else { "hostname" };
+            let name = if domainname_mode {
+                "domainname"
+            } else {
+                "hostname"
+            };
             println!("{name} (Slate OS) {VERSION}");
             0
         }
 
-        Action::Show => {
-            match read_hostname() {
-                Ok(name) => {
-                    println!("{name}");
-                    0
-                }
-                Err(e) => {
-                    eprintln!("hostname: {e}");
-                    1
-                }
+        Action::Show => match read_hostname() {
+            Ok(name) => {
+                println!("{name}");
+                0
             }
-        }
+            Err(e) => {
+                eprintln!("hostname: {e}");
+                1
+            }
+        },
 
-        Action::ShowFqdn => {
-            match build_fqdn() {
-                Ok(fqdn) => {
-                    println!("{fqdn}");
-                    0
-                }
-                Err(e) => {
-                    eprintln!("hostname: {e}");
-                    1
-                }
+        Action::ShowFqdn => match build_fqdn() {
+            Ok(fqdn) => {
+                println!("{fqdn}");
+                0
             }
-        }
+            Err(e) => {
+                eprintln!("hostname: {e}");
+                1
+            }
+        },
 
         Action::ShowDomain => {
             match build_fqdn() {
@@ -699,33 +717,27 @@ fn run(action: Action, domainname_mode: bool) -> i32 {
             }
         }
 
-        Action::Set { name } => {
-            match set_hostname(&name) {
+        Action::Set { name } => match set_hostname(&name) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("hostname: {e}");
+                1
+            }
+        },
+
+        Action::SetFromFile { path } => match read_hostname_from_file(&path) {
+            Ok(name) => match set_hostname(&name) {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!("hostname: {e}");
                     1
                 }
+            },
+            Err(e) => {
+                eprintln!("hostname: {e}");
+                1
             }
-        }
-
-        Action::SetFromFile { path } => {
-            match read_hostname_from_file(&path) {
-                Ok(name) => {
-                    match set_hostname(&name) {
-                        Ok(()) => 0,
-                        Err(e) => {
-                            eprintln!("hostname: {e}");
-                            1
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("hostname: {e}");
-                    1
-                }
-            }
-        }
+        },
 
         Action::BootSet { name } => {
             // Only set if the current hostname is empty or unreadable.
@@ -743,28 +755,22 @@ fn run(action: Action, domainname_mode: bool) -> i32 {
             }
         }
 
-        Action::DomainMode { new_name } => {
-            match new_name {
-                None => {
-                    match show_domainname() {
-                        Ok(()) => 0,
-                        Err(e) => {
-                            eprintln!("domainname: {e}");
-                            1
-                        }
-                    }
+        Action::DomainMode { new_name } => match new_name {
+            None => match show_domainname() {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("domainname: {e}");
+                    1
                 }
-                Some(name) => {
-                    match set_domainname(&name) {
-                        Ok(()) => 0,
-                        Err(e) => {
-                            eprintln!("domainname: {e}");
-                            1
-                        }
-                    }
+            },
+            Some(name) => match set_domainname(&name) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("domainname: {e}");
+                    1
                 }
-            }
-        }
+            },
+        },
     }
 }
 
@@ -952,7 +958,12 @@ mod tests {
     #[test]
     fn parse_args_set_bare_name() {
         let a = parse_args(&args(&["hostname", "myhost"]), false).unwrap();
-        assert_eq!(a, Action::Set { name: "myhost".to_string() });
+        assert_eq!(
+            a,
+            Action::Set {
+                name: "myhost".to_string()
+            }
+        );
     }
 
     #[test]
@@ -986,9 +997,19 @@ mod tests {
     #[test]
     fn parse_args_boot_mode_with_name() {
         let a = parse_args(&args(&["hostname", "-b", "myhost"]), false).unwrap();
-        assert_eq!(a, Action::BootSet { name: "myhost".to_string() });
+        assert_eq!(
+            a,
+            Action::BootSet {
+                name: "myhost".to_string()
+            }
+        );
         let a = parse_args(&args(&["hostname", "--boot", "myhost"]), false).unwrap();
-        assert_eq!(a, Action::BootSet { name: "myhost".to_string() });
+        assert_eq!(
+            a,
+            Action::BootSet {
+                name: "myhost".to_string()
+            }
+        );
     }
 
     #[test]
@@ -1157,7 +1178,10 @@ mod tests {
     fn pick_first_meaningful_line_empty_returns_none() {
         assert_eq!(pick_first_meaningful_line(""), None);
         assert_eq!(pick_first_meaningful_line("\n\n\n"), None);
-        assert_eq!(pick_first_meaningful_line("# only comments\n# more\n"), None);
+        assert_eq!(
+            pick_first_meaningful_line("# only comments\n# more\n"),
+            None
+        );
     }
 
     // ---------------- parse_proc_if_inet ----------------

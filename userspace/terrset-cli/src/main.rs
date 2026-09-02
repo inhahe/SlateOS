@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_terrset(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -30,7 +34,10 @@ fn run_terrset(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("TerrSet v19.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("TerrSet v19.0 (Slate OS)");
+        return 0;
+    }
     println!("TerrSet v19.0 (Slate OS) — Geospatial Monitoring");
     println!("  Module: Land Cover Change Analysis");
     println!("  Input: landsat_2020.tif, landsat_2023.tif");
@@ -48,7 +55,10 @@ fn run_terrset(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "terrset".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "terrset".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_terrset(&rest, &_prog);
     process::exit(code);
@@ -56,7 +66,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_terrset};
+    use super::{basename, run_terrset, strip_ext};
 
     #[test]
     fn basename_strips_path() {

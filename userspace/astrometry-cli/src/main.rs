@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_astrometry(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -42,7 +46,10 @@ fn run_astrometry(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("astrometry.net v0.85 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("astrometry.net v0.85 (Slate OS)");
+        return 0;
+    }
     match prog {
         "image2xy" => {
             println!("image2xy: extracting sources...");
@@ -51,7 +58,10 @@ fn run_astrometry(args: &[String], prog: &str) -> i32 {
         }
         _ => {
             let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-            if files.is_empty() { eprintln!("solve-field: error: no image specified"); return 1; }
+            if files.is_empty() {
+                eprintln!("solve-field: error: no image specified");
+                return 1;
+            }
             println!("solve-field: solving {}", files[0]);
             println!("  Extracting sources... 342 found");
             println!("  Searching index files...");
@@ -68,7 +78,10 @@ fn run_astrometry(args: &[String], prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "solve-field".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "solve-field".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_astrometry(&rest, &prog);
     process::exit(code);
@@ -76,7 +89,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_astrometry};
+    use super::{basename, run_astrometry, strip_ext};
 
     #[test]
     fn basename_strips_path() {

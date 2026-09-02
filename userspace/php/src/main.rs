@@ -51,23 +51,33 @@ fn run_php(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let serve = args.iter().position(|a| a == "-S")
+    let serve = args
+        .iter()
+        .position(|a| a == "-S")
         .and_then(|i| args.get(i + 1));
     if let Some(addr) = serve {
-        println!("PHP 8.3.8 Development Server (Slate OS) started at {}", addr);
+        println!(
+            "PHP 8.3.8 Development Server (Slate OS) started at {}",
+            addr
+        );
         println!("Document root is /var/www/html");
         println!("Press Ctrl-C to quit.");
         return 0;
     }
 
-    let exec_code = args.iter().position(|a| a == "-r")
+    let exec_code = args
+        .iter()
+        .position(|a| a == "-r")
         .and_then(|i| args.get(i + 1));
     if let Some(code) = exec_code {
         println!("(executing: {})", code);
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(f) = file {
         println!("(running {})", f);
     } else {
@@ -121,14 +131,19 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
     };
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog_name.as_str() {
-        "php-fpm" => { println!("php-fpm: pool www started (simulated)"); 0 }
+        "php-fpm" => {
+            println!("php-fpm: pool www started (simulated)");
+            0
+        }
         "composer" => run_composer(rest),
         _ => run_php(rest),
     };
@@ -137,7 +152,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_php};
+    use super::run_php;
 
     #[test]
     fn help_exits_zero() {

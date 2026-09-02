@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mongosh(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_mongosh(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mongosh v2.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("mongosh v2.1 (Slate OS)");
+        return 0;
+    }
     println!("mongosh: connecting to mongodb://localhost:27017");
     println!("Using MongoDB: 7.0.4");
     println!("Using Mongosh: 2.1");
@@ -39,7 +46,10 @@ fn run_mongodump(args: &[String], _prog: &str) -> i32 {
         println!("  --gzip          Compress output");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mongodump v2.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("mongodump v2.1 (Slate OS)");
+        return 0;
+    }
     println!("mongodump: dumping database...");
     println!("  Collections: 8");
     println!("  Documents: 12,456");
@@ -53,7 +63,10 @@ fn run_mongorestore(args: &[String], _prog: &str) -> i32 {
         println!("mongorestore v2.1 (Slate OS) — Restore MongoDB data");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mongorestore v2.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("mongorestore v2.1 (Slate OS)");
+        return 0;
+    }
     println!("mongorestore: restoring from dump/");
     println!("  Collections: 8 restored");
     println!("  Documents: 12,456 inserted");
@@ -66,7 +79,10 @@ fn run_mongostat(args: &[String], _prog: &str) -> i32 {
         println!("mongostat v2.1 (Slate OS) — MongoDB server statistics");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mongostat v2.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("mongostat v2.1 (Slate OS)");
+        return 0;
+    }
     println!("insert query update delete getmore command  res  vsize");
     println!("    *0    12     *0     *0       0    24|0  128M  256M");
     0
@@ -74,7 +90,10 @@ fn run_mongostat(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mongosh".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mongosh".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "mongodump" => run_mongodump(&rest, &prog),
@@ -87,7 +106,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mongosh};
+    use super::{basename, run_mongosh, strip_ext};
 
     #[test]
     fn basename_strips_path() {

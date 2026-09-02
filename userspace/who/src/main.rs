@@ -613,11 +613,12 @@ fn get_user_process_info(tty: &str, pid: i32, now: u64) -> UserProcessInfo {
 
     // If we have a specific PID from utmp, read its info directly.
     if pid > 0
-        && let Some((cpu_time, cmd)) = read_proc_stat_brief(pid as u32) {
-            pcpu = cpu_time;
-            jcpu = cpu_time;
-            what = cmd;
-        }
+        && let Some((cpu_time, cmd)) = read_proc_stat_brief(pid as u32)
+    {
+        pcpu = cpu_time;
+        jcpu = cpu_time;
+        what = cmd;
+    }
 
     // Try to scan /proc for all processes on this tty to get total JCPU.
     // This is best-effort; if /proc is not available, we use the single-process info.
@@ -637,10 +638,11 @@ fn get_user_process_info(tty: &str, pid: i32, now: u64) -> UserProcessInfo {
             // Check if this process is on the same tty.
             if let Some(proc_tty) = read_proc_tty(proc_pid)
                 && proc_tty == tty
-                    && let Some((cpu_time, _cmd)) = read_proc_stat_brief(proc_pid) {
-                        total_cpu = total_cpu.saturating_add(cpu_time);
-                        found_any = true;
-                    }
+                && let Some((cpu_time, _cmd)) = read_proc_stat_brief(proc_pid)
+            {
+                total_cpu = total_cpu.saturating_add(cpu_time);
+                found_any = true;
+            }
         }
 
         if found_any {
@@ -738,13 +740,15 @@ fn get_current_user() -> String {
     // Try USER env var, then LOGNAME, then read /proc/self/status for uid
     // and resolve via /etc/passwd.
     if let Ok(user) = env::var("USER")
-        && !user.is_empty() {
-            return user;
-        }
+        && !user.is_empty()
+    {
+        return user;
+    }
     if let Ok(user) = env::var("LOGNAME")
-        && !user.is_empty() {
-            return user;
-        }
+        && !user.is_empty()
+    {
+        return user;
+    }
     // Try to read UID from /proc/self/status and map to username.
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
@@ -765,9 +769,10 @@ fn uid_to_name(uid: u32) -> String {
             let fields: Vec<&str> = line.split(':').collect();
             if fields.len() >= 3
                 && let Ok(line_uid) = fields[2].parse::<u32>()
-                    && line_uid == uid {
-                        return fields[0].to_string();
-                    }
+                && line_uid == uid
+            {
+                return fields[0].to_string();
+            }
         }
     }
     format!("{uid}")

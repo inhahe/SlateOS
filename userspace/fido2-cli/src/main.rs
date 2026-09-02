@@ -123,7 +123,8 @@ fn run_fido2_info(_args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "fido2-token".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -139,7 +140,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fido2_token};
+    use super::{basename, run_fido2_token, strip_ext};
 
     #[test]
     fn basename_strips_path() {

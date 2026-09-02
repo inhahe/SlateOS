@@ -34,11 +34,15 @@ fn run_nginx(args: Vec<String>) -> i32 {
         println!("nginx version: nginx/1.26.1 (Slate OS)");
         println!("built with Slate OS toolchain");
         println!("TLS SNI support enabled");
-        println!("configure arguments: --prefix=/etc/nginx --sbin-path=/usr/sbin/nginx --with-http_ssl_module --with-http_v2_module --with-http_realip_module --with-http_gzip_static_module --with-http_stub_status_module --with-stream --with-stream_ssl_module");
+        println!(
+            "configure arguments: --prefix=/etc/nginx --sbin-path=/usr/sbin/nginx --with-http_ssl_module --with-http_v2_module --with-http_realip_module --with-http_gzip_static_module --with-http_stub_status_module --with-stream --with-stream_ssl_module"
+        );
         return 0;
     }
     if args.iter().any(|a| a == "-t" || a == "-T") {
-        let conf = args.iter().position(|a| a == "-c")
+        let conf = args
+            .iter()
+            .position(|a| a == "-c")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("/etc/nginx/nginx.conf");
@@ -72,7 +76,9 @@ fn run_nginx(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let signal = args.iter().position(|a| a == "-s")
+    let signal = args
+        .iter()
+        .position(|a| a == "-s")
         .and_then(|i| args.get(i + 1));
     if let Some(sig) = signal {
         match sig.as_str() {
@@ -110,7 +116,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_nginx};
+    use super::run_nginx;
 
     #[test]
     fn help_exits_zero() {

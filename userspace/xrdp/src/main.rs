@@ -28,7 +28,9 @@ fn run_xrdp(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let port = args.iter().position(|a| a == "-p" || a == "--port")
+    let port = args
+        .iter()
+        .position(|a| a == "-p" || a == "--port")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("3389");
@@ -68,7 +70,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -77,7 +81,10 @@ fn main() {
     let code = match prog_name.as_str() {
         "xrdp-sesman" => run_xrdp_sesman(rest),
         "xrdp-keygen" => run_xrdp_keygen(rest),
-        "xrdp-sesrun" => { println!("(session run — simulated)"); 0 }
+        "xrdp-sesrun" => {
+            println!("(session run — simulated)");
+            0
+        }
         _ => run_xrdp(rest),
     };
     process::exit(code);
@@ -85,7 +92,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_xrdp};
+    use super::run_xrdp;
 
     #[test]
     fn help_exits_zero() {

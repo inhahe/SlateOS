@@ -56,7 +56,8 @@ fn run_strace(args: &[String]) -> i32 {
     let timing = args.iter().any(|a| a == "-t" || a == "-tt");
     let follow_forks = args.iter().any(|a| a == "-f" || a == "-ff");
 
-    let command = args.iter()
+    let command = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("");
@@ -81,18 +82,54 @@ fn run_strace(args: &[String]) -> i32 {
     } else {
         let prefix = if timing { "12:00:01 " } else { "" };
         let fork_info = if follow_forks { "[pid 1234] " } else { "" };
-        println!("{}{}execve(\"/usr/bin/{}\", [\"{}\"], 0x7fff...) = 0", prefix, fork_info, command, command);
-        println!("{}{}brk(NULL)                        = 0x562000", prefix, fork_info);
-        println!("{}{}openat(AT_FDCWD, \"/etc/ld.so.cache\", O_RDONLY|O_CLOEXEC) = 3", prefix, fork_info);
-        println!("{}{}fstat(3, {{st_mode=S_IFREG|0644, st_size=47832, ...}}) = 0", prefix, fork_info);
-        println!("{}{}mmap(NULL, 47832, PROT_READ, MAP_PRIVATE, 3, 0) = 0x7f8000", prefix, fork_info);
-        println!("{}{}close(3)                         = 0", prefix, fork_info);
-        println!("{}{}openat(AT_FDCWD, \"/lib/x86_64-linux-gnu/libc.so.6\", O_RDONLY|O_CLOEXEC) = 3", prefix, fork_info);
-        println!("{}{}read(3, \"\\177ELF\\2\\1\\1\\3\\0\\0\\0...\", 832) = 832", prefix, fork_info);
-        println!("{}{}mmap(NULL, 2037344, PROT_READ, MAP_PRIVATE|MAP_DENYWRITE, 3, 0) = 0x7f7000", prefix, fork_info);
-        println!("{}{}close(3)                         = 0", prefix, fork_info);
-        println!("{}{}write(1, \"output\\n\", 7)          = 7", prefix, fork_info);
-        println!("{}{}exit_group(0)                    = ?", prefix, fork_info);
+        println!(
+            "{}{}execve(\"/usr/bin/{}\", [\"{}\"], 0x7fff...) = 0",
+            prefix, fork_info, command, command
+        );
+        println!(
+            "{}{}brk(NULL)                        = 0x562000",
+            prefix, fork_info
+        );
+        println!(
+            "{}{}openat(AT_FDCWD, \"/etc/ld.so.cache\", O_RDONLY|O_CLOEXEC) = 3",
+            prefix, fork_info
+        );
+        println!(
+            "{}{}fstat(3, {{st_mode=S_IFREG|0644, st_size=47832, ...}}) = 0",
+            prefix, fork_info
+        );
+        println!(
+            "{}{}mmap(NULL, 47832, PROT_READ, MAP_PRIVATE, 3, 0) = 0x7f8000",
+            prefix, fork_info
+        );
+        println!(
+            "{}{}close(3)                         = 0",
+            prefix, fork_info
+        );
+        println!(
+            "{}{}openat(AT_FDCWD, \"/lib/x86_64-linux-gnu/libc.so.6\", O_RDONLY|O_CLOEXEC) = 3",
+            prefix, fork_info
+        );
+        println!(
+            "{}{}read(3, \"\\177ELF\\2\\1\\1\\3\\0\\0\\0...\", 832) = 832",
+            prefix, fork_info
+        );
+        println!(
+            "{}{}mmap(NULL, 2037344, PROT_READ, MAP_PRIVATE|MAP_DENYWRITE, 3, 0) = 0x7f7000",
+            prefix, fork_info
+        );
+        println!(
+            "{}{}close(3)                         = 0",
+            prefix, fork_info
+        );
+        println!(
+            "{}{}write(1, \"output\\n\", 7)          = 7",
+            prefix, fork_info
+        );
+        println!(
+            "{}{}exit_group(0)                    = ?",
+            prefix, fork_info
+        );
         println!("+++ exited with 0 +++");
     }
     0
@@ -100,7 +137,8 @@ fn run_strace(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first()
+    let _prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "strace".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -111,7 +149,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_strace};
+    use super::{basename, run_strace, strip_ext};
 
     #[test]
     fn basename_strips_path() {

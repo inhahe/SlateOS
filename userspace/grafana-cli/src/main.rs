@@ -36,7 +36,10 @@ fn run_grafana_cli(args: Vec<String>) -> i32 {
 
     match (cmd, sub) {
         ("plugins", "install") => {
-            let plugin = args.get(2).map(|s| s.as_str()).unwrap_or("grafana-clock-panel");
+            let plugin = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("grafana-clock-panel");
             println!("Installing {}...", plugin);
             println!("  Downloading {}...", plugin);
             println!("  Installed {} successfully", plugin);
@@ -61,13 +64,19 @@ fn run_grafana_cli(args: Vec<String>) -> i32 {
             0
         }
         ("plugins", "remove") | ("plugins", "uninstall") => {
-            let plugin = args.get(2).map(|s| s.as_str()).unwrap_or("grafana-clock-panel");
+            let plugin = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("grafana-clock-panel");
             println!("Removing {}...", plugin);
             println!("  Plugin removed successfully.");
             0
         }
         ("plugins", "update") | ("plugins", "upgrade") => {
-            let plugin = args.get(2).map(|s| s.as_str()).unwrap_or("grafana-clock-panel");
+            let plugin = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("grafana-clock-panel");
             println!("Updating {}...", plugin);
             println!("  Updated to v2.1.4");
             0
@@ -114,7 +123,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_grafana_cli};
+    use super::run_grafana_cli;
 
     #[test]
     fn help_exits_zero() {

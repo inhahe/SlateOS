@@ -23,7 +23,10 @@ fn run_distcc(args: Vec<String>) -> i32 {
         println!("distcc 3.4 (Slate OS)");
         return 0;
     }
-    if args.iter().any(|a| a == "--show-hosts" || a == "--host-list") {
+    if args
+        .iter()
+        .any(|a| a == "--show-hosts" || a == "--host-list")
+    {
         println!("localhost/4");
         println!("192.168.1.10/8,lzo");
         println!("192.168.1.11/8,lzo");
@@ -35,7 +38,10 @@ fn run_distcc(args: Vec<String>) -> i32 {
     }
 
     let compiler = args.first().map(|s| s.as_str()).unwrap_or("cc");
-    println!("distcc: distributing compilation of source file via {}", compiler);
+    println!(
+        "distcc: distributing compilation of source file via {}",
+        compiler
+    );
     println!("(distributed compilation simulated)");
     0
 }
@@ -63,11 +69,15 @@ fn run_distccd(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let port = args.iter().position(|a| a == "--port")
+    let port = args
+        .iter()
+        .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("3632");
-    let jobs = args.iter().position(|a| a == "--jobs")
+    let jobs = args
+        .iter()
+        .position(|a| a == "--jobs")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("4");
@@ -114,7 +124,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -131,7 +143,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_distcc};
+    use super::run_distcc;
 
     #[test]
     fn help_exits_zero() {

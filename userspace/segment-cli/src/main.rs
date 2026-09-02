@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_segment(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,40 +26,69 @@ fn run_segment(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Twilio Segment 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Twilio Segment 2024 (Slate OS)");
+        return 0;
+    }
     println!("Twilio Segment 2024 (Slate OS) — Customer Data Platform");
     println!("  Vendor: Twilio Segment (part of Twilio Inc., NYSE:TWLO since acquisition)");
-    println!("  Founders: Peter Reinhardt, Calvin French-Owen, Ilya Volodarsky, Ian Storm Taylor, 2011");
+    println!(
+        "  Founders: Peter Reinhardt, Calvin French-Owen, Ilya Volodarsky, Ian Storm Taylor, 2011"
+    );
     println!("          all four were MIT students — pivoted from classroom-feedback app to CDP");
-    println!("          original idea was 'analytics.js' — single SDK that forwards events to many tools");
-    println!("          coined the 'Customer Data Platform' category (Segment, mParticle, Tealium)");
+    println!(
+        "          original idea was 'analytics.js' — single SDK that forwards events to many tools"
+    );
+    println!(
+        "          coined the 'Customer Data Platform' category (Segment, mParticle, Tealium)"
+    );
     println!("          one of YC's iconic pivot stories");
     println!("          Peter left 2021 to found Charm Industrial (carbon removal)");
     println!("          Calvin French-Owen later joined OpenAI");
     println!("  Acquisition Nov 2020:");
-    println!("         Twilio acquired Segment for $3.2B in stock (largest acquisition for Twilio)");
+    println!(
+        "         Twilio acquired Segment for $3.2B in stock (largest acquisition for Twilio)"
+    );
     println!("         strategic: CPaaS + CDP = 'customer engagement platform'");
     println!("         remained as Twilio Segment product line, separate brand");
     println!("         post-acquisition: layoffs in 2022-2023 as Twilio cut costs broadly");
     println!("  Funding history pre-acquisition:");
-    println!("         Series E Nov 2019: $175M at ~$1.5B+ valuation (Accel, Meritech, GV, Thrive)");
+    println!(
+        "         Series E Nov 2019: $175M at ~$1.5B+ valuation (Accel, Meritech, GV, Thrive)"
+    );
     println!("         total raised: ~$284M before $3.2B exit");
     println!("  Strategic position: 'first-party customer data infrastructure':");
-    println!("                    pitch: 'one API to collect, clean, and route customer data anywhere'");
+    println!(
+        "                    pitch: 'one API to collect, clean, and route customer data anywhere'"
+    );
     println!("                    target: digital-first companies wanting unified customer data");
-    println!("                    primary competitor: mParticle, Tealium, RudderStack (OSS), Adobe Experience Platform");
-    println!("                    secondary: Snowflake-native CDPs (Hightouch, Census), Salesforce CDP");
-    println!("                    Segment's moat: largest source/destination catalog + first-mover brand");
-    println!("                    challenger trend: 'composable CDP' (Hightouch + warehouse) erodes packaged CDP");
+    println!(
+        "                    primary competitor: mParticle, Tealium, RudderStack (OSS), Adobe Experience Platform"
+    );
+    println!(
+        "                    secondary: Snowflake-native CDPs (Hightouch, Census), Salesforce CDP"
+    );
+    println!(
+        "                    Segment's moat: largest source/destination catalog + first-mover brand"
+    );
+    println!(
+        "                    challenger trend: 'composable CDP' (Hightouch + warehouse) erodes packaged CDP"
+    );
     println!("  Pricing (consumption + tier):");
     println!("    Free — up to 1K visitors/mo, 2 sources, basic features");
     println!("    Team — $120/mo + usage (small startups)");
     println!("    Business — custom $30K-$500K+/yr (mid-market + enterprise)");
     println!("    pricing pegged to monthly tracked users (MTUs)");
-    println!("    historically expensive at scale — common complaint that drives Hightouch+warehouse defection");
+    println!(
+        "    historically expensive at scale — common complaint that drives Hightouch+warehouse defection"
+    );
     println!("  Core architecture:");
-    println!("    - Sources: 350+ libraries (analytics.js, iOS, Android, server SDKs, cloud-app integrations)");
-    println!("    - Destinations: 450+ tools (Mixpanel, Amplitude, Salesforce, Snowflake, BigQuery, etc.)");
+    println!(
+        "    - Sources: 350+ libraries (analytics.js, iOS, Android, server SDKs, cloud-app integrations)"
+    );
+    println!(
+        "    - Destinations: 450+ tools (Mixpanel, Amplitude, Salesforce, Snowflake, BigQuery, etc.)"
+    );
     println!("    - In the middle: identity resolution, validation, transformations, routing");
     println!("    - Schema: 'Tracking Plan' enforces consistent event names + properties");
     println!("    - Replay: send historical data to new destinations after the fact");
@@ -79,7 +112,9 @@ fn run_segment(args: &[String], _prog: &str) -> i32 {
     println!("    - Connect to custom destinations not in catalog");
     println!("    - Compete with: workflow tools (Zapier, Census Workflows)");
     println!("  Sources highlights:");
-    println!("    - Web/Mobile SDKs: analytics.js, iOS Swift, Android Kotlin, React Native, Unity, Roku");
+    println!(
+        "    - Web/Mobile SDKs: analytics.js, iOS Swift, Android Kotlin, React Native, Unity, Roku"
+    );
     println!("    - Server: Node, Python, Go, Ruby, Java, PHP, .NET");
     println!("    - Cloud sources: Stripe, Salesforce, Zendesk, HubSpot (pull events from APIs)");
     println!("    - Reverse ETL: sync from warehouse to Segment, then to destinations");
@@ -90,7 +125,9 @@ fn run_segment(args: &[String], _prog: &str) -> i32 {
     println!("    - Ads: Google Ads, Facebook Ads, TikTok Ads (Conversions API)");
     println!("    - Support: Zendesk, Intercom, Salesforce Service Cloud");
     println!("  Segment CLI usage:");
-    println!("    segment track --event 'Order Completed' --user-id 123 --properties '{{\"amount\": 99}}'");
+    println!(
+        "    segment track --event 'Order Completed' --user-id 123 --properties '{{\"amount\": 99}}'"
+    );
     println!("    segment sources list");
     println!("    segment destinations list --enabled");
     println!("    segment tracking-plan validate --plan ecommerce");
@@ -102,19 +139,28 @@ fn run_segment(args: &[String], _prog: &str) -> i32 {
     println!("    - sweet spot: e-commerce, SaaS, media, fintech");
     println!("    - global enterprise + heavy startup adoption");
     println!("  Critique: expensive at scale (MTU pricing surprises Fortune 500)");
-    println!("           'composable CDP' trend (Hightouch/Census + warehouse) eroding packaged CDP value");
+    println!(
+        "           'composable CDP' trend (Hightouch/Census + warehouse) eroding packaged CDP value"
+    );
     println!("           Twilio acquisition layoffs + reorgs disrupted product velocity 2022-2024");
     println!("           data residency / EU compliance complicated by US-centric infrastructure");
     println!("           catalog maintenance burden (450+ destinations need updating)");
-    println!("           Snowflake / Databricks pushing 'data sharing direct to ad networks' — disintermediation");
+    println!(
+        "           Snowflake / Databricks pushing 'data sharing direct to ad networks' — disintermediation"
+    );
     println!("           Twilio stock pressure means continued cost discipline at Segment");
-    println!("  Differentiator: original CDP brand + largest sources/destinations catalog + Tracking Plan + Twilio's CPaaS integration (SMS, voice, email) — the customer data infrastructure that defined the CDP category");
+    println!(
+        "  Differentiator: original CDP brand + largest sources/destinations catalog + Tracking Plan + Twilio's CPaaS integration (SMS, voice, email) — the customer data infrastructure that defined the CDP category"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "segment".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "segment".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_segment(&rest, &_prog);
     process::exit(code);
@@ -122,7 +168,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_segment};
+    use super::{basename, run_segment, strip_ext};
 
     #[test]
     fn basename_strips_path() {

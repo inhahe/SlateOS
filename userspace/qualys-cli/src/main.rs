@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_qualys(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,11 +28,16 @@ fn run_qualys(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Qualys 2024 (Slate OS) — Cloud Platform 10.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Qualys 2024 (Slate OS) — Cloud Platform 10.x");
+        return 0;
+    }
     println!("Qualys 2024 (Slate OS) — Enterprise TruRisk Platform");
     println!("  Vendor: Qualys, Inc. (Foster City, CA — NASDAQ:QLYS since 2012)");
     println!("  Founder: Philippe Courtot (1999) — French-American security entrepreneur");
-    println!("          previously CEO of Verity (search) + Signio (payments — acquired by VeriSign)");
+    println!(
+        "          previously CEO of Verity (search) + Signio (payments — acquired by VeriSign)"
+    );
     println!("          Courtot was visionary: SaaS vuln-mgmt before SaaS was a category");
     println!("          stepped down as CEO 2021, became chairman; passed away Feb 2024");
     println!("          Sumedh Thakar: current CEO (since 2021, long-time president/CTO)");
@@ -42,15 +51,29 @@ fn run_qualys(args: &[String], _prog: &str) -> i32 {
     println!("         Notably profitable — among the most-profitable security pure-plays");
     println!("         Operating margin ~30%+ (vs Tenable mid-teens, Rapid7 low-teens)");
     println!("         No major debt + ~$500M+ cash — possible buyback / M&A optionality");
-    println!("  Strategic position: 'cloud-native cybersecurity + IT compliance — the original SaaS scanner':");
-    println!("                    pitch: 'one agent, one platform, all assets — IT, OT, cloud, containers'");
+    println!(
+        "  Strategic position: 'cloud-native cybersecurity + IT compliance — the original SaaS scanner':"
+    );
+    println!(
+        "                    pitch: 'one agent, one platform, all assets — IT, OT, cloud, containers'"
+    );
     println!("                    target: large enterprise + regulated industries");
-    println!("                    primary competitor: Tenable (head-to-head VM), Rapid7, Microsoft Defender VM");
-    println!("                    secondary: Wiz, Orca (cloud-only CNAPP), CrowdStrike (endpoint-led)");
-    println!("                    Qualys's wedge: lightweight Cloud Agent + SaaS-from-day-one architecture + profitability");
-    println!("                    challenge: perceived as 'legacy SaaS' next to Wiz's agentless innovation");
+    println!(
+        "                    primary competitor: Tenable (head-to-head VM), Rapid7, Microsoft Defender VM"
+    );
+    println!(
+        "                    secondary: Wiz, Orca (cloud-only CNAPP), CrowdStrike (endpoint-led)"
+    );
+    println!(
+        "                    Qualys's wedge: lightweight Cloud Agent + SaaS-from-day-one architecture + profitability"
+    );
+    println!(
+        "                    challenge: perceived as 'legacy SaaS' next to Wiz's agentless innovation"
+    );
     println!("  Pricing:");
-    println!("    VMDR (vulnerability mgmt) — $2K-$1M+/yr based on assets ($50-200/asset/yr typical)");
+    println!(
+        "    VMDR (vulnerability mgmt) — $2K-$1M+/yr based on assets ($50-200/asset/yr typical)"
+    );
     println!("    Cloud Agent — included with VMDR (no per-agent extra)");
     println!("    TotalCloud — $20K-$2M+/yr (CNAPP for AWS/Azure/GCP)");
     println!("    Container Security — $10K-$500K+/yr");
@@ -61,7 +84,9 @@ fn run_qualys(args: &[String], _prog: &str) -> i32 {
     println!("    1. VMDR (Vulnerability Management, Detection + Response):");
     println!("       - Flagship product (modernized from original QualysGuard 1999)");
     println!("       - 200K+ vulnerability detection signatures");
-    println!("       - TruRisk score (severity + threat intel + exploit context + asset criticality)");
+    println!(
+        "       - TruRisk score (severity + threat intel + exploit context + asset criticality)"
+    );
     println!("       - Compete with: Tenable, Rapid7 InsightVM, Microsoft Defender VM");
     println!("    2. Qualys Cloud Agent (the secret weapon):");
     println!("       - 4MB lightweight agent for Windows/Linux/Mac/AIX/Solaris");
@@ -137,13 +162,18 @@ fn run_qualys(args: &[String], _prog: &str) -> i32 {
     println!("           Tenable head-to-head competition keeps deals on price");
     println!("           growth slowing to single-digits — mature business profile");
     println!("           strong cash flow + profitability could trigger PE interest");
-    println!("  Differentiator: original SaaS vuln scanner (since 1999, before AWS!) + 4MB Cloud Agent (4M+ deployed) + ~30% operating margin + cloud-native platform serving 60% of Fortune 100 + broad scope (VM + CNAPP + container + DAST + patch + compliance + EDR) — the profitable SaaS-from-day-one vulnerability management platform for enterprises that want one agent + one platform for everything");
+    println!(
+        "  Differentiator: original SaaS vuln scanner (since 1999, before AWS!) + 4MB Cloud Agent (4M+ deployed) + ~30% operating margin + cloud-native platform serving 60% of Fortune 100 + broad scope (VM + CNAPP + container + DAST + patch + compliance + EDR) — the profitable SaaS-from-day-one vulnerability management platform for enterprises that want one agent + one platform for everything"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "qualys".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "qualys".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_qualys(&rest, &_prog);
     process::exit(code);
@@ -151,7 +181,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_qualys};
+    use super::{basename, run_qualys, strip_ext};
 
     #[test]
     fn basename_strips_path() {

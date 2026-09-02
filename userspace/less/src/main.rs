@@ -188,8 +188,7 @@ static mut ORIG_TERMIOS: Option<libc::termios> = None;
 /// use the POSIX termios interface through the POSIX compatibility layer.
 fn enable_raw_mode() {
     // Try the SlateOS-specific procfs toggle first.
-    if std::fs::write("/proc/self/tty_raw", "1").is_ok() {
-    }
+    if std::fs::write("/proc/self/tty_raw", "1").is_ok() {}
     // Fallback: use libc termios interface.
     #[cfg(unix)]
     {
@@ -207,8 +206,7 @@ fn enable_raw_mode() {
 
             let mut raw = orig;
             // Input: no break, no CR-to-NL, no parity, no strip, no flow ctrl.
-            raw.c_iflag &=
-                !(libc::BRKINT | libc::ICRNL | libc::INPCK | libc::ISTRIP | libc::IXON);
+            raw.c_iflag &= !(libc::BRKINT | libc::ICRNL | libc::INPCK | libc::ISTRIP | libc::IXON);
             // Output: disable post-processing.
             raw.c_oflag &= !libc::OPOST;
             // Control: 8-bit chars.
@@ -225,8 +223,7 @@ fn enable_raw_mode() {
 
 /// Restore normal (cooked) terminal mode.
 fn disable_raw_mode() {
-    if std::fs::write("/proc/self/tty_raw", "0").is_ok() {
-    }
+    if std::fs::write("/proc/self/tty_raw", "0").is_ok() {}
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -845,20 +842,20 @@ impl Pager {
         let (term_rows, term_cols) = terminal_size();
         let content_rows = if term_rows > 1 { term_rows - 1 } else { 1 };
 
-        let (reader, file_name): (Box<dyn Read>, String) =
-            if let Some(ref path) = config.file_path {
-                let f = File::open(path)
-                    .map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
-                (Box::new(f), path.clone())
-            } else {
-                // Reading from stdin.  Slurp everything first so that keyboard
-                // input can come from the tty afterwards.
-                let stdin_data = read_stdin_fully()?;
-                (
-                    Box::new(io::Cursor::new(stdin_data)),
-                    "(standard input)".to_string(),
-                )
-            };
+        let (reader, file_name): (Box<dyn Read>, String) = if let Some(ref path) = config.file_path
+        {
+            let f =
+                File::open(path).map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
+            (Box::new(f), path.clone())
+        } else {
+            // Reading from stdin.  Slurp everything first so that keyboard
+            // input can come from the tty afterwards.
+            let stdin_data = read_stdin_fully()?;
+            (
+                Box::new(io::Cursor::new(stdin_data)),
+                "(standard input)".to_string(),
+            )
+        };
 
         let mut pager = Pager {
             lines: Vec::new(),
@@ -932,7 +929,11 @@ impl Pager {
     fn line_num_width(&self) -> usize {
         if self.config.line_numbers {
             let max_num = self.lines.len();
-            if max_num == 0 { 1 } else { digit_count(max_num) }
+            if max_num == 0 {
+                1
+            } else {
+                digit_count(max_num)
+            }
         } else {
             0
         }
@@ -945,21 +946,14 @@ impl Pager {
 
         let mut all_rows: Vec<DisplayRow> = Vec::new();
         for (idx, line) in self.lines.iter().enumerate() {
-            let rows = wrap_line(
-                line,
-                idx,
-                self.term_cols,
-                self.config.chop_long_lines,
-                lnw,
-            );
+            let rows = wrap_line(line, idx, self.term_cols, self.config.chop_long_lines, lnw);
             all_rows.extend(rows);
         }
 
         let total = all_rows.len();
         let start = self.scroll_offset.min(total.saturating_sub(1));
         let end = (start + self.content_rows).min(total);
-        let visible: Vec<DisplayRow> =
-            all_rows.into_iter().skip(start).take(end - start).collect();
+        let visible: Vec<DisplayRow> = all_rows.into_iter().skip(start).take(end - start).collect();
         (total, visible)
     }
 
@@ -968,8 +962,7 @@ impl Pager {
         let lnw = self.line_num_width();
         let mut total = 0usize;
         for line in &self.lines {
-            total += wrap_line(line, 0, self.term_cols, self.config.chop_long_lines, lnw)
-                .len();
+            total += wrap_line(line, 0, self.term_cols, self.config.chop_long_lines, lnw).len();
         }
         total
     }
@@ -1061,8 +1054,7 @@ impl Pager {
 
         if total_display_rows > 0 {
             let first_visible = self.scroll_offset + 1;
-            let last_visible =
-                (self.scroll_offset + self.content_rows).min(total_display_rows);
+            let last_visible = (self.scroll_offset + self.content_rows).min(total_display_rows);
             let _ = write!(
                 status,
                 "  lines {}-{} of {}",
@@ -1072,9 +1064,7 @@ impl Pager {
             status.push_str("  (empty)");
         }
 
-        if self.eof_reached
-            && self.scroll_offset + self.content_rows >= total_display_rows
-        {
+        if self.eof_reached && self.scroll_offset + self.content_rows >= total_display_rows {
             status.push_str("  (END)");
         }
 
@@ -1145,9 +1135,7 @@ impl Pager {
                 lnw,
             );
             for drow in &rows {
-                if row_idx > self.scroll_offset
-                    && !find_matches(&drow.text, pattern).is_empty()
-                {
+                if row_idx > self.scroll_offset && !find_matches(&drow.text, pattern).is_empty() {
                     self.scroll_offset = row_idx;
                     return true;
                 }
@@ -1172,8 +1160,7 @@ impl Pager {
                     lnw,
                 );
                 for drow in &rows {
-                    if row_idx > self.scroll_offset
-                        && !find_matches(&drow.text, pattern).is_empty()
+                    if row_idx > self.scroll_offset && !find_matches(&drow.text, pattern).is_empty()
                     {
                         self.scroll_offset = row_idx;
                         return true;
@@ -1206,9 +1193,7 @@ impl Pager {
                 lnw,
             );
             for drow in &rows {
-                if row_idx < self.scroll_offset
-                    && !find_matches(&drow.text, pattern).is_empty()
-                {
+                if row_idx < self.scroll_offset && !find_matches(&drow.text, pattern).is_empty() {
                     best_match = Some(row_idx);
                 }
                 row_idx += 1;
@@ -1254,9 +1239,8 @@ impl Pager {
                 _ => {}
             }
             cursor_to(self.term_rows, 1);
-            let line = format!(
-                "{ESC_REVERSE_VIDEO}{prompt_char}{ESC_RESET}{pattern}{ESC_CLEAR_EOL}"
-            );
+            let line =
+                format!("{ESC_REVERSE_VIDEO}{prompt_char}{ESC_RESET}{pattern}{ESC_CLEAR_EOL}");
             write_flush(&line);
         }
     }
@@ -1325,8 +1309,7 @@ impl Pager {
     /// Follow mode: jump to end and wait for new data.
     fn enter_follow_mode(&mut self) {
         self.follow_mode = true;
-        self.status_message =
-            Some(" Waiting for data... (press q or F to stop)".to_string());
+        self.status_message = Some(" Waiting for data... (press q or F to stop)".to_string());
         self.go_bottom();
         self.render();
 
@@ -1334,24 +1317,24 @@ impl Pager {
             // Try to load more data if we previously hit EOF on a file.
             if self.eof_reached
                 && let Some(ref path) = self.config.file_path.clone()
-                    && let Ok(meta) = std::fs::metadata(path) {
-                        let current_byte_count: usize =
-                            self.lines.iter().map(|l| l.raw.len() + 1).sum();
-                        if meta.len() as usize > current_byte_count
-                            && let Ok(f) = File::open(path) {
-                                let mut r =
-                                    BufReader::new(Box::new(f) as Box<dyn Read>);
-                                let mut skip_buf = String::new();
-                                for _ in 0..self.lines.len() {
-                                    if r.read_line(&mut skip_buf).unwrap_or(0) == 0 {
-                                        break;
-                                    }
-                                    skip_buf.clear();
-                                }
-                                self.reader = Some(r);
-                                self.eof_reached = false;
-                            }
+                && let Ok(meta) = std::fs::metadata(path)
+            {
+                let current_byte_count: usize = self.lines.iter().map(|l| l.raw.len() + 1).sum();
+                if meta.len() as usize > current_byte_count
+                    && let Ok(f) = File::open(path)
+                {
+                    let mut r = BufReader::new(Box::new(f) as Box<dyn Read>);
+                    let mut skip_buf = String::new();
+                    for _ in 0..self.lines.len() {
+                        if r.read_line(&mut skip_buf).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        skip_buf.clear();
                     }
+                    self.reader = Some(r);
+                    self.eof_reached = false;
+                }
+            }
 
             let added = self.load_lines(256);
             if added > 0 {
@@ -1432,24 +1415,20 @@ impl Pager {
                             direction: SearchDirection::Forward,
                         });
                         if !found {
-                            self.status_message =
-                                Some(format!(" Pattern not found: {pattern}"));
+                            self.status_message = Some(format!(" Pattern not found: {pattern}"));
                         }
                     }
                 }
 
                 Key::Char('?') => {
-                    if let Some(pattern) =
-                        self.prompt_search(SearchDirection::Backward)
-                    {
+                    if let Some(pattern) = self.prompt_search(SearchDirection::Backward) {
                         let found = self.search_backward(&pattern);
                         self.search = Some(Search {
                             pattern: pattern.clone(),
                             direction: SearchDirection::Backward,
                         });
                         if !found {
-                            self.status_message =
-                                Some(format!(" Pattern not found: {pattern}"));
+                            self.status_message = Some(format!(" Pattern not found: {pattern}"));
                         }
                     }
                 }
@@ -1458,18 +1437,12 @@ impl Pager {
                     let search_clone = self.search.clone();
                     if let Some(search) = search_clone {
                         let found = match search.direction {
-                            SearchDirection::Forward => {
-                                self.search_forward(&search.pattern)
-                            }
-                            SearchDirection::Backward => {
-                                self.search_backward(&search.pattern)
-                            }
+                            SearchDirection::Forward => self.search_forward(&search.pattern),
+                            SearchDirection::Backward => self.search_backward(&search.pattern),
                         };
                         if !found {
-                            self.status_message = Some(format!(
-                                " Pattern not found: {}",
-                                search.pattern
-                            ));
+                            self.status_message =
+                                Some(format!(" Pattern not found: {}", search.pattern));
                         }
                     }
                 }
@@ -1478,18 +1451,12 @@ impl Pager {
                     let search_clone = self.search.clone();
                     if let Some(search) = search_clone {
                         let found = match search.direction {
-                            SearchDirection::Forward => {
-                                self.search_backward(&search.pattern)
-                            }
-                            SearchDirection::Backward => {
-                                self.search_forward(&search.pattern)
-                            }
+                            SearchDirection::Forward => self.search_backward(&search.pattern),
+                            SearchDirection::Backward => self.search_forward(&search.pattern),
                         };
                         if !found {
-                            self.status_message = Some(format!(
-                                " Pattern not found: {}",
-                                search.pattern
-                            ));
+                            self.status_message =
+                                Some(format!(" Pattern not found: {}", search.pattern));
                         }
                     }
                 }
@@ -1552,9 +1519,10 @@ fn read_stdin_fully() -> io::Result<Vec<u8>> {
 /// Uses the Slate OS `/proc/self/tty_avail` interface or returns false.
 fn check_key_available() -> bool {
     if let Ok(val) = std::fs::read_to_string("/proc/self/tty_avail")
-        && let Ok(n) = val.trim().parse::<usize>() {
-            return n > 0;
-        }
+        && let Ok(n) = val.trim().parse::<usize>()
+    {
+        return n > 0;
+    }
     false
 }
 

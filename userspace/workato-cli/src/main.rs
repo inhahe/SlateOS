@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_workato(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,12 +26,17 @@ fn run_workato(args: &[String], _prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Workato 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Workato 2024 (Slate OS)");
+        return 0;
+    }
     println!("Workato 2024 (Slate OS) — Enterprise Automation Platform");
     println!("  Vendor: Workato, Inc. (Mountain View, CA — private unicorn)");
     println!("  Founders: Vijay Tella + Gautham Viswanathan + Harish Shetty, 2013");
     println!("          Vijay Tella: long-time CEO + ex-TIBCO + ex-Oracle Fusion Middleware");
-    println!("          founded with thesis: 'iPaaS for the cloud era — built for business users not just IT'");
+    println!(
+        "          founded with thesis: 'iPaaS for the cloud era — built for business users not just IT'"
+    );
     println!("          headquartered in Mountain View; large engineering presence in Singapore");
     println!("  Private funding:");
     println!("         Series E Nov 2021: $200M at $5.7B valuation (Battery, Insight, Altimeter)");
@@ -35,13 +44,25 @@ fn run_workato(args: &[String], _prog: &str) -> i32 {
     println!("         Battery, Insight, Altimeter, Salesforce Ventures, Workday Ventures backers");
     println!("         expected IPO 2024-2025 (delayed by market conditions)");
     println!("         revenue: ~$200M+ ARR (private, estimated)");
-    println!("  Strategic position: 'enterprise automation platform — citizen + IT — recipes for everything':");
-    println!("                    pitch: 'one platform for integration + workflow + chatbots + APIs + AI'");
-    println!("                    target: mid-market to large enterprise (challenger to MuleSoft/Boomi)");
-    println!("                    primary competitor: MuleSoft, Boomi, Microsoft Power Automate, Zapier (lower-end)");
+    println!(
+        "  Strategic position: 'enterprise automation platform — citizen + IT — recipes for everything':"
+    );
+    println!(
+        "                    pitch: 'one platform for integration + workflow + chatbots + APIs + AI'"
+    );
+    println!(
+        "                    target: mid-market to large enterprise (challenger to MuleSoft/Boomi)"
+    );
+    println!(
+        "                    primary competitor: MuleSoft, Boomi, Microsoft Power Automate, Zapier (lower-end)"
+    );
     println!("                    secondary: Tray.io, Celigo, Jitterbit, n8n (open-source)");
-    println!("                    Workato's wedge: business-user-friendly + IT-grade governance + native chatbots + AI");
-    println!("                    'Embedded automation' for SaaS vendors — many partners embed Workato in their products");
+    println!(
+        "                    Workato's wedge: business-user-friendly + IT-grade governance + native chatbots + AI"
+    );
+    println!(
+        "                    'Embedded automation' for SaaS vendors — many partners embed Workato in their products"
+    );
     println!("  Pricing:");
     println!("    Workspace plan: $10K-$50K/yr starter");
     println!("    Enterprise plan: $100K-$2M+/yr (most customers)");
@@ -111,14 +132,21 @@ fn run_workato(args: &[String], _prog: &str) -> i32 {
     println!("           AI features still maturing");
     println!("           expected IPO has slipped — market timing concerns");
     println!("           Microsoft Power Automate's E5 bundling threatens low-end");
-    println!("           focus on tech-company sweet spot = challenging diversification to other verticals");
-    println!("  Differentiator: 'iPaaS for everyone — IT + business + developers' + Workbot (early enterprise chatbot platform) + Recipes (1,000+ connectors with smart error recovery + Recipe IQ) + Workato Embedded (the platform many SaaS vendors embed for their integrations) + AI-powered recipe building + ~$5.7B last-round valuation with 21K+ customers — the next-generation iPaaS that's growing share against MuleSoft and pushing Microsoft Power Automate out of the enterprise");
+    println!(
+        "           focus on tech-company sweet spot = challenging diversification to other verticals"
+    );
+    println!(
+        "  Differentiator: 'iPaaS for everyone — IT + business + developers' + Workbot (early enterprise chatbot platform) + Recipes (1,000+ connectors with smart error recovery + Recipe IQ) + Workato Embedded (the platform many SaaS vendors embed for their integrations) + AI-powered recipe building + ~$5.7B last-round valuation with 21K+ customers — the next-generation iPaaS that's growing share against MuleSoft and pushing Microsoft Power Automate out of the enterprise"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "workato".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "workato".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_workato(&rest, &_prog);
     process::exit(code);
@@ -126,7 +154,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_workato};
+    use super::{basename, run_workato, strip_ext};
 
     #[test]
     fn basename_strips_path() {

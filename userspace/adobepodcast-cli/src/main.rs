@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ap(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_ap(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe Podcast 1.0 (beta) (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Adobe Podcast 1.0 (beta) (Slate OS)");
+        return 0;
+    }
     println!("Adobe Podcast (Slate OS) — beta as of 2024");
     println!("  Enhance Speech: AI removes background noise + room echo");
     println!("  Mic Check: scores room/setup for podcast quality");
@@ -37,7 +44,10 @@ fn run_ap(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "adobepodcast".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "adobepodcast".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ap(&rest, &_prog);
     process::exit(code);
@@ -45,7 +55,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ap};
+    use super::{basename, run_ap, strip_ext};
 
     #[test]
     fn basename_strips_path() {

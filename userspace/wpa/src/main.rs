@@ -195,12 +195,7 @@ fn sha1_compress(h: &mut [u32; 5], block: &[u8]) {
     // Load 16 big-endian words.
     for (i, w_word) in w.iter_mut().enumerate().take(16) {
         let off = i * 4;
-        *w_word = u32::from_be_bytes([
-            block[off],
-            block[off + 1],
-            block[off + 2],
-            block[off + 3],
-        ]);
+        *w_word = u32::from_be_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]]);
     }
     // Extend to 80 words.
     for i in 16..80 {
@@ -492,8 +487,12 @@ impl BssEntry {
     fn bssid_str(&self) -> String {
         format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            self.bssid[0], self.bssid[1], self.bssid[2],
-            self.bssid[3], self.bssid[4], self.bssid[5]
+            self.bssid[0],
+            self.bssid[1],
+            self.bssid[2],
+            self.bssid[3],
+            self.bssid[4],
+            self.bssid[5]
         )
     }
 
@@ -684,11 +683,12 @@ impl WpaConfig {
                 // If 64 hex chars, it is a raw PSK; otherwise a passphrase.
                 if unq.len() == 64 && unq.chars().all(|c| c.is_ascii_hexdigit()) {
                     if let Some(bytes) = hex_decode(unq.as_bytes())
-                        && bytes.len() == WPA_PSK_LEN {
-                            let mut psk = [0u8; WPA_PSK_LEN];
-                            psk.copy_from_slice(&bytes);
-                            net.psk = Some(psk);
-                        }
+                        && bytes.len() == WPA_PSK_LEN
+                    {
+                        let mut psk = [0u8; WPA_PSK_LEN];
+                        psk.copy_from_slice(&bytes);
+                        net.psk = Some(psk);
+                    }
                 } else {
                     net.passphrase = Some(unq.as_bytes().to_vec());
                     // Derive PSK from passphrase + SSID.
@@ -738,7 +738,8 @@ impl WpaConfig {
                 }
             }
             _ => {
-                net.properties.insert(key.to_string(), Self::unquote(val).to_string());
+                net.properties
+                    .insert(key.to_string(), Self::unquote(val).to_string());
             }
         }
     }
@@ -985,9 +986,10 @@ impl SupplicantState {
 
             // Match BSSID filter if set.
             if let Some(ref filter) = net.bssid
-                && bss.bssid != *filter {
-                    continue;
-                }
+                && bss.bssid != *filter
+            {
+                continue;
+            }
 
             // Prefer strongest signal.
             match best {
@@ -1022,13 +1024,14 @@ impl SupplicantState {
         }
 
         if let Some(net_id) = self.selected_network
-            && let Some(net) = self.config.networks.get(net_id) {
-                s.push_str(&format!("ssid={}\n", net.ssid_str()));
-                s.push_str(&format!("id={}\n", net_id));
-                s.push_str(&format!("key_mgmt={}\n", net.key_mgmt.as_str()));
-                s.push_str(&format!("pairwise_cipher={}\n", net.pairwise.as_str()));
-                s.push_str(&format!("group_cipher={}\n", net.group.as_str()));
-            }
+            && let Some(net) = self.config.networks.get(net_id)
+        {
+            s.push_str(&format!("ssid={}\n", net.ssid_str()));
+            s.push_str(&format!("id={}\n", net_id));
+            s.push_str(&format!("key_mgmt={}\n", net.key_mgmt.as_str()));
+            s.push_str(&format!("pairwise_cipher={}\n", net.pairwise.as_str()));
+            s.push_str(&format!("group_cipher={}\n", net.group.as_str()));
+        }
 
         if let Some(ref ip) = self.ip_address {
             s.push_str(&format!("ip_address={}\n", ip));
@@ -1147,7 +1150,10 @@ fn run_supplicant(args: &[&str], out: &mut dyn Write) -> i32 {
 fn print_supplicant_help(out: &mut dyn Write) {
     let _ = writeln!(out, "wpa_supplicant v{}", VERSION);
     let _ = writeln!(out);
-    let _ = writeln!(out, "Usage: wpa_supplicant [-BdhvW] [-i<iface>] [-c<config>] [-D<driver>]");
+    let _ = writeln!(
+        out,
+        "Usage: wpa_supplicant [-BdhvW] [-i<iface>] [-c<config>] [-D<driver>]"
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Options:");
     let _ = writeln!(out, "  -i<iface>   Interface name (default: wlan0)");
@@ -1234,7 +1240,14 @@ fn process_cli_command(
                 } else {
                     ""
                 };
-                let _ = writeln!(out, "{}\t{}\t{}\t{}", net.id, net.ssid_str(), bssid_str, flags);
+                let _ = writeln!(
+                    out,
+                    "{}\t{}\t{}\t{}",
+                    net.id,
+                    net.ssid_str(),
+                    bssid_str,
+                    flags
+                );
             }
             Ok(())
         }
@@ -1291,11 +1304,12 @@ fn process_cli_command(
                     let unq = WpaConfig::unquote(val);
                     if unq.len() == 64 && unq.chars().all(|c| c.is_ascii_hexdigit()) {
                         if let Some(bytes) = hex_decode(unq.as_bytes())
-                            && bytes.len() == WPA_PSK_LEN {
-                                let mut psk = [0u8; WPA_PSK_LEN];
-                                psk.copy_from_slice(&bytes);
-                                net.psk = Some(psk);
-                            }
+                            && bytes.len() == WPA_PSK_LEN
+                        {
+                            let mut psk = [0u8; WPA_PSK_LEN];
+                            psk.copy_from_slice(&bytes);
+                            net.psk = Some(psk);
+                        }
                     } else {
                         net.passphrase = Some(unq.as_bytes().to_vec());
                         if !net.ssid.is_empty() {
@@ -1319,17 +1333,13 @@ fn process_cli_command(
                     net.bssid = parse_bssid(val);
                 }
                 "priority" => {
-                    net.priority = val
-                        .parse()
-                        .map_err(|_| "invalid priority".to_string())?;
+                    net.priority = val.parse().map_err(|_| "invalid priority".to_string())?;
                 }
                 "disabled" => {
                     net.enabled = val != "1";
                 }
                 "scan_ssid" => {
-                    net.scan_ssid = val
-                        .parse()
-                        .map_err(|_| "invalid scan_ssid".to_string())?;
+                    net.scan_ssid = val.parse().map_err(|_| "invalid scan_ssid".to_string())?;
                 }
                 _ => {
                     net.properties.insert(key.to_string(), val.to_string());
@@ -1407,9 +1417,10 @@ fn process_cli_command(
                     state.selected_network = None;
                     state.disconnect();
                 } else if let Some(sel) = state.selected_network
-                    && sel > id {
-                        state.selected_network = Some(sel - 1);
-                    }
+                    && sel > id
+                {
+                    state.selected_network = Some(sel - 1);
+                }
             }
             let _ = writeln!(out, "OK");
             Ok(())
@@ -1426,19 +1437,21 @@ fn process_cli_command(
         }
         "reconnect" => {
             if let Some(id) = state.selected_network
-                && id < state.config.networks.len() {
-                    state.disconnect();
-                    state.do_associate();
-                }
+                && id < state.config.networks.len()
+            {
+                state.disconnect();
+                state.do_associate();
+            }
             let _ = writeln!(out, "OK");
             Ok(())
         }
         "reassociate" => {
             state.disconnect();
             if let Some(id) = state.selected_network
-                && id < state.config.networks.len() {
-                    state.do_associate();
-                }
+                && id < state.config.networks.len()
+            {
+                state.do_associate();
+            }
             let _ = writeln!(out, "OK");
             Ok(())
         }
@@ -1501,17 +1514,18 @@ fn run_passphrase(args: &[&str], out: &mut dyn Write) -> i32 {
         let _ = writeln!(out, "Usage: wpa_passphrase <ssid> [passphrase]");
         let _ = writeln!(out);
         let _ = writeln!(out, "Generates a WPA PSK from an SSID and passphrase.");
-        let _ = writeln!(
-            out,
-            "If passphrase is not given, it is read from stdin."
-        );
+        let _ = writeln!(out, "If passphrase is not given, it is read from stdin.");
         return 1;
     }
 
     let ssid = args[0].as_bytes();
 
     if ssid.len() > MAX_SSID_LEN {
-        let _ = writeln!(out, "wpa_passphrase: SSID too long (max {} bytes)", MAX_SSID_LEN);
+        let _ = writeln!(
+            out,
+            "wpa_passphrase: SSID too long (max {} bytes)",
+            MAX_SSID_LEN
+        );
         return 1;
     }
 
@@ -1591,11 +1605,11 @@ fn run(args: &[String], out: &mut dyn Write) -> i32 {
             // Default: show usage for all personalities.
             let _ = writeln!(out, "wpa multi-personality binary v{}", VERSION);
             let _ = writeln!(out);
+            let _ = writeln!(out, "Invoke as wpa_supplicant, wpa_cli, or wpa_passphrase.");
             let _ = writeln!(
                 out,
-                "Invoke as wpa_supplicant, wpa_cli, or wpa_passphrase."
+                "The personality is detected from the program name (argv[0])."
             );
-            let _ = writeln!(out, "The personality is detected from the program name (argv[0]).");
             let _ = writeln!(out);
             let _ = writeln!(out, "Symlink examples:");
             let _ = writeln!(out, "  ln -s wpa wpa_supplicant");
@@ -1786,7 +1800,12 @@ mod tests {
     #[test]
     fn test_pbkdf2_longer_dk() {
         // dkLen=25 -- needs part of a second block.
-        let dk = pbkdf2_sha1(b"passwordPASSWORDpassword", b"saltSALTsaltSALTsaltSALTsaltSALTsalt", 4096, 25);
+        let dk = pbkdf2_sha1(
+            b"passwordPASSWORDpassword",
+            b"saltSALTsaltSALTsaltSALTsaltSALTsalt",
+            4096,
+            25,
+        );
         assert_eq!(
             hex_encode_string(&dk),
             "3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038"
@@ -1965,9 +1984,18 @@ mod tests {
 
     #[test]
     fn test_state_from_str_ci() {
-        assert_eq!(WpaState::from_str_ci("disconnected"), Some(WpaState::Disconnected));
-        assert_eq!(WpaState::from_str_ci("COMPLETED"), Some(WpaState::Completed));
-        assert_eq!(WpaState::from_str_ci("4way_handshake"), Some(WpaState::FourWayHandshake));
+        assert_eq!(
+            WpaState::from_str_ci("disconnected"),
+            Some(WpaState::Disconnected)
+        );
+        assert_eq!(
+            WpaState::from_str_ci("COMPLETED"),
+            Some(WpaState::Completed)
+        );
+        assert_eq!(
+            WpaState::from_str_ci("4way_handshake"),
+            Some(WpaState::FourWayHandshake)
+        );
         assert_eq!(WpaState::from_str_ci("bogus"), None);
     }
 
@@ -1995,9 +2023,18 @@ mod tests {
 
     #[test]
     fn test_pairwise_cipher_parse() {
-        assert_eq!(PairwiseCipher::from_str_ci("CCMP"), Some(PairwiseCipher::Ccmp));
-        assert_eq!(PairwiseCipher::from_str_ci("tkip"), Some(PairwiseCipher::Tkip));
-        assert_eq!(PairwiseCipher::from_str_ci("none"), Some(PairwiseCipher::None));
+        assert_eq!(
+            PairwiseCipher::from_str_ci("CCMP"),
+            Some(PairwiseCipher::Ccmp)
+        );
+        assert_eq!(
+            PairwiseCipher::from_str_ci("tkip"),
+            Some(PairwiseCipher::Tkip)
+        );
+        assert_eq!(
+            PairwiseCipher::from_str_ci("none"),
+            Some(PairwiseCipher::None)
+        );
         assert_eq!(PairwiseCipher::from_str_ci("xyz"), None);
     }
 
@@ -2248,10 +2285,7 @@ network={
     #[test]
     fn test_config_parse_hex_psk() {
         let hex_psk = "a".repeat(64); // 64 hex chars
-        let content = format!(
-            "network={{\n    ssid=\"Test\"\n    psk={}\n}}\n",
-            hex_psk
-        );
+        let content = format!("network={{\n    ssid=\"Test\"\n    psk={}\n}}\n", hex_psk);
         let cfg = WpaConfig::parse(&content);
         assert!(cfg.networks[0].psk.is_some());
         assert!(cfg.networks[0].passphrase.is_none());
@@ -2282,7 +2316,10 @@ network={
     fn test_config_parse_unknown_property() {
         let content = "network={\n    ssid=\"X\"\n    eap=PEAP\n}\n";
         let cfg = WpaConfig::parse(content);
-        assert_eq!(cfg.networks[0].properties.get("eap").map(|s| s.as_str()), Some("PEAP"));
+        assert_eq!(
+            cfg.networks[0].properties.get("eap").map(|s| s.as_str()),
+            Some("PEAP")
+        );
     }
 
     // =====================================================================
@@ -2445,8 +2482,7 @@ network={
         let mut state = SupplicantState::new();
         run_cli_cmd(&mut state, "add_network", &[]);
         run_cli_cmd(&mut state, "set_network", &["0", "ssid", "\"TestSSID\""]);
-        let (code, _) =
-            run_cli_cmd(&mut state, "set_network", &["0", "psk", "\"testpassword\""]);
+        let (code, _) = run_cli_cmd(&mut state, "set_network", &["0", "psk", "\"testpassword\""]);
         assert_eq!(code, 0);
         assert!(state.config.networks[0].psk.is_some());
         assert_eq!(

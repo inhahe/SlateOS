@@ -29,11 +29,14 @@ fn run_litecli(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let execute = args.windows(2)
+    let execute = args
+        .windows(2)
         .find(|w| w[0] == "-e" || w[0] == "--execute")
         .map(|w| w[1].as_str());
 
-    let dbfile = args.iter().rfind(|a| !a.starts_with('-'))
+    let dbfile = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(":memory:");
 
@@ -66,7 +69,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_litecli};
+    use super::run_litecli;
 
     #[test]
     fn help_exits_zero() {

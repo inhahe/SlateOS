@@ -35,8 +35,16 @@ fn run_verilator(args: &[String]) -> i32 {
     let lint_only = args.iter().any(|a| a == "--lint-only");
     let cc = args.iter().any(|a| a == "--cc");
     let binary = args.iter().any(|a| a == "--binary");
-    let file = args.iter().find(|a| a.ends_with(".v") || a.ends_with(".sv")).map(|s| s.as_str()).unwrap_or("design.v");
-    let top = args.windows(2).find(|w| w[0] == "--top-module").map(|w| w[1].as_str()).unwrap_or("top");
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".v") || a.ends_with(".sv"))
+        .map(|s| s.as_str())
+        .unwrap_or("design.v");
+    let top = args
+        .windows(2)
+        .find(|w| w[0] == "--top-module")
+        .map(|w| w[1].as_str())
+        .unwrap_or("top");
 
     println!("- Verilator 5.020");
     println!("- Reading: {}", file);
@@ -69,7 +77,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_verilator};
+    use super::run_verilator;
 
     #[test]
     fn help_exits_zero() {

@@ -43,7 +43,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("whimsical-cli 0.1.0 (visual-collab-bootstrapped personality build)"); }
+fn print_version() {
+    println!("whimsical-cli 0.1.0 (visual-collab-bootstrapped personality build)");
+}
 
 fn run_about() {
     println!("Whimsical, Inc.");

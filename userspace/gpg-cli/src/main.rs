@@ -74,8 +74,11 @@ fn run_gpg(args: Vec<String>) -> i32 {
         return 0;
     }
     if has_flag(&["--encrypt", "-e"]) {
-        let recipient = args.windows(2).find(|w| w[0] == "-r" || w[0] == "--recipient")
-            .map(|w| w[1].as_str()).unwrap_or("user@example.com");
+        let recipient = args
+            .windows(2)
+            .find(|w| w[0] == "-r" || w[0] == "--recipient")
+            .map(|w| w[1].as_str())
+            .unwrap_or("user@example.com");
         let file = args.last().map(|s| s.as_str()).unwrap_or("message.txt");
         println!("gpg: encrypted for {}", recipient);
         println!("gpg: wrote {}.gpg", file);
@@ -95,7 +98,10 @@ fn run_gpg(args: Vec<String>) -> i32 {
         return 0;
     }
     if has_flag(&["--verify"]) {
-        let file = args.last().map(|s| s.as_str()).unwrap_or("document.txt.sig");
+        let file = args
+            .last()
+            .map(|s| s.as_str())
+            .unwrap_or("document.txt.sig");
         println!("gpg: Signature made Mon Jan 15 14:00:00 2024 UTC");
         println!("gpg:                using EDDSA key ABC123DEF456GHI789JKL012MNO345PQR678STU9");
         println!("gpg: Good signature from \"User Name <user@example.com>\" [ultimate]");
@@ -104,7 +110,9 @@ fn run_gpg(args: Vec<String>) -> i32 {
     }
     if has_flag(&["--import"]) {
         let file = args.last().map(|s| s.as_str()).unwrap_or("pubkey.asc");
-        println!("gpg: key 0123456789ABCDEF: public key \"Imported User <import@example.com>\" imported");
+        println!(
+            "gpg: key 0123456789ABCDEF: public key \"Imported User <import@example.com>\" imported"
+        );
         println!("gpg: Total number processed: 1");
         println!("gpg:               imported: 1");
         println!("  File: {}", file);
@@ -143,7 +151,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gpg};
+    use super::run_gpg;
 
     #[test]
     fn help_exits_zero() {

@@ -47,7 +47,9 @@ fn run_timeshift(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--create") {
-        let comments = args.iter().position(|a| a == "--comments")
+        let comments = args
+            .iter()
+            .position(|a| a == "--comments")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("");
@@ -88,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_timeshift};
+    use super::run_timeshift;
 
     #[test]
     fn help_exits_zero() {

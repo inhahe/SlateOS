@@ -43,8 +43,11 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let urls: Vec<&str> = args.iter()
-        .filter(|a| !a.starts_with('-') && (a.contains("http") || a.contains("youtu") || a.contains("www.")))
+    let urls: Vec<&str> = args
+        .iter()
+        .filter(|a| {
+            !a.starts_with('-') && (a.contains("http") || a.contains("youtu") || a.contains("www."))
+        })
         .map(|s| s.as_str())
         .collect();
 
@@ -69,7 +72,9 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
     }
 
     let url = urls.first().copied().unwrap_or("https://example.com/video");
-    let format = args.windows(2).find(|w| w[0] == "-f" || w[0] == "--format")
+    let format = args
+        .windows(2)
+        .find(|w| w[0] == "-f" || w[0] == "--format")
         .map(|w| w[1].as_str());
 
     println!("[yt-dlp] Extracting URL: {}", url);
@@ -82,11 +87,17 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
     }
 
     if extract_audio {
-        let audio_fmt = args.windows(2).find(|w| w[0] == "--audio-format")
-            .map(|w| w[1].as_str()).unwrap_or("mp3");
+        let audio_fmt = args
+            .windows(2)
+            .find(|w| w[0] == "--audio-format")
+            .map(|w| w[1].as_str())
+            .unwrap_or("mp3");
         println!("[download] Destination: Example Video Title.{}", audio_fmt);
         println!("[download] 100% of 3.45MiB in 00:02");
-        println!("[ExtractAudio] Destination: Example Video Title.{}", audio_fmt);
+        println!(
+            "[ExtractAudio] Destination: Example Video Title.{}",
+            audio_fmt
+        );
     } else {
         println!("[download] Destination: Example Video Title.mp4");
         println!("[download]   0.0% of 35.67MiB at  2.34MiB/s ETA 00:15");
@@ -113,7 +124,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ytdlp};
+    use super::run_ytdlp;
 
     #[test]
     fn help_exits_zero() {

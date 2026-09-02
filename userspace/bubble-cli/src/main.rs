@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("bubble-cli 0.1.0 (consumer-no-code-pioneer personality build)"); }
+fn print_version() {
+    println!("bubble-cli 0.1.0 (consumer-no-code-pioneer personality build)");
+}
 
 fn run_about() {
     println!("Bubble Group, Inc.");

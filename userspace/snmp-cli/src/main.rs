@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_snmpget(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.len() < 2 {
@@ -24,10 +28,18 @@ fn run_snmpget(args: &[String]) -> i32 {
 
     let oid = args.last().map(|s| s.as_str()).unwrap_or("sysDescr.0");
     match oid {
-        "sysDescr.0" | ".1.3.6.1.2.1.1.1.0" => println!("SNMPv2-MIB::sysDescr.0 = STRING: Slate OS Desktop 1.0 (x86_64)"),
-        "sysUpTime.0" | ".1.3.6.1.2.1.1.3.0" => println!("DISMAN-EVENT-MIB::sysUpTimeInstance = Timeticks: (1440000) 4:00:00.00"),
-        "sysName.0" | ".1.3.6.1.2.1.1.5.0" => println!("SNMPv2-MIB::sysName.0 = STRING: slateos-desktop"),
-        "sysContact.0" | ".1.3.6.1.2.1.1.4.0" => println!("SNMPv2-MIB::sysContact.0 = STRING: admin@slateos.local"),
+        "sysDescr.0" | ".1.3.6.1.2.1.1.1.0" => {
+            println!("SNMPv2-MIB::sysDescr.0 = STRING: Slate OS Desktop 1.0 (x86_64)")
+        }
+        "sysUpTime.0" | ".1.3.6.1.2.1.1.3.0" => {
+            println!("DISMAN-EVENT-MIB::sysUpTimeInstance = Timeticks: (1440000) 4:00:00.00")
+        }
+        "sysName.0" | ".1.3.6.1.2.1.1.5.0" => {
+            println!("SNMPv2-MIB::sysName.0 = STRING: slateos-desktop")
+        }
+        "sysContact.0" | ".1.3.6.1.2.1.1.4.0" => {
+            println!("SNMPv2-MIB::sysContact.0 = STRING: admin@slateos.local")
+        }
         _ => println!("SNMPv2-MIB::{} = STRING: (value)", oid),
     }
     0
@@ -61,7 +73,12 @@ fn run_snmpset(args: &[String]) -> i32 {
         println!("Usage: snmpset [OPTIONS] <host> <OID> <type> <value>");
         return 0;
     }
-    let oid = args.iter().rev().nth(2).map(|s| s.as_str()).unwrap_or("sysName.0");
+    let oid = args
+        .iter()
+        .rev()
+        .nth(2)
+        .map(|s| s.as_str())
+        .unwrap_or("sysName.0");
     let val = args.last().map(|s| s.as_str()).unwrap_or("new-value");
     println!("SNMPv2-MIB::{} = STRING: {}", oid, val);
     0
@@ -76,7 +93,11 @@ fn run_snmptranslate(args: &[String]) -> i32 {
         return 0;
     }
 
-    let oid = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("sysDescr");
+    let oid = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("sysDescr");
     if args.iter().any(|a| a == "-On") {
         println!(".1.3.6.1.2.1.1.1");
     } else if args.iter().any(|a| a == "-Td") {
@@ -96,13 +117,19 @@ fn run_snmptranslate(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "snmpget".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "snmpget".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "snmpwalk" | "snmpbulkwalk" => run_snmpwalk(&rest),
         "snmpset" => run_snmpset(&rest),
         "snmptranslate" => run_snmptranslate(&rest),
-        "snmptrap" => { println!("Trap sent successfully."); 0 }
+        "snmptrap" => {
+            println!("Trap sent successfully.");
+            0
+        }
         _ => run_snmpget(&rest),
     };
     process::exit(code);
@@ -110,7 +137,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_snmpget};
+    use super::{basename, run_snmpget, strip_ext};
 
     #[test]
     fn basename_strips_path() {

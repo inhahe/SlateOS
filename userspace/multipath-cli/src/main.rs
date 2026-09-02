@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_multipath(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -88,13 +92,23 @@ fn run_kpartx(args: &[String]) -> i32 {
         println!("  -l    List partition mappings");
         return 0;
     }
-    let dev = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/dev/dm-0");
+    let dev = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/dev/dm-0");
     if args.iter().any(|a| a == "-l") {
         println!("loop0p1 : 0 204800 /dev/{}1 2048", dev);
         println!("loop0p2 : 0 2097152 /dev/{}2 206848", dev);
     } else if args.iter().any(|a| a == "-a") {
-        println!("add map {}p1 (253:2): 0 204800 linear /dev/{} 2048", dev, dev);
-        println!("add map {}p2 (253:3): 0 2097152 linear /dev/{} 206848", dev, dev);
+        println!(
+            "add map {}p1 (253:2): 0 204800 linear /dev/{} 2048",
+            dev, dev
+        );
+        println!(
+            "add map {}p2 (253:3): 0 2097152 linear /dev/{} 206848",
+            dev, dev
+        );
     } else {
         println!("kpartx: operation on {} completed", dev);
     }
@@ -103,7 +117,10 @@ fn run_kpartx(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "multipath".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "multipath".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "multipathd" => run_multipathd(&rest),
@@ -115,7 +132,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_multipath};
+    use super::{basename, run_multipath, strip_ext};
 
     #[test]
     fn basename_strips_path() {

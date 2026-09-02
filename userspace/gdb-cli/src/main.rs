@@ -43,7 +43,10 @@ fn run_gdb(args: &[String]) -> i32 {
 
     let quiet = args.iter().any(|a| a == "-q" || a == "--quiet");
     let batch = args.iter().any(|a| a == "-batch");
-    let program = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let program = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
 
     if !quiet {
         println!("GNU gdb (Slate OS) 14.2");
@@ -99,7 +102,8 @@ fn run_gdbserver(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "gdb".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -113,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gdb};
+    use super::{basename, run_gdb, strip_ext};
 
     #[test]
     fn basename_strips_path() {

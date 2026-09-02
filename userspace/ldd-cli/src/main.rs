@@ -34,7 +34,8 @@ fn run_ldd(args: &[String]) -> i32 {
     }
 
     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -95,7 +96,11 @@ fn run_sprof(args: &[String]) -> i32 {
         return 0;
     }
 
-    let lib = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("libfoo.so");
+    let lib = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("libfoo.so");
     println!("Flat profile for {}:", lib);
     println!();
     println!("  %   cumulative   self");
@@ -109,7 +114,8 @@ fn run_sprof(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "ldd".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -124,7 +130,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ldd};
+    use super::{basename, run_ldd, strip_ext};
 
     #[test]
     fn basename_strips_path() {

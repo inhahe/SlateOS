@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("justworks-cli 0.1.0 (SMB-PEO personality build)"); }
+fn print_version() {
+    println!("justworks-cli 0.1.0 (SMB-PEO personality build)");
+}
 
 fn run_about() {
     println!("Justworks, Inc.");

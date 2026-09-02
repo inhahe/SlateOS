@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_pcsx2(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -32,11 +36,22 @@ fn run_pcsx2(args: &[String]) -> i32 {
         return 0;
     }
 
-    let renderer = args.windows(2).find(|w| w[0] == "--renderer")
-        .map(|w| w[1].as_str()).unwrap_or("vulkan");
-    let upscale = args.windows(2).find(|w| w[0] == "--upscale")
-        .map(|w| w[1].as_str()).unwrap_or("3");
-    let iso = args.iter().find(|a| !a.starts_with('-') && (a.ends_with(".iso") || a.ends_with(".bin") || a.ends_with(".cso")))
+    let renderer = args
+        .windows(2)
+        .find(|w| w[0] == "--renderer")
+        .map(|w| w[1].as_str())
+        .unwrap_or("vulkan");
+    let upscale = args
+        .windows(2)
+        .find(|w| w[0] == "--upscale")
+        .map(|w| w[1].as_str())
+        .unwrap_or("3");
+    let iso = args
+        .iter()
+        .find(|a| {
+            !a.starts_with('-')
+                && (a.ends_with(".iso") || a.ends_with(".bin") || a.ends_with(".cso"))
+        })
         .map(|s| s.as_str());
 
     println!("[PCSX2] Version 1.7.5491 (Slate OS)");
@@ -58,7 +73,10 @@ fn run_pcsx2(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pcsx2".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pcsx2".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_pcsx2(&rest);
     process::exit(code);
@@ -66,7 +84,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pcsx2};
+    use super::{basename, run_pcsx2, strip_ext};
 
     #[test]
     fn basename_strips_path() {

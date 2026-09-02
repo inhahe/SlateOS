@@ -61,11 +61,14 @@ fn run_silicon(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let output = args.windows(2)
+    let output = args
+        .windows(2)
         .find(|w| w[0] == "-o" || w[0] == "--output")
         .map(|w| w[1].as_str());
     let clipboard = args.iter().any(|a| a == "--to-clipboard");
-    let file = args.iter().rfind(|a| !a.starts_with('-'))
+    let file = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
     if let Some(f) = file {
@@ -95,7 +98,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_silicon};
+    use super::run_silicon;
 
     #[test]
     fn help_exits_zero() {

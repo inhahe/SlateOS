@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("rapyd-cli 0.1.0 (global-payment-aggregator personality build)"); }
+fn print_version() {
+    println!("rapyd-cli 0.1.0 (global-payment-aggregator personality build)");
+}
 
 fn run_about() {
     println!("Rapyd Financial Network.");

@@ -43,19 +43,22 @@ fn run_oxipng(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let opt_level: u8 = args.windows(2)
+    let opt_level: u8 = args
+        .windows(2)
         .find(|w| w[0] == "-o" || w[0] == "--opt")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(2);
 
     let pretend = args.iter().any(|a| a == "--pretend");
     let quiet = args.iter().any(|a| a == "-q" || a == "--quiet");
-    let strip = args.windows(2)
+    let strip = args
+        .windows(2)
         .find(|w| w[0] == "-s" || w[0] == "--strip")
         .map(|w| w[1].as_str())
         .unwrap_or("none");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -98,7 +101,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_oxipng};
+    use super::run_oxipng;
 
     #[test]
     fn help_exits_zero() {

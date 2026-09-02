@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("yugabyte-cli 0.1.0 (DocDB-on-Raft personality build)"); }
+fn print_version() {
+    println!("yugabyte-cli 0.1.0 (DocDB-on-Raft personality build)");
+}
 
 fn run_about() {
     println!("Yugabyte, Inc.");

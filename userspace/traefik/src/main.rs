@@ -57,7 +57,10 @@ fn run_traefik(args: Vec<String>) -> i32 {
     println!("INFO[0001] Starting TCP/UDP entryPoint web on :80");
     println!("INFO[0001] Starting TCP/UDP entryPoint websecure on :443");
 
-    if args.iter().any(|a| a.contains("api") || a.contains("dashboard")) {
+    if args
+        .iter()
+        .any(|a| a.contains("api") || a.contains("dashboard"))
+    {
         println!("INFO[0001] API Dashboard is enabled at :8080/dashboard/");
     }
     if args.iter().any(|a| a.contains("prometheus")) {
@@ -92,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_traefik};
+    use super::run_traefik;
 
     #[test]
     fn help_exits_zero() {

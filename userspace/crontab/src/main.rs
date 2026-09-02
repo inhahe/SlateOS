@@ -149,8 +149,8 @@ fn validate_special(line: &str) -> Result<LineKind, String> {
     let keyword = parts[0];
 
     match keyword {
-        "@reboot" | "@hourly" | "@daily" | "@midnight" | "@weekly" | "@monthly"
-        | "@yearly" | "@annually" => {}
+        "@reboot" | "@hourly" | "@daily" | "@midnight" | "@weekly" | "@monthly" | "@yearly"
+        | "@annually" => {}
         other => return Err(format!("unknown special keyword '{other}'")),
     }
 
@@ -163,7 +163,8 @@ fn validate_special(line: &str) -> Result<LineKind, String> {
 
 /// Validate a standard 5-field cron entry.
 fn validate_five_field(line: &str) -> Result<LineKind, String> {
-    let parts: Vec<&str> = line.splitn(6, char::is_whitespace)
+    let parts: Vec<&str> = line
+        .splitn(6, char::is_whitespace)
         .filter(|s| !s.is_empty())
         .collect();
 
@@ -296,13 +297,15 @@ fn validate_crontab(content: &str) -> (Vec<Error>, usize) {
 /// falls back to the UID.
 fn current_username() -> String {
     if let Ok(user) = env::var("USER")
-        && !user.is_empty() {
-            return user;
-        }
+        && !user.is_empty()
+    {
+        return user;
+    }
     if let Ok(user) = env::var("LOGNAME")
-        && !user.is_empty() {
-            return user;
-        }
+        && !user.is_empty()
+    {
+        return user;
+    }
     // Fallback: use the numeric UID as the "username" so we at least have a
     // unique spool path. On a real Slate OS system this would call getuid().
     format!("uid{}", std::process::id())
@@ -313,9 +316,10 @@ fn current_username() -> String {
 /// Checks `$EUID` first (set by our shell), then assumes non-root.
 fn effective_uid() -> u32 {
     if let Ok(val) = env::var("EUID")
-        && let Ok(uid) = val.parse::<u32>() {
-            return uid;
-        }
+        && let Ok(uid) = val.parse::<u32>()
+    {
+        return uid;
+    }
     // Conservative default: not root.
     1000
 }
@@ -363,10 +367,7 @@ fn cmd_list(username: &str) -> Result<(), Error> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             Err(Error::Io(format!("no crontab for {username}")))
         }
-        Err(e) => Err(Error::Io(format!(
-            "cannot read {}: {e}",
-            path.display()
-        ))),
+        Err(e) => Err(Error::Io(format!("cannot read {}: {e}", path.display()))),
     }
 }
 
@@ -387,23 +388,21 @@ fn cmd_edit(username: &str) -> Result<(), Error> {
         Ok(content) => content,
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => {
-            return Err(Error::Io(format!(
-                "cannot read {}: {e}",
-                path.display()
-            )));
+            return Err(Error::Io(format!("cannot read {}: {e}", path.display())));
         }
     };
     fs::write(&tmp_path, &existing).map_err(|e| {
-        Error::Io(format!("cannot write temp file {}: {e}", tmp_path.display()))
+        Error::Io(format!(
+            "cannot write temp file {}: {e}",
+            tmp_path.display()
+        ))
     })?;
 
     let editor = pick_editor();
 
     loop {
         // Launch editor.
-        let status = process::Command::new(&editor)
-            .arg(&tmp_path)
-            .status();
+        let status = process::Command::new(&editor).arg(&tmp_path).status();
 
         match status {
             Ok(s) if !s.success() => {
@@ -444,9 +443,8 @@ fn cmd_edit(username: &str) -> Result<(), Error> {
         let (errors, entry_count) = validate_crontab(&new_content);
         if errors.is_empty() {
             // Install.
-            fs::write(&path, &new_content).map_err(|e| {
-                Error::Io(format!("cannot install crontab: {e}"))
-            })?;
+            fs::write(&path, &new_content)
+                .map_err(|e| Error::Io(format!("cannot install crontab: {e}")))?;
             let _ = fs::remove_file(&tmp_path);
             signal_reload(username);
             eprintln!(
@@ -466,8 +464,7 @@ fn cmd_edit(username: &str) -> Result<(), Error> {
         let _ = io::stderr().flush();
 
         let mut answer = String::new();
-        if io::stdin().read_line(&mut answer).is_err() || !answer.trim().eq_ignore_ascii_case("y")
-        {
+        if io::stdin().read_line(&mut answer).is_err() || !answer.trim().eq_ignore_ascii_case("y") {
             let _ = fs::remove_file(&tmp_path);
             eprintln!("crontab: edits left in {}", tmp_path.display());
             return Err(Error::Io("crontab not installed due to errors".into()));
@@ -488,10 +485,7 @@ fn cmd_remove(username: &str) -> Result<(), Error> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             Err(Error::Io(format!("no crontab for {username}")))
         }
-        Err(e) => Err(Error::Io(format!(
-            "cannot remove {}: {e}",
-            path.display()
-        ))),
+        Err(e) => Err(Error::Io(format!("cannot remove {}: {e}", path.display()))),
     }
 }
 
@@ -499,14 +493,13 @@ fn cmd_remove(username: &str) -> Result<(), Error> {
 fn cmd_install(username: &str, source: &str) -> Result<(), Error> {
     let content = if source == "-" {
         let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf).map_err(|e| {
-            Error::Io(format!("cannot read stdin: {e}"))
-        })?;
+        io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| Error::Io(format!("cannot read stdin: {e}")))?;
         buf
     } else {
-        fs::read_to_string(source).map_err(|e| {
-            Error::Io(format!("cannot read '{}': {e}", source))
-        })?
+        fs::read_to_string(source)
+            .map_err(|e| Error::Io(format!("cannot read '{}': {e}", source)))?
     };
 
     // Validate before installing.
@@ -522,9 +515,7 @@ fn cmd_install(username: &str, source: &str) -> Result<(), Error> {
     ensure_spool_dir()?;
 
     let path = crontab_path(username);
-    fs::write(&path, &content).map_err(|e| {
-        Error::Io(format!("cannot install crontab: {e}"))
-    })?;
+    fs::write(&path, &content).map_err(|e| Error::Io(format!("cannot install crontab: {e}")))?;
 
     signal_reload(username);
     eprintln!(
@@ -539,14 +530,13 @@ fn cmd_install(username: &str, source: &str) -> Result<(), Error> {
 fn cmd_validate(source: &str) -> Result<(), Error> {
     let content = if source == "-" {
         let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf).map_err(|e| {
-            Error::Io(format!("cannot read stdin: {e}"))
-        })?;
+        io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| Error::Io(format!("cannot read stdin: {e}")))?;
         buf
     } else {
-        fs::read_to_string(source).map_err(|e| {
-            Error::Io(format!("cannot read '{}': {e}", source))
-        })?
+        fs::read_to_string(source)
+            .map_err(|e| Error::Io(format!("cannot read '{}': {e}", source)))?
     };
 
     let (errors, entry_count) = validate_crontab(&content);
@@ -562,10 +552,7 @@ fn cmd_validate(source: &str) -> Result<(), Error> {
         for err in &errors {
             eprintln!("  {err}");
         }
-        Err(Error::Io(format!(
-            "{} error(s) found",
-            errors.len()
-        )))
+        Err(Error::Io(format!("{} error(s) found", errors.len())))
     }
 }
 
@@ -575,22 +562,23 @@ fn cmd_validate(source: &str) -> Result<(), Error> {
 
 /// Ensure the spool directory exists.
 fn ensure_spool_dir() -> Result<(), Error> {
-    fs::create_dir_all(SPOOL_DIR).map_err(|e| {
-        Error::Io(format!("cannot create spool directory {SPOOL_DIR}: {e}"))
-    })
+    fs::create_dir_all(SPOOL_DIR)
+        .map_err(|e| Error::Io(format!("cannot create spool directory {SPOOL_DIR}: {e}")))
 }
 
 /// Pick the best available editor, checking `$VISUAL`, `$EDITOR`, then the
 /// default fallback.
 fn pick_editor() -> String {
     if let Ok(ed) = env::var("VISUAL")
-        && !ed.is_empty() {
-            return ed;
-        }
+        && !ed.is_empty()
+    {
+        return ed;
+    }
     if let Ok(ed) = env::var("EDITOR")
-        && !ed.is_empty() {
-            return ed;
-        }
+        && !ed.is_empty()
+    {
+        return ed;
+    }
     DEFAULT_EDITOR.to_string()
 }
 
@@ -785,15 +773,30 @@ mod tests {
 
     #[test]
     fn comment_lines_accepted() {
-        assert!(matches!(validate_line("# this is a comment"), Ok(LineKind::Comment)));
-        assert!(matches!(validate_line("  # indented comment"), Ok(LineKind::Comment)));
+        assert!(matches!(
+            validate_line("# this is a comment"),
+            Ok(LineKind::Comment)
+        ));
+        assert!(matches!(
+            validate_line("  # indented comment"),
+            Ok(LineKind::Comment)
+        ));
     }
 
     #[test]
     fn env_var_lines_accepted() {
-        assert!(matches!(validate_line("SHELL=/bin/sh"), Ok(LineKind::EnvVar)));
-        assert!(matches!(validate_line("PATH=/usr/bin:/bin"), Ok(LineKind::EnvVar)));
-        assert!(matches!(validate_line("MAILTO=admin@example.com"), Ok(LineKind::EnvVar)));
+        assert!(matches!(
+            validate_line("SHELL=/bin/sh"),
+            Ok(LineKind::EnvVar)
+        ));
+        assert!(matches!(
+            validate_line("PATH=/usr/bin:/bin"),
+            Ok(LineKind::EnvVar)
+        ));
+        assert!(matches!(
+            validate_line("MAILTO=admin@example.com"),
+            Ok(LineKind::EnvVar)
+        ));
         assert!(matches!(validate_line("_FOO=bar"), Ok(LineKind::EnvVar)));
     }
 
@@ -806,14 +809,38 @@ mod tests {
 
     #[test]
     fn special_strings_valid() {
-        assert!(matches!(validate_line("@reboot /bin/foo"), Ok(LineKind::CronEntry)));
-        assert!(matches!(validate_line("@hourly /bin/bar"), Ok(LineKind::CronEntry)));
-        assert!(matches!(validate_line("@daily /bin/baz"), Ok(LineKind::CronEntry)));
-        assert!(matches!(validate_line("@weekly /bin/qux"), Ok(LineKind::CronEntry)));
-        assert!(matches!(validate_line("@monthly /bin/quux"), Ok(LineKind::CronEntry)));
-        assert!(matches!(validate_line("@yearly /bin/corge"), Ok(LineKind::CronEntry)));
-        assert!(matches!(validate_line("@annually /bin/grault"), Ok(LineKind::CronEntry)));
-        assert!(matches!(validate_line("@midnight /bin/garply"), Ok(LineKind::CronEntry)));
+        assert!(matches!(
+            validate_line("@reboot /bin/foo"),
+            Ok(LineKind::CronEntry)
+        ));
+        assert!(matches!(
+            validate_line("@hourly /bin/bar"),
+            Ok(LineKind::CronEntry)
+        ));
+        assert!(matches!(
+            validate_line("@daily /bin/baz"),
+            Ok(LineKind::CronEntry)
+        ));
+        assert!(matches!(
+            validate_line("@weekly /bin/qux"),
+            Ok(LineKind::CronEntry)
+        ));
+        assert!(matches!(
+            validate_line("@monthly /bin/quux"),
+            Ok(LineKind::CronEntry)
+        ));
+        assert!(matches!(
+            validate_line("@yearly /bin/corge"),
+            Ok(LineKind::CronEntry)
+        ));
+        assert!(matches!(
+            validate_line("@annually /bin/grault"),
+            Ok(LineKind::CronEntry)
+        ));
+        assert!(matches!(
+            validate_line("@midnight /bin/garply"),
+            Ok(LineKind::CronEntry)
+        ));
     }
 
     #[test]
@@ -923,7 +950,11 @@ PATH=/usr/bin:/bin
 @reboot /bin/indexer daemon
 ";
         let (errors, count) = validate_crontab(content);
-        assert!(errors.is_empty(), "unexpected errors: {:?}", errors.iter().map(|e| e.to_string()).collect::<Vec<_>>());
+        assert!(
+            errors.is_empty(),
+            "unexpected errors: {:?}",
+            errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+        );
         assert_eq!(count, 4);
     }
 

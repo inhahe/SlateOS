@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_hostapd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -30,7 +34,11 @@ fn run_hostapd(args: &[String]) -> i32 {
         return 0;
     }
 
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/etc/hostapd/hostapd.conf");
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/etc/hostapd/hostapd.conf");
     println!("Configuration file: {}", config);
     println!("Using interface wlan0 with hwaddr 00:11:22:33:44:55 and ssid \"SlateOS-AP\"");
     println!("wlan0: interface state UNINITIALIZED->ENABLED");
@@ -84,7 +92,10 @@ fn run_hostapd_cli(args: &[String]) -> i32 {
         "reload" => println!("OK"),
         "set" => println!("OK"),
         "deauthenticate" | "disassociate" => {
-            let addr = args.get(1).map(|s| s.as_str()).unwrap_or("AA:BB:CC:DD:EE:01");
+            let addr = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("AA:BB:CC:DD:EE:01");
             println!("OK — {} {}", subcmd, addr);
         }
         _ => println!("OK"),
@@ -94,7 +105,10 @@ fn run_hostapd_cli(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "hostapd".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "hostapd".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "hostapd_cli" => run_hostapd_cli(&rest),
@@ -105,7 +119,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_hostapd};
+    use super::{basename, run_hostapd, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_wayfire(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -20,7 +24,10 @@ fn run_wayfire(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wayfire v0.8 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("wayfire v0.8 (Slate OS)");
+        return 0;
+    }
     println!("Wayfire compositor starting...");
     println!("  Backend: DRM/KMS");
     println!("  Plugins: animate, cube, expo, grid, move, resize, switcher, vswitch");
@@ -48,7 +55,9 @@ fn run_wf_msg(args: &[String], _prog: &str) -> i32 {
             println!("]");
         }
         "get_output" => {
-            println!("{{\"name\": \"eDP-1\", \"width\": 2560, \"height\": 1600, \"refresh\": 120000}}");
+            println!(
+                "{{\"name\": \"eDP-1\", \"width\": 2560, \"height\": 1600, \"refresh\": 120000}}"
+            );
         }
         _ => println!("wf-msg {}: completed", cmd),
     }
@@ -57,7 +66,10 @@ fn run_wf_msg(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "wayfire".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "wayfire".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "wf-msg" => run_wf_msg(&rest, &prog),
@@ -68,7 +80,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_wayfire};
+    use super::{basename, run_wayfire, strip_ext};
 
     #[test]
     fn basename_strips_path() {

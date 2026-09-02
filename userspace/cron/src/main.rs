@@ -53,10 +53,7 @@ impl Personality {
 }
 
 fn detect_personality(argv0: &str) -> Personality {
-    let name = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     let lower = name.to_ascii_lowercase();
 
@@ -86,10 +83,23 @@ fn detect_personality(argv0: &str) -> Personality {
 
 #[derive(Debug, PartialEq, Eq)]
 enum CronError {
-    InvalidField { field: &'static str, value: String },
-    InvalidRange { field: &'static str, low: u32, high: u32 },
-    InvalidStep { field: &'static str, step: u32 },
-    ParseInt { field: &'static str, value: String },
+    InvalidField {
+        field: &'static str,
+        value: String,
+    },
+    InvalidRange {
+        field: &'static str,
+        low: u32,
+        high: u32,
+    },
+    InvalidStep {
+        field: &'static str,
+        step: u32,
+    },
+    ParseInt {
+        field: &'static str,
+        value: String,
+    },
     InvalidSpecial(String),
     InvalidLine(String),
     InvalidTimeSpec(String),
@@ -128,17 +138,24 @@ impl fmt::Display for CronError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DateTime {
     year: u32,
-    month: u32,  // 1-12
-    day: u32,    // 1-31
-    hour: u32,   // 0-23
-    minute: u32, // 0-59
+    month: u32,   // 1-12
+    day: u32,     // 1-31
+    hour: u32,    // 0-23
+    minute: u32,  // 0-59
     weekday: u32, // 0=Sunday, 1=Monday, ..., 6=Saturday
 }
 
 impl DateTime {
     fn new(year: u32, month: u32, day: u32, hour: u32, minute: u32) -> Self {
         let weekday = day_of_week(year, month, day);
-        Self { year, month, day, hour, minute, weekday }
+        Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            weekday,
+        }
     }
 }
 
@@ -197,7 +214,9 @@ impl CronField {
     }
 
     fn matches(&self, val: u32) -> bool {
-        if val > 63 { return false; }
+        if val > 63 {
+            return false;
+        }
         (self.bits >> val) & 1 == 1
     }
 
@@ -571,8 +590,7 @@ fn parse_crontab(content: &str, system_format: bool) -> Result<CrontabFile, Cron
             }
             let special = parts[0];
             let rest = parts[1].trim();
-            let is_reboot =
-                special.eq_ignore_ascii_case("@reboot");
+            let is_reboot = special.eq_ignore_ascii_case("@reboot");
 
             let schedule = CronExpr::parse(special)?;
 
@@ -596,7 +614,9 @@ fn parse_crontab(content: &str, system_format: bool) -> Result<CrontabFile, Cron
         }
 
         // Standard 5-field line
-        let fields: Vec<&str> = line.splitn(6 + usize::from(system_format), char::is_whitespace).collect();
+        let fields: Vec<&str> = line
+            .splitn(6 + usize::from(system_format), char::is_whitespace)
+            .collect();
         let min_fields = if system_format { 7 } else { 6 };
         if fields.len() < min_fields {
             return Err(CronError::InvalidLine(line.to_string()));
@@ -629,11 +649,10 @@ fn parse_crontab(content: &str, system_format: bool) -> Result<CrontabFile, Cron
 
 fn strip_quotes(s: &str) -> String {
     if s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"'))
-            || (s.starts_with('\'') && s.ends_with('\'')))
-        {
-            return s[1..s.len() - 1].to_string();
-        }
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        return s[1..s.len() - 1].to_string();
+    }
     s.to_string()
 }
 
@@ -783,11 +802,7 @@ impl AtJob {
                 // Other comment, skip
             } else if let Some(eq_pos) = line.find('=') {
                 let key = &line[..eq_pos];
-                if !key.is_empty()
-                    && key
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
+                if !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     env_vars.push(CrontabEnvVar {
                         key: key.to_string(),
                         value: line[eq_pos + 1..].to_string(),
@@ -862,7 +877,11 @@ fn parse_datetime_str(s: &str) -> Result<DateTime, CronError> {
         .parse::<u32>()
         .map_err(|_| CronError::InvalidTimeSpec(s.to_string()))?;
 
-    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) || hour > 23 || minute > 59
+    if !(1..=12).contains(&month)
+        || day < 1
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute > 59
     {
         return Err(CronError::InvalidTimeSpec(s.to_string()));
     }
@@ -929,7 +948,13 @@ fn parse_at_time(spec: &str, now: &DateTime) -> Result<DateTime, CronError> {
         let rest = rest.trim();
         let (h, m) = parse_hhmm(rest)?;
         let tomorrow = advance_day(now);
-        return Ok(DateTime::new(tomorrow.year, tomorrow.month, tomorrow.day, h, m));
+        return Ok(DateTime::new(
+            tomorrow.year,
+            tomorrow.month,
+            tomorrow.day,
+            h,
+            m,
+        ));
     }
 
     // YYYY-MM-DD HH:MM
@@ -1027,9 +1052,7 @@ fn add_duration(now: &DateTime, n: u32, unit: &str) -> Result<DateTime, CronErro
                 dt.year, dt.month, dt.day, now.hour, now.minute,
             ))
         }
-        _ => Err(CronError::InvalidTimeSpec(format!(
-            "unknown unit: {unit}"
-        ))),
+        _ => Err(CronError::InvalidTimeSpec(format!("unknown unit: {unit}"))),
     }
 }
 
@@ -1056,9 +1079,10 @@ fn next_at_job_id(spool_dir: &Path) -> u32 {
             // Job filename format: queue_char + 5-hex-digit ID + timestamp
             if name.len() >= 6
                 && let Ok(id) = u32::from_str_radix(&name[1..6], 16)
-                    && id > max_id {
-                        max_id = id;
-                    }
+                && id > max_id
+            {
+                max_id = id;
+            }
         }
     }
     max_id + 1
@@ -1172,10 +1196,7 @@ fn run_crond(args: &[String]) -> i32 {
                         all_entries.extend(ctab.entries);
                     }
                     Err(e) => {
-                        let _ = writeln!(
-                            out,
-                            "crond: error in crontab for '{user}': {e}"
-                        );
+                        let _ = writeln!(out, "crond: error in crontab for '{user}': {e}");
                     }
                 }
             }
@@ -1259,9 +1280,8 @@ fn run_crontab(args: &[String]) -> i32 {
         i += 1;
     }
 
-    let user = target_user.unwrap_or_else(|| {
-        env::var("USER").unwrap_or_else(|_| "root".to_string())
-    });
+    let user =
+        target_user.unwrap_or_else(|| env::var("USER").unwrap_or_else(|_| "root".to_string()));
 
     match action {
         CrontabAction::None => {
@@ -1301,10 +1321,11 @@ fn run_crontab(args: &[String]) -> i32 {
                 let stdin = io::stdin();
                 let mut line = String::new();
                 if stdin.lock().read_line(&mut line).is_ok()
-                    && !line.trim().eq_ignore_ascii_case("y") {
-                        let _ = writeln!(out, "crontab: aborted");
-                        return 0;
-                    }
+                    && !line.trim().eq_ignore_ascii_case("y")
+                {
+                    let _ = writeln!(out, "crontab: aborted");
+                    return 0;
+                }
             }
             let path = user_crontab_path(&user);
             match fs::remove_file(&path) {
@@ -1313,11 +1334,7 @@ fn run_crontab(args: &[String]) -> i32 {
                     0
                 }
                 Err(e) => {
-                    let _ = writeln!(
-                        out,
-                        "crontab: cannot remove {}: {e}",
-                        path.display()
-                    );
+                    let _ = writeln!(out, "crontab: cannot remove {}: {e}", path.display());
                     1
                 }
             }
@@ -1343,11 +1360,7 @@ fn run_crontab(args: &[String]) -> i32 {
             // Validate before installing
             match parse_crontab(&content, false) {
                 Ok(ctab) => {
-                    let _ = writeln!(
-                        out,
-                        "crontab: validated {} entries",
-                        ctab.entries.len()
-                    );
+                    let _ = writeln!(out, "crontab: validated {} entries", ctab.entries.len());
                 }
                 Err(e) => {
                     let _ = writeln!(out, "crontab: errors in input: {e}");
@@ -1361,10 +1374,7 @@ fn run_crontab(args: &[String]) -> i32 {
             }
             match fs::write(&path, &content) {
                 Ok(()) => {
-                    let _ = writeln!(
-                        out,
-                        "crontab: installed new crontab for {user}"
-                    );
+                    let _ = writeln!(out, "crontab: installed new crontab for {user}");
                     0
                 }
                 Err(e) => {
@@ -1459,8 +1469,7 @@ fn run_anacron(args: &[String]) -> i32 {
     let _ = fs::create_dir_all(ANACRON_SPOOL_DIR);
 
     for entry in &config.entries {
-        let timestamp_file =
-            PathBuf::from(ANACRON_SPOOL_DIR).join(&entry.job_id);
+        let timestamp_file = PathBuf::from(ANACRON_SPOOL_DIR).join(&entry.job_id);
 
         let needs_run = if force {
             true
@@ -1480,11 +1489,7 @@ fn run_anacron(args: &[String]) -> i32 {
 
         if needs_run {
             if update_only {
-                let _ = writeln!(
-                    out,
-                    "anacron: updating timestamp for '{}'",
-                    entry.job_id
-                );
+                let _ = writeln!(out, "anacron: updating timestamp for '{}'", entry.job_id);
                 let _ = fs::write(&timestamp_file, "20260520\n");
             } else {
                 let delay_msg = if run_now {
@@ -1503,11 +1508,7 @@ fn run_anacron(args: &[String]) -> i32 {
                 let _ = fs::write(&timestamp_file, "20260520\n");
             }
         } else {
-            let _ = writeln!(
-                out,
-                "anacron: job '{}' not due yet",
-                entry.job_id
-            );
+            let _ = writeln!(out, "anacron: job '{}' not due yet", entry.job_id);
         }
     }
 
@@ -1678,22 +1679,23 @@ fn list_at_jobs(out: &mut io::StdoutLock<'_>) -> i32 {
     for entry in entries.flatten() {
         let path = entry.path();
         if let Ok(content) = fs::read_to_string(&path)
-            && let Ok(job) = AtJob::deserialize(&content) {
-                jobs.insert(
+            && let Ok(job) = AtJob::deserialize(&content)
+        {
+            jobs.insert(
+                job.id,
+                format!(
+                    "{}\t{:04}-{:02}-{:02} {:02}:{:02} {} {}",
                     job.id,
-                    format!(
-                        "{}\t{:04}-{:02}-{:02} {:02}:{:02} {} {}",
-                        job.id,
-                        job.time.year,
-                        job.time.month,
-                        job.time.day,
-                        job.time.hour,
-                        job.time.minute,
-                        job.queue,
-                        job.user,
-                    ),
-                );
-            }
+                    job.time.year,
+                    job.time.month,
+                    job.time.day,
+                    job.time.hour,
+                    job.time.minute,
+                    job.queue,
+                    job.user,
+                ),
+            );
+        }
     }
 
     for line in jobs.values() {
@@ -1790,10 +1792,7 @@ fn run_atd(args: &[String]) -> i32 {
         i += 1;
     }
 
-    let _ = writeln!(
-        out,
-        "atd: starting (batch_threshold={batch_threshold})"
-    );
+    let _ = writeln!(out, "atd: starting (batch_threshold={batch_threshold})");
 
     // Scan spool directory
     let spool = Path::new(AT_SPOOL_DIR);
@@ -1811,27 +1810,36 @@ fn run_atd(args: &[String]) -> i32 {
     for entry in entries.flatten() {
         let path = entry.path();
         if let Ok(content) = fs::read_to_string(&path)
-            && let Ok(job) = AtJob::deserialize(&content) {
-                if job.queue == 'b' {
-                    batch_pending += 1;
-                    let _ = writeln!(
-                        out,
-                        "atd: batch job {} for user '{}' at {:04}-{:02}-{:02} {:02}:{:02}",
-                        job.id, job.user,
-                        job.time.year, job.time.month, job.time.day,
-                        job.time.hour, job.time.minute,
-                    );
-                } else {
-                    pending += 1;
-                    let _ = writeln!(
-                        out,
-                        "atd: job {} for user '{}' at {:04}-{:02}-{:02} {:02}:{:02}",
-                        job.id, job.user,
-                        job.time.year, job.time.month, job.time.day,
-                        job.time.hour, job.time.minute,
-                    );
-                }
+            && let Ok(job) = AtJob::deserialize(&content)
+        {
+            if job.queue == 'b' {
+                batch_pending += 1;
+                let _ = writeln!(
+                    out,
+                    "atd: batch job {} for user '{}' at {:04}-{:02}-{:02} {:02}:{:02}",
+                    job.id,
+                    job.user,
+                    job.time.year,
+                    job.time.month,
+                    job.time.day,
+                    job.time.hour,
+                    job.time.minute,
+                );
+            } else {
+                pending += 1;
+                let _ = writeln!(
+                    out,
+                    "atd: job {} for user '{}' at {:04}-{:02}-{:02} {:02}:{:02}",
+                    job.id,
+                    job.user,
+                    job.time.year,
+                    job.time.month,
+                    job.time.day,
+                    job.time.hour,
+                    job.time.minute,
+                );
             }
+        }
     }
 
     let _ = writeln!(
@@ -2115,8 +2123,7 @@ mod tests {
 
     #[test]
     fn test_parse_month_names() {
-        let f =
-            parse_field_token("jan-mar", "month", 1, 12, month_name_to_num).unwrap();
+        let f = parse_field_token("jan-mar", "month", 1, 12, month_name_to_num).unwrap();
         assert!(f.matches(1));
         assert!(f.matches(2));
         assert!(f.matches(3));
@@ -2125,14 +2132,7 @@ mod tests {
 
     #[test]
     fn test_parse_weekday_names() {
-        let f = parse_field_token(
-            "mon-fri",
-            "day-of-week",
-            0,
-            6,
-            weekday_name_to_num,
-        )
-        .unwrap();
+        let f = parse_field_token("mon-fri", "day-of-week", 0, 6, weekday_name_to_num).unwrap();
         assert!(f.matches(1)); // mon
         assert!(f.matches(5)); // fri
         assert!(!f.matches(0)); // sun
@@ -2768,10 +2768,7 @@ mod tests {
             split_number_unit("30minutes"),
             Some((30, "minutes".to_string()))
         );
-        assert_eq!(
-            split_number_unit("5hours"),
-            Some((5, "hours".to_string()))
-        );
+        assert_eq!(split_number_unit("5hours"), Some((5, "hours".to_string())));
         assert_eq!(split_number_unit("abc"), None);
         assert_eq!(split_number_unit(""), None);
     }

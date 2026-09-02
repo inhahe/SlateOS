@@ -36,7 +36,8 @@ fn run_flatc(args: &[String]) -> i32 {
         println!("flatc version 24.3.25 (Slate OS)");
         return 0;
     }
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| a.ends_with(".fbs") || a.ends_with(".json"))
         .map(|s| s.as_str())
         .collect();
@@ -44,16 +45,27 @@ fn run_flatc(args: &[String]) -> i32 {
         println!("flatc: no input files");
         return 1;
     }
-    let lang = if args.iter().any(|a| a == "--cpp") { "C++" }
-        else if args.iter().any(|a| a == "--java") { "Java" }
-        else if args.iter().any(|a| a == "--python") { "Python" }
-        else if args.iter().any(|a| a == "--go") { "Go" }
-        else if args.iter().any(|a| a == "--rust") { "Rust" }
-        else if args.iter().any(|a| a == "--csharp") { "C#" }
-        else if args.iter().any(|a| a == "--ts") { "TypeScript" }
-        else if args.iter().any(|a| a == "--binary") { "binary" }
-        else if args.iter().any(|a| a == "--json") { "JSON" }
-        else { "C++" };
+    let lang = if args.iter().any(|a| a == "--cpp") {
+        "C++"
+    } else if args.iter().any(|a| a == "--java") {
+        "Java"
+    } else if args.iter().any(|a| a == "--python") {
+        "Python"
+    } else if args.iter().any(|a| a == "--go") {
+        "Go"
+    } else if args.iter().any(|a| a == "--rust") {
+        "Rust"
+    } else if args.iter().any(|a| a == "--csharp") {
+        "C#"
+    } else if args.iter().any(|a| a == "--ts") {
+        "TypeScript"
+    } else if args.iter().any(|a| a == "--binary") {
+        "binary"
+    } else if args.iter().any(|a| a == "--json") {
+        "JSON"
+    } else {
+        "C++"
+    };
     for f in &files {
         let base = f.rsplit_once('.').map_or(*f, |(b, _)| b);
         println!("flatc: compiling {} -> {} ({})", f, base, lang);
@@ -71,7 +83,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_flatc};
+    use super::run_flatc;
 
     #[test]
     fn help_exits_zero() {

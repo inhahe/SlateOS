@@ -43,7 +43,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("zenefits-cli 0.1.0 (broker-commission cautionary-tale personality build)"); }
+fn print_version() {
+    println!("zenefits-cli 0.1.0 (broker-commission cautionary-tale personality build)");
+}
 
 fn run_about() {
     println!("Zenefits (now TriNet Zenefits, a TriNet brand).");
@@ -81,7 +83,9 @@ fn run_scandal() {
     println!("  Layoffs of >450 staff in 2016. Multiple rounds of valuation reset (down to");
     println!("  ~$2B then lower).");
     println!("  Conrad later founded Rippling 2016, explicitly framed as 'doing Zenefits");
-    println!("  properly this time' — and has since out-grown his old company by orders of magnitude.");
+    println!(
+        "  properly this time' — and has since out-grown his old company by orders of magnitude."
+    );
 }
 
 fn run_rebuild() {

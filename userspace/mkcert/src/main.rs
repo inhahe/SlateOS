@@ -47,7 +47,8 @@ fn run_mkcert(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let domains: Vec<&str> = args.iter()
+    let domains: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -63,7 +64,10 @@ fn run_mkcert(args: Vec<String>) -> i32 {
         println!("  - \"{}\"", d);
     }
     println!();
-    println!("The certificate is at \"./{}.pem\" and the key at \"./{}-key.pem\"", name, name);
+    println!(
+        "The certificate is at \"./{}.pem\" and the key at \"./{}-key.pem\"",
+        name, name
+    );
     println!();
     println!("It will expire on 15 April 2026.");
     0
@@ -78,7 +82,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mkcert};
+    use super::run_mkcert;
 
     #[test]
     fn help_exits_zero() {

@@ -69,7 +69,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gitui};
+    use super::run_gitui;
 
     #[test]
     fn help_exits_zero() {

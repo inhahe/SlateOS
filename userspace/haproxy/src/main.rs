@@ -53,7 +53,9 @@ fn run_haproxy(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-c") {
-        let cfg = args.iter().position(|a| a == "-f")
+        let cfg = args
+            .iter()
+            .position(|a| a == "-f")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("/etc/haproxy/haproxy.cfg");
@@ -62,7 +64,9 @@ fn run_haproxy(args: Vec<String>) -> i32 {
     }
 
     // Start server
-    let cfg = args.iter().position(|a| a == "-f")
+    let cfg = args
+        .iter()
+        .position(|a| a == "-f")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("/etc/haproxy/haproxy.cfg");
@@ -93,7 +97,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_haproxy};
+    use super::run_haproxy;
 
     #[test]
     fn help_exits_zero() {

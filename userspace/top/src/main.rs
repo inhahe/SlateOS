@@ -112,7 +112,8 @@ fn read_file(path: &str) -> Option<String> {
 }
 
 fn parse_kb_value(s: &str) -> u64 {
-    let s = s.trim()
+    let s = s
+        .trim()
         .trim_end_matches(" kB")
         .trim_end_matches(" KB")
         .trim();
@@ -122,9 +123,10 @@ fn parse_kb_value(s: &str) -> u64 {
 fn get_meminfo_value(content: &str, key: &str) -> u64 {
     for line in content.lines() {
         if let Some((k, v)) = line.split_once(':')
-            && k.trim() == key {
-                return parse_kb_value(v);
-            }
+            && k.trim() == key
+        {
+            return parse_kb_value(v);
+        }
     }
     0
 }
@@ -160,9 +162,10 @@ fn read_system_summary() -> SystemSummary {
     // Uptime.
     if let Some(uptime) = read_file("/proc/uptime")
         && let Some(secs_str) = uptime.split_whitespace().next()
-            && let Ok(secs) = secs_str.parse::<f64>() {
-                summary.uptime_secs = secs as u64;
-            }
+        && let Ok(secs) = secs_str.parse::<f64>()
+    {
+        summary.uptime_secs = secs as u64;
+    }
 
     // Load average.
     if let Some(loadavg) = read_file("/proc/loadavg") {
@@ -189,7 +192,8 @@ fn read_system_summary() -> SystemSummary {
     if let Some(stat) = read_file("/proc/stat") {
         for line in stat.lines() {
             if let Some(rest) = line.strip_prefix("cpu ") {
-                let vals: Vec<u64> = rest.split_whitespace()
+                let vals: Vec<u64> = rest
+                    .split_whitespace()
                     .filter_map(|s| s.parse().ok())
                     .collect();
                 if vals.len() >= 7 {
@@ -263,9 +267,7 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
         .and_then(|content| {
             for line in content.lines() {
                 if let Some(val) = line.strip_prefix("Uid:") {
-                    return val.split_whitespace()
-                        .next()
-                        .and_then(|s| s.parse().ok());
+                    return val.split_whitespace().next().and_then(|s| s.parse().ok());
                 }
             }
             None
@@ -298,9 +300,10 @@ fn read_all_processes(mem_total_kb: u64) -> Vec<ProcessInfo> {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
                 && let Ok(pid) = name.parse::<u32>()
-                    && let Some(info) = read_process(pid, mem_total_kb) {
-                        procs.push(info);
-                    }
+                && let Some(info) = read_process(pid, mem_total_kb)
+            {
+                procs.push(info);
+            }
         }
     }
 
@@ -308,13 +311,10 @@ fn read_all_processes(mem_total_kb: u64) -> Vec<ProcessInfo> {
 }
 
 /// Compute CPU usage percentages by comparing two snapshots.
-fn compute_cpu_usage(
-    current: &mut [ProcessInfo],
-    prev: &[(u32, u64)],
-    total_cpu_delta: u64,
-) {
+fn compute_cpu_usage(current: &mut [ProcessInfo], prev: &[(u32, u64)], total_cpu_delta: u64) {
     for proc in current.iter_mut() {
-        let prev_ticks = prev.iter()
+        let prev_ticks = prev
+            .iter()
             .find(|(pid, _)| *pid == proc.pid)
             .map(|(_, t)| *t)
             .unwrap_or(0);
@@ -351,8 +351,10 @@ fn format_uptime(secs: u64) -> String {
     let mins = (secs % 3600) / 60;
 
     if days > 0 {
-        format!("up {days} day{}, {hours:02}:{mins:02}",
-            if days == 1 { "" } else { "s" })
+        format!(
+            "up {days} day{}, {hours:02}:{mins:02}",
+            if days == 1 { "" } else { "s" }
+        )
     } else {
         format!("up {hours:02}:{mins:02}")
     }
@@ -387,16 +389,16 @@ fn print_header(summary: &SystemSummary) {
     // Line 2: task counts.
     println!(
         "Tasks: {} total, {} running, {} sleeping, {} stopped, {} zombie",
-        summary.total_tasks,
-        summary.running,
-        summary.sleeping,
-        summary.stopped,
-        summary.zombie
+        summary.total_tasks, summary.running, summary.sleeping, summary.stopped, summary.zombie
     );
 
     // Line 3: CPU usage.
-    let total = summary.cpu_user + summary.cpu_nice + summary.cpu_system
-        + summary.cpu_idle + summary.cpu_iowait + summary.cpu_irq
+    let total = summary.cpu_user
+        + summary.cpu_nice
+        + summary.cpu_system
+        + summary.cpu_idle
+        + summary.cpu_iowait
+        + summary.cpu_irq
         + summary.cpu_softirq;
     let total_f = if total > 0 { total as f64 } else { 1.0 };
 
@@ -412,7 +414,8 @@ fn print_header(summary: &SystemSummary) {
     );
 
     // Line 4: memory.
-    let mem_used = summary.mem_total_kb
+    let mem_used = summary
+        .mem_total_kb
         .saturating_sub(summary.mem_free_kb)
         .saturating_sub(summary.mem_buffers_kb)
         .saturating_sub(summary.mem_cached_kb);
@@ -458,7 +461,11 @@ fn print_process(p: &ProcessInfo) {
         p.cpu_pct,
         p.mem_pct,
         p.time_str,
-        if p.name.len() > 16 { &p.name[..16] } else { &p.name },
+        if p.name.len() > 16 {
+            &p.name[..16]
+        } else {
+            &p.name
+        },
     );
 }
 
@@ -467,9 +474,13 @@ fn sort_processes(procs: &mut [ProcessInfo], field: SortField, reverse: bool) {
     procs.sort_by(|a, b| {
         let cmp = match field {
             SortField::Pid => a.pid.cmp(&b.pid),
-            SortField::Cpu => a.cpu_pct.partial_cmp(&b.cpu_pct)
+            SortField::Cpu => a
+                .cpu_pct
+                .partial_cmp(&b.cpu_pct)
                 .unwrap_or(std::cmp::Ordering::Equal),
-            SortField::Mem => a.mem_pct.partial_cmp(&b.mem_pct)
+            SortField::Mem => a
+                .mem_pct
+                .partial_cmp(&b.mem_pct)
                 .unwrap_or(std::cmp::Ordering::Equal),
             SortField::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
             SortField::Time => a.cpu_ticks.cmp(&b.cpu_ticks),
@@ -481,10 +492,18 @@ fn sort_processes(procs: &mut [ProcessInfo], field: SortField, reverse: bool) {
         // Default: descending for numeric fields, ascending for name.
         match field {
             SortField::Name | SortField::Pid => {
-                if reverse { cmp.reverse() } else { cmp }
+                if reverse {
+                    cmp.reverse()
+                } else {
+                    cmp
+                }
             }
             _ => {
-                if reverse { cmp } else { cmp.reverse() }
+                if reverse {
+                    cmp
+                } else {
+                    cmp.reverse()
+                }
             }
         }
     });
@@ -528,8 +547,12 @@ fn display_snapshot(
     summary.zombie = zombie;
 
     // Compute CPU delta.
-    let current_cpu_total = summary.cpu_user + summary.cpu_nice + summary.cpu_system
-        + summary.cpu_idle + summary.cpu_iowait + summary.cpu_irq
+    let current_cpu_total = summary.cpu_user
+        + summary.cpu_nice
+        + summary.cpu_system
+        + summary.cpu_idle
+        + summary.cpu_iowait
+        + summary.cpu_irq
         + summary.cpu_softirq;
     let cpu_delta = current_cpu_total.saturating_sub(prev_cpu_total);
 
@@ -555,7 +578,11 @@ fn display_snapshot(
     print_table_header();
 
     // Print processes (limited to terminal height minus header lines).
-    let display_count = if max_lines > 7 { max_lines - 7 } else { procs.len() };
+    let display_count = if max_lines > 7 {
+        max_lines - 7
+    } else {
+        procs.len()
+    };
     for proc in procs.iter().take(display_count) {
         print_process(proc);
     }
@@ -590,8 +617,12 @@ fn run(config: &Config) {
 
         // Save current ticks for next delta computation.
         prev_ticks = procs.iter().map(|p| (p.pid, p.cpu_ticks)).collect();
-        prev_cpu_total = summary.cpu_user + summary.cpu_nice + summary.cpu_system
-            + summary.cpu_idle + summary.cpu_iowait + summary.cpu_irq
+        prev_cpu_total = summary.cpu_user
+            + summary.cpu_nice
+            + summary.cpu_system
+            + summary.cpu_idle
+            + summary.cpu_iowait
+            + summary.cpu_irq
             + summary.cpu_softirq;
 
         iteration += 1;
@@ -601,9 +632,10 @@ fn run(config: &Config) {
             break;
         }
         if let Some(max) = config.iterations
-            && iteration >= max {
-                break;
-            }
+            && iteration >= max
+        {
+            break;
+        }
 
         // Sleep until next refresh.
         // Use a simple busy-wait with /proc/uptime polling if sleep syscall

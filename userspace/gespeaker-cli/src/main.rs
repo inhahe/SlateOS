@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_gespeaker(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -29,7 +33,10 @@ fn run_gespeaker(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gespeaker v0.8.6 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("gespeaker v0.8.6 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "--list-voices") {
         println!("Available voices:");
         println!("  default       Default voice (espeak)");
@@ -45,8 +52,16 @@ fn run_gespeaker(args: &[String], _prog: &str) -> i32 {
         println!("  ja            Japanese");
         return 0;
     }
-    let voice = args.windows(2).find(|w| w[0] == "-v").map(|w| w[1].as_str()).unwrap_or("default");
-    let speed = args.windows(2).find(|w| w[0] == "-s").map(|w| w[1].as_str()).unwrap_or("175");
+    let voice = args
+        .windows(2)
+        .find(|w| w[0] == "-v")
+        .map(|w| w[1].as_str())
+        .unwrap_or("default");
+    let speed = args
+        .windows(2)
+        .find(|w| w[0] == "-s")
+        .map(|w| w[1].as_str())
+        .unwrap_or("175");
     println!("gespeaker v0.8.6 (Slate OS)");
     println!("  Backend: espeak");
     println!("  Voice: {}", voice);
@@ -60,7 +75,10 @@ fn run_gespeaker(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "gespeaker".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "gespeaker".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_gespeaker(&rest, &_prog);
     process::exit(code);
@@ -68,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gespeaker};
+    use super::{basename, run_gespeaker, strip_ext};
 
     #[test]
     fn basename_strips_path() {

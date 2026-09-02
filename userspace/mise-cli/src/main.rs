@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mise(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -53,8 +57,11 @@ fn run_mise(args: &[String], _prog: &str) -> i32 {
         println!("mise 2024.11.0 (Slate OS)");
         return 0;
     }
-    let cmd = args.iter().find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("version");
+    let cmd = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("version");
     match cmd {
         "version" => println!("mise 2024.11.0 (Slate OS)"),
         "current" => {
@@ -66,8 +73,11 @@ fn run_mise(args: &[String], _prog: &str) -> i32 {
             println!("python 3.12.1    ~/.local/share/mise/installs/python/3.12.1");
         }
         "install" | "i" => {
-            let tool = args.iter().find(|a| a.as_str() != cmd)
-                .map(|s| s.as_str()).unwrap_or("(all from config)");
+            let tool = args
+                .iter()
+                .find(|a| a.as_str() != cmd)
+                .map(|s| s.as_str())
+                .unwrap_or("(all from config)");
             println!("mise: Installing {}...", tool);
         }
         "doctor" | "dr" => {
@@ -93,7 +103,10 @@ fn run_mise(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mise".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mise".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mise(&rest, &prog);
     process::exit(code);
@@ -101,7 +114,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mise};
+    use super::{basename, run_mise, strip_ext};
 
     #[test]
     fn basename_strips_path() {

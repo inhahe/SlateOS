@@ -104,21 +104,15 @@ fn read_displays() -> Vec<DisplayInfo> {
 
                 let base = format!("/sys/class/drm/{name}");
 
-                let status = read_file(&format!("{base}/status"))
-                    .unwrap_or_default();
+                let status = read_file(&format!("{base}/status")).unwrap_or_default();
                 let connected = status == "connected";
 
-                let modes = read_file(&format!("{base}/modes"))
-                    .unwrap_or_default();
-                let resolution = modes.lines()
-                    .next()
-                    .unwrap_or("unknown")
-                    .to_string();
+                let modes = read_file(&format!("{base}/modes")).unwrap_or_default();
+                let resolution = modes.lines().next().unwrap_or("unknown").to_string();
 
                 let refresh_hz = parse_refresh_hz(&resolution);
 
-                let dpms = read_file(&format!("{base}/dpms"))
-                    .unwrap_or_else(|| "On".to_string());
+                let dpms = read_file(&format!("{base}/dpms")).unwrap_or_else(|| "On".to_string());
 
                 // Brightness from backlight subsystem.
                 let brightness = read_backlight_percent();
@@ -315,15 +309,25 @@ fn cmd_list() {
         return;
     }
 
-    println!("{:<25} {:<12} {:<16} {:<8}",
-        "Display", "Status", "Resolution", "DPMS");
-    println!("{:<25} {:<12} {:<16} {:<8}",
-        "-------", "------", "----------", "----");
+    println!(
+        "{:<25} {:<12} {:<16} {:<8}",
+        "Display", "Status", "Resolution", "DPMS"
+    );
+    println!(
+        "{:<25} {:<12} {:<16} {:<8}",
+        "-------", "------", "----------", "----"
+    );
 
     for disp in &displays {
-        let status = if disp.connected { "connected" } else { "disconnected" };
-        println!("{:<25} {:<12} {:<16} {:<8}",
-            disp.name, status, disp.resolution, disp.dpms_state);
+        let status = if disp.connected {
+            "connected"
+        } else {
+            "disconnected"
+        };
+        println!(
+            "{:<25} {:<12} {:<16} {:<8}",
+            disp.name, status, disp.resolution, disp.dpms_state
+        );
     }
 }
 

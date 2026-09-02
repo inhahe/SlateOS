@@ -33,7 +33,9 @@ fn run_jackd(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let backend = args.iter().position(|a| a == "-d")
+    let backend = args
+        .iter()
+        .position(|a| a == "-d")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("alsa");
@@ -112,7 +114,10 @@ fn run_jack_connect(args: Vec<String>, disconnect: bool) -> i32 {
         println!("Usage: jack_{} port1 port2", verb);
         return 0;
     }
-    let port1 = args.first().map(|s| s.as_str()).unwrap_or("system:capture_1");
+    let port1 = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("system:capture_1");
     let port2 = args.get(1).map(|s| s.as_str()).unwrap_or("myapp:input_1");
     println!("({} {} <-> {})", verb, port1, port2);
     0
@@ -139,7 +144,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -159,7 +166,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_jack_connect};
+    use super::run_jack_connect;
 
     #[test]
     fn help_exits_zero() {

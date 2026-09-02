@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_boomi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,12 +27,17 @@ fn run_boomi(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Boomi 2024 (Slate OS) — AtomSphere"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Boomi 2024 (Slate OS) — AtomSphere");
+        return 0;
+    }
     println!("Boomi 2024 (Slate OS) — AtomSphere iPaaS");
     println!("  Vendor: Boomi, LP (Conshohocken, PA — private after 2021 Dell carve-out)");
     println!("  Founder: Rick Nucci, 2000 (in basement-startup style)");
     println!("          early SaaS-delivered integration platform — pioneered the iPaaS category");
-    println!("          'Atom' = lightweight runtime concept — could run in cloud, on-prem, or hybrid");
+    println!(
+        "          'Atom' = lightweight runtime concept — could run in cloud, on-prem, or hybrid"
+    );
     println!("          Steve Lucas: current CEO (since 2023, came from Marketo + iCIMS)");
     println!("          Chris McNabb: long-time CEO (2018-2023)");
     println!("  Corporate history:");
@@ -39,12 +48,22 @@ fn run_boomi(args: &[String], _prog: &str) -> i32 {
     println!("         possible IPO 2024-2025 path");
     println!("         revenue: ~$300M+ ARR (private, estimated)");
     println!("  Strategic position: 'connect everything — pioneer of cloud-native iPaaS':");
-    println!("                    pitch: 'the leading iPaaS for AnyApp connectivity — cloud, on-prem, edge'");
+    println!(
+        "                    pitch: 'the leading iPaaS for AnyApp connectivity — cloud, on-prem, edge'"
+    );
     println!("                    target: mid-market + enterprise (broadest base of any iPaaS)");
-    println!("                    primary competitor: MuleSoft, Workato, Microsoft Power Automate, Informatica");
-    println!("                    secondary: Celigo, Jitterbit, Tray.io, SnapLogic, IBM webMethods");
-    println!("                    Boomi's wedge: 24-year history + Atom architecture + broadest install base in iPaaS");
-    println!("                    'pioneer' positioning (since 2000) vs newer challengers like Workato");
+    println!(
+        "                    primary competitor: MuleSoft, Workato, Microsoft Power Automate, Informatica"
+    );
+    println!(
+        "                    secondary: Celigo, Jitterbit, Tray.io, SnapLogic, IBM webMethods"
+    );
+    println!(
+        "                    Boomi's wedge: 24-year history + Atom architecture + broadest install base in iPaaS"
+    );
+    println!(
+        "                    'pioneer' positioning (since 2000) vs newer challengers like Workato"
+    );
     println!("  Pricing:");
     println!("    Professional plan: $50K-$200K/yr (starting tier)");
     println!("    Enterprise plan: $150K-$1M+/yr");
@@ -93,7 +112,9 @@ fn run_boomi(args: &[String], _prog: &str) -> i32 {
     println!("    - Single binary deployed wherever connectivity is needed");
     println!("    - Can run in Boomi Cloud (most customers) or self-hosted (regulated industries)");
     println!("    - Hybrid orchestration: cloud-managed control plane + distributed runtime");
-    println!("    - Allows iPaaS in air-gapped + on-prem-only environments (unique vs pure-SaaS competitors)");
+    println!(
+        "    - Allows iPaaS in air-gapped + on-prem-only environments (unique vs pure-SaaS competitors)"
+    );
     println!("  Integrations (200+ pre-built connectors):");
     println!("    - SaaS: Salesforce, NetSuite, Workday, ServiceNow, HubSpot, Marketo");
     println!("    - ERP: SAP, Oracle, Microsoft Dynamics, Sage Intacct, JD Edwards");
@@ -121,18 +142,29 @@ fn run_boomi(args: &[String], _prog: &str) -> i32 {
     println!("  Critique: Atom architecture feels dated next to serverless competitors");
     println!("           UI/UX functional but lagging cloud-native challengers (Workato)");
     println!("           Boomi AI a follower, not a leader, in generative AI integration");
-    println!("           Dell era (2010-2021) was slow innovation period — catching up post-spinout");
-    println!("           pricing complexity (Atoms + connections + processes) frustrating to estimate");
-    println!("           private-equity ownership pressure for margin growth vs new product investment");
+    println!(
+        "           Dell era (2010-2021) was slow innovation period — catching up post-spinout"
+    );
+    println!(
+        "           pricing complexity (Atoms + connections + processes) frustrating to estimate"
+    );
+    println!(
+        "           private-equity ownership pressure for margin growth vs new product investment"
+    );
     println!("           Workato + Microsoft Power Automate eating mid-market share");
     println!("           expected IPO timing uncertain in current market");
-    println!("  Differentiator: pioneered iPaaS category in 2000 (24-year history) + Atom architecture (cloud + on-prem + edge deployment) + 20K+ customers (one of broadest iPaaS bases) + Master Data Hub MDM + B2B/EDI strong + sold by Dell for $4B in 2021 to PE — the most-established and broadly-deployed iPaaS for organizations that want hybrid deployment flexibility, particularly mid-market manufacturing, education, and retail");
+    println!(
+        "  Differentiator: pioneered iPaaS category in 2000 (24-year history) + Atom architecture (cloud + on-prem + edge deployment) + 20K+ customers (one of broadest iPaaS bases) + Master Data Hub MDM + B2B/EDI strong + sold by Dell for $4B in 2021 to PE — the most-established and broadly-deployed iPaaS for organizations that want hybrid deployment flexibility, particularly mid-market manufacturing, education, and retail"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "boomi".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "boomi".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_boomi(&rest, &_prog);
     process::exit(code);
@@ -140,7 +172,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_boomi};
+    use super::{basename, run_boomi, strip_ext};
 
     #[test]
     fn basename_strips_path() {

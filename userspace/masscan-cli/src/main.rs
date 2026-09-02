@@ -36,18 +36,28 @@ fn run_masscan(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let rate = args.windows(2).find(|w| w[0] == "--rate")
-        .map(|w| w[1].as_str()).unwrap_or("100");
-    let ports = args.windows(2).find(|w| w[0] == "-p")
-        .map(|w| w[1].as_str()).unwrap_or("80");
-    let target = args.iter()
+    let rate = args
+        .windows(2)
+        .find(|w| w[0] == "--rate")
+        .map(|w| w[1].as_str())
+        .unwrap_or("100");
+    let ports = args
+        .windows(2)
+        .find(|w| w[0] == "-p")
+        .map(|w| w[1].as_str())
+        .unwrap_or("80");
+    let target = args
+        .iter()
         .find(|a| !a.starts_with('-') && (a.contains('.') || a.contains(':')))
         .map(|s| s.as_str())
         .unwrap_or("10.0.0.0/24");
 
     println!("Starting masscan 1.3.2 (Slate OS)");
     println!("Initiating SYN Stealth Scan");
-    println!("Scanning {} ports on {} -- rate: {} pps", ports, target, rate);
+    println!(
+        "Scanning {} ports on {} -- rate: {} pps",
+        ports, target, rate
+    );
     println!();
     println!("Discovered open port 22/tcp on 10.0.0.1");
     println!("Discovered open port 80/tcp on 10.0.0.1");
@@ -69,7 +79,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_masscan};
+    use super::run_masscan;
 
     #[test]
     fn help_exits_zero() {

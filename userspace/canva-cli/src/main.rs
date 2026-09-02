@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_canva(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_canva(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Canva 1.103.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Canva 1.103.0 (Slate OS)");
+        return 0;
+    }
     println!("Canva 1.103.0 (Slate OS)");
     println!("  Vendor: Canva Pty Ltd (HQ Sydney, Australia — founded 2013)");
     println!("  Founders: Melanie Perkins (CEO), Cliff Obrecht, Cameron Adams");
@@ -37,8 +44,12 @@ fn run_canva(args: &[String], _prog: &str) -> i32 {
     println!("  Free tier: huge library + basic tools — fremium model is the growth engine");
     println!("  Canva Pro: $14.99/mo or $119.99/yr (premium templates, Magic Studio, Brand Kit)");
     println!("  Canva for Teams: $14.99/mo for first 5 users, real-time collab");
-    println!("  Magic Studio: Magic Write (text), Magic Design (layouts), Magic Edit/Eraser/Expand,");
-    println!("               Magic Switch (resize), Magic Animate, DreamLab (image gen, ex-Leonardo.AI)");
+    println!(
+        "  Magic Studio: Magic Write (text), Magic Design (layouts), Magic Edit/Eraser/Expand,"
+    );
+    println!(
+        "               Magic Switch (resize), Magic Animate, DreamLab (image gen, ex-Leonardo.AI)"
+    );
     println!("  Acquisitions: Pexels, Pixabay (stock), Affinity (Photo/Designer/Publisher),");
     println!("               Flourish (data viz), Kaleido (Remove.bg), Leonardo.AI (Aug 2024)");
     println!("  Use cases: social media graphics, slide decks, marketing, simple video edits,");
@@ -51,7 +62,10 @@ fn run_canva(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "canva".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "canva".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_canva(&rest, &_prog);
     process::exit(code);
@@ -59,7 +73,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_canva};
+    use super::{basename, run_canva, strip_ext};
 
     #[test]
     fn basename_strips_path() {

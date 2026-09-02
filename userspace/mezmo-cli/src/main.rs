@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mezmo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,12 +25,17 @@ fn run_mezmo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Mezmo 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Mezmo 2024 (Slate OS)");
+        return 0;
+    }
     println!("Mezmo 2024 (Slate OS) — Telemetry Pipeline + Log Analysis");
     println!("  Vendor: Mezmo, Inc. (Mountain View, CA + Vancouver — private)");
     println!("  History: Founded as LogDNA in 2015 by Chris Nguyen + Lee Liu");
     println!("          'LogDNA' = 'DNA of logs' branding for log management");
-    println!("          Rebranded to 'Mezmo' Feb 2022 to reflect broader pipeline + observability vision");
+    println!(
+        "          Rebranded to 'Mezmo' Feb 2022 to reflect broader pipeline + observability vision"
+    );
     println!("          Chris Nguyen: long-time CEO");
     println!("          'Mezmo' = phonetic spelling of 'mesmo' (Portuguese 'same' / 'self')");
     println!("  Private funding:");
@@ -35,12 +44,22 @@ fn run_mezmo(args: &[String], _prog: &str) -> i32 {
     println!("         Initialized, Microsoft M12, Salesforce Ventures, Hercules Capital backers");
     println!("         estimated $50-80M ARR (private)");
     println!("  Strategic position: 'telemetry pipeline — control + route observability data':");
-    println!("                    pitch: 'reduce, redact, route — pay only for the observability data you need'");
-    println!("                    target: cost-conscious observability + compliance-aware enterprises");
-    println!("                    primary competitor: Cribl (head-to-head telemetry pipeline), Datadog, Splunk, Sumo Logic");
+    println!(
+        "                    pitch: 'reduce, redact, route — pay only for the observability data you need'"
+    );
+    println!(
+        "                    target: cost-conscious observability + compliance-aware enterprises"
+    );
+    println!(
+        "                    primary competitor: Cribl (head-to-head telemetry pipeline), Datadog, Splunk, Sumo Logic"
+    );
     println!("                    secondary: Edge Delta, Vector (open-source), Fluentd, Logz.io");
-    println!("                    Mezmo's wedge: telemetry pipeline + log analysis in single platform + IBM Cloud Logging OEM");
-    println!("                    pivot 2022: from log management to telemetry pipeline (Cribl's category) + log mgmt");
+    println!(
+        "                    Mezmo's wedge: telemetry pipeline + log analysis in single platform + IBM Cloud Logging OEM"
+    );
+    println!(
+        "                    pivot 2022: from log management to telemetry pipeline (Cribl's category) + log mgmt"
+    );
     println!("  Pricing:");
     println!("    Log Analysis: $0.80/GB/month for 7-day retention (volume-tiered)");
     println!("    Telemetry Pipeline: per-GB processed pricing");
@@ -100,7 +119,9 @@ fn run_mezmo(args: &[String], _prog: &str) -> i32 {
     println!("  Integrations:");
     println!("    - Sources: Kubernetes, Docker, AWS, Azure, GCP, syslog, FluentBit, Filebeat");
     println!("    - OpenTelemetry (ingest support)");
-    println!("    - Cloud Logs: CloudWatch, GuardDuty, VPC Flow, CloudTrail, Azure Activity, GCP Cloud Logging");
+    println!(
+        "    - Cloud Logs: CloudWatch, GuardDuty, VPC Flow, CloudTrail, Azure Activity, GCP Cloud Logging"
+    );
     println!("    - SIEM destinations: Splunk, Datadog, New Relic, Sumo Logic, Elastic");
     println!("    - Cold storage: S3, GCS, Azure Blob (with rehydration)");
     println!("    - Streaming: Kafka, Kinesis, Pub/Sub, Event Hubs");
@@ -109,7 +130,9 @@ fn run_mezmo(args: &[String], _prog: &str) -> i32 {
     println!("  Mezmo CLI usage:");
     println!("    mezmo login --tenant my-org");
     println!("    mezmo log search --query 'level:error' --from -1h --tail");
-    println!("    mezmo pipeline create --name 'k8s-prod-noise-reduction' --source k8s --dest splunk");
+    println!(
+        "    mezmo pipeline create --name 'k8s-prod-noise-reduction' --source k8s --dest splunk"
+    );
     println!("    mezmo processor add --pipeline 'k8s-prod' --type redact --pattern 'email|ssn'");
     println!("    mezmo destination create --type s3 --bucket logs-cold-tier --format parquet");
     println!("    mezmo alert create --name 'High Error Rate' --condition 'count > 100'");
@@ -128,13 +151,18 @@ fn run_mezmo(args: &[String], _prog: &str) -> i32 {
     println!("           Edge Delta + Vector (Datadog acquisition) compress competitive space");
     println!("           growth slower than peer observability vendors in 2023-2024");
     println!("           AI features minimal vs Datadog / Dynatrace");
-    println!("  Differentiator: telemetry pipeline + log analysis in single platform (rare combination — Cribl is pipeline-only) + IBM Cloud Logging OEM partnership (material revenue + global distribution) + visual pipeline builder with rich processors (redact, reduce, route, encrypt) + LogDNA heritage with sub-second log search + 30-50% cost reduction for downstream SIEMs by filtering noise — the dual-purpose telemetry pipeline + log management platform that customers use to shape their observability data while keeping logs analyzable in the same place");
+    println!(
+        "  Differentiator: telemetry pipeline + log analysis in single platform (rare combination — Cribl is pipeline-only) + IBM Cloud Logging OEM partnership (material revenue + global distribution) + visual pipeline builder with rich processors (redact, reduce, route, encrypt) + LogDNA heritage with sub-second log search + 30-50% cost reduction for downstream SIEMs by filtering noise — the dual-purpose telemetry pipeline + log management platform that customers use to shape their observability data while keeping logs analyzable in the same place"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mezmo".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mezmo".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mezmo(&rest, &_prog);
     process::exit(code);
@@ -142,7 +170,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mezmo};
+    use super::{basename, run_mezmo, strip_ext};
 
     #[test]
     fn basename_strips_path() {

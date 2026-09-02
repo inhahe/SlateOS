@@ -40,7 +40,8 @@ fn run_nmap(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let target = args.iter()
+    let target = args
+        .iter()
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("scanme.nmap.org");
@@ -52,14 +53,38 @@ fn run_nmap(args: Vec<String>) -> i32 {
     println!("Nmap scan report for {}", target);
     println!("Host is up (0.023s latency).");
     println!();
-    println!("PORT     STATE    SERVICE{}",
-        if version_detect { "         VERSION" } else { "" });
-    println!("22/tcp   open     ssh{}",
-        if version_detect { "             OpenSSH 9.6 (protocol 2.0)" } else { "" });
-    println!("80/tcp   open     http{}",
-        if version_detect { "            nginx 1.25.3" } else { "" });
-    println!("443/tcp  open     https{}",
-        if version_detect { "           nginx 1.25.3" } else { "" });
+    println!(
+        "PORT     STATE    SERVICE{}",
+        if version_detect {
+            "         VERSION"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "22/tcp   open     ssh{}",
+        if version_detect {
+            "             OpenSSH 9.6 (protocol 2.0)"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "80/tcp   open     http{}",
+        if version_detect {
+            "            nginx 1.25.3"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "443/tcp  open     https{}",
+        if version_detect {
+            "           nginx 1.25.3"
+        } else {
+            ""
+        }
+    );
     println!("3306/tcp filtered mysql");
     println!("8080/tcp closed   http-proxy");
 
@@ -83,7 +108,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_nmap};
+    use super::run_nmap;
 
     #[test]
     fn help_exits_zero() {

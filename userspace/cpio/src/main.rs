@@ -197,9 +197,7 @@ fn parse_args() -> Result<Options, String> {
                                 // is dest dir.
                                 i += 1;
                                 if i >= args.len() {
-                                    return Err(
-                                        "-p requires a destination directory".to_string(),
-                                    );
+                                    return Err("-p requires a destination directory".to_string());
                                 }
                                 dest_dir = Some(args[i].clone());
                                 ci = chars.len(); // break inner loop
@@ -446,9 +444,10 @@ fn matches_patterns(filename: &str, patterns: &[String]) -> bool {
         // Also try matching against just the final component.
         if let Some(basename) = Path::new(filename).file_name()
             && let Some(name_str) = basename.to_str()
-                && glob_matches(pat, name_str) {
-                    return true;
-                }
+            && glob_matches(pat, name_str)
+        {
+            return true;
+        }
     }
     false
 }
@@ -507,11 +506,7 @@ fn get_nlink(meta: &Metadata) -> u32 {
 
 #[cfg(not(unix))]
 fn get_nlink(meta: &Metadata) -> u32 {
-    if meta.is_dir() {
-        2
-    } else {
-        1
-    }
+    if meta.is_dir() { 2 } else { 1 }
 }
 
 /// Get uid.
@@ -569,13 +564,9 @@ fn get_devminor(_meta: &Metadata) -> u32 {
 
 /// Read the target of a symlink. Returns the target as bytes.
 fn read_symlink_target(path: &Path) -> Result<Vec<u8>, String> {
-    let target = fs::read_link(path)
-        .map_err(|e| format!("read symlink '{}': {}", path.display(), e))?;
-    Ok(target
-        .to_str()
-        .unwrap_or("")
-        .as_bytes()
-        .to_vec())
+    let target =
+        fs::read_link(path).map_err(|e| format!("read symlink '{}': {}", path.display(), e))?;
+    Ok(target.to_str().unwrap_or("").as_bytes().to_vec())
 }
 
 // ============================================================================
@@ -596,17 +587,35 @@ fn format_permissions(mode: u32) -> String {
     };
 
     // Owner.
-    if mode & 0o400 != 0 { perms[1] = b'r'; }
-    if mode & 0o200 != 0 { perms[2] = b'w'; }
-    if mode & 0o100 != 0 { perms[3] = b'x'; }
+    if mode & 0o400 != 0 {
+        perms[1] = b'r';
+    }
+    if mode & 0o200 != 0 {
+        perms[2] = b'w';
+    }
+    if mode & 0o100 != 0 {
+        perms[3] = b'x';
+    }
     // Group.
-    if mode & 0o040 != 0 { perms[4] = b'r'; }
-    if mode & 0o020 != 0 { perms[5] = b'w'; }
-    if mode & 0o010 != 0 { perms[6] = b'x'; }
+    if mode & 0o040 != 0 {
+        perms[4] = b'r';
+    }
+    if mode & 0o020 != 0 {
+        perms[5] = b'w';
+    }
+    if mode & 0o010 != 0 {
+        perms[6] = b'x';
+    }
     // Other.
-    if mode & 0o004 != 0 { perms[7] = b'r'; }
-    if mode & 0o002 != 0 { perms[8] = b'w'; }
-    if mode & 0o001 != 0 { perms[9] = b'x'; }
+    if mode & 0o004 != 0 {
+        perms[7] = b'r';
+    }
+    if mode & 0o002 != 0 {
+        perms[8] = b'w';
+    }
+    if mode & 0o001 != 0 {
+        perms[9] = b'x';
+    }
 
     String::from_utf8(perms.to_vec()).unwrap_or_else(|_| "----------".to_string())
 }
@@ -627,8 +636,8 @@ fn strip_leading_slash(path: &str) -> &str {
 /// Build a cpio entry for a file.
 fn build_entry(filepath: &str) -> Result<CpioEntry, String> {
     let path = Path::new(filepath);
-    let symlink_meta = fs::symlink_metadata(path)
-        .map_err(|e| format!("stat '{}': {}", filepath, e))?;
+    let symlink_meta =
+        fs::symlink_metadata(path).map_err(|e| format!("stat '{}': {}", filepath, e))?;
 
     let is_symlink = symlink_meta.is_symlink();
 
@@ -754,15 +763,10 @@ fn write_entry<W: Write>(writer: &mut W, entry: &CpioEntry) -> Result<usize, Str
 /// Create a cpio archive from file paths read from stdin.
 fn copy_out(opts: &Options) -> Result<(), String> {
     // Determine output: -F, -O, or stdout.
-    let output_path = opts
-        .archive_file
-        .as_ref()
-        .or(opts.output_file.as_ref());
+    let output_path = opts.archive_file.as_ref().or(opts.output_file.as_ref());
 
     let mut writer: Box<dyn Write> = if let Some(path) = output_path {
-        Box::new(
-            File::create(path).map_err(|e| format!("cannot create '{}': {}", path, e))?,
-        )
+        Box::new(File::create(path).map_err(|e| format!("cannot create '{}': {}", path, e))?)
     } else {
         Box::new(io::stdout().lock())
     };
@@ -809,9 +813,7 @@ fn copy_out(opts: &Options) -> Result<(), String> {
         Err(e) => return Err(format!("write trailer: {}", e)),
     }
 
-    writer
-        .flush()
-        .map_err(|e| format!("flush output: {}", e))?;
+    writer.flush().map_err(|e| format!("flush output: {}", e))?;
 
     if !opts.quiet {
         let blocks = total_bytes.div_ceil(BLOCK_SIZE);
@@ -839,7 +841,10 @@ fn read_exact<R: Read>(reader: &mut R, n: usize) -> Result<Vec<u8>, String> {
 }
 
 /// Read the next cpio entry from the reader. Returns None at the trailer.
-fn read_entry<R: Read>(reader: &mut R, total_bytes: &mut usize) -> Result<Option<CpioEntry>, String> {
+fn read_entry<R: Read>(
+    reader: &mut R,
+    total_bytes: &mut usize,
+) -> Result<Option<CpioEntry>, String> {
     // Read header.
     let header_buf = read_exact(reader, HEADER_LEN)?;
     *total_bytes += HEADER_LEN;
@@ -932,15 +937,10 @@ fn set_mtime(path: &Path, mtime: u32) -> Result<(), String> {
 /// Extract or list the cpio archive.
 fn copy_in(opts: &Options) -> Result<(), String> {
     // Determine input source: -F, -I, or stdin.
-    let input_path = opts
-        .archive_file
-        .as_ref()
-        .or(opts.input_file.as_ref());
+    let input_path = opts.archive_file.as_ref().or(opts.input_file.as_ref());
 
     let mut reader: Box<dyn Read> = if let Some(path) = input_path {
-        Box::new(
-            File::open(path).map_err(|e| format!("cannot open '{}': {}", path, e))?,
-        )
+        Box::new(File::open(path).map_err(|e| format!("cannot open '{}': {}", path, e))?)
     } else {
         Box::new(io::stdin().lock())
     };
@@ -1013,17 +1013,15 @@ fn copy_in(opts: &Options) -> Result<(), String> {
                 // Create parent directories if -d is set.
                 if opts.make_directories
                     && let Some(parent) = dest.parent()
-                        && !parent.as_os_str().is_empty() && !parent.exists()
-                            && let Err(e) = fs::create_dir_all(parent) {
-                                let msg = format!(
-                                    "cpio: mkdir '{}': {}",
-                                    parent.display(),
-                                    e
-                                );
-                                eprintln!("{}", msg);
-                                errors.push(msg);
-                                continue;
-                            }
+                    && !parent.as_os_str().is_empty()
+                    && !parent.exists()
+                    && let Err(e) = fs::create_dir_all(parent)
+                {
+                    let msg = format!("cpio: mkdir '{}': {}", parent.display(), e);
+                    eprintln!("{}", msg);
+                    errors.push(msg);
+                    continue;
+                }
 
                 // Check if file exists and -u is not set.
                 if dest.exists() && !opts.unconditional {
@@ -1039,8 +1037,7 @@ fn copy_in(opts: &Options) -> Result<(), String> {
                 match File::create(&dest) {
                     Ok(mut file) => {
                         if let Err(e) = file.write_all(&entry.data) {
-                            let msg =
-                                format!("cpio: write '{}': {}", dest.display(), e);
+                            let msg = format!("cpio: write '{}': {}", dest.display(), e);
                             eprintln!("{}", msg);
                             errors.push(msg);
                         } else {
@@ -1051,8 +1048,7 @@ fn copy_in(opts: &Options) -> Result<(), String> {
                         }
                     }
                     Err(e) => {
-                        let msg =
-                            format!("cpio: create '{}': {}", dest.display(), e);
+                        let msg = format!("cpio: create '{}': {}", dest.display(), e);
                         eprintln!("{}", msg);
                         errors.push(msg);
                     }
@@ -1062,9 +1058,11 @@ fn copy_in(opts: &Options) -> Result<(), String> {
                 // Symlink: data contains the target path.
                 if opts.make_directories
                     && let Some(parent) = dest.parent()
-                        && !parent.as_os_str().is_empty() && !parent.exists() {
-                            let _ = fs::create_dir_all(parent);
-                        }
+                    && !parent.as_os_str().is_empty()
+                    && !parent.exists()
+                {
+                    let _ = fs::create_dir_all(parent);
+                }
 
                 let target = String::from_utf8_lossy(&entry.data).into_owned();
                 #[cfg(unix)]
@@ -1074,12 +1072,8 @@ fn copy_in(opts: &Options) -> Result<(), String> {
                         let _ = fs::remove_file(&dest);
                     }
                     if let Err(e) = std::os::unix::fs::symlink(&target, &dest) {
-                        let msg = format!(
-                            "cpio: symlink '{}' -> '{}': {}",
-                            dest.display(),
-                            target,
-                            e
-                        );
+                        let msg =
+                            format!("cpio: symlink '{}' -> '{}': {}", dest.display(), target, e);
                         eprintln!("{}", msg);
                         errors.push(msg);
                     }
@@ -1096,8 +1090,7 @@ fn copy_in(opts: &Options) -> Result<(), String> {
             _ => {
                 eprintln!(
                     "cpio: {}: unsupported file type 0o{:06o}, skipping",
-                    filename,
-                    file_type
+                    filename, file_type
                 );
             }
         }
@@ -1185,17 +1178,20 @@ fn pass_through(opts: &Options) -> Result<(), String> {
 
         if symlink_meta.is_dir() {
             if opts.make_directories
-                && let Err(e) = fs::create_dir_all(&dest) {
-                    let msg = format!("cpio: mkdir '{}': {}", dest.display(), e);
-                    eprintln!("{}", msg);
-                    errors.push(msg);
-                }
+                && let Err(e) = fs::create_dir_all(&dest)
+            {
+                let msg = format!("cpio: mkdir '{}': {}", dest.display(), e);
+                eprintln!("{}", msg);
+                errors.push(msg);
+            }
         } else if symlink_meta.is_symlink() {
             // Copy symlink.
             if let Some(parent) = dest.parent()
-                && opts.make_directories && !parent.exists() {
-                    let _ = fs::create_dir_all(parent);
-                }
+                && opts.make_directories
+                && !parent.exists()
+            {
+                let _ = fs::create_dir_all(parent);
+            }
             match fs::read_link(src) {
                 Ok(target) => {
                     #[cfg(unix)]
@@ -1208,11 +1204,7 @@ fn pass_through(opts: &Options) -> Result<(), String> {
                             }
                         }
                         if let Err(e) = std::os::unix::fs::symlink(&target, &dest) {
-                            let msg = format!(
-                                "cpio: symlink '{}': {}",
-                                dest.display(),
-                                e
-                            );
+                            let msg = format!("cpio: symlink '{}': {}", dest.display(), e);
                             eprintln!("{}", msg);
                             errors.push(msg);
                         }
@@ -1235,23 +1227,27 @@ fn pass_through(opts: &Options) -> Result<(), String> {
         } else if symlink_meta.is_file() {
             // Copy regular file.
             if let Some(parent) = dest.parent()
-                && opts.make_directories && !parent.exists()
-                    && let Err(e) = fs::create_dir_all(parent) {
-                        let msg = format!("cpio: mkdir '{}': {}", parent.display(), e);
-                        eprintln!("{}", msg);
-                        errors.push(msg);
-                        continue;
-                    }
+                && opts.make_directories
+                && !parent.exists()
+                && let Err(e) = fs::create_dir_all(parent)
+            {
+                let msg = format!("cpio: mkdir '{}': {}", parent.display(), e);
+                eprintln!("{}", msg);
+                errors.push(msg);
+                continue;
+            }
 
             // Check unconditional / newer-than logic.
-            if dest.exists() && !opts.unconditional
-                && let Ok(existing_meta) = fs::metadata(&dest) {
-                    let existing_mtime = get_mtime(&existing_meta);
-                    let src_mtime = get_mtime(&symlink_meta);
-                    if src_mtime <= existing_mtime {
-                        continue;
-                    }
+            if dest.exists()
+                && !opts.unconditional
+                && let Ok(existing_meta) = fs::metadata(&dest)
+            {
+                let existing_mtime = get_mtime(&existing_meta);
+                let src_mtime = get_mtime(&symlink_meta);
+                if src_mtime <= existing_mtime {
+                    continue;
                 }
+            }
 
             match fs::copy(src, &dest) {
                 Ok(_) => {
@@ -1269,10 +1265,7 @@ fn pass_through(opts: &Options) -> Result<(), String> {
     }
 
     if !errors.is_empty() {
-        return Err(format!(
-            "cpio: completed with {} error(s)",
-            errors.len()
-        ));
+        return Err(format!("cpio: completed with {} error(s)", errors.len()));
     }
 
     Ok(())

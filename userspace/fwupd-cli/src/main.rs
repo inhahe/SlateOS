@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_fwupdmgr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_fwupdmgr(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fwupdmgr v1.9 (Slate OS, fwupd)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("fwupdmgr v1.9 (Slate OS, fwupd)");
+        return 0;
+    }
     match args.first().map(|s| s.as_str()) {
         Some("get-devices") => {
             println!("System Firmware");
@@ -55,14 +62,20 @@ fn run_fwupdtool(args: &[String], _prog: &str) -> i32 {
         println!("  get-details CAB  Show firmware details");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fwupdtool v1.9 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("fwupdtool v1.9 (Slate OS)");
+        return 0;
+    }
     println!("fwupdtool: firmware debugging utility");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "fwupdmgr".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "fwupdmgr".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "fwupdtool" => run_fwupdtool(&rest, &prog),
@@ -73,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fwupdmgr};
+    use super::{basename, run_fwupdmgr, strip_ext};
 
     #[test]
     fn basename_strips_path() {

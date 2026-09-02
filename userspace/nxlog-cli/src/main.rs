@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_nxlog(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_nxlog(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("NXLog v5.7.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("NXLog v5.7.0 (Slate OS)");
+        return 0;
+    }
     println!("NXLog v5.7.0 (Slate OS)");
     println!("  Inputs: im_file (3), im_udp (1), im_tcp (1)");
     println!("  Outputs: om_file (2), om_tcp (1), om_elasticsearch (1)");
@@ -38,7 +45,10 @@ fn run_nxlog(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "nxlog".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "nxlog".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_nxlog(&rest, &_prog);
     process::exit(code);
@@ -46,7 +56,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_nxlog};
+    use super::{basename, run_nxlog, strip_ext};
 
     #[test]
     fn basename_strips_path() {

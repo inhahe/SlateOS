@@ -104,18 +104,66 @@ struct LinkMode {
 }
 
 const COMMON_MODES: &[LinkMode] = &[
-    LinkMode { speed: 10, duplex: DUPLEX_HALF, name: b"10baseT/Half" },
-    LinkMode { speed: 10, duplex: DUPLEX_FULL, name: b"10baseT/Full" },
-    LinkMode { speed: 100, duplex: DUPLEX_HALF, name: b"100baseT/Half" },
-    LinkMode { speed: 100, duplex: DUPLEX_FULL, name: b"100baseT/Full" },
-    LinkMode { speed: 1000, duplex: DUPLEX_HALF, name: b"1000baseT/Half" },
-    LinkMode { speed: 1000, duplex: DUPLEX_FULL, name: b"1000baseT/Full" },
-    LinkMode { speed: 2500, duplex: DUPLEX_FULL, name: b"2500baseT/Full" },
-    LinkMode { speed: 5000, duplex: DUPLEX_FULL, name: b"5000baseT/Full" },
-    LinkMode { speed: 10000, duplex: DUPLEX_FULL, name: b"10000baseT/Full" },
-    LinkMode { speed: 25000, duplex: DUPLEX_FULL, name: b"25000baseCR/Full" },
-    LinkMode { speed: 40000, duplex: DUPLEX_FULL, name: b"40000baseCR4/Full" },
-    LinkMode { speed: 100000, duplex: DUPLEX_FULL, name: b"100000baseCR4/Full" },
+    LinkMode {
+        speed: 10,
+        duplex: DUPLEX_HALF,
+        name: b"10baseT/Half",
+    },
+    LinkMode {
+        speed: 10,
+        duplex: DUPLEX_FULL,
+        name: b"10baseT/Full",
+    },
+    LinkMode {
+        speed: 100,
+        duplex: DUPLEX_HALF,
+        name: b"100baseT/Half",
+    },
+    LinkMode {
+        speed: 100,
+        duplex: DUPLEX_FULL,
+        name: b"100baseT/Full",
+    },
+    LinkMode {
+        speed: 1000,
+        duplex: DUPLEX_HALF,
+        name: b"1000baseT/Half",
+    },
+    LinkMode {
+        speed: 1000,
+        duplex: DUPLEX_FULL,
+        name: b"1000baseT/Full",
+    },
+    LinkMode {
+        speed: 2500,
+        duplex: DUPLEX_FULL,
+        name: b"2500baseT/Full",
+    },
+    LinkMode {
+        speed: 5000,
+        duplex: DUPLEX_FULL,
+        name: b"5000baseT/Full",
+    },
+    LinkMode {
+        speed: 10000,
+        duplex: DUPLEX_FULL,
+        name: b"10000baseT/Full",
+    },
+    LinkMode {
+        speed: 25000,
+        duplex: DUPLEX_FULL,
+        name: b"25000baseCR/Full",
+    },
+    LinkMode {
+        speed: 40000,
+        duplex: DUPLEX_FULL,
+        name: b"40000baseCR4/Full",
+    },
+    LinkMode {
+        speed: 100000,
+        duplex: DUPLEX_FULL,
+        name: b"100000baseCR4/Full",
+    },
 ];
 
 struct WolInfo {
@@ -192,30 +240,30 @@ struct EepromInfo {
 
 #[derive(Clone, PartialEq, Debug)]
 enum Command {
-    ShowSettings,        // default: show device settings
-    ShowDriverInfo,      // -i, --driver
-    ShowStatistics,      // -S, --statistics
-    ShowFeatures,        // -k, --show-features
-    SetFeatures,         // -K, --features
-    ShowRing,            // -g, --show-ring
-    SetRing,             // -G, --set-ring
-    ShowCoalesce,        // -c, --show-coalesce
-    SetCoalesce,         // -C, --coalesce
-    ShowPause,           // -a, --show-pause
-    SetPause,            // -A, --pause
-    ShowWol,             // show wake-on-lan
-    SetWol,              // -s (with wol)
-    ShowChannels,        // -l, --show-channels
-    SetChannels,         // -L, --set-channels
-    ShowEeprom,          // -e, --eeprom-dump
-    ShowRegDump,         // -d, --register-dump
-    ShowTimestamping,    // -T, --show-time-stamping
-    ShowPermAddr,        // -P, --show-permaddr
-    SetSpeed,            // -s (with speed/duplex/autoneg)
-    TestSelftest,        // -t, --test
-    Identify,            // -p, --identify
-    ResetDevice,         // --reset
-    ShowModule,          // -m, --dump-module-eeprom
+    ShowSettings,     // default: show device settings
+    ShowDriverInfo,   // -i, --driver
+    ShowStatistics,   // -S, --statistics
+    ShowFeatures,     // -k, --show-features
+    SetFeatures,      // -K, --features
+    ShowRing,         // -g, --show-ring
+    SetRing,          // -G, --set-ring
+    ShowCoalesce,     // -c, --show-coalesce
+    SetCoalesce,      // -C, --coalesce
+    ShowPause,        // -a, --show-pause
+    SetPause,         // -A, --pause
+    ShowWol,          // show wake-on-lan
+    SetWol,           // -s (with wol)
+    ShowChannels,     // -l, --show-channels
+    SetChannels,      // -L, --set-channels
+    ShowEeprom,       // -e, --eeprom-dump
+    ShowRegDump,      // -d, --register-dump
+    ShowTimestamping, // -T, --show-time-stamping
+    ShowPermAddr,     // -P, --show-permaddr
+    SetSpeed,         // -s (with speed/duplex/autoneg)
+    TestSelftest,     // -t, --test
+    Identify,         // -p, --identify
+    ResetDevice,      // --reset
+    ShowModule,       // -m, --dump-module-eeprom
     Help,
     Version,
 }
@@ -784,14 +832,30 @@ fn print_port_list(port: u8) {
 }
 
 fn print_wol_flags(flags: u32) {
-    if flags & WAKE_PHY != 0 { print_out(b"p"); }
-    if flags & WAKE_UCAST != 0 { print_out(b"u"); }
-    if flags & WAKE_MCAST != 0 { print_out(b"m"); }
-    if flags & WAKE_BCAST != 0 { print_out(b"b"); }
-    if flags & WAKE_ARP != 0 { print_out(b"a"); }
-    if flags & WAKE_MAGIC != 0 { print_out(b"g"); }
-    if flags & WAKE_MAGICSECURE != 0 { print_out(b"s"); }
-    if flags & WAKE_FILTER != 0 { print_out(b"f"); }
+    if flags & WAKE_PHY != 0 {
+        print_out(b"p");
+    }
+    if flags & WAKE_UCAST != 0 {
+        print_out(b"u");
+    }
+    if flags & WAKE_MCAST != 0 {
+        print_out(b"m");
+    }
+    if flags & WAKE_BCAST != 0 {
+        print_out(b"b");
+    }
+    if flags & WAKE_ARP != 0 {
+        print_out(b"a");
+    }
+    if flags & WAKE_MAGIC != 0 {
+        print_out(b"g");
+    }
+    if flags & WAKE_MAGICSECURE != 0 {
+        print_out(b"s");
+    }
+    if flags & WAKE_FILTER != 0 {
+        print_out(b"f");
+    }
 }
 
 fn format_hex_byte(b: u8) -> Vec<u8> {
@@ -950,7 +1014,9 @@ fn test_selftest(_device: &[u8]) -> i32 {
 }
 
 fn identify_device(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
-    let duration = params.values().next()
+    let duration = params
+        .values()
+        .next()
         .and_then(|v| parse_u64_bytes(v))
         .unwrap_or(5);
 
@@ -1014,18 +1080,22 @@ fn get_default_settings() -> LinkSettings {
         mdi_x: MdiX::Auto,
         transceiver: Transceiver::Internal,
         supported_modes: vec![
-            COMMON_MODES[0], COMMON_MODES[1],
-            COMMON_MODES[2], COMMON_MODES[3],
-            COMMON_MODES[4], COMMON_MODES[5],
+            COMMON_MODES[0],
+            COMMON_MODES[1],
+            COMMON_MODES[2],
+            COMMON_MODES[3],
+            COMMON_MODES[4],
+            COMMON_MODES[5],
         ],
         advertised_modes: vec![
-            COMMON_MODES[0], COMMON_MODES[1],
-            COMMON_MODES[2], COMMON_MODES[3],
-            COMMON_MODES[4], COMMON_MODES[5],
+            COMMON_MODES[0],
+            COMMON_MODES[1],
+            COMMON_MODES[2],
+            COMMON_MODES[3],
+            COMMON_MODES[4],
+            COMMON_MODES[5],
         ],
-        lp_advertised_modes: vec![
-            COMMON_MODES[1], COMMON_MODES[3], COMMON_MODES[5],
-        ],
+        lp_advertised_modes: vec![COMMON_MODES[1], COMMON_MODES[3], COMMON_MODES[5]],
     }
 }
 
@@ -1067,20 +1137,104 @@ fn get_default_stats() -> InterfaceStats {
 
 fn get_default_features() -> Vec<FeatureState> {
     vec![
-        FeatureState { name: b"rx-checksumming".to_vec(), available: true, requested: true, active: true, never_changed: false },
-        FeatureState { name: b"tx-checksumming".to_vec(), available: true, requested: true, active: true, never_changed: false },
-        FeatureState { name: b"scatter-gather".to_vec(), available: true, requested: true, active: true, never_changed: false },
-        FeatureState { name: b"tcp-segmentation-offload".to_vec(), available: true, requested: true, active: true, never_changed: false },
-        FeatureState { name: b"generic-segmentation-offload".to_vec(), available: true, requested: true, active: true, never_changed: false },
-        FeatureState { name: b"generic-receive-offload".to_vec(), available: true, requested: true, active: true, never_changed: false },
-        FeatureState { name: b"large-receive-offload".to_vec(), available: false, requested: false, active: false, never_changed: true },
-        FeatureState { name: b"rx-vlan-offload".to_vec(), available: true, requested: false, active: false, never_changed: true },
-        FeatureState { name: b"tx-vlan-offload".to_vec(), available: true, requested: false, active: false, never_changed: true },
-        FeatureState { name: b"ntuple-filters".to_vec(), available: false, requested: false, active: false, never_changed: true },
-        FeatureState { name: b"receive-hashing".to_vec(), available: false, requested: false, active: false, never_changed: true },
-        FeatureState { name: b"highdma".to_vec(), available: true, requested: true, active: true, never_changed: true },
-        FeatureState { name: b"rx-gro-hw".to_vec(), available: false, requested: false, active: false, never_changed: true },
-        FeatureState { name: b"tx-nocache-copy".to_vec(), available: false, requested: false, active: false, never_changed: true },
+        FeatureState {
+            name: b"rx-checksumming".to_vec(),
+            available: true,
+            requested: true,
+            active: true,
+            never_changed: false,
+        },
+        FeatureState {
+            name: b"tx-checksumming".to_vec(),
+            available: true,
+            requested: true,
+            active: true,
+            never_changed: false,
+        },
+        FeatureState {
+            name: b"scatter-gather".to_vec(),
+            available: true,
+            requested: true,
+            active: true,
+            never_changed: false,
+        },
+        FeatureState {
+            name: b"tcp-segmentation-offload".to_vec(),
+            available: true,
+            requested: true,
+            active: true,
+            never_changed: false,
+        },
+        FeatureState {
+            name: b"generic-segmentation-offload".to_vec(),
+            available: true,
+            requested: true,
+            active: true,
+            never_changed: false,
+        },
+        FeatureState {
+            name: b"generic-receive-offload".to_vec(),
+            available: true,
+            requested: true,
+            active: true,
+            never_changed: false,
+        },
+        FeatureState {
+            name: b"large-receive-offload".to_vec(),
+            available: false,
+            requested: false,
+            active: false,
+            never_changed: true,
+        },
+        FeatureState {
+            name: b"rx-vlan-offload".to_vec(),
+            available: true,
+            requested: false,
+            active: false,
+            never_changed: true,
+        },
+        FeatureState {
+            name: b"tx-vlan-offload".to_vec(),
+            available: true,
+            requested: false,
+            active: false,
+            never_changed: true,
+        },
+        FeatureState {
+            name: b"ntuple-filters".to_vec(),
+            available: false,
+            requested: false,
+            active: false,
+            never_changed: true,
+        },
+        FeatureState {
+            name: b"receive-hashing".to_vec(),
+            available: false,
+            requested: false,
+            active: false,
+            never_changed: true,
+        },
+        FeatureState {
+            name: b"highdma".to_vec(),
+            available: true,
+            requested: true,
+            active: true,
+            never_changed: true,
+        },
+        FeatureState {
+            name: b"rx-gro-hw".to_vec(),
+            available: false,
+            requested: false,
+            active: false,
+            never_changed: true,
+        },
+        FeatureState {
+            name: b"tx-nocache-copy".to_vec(),
+            available: false,
+            requested: false,
+            active: false,
+            never_changed: true,
+        },
     ]
 }
 
@@ -1178,8 +1332,13 @@ fn format_u64(mut n: u64) -> Vec<u8> {
 }
 
 fn trim_bytes(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n').unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+    let start = s
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+        .unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
         .map(|p| p + 1)
         .unwrap_or(start);
     if start >= end { &[] } else { &s[start..end] }
@@ -1244,7 +1403,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         return 0;
     }
 
-    if parsed.device.is_empty() && parsed.command != Command::Help && parsed.command != Command::Version {
+    if parsed.device.is_empty()
+        && parsed.command != Command::Help
+        && parsed.command != Command::Version
+    {
         print_err(b"ethtool: no device specified\n");
         print_err(b"Usage: ethtool [OPTIONS] DEVNAME\n");
         return 1;
@@ -1387,7 +1549,10 @@ mod tests {
     #[test]
     fn test_parse_key_value() {
         let args = parse_args(&[b"-s".to_vec(), b"eth0".to_vec(), b"speed=1000".to_vec()]);
-        assert_eq!(args.params.get(b"speed".as_slice()), Some(&b"1000".to_vec()));
+        assert_eq!(
+            args.params.get(b"speed".as_slice()),
+            Some(&b"1000".to_vec())
+        );
     }
 
     // ── Link Settings ──────────────────────────────────────────
@@ -1665,8 +1830,14 @@ mod tests {
         assert_eq!(WAKE_PHY, 1);
         assert_eq!(WAKE_MAGIC, 32);
         // All flags should be non-overlapping
-        let all_flags = WAKE_PHY | WAKE_UCAST | WAKE_MCAST | WAKE_BCAST |
-                       WAKE_ARP | WAKE_MAGIC | WAKE_MAGICSECURE | WAKE_FILTER;
+        let all_flags = WAKE_PHY
+            | WAKE_UCAST
+            | WAKE_MCAST
+            | WAKE_BCAST
+            | WAKE_ARP
+            | WAKE_MAGIC
+            | WAKE_MAGICSECURE
+            | WAKE_FILTER;
         assert_eq!(all_flags, 0xFF);
     }
 }

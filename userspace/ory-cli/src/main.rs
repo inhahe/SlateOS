@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("ory-cli 0.1.0 (four-daemon OSS personality build)"); }
+fn print_version() {
+    println!("ory-cli 0.1.0 (four-daemon OSS personality build)");
+}
 
 fn run_about() {
     println!("Ory Corp.");

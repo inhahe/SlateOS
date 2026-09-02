@@ -27,7 +27,8 @@ fn run_so(args: Vec<String>) -> i32 {
     }
 
     let lucky = args.iter().any(|a| a == "--lucky");
-    let query: Vec<&str> = args.iter()
+    let query: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -80,7 +81,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_so};
+    use super::run_so;
 
     #[test]
     fn help_exits_zero() {

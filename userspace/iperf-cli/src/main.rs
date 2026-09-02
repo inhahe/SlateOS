@@ -46,15 +46,21 @@ fn run_iperf(args: Vec<String>) -> i32 {
     let server_mode = args.iter().any(|a| a == "-s" || a == "--server");
     let udp = args.iter().any(|a| a == "-u" || a == "--udp");
     let json = args.iter().any(|a| a == "-J" || a == "--json");
-    let port = args.windows(2).find(|w| w[0] == "-p" || w[0] == "--port")
-        .map(|w| w[1].as_str()).unwrap_or("5201");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "-p" || w[0] == "--port")
+        .map(|w| w[1].as_str())
+        .unwrap_or("5201");
 
     if server_mode {
         println!("-----------------------------------------------------------");
         println!("Server listening on {}", port);
         println!("-----------------------------------------------------------");
         println!("Accepted connection from 192.168.1.100, port 54321");
-        println!("[  5] local 192.168.1.1 port {} connected to 192.168.1.100 port 54321", port);
+        println!(
+            "[  5] local 192.168.1.1 port {} connected to 192.168.1.100 port 54321",
+            port
+        );
         println!("[ ID] Interval           Transfer     Bitrate");
         println!("[  5]   0.00-1.00   sec   112 MBytes   940 Mbits/sec");
         println!("[  5]   1.00-2.00   sec   112 MBytes   941 Mbits/sec");
@@ -63,18 +69,27 @@ fn run_iperf(args: Vec<String>) -> i32 {
         println!("[  5]   0.00-3.00   sec   336 MBytes   940 Mbits/sec  receiver");
     } else if json {
         println!("{{");
-        println!("  \"start\": {{\"test_start\": {{\"protocol\": \"{}\"}}}},", if udp { "UDP" } else { "TCP" });
+        println!(
+            "  \"start\": {{\"test_start\": {{\"protocol\": \"{}\"}}}},",
+            if udp { "UDP" } else { "TCP" }
+        );
         println!("  \"intervals\": [");
         println!("    {{\"sum\": {{\"bits_per_second\": 940000000}}}}");
         println!("  ],");
         println!("  \"end\": {{\"sum_sent\": {{\"bits_per_second\": 940000000}}}}");
         println!("}}");
     } else {
-        let host = args.windows(2).find(|w| w[0] == "-c" || w[0] == "--client")
-            .map(|w| w[1].as_str()).unwrap_or("192.168.1.1");
+        let host = args
+            .windows(2)
+            .find(|w| w[0] == "-c" || w[0] == "--client")
+            .map(|w| w[1].as_str())
+            .unwrap_or("192.168.1.1");
         let proto = if udp { "UDP" } else { "TCP" };
         println!("Connecting to host {}, port {}", host, port);
-        println!("[  5] local 192.168.1.100 port 54321 connected to {} port {}", host, port);
+        println!(
+            "[  5] local 192.168.1.100 port 54321 connected to {} port {}",
+            host, port
+        );
         println!("[ ID] Interval           Transfer     Bitrate         Retr");
         println!("[  5]   0.00-1.00   sec   112 MBytes   940 Mbits/sec    0      sender ({proto})");
         println!("[  5]   1.00-2.00   sec   112 MBytes   941 Mbits/sec    0      sender ({proto})");
@@ -90,7 +105,8 @@ fn run_iperf(args: Vec<String>) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first()
+    let _prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "iperf3".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -100,7 +116,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_iperf};
+    use super::{basename, run_iperf, strip_ext};
 
     #[test]
     fn basename_strips_path() {

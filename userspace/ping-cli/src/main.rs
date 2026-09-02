@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ping(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ping [OPTIONS]");
-        println!("Ping Identity (Slate OS) — enterprise identity (PingOne + PingFederate + PingAccess + PingAuthorize)");
+        println!(
+            "Ping Identity (Slate OS) — enterprise identity (PingOne + PingFederate + PingAccess + PingAuthorize)"
+        );
         println!();
         println!("Options:");
         println!("  --pingone              PingOne Cloud (IDaaS unified platform)");
@@ -22,8 +28,13 @@ fn run_ping(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ping Identity 2024 (Slate OS) — ping-cli (PingOne admin)"); return 0; }
-    println!("Ping Identity 2024 (Slate OS) — Enterprise IDaaS Platform (Thoma Bravo / ForgeRock merger)");
+    if args.iter().any(|a| a == "--version") {
+        println!("Ping Identity 2024 (Slate OS) — ping-cli (PingOne admin)");
+        return 0;
+    }
+    println!(
+        "Ping Identity 2024 (Slate OS) — Enterprise IDaaS Platform (Thoma Bravo / ForgeRock merger)"
+    );
     println!("  Vendor: Ping Identity Corporation (Denver, CO — private under Thoma Bravo)");
     println!("  Founders: Andre Durand, 2002 (CEO until 2023, founder-led for 21 years)");
     println!("          Andre Durand: serial entrepreneur, founded Ping Identity from scratch");
@@ -42,11 +53,19 @@ fn run_ping(args: &[String], _prog: &str) -> i32 {
     println!("    - Joins SailPoint (also Thoma Bravo) in identity portfolio");
     println!("    - Thoma Bravo: largest software PE firm, building identity vertical");
     println!("  Strategic position: 'enterprise IDaaS for large complex orgs':");
-    println!("                    pitch: 'identity for the Fortune 500 — federation, AuthN, AuthZ, MFA, fraud'");
-    println!("                    target: Fortune 1000, government, healthcare, financial services");
-    println!("                    primary competitor: Okta, Microsoft Entra ID (Azure AD), IBM Security Verify");
+    println!(
+        "                    pitch: 'identity for the Fortune 500 — federation, AuthN, AuthZ, MFA, fraud'"
+    );
+    println!(
+        "                    target: Fortune 1000, government, healthcare, financial services"
+    );
+    println!(
+        "                    primary competitor: Okta, Microsoft Entra ID (Azure AD), IBM Security Verify"
+    );
     println!("                    secondary: Auth0 (now Okta), SailPoint (IGA), CyberArk (PAM)");
-    println!("                    Ping wedge: federation heritage + complex use cases + on-prem + cloud hybrid");
+    println!(
+        "                    Ping wedge: federation heritage + complex use cases + on-prem + cloud hybrid"
+    );
     println!("                    + workforce + customer + B2B identity coverage");
     println!("                    + post-ForgeRock merger = largest enterprise IDaaS portfolio");
     println!("                    'For complex Fortune 500 IT, Ping handles what Okta can't'");
@@ -64,7 +83,9 @@ fn run_ping(args: &[String], _prog: &str) -> i32 {
     println!("    - PingFederate: self-hosted federation server (Java, SAML/OIDC IdP + SP)");
     println!("    - PingAccess: reverse-proxy web access management (Java)");
     println!("    - PingAuthorize: dynamic policy decision point (XACML / dynamic authorization)");
-    println!("    - PingDirectory: LDAP-compatible directory server (Java, from UnboundID acq 2016)");
+    println!(
+        "    - PingDirectory: LDAP-compatible directory server (Java, from UnboundID acq 2016)"
+    );
     println!("    - PingID: MFA (push, OTP, FIDO2, biometric)");
     println!("    - PingIntelligence for APIs: API security + bot detection");
     println!("    - DaVinci: identity orchestration low-code platform (Singular Key acq 2021)");
@@ -131,7 +152,9 @@ fn run_ping(args: &[String], _prog: &str) -> i32 {
     println!("    - PingFederate admin UI + REST API");
     println!("    - PingAccess CLI + REST API");
     println!("    - PingID SDK for mobile apps");
-    println!("    - 1000+ integrations (Salesforce, Workday, ServiceNow, Office 365, AWS, GCP, Azure)");
+    println!(
+        "    - 1000+ integrations (Salesforce, Workday, ServiceNow, Office 365, AWS, GCP, Azure)"
+    );
     println!("    - SCIM 2.0 for user provisioning");
     println!("    - SAML 2.0 + OIDC + OAuth 2.0 + FIDO2/WebAuthn");
     println!("    - Active Directory + LDAP source integration");
@@ -158,7 +181,9 @@ fn run_ping(args: &[String], _prog: &str) -> i32 {
     println!("    - Walmart, Target, Lowes (retail)");
     println!("    - Boeing, Lockheed (aerospace)");
     println!("    - ~50% of Fortune 100 use Ping somewhere");
-    println!("  Critique: complex product matrix (PingOne vs PingFederate vs PingAccess confusion)");
+    println!(
+        "  Critique: complex product matrix (PingOne vs PingFederate vs PingAccess confusion)"
+    );
     println!("           on-prem + cloud + merger = lots of overlap to rationalize");
     println!("           less Okta-shiny in dev DX (Ping is enterprise-IT-led, not dev-led)");
     println!("           PingOne UI rough compared to Okta + Microsoft");
@@ -167,13 +192,18 @@ fn run_ping(args: &[String], _prog: &str) -> i32 {
     println!("           licensing complexity remains (PE-owned)");
     println!("           customer identity less developer-friendly than Auth0 + Clerk + Stytch");
     println!("           hybrid on-prem + SaaS deployment = more ops burden");
-    println!("  Differentiator: 22-year enterprise IDaaS pioneer (founded 2002 by Andre Durand in Denver CO, IPO NYSE:PING 2019, Thoma Bravo acquisition Oct 2022 $2.8B, Andre Durand returned as CEO Aug 2023 of merged Ping+ForgeRock entity) + most comprehensive identity portfolio (PingOne cloud IDaaS + PingFederate on-prem federation + PingAccess WAM + PingAuthorize dynamic authorization + PingDirectory LDAP + PingID MFA + PingIntelligence API security + DaVinci identity orchestration low-code + post-ForgeRock ForgeRock Identity Cloud + OpenAM + OpenIDM + OpenDJ integration) + the federation heritage ('Ping' = SAML federation handshake) + workforce + customer + B2B identity coverage + UnboundID directory acquisition + Singular Key DaVinci orchestration acquisition + Thoma Bravo identity vertical play (with SailPoint sister portfolio) + 1000+ app integrations + Bank of America/Citi/Wells/Allianz/AXA/Cisco/IBM/HHS/DHS-proven + FedRAMP authorized + ~50% of Fortune 100 + 6-7 figure enterprise deals + JSON Pointer policy authorization + Andre Durand founder comeback (rare in PE-owned enterprise software) — the most enterprise-grade IDaaS portfolio after the ForgeRock merger, the choice for complex Fortune 500 hybrid identity that's beyond Okta's SaaS comfort zone");
+    println!(
+        "  Differentiator: 22-year enterprise IDaaS pioneer (founded 2002 by Andre Durand in Denver CO, IPO NYSE:PING 2019, Thoma Bravo acquisition Oct 2022 $2.8B, Andre Durand returned as CEO Aug 2023 of merged Ping+ForgeRock entity) + most comprehensive identity portfolio (PingOne cloud IDaaS + PingFederate on-prem federation + PingAccess WAM + PingAuthorize dynamic authorization + PingDirectory LDAP + PingID MFA + PingIntelligence API security + DaVinci identity orchestration low-code + post-ForgeRock ForgeRock Identity Cloud + OpenAM + OpenIDM + OpenDJ integration) + the federation heritage ('Ping' = SAML federation handshake) + workforce + customer + B2B identity coverage + UnboundID directory acquisition + Singular Key DaVinci orchestration acquisition + Thoma Bravo identity vertical play (with SailPoint sister portfolio) + 1000+ app integrations + Bank of America/Citi/Wells/Allianz/AXA/Cisco/IBM/HHS/DHS-proven + FedRAMP authorized + ~50% of Fortune 100 + 6-7 figure enterprise deals + JSON Pointer policy authorization + Andre Durand founder comeback (rare in PE-owned enterprise software) — the most enterprise-grade IDaaS portfolio after the ForgeRock merger, the choice for complex Fortune 500 hybrid identity that's beyond Okta's SaaS comfort zone"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "ping".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "ping".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ping(&rest, &_prog);
     process::exit(code);
@@ -181,7 +211,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ping};
+    use super::{basename, run_ping, strip_ext};
 
     #[test]
     fn basename_strips_path() {

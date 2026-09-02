@@ -56,7 +56,11 @@ fn run_hunspell(args: Vec<String>) -> i32 {
         println!("recieve");
         println!("occured");
     } else {
-        let dict = args.windows(2).find(|w| w[0] == "-d").map(|w| w[1].as_str()).unwrap_or("en_US");
+        let dict = args
+            .windows(2)
+            .find(|w| w[0] == "-d")
+            .map(|w| w[1].as_str())
+            .unwrap_or("en_US");
         println!("Hunspell 1.7.2 (dict={})", dict);
         println!("(interactive spell-check mode)");
     }
@@ -72,7 +76,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_hunspell};
+    use super::run_hunspell;
 
     #[test]
     fn help_exits_zero() {

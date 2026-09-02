@@ -43,7 +43,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("retool-cli 0.1.0 (internal-tools personality build)"); }
+fn print_version() {
+    println!("retool-cli 0.1.0 (internal-tools personality build)");
+}
 
 fn run_about() {
     println!("Retool, Inc.");

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ol(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,19 +27,28 @@ fn run_ol(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("OneLogin 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("OneLogin 2024 (Slate OS)");
+        return 0;
+    }
     println!("OneLogin 2024 (Slate OS)");
-    println!("  Vendor: OneLogin → acquired by One Identity (Quest Software, Clearlake Capital) Oct 2021");
+    println!(
+        "  Vendor: OneLogin → acquired by One Identity (Quest Software, Clearlake Capital) Oct 2021"
+    );
     println!("          rebranded part of One Identity portfolio");
     println!("  Founders: Thomas Pedersen (Danish — also founded Zendesk, Snaplogic alum)");
     println!("            Christian Pedersen (brother)");
     println!("  Founded: 2009, San Francisco");
     println!("  History: one of the earliest standalone SaaS IAM vendors (alongside Okta)");
-    println!("          competed with Okta + Centrify (now Delinea) + Ping Identity throughout the 2010s");
+    println!(
+        "          competed with Okta + Centrify (now Delinea) + Ping Identity throughout the 2010s"
+    );
     println!("          ~$170M raised, never IPO'd");
     println!("          acquired by One Identity (private equity-backed Quest Software arm) 2021");
     println!("  Security incidents:");
-    println!("    - May 2017 breach: customer data accessed via compromised AWS keys (cleartext password storage controversy)");
+    println!(
+        "    - May 2017 breach: customer data accessed via compromised AWS keys (cleartext password storage controversy)"
+    );
     println!("    - 2019 lesser incident — both hurt brand vs Okta during critical growth window");
     println!("  Pricing: Starter $4/user/mo, Enterprise $8/user/mo");
     println!("          add-ons for MFA, VPN, advanced features");
@@ -61,7 +74,10 @@ fn run_ol(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "onelogin".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "onelogin".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ol(&rest, &_prog);
     process::exit(code);
@@ -69,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ol};
+    use super::{basename, run_ol, strip_ext};
 
     #[test]
     fn basename_strips_path() {

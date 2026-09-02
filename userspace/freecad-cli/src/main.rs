@@ -41,8 +41,15 @@ fn run_freecad(args: &[String], cmd_mode: bool) -> i32 {
         return 0;
     }
 
-    let macro_file = args.windows(2).find(|w| w[0] == "--run-macro").map(|w| w[1].as_str());
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let macro_file = args
+        .windows(2)
+        .find(|w| w[0] == "--run-macro")
+        .map(|w| w[1].as_str());
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
 
     if cmd_mode {
         println!("FreeCAD 0.21.2 — console mode");
@@ -68,7 +75,8 @@ fn run_freecad(args: &[String], cmd_mode: bool) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "freecad".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -82,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_freecad};
+    use super::{basename, run_freecad, strip_ext};
 
     #[test]
     fn basename_strips_path() {

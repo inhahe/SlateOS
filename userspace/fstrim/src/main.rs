@@ -95,10 +95,10 @@ struct TrimRange {
 #[derive(Clone, Copy)]
 struct DiscardParams {
     offset: u64,
-    length: u64,       // 0 = entire device
-    step: u64,         // step size for progress
-    secure: bool,      // secure discard
-    zeroout: bool,     // zero instead of discard
+    length: u64,   // 0 = entire device
+    step: u64,     // step size for progress
+    secure: bool,  // secure discard
+    zeroout: bool, // zero instead of discard
 }
 
 /// Wipefs signature info
@@ -138,13 +138,13 @@ struct FstrimOpts {
     target: [u8; MAX_PATH],
     target_len: usize,
     // fstrim options
-    offset: u64,         // -o
-    length: u64,         // -l (0 = entire)
-    minimum: u64,        // -m (minimum free extent)
-    verbose: bool,       // -v
-    dry_run: bool,       // -n (for wipefs)
-    all_mounts: bool,    // -a (fstrim all mounted)
-    listed_in: [u8; MAX_PATH],  // --listed-in (fstab file)
+    offset: u64,               // -o
+    length: u64,               // -l (0 = entire)
+    minimum: u64,              // -m (minimum free extent)
+    verbose: bool,             // -v
+    dry_run: bool,             // -n (for wipefs)
+    all_mounts: bool,          // -a (fstrim all mounted)
+    listed_in: [u8; MAX_PATH], // --listed-in (fstab file)
     listed_in_len: usize,
     // blkdiscard options
     discard_offset: u64, // -o
@@ -154,12 +154,12 @@ struct FstrimOpts {
     zeroout: bool,       // -z (zero instead of discard)
     force: bool,         // -f
     // wipefs options
-    wipe_all: bool,      // -a (wipe all signatures)
-    wipe_quiet: bool,    // -q
-    no_header: bool,     // -n (no heading for wipefs output)
-    backup: bool,        // -b (backup erased data)
+    wipe_all: bool,        // -a (wipe all signatures)
+    wipe_quiet: bool,      // -q
+    no_header: bool,       // -n (no heading for wipefs output)
+    backup: bool,          // -b (backup erased data)
     output_parsable: bool, // -p (parsable output)
-    types: [u8; 64],     // -t (filter by type)
+    types: [u8; 64],       // -t (filter by type)
     types_len: usize,
 }
 
@@ -703,7 +703,12 @@ fn show_wipefs_help() {
 /// pass it down to the kernel as part of the FITRIM ioctl `struct
 /// fstrim_range`. The personality-CLI stub computes a representative
 /// trimmed-byte count without consulting the range.
-fn do_fstrim(mountpoint: &[u8], _range: &TrimRange, verbose: bool, dry_run: bool) -> Result<u64, i32> {
+fn do_fstrim(
+    mountpoint: &[u8],
+    _range: &TrimRange,
+    verbose: bool,
+    dry_run: bool,
+) -> Result<u64, i32> {
     // In a real implementation:
     // 1. Open the mountpoint
     // 2. Issue FITRIM ioctl with the range
@@ -856,10 +861,21 @@ fn detect_signatures(_device: &[u8]) -> ([Signature; MAX_SIGNATURES], usize) {
         sigs[count].magic[0] = 0x53;
         sigs[count].magic[1] = 0xEF;
         sigs[count].magic_len = 2;
-        set_field(&mut sigs[count].fstype, &mut sigs[count].fstype_len, b"ext4");
-        set_field(&mut sigs[count].label, &mut sigs[count].label_len, b"rootfs");
-        set_field(&mut sigs[count].uuid, &mut sigs[count].uuid_len,
-                  b"12345678-1234-1234-1234-123456789abc");
+        set_field(
+            &mut sigs[count].fstype,
+            &mut sigs[count].fstype_len,
+            b"ext4",
+        );
+        set_field(
+            &mut sigs[count].label,
+            &mut sigs[count].label_len,
+            b"rootfs",
+        );
+        set_field(
+            &mut sigs[count].uuid,
+            &mut sigs[count].uuid_len,
+            b"12345678-1234-1234-1234-123456789abc",
+        );
         count += 1;
     }
 

@@ -143,12 +143,13 @@ fn read_all_boot_entries() -> Vec<BootEntry> {
             let name = entry.file_name().to_string_lossy().to_string();
             if let Some(rest) = name.strip_prefix("Boot")
                 && let Some(hex) = rest.strip_suffix(&format!("-{EFI_GLOBAL_GUID}"))
-                    && hex.len() == 4
-                        && let Ok(num) = u16::from_str_radix(hex, 16)
-                            && !order.entries.contains(&num)
-                                && let Some(entry) = read_boot_entry(num) {
-                                    entries.push(entry);
-                                }
+                && hex.len() == 4
+                && let Ok(num) = u16::from_str_radix(hex, 16)
+                && !order.entries.contains(&num)
+                && let Some(entry) = read_boot_entry(num)
+            {
+                entries.push(entry);
+            }
         }
     }
 
@@ -157,8 +158,20 @@ fn read_all_boot_entries() -> Vec<BootEntry> {
 
 fn generate_default_entries() -> Vec<BootEntry> {
     vec![
-        BootEntry { num: 0, active: true, label: "Slate OS".to_string(), path: "HD(1,GPT)/EFI/slateos/bootx64.efi".to_string(), _optional: String::new() },
-        BootEntry { num: 1, active: true, label: "UEFI Shell".to_string(), path: "HD(1,GPT)/EFI/Shell/Shell.efi".to_string(), _optional: String::new() },
+        BootEntry {
+            num: 0,
+            active: true,
+            label: "Slate OS".to_string(),
+            path: "HD(1,GPT)/EFI/slateos/bootx64.efi".to_string(),
+            _optional: String::new(),
+        },
+        BootEntry {
+            num: 1,
+            active: true,
+            label: "UEFI Shell".to_string(),
+            path: "HD(1,GPT)/EFI/Shell/Shell.efi".to_string(),
+            _optional: String::new(),
+        },
     ]
 }
 
@@ -166,7 +179,12 @@ fn generate_default_entries() -> Vec<BootEntry> {
 // Output
 // ============================================================================
 
-fn print_boot_entries(out: &mut io::StdoutLock<'_>, entries: &[BootEntry], boot_order: &BootOrder, verbose: bool) {
+fn print_boot_entries(
+    out: &mut io::StdoutLock<'_>,
+    entries: &[BootEntry],
+    boot_order: &BootOrder,
+    verbose: bool,
+) {
     // Boot current.
     let _ = writeln!(out, "BootCurrent: 0000");
 
@@ -175,7 +193,11 @@ fn print_boot_entries(out: &mut io::StdoutLock<'_>, entries: &[BootEntry], boot_
 
     // Boot order.
     if !boot_order.entries.is_empty() {
-        let order_str: Vec<String> = boot_order.entries.iter().map(|n| format!("{n:04X}")).collect();
+        let order_str: Vec<String> = boot_order
+            .entries
+            .iter()
+            .map(|n| format!("{n:04X}"))
+            .collect();
         let _ = writeln!(out, "BootOrder: {}", order_str.join(","));
     }
 
@@ -315,37 +337,50 @@ fn cmd_efibootmgr(args: &[String]) {
             }
             "-L" | "--label" => {
                 i += 1;
-                if i < args.len() { opts.label = Some(args[i].clone()); }
+                if i < args.len() {
+                    opts.label = Some(args[i].clone());
+                }
             }
             "-l" | "--loader" => {
                 i += 1;
-                if i < args.len() { opts.loader = Some(args[i].clone()); }
+                if i < args.len() {
+                    opts.loader = Some(args[i].clone());
+                }
             }
             "-d" | "--disk" => {
                 i += 1;
-                if i < args.len() { opts.disk = Some(args[i].clone()); }
+                if i < args.len() {
+                    opts.disk = Some(args[i].clone());
+                }
             }
             "-p" | "--part" => {
                 i += 1;
-                if i < args.len() { opts.part = args[i].parse().ok(); }
+                if i < args.len() {
+                    opts.part = args[i].parse().ok();
+                }
             }
             "-n" | "--bootnext" => {
                 i += 1;
-                if i < args.len() { opts.boot_next = u16::from_str_radix(&args[i], 16).ok(); }
+                if i < args.len() {
+                    opts.boot_next = u16::from_str_radix(&args[i], 16).ok();
+                }
             }
             "-o" | "--bootorder" => {
                 i += 1;
                 if i < args.len() {
                     opts.boot_order = Some(
-                        args[i].split(',')
+                        args[i]
+                            .split(',')
                             .filter_map(|s| u16::from_str_radix(s.trim(), 16).ok())
-                            .collect()
+                            .collect(),
                     );
                 }
             }
             "-t" | "--timeout" => {
                 i += 1;
-                if i < args.len() { opts.timeout = args[i].parse().ok(); }
+                if i < args.len() {
+                    opts.timeout = args[i].parse().ok();
+                }
             }
             _ => {}
         }
@@ -359,18 +394,29 @@ fn cmd_efibootmgr(args: &[String]) {
     // If no real EFI, use defaults.
     if entries.is_empty() {
         entries = generate_default_entries();
-        boot_order = BootOrder { entries: vec![0, 1] };
+        boot_order = BootOrder {
+            entries: vec![0, 1],
+        };
     }
 
     // Handle modifications.
     if opts.create {
         let num = opts.bootnum.unwrap_or_else(|| {
-            (0..0xFFFF_u16).find(|n| !entries.iter().any(|e| e.num == *n)).unwrap_or(0)
+            (0..0xFFFF_u16)
+                .find(|n| !entries.iter().any(|e| e.num == *n))
+                .unwrap_or(0)
         });
-        let label = opts.label.clone().unwrap_or_else(|| "New Entry".to_string());
+        let label = opts
+            .label
+            .clone()
+            .unwrap_or_else(|| "New Entry".to_string());
         let path = opts.loader.clone().unwrap_or_default();
         entries.push(BootEntry {
-            num, active: true, label, path, _optional: String::new(),
+            num,
+            active: true,
+            label,
+            path,
+            _optional: String::new(),
         });
         if !boot_order.entries.contains(&num) {
             boot_order.entries.push(num);
@@ -379,11 +425,12 @@ fn cmd_efibootmgr(args: &[String]) {
     }
 
     if opts.delete
-        && let Some(num) = opts.bootnum {
-            entries.retain(|e| e.num != num);
-            boot_order.entries.retain(|n| *n != num);
-            eprintln!("efibootmgr: deleted Boot{num:04X}");
-        }
+        && let Some(num) = opts.bootnum
+    {
+        entries.retain(|e| e.num != num);
+        boot_order.entries.retain(|n| *n != num);
+        eprintln!("efibootmgr: deleted Boot{num:04X}");
+    }
 
     if let Some(order) = &opts.boot_order {
         boot_order.entries = order.clone();
@@ -406,8 +453,11 @@ mod tests {
     #[test]
     fn test_boot_entry_clone() {
         let e = BootEntry {
-            num: 0, active: true, label: "Test".to_string(),
-            path: "/test".to_string(), _optional: String::new(),
+            num: 0,
+            active: true,
+            label: "Test".to_string(),
+            path: "/test".to_string(),
+            _optional: String::new(),
         };
         let c = e.clone();
         assert_eq!(c.num, 0);
@@ -442,7 +492,9 @@ mod tests {
 
     #[test]
     fn test_boot_order_clone() {
-        let order = BootOrder { entries: vec![0, 1, 2] };
+        let order = BootOrder {
+            entries: vec![0, 1, 2],
+        };
         let c = order.clone();
         assert_eq!(c.entries, vec![0, 1, 2]);
     }

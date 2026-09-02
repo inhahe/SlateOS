@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_daemon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -20,7 +24,10 @@ fn run_daemon(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("power-profiles-daemon v0.21 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("power-profiles-daemon v0.21 (Slate OS)");
+        return 0;
+    }
     println!("power-profiles-daemon: started");
     println!("  D-Bus: net.hadess.PowerProfiles");
     0
@@ -57,7 +64,10 @@ fn run_ctl(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "power-profiles-daemon".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "power-profiles-daemon".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "powerprofilesctl" => run_ctl(&rest, &prog),
@@ -68,24 +78,36 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_daemon};
+    use super::{basename, run_daemon, strip_ext};
 
     #[test]
     fn basename_strips_path() {
-        assert_eq!(basename("/usr/bin/power-profiles-daemon"), "power-profiles-daemon");
-        assert_eq!(basename(r"C:\bin\power-profiles-daemon.exe"), "power-profiles-daemon.exe");
+        assert_eq!(
+            basename("/usr/bin/power-profiles-daemon"),
+            "power-profiles-daemon"
+        );
+        assert_eq!(
+            basename(r"C:\bin\power-profiles-daemon.exe"),
+            "power-profiles-daemon.exe"
+        );
         assert_eq!(basename("plain"), "plain");
     }
 
     #[test]
     fn strip_ext_removes_extension() {
-        assert_eq!(strip_ext("power-profiles-daemon.exe"), "power-profiles-daemon");
+        assert_eq!(
+            strip_ext("power-profiles-daemon.exe"),
+            "power-profiles-daemon"
+        );
         assert_eq!(strip_ext("no-ext"), "no-ext");
     }
 
     #[test]
     fn help_exits_zero() {
-        assert_eq!(run_daemon(&["--help".to_string()], "power-profiles-daemon"), 0);
+        assert_eq!(
+            run_daemon(&["--help".to_string()], "power-profiles-daemon"),
+            0
+        );
         assert_eq!(run_daemon(&["-h".to_string()], "power-profiles-daemon"), 0);
         let _ = run_daemon(&["--version".to_string()], "power-profiles-daemon");
     }

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bombardier(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -35,14 +39,22 @@ fn run_bombardier(args: &[String]) -> i32 {
         println!("bombardier 1.2.6");
         return 0;
     }
-    let url = args.iter().rfind(|a| !a.starts_with('-'))
+    let url = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("http://localhost:8080");
-    let connections = args.windows(2).find(|w| w[0] == "-c")
-        .map(|w| w[1].as_str()).unwrap_or("125");
+    let connections = args
+        .windows(2)
+        .find(|w| w[0] == "-c")
+        .map(|w| w[1].as_str())
+        .unwrap_or("125");
     let show_latency = args.iter().any(|a| a == "-l");
-    let json_output = args.windows(2).find(|w| w[0] == "-o")
-        .map(|w| w[1].as_str()) == Some("json");
+    let json_output = args
+        .windows(2)
+        .find(|w| w[0] == "-o")
+        .map(|w| w[1].as_str())
+        == Some("json");
 
     if json_output {
         println!("{{");
@@ -62,11 +74,16 @@ fn run_bombardier(args: &[String]) -> i32 {
         println!("    \"req5xx\": 12,");
         println!("    \"others\": 0,");
         println!("    \"latency\": {{\"mean\": 12345.6, \"stddev\": 5678.9, \"max\": 98765.4}},");
-        println!("    \"rps\": {{\"mean\": 9875.23, \"stddev\": 234.56, \"max\": 12345.67, \"percentiles\": {{\"50\": 9800, \"75\": 10200, \"90\": 10800, \"95\": 11200, \"99\": 12000}}}}");
+        println!(
+            "    \"rps\": {{\"mean\": 9875.23, \"stddev\": 234.56, \"max\": 12345.67, \"percentiles\": {{\"50\": 9800, \"75\": 10200, \"90\": 10800, \"95\": 11200, \"99\": 12000}}}}"
+        );
         println!("  }}");
         println!("}}");
     } else {
-        println!("Bombarding {} for 10s using {} connection(s)", url, connections);
+        println!(
+            "Bombarding {} for 10s using {} connection(s)",
+            url, connections
+        );
         println!("[====================================================================] 10s");
         println!("Done!");
         println!();
@@ -94,7 +111,10 @@ fn run_bombardier(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bombardier".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bombardier".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_bombardier(&rest);
     process::exit(code);
@@ -102,7 +122,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bombardier};
+    use super::{basename, run_bombardier, strip_ext};
 
     #[test]
     fn basename_strips_path() {

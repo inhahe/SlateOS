@@ -64,7 +64,8 @@ fn run_thermal_monitor(_args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "thermald".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -78,7 +79,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_thermald};
+    use super::{basename, run_thermald, strip_ext};
 
     #[test]
     fn basename_strips_path() {

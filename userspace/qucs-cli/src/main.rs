@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_qucs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_qucs(args: &[String], _prog: &str) -> i32 {
         println!("  digital, harmonic balance, parameter sweep");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qucs v24.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("qucs v24.2 (Slate OS)");
+        return 0;
+    }
     println!("qucs: circuit simulator GUI started");
     println!("  Components: R, L, C, diodes, BJT, MOSFET, OpAmp, ...");
     println!("  Simulation: DC/AC/Transient/S-parameter");
@@ -42,14 +49,20 @@ fn run_qucsator(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qucsator v24.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("qucsator v24.2 (Slate OS)");
+        return 0;
+    }
     println!("qucsator: running simulation...");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "qucs".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "qucs".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "qucsator" => run_qucsator(&rest, &prog),
@@ -60,7 +73,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_qucs};
+    use super::{basename, run_qucs, strip_ext};
 
     #[test]
     fn basename_strips_path() {

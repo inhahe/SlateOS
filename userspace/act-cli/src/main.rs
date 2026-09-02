@@ -54,7 +54,8 @@ fn run_act(args: Vec<String>) -> i32 {
     }
 
     let dryrun = args.iter().any(|a| a == "-n" || a == "--dryrun");
-    let job = args.windows(2)
+    let job = args
+        .windows(2)
         .find(|w| w[0] == "-j" || w[0] == "--job")
         .map(|w| w[1].as_str());
 
@@ -93,7 +94,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_act};
+    use super::run_act;
 
     #[test]
     fn help_exits_zero() {

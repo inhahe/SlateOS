@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_td(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -15,33 +19,62 @@ fn run_td(args: &[String], _prog: &str) -> i32 {
         println!();
         println!("Options:");
         println!("  --plazma               Plazma — proprietary columnar query engine");
-        println!("  --fluentd              Fluentd-based ingestion (Treasure Data created Fluentd)");
-        println!("  --cdp                  Customer Data Platform (audiences, identity, activations)");
+        println!(
+            "  --fluentd              Fluentd-based ingestion (Treasure Data created Fluentd)"
+        );
+        println!(
+            "  --cdp                  Customer Data Platform (audiences, identity, activations)"
+        );
         println!("  --ml                   Treasure Insights ML auto-modeling");
         println!("  --dataops              Workflows (Digdag) + scheduled queries");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Treasure Data 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Treasure Data 2024 (Slate OS)");
+        return 0;
+    }
     println!("Treasure Data 2024 (Slate OS) — Enterprise CDP");
     println!("  Vendor: Treasure Data, Inc. (Mountain View + Tokyo)");
-    println!("  Founders: Hiro Yoshikawa (former CEO) + Kazuki Ohta (CTO) + Sadayuki Furuhashi, 2011");
+    println!(
+        "  Founders: Hiro Yoshikawa (former CEO) + Kazuki Ohta (CTO) + Sadayuki Furuhashi, 2011"
+    );
     println!("          all three Japanese — founded in Tokyo, moved HQ to Bay Area");
-    println!("          Kazuki + Sadayuki: created Fluentd (open-source log collector, CNCF graduated)");
+    println!(
+        "          Kazuki + Sadayuki: created Fluentd (open-source log collector, CNCF graduated)"
+    );
     println!("          MessagePack co-creators (efficient binary serialization format)");
-    println!("          one of the few Japan-rooted enterprise data companies with global presence");
+    println!(
+        "          one of the few Japan-rooted enterprise data companies with global presence"
+    );
     println!("  Ownership history:");
-    println!("         Acquired by Arm Holdings Aug 2018 for ~$600M (Arm wanted IoT data platform)");
-    println!("         When SoftBank sold Arm to Nvidia attempt failed (2020-2022), TD was spun out");
-    println!("         Spun off back to SoftBank-led group Sep 2018 — actually back to Arm/SoftBank for some years");
+    println!(
+        "         Acquired by Arm Holdings Aug 2018 for ~$600M (Arm wanted IoT data platform)"
+    );
+    println!(
+        "         When SoftBank sold Arm to Nvidia attempt failed (2020-2022), TD was spun out"
+    );
+    println!(
+        "         Spun off back to SoftBank-led group Sep 2018 — actually back to Arm/SoftBank for some years"
+    );
     println!("         Since ~2023: independent again, majority-owned by SoftBank Vision Fund");
     println!("         complicated ownership history but consistently independent operations");
     println!("  Strategic position: 'enterprise CDP — Japanese engineering rigor':");
-    println!("                    pitch: 'unified customer data + AI activations + 170+ pre-built integrations'");
-    println!("                    target: large global enterprises (Fortune 500 + Japan/APAC dominant)");
-    println!("                    primary competitor: Segment, mParticle, Tealium, Adobe Experience Platform");
-    println!("                    TD's wedge: Japanese enterprise dominance + ML auto-modeling + Plazma engine");
-    println!("                    sales motion: enterprise direct + heavy SI channel (Accenture, Dentsu, Hakuhodo)");
+    println!(
+        "                    pitch: 'unified customer data + AI activations + 170+ pre-built integrations'"
+    );
+    println!(
+        "                    target: large global enterprises (Fortune 500 + Japan/APAC dominant)"
+    );
+    println!(
+        "                    primary competitor: Segment, mParticle, Tealium, Adobe Experience Platform"
+    );
+    println!(
+        "                    TD's wedge: Japanese enterprise dominance + ML auto-modeling + Plazma engine"
+    );
+    println!(
+        "                    sales motion: enterprise direct + heavy SI channel (Accenture, Dentsu, Hakuhodo)"
+    );
     println!("                    nearly every major Japanese brand uses TD");
     println!("  Pricing:");
     println!("    no free tier — enterprise sales-led");
@@ -96,20 +129,27 @@ fn run_td(args: &[String], _prog: &str) -> i32 {
     println!("    - sweet spot: large enterprise — automotive, retail, financial services, telco");
     println!("    - 60%+ of Japan's Nikkei 225 use TD");
     println!("  Critique: less brand recognition in US/EU than Segment/mParticle/Tealium");
-    println!("           Plazma proprietary engine adds onboarding complexity (vs warehouse-native)");
+    println!(
+        "           Plazma proprietary engine adds onboarding complexity (vs warehouse-native)"
+    );
     println!("           UX less polished than newer CDPs (Hightouch, RudderStack)");
     println!("           expensive — minimum 6-figure ACV");
     println!("           ownership history confusion hurt enterprise sales conversations");
     println!("           Snowflake-native CDPs (Hightouch) attacking from composable angle");
     println!("           dependence on Japanese SI channel slows global expansion");
     println!("           open-source projects (Fluentd, Digdag) reach > commercial product");
-    println!("  Differentiator: Fluentd-creator engineering pedigree + Plazma trillion-row engine + dominant Japan/APAC enterprise footprint + 170+ pre-built integrations including Japan-specific platforms — the CDP choice for global enterprises with significant APAC presence");
+    println!(
+        "  Differentiator: Fluentd-creator engineering pedigree + Plazma trillion-row engine + dominant Japan/APAC enterprise footprint + 170+ pre-built integrations including Japan-specific platforms — the CDP choice for global enterprises with significant APAC presence"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "treasuredata".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "treasuredata".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_td(&rest, &_prog);
     process::exit(code);
@@ -117,7 +157,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_td};
+    use super::{basename, run_td, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -43,7 +43,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("paloalto-cli 0.1.0 (next-gen-firewall-platform personality build)"); }
+fn print_version() {
+    println!("paloalto-cli 0.1.0 (next-gen-firewall-platform personality build)");
+}
 
 fn run_about() {
     println!("Palo Alto Networks, Inc.");

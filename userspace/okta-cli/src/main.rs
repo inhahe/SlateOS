@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_okta(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,14 +28,19 @@ fn run_okta(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Okta Workforce Identity Cloud 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Okta Workforce Identity Cloud 2024 (Slate OS)");
+        return 0;
+    }
     println!("Okta Workforce Identity Cloud 2024 (Slate OS)");
     println!("  Vendor: Okta, Inc. (San Francisco — NASDAQ:OKTA)");
     println!("  Founders: Todd McKinnon (ex-Salesforce SVP Engineering) + Frederic Kerrest");
     println!("  Founded: 2009; IPO 2017");
     println!("  Funding (pre-IPO): Andreessen Horowitz, Sequoia, Greylock + others");
     println!("  Peak market cap: ~$45B (Feb 2021), ~$80B momentary peak");
-    println!("                  declined sharply post-2022 SaaS correction + breach reputation hits");
+    println!(
+        "                  declined sharply post-2022 SaaS correction + breach reputation hits"
+    );
     println!("  Scale: 18,000+ customer companies");
     println!("        ~6,800 employees");
     println!("        FY2024 revenue $2.3B");
@@ -40,9 +49,13 @@ fn run_okta(args: &[String], _prog: &str) -> i32 {
     println!("  Security incidents:");
     println!("    - LAPSUS$ breach Jan 2022 (intrusion via Sitel subcontractor)");
     println!("    - Customer support breach Oct 2023 (HAR file access tokens stolen)");
-    println!("    - Several smaller incidents — Okta's reputation as 'identity for identity providers' damaged");
-    println!("    - Cloudflare, BeyondTrust, 1Password all victims via Okta")    ;
-    println!("  Pricing: SSO from $2/user/mo, Adaptive MFA $6/user/mo, Lifecycle Management $4/user/mo");
+    println!(
+        "    - Several smaller incidents — Okta's reputation as 'identity for identity providers' damaged"
+    );
+    println!("    - Cloudflare, BeyondTrust, 1Password all victims via Okta");
+    println!(
+        "  Pricing: SSO from $2/user/mo, Adaptive MFA $6/user/mo, Lifecycle Management $4/user/mo"
+    );
     println!("          enterprise typically $15-25/user/mo for full bundle");
     println!("  Workforce products:");
     println!("    - SSO (SAML, OIDC, WS-Fed) with 7,000+ app catalog (Okta Integration Network)");
@@ -60,17 +73,26 @@ fn run_okta(args: &[String], _prog: &str) -> i32 {
     println!("    - Social login (Google, Facebook, Apple, etc.)");
     println!("    - Universal Login + branded sign-in pages");
     println!("    - Actions (extension hooks at login/registration)");
-    println!("  Culture: 'Oktane' annual conference, Identity Day, 'identity-first security' marketing");
-    println!("  Critique: pricing pressure from cheaper competitors (Microsoft Entra ID bundled in M365)");
+    println!(
+        "  Culture: 'Oktane' annual conference, Identity Day, 'identity-first security' marketing"
+    );
+    println!(
+        "  Critique: pricing pressure from cheaper competitors (Microsoft Entra ID bundled in M365)"
+    );
     println!("           breach fatigue — every 6-12 months a new incident");
     println!("           Auth0 integration into Okta UX still imperfect");
-    println!("  Differentiator: largest neutral identity provider — works with everyone (Microsoft/Google/Apple)");
+    println!(
+        "  Differentiator: largest neutral identity provider — works with everyone (Microsoft/Google/Apple)"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "okta".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "okta".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_okta(&rest, &_prog);
     process::exit(code);
@@ -78,7 +100,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_okta};
+    use super::{basename, run_okta, strip_ext};
 
     #[test]
     fn basename_strips_path() {

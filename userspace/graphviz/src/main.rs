@@ -36,7 +36,10 @@ fn run_graphviz(layout: &str, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") {
         println!("Usage: {} [OPTIONS] [FILE]...", layout);
         println!();
-        println!("Render graph descriptions ({}).", layout_description(layout));
+        println!(
+            "Render graph descriptions ({}).",
+            layout_description(layout)
+        );
         println!();
         println!("Options:");
         println!("  -T<FORMAT>        Output format (svg/png/pdf/ps/json/dot/xdot/plain)");
@@ -60,16 +63,19 @@ fn run_graphviz(layout: &str, args: &[String]) -> i32 {
         return 0;
     }
 
-    let output_format = args.iter()
+    let output_format = args
+        .iter()
         .find(|a| a.starts_with("-T"))
         .map(|a| &a[2..])
         .unwrap_or("svg");
 
-    let output_file = args.windows(2)
+    let output_file = args
+        .windows(2)
         .find(|w| w[0] == "-o")
         .map(|w| w[1].as_str());
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -84,23 +90,35 @@ fn run_graphviz(layout: &str, args: &[String]) -> i32 {
         println!("<svg width=\"400pt\" height=\"300pt\"");
         println!(" viewBox=\"0.00 0.00 400.00 300.00\"");
         println!(" xmlns=\"http://www.w3.org/2000/svg\">");
-        println!("<g id=\"graph0\" class=\"graph\" transform=\"scale(1 1) rotate(0) translate(4 296)\">");
+        println!(
+            "<g id=\"graph0\" class=\"graph\" transform=\"scale(1 1) rotate(0) translate(4 296)\">"
+        );
         println!("  <title>G</title>");
-        println!("  <polygon fill=\"white\" stroke=\"none\" points=\"-4,4 -4,-296 396,-296 396,4 -4,4\"/>");
+        println!(
+            "  <polygon fill=\"white\" stroke=\"none\" points=\"-4,4 -4,-296 396,-296 396,4 -4,4\"/>"
+        );
         println!("  <!-- node A -->");
         println!("  <g id=\"node1\" class=\"node\">");
-        println!("    <ellipse fill=\"none\" stroke=\"black\" cx=\"100\" cy=\"-200\" rx=\"27\" ry=\"18\"/>");
+        println!(
+            "    <ellipse fill=\"none\" stroke=\"black\" cx=\"100\" cy=\"-200\" rx=\"27\" ry=\"18\"/>"
+        );
         println!("    <text x=\"100\" y=\"-196\">A</text>");
         println!("  </g>");
         println!("  <!-- node B -->");
         println!("  <g id=\"node2\" class=\"node\">");
-        println!("    <ellipse fill=\"none\" stroke=\"black\" cx=\"200\" cy=\"-100\" rx=\"27\" ry=\"18\"/>");
+        println!(
+            "    <ellipse fill=\"none\" stroke=\"black\" cx=\"200\" cy=\"-100\" rx=\"27\" ry=\"18\"/>"
+        );
         println!("    <text x=\"200\" y=\"-96\">B</text>");
         println!("  </g>");
         println!("  <!-- A&#45;&gt;B -->");
         println!("  <g id=\"edge1\" class=\"edge\">");
-        println!("    <path fill=\"none\" stroke=\"black\" d=\"M115,-186C135,-170 165,-145 185,-118\"/>");
-        println!("    <polygon fill=\"black\" stroke=\"black\" points=\"188,-120 191,-110 182,-116 188,-120\"/>");
+        println!(
+            "    <path fill=\"none\" stroke=\"black\" d=\"M115,-186C135,-170 165,-145 185,-118\"/>"
+        );
+        println!(
+            "    <polygon fill=\"black\" stroke=\"black\" points=\"188,-120 191,-110 182,-116 188,-120\"/>"
+        );
         println!("  </g>");
         println!("</g>");
         println!("</svg>");
@@ -108,22 +126,34 @@ fn run_graphviz(layout: &str, args: &[String]) -> i32 {
     }
 
     if let Some(out) = output_file {
-        println!("{}: processing {} ({} layout)", layout, input, layout_description(layout));
+        println!(
+            "{}: processing {} ({} layout)",
+            layout,
+            input,
+            layout_description(layout)
+        );
         println!("  Layout engine: {}", layout);
         println!("  Output format: {}", output_format);
         println!("  Nodes: 12");
         println!("  Edges: 18");
         println!("  Subgraphs: 3");
         println!("  Layout computed in 0.023s");
-        println!("  Written: {} ({} bytes)", out, match output_format {
-            "svg" => "45,678",
-            "png" => "234,567",
-            "pdf" => "123,456",
-            "ps" => "89,012",
-            _ => "12,345",
-        });
+        println!(
+            "  Written: {} ({} bytes)",
+            out,
+            match output_format {
+                "svg" => "45,678",
+                "png" => "234,567",
+                "pdf" => "123,456",
+                "ps" => "89,012",
+                _ => "12,345",
+            }
+        );
     } else {
-        println!("{}: processing {} -> stdout ({})", layout, input, output_format);
+        println!(
+            "{}: processing {} -> stdout ({})",
+            layout, input, output_format
+        );
         println!("  Layout engine: {}", layout);
         println!("  Output format: {}", output_format);
         println!("  (output written to stdout)");
@@ -142,7 +172,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_graphviz};
+    use super::run_graphviz;
 
     #[test]
     fn help_exits_zero() {

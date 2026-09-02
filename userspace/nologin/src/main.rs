@@ -43,7 +43,8 @@ fn cmd_nologin(args: &[String]) {
     }
 
     // Display custom message or default.
-    let message = fs::read_to_string(NOLOGIN_MSG_FILE).unwrap_or_else(|_| DEFAULT_MESSAGE.to_string());
+    let message =
+        fs::read_to_string(NOLOGIN_MSG_FILE).unwrap_or_else(|_| DEFAULT_MESSAGE.to_string());
     eprintln!("{message}");
     process::exit(1);
 }

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_plausible(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -17,21 +21,30 @@ fn run_plausible(args: &[String], _prog: &str) -> i32 {
         println!();
         println!("Options:");
         println!("  --growth               Growth from $9/mo (10K pageviews/mo)");
-        println!("  --business             Business from $19/mo (10K pageviews/mo, +funnels/goals)");
+        println!(
+            "  --business             Business from $19/mo (10K pageviews/mo, +funnels/goals)"
+        );
         println!("  --enterprise           Enterprise (custom, large volume)");
         println!("  --self-host            Self-host (AGPL — free if you run it yourself)");
         println!("  --ga-import            Google Analytics import (preserve historical data)");
-        println!("  --no-cookies           No-cookie tracking (GDPR + CCPA + PECR compliant out of box)");
+        println!(
+            "  --no-cookies           No-cookie tracking (GDPR + CCPA + PECR compliant out of box)"
+        );
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Plausible 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Plausible 2024 (Slate OS)");
+        return 0;
+    }
     println!("Plausible 2024 (Slate OS)");
     println!("  Vendor: Plausible Insights OÜ (Tallinn, Estonia — bootstrapped, profitable)");
     println!("  Founders: Uku Taht (Estonia) + Marko Saric (Denmark), 2018");
     println!("          Uku: developer who built the OG product in spare time");
     println!("          Marko: marketing/SEO blogger who joined as co-founder + marketer 2019");
-    println!("          partnership doubled as 'tech + marketing' textbook (their blog is a content masterclass)");
+    println!(
+        "          partnership doubled as 'tech + marketing' textbook (their blog is a content masterclass)"
+    );
     println!("  Founded: 2018 — fully bootstrapped, no VC, no debt");
     println!("          ~$2.5M ARR (publicly disclosed — they share metrics on their blog)");
     println!("          ~12 employees fully remote");
@@ -50,7 +63,9 @@ fn run_plausible(args: &[String], _prog: &str) -> i32 {
     println!("    Growth 100K pageviews — $19/mo");
     println!("    Growth 1M pageviews — $69/mo");
     println!("    Growth 10M pageviews — $199/mo");
-    println!("    Business tier adds: custom events, funnels, goals, ecommerce revenue tracking ($+10/mo over Growth)");
+    println!(
+        "    Business tier adds: custom events, funnels, goals, ecommerce revenue tracking ($+10/mo over Growth)"
+    );
     println!("    Self-host: FREE (with AGPL obligations)");
     println!("    Annual billing -33% (vs monthly)");
     println!("  Dashboard features:");
@@ -73,7 +88,9 @@ fn run_plausible(args: &[String], _prog: &str) -> i32 {
     println!("    - No personally identifiable properties — schema deliberately limited");
     println!("    - No data warehouse exports of raw user data — only aggregates");
     println!("  Migration tools:");
-    println!("    - One-click Google Analytics import (preserve historical data alongside Plausible going forward)");
+    println!(
+        "    - One-click Google Analytics import (preserve historical data alongside Plausible going forward)"
+    );
     println!("    - Helper scripts for self-host migration from cloud or vice versa");
     println!("  Integrations: 30+ tools");
     println!("              Slack alerts (weekly digests + traffic spike alerts)");
@@ -82,20 +99,29 @@ fn run_plausible(args: &[String], _prog: &str) -> i32 {
     println!("              REST API for custom dashboards");
     println!("              Looker Studio + Notion connectors");
     println!("  Customers: 13,000+ paying sites");
-    println!("            DuckDuckGo, GitLab (some pages), Tailwind CSS, OnlineOrNot, Smashing Magazine");
+    println!(
+        "            DuckDuckGo, GitLab (some pages), Tailwind CSS, OnlineOrNot, Smashing Magazine"
+    );
     println!("            Indie hackers + privacy-conscious publications heavy");
     println!("            sweet spot: blogs, marketing sites, small SaaS landing pages");
-    println!("  Critique: NOT a product analytics tool — funnels limited, no cohort retention curves");
+    println!(
+        "  Critique: NOT a product analytics tool — funnels limited, no cohort retention curves"
+    );
     println!("           less useful for in-app behavior tracking (try PostHog/Mixpanel for that)");
     println!("           historical data export limited to CSV (no warehouse sync for raw events)");
     println!("           no session replay or heatmaps (out of scope by design)");
-    println!("  Differentiator: simplest + most ethical web analytics — entire dashboard on one screen, no cookies, ~1KB script");
+    println!(
+        "  Differentiator: simplest + most ethical web analytics — entire dashboard on one screen, no cookies, ~1KB script"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "plausible".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "plausible".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_plausible(&rest, &_prog);
     process::exit(code);
@@ -103,7 +129,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_plausible};
+    use super::{basename, run_plausible, strip_ext};
 
     #[test]
     fn basename_strips_path() {

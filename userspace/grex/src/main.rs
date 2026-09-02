@@ -40,7 +40,8 @@ fn run_grex(args: Vec<String>) -> i32 {
     let use_words = args.iter().any(|a| a == "-w" || a == "--words");
     let use_reps = args.iter().any(|a| a == "-r" || a == "--repetitions");
 
-    let inputs: Vec<&str> = args.iter()
+    let inputs: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -91,9 +92,7 @@ fn run_grex(args: Vec<String>) -> i32 {
             }
         } else {
             // Alternation
-            let alts: Vec<String> = inputs.iter()
-                .map(|s| regex_escape(s))
-                .collect();
+            let alts: Vec<String> = inputs.iter().map(|s| regex_escape(s)).collect();
             println!("^(?:{})$", alts.join("|"));
         }
     }
@@ -123,7 +122,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_grex};
+    use super::run_grex;
 
     #[test]
     fn help_exits_zero() {

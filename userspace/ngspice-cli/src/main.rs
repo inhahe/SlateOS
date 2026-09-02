@@ -25,7 +25,10 @@ fn run_ngspice(args: &[String]) -> i32 {
         return 0;
     }
     let batch = args.iter().any(|a| a == "-b");
-    let file = args.iter().find(|a| a.ends_with(".cir") || a.ends_with(".spice") || a.ends_with(".sp")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".cir") || a.ends_with(".spice") || a.ends_with(".sp"))
+        .map(|s| s.as_str());
 
     if batch {
         if let Some(f) = file {
@@ -68,7 +71,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ngspice};
+    use super::run_ngspice;
 
     #[test]
     fn help_exits_zero() {

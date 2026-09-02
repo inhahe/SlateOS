@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_oc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,12 @@ fn run_oc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Client Version: 4.17.4 / Kubernetes Version: v1.30.5 / Server Version: 4.17.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!(
+            "Client Version: 4.17.4 / Kubernetes Version: v1.30.5 / Server Version: 4.17.4 (Slate OS)"
+        );
+        return 0;
+    }
     println!("Red Hat OpenShift Container Platform 4.17 (Slate OS)");
     println!("  Foundation: Kubernetes 1.30 + Red Hat opinionated additions");
     println!("  CRI-O container runtime (not Docker); RHEL CoreOS host OS");
@@ -42,7 +51,10 @@ fn run_oc(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "openshift".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "openshift".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_oc(&rest, &_prog);
     process::exit(code);
@@ -50,7 +62,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_oc};
+    use super::{basename, run_oc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

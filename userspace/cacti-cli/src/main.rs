@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_cacti(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_cacti(args: &[String], _prog: &str) -> i32 {
         println!("RRDTool-based network graphing with SNMP polling.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cacti v1.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("cacti v1.2 (Slate OS)");
+        return 0;
+    }
     println!("cacti: graphing system active");
     println!("  Data sources: 156");
     println!("  Graphs: 48");
@@ -38,7 +45,10 @@ fn run_cacti_poller(args: &[String], _prog: &str) -> i32 {
         println!("cacti-poller v1.2 (Slate OS) — Data collection poller");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cacti-poller v1.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("cacti-poller v1.2 (Slate OS)");
+        return 0;
+    }
     println!("cacti-poller: polling cycle started");
     println!("  Hosts polled: 12");
     println!("  Data sources updated: 156");
@@ -52,7 +62,10 @@ fn run_cacti_spine(args: &[String], _prog: &str) -> i32 {
         println!("cacti-spine v1.2 (Slate OS) — High-performance C-based poller");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cacti-spine v1.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("cacti-spine v1.2 (Slate OS)");
+        return 0;
+    }
     println!("cacti-spine: fast poller started");
     println!("  Threads: 4");
     println!("  Hosts processed: 12");
@@ -62,7 +75,10 @@ fn run_cacti_spine(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "cacti".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "cacti".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "cacti-poller" => run_cacti_poller(&rest, &prog),
@@ -74,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cacti};
+    use super::{basename, run_cacti, strip_ext};
 
     #[test]
     fn basename_strips_path() {

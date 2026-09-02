@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_vsql(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -14,38 +18,63 @@ fn run_vsql(args: &[String], _prog: &str) -> i32 {
         println!("Vertica (Slate OS) — columnar MPP analytics database (OpenText, since 2005)");
         println!();
         println!("Options:");
-        println!("  --eon                  Eon Mode (separation of storage + compute on S3/HDFS/Azure)");
+        println!(
+            "  --eon                  Eon Mode (separation of storage + compute on S3/HDFS/Azure)"
+        );
         println!("  --enterprise           Enterprise Mode (shared-nothing on-prem classic)");
         println!("  --in-db-ml             In-database ML functions");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Vertica 2024 (Slate OS) — vsql 24.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Vertica 2024 (Slate OS) — vsql 24.x");
+        return 0;
+    }
     println!("Vertica 2024 (Slate OS) — Columnar MPP Analytics Database");
     println!("  Vendor: Vertica (part of OpenText Corp. — NASDAQ:OTEX, TSX:OTEX since 1996)");
     println!("  Origins: Spun out of Michael Stonebraker's MIT C-Store research (2005)");
-    println!("          Michael Stonebraker: Turing Award 2014, founder of Ingres, Postgres, Vertica, VoltDB, SciDB, Tamr");
+    println!(
+        "          Michael Stonebraker: Turing Award 2014, founder of Ingres, Postgres, Vertica, VoltDB, SciDB, Tamr"
+    );
     println!("          'C-Store: A Column-Oriented DBMS' (Stonebraker et al, VLDB 2005)");
-    println!("          One of the most cited papers in databases — birthed Vertica + influenced everyone else");
+    println!(
+        "          One of the most cited papers in databases — birthed Vertica + influenced everyone else"
+    );
     println!("          Andrew Palmer + Stan Zdonik + Sam Madden + Daniel Abadi: co-founders");
     println!("  Corporate history:");
     println!("         Founded 2005 (Vertica Systems Inc.)");
     println!("         Acquired by HP $350M (2011) → HP Enterprise (2015)");
-    println!("         Spun into Micro Focus (2017) → OpenText acquired Micro Focus (Jan 2023, $6B)");
+    println!(
+        "         Spun into Micro Focus (2017) → OpenText acquired Micro Focus (Jan 2023, $6B)"
+    );
     println!("         Now part of OpenText (Canadian enterprise software, NASDAQ:OTEX/TSX:OTEX)");
     println!("         OpenText FY2024 revenue: ~$5.7B (Vertica is ~$300M-$500M segment estimate)");
     println!("  Public market (OpenText NASDAQ:OTEX):");
     println!("         OpenText IPO 1996 (early Canadian tech IPO)");
     println!("         Market cap: $7-10B range");
     println!("         Bought Documentum 2017, Carbonite 2019, Micro Focus 2023 ($6B)");
-    println!("         Vertica positioned as 'analytics engine' in OpenText enterprise content portfolio");
-    println!("  Strategic position: 'cloud-optional MPP columnar analytics — sweet spot between Snowflake + Postgres':");
-    println!("                    pitch: 'columnar MPP analytics — deploy anywhere (cloud, hybrid, on-prem), with in-DB ML'");
-    println!("                    target: enterprises with petabyte-scale analytics + multi-cloud requirements");
-    println!("                    primary competitor: Snowflake, Databricks, ClickHouse, Greenplum");
+    println!(
+        "         Vertica positioned as 'analytics engine' in OpenText enterprise content portfolio"
+    );
+    println!(
+        "  Strategic position: 'cloud-optional MPP columnar analytics — sweet spot between Snowflake + Postgres':"
+    );
+    println!(
+        "                    pitch: 'columnar MPP analytics — deploy anywhere (cloud, hybrid, on-prem), with in-DB ML'"
+    );
+    println!(
+        "                    target: enterprises with petabyte-scale analytics + multi-cloud requirements"
+    );
+    println!(
+        "                    primary competitor: Snowflake, Databricks, ClickHouse, Greenplum"
+    );
     println!("                    secondary: Teradata, Redshift, Synapse");
-    println!("                    Vertica's wedge: cloud + on-prem + hybrid + edge deployments (rare flexibility)");
-    println!("                    challenge: ownership churn (Vertica → HP → HPE → Micro Focus → OpenText) bred uncertainty");
+    println!(
+        "                    Vertica's wedge: cloud + on-prem + hybrid + edge deployments (rare flexibility)"
+    );
+    println!(
+        "                    challenge: ownership churn (Vertica → HP → HPE → Micro Focus → OpenText) bred uncertainty"
+    );
     println!("                    counter: technical excellence + 100+ in-database ML algorithms");
     println!("  Pricing (consumption + perpetual options):");
     println!("    Vertica Analytics Platform: $999/TB/yr (perpetual license, on-prem)");
@@ -134,9 +163,13 @@ fn run_vsql(args: &[String], _prog: &str) -> i32 {
     println!("    admintools -t create_db -d mydb -p mypass -s node1,node2,node3");
     println!("    admintools -t start_db -d mydb");
     println!("    vsql -c \"COPY my_table FROM '/path/to/data.csv' DELIMITER ',';\"");
-    println!("    vsql -c \"SELECT REBALANCE_CLUSTER();\"                  # rebalance after node add");
+    println!(
+        "    vsql -c \"SELECT REBALANCE_CLUSTER();\"                  # rebalance after node add"
+    );
     println!("    vsql -c \"SELECT ANALYZE_STATISTICS('my_schema.my_table');\"");
-    println!("    vsql -c \"SELECT KMEANS('cluster_model', 'customers', 'features', 5);\"  # in-DB ML");
+    println!(
+        "    vsql -c \"SELECT KMEANS('cluster_model', 'customers', 'features', 5);\"  # in-DB ML"
+    );
     println!("  Customers:");
     println!("    - Telcos: AT&T, T-Mobile, Verizon (call detail records — billions of rows/day)");
     println!("    - Financial: Morgan Stanley, Cerberus");
@@ -152,13 +185,18 @@ fn run_vsql(args: &[String], _prog: &str) -> i32 {
     println!("           Vertica Accelerator (SaaS) is years behind Snowflake on polish");
     println!("           projections concept is powerful but operationally heavy");
     println!("           less marketing budget than cloud DW competitors");
-    println!("  Differentiator: Stonebraker's C-Store paper (VLDB 2005) productized → original columnar MPP DB + projections (multiple sort orders per table) + 100+ in-database ML functions + Eon Mode (storage/compute separation on S3/HDFS/Azure) + cloud + on-prem + hybrid + edge deployments + aggressive compression (8-10x typical) + telecom CDR / adtech / gaming workloads at petabyte scale + AT&T/Trade Desk/Zynga customers + ~$300-500M segment revenue + Stonebraker's pedigree — the columnar MPP database that powers some of the largest analytical workloads in telecom and adtech, with the flexibility to deploy anywhere and 100+ in-DB ML algorithms");
+    println!(
+        "  Differentiator: Stonebraker's C-Store paper (VLDB 2005) productized → original columnar MPP DB + projections (multiple sort orders per table) + 100+ in-database ML functions + Eon Mode (storage/compute separation on S3/HDFS/Azure) + cloud + on-prem + hybrid + edge deployments + aggressive compression (8-10x typical) + telecom CDR / adtech / gaming workloads at petabyte scale + AT&T/Trade Desk/Zynga customers + ~$300-500M segment revenue + Stonebraker's pedigree — the columnar MPP database that powers some of the largest analytical workloads in telecom and adtech, with the flexibility to deploy anywhere and 100+ in-DB ML algorithms"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "vertica".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "vertica".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_vsql(&rest, &_prog);
     process::exit(code);
@@ -166,7 +204,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_vsql};
+    use super::{basename, run_vsql, strip_ext};
 
     #[test]
     fn basename_strips_path() {

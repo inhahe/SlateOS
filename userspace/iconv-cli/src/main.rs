@@ -59,8 +59,16 @@ fn run_iconv(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let from = args.windows(2).find(|w| w[0] == "-f" || w[0] == "--from-code").map(|w| w[1].as_str()).unwrap_or("UTF-8");
-    let to = args.windows(2).find(|w| w[0] == "-t" || w[0] == "--to-code").map(|w| w[1].as_str()).unwrap_or("UTF-8");
+    let from = args
+        .windows(2)
+        .find(|w| w[0] == "-f" || w[0] == "--from-code")
+        .map(|w| w[1].as_str())
+        .unwrap_or("UTF-8");
+    let to = args
+        .windows(2)
+        .find(|w| w[0] == "-t" || w[0] == "--to-code")
+        .map(|w| w[1].as_str())
+        .unwrap_or("UTF-8");
 
     let verbose = args.iter().any(|a| a == "--verbose");
     if verbose {
@@ -80,7 +88,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_iconv};
+    use super::run_iconv;
 
     #[test]
     fn help_exits_zero() {

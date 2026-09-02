@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("liveagent-cli 0.1.0 (bundle-help-desk personality build)"); }
+fn print_version() {
+    println!("liveagent-cli 0.1.0 (bundle-help-desk personality build)");
+}
 
 fn run_about() {
     println!("LiveAgent (Quality Unit, LLC; product of Quality Unit s.r.o.).");

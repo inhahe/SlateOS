@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_travis(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,16 +27,25 @@ fn run_travis(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Travis CI (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Travis CI (Slate OS)");
+        return 0;
+    }
     println!("Travis CI (Slate OS)");
     println!("  Vendor: Travis CI GmbH (Berlin, Germany)");
     println!("          acquired by Idera Inc. Jan 2019 (controversial — layoffs followed)");
-    println!("  Founders: Sven Fuchs, Josh Kalderimis, Mathias Meyer + Konstantin Haase (Berlin 2011)");
+    println!(
+        "  Founders: Sven Fuchs, Josh Kalderimis, Mathias Meyer + Konstantin Haase (Berlin 2011)"
+    );
     println!("  History: launched 2011 — the first hosted CI for GitHub OSS projects");
     println!("          ~2011-2018: THE de facto CI for Ruby/Python/Node OSS");
-    println!("          .travis.yml was the canonical CI config (predates GitHub Actions by ~7 years)");
+    println!(
+        "          .travis.yml was the canonical CI config (predates GitHub Actions by ~7 years)"
+    );
     println!("          Idera acquisition 2019 → mass layoffs of senior engineers");
-    println!("          May 2020: ended free unlimited OSS minutes (replaced with 10K credit allotment)");
+    println!(
+        "          May 2020: ended free unlimited OSS minutes (replaced with 10K credit allotment)"
+    );
     println!("          → exodus to GitHub Actions / CircleCI accelerated");
     println!("  Pricing: Free tier — 10,000 credits one-time for OSS");
     println!("          Bootstrap $69/mo — 25,000 credits");
@@ -45,7 +58,9 @@ fn run_travis(args: &[String], _prog: &str) -> i32 {
     println!("    - Build environments: Linux (Ubuntu Bionic/Focal/Jammy), macOS (Xcode), Windows");
     println!("    - Build stages — fan-in/fan-out workflows");
     println!("    - Encrypted secrets (RSA-encrypted in .travis.yml)");
-    println!("    - First-class support for ~30 languages (Ruby, Python, Node, Go, Rust, Java, C++, Swift, ...)");
+    println!(
+        "    - First-class support for ~30 languages (Ruby, Python, Node, Go, Rust, Java, C++, Swift, ...)"
+    );
     println!("    - GitHub status integration, build matrix badges (the iconic green/red badge)");
     println!("    - Slack/email/IRC notifications");
     println!("  Cultural impact: helped popularize the GitHub Flow PR-test culture");
@@ -60,7 +75,10 @@ fn run_travis(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "travisci".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "travisci".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_travis(&rest, &_prog);
     process::exit(code);
@@ -68,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_travis};
+    use super::{basename, run_travis, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -57,7 +57,8 @@ fn run_flac(args: &[String]) -> i32 {
     let test = args.iter().any(|a| a == "-t" || a == "--test");
     let silent = args.iter().any(|a| a == "-s" || a == "--silent");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -121,11 +122,14 @@ fn run_metaflac(args: &[String]) -> i32 {
         return 0;
     }
 
-    let show_tag = args.iter().find(|a| a.starts_with("--show-tag="))
+    let show_tag = args
+        .iter()
+        .find(|a| a.starts_with("--show-tag="))
         .map(|a| &a[11..]);
     let list = args.iter().any(|a| a == "--list");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -168,7 +172,10 @@ fn run_metaflac(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("flac"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("flac"));
     let p = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
@@ -187,7 +194,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_flac};
+    use super::run_flac;
 
     #[test]
     fn help_exits_zero() {

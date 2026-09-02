@@ -42,7 +42,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("penpot-cli 0.1.0 (open-source-design-tool personality build)"); }
+fn print_version() {
+    println!("penpot-cli 0.1.0 (open-source-design-tool personality build)");
+}
 
 fn run_about() {
     println!("Penpot (Kaleidos Open Source S.L.).");

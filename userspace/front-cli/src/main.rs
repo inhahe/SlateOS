@@ -42,7 +42,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("front-cli 0.1.0 (shared-inbox-team personality build)"); }
+fn print_version() {
+    println!("front-cli 0.1.0 (shared-inbox-team personality build)");
+}
 
 fn run_about() {
     println!("Front (Front App, Inc.).");

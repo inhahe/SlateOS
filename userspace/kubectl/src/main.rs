@@ -62,25 +62,61 @@ fn run_kubectl(args: Vec<String>) -> i32 {
         }
         "get" => {
             let resource = cmd_args.first().map(|s| s.as_str()).unwrap_or("pods");
-            let wide = cmd_args.iter().any(|a| a == "-o" && cmd_args.iter().any(|b| b == "wide")) ||
-                cmd_args.iter().any(|a| a == "-o=wide");
-            let namespace = cmd_args.iter().position(|a| a == "-n" || a == "--namespace")
+            let wide = cmd_args
+                .iter()
+                .any(|a| a == "-o" && cmd_args.iter().any(|b| b == "wide"))
+                || cmd_args.iter().any(|a| a == "-o=wide");
+            let namespace = cmd_args
+                .iter()
+                .position(|a| a == "-n" || a == "--namespace")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("default");
 
             match resource {
                 "pods" | "pod" | "po" => {
-                    println!("NAME                      READY   STATUS    RESTARTS   AGE{}", if wide { "   IP            NODE" } else { "" });
-                    println!("nginx-7f456bf56d-x2k9l    1/1     Running   0          2d{}", if wide { "    10.244.1.5    node-01" } else { "" });
-                    println!("postgres-5b8f4c9d6-m3n7p  1/1     Running   0          5d{}", if wide { "    10.244.2.8    node-02" } else { "" });
-                    println!("redis-8c7d6e5f4-k9j8h     1/1     Running   1          3d{}", if wide { "    10.244.1.12   node-01" } else { "" });
+                    println!(
+                        "NAME                      READY   STATUS    RESTARTS   AGE{}",
+                        if wide { "   IP            NODE" } else { "" }
+                    );
+                    println!(
+                        "nginx-7f456bf56d-x2k9l    1/1     Running   0          2d{}",
+                        if wide {
+                            "    10.244.1.5    node-01"
+                        } else {
+                            ""
+                        }
+                    );
+                    println!(
+                        "postgres-5b8f4c9d6-m3n7p  1/1     Running   0          5d{}",
+                        if wide {
+                            "    10.244.2.8    node-02"
+                        } else {
+                            ""
+                        }
+                    );
+                    println!(
+                        "redis-8c7d6e5f4-k9j8h     1/1     Running   1          3d{}",
+                        if wide {
+                            "    10.244.1.12   node-01"
+                        } else {
+                            ""
+                        }
+                    );
                 }
                 "services" | "service" | "svc" => {
-                    println!("NAME         TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)          AGE");
-                    println!("kubernetes   ClusterIP   10.96.0.1      <none>        443/TCP          30d");
-                    println!("nginx        NodePort    10.96.45.123   <none>        80:30080/TCP     2d");
-                    println!("postgres     ClusterIP   10.96.78.56    <none>        5432/TCP         5d");
+                    println!(
+                        "NAME         TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)          AGE"
+                    );
+                    println!(
+                        "kubernetes   ClusterIP   10.96.0.1      <none>        443/TCP          30d"
+                    );
+                    println!(
+                        "nginx        NodePort    10.96.45.123   <none>        80:30080/TCP     2d"
+                    );
+                    println!(
+                        "postgres     ClusterIP   10.96.78.56    <none>        5432/TCP         5d"
+                    );
                 }
                 "nodes" | "node" | "no" => {
                     println!("NAME      STATUS   ROLES           AGE   VERSION");
@@ -132,11 +168,15 @@ fn run_kubectl(args: Vec<String>) -> i32 {
             println!("[{}] 2025-05-22T10:00:00Z Starting...", name);
             println!("[{}] 2025-05-22T10:00:01Z Listening on :80", name);
             println!("[{}] 2025-05-22T10:00:05Z GET / 200 0.5ms", name);
-            if follow { println!("(following logs — simulated)"); }
+            if follow {
+                println!("(following logs — simulated)");
+            }
             0
         }
         "apply" => {
-            let file = cmd_args.iter().position(|a| a == "-f")
+            let file = cmd_args
+                .iter()
+                .position(|a| a == "-f")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("manifest.yaml");
@@ -160,7 +200,9 @@ fn run_kubectl(args: Vec<String>) -> i32 {
             0
         }
         "scale" => {
-            let replicas = cmd_args.iter().find(|a| a.starts_with("--replicas="))
+            let replicas = cmd_args
+                .iter()
+                .find(|a| a.starts_with("--replicas="))
                 .map(|a| a.split('=').nth(1).unwrap_or("1"))
                 .unwrap_or("1");
             println!("deployment.apps/nginx scaled to {} replicas", replicas);
@@ -183,7 +225,9 @@ fn run_kubectl(args: Vec<String>) -> i32 {
         }
         "cluster-info" => {
             println!("Kubernetes control plane is running at https://10.0.0.1:6443");
-            println!("CoreDNS is running at https://10.0.0.1:6443/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy");
+            println!(
+                "CoreDNS is running at https://10.0.0.1:6443/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy"
+            );
             0
         }
         "top" => {
@@ -231,13 +275,34 @@ fn run_kubectl(args: Vec<String>) -> i32 {
             }
             0
         }
-        "port-forward" => { println!("Forwarding from 127.0.0.1:8080 -> 80 (simulated)"); 0 }
-        "expose" => { println!("service/nginx exposed (simulated)"); 0 }
-        "cordon" => { println!("node/node-02 cordoned"); 0 }
-        "drain" => { println!("node/node-02 drained (simulated)"); 0 }
-        "edit" => { println!("(editing resource — simulated)"); 0 }
-        "patch" => { println!("resource patched (simulated)"); 0 }
-        other => { eprintln!("kubectl: unknown command \"{}\"", other); 1 }
+        "port-forward" => {
+            println!("Forwarding from 127.0.0.1:8080 -> 80 (simulated)");
+            0
+        }
+        "expose" => {
+            println!("service/nginx exposed (simulated)");
+            0
+        }
+        "cordon" => {
+            println!("node/node-02 cordoned");
+            0
+        }
+        "drain" => {
+            println!("node/node-02 drained (simulated)");
+            0
+        }
+        "edit" => {
+            println!("(editing resource — simulated)");
+            0
+        }
+        "patch" => {
+            println!("resource patched (simulated)");
+            0
+        }
+        other => {
+            eprintln!("kubectl: unknown command \"{}\"", other);
+            1
+        }
     }
 }
 
@@ -254,7 +319,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_kubectl};
+    use super::run_kubectl;
 
     #[test]
     fn help_exits_zero() {

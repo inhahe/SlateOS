@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_usdcat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -21,7 +25,8 @@ fn run_usdcat(args: &[String], _prog: &str) -> i32 {
         println!("  --usdz            Output as USDZ package");
         return 0;
     }
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("scene.usda");
@@ -42,7 +47,8 @@ fn run_usdchecker(args: &[String], _prog: &str) -> i32 {
         println!("usdchecker (Slate OS) — Validate USD files for compliance");
         return 0;
     }
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("scene.usd");
@@ -59,7 +65,8 @@ fn run_usdview(args: &[String], _prog: &str) -> i32 {
         println!("usdview (Slate OS) — Interactive USD scene viewer");
         return 0;
     }
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("scene.usd");
@@ -75,7 +82,8 @@ fn run_usdzip(args: &[String], _prog: &str) -> i32 {
         println!("usdzip (Slate OS) — Create USDZ packages");
         return 0;
     }
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("scene.usd");
@@ -87,7 +95,10 @@ fn run_usdzip(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "usdcat".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "usdcat".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "usdchecker" => run_usdchecker(&rest, &prog),
@@ -100,7 +111,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_usdcat};
+    use super::{basename, run_usdcat, strip_ext};
 
     #[test]
     fn basename_strips_path() {

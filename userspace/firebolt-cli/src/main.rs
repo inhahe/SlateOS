@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_fb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: firebolt [OPTIONS]");
-        println!("Firebolt (Slate OS) — cloud data warehouse for data-intensive apps + sub-second analytics");
+        println!(
+            "Firebolt (Slate OS) — cloud data warehouse for data-intensive apps + sub-second analytics"
+        );
         println!();
         println!("Options:");
         println!("  --engines              Compute engines (independent scalable per-workload)");
@@ -20,7 +26,10 @@ fn run_fb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Firebolt 2024 (Slate OS) — firebolt CLI 2.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Firebolt 2024 (Slate OS) — firebolt CLI 2.x");
+        return 0;
+    }
     println!("Firebolt 2024 (Slate OS) — Cloud Data Warehouse for Data-Intensive Apps");
     println!("  Vendor: Firebolt Analytics, Inc. (Tel Aviv, Israel + NYC — private)");
     println!("  Founders: Eldad Farkash + Saar Bitner + Ariel Yaroshevich + Eran Levy, 2019");
@@ -33,20 +42,36 @@ fn run_fb(args: &[String], _prog: &str) -> i32 {
     println!("         Series C Jan 2022: $100M at $1.4B valuation");
     println!("         Layoffs in 2023 (industry-wide cooling), refocused product");
     println!("         Investors: Sapphire Ventures, Zeev Ventures, Bessemer, Insight Partners");
-    println!("  Strategic position: 'cloud DW for data-intensive apps + sub-second BI — Snowflake too slow for app backends':");
-    println!("                    pitch: 'sub-second analytical queries for customer-facing dashboards + data products'");
-    println!("                    target: SaaS companies building data products + customer dashboards");
-    println!("                    primary competitor: Snowflake (positioned as 'too slow for app backends')");
+    println!(
+        "  Strategic position: 'cloud DW for data-intensive apps + sub-second BI — Snowflake too slow for app backends':"
+    );
+    println!(
+        "                    pitch: 'sub-second analytical queries for customer-facing dashboards + data products'"
+    );
+    println!(
+        "                    target: SaaS companies building data products + customer dashboards"
+    );
+    println!(
+        "                    primary competitor: Snowflake (positioned as 'too slow for app backends')"
+    );
     println!("                    secondary: ClickHouse, Druid, Pinot, Rockset, StarRocks");
-    println!("                    Firebolt's wedge: sparse + aggregating indexes + sub-second p99 + per-workload engines");
-    println!("                    target use case: power Mode dashboards, Looker embedded analytics, customer-facing analytics");
-    println!("                    challenge: ClickHouse is open source and similarly fast for many workloads");
+    println!(
+        "                    Firebolt's wedge: sparse + aggregating indexes + sub-second p99 + per-workload engines"
+    );
+    println!(
+        "                    target use case: power Mode dashboards, Looker embedded analytics, customer-facing analytics"
+    );
+    println!(
+        "                    challenge: ClickHouse is open source and similarly fast for many workloads"
+    );
     println!("  Pricing (consumption + transparent):");
     println!("    Free trial: $200 credit + free tier");
     println!("    Engine pricing: $0.65-$10/hr per engine (varies by spec — XS to XL)");
     println!("    Storage: $0.023/GB-month (decoupled from compute)");
     println!("    Pause engines when idle (no compute charge)");
-    println!("    typically positioned as cheaper than Snowflake for sustained interactive workloads");
+    println!(
+        "    typically positioned as cheaper than Snowflake for sustained interactive workloads"
+    );
     println!("    transparent engine sizing (XS/S/M/L/XL with vCPU/RAM spec disclosed)");
     println!("  Architecture (sub-second analytics):");
     println!("    - Decoupled storage + compute (S3-backed Tabular store)");
@@ -137,13 +162,18 @@ fn run_fb(args: &[String], _prog: &str) -> i32 {
     println!("           AI/vector features behind newer competitors (SingleStore, Pinecone)");
     println!("           index management (sparse/aggregating) requires expertise");
     println!("           private + closed-source = no community contribution moat vs ClickHouse");
-    println!("  Differentiator: cloud DW purpose-built for data-intensive apps + customer-facing dashboards + sub-200ms p99 query latency + sparse/aggregating/join indexes (unique combo) + multiple independent engines per database (workload isolation) + auto-pause idle engines + PostgreSQL wire-compatible + F3 columnar format + vectorized SIMD execution + ex-Sisense founders (Eldad Farkash et al) + $269M raised + $1.4B valuation + Tel Aviv DB engineering heritage + SimilarWeb/AppsFlyer customers — the cloud data warehouse for SaaS companies building customer-facing analytics where Snowflake/BigQuery are too slow for embedded dashboards");
+    println!(
+        "  Differentiator: cloud DW purpose-built for data-intensive apps + customer-facing dashboards + sub-200ms p99 query latency + sparse/aggregating/join indexes (unique combo) + multiple independent engines per database (workload isolation) + auto-pause idle engines + PostgreSQL wire-compatible + F3 columnar format + vectorized SIMD execution + ex-Sisense founders (Eldad Farkash et al) + $269M raised + $1.4B valuation + Tel Aviv DB engineering heritage + SimilarWeb/AppsFlyer customers — the cloud data warehouse for SaaS companies building customer-facing analytics where Snowflake/BigQuery are too slow for embedded dashboards"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "firebolt".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "firebolt".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_fb(&rest, &_prog);
     process::exit(code);
@@ -151,7 +181,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fb};
+    use super::{basename, run_fb, strip_ext};
 
     #[test]
     fn basename_strips_path() {

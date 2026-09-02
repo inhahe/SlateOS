@@ -465,8 +465,7 @@ fn bridge_set_link(ports: &mut [BridgePort], args: &[String]) -> Result<(), Stri
             "mcast_flood" => port.mcast_flood = *val == "on",
             "bcast_flood" => port.bcast_flood = *val == "on",
             "state" => {
-                port.state =
-                    parse_state(val).ok_or_else(|| format!("invalid state: {val}"))?;
+                port.state = parse_state(val).ok_or_else(|| format!("invalid state: {val}"))?;
             }
             "priority" => {
                 port.priority = val
@@ -510,7 +509,11 @@ fn bridge_show_fdb(entries: &[FdbEntry], ctx: &OutputCtx, filter_br: Option<&str
                  {indent}}}{comma}{nl}",
                 format_mac(&e.mac),
                 e.port,
-                if e.is_static { "\"static\"" } else { "\"dynamic\"" },
+                if e.is_static {
+                    "\"static\""
+                } else {
+                    "\"dynamic\""
+                },
                 if e.is_local { "permanent" } else { "reachable" },
             ));
         }
@@ -524,10 +527,7 @@ fn bridge_show_fdb(entries: &[FdbEntry], ctx: &OutputCtx, filter_br: Option<&str
             } else {
                 "dynamic"
             };
-            let vlan_str = e
-                .vlan
-                .map(|v| format!(" vlan {v}"))
-                .unwrap_or_default();
+            let vlan_str = e.vlan.map(|v| format!(" vlan {v}")).unwrap_or_default();
             let offload_str = if e.offloaded { " offload" } else { "" };
             write_out(&format!(
                 "{} dev {}{} {} master br0{offload_str}\n",
@@ -540,10 +540,7 @@ fn bridge_show_fdb(entries: &[FdbEntry], ctx: &OutputCtx, filter_br: Option<&str
     }
 }
 
-fn bridge_add_fdb(
-    entries: &mut Vec<FdbEntry>,
-    args: &[String],
-) -> Result<(), String> {
+fn bridge_add_fdb(entries: &mut Vec<FdbEntry>, args: &[String]) -> Result<(), String> {
     // bridge fdb add <mac> dev <dev> [vlan <vid>] [self] [master] [static] [dynamic]
     if args.is_empty() {
         return Err("missing MAC address".to_string());
@@ -581,10 +578,7 @@ fn bridge_add_fdb(
     Ok(())
 }
 
-fn bridge_del_fdb(
-    entries: &mut Vec<FdbEntry>,
-    args: &[String],
-) -> Result<(), String> {
+fn bridge_del_fdb(entries: &mut Vec<FdbEntry>, args: &[String]) -> Result<(), String> {
     if args.is_empty() {
         return Err("missing MAC address".to_string());
     }
@@ -620,7 +614,11 @@ fn bridge_del_fdb(
 }
 
 fn bridge_flush_fdb(entries: &mut Vec<FdbEntry>, args: &[String]) {
-    if let Some(dev) = args.iter().position(|a| a == "dev").and_then(|i| args.get(i + 1)) {
+    if let Some(dev) = args
+        .iter()
+        .position(|a| a == "dev")
+        .and_then(|i| args.get(i + 1))
+    {
         entries.retain(|e| e.port != *dev || e.is_local);
     } else {
         entries.retain(|e| e.is_local);
@@ -658,22 +656,13 @@ fn bridge_show_mdb(entries: &[MdbEntry], ctx: &OutputCtx, filter_dev: Option<&st
         write_out("dev br0 port group\n");
         for e in &filtered {
             let perm = if e.is_permanent { "permanent" } else { "temp" };
-            let vlan_str = e
-                .vlan
-                .map(|v| format!(" vlan {v}"))
-                .unwrap_or_default();
-            write_out(&format!(
-                "  {} {} {}{vlan_str}\n",
-                e.port, e.group, perm,
-            ));
+            let vlan_str = e.vlan.map(|v| format!(" vlan {v}")).unwrap_or_default();
+            write_out(&format!("  {} {} {}{vlan_str}\n", e.port, e.group, perm,));
         }
     }
 }
 
-fn bridge_add_mdb(
-    entries: &mut Vec<MdbEntry>,
-    args: &[String],
-) -> Result<(), String> {
+fn bridge_add_mdb(entries: &mut Vec<MdbEntry>, args: &[String]) -> Result<(), String> {
     // bridge mdb add dev <br> port <port> grp <group> [permanent] [temp] [vlan <vid>]
     let mut dev: Option<&str> = None;
     let mut port: Option<&str> = None;
@@ -717,10 +706,7 @@ fn bridge_add_mdb(
     Ok(())
 }
 
-fn bridge_del_mdb(
-    entries: &mut Vec<MdbEntry>,
-    args: &[String],
-) -> Result<(), String> {
+fn bridge_del_mdb(entries: &mut Vec<MdbEntry>, args: &[String]) -> Result<(), String> {
     let mut port: Option<&str> = None;
     let mut group: Option<&str> = None;
     let mut i = 0;
@@ -815,10 +801,7 @@ fn build_vlan_flags_text(pvid: bool, untagged: bool) -> String {
     s
 }
 
-fn bridge_add_vlan(
-    entries: &mut Vec<VlanEntry>,
-    args: &[String],
-) -> Result<(), String> {
+fn bridge_add_vlan(entries: &mut Vec<VlanEntry>, args: &[String]) -> Result<(), String> {
     // bridge vlan add dev <dev> vid <vid> [pvid] [untagged] [self] [master]
     let mut dev: Option<&str> = None;
     let mut vid: Option<u16> = None;
@@ -854,10 +837,7 @@ fn bridge_add_vlan(
     Ok(())
 }
 
-fn bridge_del_vlan(
-    entries: &mut Vec<VlanEntry>,
-    args: &[String],
-) -> Result<(), String> {
+fn bridge_del_vlan(entries: &mut Vec<VlanEntry>, args: &[String]) -> Result<(), String> {
     let mut dev: Option<&str> = None;
     let mut vid: Option<u16> = None;
     let mut i = 0;
@@ -1025,7 +1005,11 @@ fn bridge_dispatch_mdb(args: &[String], ctx: &OutputCtx) -> i32 {
     match action {
         "show" | "list" => {
             let entries = sample_mdb_entries();
-            let dev = args.iter().position(|a| a == "dev").and_then(|i| args.get(i + 1)).map(|s| s.as_str());
+            let dev = args
+                .iter()
+                .position(|a| a == "dev")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str());
             bridge_show_mdb(&entries, ctx, dev);
             0
         }
@@ -1061,7 +1045,11 @@ fn bridge_dispatch_vlan(args: &[String], ctx: &OutputCtx) -> i32 {
     match action {
         "show" | "list" => {
             let entries = sample_vlan_entries();
-            let dev = args.iter().position(|a| a == "dev").and_then(|i| args.get(i + 1)).map(|s| s.as_str());
+            let dev = args
+                .iter()
+                .position(|a| a == "dev")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str());
             bridge_show_vlan(&entries, ctx, dev);
             0
         }
@@ -1225,9 +1213,17 @@ struct TcClass {
 
 #[derive(Debug, Clone)]
 enum FilterKind {
-    U32 { match_field: String, match_value: String, mask: String },
-    Fw { fwmark: u32 },
-    Basic { expr: String },
+    U32 {
+        match_field: String,
+        match_value: String,
+        mask: String,
+    },
+    Fw {
+        fwmark: u32,
+    },
+    Basic {
+        expr: String,
+    },
     Matchall,
 }
 
@@ -1296,7 +1292,13 @@ fn tc_show_qdisc(qdiscs: &[Qdisc], ctx: &OutputCtx, filter_dev: Option<&str>) {
 fn tc_show_qdisc_params(kind: &QdiscKind, _ctx: &OutputCtx) {
     match kind {
         QdiscKind::PfifoFast => write_out("  bands 3 priomap 1 2 2 2 1 2 0 0\n"),
-        QdiscKind::Tbf { rate, burst, latency, peakrate, mtu } => {
+        QdiscKind::Tbf {
+            rate,
+            burst,
+            latency,
+            peakrate,
+            mtu,
+        } => {
             write_out(&format!(
                 "  rate {} burst {} latency {}\n",
                 format_rate(*rate),
@@ -1316,7 +1318,12 @@ fn tc_show_qdisc_params(kind: &QdiscKind, _ctx: &OutputCtx) {
         QdiscKind::Sfq { perturb, quantum } => {
             write_out(&format!("  perturb {perturb}sec quantum {quantum}\n"));
         }
-        QdiscKind::FqCodel { target, interval, quantum, limit } => {
+        QdiscKind::FqCodel {
+            target,
+            interval,
+            quantum,
+            limit,
+        } => {
             write_out(&format!(
                 "  target {} interval {} quantum {quantum} limit {limit}\n",
                 format_time(*target),
@@ -1324,7 +1331,14 @@ fn tc_show_qdisc_params(kind: &QdiscKind, _ctx: &OutputCtx) {
             ));
         }
         QdiscKind::Ingress => write_out("  -------- (ingress) ----------\n"),
-        QdiscKind::Netem { delay, jitter, loss, duplicate, corrupt, reorder } => {
+        QdiscKind::Netem {
+            delay,
+            jitter,
+            loss,
+            duplicate,
+            corrupt,
+            reorder,
+        } => {
             write_out(&format!("  delay {}", format_time(*delay)));
             if let Some(j) = jitter {
                 write_out(&format!(" {}", format_time(*j)));
@@ -1518,7 +1532,12 @@ fn tc_parse_fqcodel_params(args: &[String]) -> QdiscKind {
         }
         i += 1;
     }
-    QdiscKind::FqCodel { target, interval, quantum, limit }
+    QdiscKind::FqCodel {
+        target,
+        interval,
+        quantum,
+        limit,
+    }
 }
 
 fn tc_parse_netem_params(args: &[String]) -> Result<QdiscKind, String> {
@@ -1536,14 +1555,15 @@ fn tc_parse_netem_params(args: &[String]) -> Result<QdiscKind, String> {
                 delay = args.get(i).and_then(|s| parse_time(s)).unwrap_or(0);
                 // Check for jitter (next arg might be a time value)
                 if let Some(next) = args.get(i + 1)
-                    && let Some(j) = parse_time(next) {
-                        // Only treat as jitter if it looks like a time value
-                        // and not a keyword
-                        if !is_netem_keyword(next) {
-                            jitter = Some(j);
-                            i += 1;
-                        }
+                    && let Some(j) = parse_time(next)
+                {
+                    // Only treat as jitter if it looks like a time value
+                    // and not a keyword
+                    if !is_netem_keyword(next) {
+                        jitter = Some(j);
+                        i += 1;
                     }
+                }
             }
             "jitter" => {
                 i += 1;
@@ -1569,14 +1589,29 @@ fn tc_parse_netem_params(args: &[String]) -> Result<QdiscKind, String> {
         }
         i += 1;
     }
-    Ok(QdiscKind::Netem { delay, jitter, loss, duplicate, corrupt, reorder })
+    Ok(QdiscKind::Netem {
+        delay,
+        jitter,
+        loss,
+        duplicate,
+        corrupt,
+        reorder,
+    })
 }
 
 fn is_netem_keyword(s: &str) -> bool {
     matches!(
         s,
-        "delay" | "jitter" | "loss" | "duplicate" | "corrupt" | "reorder"
-            | "dev" | "parent" | "root" | "handle"
+        "delay"
+            | "jitter"
+            | "loss"
+            | "duplicate"
+            | "corrupt"
+            | "reorder"
+            | "dev"
+            | "parent"
+            | "root"
+            | "handle"
     )
 }
 
@@ -1632,10 +1667,7 @@ fn tc_show_class(classes: &[TcClass], ctx: &OutputCtx, filter_dev: Option<&str>)
                 c.cburst,
             ));
             if ctx.stats {
-                write_out(&format!(
-                    "  Sent {} bytes {} pkt\n",
-                    c.bytes, c.packets,
-                ));
+                write_out(&format!("  Sent {} bytes {} pkt\n", c.bytes, c.packets,));
             }
         }
     }
@@ -1773,8 +1805,14 @@ fn filter_kind_name(kind: &FilterKind) -> &'static str {
 
 fn tc_show_filter_params(kind: &FilterKind) {
     match kind {
-        FilterKind::U32 { match_field, match_value, mask } => {
-            write_out(&format!("  match {match_field} {match_value} mask {mask}\n"));
+        FilterKind::U32 {
+            match_field,
+            match_value,
+            mask,
+        } => {
+            write_out(&format!(
+                "  match {match_field} {match_value} mask {mask}\n"
+            ));
         }
         FilterKind::Fw { fwmark } => {
             write_out(&format!("  handle 0x{fwmark:x} fw\n"));
@@ -1877,7 +1915,11 @@ fn tc_parse_u32_filter(args: &[String]) -> FilterKind {
         }
         i += 1;
     }
-    FilterKind::U32 { match_field, match_value, mask }
+    FilterKind::U32 {
+        match_field,
+        match_value,
+        mask,
+    }
 }
 
 fn tc_parse_fw_filter(args: &[String]) -> FilterKind {
@@ -1885,7 +1927,9 @@ fn tc_parse_fw_filter(args: &[String]) -> FilterKind {
     for (i, arg) in args.iter().enumerate() {
         if arg == "handle" {
             if let Some(h) = args.get(i + 1) {
-                fwmark = h.strip_prefix("0x").and_then(|s| u32::from_str_radix(s, 16).ok())
+                fwmark = h
+                    .strip_prefix("0x")
+                    .and_then(|s| u32::from_str_radix(s, 16).ok())
                     .or_else(|| h.parse::<u32>().ok())
                     .unwrap_or(0);
             }
@@ -1958,27 +2002,32 @@ fn tc_dispatch_qdisc(args: &[String], ctx: &OutputCtx) -> i32 {
     match action {
         "show" | "list" | "ls" => {
             let qdiscs = sample_qdiscs();
-            let dev = args.iter().position(|a| a == "dev").and_then(|i| args.get(i + 1)).map(|s| s.as_str());
+            let dev = args
+                .iter()
+                .position(|a| a == "dev")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str());
             tc_show_qdisc(&qdiscs, ctx, dev);
             0
         }
-        "add" | "replace" | "change" => {
-            match tc_parse_qdisc(&args[1..]) {
-                Ok((dev, _parent, kind)) => {
-                    write_out(&format!(
-                        "qdisc {} added on {dev}\n",
-                        qdisc_kind_name(&kind),
-                    ));
-                    0
-                }
-                Err(e) => {
-                    write_err(&format!("tc: qdisc: {e}\n"));
-                    1
-                }
+        "add" | "replace" | "change" => match tc_parse_qdisc(&args[1..]) {
+            Ok((dev, _parent, kind)) => {
+                write_out(&format!(
+                    "qdisc {} added on {dev}\n",
+                    qdisc_kind_name(&kind),
+                ));
+                0
             }
-        }
+            Err(e) => {
+                write_err(&format!("tc: qdisc: {e}\n"));
+                1
+            }
+        },
         "del" | "delete" => {
-            let dev = args.iter().position(|a| a == "dev").and_then(|i| args.get(i + 1));
+            let dev = args
+                .iter()
+                .position(|a| a == "dev")
+                .and_then(|i| args.get(i + 1));
             if let Some(d) = dev {
                 write_out(&format!("qdisc deleted on {d}\n"));
                 0
@@ -1999,29 +2048,34 @@ fn tc_dispatch_class(args: &[String], ctx: &OutputCtx) -> i32 {
     match action {
         "show" | "list" | "ls" => {
             let classes = sample_classes();
-            let dev = args.iter().position(|a| a == "dev").and_then(|i| args.get(i + 1)).map(|s| s.as_str());
+            let dev = args
+                .iter()
+                .position(|a| a == "dev")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str());
             tc_show_class(&classes, ctx, dev);
             0
         }
-        "add" | "replace" | "change" => {
-            match tc_parse_class(&args[1..]) {
-                Ok(class) => {
-                    write_out(&format!(
-                        "class {} {} added on {}\n",
-                        class.kind,
-                        format_handle(class.handle),
-                        class.dev,
-                    ));
-                    0
-                }
-                Err(e) => {
-                    write_err(&format!("tc: class: {e}\n"));
-                    1
-                }
+        "add" | "replace" | "change" => match tc_parse_class(&args[1..]) {
+            Ok(class) => {
+                write_out(&format!(
+                    "class {} {} added on {}\n",
+                    class.kind,
+                    format_handle(class.handle),
+                    class.dev,
+                ));
+                0
             }
-        }
+            Err(e) => {
+                write_err(&format!("tc: class: {e}\n"));
+                1
+            }
+        },
         "del" | "delete" => {
-            let dev = args.iter().position(|a| a == "dev").and_then(|i| args.get(i + 1));
+            let dev = args
+                .iter()
+                .position(|a| a == "dev")
+                .and_then(|i| args.get(i + 1));
             if let Some(d) = dev {
                 write_out(&format!("class deleted on {d}\n"));
                 0
@@ -2042,28 +2096,33 @@ fn tc_dispatch_filter(args: &[String], ctx: &OutputCtx) -> i32 {
     match action {
         "show" | "list" | "ls" => {
             let filters = sample_filters();
-            let dev = args.iter().position(|a| a == "dev").and_then(|i| args.get(i + 1)).map(|s| s.as_str());
+            let dev = args
+                .iter()
+                .position(|a| a == "dev")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str());
             tc_show_filter(&filters, ctx, dev);
             0
         }
-        "add" | "replace" | "change" => {
-            match tc_parse_filter(&args[1..]) {
-                Ok(f) => {
-                    write_out(&format!(
-                        "filter {} added on {}\n",
-                        filter_kind_name(&f.kind),
-                        f.dev,
-                    ));
-                    0
-                }
-                Err(e) => {
-                    write_err(&format!("tc: filter: {e}\n"));
-                    1
-                }
+        "add" | "replace" | "change" => match tc_parse_filter(&args[1..]) {
+            Ok(f) => {
+                write_out(&format!(
+                    "filter {} added on {}\n",
+                    filter_kind_name(&f.kind),
+                    f.dev,
+                ));
+                0
             }
-        }
+            Err(e) => {
+                write_err(&format!("tc: filter: {e}\n"));
+                1
+            }
+        },
         "del" | "delete" => {
-            let dev = args.iter().position(|a| a == "dev").and_then(|i| args.get(i + 1));
+            let dev = args
+                .iter()
+                .position(|a| a == "dev")
+                .and_then(|i| args.get(i + 1));
             if let Some(d) = dev {
                 write_out(&format!("filter deleted on {d}\n"));
                 0
@@ -2094,7 +2153,9 @@ fn sample_qdiscs() -> Vec<Qdisc> {
             handle: 0x0001_0000,
             parent: TC_H_ROOT,
             dev: "eth0".to_string(),
-            kind: QdiscKind::Htb { default_class: 0x0001_0030 },
+            kind: QdiscKind::Htb {
+                default_class: 0x0001_0030,
+            },
             bytes: 123456,
             packets: 789,
             drops: 2,
@@ -2285,9 +2346,10 @@ fn ebt_format_rule(r: &EbtablesRule) -> String {
 fn ebt_list_chains(chains: &[EbtablesChain], filter: Option<&str>) {
     for chain in chains {
         if let Some(f) = filter
-            && chain.name != f {
-                continue;
-            }
+            && chain.name != f
+        {
+            continue;
+        }
         write_out(&format!(
             "Bridge chain: {}, entries: {}, policy: {}\n",
             chain.name,
@@ -2324,7 +2386,11 @@ fn ebt_insert_rule(
         .iter_mut()
         .find(|c| c.name == chain_name)
         .ok_or_else(|| format!("chain {chain_name} not found"))?;
-    let idx = if pos == 0 { 0 } else { pos.min(chain.rules.len()) };
+    let idx = if pos == 0 {
+        0
+    } else {
+        pos.min(chain.rules.len())
+    };
     chain.rules.insert(idx, rule);
     Ok(())
 }
@@ -2348,9 +2414,10 @@ fn ebt_delete_rule(
 fn ebt_flush(chains: &mut [EbtablesChain], filter: Option<&str>) {
     for chain in chains.iter_mut() {
         if let Some(f) = filter
-            && chain.name != f {
-                continue;
-            }
+            && chain.name != f
+        {
+            continue;
+        }
         chain.rules.clear();
     }
 }
@@ -2378,10 +2445,7 @@ fn ebt_set_policy(
     }
 }
 
-fn ebt_new_chain(
-    chains: &mut Vec<EbtablesChain>,
-    name: &str,
-) -> Result<(), String> {
+fn ebt_new_chain(chains: &mut Vec<EbtablesChain>, name: &str) -> Result<(), String> {
     if chains.iter().any(|c| c.name == name) {
         return Err(format!("chain {name} already exists"));
     }
@@ -2394,10 +2458,7 @@ fn ebt_new_chain(
     Ok(())
 }
 
-fn ebt_delete_chain(
-    chains: &mut Vec<EbtablesChain>,
-    name: &str,
-) -> Result<(), String> {
+fn ebt_delete_chain(chains: &mut Vec<EbtablesChain>, name: &str) -> Result<(), String> {
     let idx = chains
         .iter()
         .position(|c| c.name == name)
@@ -2438,21 +2499,19 @@ fn run_ebtables(args: &[String]) -> i32 {
             ebt_list_chains(&chains, filter);
             0
         }
-        "-A" | "--append" => {
-            match ebt_parse_rule(&args[1..]) {
-                Ok((chain_name, rule)) => match ebt_add_rule(&mut chains, &chain_name, rule) {
-                    Ok(()) => 0,
-                    Err(e) => {
-                        write_err(&format!("ebtables: {e}\n"));
-                        1
-                    }
-                },
+        "-A" | "--append" => match ebt_parse_rule(&args[1..]) {
+            Ok((chain_name, rule)) => match ebt_add_rule(&mut chains, &chain_name, rule) {
+                Ok(()) => 0,
                 Err(e) => {
                     write_err(&format!("ebtables: {e}\n"));
                     1
                 }
+            },
+            Err(e) => {
+                write_err(&format!("ebtables: {e}\n"));
+                1
             }
-        }
+        },
         "-I" | "--insert" => {
             // -I chain [rulenum] rule-spec
             let rest = &args[1..];
@@ -2494,9 +2553,7 @@ fn run_ebtables(args: &[String]) -> i32 {
                 return 1;
             }
             let chain_name = &args[1];
-            let rule_num = args[2]
-                .parse::<usize>()
-                .map_err(|_| "invalid rule number");
+            let rule_num = args[2].parse::<usize>().map_err(|_| "invalid rule number");
             match rule_num {
                 Ok(num) => match ebt_delete_rule(&mut chains, chain_name, num) {
                     Ok(()) => 0,
@@ -2948,7 +3005,9 @@ mod tests {
     fn test_bridge_set_link_learning_off() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["dev", "eth0", "learning", "off"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_set_link(&mut ports, &args).unwrap();
         assert!(!ports[0].learning);
     }
@@ -2957,7 +3016,9 @@ mod tests {
     fn test_bridge_set_link_state() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["dev", "eth0", "state", "blocking"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_set_link(&mut ports, &args).unwrap();
         assert_eq!(ports[0].state, BR_STATE_BLOCKING);
     }
@@ -2966,7 +3027,9 @@ mod tests {
     fn test_bridge_set_link_missing_dev() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["learning", "off"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert!(bridge_set_link(&mut ports, &args).is_err());
     }
 
@@ -2974,7 +3037,9 @@ mod tests {
     fn test_bridge_set_link_unknown_port() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["dev", "eth9", "learning", "off"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert!(bridge_set_link(&mut ports, &args).is_err());
     }
 
@@ -2982,7 +3047,9 @@ mod tests {
     fn test_bridge_set_link_priority() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["dev", "eth0", "priority", "64"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_set_link(&mut ports, &args).unwrap();
         assert_eq!(ports[0].priority, 64);
     }
@@ -2991,7 +3058,9 @@ mod tests {
     fn test_bridge_set_link_cost() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["dev", "eth0", "cost", "200"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_set_link(&mut ports, &args).unwrap();
         assert_eq!(ports[0].cost, 200);
     }
@@ -3000,7 +3069,9 @@ mod tests {
     fn test_bridge_set_link_hairpin() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["dev", "eth0", "hairpin", "on"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_set_link(&mut ports, &args).unwrap();
         assert!(ports[0].hairpin);
     }
@@ -3009,7 +3080,9 @@ mod tests {
     fn test_bridge_set_link_flood_off() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["dev", "eth0", "flood", "off"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_set_link(&mut ports, &args).unwrap();
         assert!(!ports[0].flood);
     }
@@ -3020,7 +3093,9 @@ mod tests {
     fn test_fdb_add() {
         let mut entries = Vec::new();
         let args: Vec<String> = vec!["00:11:22:33:44:55", "dev", "eth0"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_add_fdb(&mut entries, &args).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].mac, [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
@@ -3031,7 +3106,9 @@ mod tests {
     fn test_fdb_add_with_vlan() {
         let mut entries = Vec::new();
         let args: Vec<String> = vec!["AA:BB:CC:DD:EE:FF", "dev", "eth1", "vlan", "100"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_add_fdb(&mut entries, &args).unwrap();
         assert_eq!(entries[0].vlan, Some(100));
     }
@@ -3040,7 +3117,9 @@ mod tests {
     fn test_fdb_add_dynamic() {
         let mut entries = Vec::new();
         let args: Vec<String> = vec!["00:11:22:33:44:55", "dev", "eth0", "dynamic"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_add_fdb(&mut entries, &args).unwrap();
         assert!(!entries[0].is_static);
     }
@@ -3056,7 +3135,9 @@ mod tests {
     fn test_fdb_add_invalid_mac() {
         let mut entries = Vec::new();
         let args: Vec<String> = vec!["invalid_mac", "dev", "eth0"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert!(bridge_add_fdb(&mut entries, &args).is_err());
     }
 
@@ -3071,7 +3152,9 @@ mod tests {
             offloaded: false,
         }];
         let args: Vec<String> = vec!["00:11:22:33:44:55", "dev", "eth0"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_del_fdb(&mut entries, &args).unwrap();
         assert!(entries.is_empty());
     }
@@ -3080,7 +3163,9 @@ mod tests {
     fn test_fdb_del_not_found() {
         let mut entries = Vec::new();
         let args: Vec<String> = vec!["00:11:22:33:44:55"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert!(bridge_del_fdb(&mut entries, &args).is_err());
     }
 
@@ -3131,8 +3216,7 @@ mod tests {
                 offloaded: false,
             },
         ];
-        let args: Vec<String> = vec!["dev", "eth0"]
-            .into_iter().map(String::from).collect();
+        let args: Vec<String> = vec!["dev", "eth0"].into_iter().map(String::from).collect();
         bridge_flush_fdb(&mut entries, &args);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].port, "eth1");
@@ -3143,8 +3227,18 @@ mod tests {
     #[test]
     fn test_mdb_add() {
         let mut entries = Vec::new();
-        let args: Vec<String> = vec!["dev", "br0", "port", "eth0", "grp", "239.1.1.1", "permanent"]
-            .into_iter().map(String::from).collect();
+        let args: Vec<String> = vec![
+            "dev",
+            "br0",
+            "port",
+            "eth0",
+            "grp",
+            "239.1.1.1",
+            "permanent",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         bridge_add_mdb(&mut entries, &args).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].group, "239.1.1.1");
@@ -3155,7 +3249,9 @@ mod tests {
     fn test_mdb_add_temp() {
         let mut entries = Vec::new();
         let args: Vec<String> = vec!["dev", "br0", "port", "eth0", "grp", "239.1.1.2", "temp"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_add_mdb(&mut entries, &args).unwrap();
         assert!(!entries[0].is_permanent);
     }
@@ -3163,8 +3259,19 @@ mod tests {
     #[test]
     fn test_mdb_add_with_vlan() {
         let mut entries = Vec::new();
-        let args: Vec<String> = vec!["dev", "br0", "port", "eth0", "grp", "239.1.1.1", "vlan", "100"]
-            .into_iter().map(String::from).collect();
+        let args: Vec<String> = vec![
+            "dev",
+            "br0",
+            "port",
+            "eth0",
+            "grp",
+            "239.1.1.1",
+            "vlan",
+            "100",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         bridge_add_mdb(&mut entries, &args).unwrap();
         assert_eq!(entries[0].vlan, Some(100));
     }
@@ -3173,7 +3280,9 @@ mod tests {
     fn test_mdb_add_missing_port() {
         let mut entries = Vec::new();
         let args: Vec<String> = vec!["dev", "br0", "grp", "239.1.1.1"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert!(bridge_add_mdb(&mut entries, &args).is_err());
     }
 
@@ -3186,7 +3295,9 @@ mod tests {
             is_permanent: true,
         }];
         let args: Vec<String> = vec!["dev", "br0", "port", "eth0", "grp", "239.1.1.1"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_del_mdb(&mut entries, &args).unwrap();
         assert!(entries.is_empty());
     }
@@ -3195,7 +3306,9 @@ mod tests {
     fn test_mdb_del_not_found() {
         let mut entries = Vec::new();
         let args: Vec<String> = vec!["dev", "br0", "port", "eth0", "grp", "239.1.1.1"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert!(bridge_del_mdb(&mut entries, &args).is_err());
     }
 
@@ -3205,7 +3318,9 @@ mod tests {
     fn test_vlan_add() {
         let mut entries = Vec::new();
         let args: Vec<String> = vec!["dev", "eth0", "vid", "100", "pvid", "untagged"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_add_vlan(&mut entries, &args).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].vid, 100);
@@ -3217,7 +3332,9 @@ mod tests {
     fn test_vlan_add_no_flags() {
         let mut entries = Vec::new();
         let args: Vec<String> = vec!["dev", "eth0", "vid", "200"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_add_vlan(&mut entries, &args).unwrap();
         assert!(!entries[0].pvid);
         assert!(!entries[0].untagged);
@@ -3226,8 +3343,7 @@ mod tests {
     #[test]
     fn test_vlan_add_missing_vid() {
         let mut entries = Vec::new();
-        let args: Vec<String> = vec!["dev", "eth0"]
-            .into_iter().map(String::from).collect();
+        let args: Vec<String> = vec!["dev", "eth0"].into_iter().map(String::from).collect();
         assert!(bridge_add_vlan(&mut entries, &args).is_err());
     }
 
@@ -3241,7 +3357,9 @@ mod tests {
             untagged: false,
         }];
         let args: Vec<String> = vec!["dev", "eth0", "vid", "100"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_del_vlan(&mut entries, &args).unwrap();
         assert!(entries.is_empty());
     }
@@ -3250,7 +3368,9 @@ mod tests {
     fn test_vlan_del_not_found() {
         let mut entries = Vec::new();
         let args: Vec<String> = vec!["dev", "eth0", "vid", "999"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert!(bridge_del_vlan(&mut entries, &args).is_err());
     }
 
@@ -3281,22 +3401,37 @@ mod tests {
 
     #[test]
     fn test_tc_parse_qdisc_htb() {
-        let args: Vec<String> = vec!["dev", "eth0", "root", "handle", "1:", "htb", "default", "30"]
-            .into_iter().map(String::from).collect();
+        let args: Vec<String> = vec![
+            "dev", "eth0", "root", "handle", "1:", "htb", "default", "30",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let (dev, parent, kind) = tc_parse_qdisc(&args).unwrap();
         assert_eq!(dev, "eth0");
         assert_eq!(parent, TC_H_ROOT);
-        assert!(matches!(kind, QdiscKind::Htb { default_class } if default_class == parse_handle("30").unwrap()));
+        assert!(
+            matches!(kind, QdiscKind::Htb { default_class } if default_class == parse_handle("30").unwrap())
+        );
     }
 
     #[test]
     fn test_tc_parse_qdisc_tbf() {
-        let args: Vec<String> = vec!["dev", "eth0", "root", "tbf", "rate", "1mbit", "burst", "1600b", "latency", "50ms"]
-            .into_iter().map(String::from).collect();
+        let args: Vec<String> = vec![
+            "dev", "eth0", "root", "tbf", "rate", "1mbit", "burst", "1600b", "latency", "50ms",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let (dev, _parent, kind) = tc_parse_qdisc(&args).unwrap();
         assert_eq!(dev, "eth0");
         match kind {
-            QdiscKind::Tbf { rate, burst, latency, .. } => {
+            QdiscKind::Tbf {
+                rate,
+                burst,
+                latency,
+                ..
+            } => {
                 assert_eq!(rate, 1_000_000);
                 assert_eq!(burst, 1600);
                 assert_eq!(latency, 50_000);
@@ -3307,8 +3442,12 @@ mod tests {
 
     #[test]
     fn test_tc_parse_qdisc_netem() {
-        let args: Vec<String> = vec!["dev", "eth0", "root", "netem", "delay", "100ms", "loss", "5%"]
-            .into_iter().map(String::from).collect();
+        let args: Vec<String> = vec![
+            "dev", "eth0", "root", "netem", "delay", "100ms", "loss", "5%",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let (_, _, kind) = tc_parse_qdisc(&args).unwrap();
         match kind {
             QdiscKind::Netem { delay, loss, .. } => {
@@ -3322,7 +3461,9 @@ mod tests {
     #[test]
     fn test_tc_parse_qdisc_sfq() {
         let args: Vec<String> = vec!["dev", "eth0", "root", "sfq", "perturb", "15"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         let (_, _, kind) = tc_parse_qdisc(&args).unwrap();
         match kind {
             QdiscKind::Sfq { perturb, .. } => assert_eq!(perturb, 15),
@@ -3332,8 +3473,12 @@ mod tests {
 
     #[test]
     fn test_tc_parse_qdisc_fqcodel() {
-        let args: Vec<String> = vec!["dev", "eth0", "root", "fq_codel", "target", "5ms", "limit", "2048"]
-            .into_iter().map(String::from).collect();
+        let args: Vec<String> = vec![
+            "dev", "eth0", "root", "fq_codel", "target", "5ms", "limit", "2048",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let (_, _, kind) = tc_parse_qdisc(&args).unwrap();
         match kind {
             QdiscKind::FqCodel { target, limit, .. } => {
@@ -3347,7 +3492,9 @@ mod tests {
     #[test]
     fn test_tc_parse_qdisc_ingress() {
         let args: Vec<String> = vec!["dev", "eth0", "ingress"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         let (_, parent, kind) = tc_parse_qdisc(&args).unwrap();
         assert!(matches!(kind, QdiscKind::Ingress));
         assert_eq!(parent, TC_H_INGRESS);
@@ -3355,8 +3502,7 @@ mod tests {
 
     #[test]
     fn test_tc_parse_qdisc_missing_dev() {
-        let args: Vec<String> = vec!["root", "htb"]
-            .into_iter().map(String::from).collect();
+        let args: Vec<String> = vec!["root", "htb"].into_iter().map(String::from).collect();
         assert!(tc_parse_qdisc(&args).is_err());
     }
 
@@ -3365,9 +3511,12 @@ mod tests {
     #[test]
     fn test_tc_parse_class_htb() {
         let args: Vec<String> = vec![
-            "dev", "eth0", "parent", "1:0", "classid", "1:10",
-            "htb", "rate", "10mbit", "ceil", "100mbit", "prio", "1",
-        ].into_iter().map(String::from).collect();
+            "dev", "eth0", "parent", "1:0", "classid", "1:10", "htb", "rate", "10mbit", "ceil",
+            "100mbit", "prio", "1",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let class = tc_parse_class(&args).unwrap();
         assert_eq!(class.dev, "eth0");
         assert_eq!(class.rate, 10_000_000);
@@ -3377,9 +3526,10 @@ mod tests {
 
     #[test]
     fn test_tc_parse_class_ceil_defaults_to_rate() {
-        let args: Vec<String> = vec![
-            "dev", "eth0", "parent", "1:0", "htb", "rate", "5mbit",
-        ].into_iter().map(String::from).collect();
+        let args: Vec<String> = vec!["dev", "eth0", "parent", "1:0", "htb", "rate", "5mbit"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         let class = tc_parse_class(&args).unwrap();
         assert_eq!(class.ceil, 5_000_000);
     }
@@ -3387,7 +3537,9 @@ mod tests {
     #[test]
     fn test_tc_parse_class_missing_dev() {
         let args: Vec<String> = vec!["parent", "1:0", "htb", "rate", "10mbit"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert!(tc_parse_class(&args).is_err());
     }
 
@@ -3396,9 +3548,25 @@ mod tests {
     #[test]
     fn test_tc_parse_filter_u32() {
         let args: Vec<String> = vec![
-            "dev", "eth0", "parent", "1:0", "protocol", "ip", "prio", "1",
-            "u32", "match", "ip", "dst", "0xffffff00", "flowid", "1:10",
-        ].into_iter().map(String::from).collect();
+            "dev",
+            "eth0",
+            "parent",
+            "1:0",
+            "protocol",
+            "ip",
+            "prio",
+            "1",
+            "u32",
+            "match",
+            "ip",
+            "dst",
+            "0xffffff00",
+            "flowid",
+            "1:10",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let f = tc_parse_filter(&args).unwrap();
         assert_eq!(f.dev, "eth0");
         assert!(matches!(f.kind, FilterKind::U32 { .. }));
@@ -3408,9 +3576,11 @@ mod tests {
     #[test]
     fn test_tc_parse_filter_fw() {
         let args: Vec<String> = vec![
-            "dev", "eth0", "parent", "1:0", "fw", "handle", "0x1",
-            "flowid", "1:10",
-        ].into_iter().map(String::from).collect();
+            "dev", "eth0", "parent", "1:0", "fw", "handle", "0x1", "flowid", "1:10",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let f = tc_parse_filter(&args).unwrap();
         match &f.kind {
             FilterKind::Fw { fwmark } => assert_eq!(*fwmark, 1),
@@ -3422,7 +3592,10 @@ mod tests {
     fn test_tc_parse_filter_matchall() {
         let args: Vec<String> = vec![
             "dev", "eth0", "parent", "ffff:", "matchall", "action", "drop",
-        ].into_iter().map(String::from).collect();
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let f = tc_parse_filter(&args).unwrap();
         assert!(matches!(f.kind, FilterKind::Matchall));
         assert_eq!(f.action, Some("drop".to_string()));
@@ -3430,9 +3603,10 @@ mod tests {
 
     #[test]
     fn test_tc_parse_filter_basic() {
-        let args: Vec<String> = vec![
-            "dev", "eth0", "parent", "1:0", "basic", "flowid", "1:10",
-        ].into_iter().map(String::from).collect();
+        let args: Vec<String> = vec!["dev", "eth0", "parent", "1:0", "basic", "flowid", "1:10"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         let f = tc_parse_filter(&args).unwrap();
         assert!(matches!(f.kind, FilterKind::Basic { .. }));
     }
@@ -3451,7 +3625,9 @@ mod tests {
     #[test]
     fn test_ebt_parse_rule_basic() {
         let args: Vec<String> = vec!["INPUT", "-j", "DROP"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         let (chain, rule) = ebt_parse_rule(&args).unwrap();
         assert_eq!(chain, "INPUT");
         assert_eq!(rule.target, "DROP");
@@ -3460,10 +3636,25 @@ mod tests {
     #[test]
     fn test_ebt_parse_rule_full() {
         let args: Vec<String> = vec![
-            "FORWARD", "-p", "IPv4", "-s", "00:11:22:33:44:55",
-            "-d", "AA:BB:CC:DD:EE:FF", "-i", "eth0", "-o", "eth1",
-            "--vlan-id", "100", "-j", "ACCEPT",
-        ].into_iter().map(String::from).collect();
+            "FORWARD",
+            "-p",
+            "IPv4",
+            "-s",
+            "00:11:22:33:44:55",
+            "-d",
+            "AA:BB:CC:DD:EE:FF",
+            "-i",
+            "eth0",
+            "-o",
+            "eth1",
+            "--vlan-id",
+            "100",
+            "-j",
+            "ACCEPT",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let (chain, rule) = ebt_parse_rule(&args).unwrap();
         assert_eq!(chain, "FORWARD");
         assert_eq!(rule.protocol, Some("IPv4".to_string()));
@@ -3517,13 +3708,19 @@ mod tests {
         let mut chains = default_chains();
         let rule1 = EbtablesRule {
             protocol: Some("IPv4".to_string()),
-            src_mac: None, dst_mac: None, in_if: None, out_if: None,
+            src_mac: None,
+            dst_mac: None,
+            in_if: None,
+            out_if: None,
             vlan_id: None,
             target: TARGET_ACCEPT.to_string(),
         };
         let rule2 = EbtablesRule {
             protocol: Some("ARP".to_string()),
-            src_mac: None, dst_mac: None, in_if: None, out_if: None,
+            src_mac: None,
+            dst_mac: None,
+            in_if: None,
+            out_if: None,
             vlan_id: None,
             target: TARGET_DROP.to_string(),
         };
@@ -3537,8 +3734,12 @@ mod tests {
     fn test_ebt_delete_rule() {
         let mut chains = default_chains();
         let rule = EbtablesRule {
-            protocol: None, src_mac: None, dst_mac: None,
-            in_if: None, out_if: None, vlan_id: None,
+            protocol: None,
+            src_mac: None,
+            dst_mac: None,
+            in_if: None,
+            out_if: None,
+            vlan_id: None,
             target: TARGET_DROP.to_string(),
         };
         ebt_add_rule(&mut chains, "INPUT", rule).unwrap();
@@ -3562,8 +3763,12 @@ mod tests {
     fn test_ebt_flush_all() {
         let mut chains = default_chains();
         let rule = EbtablesRule {
-            protocol: None, src_mac: None, dst_mac: None,
-            in_if: None, out_if: None, vlan_id: None,
+            protocol: None,
+            src_mac: None,
+            dst_mac: None,
+            in_if: None,
+            out_if: None,
+            vlan_id: None,
             target: TARGET_DROP.to_string(),
         };
         ebt_add_rule(&mut chains, "INPUT", rule).unwrap();
@@ -3575,13 +3780,21 @@ mod tests {
     fn test_ebt_flush_specific_chain() {
         let mut chains = default_chains();
         let rule1 = EbtablesRule {
-            protocol: None, src_mac: None, dst_mac: None,
-            in_if: None, out_if: None, vlan_id: None,
+            protocol: None,
+            src_mac: None,
+            dst_mac: None,
+            in_if: None,
+            out_if: None,
+            vlan_id: None,
             target: TARGET_DROP.to_string(),
         };
         let rule2 = EbtablesRule {
-            protocol: None, src_mac: None, dst_mac: None,
-            in_if: None, out_if: None, vlan_id: None,
+            protocol: None,
+            src_mac: None,
+            dst_mac: None,
+            in_if: None,
+            out_if: None,
+            vlan_id: None,
             target: TARGET_ACCEPT.to_string(),
         };
         ebt_add_rule(&mut chains, "INPUT", rule1).unwrap();
@@ -3645,8 +3858,12 @@ mod tests {
         let mut chains = default_chains();
         ebt_new_chain(&mut chains, "CUSTOM").unwrap();
         let rule = EbtablesRule {
-            protocol: None, src_mac: None, dst_mac: None,
-            in_if: None, out_if: None, vlan_id: None,
+            protocol: None,
+            src_mac: None,
+            dst_mac: None,
+            in_if: None,
+            out_if: None,
+            vlan_id: None,
             target: TARGET_ACCEPT.to_string(),
         };
         ebt_add_rule(&mut chains, "CUSTOM", rule).unwrap();
@@ -3656,8 +3873,12 @@ mod tests {
     #[test]
     fn test_ebt_format_rule_basic() {
         let rule = EbtablesRule {
-            protocol: None, src_mac: None, dst_mac: None,
-            in_if: None, out_if: None, vlan_id: None,
+            protocol: None,
+            src_mac: None,
+            dst_mac: None,
+            in_if: None,
+            out_if: None,
+            vlan_id: None,
             target: TARGET_DROP.to_string(),
         };
         assert_eq!(ebt_format_rule(&rule), "-j DROP");
@@ -3709,28 +3930,39 @@ mod tests {
         assert_eq!(qdisc_kind_name(&QdiscKind::Ingress), "ingress");
         assert_eq!(
             qdisc_kind_name(&QdiscKind::Tbf {
-                rate: 0, burst: 0, latency: 0, peakrate: None, mtu: None,
+                rate: 0,
+                burst: 0,
+                latency: 0,
+                peakrate: None,
+                mtu: None,
             }),
             "tbf"
         );
+        assert_eq!(qdisc_kind_name(&QdiscKind::Htb { default_class: 0 }), "htb");
         assert_eq!(
-            qdisc_kind_name(&QdiscKind::Htb { default_class: 0 }),
-            "htb"
-        );
-        assert_eq!(
-            qdisc_kind_name(&QdiscKind::Sfq { perturb: 0, quantum: 0 }),
+            qdisc_kind_name(&QdiscKind::Sfq {
+                perturb: 0,
+                quantum: 0
+            }),
             "sfq"
         );
         assert_eq!(
             qdisc_kind_name(&QdiscKind::FqCodel {
-                target: 0, interval: 0, quantum: 0, limit: 0,
+                target: 0,
+                interval: 0,
+                quantum: 0,
+                limit: 0,
             }),
             "fq_codel"
         );
         assert_eq!(
             qdisc_kind_name(&QdiscKind::Netem {
-                delay: 0, jitter: None, loss: None,
-                duplicate: None, corrupt: None, reorder: None,
+                delay: 0,
+                jitter: None,
+                loss: None,
+                duplicate: None,
+                corrupt: None,
+                reorder: None,
             }),
             "netem"
         );
@@ -3838,10 +4070,7 @@ mod tests {
 
     #[test]
     fn test_run_ebtables_list_chain() {
-        assert_eq!(
-            run_ebtables(&["-L".to_string(), "INPUT".to_string()]),
-            0
-        );
+        assert_eq!(run_ebtables(&["-L".to_string(), "INPUT".to_string()]), 0);
     }
 
     #[test]
@@ -3851,20 +4080,13 @@ mod tests {
 
     #[test]
     fn test_run_ebtables_new_chain() {
-        assert_eq!(
-            run_ebtables(&["-N".to_string(), "TEST".to_string()]),
-            0
-        );
+        assert_eq!(run_ebtables(&["-N".to_string(), "TEST".to_string()]), 0);
     }
 
     #[test]
     fn test_run_ebtables_policy() {
         assert_eq!(
-            run_ebtables(&[
-                "-P".to_string(),
-                "INPUT".to_string(),
-                "DROP".to_string(),
-            ]),
+            run_ebtables(&["-P".to_string(), "INPUT".to_string(), "DROP".to_string(),]),
             0
         );
     }
@@ -3992,7 +4214,9 @@ mod tests {
     fn test_bridge_set_link_guard() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["dev", "eth0", "guard", "on"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_set_link(&mut ports, &args).unwrap();
         assert!(ports[0].guard);
     }
@@ -4001,7 +4225,9 @@ mod tests {
     fn test_bridge_set_link_mcast_flood_off() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["dev", "eth0", "mcast_flood", "off"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_set_link(&mut ports, &args).unwrap();
         assert!(!ports[0].mcast_flood);
     }
@@ -4010,7 +4236,9 @@ mod tests {
     fn test_bridge_set_link_bcast_flood_off() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["dev", "eth0", "bcast_flood", "off"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         bridge_set_link(&mut ports, &args).unwrap();
         assert!(!ports[0].bcast_flood);
     }
@@ -4019,7 +4247,9 @@ mod tests {
     fn test_bridge_set_link_invalid_state() {
         let mut ports = vec![BridgePort::new("eth0", "br0")];
         let args: Vec<String> = vec!["dev", "eth0", "state", "bogus"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert!(bridge_set_link(&mut ports, &args).is_err());
     }
 }

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_i2cdetect(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,7 +26,10 @@ fn run_i2cdetect(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("i2cdetect v4.3 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("i2cdetect v4.3 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "-l") {
         println!("i2c-0\ti2c       \tSMBus I801 adapter at e000");
         println!("i2c-1\ti2c       \tNVIDIA i2c adapter 0");
@@ -46,7 +53,10 @@ fn run_i2cget(args: &[String], _prog: &str) -> i32 {
         println!("i2cget v4.3 (Slate OS) — Read I2C register");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("i2cget v4.3 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("i2cget v4.3 (Slate OS)");
+        return 0;
+    }
     println!("0x42");
     0
 }
@@ -57,7 +67,10 @@ fn run_i2cset(args: &[String], _prog: &str) -> i32 {
         println!("i2cset v4.3 (Slate OS) — Write I2C register");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("i2cset v4.3 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("i2cset v4.3 (Slate OS)");
+        return 0;
+    }
     println!("Value 0x42 written to register 0x00");
     0
 }
@@ -68,7 +81,10 @@ fn run_i2cdump(args: &[String], _prog: &str) -> i32 {
         println!("i2cdump v4.3 (Slate OS) — Dump I2C device registers");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("i2cdump v4.3 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("i2cdump v4.3 (Slate OS)");
+        return 0;
+    }
     println!("     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f");
     println!("00: 42 00 ff 00 00 00 00 00 00 00 00 00 00 00 00 00");
     println!("10: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00");
@@ -77,7 +93,10 @@ fn run_i2cdump(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "i2cdetect".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "i2cdetect".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "i2cget" => run_i2cget(&rest, &prog),
@@ -90,7 +109,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_i2cdetect};
+    use super::{basename, run_i2cdetect, strip_ext};
 
     #[test]
     fn basename_strips_path() {

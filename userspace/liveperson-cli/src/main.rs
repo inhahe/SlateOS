@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("liveperson-cli 0.1.0 (conversational-cloud personality build)"); }
+fn print_version() {
+    println!("liveperson-cli 0.1.0 (conversational-cloud personality build)");
+}
 
 fn run_about() {
     println!("LivePerson, Inc. (Nasdaq:LPSN).");

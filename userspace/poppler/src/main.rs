@@ -20,7 +20,11 @@ fn run_pdfinfo(args: Vec<String>) -> i32 {
         println!("pdfinfo version 24.05.0 (Slate OS)");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("document.pdf");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("document.pdf");
     let _ = file;
     println!("Title:          Example Document");
     println!("Subject:        ");
@@ -55,7 +59,11 @@ fn run_pdftotext(args: Vec<String>) -> i32 {
         println!("  -enc <encoding>   Text encoding");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("document.pdf");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("document.pdf");
     let _ = file;
     println!("This is the extracted text content from the PDF document.");
     println!("It contains multiple paragraphs and sections.");
@@ -76,7 +84,12 @@ fn run_pdftoppm(args: Vec<String>) -> i32 {
         println!("  -tiff         Output TIFF format");
         return 0;
     }
-    let root = args.iter().filter(|a| !a.starts_with('-')).nth(1).map(|s| s.as_str()).unwrap_or("page");
+    let root = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .nth(1)
+        .map(|s| s.as_str())
+        .unwrap_or("page");
     println!("Converting pages to images...");
     println!("  {}-1.png", root);
     println!("  {}-2.png", root);
@@ -94,10 +107,18 @@ fn run_pdfimages(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-list") {
-        println!("page   num  type   width  height  color  comp  bpc  enc   interp  object ID  x-ppi  y-ppi  size   ratio");
-        println!("-----------------------------------------------------------------------------------------------------------");
-        println!("   1     0  image    800    600    rgb     3    8   jpeg   yes     10 0       150    150    128K   26.8%");
-        println!("   3     1  image   1024    768    rgb     3    8   png    no      25 0       300    300    512K   21.7%");
+        println!(
+            "page   num  type   width  height  color  comp  bpc  enc   interp  object ID  x-ppi  y-ppi  size   ratio"
+        );
+        println!(
+            "-----------------------------------------------------------------------------------------------------------"
+        );
+        println!(
+            "   1     0  image    800    600    rgb     3    8   jpeg   yes     10 0       150    150    128K   26.8%"
+        );
+        println!(
+            "   3     1  image   1024    768    rgb     3    8   png    no      25 0       300    300    512K   21.7%"
+        );
         return 0;
     }
     println!("Extracting images from PDF... 2 images extracted.");
@@ -123,7 +144,11 @@ fn run_pdfunite(args: Vec<String>) -> i32 {
         println!("Usage: pdfunite <PDF-file-1> ... <PDF-file-n> <output-PDF>");
         return 0;
     }
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     if files.len() >= 2 {
         let output = files.last().unwrap_or(&"output.pdf");
         println!("Merging {} files into {}", files.len() - 1, output);
@@ -140,7 +165,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -149,7 +176,10 @@ fn main() {
     let code = match prog_name.as_str() {
         "pdftotext" => run_pdftotext(rest),
         "pdftoppm" => run_pdftoppm(rest),
-        "pdftohtml" => { println!("(HTML conversion — simulated)"); 0 }
+        "pdftohtml" => {
+            println!("(HTML conversion — simulated)");
+            0
+        }
         "pdfimages" => run_pdfimages(rest),
         "pdfseparate" => run_pdfseparate(rest),
         "pdfunite" => run_pdfunite(rest),
@@ -160,7 +190,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pdfinfo};
+    use super::run_pdfinfo;
 
     #[test]
     fn help_exits_zero() {

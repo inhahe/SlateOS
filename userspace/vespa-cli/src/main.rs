@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_vespa(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vespa [OPTIONS]");
-        println!("Vespa (Slate OS) — big-data search + ranking + vectors + LLM platform (Yahoo open-source)");
+        println!(
+            "Vespa (Slate OS) — big-data search + ranking + vectors + LLM platform (Yahoo open-source)"
+        );
         println!();
         println!("Options:");
         println!("  --search               Full-text + structured search (Yahoo origin)");
@@ -21,14 +27,23 @@ fn run_vespa(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Vespa 2024 (Slate OS) — vespa-cli 8.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Vespa 2024 (Slate OS) — vespa-cli 8.x");
+        return 0;
+    }
     println!("Vespa 2024 (Slate OS) — Big-Data Serving Engine (Search + Ranking + Vectors + LLM)");
     println!("  Vendor: Vespa.ai (Trondheim, Norway — private, Yahoo spin-off Aug 2023)");
     println!("  Origins:");
-    println!("         FAST Search & Transfer founded 1997 (Norway) — acquired by Microsoft 2008 ($1.2B)");
-    println!("         Yahoo Search engineers built Vespa from scratch (2003+) for Yahoo search/ranking");
+    println!(
+        "         FAST Search & Transfer founded 1997 (Norway) — acquired by Microsoft 2008 ($1.2B)"
+    );
+    println!(
+        "         Yahoo Search engineers built Vespa from scratch (2003+) for Yahoo search/ranking"
+    );
     println!("         Vespa open-sourced by Yahoo 2017 (Apache 2.0)");
-    println!("         Powers Yahoo Search, Yahoo Mail, Yahoo Finance, Flickr — billions of queries/day");
+    println!(
+        "         Powers Yahoo Search, Yahoo Mail, Yahoo Finance, Flickr — billions of queries/day"
+    );
     println!("         Aug 2023: spun out as Vespa.ai (separate company, Yahoo investor)");
     println!("  Founders: Jon Bratseth (CEO), 2023 spin-off");
     println!("          Jon Bratseth: Vespa architect at Yahoo for 17+ years, principal architect");
@@ -39,12 +54,22 @@ fn run_vespa(args: &[String], _prog: &str) -> i32 {
     println!("         Series A Sep 2023: $31M Blossom Capital lead");
     println!("         Yahoo retained minority stake in spin-off");
     println!("         Revenue private — Vespa Cloud growing 2024");
-    println!("  Strategic position: 'big-data serving — search + ranking + vectors + ML inference, sub-100ms':");
-    println!("                    pitch: 'big-data search + ranking + vector + ML in one engine — proven at Yahoo scale'");
-    println!("                    target: large-scale search + recommendation + RAG + ad-serving workloads");
-    println!("                    primary competitor: Elasticsearch (search), Pinecone (vector), Solr, OpenSearch");
+    println!(
+        "  Strategic position: 'big-data serving — search + ranking + vectors + ML inference, sub-100ms':"
+    );
+    println!(
+        "                    pitch: 'big-data search + ranking + vector + ML in one engine — proven at Yahoo scale'"
+    );
+    println!(
+        "                    target: large-scale search + recommendation + RAG + ad-serving workloads"
+    );
+    println!(
+        "                    primary competitor: Elasticsearch (search), Pinecone (vector), Solr, OpenSearch"
+    );
     println!("                    secondary: Milvus + Weaviate + Qdrant (pure vector)");
-    println!("                    Vespa's wedge: combined search + ranking + vector + ML in one engine + battle-tested");
+    println!(
+        "                    Vespa's wedge: combined search + ranking + vector + ML in one engine + battle-tested"
+    );
     println!("                    'Most mature unified search + ranking + vector platform'");
     println!("                    Bing Search (Microsoft) reportedly uses Vespa-inspired tech");
     println!("  Pricing (OSS + Cloud + Enterprise):");
@@ -67,7 +92,9 @@ fn run_vespa(args: &[String], _prog: &str) -> i32 {
     println!("  Product portfolio:");
     println!("    1. Vespa Engine (OSS core):");
     println!("       - Apache 2.0 open source");
-    println!("       - 5K+ GitHub stars (lower than newer vector DBs due to being long-established + less hype)");
+    println!(
+        "       - 5K+ GitHub stars (lower than newer vector DBs due to being long-established + less hype)"
+    );
     println!("       - Battle-tested at Yahoo (billions of queries/day for 20+ years)");
     println!("    2. Vespa Cloud (managed):");
     println!("       - Multi-cloud (AWS, GCP, Azure)");
@@ -120,7 +147,9 @@ fn run_vespa(args: &[String], _prog: &str) -> i32 {
     println!("    - 20+ years of production at billions of queries/day");
     println!("    - 'No vector DB has anywhere near this production track record'");
     println!("  The unified-engine angle:");
-    println!("    - Traditional stack: Elasticsearch (search) + Pinecone (vector) + ML service (ranking) + Postgres (filter)");
+    println!(
+        "    - Traditional stack: Elasticsearch (search) + Pinecone (vector) + ML service (ranking) + Postgres (filter)"
+    );
     println!("    - Vespa: one engine does all four — schema, indexing, ranking, ML inference");
     println!("    - Trade-off: more learning curve, but consolidates infra");
     println!("    - 'One database for search + vector + ranking + filter'");
@@ -139,13 +168,19 @@ fn run_vespa(args: &[String], _prog: &str) -> i32 {
     println!("    vespa status                                              # cluster health");
     println!("    vespa document put id:my-coll:my-doc::1 docs.json");
     println!("    vespa document get id:my-coll:my-doc::1");
-    println!("    vespa query 'select * from my-coll where userQuery() and category=\"news\"' --param=query='AI databases'");
-    println!("    vespa visit                                               # iterate over all docs");
+    println!(
+        "    vespa query 'select * from my-coll where userQuery() and category=\"news\"' --param=query='AI databases'"
+    );
+    println!(
+        "    vespa visit                                               # iterate over all docs"
+    );
     println!("    vespa feed docs.jsonl                                    # bulk feed");
     println!("    vespa target cloud --application=my-tenant.my-app.default");
     println!("    vespa auth login                                          # Vespa Cloud auth");
     println!("    # Schema (.sd file):");
-    println!("    # schema my_coll {{ document my_coll {{ field title type string {{ indexing: index | summary }} }} }}");
+    println!(
+        "    # schema my_coll {{ document my_coll {{ field title type string {{ indexing: index | summary }} }} }}"
+    );
     println!("  Customers (large-scale search + recommendation + RAG):");
     println!("    - Yahoo (parent + still major user)");
     println!("    - Spotify (recommendation + search)");
@@ -162,13 +197,18 @@ fn run_vespa(args: &[String], _prog: &str) -> i32 {
     println!("           feature breadth = sometimes overwhelming for simple use cases");
     println!("           Java + C++ codebase = contribution barrier for newcomers");
     println!("           dev community smaller than newer hype-cycle products");
-    println!("  Differentiator: Yahoo-origin (2003+) + battle-tested at billions of queries/day for 20+ years + powers Yahoo Search + Yahoo Mail + Yahoo Finance + Flickr + Spotify + Vimeo + Ahrefs + unified search + vector + ranking + ML inference in one engine + in-engine ML model serving (ONNX + LightGBM + XGBoost) + phased ranking (first-stage recall + second-stage ML re-rank) + first-class tensor type system + ColBERT multi-vector late interaction + 1000s of updates/sec/node + Jon Bratseth founder (Vespa architect at Yahoo 17+ years) + Apache 2.0 + Vespa Cloud managed + $31M Series A 2023 spin-off — the most production-proven and unified search + ranking + vector + ML platform, perfected at Yahoo over two decades and now independent");
+    println!(
+        "  Differentiator: Yahoo-origin (2003+) + battle-tested at billions of queries/day for 20+ years + powers Yahoo Search + Yahoo Mail + Yahoo Finance + Flickr + Spotify + Vimeo + Ahrefs + unified search + vector + ranking + ML inference in one engine + in-engine ML model serving (ONNX + LightGBM + XGBoost) + phased ranking (first-stage recall + second-stage ML re-rank) + first-class tensor type system + ColBERT multi-vector late interaction + 1000s of updates/sec/node + Jon Bratseth founder (Vespa architect at Yahoo 17+ years) + Apache 2.0 + Vespa Cloud managed + $31M Series A 2023 spin-off — the most production-proven and unified search + ranking + vector + ML platform, perfected at Yahoo over two decades and now independent"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "vespa".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "vespa".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_vespa(&rest, &_prog);
     process::exit(code);
@@ -176,7 +216,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_vespa};
+    use super::{basename, run_vespa, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -50,7 +50,8 @@ fn run_dog(args: Vec<String>) -> i32 {
     let show_time = args.iter().any(|a| a == "--time");
 
     // Parse domain and type from positional args
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-') && !a.starts_with('@'))
         .map(|s| s.as_str())
         .collect();
@@ -63,7 +64,8 @@ fn run_dog(args: Vec<String>) -> i32 {
         record_types
     };
 
-    let nameserver = args.iter()
+    let nameserver = args
+        .iter()
         .find(|a| a.starts_with('@'))
         .map(|s| &s[1..])
         .unwrap_or("9.9.9.9");
@@ -77,11 +79,16 @@ fn run_dog(args: Vec<String>) -> i32 {
                 "NS" => "\"ns1.example.com.\"",
                 "TXT" => "\"v=spf1 include:_spf.example.com ~all\"",
                 "CNAME" => "\"www.example.com.\"",
-                "SOA" => "\"ns1.example.com. admin.example.com. 2025052201 3600 900 1209600 86400\"",
+                "SOA" => {
+                    "\"ns1.example.com. admin.example.com. 2025052201 3600 900 1209600 86400\""
+                }
                 _ => "\"93.184.216.34\"",
             };
             let comma = if i + 1 < rtypes.len() { "," } else { "" };
-            println!("  {{\"name\":\"{}\",\"type\":\"{}\",\"TTL\":3600,\"data\":{}}}{}", domain, rtype, data, comma);
+            println!(
+                "  {{\"name\":\"{}\",\"type\":\"{}\",\"TTL\":3600,\"data\":{}}}{}",
+                domain, rtype, data, comma
+            );
         }
         println!("]");
     } else if short {
@@ -129,7 +136,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_dog};
+    use super::run_dog;
 
     #[test]
     fn help_exits_zero() {

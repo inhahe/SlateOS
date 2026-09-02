@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_kib(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,16 +27,27 @@ fn run_kib(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kibana 8.16.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Kibana 8.16.1 (Slate OS)");
+        return 0;
+    }
     println!("Kibana 8.16.1 (Slate OS)");
     println!("  Vendor: Elastic N.V. (Mountain View / Amsterdam — NYSE:ESTC)");
-    println!("  Original author: Rashid Khan (~2013, started as personal project to query Logstash data)");
+    println!(
+        "  Original author: Rashid Khan (~2013, started as personal project to query Logstash data)"
+    );
     println!("                   joined Elastic, Kibana became official UI");
     println!("  Role in stack: the 'K' in ELK / Elastic Stack");
-    println!("                 Elasticsearch (store/search) + Logstash (ingest) + Kibana (viz) + Beats (ship)");
-    println!("  License: 2021 — Elasticsearch + Kibana relicensed from Apache 2.0 to dual SSPL/Elastic License");
+    println!(
+        "                 Elasticsearch (store/search) + Logstash (ingest) + Kibana (viz) + Beats (ship)"
+    );
+    println!(
+        "  License: 2021 — Elasticsearch + Kibana relicensed from Apache 2.0 to dual SSPL/Elastic License"
+    );
     println!("          → AWS forked into OpenSearch + OpenSearch Dashboards");
-    println!("          2024 — Elastic re-added AGPLv3 as third option (some upstream→OpenSearch flow back)");
+    println!(
+        "          2024 — Elastic re-added AGPLv3 as third option (some upstream→OpenSearch flow back)"
+    );
     println!("  Pricing: Self-managed (free with restrictions) + Elastic Cloud subscription tiers");
     println!("          Standard, Gold, Platinum, Enterprise (per-resource pricing)");
     println!("  Core features:");
@@ -48,14 +63,21 @@ fn run_kib(args: &[String], _prog: &str) -> i32 {
     println!("    - Enterprise Search (Workplace Search, App Search, Site Search)");
     println!("    - Machine Learning (anomaly detection, forecasting, classification)");
     println!("  Tech: Node.js server, React frontend, talks to Elasticsearch REST API");
-    println!("  Customers: Walmart, Netflix, Salesforce, Adobe, US Census, NASA — anyone with ELK stack");
-    println!("  Differentiator: best UX for ad-hoc log search at scale + tight Elasticsearch integration");
+    println!(
+        "  Customers: Walmart, Netflix, Salesforce, Adobe, US Census, NASA — anyone with ELK stack"
+    );
+    println!(
+        "  Differentiator: best UX for ad-hoc log search at scale + tight Elasticsearch integration"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "kibana".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "kibana".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_kib(&rest, &_prog);
     process::exit(code);
@@ -63,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_kib};
+    use super::{basename, run_kib, strip_ext};
 
     #[test]
     fn basename_strips_path() {

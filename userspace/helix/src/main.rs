@@ -28,7 +28,9 @@ fn run_hx(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--health") {
-        let lang = args.iter().position(|a| a == "--health")
+        let lang = args
+            .iter()
+            .position(|a| a == "--health")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str());
         if let Some(l) = lang {
@@ -56,7 +58,11 @@ fn run_hx(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     if files.is_empty() {
         println!("helix 24.07 (Slate OS) — post-modern modal editor");
     } else {
@@ -77,7 +83,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_hx};
+    use super::run_hx;
 
     #[test]
     fn help_exits_zero() {

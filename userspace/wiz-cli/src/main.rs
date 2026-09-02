@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_wiz(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,14 +26,19 @@ fn run_wiz(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Wiz 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Wiz 2024 (Slate OS)");
+        return 0;
+    }
     println!("Wiz 2024 (Slate OS) — Cloud-Native Application Protection Platform");
     println!("  Vendor: Wiz, Inc. (New York City + Tel Aviv)");
     println!("  Founders: Assaf Rappaport (CEO), Yinon Costica, Roy Reznik, Ami Luttwak, 2020");
     println!("          all four: Israeli Unit 8200 (IDF intelligence) alumni + ex-Microsoft");
     println!("          previously founded Adallom (CASB), sold to Microsoft 2015 for $320M");
     println!("          Wiz is their 'second act' — same team, all back together");
-    println!("          founded March 2020 — became fastest SaaS startup to $100M ARR in history (18 months)");
+    println!(
+        "          founded March 2020 — became fastest SaaS startup to $100M ARR in history (18 months)"
+    );
     println!("          $500M ARR by year 3.5 — unprecedented growth");
     println!("  Funding history (the fastest unicorn ever):");
     println!("         Seed 2020: $21M");
@@ -45,14 +54,22 @@ fn run_wiz(args: &[String], _prog: &str) -> i32 {
     println!("         Largest acquisition in Google's history (surpassing Motorola $12.5B)");
     println!("         Will be integrated into Google Cloud as core security offering");
     println!("         Pending regulatory approval (expected 2025-2026)");
-    println!("         Earlier July 2024: Google offered $23B, Wiz rejected to pursue IPO; revisited March 2025");
+    println!(
+        "         Earlier July 2024: Google offered $23B, Wiz rejected to pursue IPO; revisited March 2025"
+    );
     println!("  ARR: ~$500M+ ARR at 2024 (and growing 100%+ YoY)");
     println!("  Strategic position: 'agentless cloud security via API-first scanning':");
-    println!("                    pitch: 'see all your cloud risks in 24 hours, no agents required'");
+    println!(
+        "                    pitch: 'see all your cloud risks in 24 hours, no agents required'"
+    );
     println!("                    target: enterprises running multi-cloud (AWS, Azure, GCP)");
-    println!("                    primary competitor: Palo Alto Prisma Cloud, CrowdStrike Falcon Cloud, Orca Security");
+    println!(
+        "                    primary competitor: Palo Alto Prisma Cloud, CrowdStrike Falcon Cloud, Orca Security"
+    );
     println!("                    secondary: Aqua, Sysdig, Lacework, Microsoft Defender for Cloud");
-    println!("                    Wiz's wedge: agentless via cloud APIs + Wiz Security Graph + 24-hour value");
+    println!(
+        "                    Wiz's wedge: agentless via cloud APIs + Wiz Security Graph + 24-hour value"
+    );
     println!("                    customer love: 50%+ Fortune 100 in <4 years");
     println!("  Pricing (enterprise sales-led):");
     println!("    no free tier");
@@ -66,7 +83,9 @@ fn run_wiz(args: &[String], _prog: &str) -> i32 {
     println!("    - Kubernetes + containers + serverless + IaC");
     println!("    - Vulnerabilities, misconfigurations, exposed secrets, identity issues");
     println!("    - Wiz Security Graph: connects findings into attack-path visualization");
-    println!("    - 'toxic combination' detection (e.g., 'public S3 + IAM with admin + connects to crown jewels')");
+    println!(
+        "    - 'toxic combination' detection (e.g., 'public S3 + IAM with admin + connects to crown jewels')"
+    );
     println!("  Wiz Security Graph (the differentiator):");
     println!("    - Models cloud assets + identities + network + data as a graph");
     println!("    - Surfaces attack paths an attacker could exploit");
@@ -99,7 +118,9 @@ fn run_wiz(args: &[String], _prog: &str) -> i32 {
     println!("    wiz defend status --cluster prod-k8s");
     println!("  Customers (~1,500+ paying enterprise):");
     println!("    - LVMH, BMW, Salesforce, Morgan Stanley, Plaid, Bridgewater Associates");
-    println!("    - Slack, ASML, Snowflake (irony: Snowflake hack 2024 wasn't on Wiz-monitored infra)");
+    println!(
+        "    - Slack, ASML, Snowflake (irony: Snowflake hack 2024 wasn't on Wiz-monitored infra)"
+    );
     println!("    - sweet spot: any enterprise with multi-cloud + Kubernetes");
     println!("    - dominant in: tech, financial services, retail, manufacturing");
     println!("  Critique (less common given growth):");
@@ -109,14 +130,21 @@ fn run_wiz(args: &[String], _prog: &str) -> i32 {
     println!("           Israel-team-heavy = some geopolitical sourcing concerns (post-Oct 2023)");
     println!("           crowded CNAPP space — differentiation via Security Graph + brand");
     println!("           post-Google acquisition: customers worry about cross-cloud commitment");
-    println!("           rumored CEO Assaf Rappaport's $10B+ personal stake on exit = founder retention question");
-    println!("  Differentiator: agentless multi-cloud scanning + Wiz Security Graph attack-path modeling + 24-hour time-to-value + Israeli Unit 8200 founder pedigree + fastest-growing SaaS in history + soon-to-be Google Cloud's flagship security platform — the CNAPP that redefined cloud security in <4 years");
+    println!(
+        "           rumored CEO Assaf Rappaport's $10B+ personal stake on exit = founder retention question"
+    );
+    println!(
+        "  Differentiator: agentless multi-cloud scanning + Wiz Security Graph attack-path modeling + 24-hour time-to-value + Israeli Unit 8200 founder pedigree + fastest-growing SaaS in history + soon-to-be Google Cloud's flagship security platform — the CNAPP that redefined cloud security in <4 years"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "wiz".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "wiz".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_wiz(&rest, &_prog);
     process::exit(code);
@@ -124,7 +152,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_wiz};
+    use super::{basename, run_wiz, strip_ext};
 
     #[test]
     fn basename_strips_path() {

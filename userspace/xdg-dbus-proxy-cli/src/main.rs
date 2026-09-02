@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_proxy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.len() < 2 {
@@ -29,7 +33,10 @@ fn run_proxy(args: &[String], _prog: &str) -> i32 {
         println!("  --log             Log filtered messages");
         return 0;
     }
-    let addr = args.first().map(|s| s.as_str()).unwrap_or("unix:path=/run/dbus/system_bus_socket");
+    let addr = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("unix:path=/run/dbus/system_bus_socket");
     let socket = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp/proxy-bus");
     println!("xdg-dbus-proxy: {} -> {}", addr, socket);
     if args.iter().any(|a| a == "--filter") {
@@ -40,7 +47,10 @@ fn run_proxy(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "xdg-dbus-proxy".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "xdg-dbus-proxy".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_proxy(&rest, &prog);
     process::exit(code);
@@ -48,7 +58,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_proxy};
+    use super::{basename, run_proxy, strip_ext};
 
     #[test]
     fn basename_strips_path() {

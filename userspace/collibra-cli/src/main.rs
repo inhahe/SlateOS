@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_collibra(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,13 +26,18 @@ fn run_collibra(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Collibra 2024.07 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Collibra 2024.07 (Slate OS)");
+        return 0;
+    }
     println!("Collibra 2024.07 (Slate OS) — Data Intelligence Platform");
     println!("  Vendor: Collibra NV (Brussels, Belgium + New York City)");
     println!("  Founders: Felix Van de Maele (CEO) + Stijn Christiaens + Pieter De Leenheer, 2008");
     println!("          Felix: Belgian data scientist, also founded later companies");
     println!("          spun out of STARLab at Vrije Universiteit Brussel (semantic web research)");
-    println!("          16+ years building — one of the oldest still-private 'data intelligence' vendors");
+    println!(
+        "          16+ years building — one of the oldest still-private 'data intelligence' vendors"
+    );
     println!("          dual HQ: Brussels (engineering) + NYC (sales)");
     println!("  Funding: ~$600M total — Decacorn ($5.25B valuation 2021)");
     println!("         Series G Nov 2021: $250M led by Sequoia + Tiger + Battery + ICONIQ");
@@ -36,13 +45,25 @@ fn run_collibra(args: &[String], _prog: &str) -> i32 {
     println!("         valuation reportedly cut to ~$2B in 2023 secondary sales (down round)");
     println!("         layoffs 2023 (~15% headcount) + 2024 — typical post-2021 zirp adjustment");
     println!("  ARR: $250M+ (largest pure-play catalog/governance vendor)");
-    println!("  Strategic position: 'governance-first' data intelligence (vs Alation's catalog-first):");
-    println!("                    pitch: 'enterprise data governance + catalog + quality + privacy in one'");
-    println!("                    contrast: Alation more catalog UX-focused; Collibra more governance + workflow depth");
-    println!("                    primary competitor: Alation (head-to-head), Informatica, Atlan, IBM, Microsoft Purview");
-    println!("                    moat: 16-year head start on enterprise governance feature breadth");
+    println!(
+        "  Strategic position: 'governance-first' data intelligence (vs Alation's catalog-first):"
+    );
+    println!(
+        "                    pitch: 'enterprise data governance + catalog + quality + privacy in one'"
+    );
+    println!(
+        "                    contrast: Alation more catalog UX-focused; Collibra more governance + workflow depth"
+    );
+    println!(
+        "                    primary competitor: Alation (head-to-head), Informatica, Atlan, IBM, Microsoft Purview"
+    );
+    println!(
+        "                    moat: 16-year head start on enterprise governance feature breadth"
+    );
     println!("                    sales motion: 6-18 month sales cycles, Fortune 500 dominant");
-    println!("                    Gartner Magic Quadrant Leader for data governance year after year");
+    println!(
+        "                    Gartner Magic Quadrant Leader for data governance year after year"
+    );
     println!("  Pricing (enterprise, no free tier):");
     println!("    Standard — $100K-300K/yr");
     println!("    Premium — $300K-1M/yr (full modules)");
@@ -82,7 +103,9 @@ fn run_collibra(args: &[String], _prog: &str) -> i32 {
     println!("    - Chat with your catalog (GPT-4 + Anthropic)");
     println!("    - Compete with Alation Anywhere + Atlan AI");
     println!("  Connectors (200+):");
-    println!("    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Teradata, Netezza, Oracle");
+    println!(
+        "    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Teradata, Netezza, Oracle"
+    );
     println!("    - Legacy: SAP, mainframe, Cobol/DB2 (still relevant for bank customers)");
     println!("    - BI: Tableau, Power BI, Looker, Qlik, Cognos, MicroStrategy, SAP BO");
     println!("    - ETL: Informatica, Talend, Ab Initio, IBM DataStage, dbt, Airflow, Fivetran");
@@ -109,13 +132,18 @@ fn run_collibra(args: &[String], _prog: &str) -> i32 {
     println!("           valuation cut 2023 + layoffs = pressure on growth narrative");
     println!("           Atlan winning modern-data-stack greenfield in tech sector");
     println!("           limited self-service — typically requires consultants to deploy");
-    println!("  Differentiator: 16-year head start + Fortune 500 governance dominance (especially banking + pharma + government) + deepest workflow engine + AI Governance early mover + 200+ connectors including legacy SAP/mainframe — the enterprise governance choice for regulated industries");
+    println!(
+        "  Differentiator: 16-year head start + Fortune 500 governance dominance (especially banking + pharma + government) + deepest workflow engine + AI Governance early mover + 200+ connectors including legacy SAP/mainframe — the enterprise governance choice for regulated industries"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "collibra".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "collibra".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_collibra(&rest, &_prog);
     process::exit(code);
@@ -123,7 +151,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_collibra};
+    use super::{basename, run_collibra, strip_ext};
 
     #[test]
     fn basename_strips_path() {

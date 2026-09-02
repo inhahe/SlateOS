@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ping(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_ping(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ping Identity 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Ping Identity 2024 (Slate OS)");
+        return 0;
+    }
     println!("Ping Identity 2024 (Slate OS)");
     println!("  Vendor: Ping Identity Corporation (Denver, CO)");
     println!("          taken private by Thoma Bravo Oct 2022 for $2.8B");
@@ -50,22 +57,31 @@ fn run_ping(args: &[String], _prog: &str) -> i32 {
     println!("    PingDirectory — LDAP-compatible directory");
     println!("    PingID — MFA");
     println!("    PingCentral — admin console");
-    println!("    ForgeRock Identity Cloud + Access Management + Identity Management + Directory Services");
+    println!(
+        "    ForgeRock Identity Cloud + Access Management + Identity Management + Directory Services"
+    );
     println!("  Strategy:");
     println!("    - Hybrid on-prem + cloud architecture (vs Okta's pure cloud)");
     println!("    - Highly regulated industries: large banks, telcos, healthcare, government");
     println!("    - Identity orchestration (DaVinci): no-code drag-and-drop login flows");
     println!("  Customers: 50%+ Fortune 100, half the world's largest banks, US federal agencies");
-    println!("  Critique: complex product portfolio (PingOne + PingFed + PingAccess + PingDirectory + PingID + ForgeRock)");
+    println!(
+        "  Critique: complex product portfolio (PingOne + PingFed + PingAccess + PingDirectory + PingID + ForgeRock)"
+    );
     println!("           higher implementation cost than Okta/Auth0");
     println!("           still recovering from ForgeRock integration overhead (2023-2024)");
-    println!("  Differentiator: depth + hybrid + complex regulated enterprise — where Okta can't go");
+    println!(
+        "  Differentiator: depth + hybrid + complex regulated enterprise — where Okta can't go"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pingidentity".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pingidentity".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_ping(&rest, &_prog);
     process::exit(code);
@@ -73,7 +89,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ping};
+    use super::{basename, run_ping, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -68,12 +68,17 @@ fn run_mold(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let output = args.iter().position(|a| a == "-o")
+    let output = args
+        .iter()
+        .position(|a| a == "-o")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("a.out");
-    let inputs: Vec<&str> = args.iter()
-        .filter(|a| !a.starts_with('-') && (a.ends_with(".o") || a.ends_with(".a") || a.ends_with(".so")))
+    let inputs: Vec<&str> = args
+        .iter()
+        .filter(|a| {
+            !a.starts_with('-') && (a.ends_with(".o") || a.ends_with(".a") || a.ends_with(".so"))
+        })
         .map(|s| s.as_str())
         .collect();
     let gc = args.iter().any(|a| a == "--gc-sections");
@@ -104,7 +109,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mold};
+    use super::run_mold;
 
     #[test]
     fn help_exits_zero() {

@@ -31,7 +31,9 @@ fn run_cypher_shell(args: &[String]) -> i32 {
         return 0;
     }
 
-    let query = args.iter().find(|a| !a.starts_with('-'))
+    let query = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
     if let Some(q) = query {
@@ -87,7 +89,9 @@ fn run_neo4j_admin(args: &[String]) -> i32 {
             println!("server.memory.pagecache.size=2g");
         }
         ("dbms", "set-initial-password") => {
-            println!("Changed password for user 'neo4j'. IMPORTANT: change password again after first login.");
+            println!(
+                "Changed password for user 'neo4j'. IMPORTANT: change password again after first login."
+            );
         }
         _ => {
             println!("neo4j-admin: see neo4j-admin --help.");
@@ -98,7 +102,8 @@ fn run_neo4j_admin(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "cypher-shell".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -112,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cypher_shell};
+    use super::{basename, run_cypher_shell, strip_ext};
 
     #[test]
     fn basename_strips_path() {

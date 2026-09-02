@@ -115,9 +115,10 @@ fn default_dns_server() -> String {
         for line in contents.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("nameserver")
-                && let Some(addr) = trimmed.split_whitespace().nth(1) {
-                    return addr.to_string();
-                }
+                && let Some(addr) = trimmed.split_whitespace().nth(1)
+            {
+                return addr.to_string();
+            }
         }
     }
     FALLBACK_SERVER.to_string()
@@ -740,8 +741,8 @@ mod tests {
         assert_eq!(
             buf,
             &[
-                3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c',
-                b'o', b'm', 0
+                3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o',
+                b'm', 0
             ]
         );
     }
@@ -750,14 +751,17 @@ mod tests {
     fn encode_single_label() {
         let mut buf = Vec::new();
         encode_domain_name("localhost", &mut buf);
-        assert_eq!(buf, &[9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0]);
+        assert_eq!(
+            buf,
+            &[9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0]
+        );
     }
 
     #[test]
     fn decode_simple_domain() {
         let data = [
-            3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o',
-            b'm', 0,
+            3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm',
+            0,
         ];
         let (name, consumed) = decode_domain_name(&data, 0).unwrap();
         assert_eq!(name, "www.example.com");
@@ -770,7 +774,7 @@ mod tests {
         let mut data = vec![
             7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // "example"
             3, b'c', b'o', b'm', // "com"
-            0, // terminator
+            0,    // terminator
             // At offset 13: a pointer to offset 0.
             0xC0, 0x00,
         ];
@@ -922,7 +926,9 @@ mod tests {
 
     #[test]
     fn type_name_round_trip() {
-        for &code in &[TYPE_A, TYPE_NS, TYPE_CNAME, TYPE_PTR, TYPE_MX, TYPE_TXT, TYPE_AAAA] {
+        for &code in &[
+            TYPE_A, TYPE_NS, TYPE_CNAME, TYPE_PTR, TYPE_MX, TYPE_TXT, TYPE_AAAA,
+        ] {
             let name = type_name(code);
             assert_eq!(parse_record_type(name), Some(code));
         }
@@ -976,8 +982,8 @@ mod tests {
     fn parse_rdata_cname() {
         // Wire-format "mail.example.com"
         let data = [
-            4, b'm', b'a', b'i', b'l', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c',
-            b'o', b'm', 0,
+            4, b'm', b'a', b'i', b'l', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o',
+            b'm', 0,
         ];
         let result = parse_rdata(TYPE_CNAME, &data, 0, data.len()).unwrap();
         assert_eq!(result, "mail.example.com");

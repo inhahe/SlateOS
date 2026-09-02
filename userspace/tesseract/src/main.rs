@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn run_tesseract(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "--help-extra") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "--help-extra")
+    {
         println!("Usage: tesseract <imagename|imagelist|stdin> <outputbase|stdout> [options...]");
         println!();
         println!("OCR options:");
@@ -48,9 +51,18 @@ fn run_tesseract(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let input = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
-    let output = args.iter().filter(|a| !a.starts_with('-')).nth(1).map(|s| s.as_str());
-    let lang = args.iter().position(|a| a == "-l")
+    let input = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
+    let output = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .nth(1)
+        .map(|s| s.as_str());
+    let lang = args
+        .iter()
+        .position(|a| a == "-l")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("eng");
@@ -86,7 +98,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_tesseract};
+    use super::run_tesseract;
 
     #[test]
     fn help_exits_zero() {

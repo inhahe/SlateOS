@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_admesh(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -33,11 +37,32 @@ fn run_admesh(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ADMesh v0.98.4 (Slate OS)"); return 0; }
-    let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-') && {
-        let idx = args.iter().position(|x| std::ptr::eq(x, *a)).unwrap_or(0);
-        idx == 0 || !matches!(args.get(idx.wrapping_sub(1)).map(|s| s.as_str()), Some("-x" | "-y" | "-z" | "--scale" | "--translate" | "--merge" | "-a" | "-b" | "-e"))
-    }).collect();
+    if args.iter().any(|a| a == "--version") {
+        println!("ADMesh v0.98.4 (Slate OS)");
+        return 0;
+    }
+    let files: Vec<&String> = args
+        .iter()
+        .filter(|a| {
+            !a.starts_with('-') && {
+                let idx = args.iter().position(|x| std::ptr::eq(x, *a)).unwrap_or(0);
+                idx == 0
+                    || !matches!(
+                        args.get(idx.wrapping_sub(1)).map(|s| s.as_str()),
+                        Some(
+                            "-x" | "-y"
+                                | "-z"
+                                | "--scale"
+                                | "--translate"
+                                | "--merge"
+                                | "-a"
+                                | "-b"
+                                | "-e"
+                        )
+                    )
+            }
+        })
+        .collect();
     if files.is_empty() {
         eprintln!("admesh: error: no input file");
         return 1;
@@ -57,7 +82,10 @@ fn run_admesh(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "admesh".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "admesh".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_admesh(&rest, &_prog);
     process::exit(code);
@@ -65,7 +93,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_admesh};
+    use super::{basename, run_admesh, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -23,8 +23,14 @@ fn run_musescore(args: &[String]) -> i32 {
         println!("Built with Qt 6.6.1");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".mscz") || a.ends_with(".mscx") || a.ends_with(".musicxml")).map(|s| s.as_str());
-    let export = args.windows(2).find(|w| w[0] == "-o").map(|w| w[1].as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".mscz") || a.ends_with(".mscx") || a.ends_with(".musicxml"))
+        .map(|s| s.as_str());
+    let export = args
+        .windows(2)
+        .find(|w| w[0] == "-o")
+        .map(|w| w[1].as_str());
     if let Some(out) = export {
         let input = file.unwrap_or("score.mscz");
         println!("MuseScore 4.2.1 — exporting");
@@ -58,7 +64,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_musescore};
+    use super::run_musescore;
 
     #[test]
     fn help_exits_zero() {

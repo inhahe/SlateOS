@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_meshlab(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,9 +26,16 @@ fn run_meshlab(args: &[String]) -> i32 {
         println!("VCG Library 2023.12");
         return 0;
     }
-    let file = args.iter().find(|a| {
-        a.ends_with(".stl") || a.ends_with(".obj") || a.ends_with(".ply") || a.ends_with(".off") || a.ends_with(".3ds")
-    }).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| {
+            a.ends_with(".stl")
+                || a.ends_with(".obj")
+                || a.ends_with(".ply")
+                || a.ends_with(".off")
+                || a.ends_with(".3ds")
+        })
+        .map(|s| s.as_str());
     if let Some(f) = file {
         println!("MeshLab 2023.12 — loading: {}", f);
         println!("  Vertices: 6,230");
@@ -51,9 +62,19 @@ fn run_meshlabserver(args: &[String]) -> i32 {
         println!("MeshLab Server 2023.12 (Slate OS)");
         return 0;
     }
-    let input = args.windows(2).find(|w| w[0] == "-i").map(|w| w[1].as_str()).unwrap_or("input.stl");
-    let output = args.windows(2).find(|w| w[0] == "-o").map(|w| w[1].as_str());
-    let script = args.windows(2).find(|w| w[0] == "-s").map(|w| w[1].as_str());
+    let input = args
+        .windows(2)
+        .find(|w| w[0] == "-i")
+        .map(|w| w[1].as_str())
+        .unwrap_or("input.stl");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o")
+        .map(|w| w[1].as_str());
+    let script = args
+        .windows(2)
+        .find(|w| w[0] == "-s")
+        .map(|w| w[1].as_str());
     println!("MeshLab Server 2023.12");
     println!("  Loading: {}", input);
     println!("  Mesh: 6,230 vertices, 12,456 faces");
@@ -70,7 +91,10 @@ fn run_meshlabserver(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "meshlab".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "meshlab".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "meshlabserver" => run_meshlabserver(&rest),
@@ -81,7 +105,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_meshlab};
+    use super::{basename, run_meshlab, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -35,7 +35,11 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let urls: Vec<&str> = args.iter().filter(|a| a.starts_with("http")).map(|s| s.as_str()).collect();
+    let urls: Vec<&str> = args
+        .iter()
+        .filter(|a| a.starts_with("http"))
+        .map(|s| s.as_str())
+        .collect();
     if urls.is_empty() {
         eprintln!("yt-dlp: error: no URL specified. Use --help.");
         return 1;
@@ -51,8 +55,12 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
         println!("140  m4a  audio only     2   │  3.50MiB   128k https │ audio only     aac");
         println!("251  webm audio only     2   │  4.20MiB   160k https │ audio only     opus");
         println!("22   mp4  1280x720  30       │  42.0MiB   720k https │ avc1.64001F    aac");
-        println!("137  mp4  1920x1080 30       │  85.0MiB  2500k https │ avc1.640028    video only");
-        println!("313  webm 3840x2160 30       │ 250.0MiB  8000k https │ vp9            video only");
+        println!(
+            "137  mp4  1920x1080 30       │  85.0MiB  2500k https │ avc1.640028    video only"
+        );
+        println!(
+            "313  webm 3840x2160 30       │ 250.0MiB  8000k https │ vp9            video only"
+        );
         return 0;
     }
 
@@ -62,7 +70,9 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
         println!("[info] Video123: Downloading format metadata");
 
         if extract_audio {
-            let fmt = args.iter().position(|a| a == "--audio-format")
+            let fmt = args
+                .iter()
+                .position(|a| a == "--audio-format")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("mp3");
@@ -88,7 +98,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ytdlp};
+    use super::run_ytdlp;
 
     #[test]
     fn help_exits_zero() {

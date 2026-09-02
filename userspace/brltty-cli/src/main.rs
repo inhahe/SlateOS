@@ -49,8 +49,16 @@ fn run_brltty(args: &[String]) -> i32 {
         return 0;
     }
 
-    let driver = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].as_str()).unwrap_or("auto");
-    let device = args.windows(2).find(|w| w[0] == "-d").map(|w| w[1].as_str()).unwrap_or("usb:");
+    let driver = args
+        .windows(2)
+        .find(|w| w[0] == "-b")
+        .map(|w| w[1].as_str())
+        .unwrap_or("auto");
+    let device = args
+        .windows(2)
+        .find(|w| w[0] == "-d")
+        .map(|w| w[1].as_str())
+        .unwrap_or("usb:");
 
     println!("BRLTTY 6.6 starting (driver={}, device={})", driver, device);
     println!("  Searching for braille display...");
@@ -87,7 +95,8 @@ fn run_brltty_lsinc(_args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "brltty".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -102,7 +111,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_brltty};
+    use super::{basename, run_brltty, strip_ext};
 
     #[test]
     fn basename_strips_path() {

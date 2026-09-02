@@ -32,11 +32,15 @@ fn run_rest_server(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let listen = args.iter().position(|a| a == "--listen")
+    let listen = args
+        .iter()
+        .position(|a| a == "--listen")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or(":8000");
-    let path = args.iter().position(|a| a == "--path")
+    let path = args
+        .iter()
+        .position(|a| a == "--path")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("/tmp/restic");
@@ -48,8 +52,14 @@ fn run_rest_server(args: Vec<String>) -> i32 {
     let proto = if tls { "https" } else { "http" };
     println!("rest-server 0.12.1 (Slate OS)");
     println!("Data directory: {}", path);
-    println!("Authentication: {}", if no_auth { "disabled" } else { "enabled" });
-    println!("Append only: {}", if append_only { "enabled" } else { "disabled" });
+    println!(
+        "Authentication: {}",
+        if no_auth { "disabled" } else { "enabled" }
+    );
+    println!(
+        "Append only: {}",
+        if append_only { "enabled" } else { "disabled" }
+    );
     if prometheus {
         println!("Prometheus metrics: enabled");
     }
@@ -66,7 +76,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_rest_server};
+    use super::run_rest_server;
 
     #[test]
     fn help_exits_zero() {

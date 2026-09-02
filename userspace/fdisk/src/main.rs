@@ -61,10 +61,9 @@ fn basename(path: &[u8]) -> &[u8] {
     let mut last = 0;
     let mut i = 0;
     while i < path.len() {
-        if (path[i] == b'/' || path[i] == b'\\')
-            && i + 1 < path.len() {
-                last = i + 1;
-            }
+        if (path[i] == b'/' || path[i] == b'\\') && i + 1 < path.len() {
+            last = i + 1;
+        }
         i += 1;
     }
     if last < path.len() {
@@ -111,8 +110,16 @@ fn bytes_eq_ci(a: &[u8], b: &[u8]) -> bool {
     }
     let mut i = 0;
     while i < a.len() {
-        let ca = if a[i] >= b'A' && a[i] <= b'Z' { a[i] + 32 } else { a[i] };
-        let cb = if b[i] >= b'A' && b[i] <= b'Z' { b[i] + 32 } else { b[i] };
+        let ca = if a[i] >= b'A' && a[i] <= b'Z' {
+            a[i] + 32
+        } else {
+            a[i]
+        };
+        let cb = if b[i] >= b'A' && b[i] <= b'Z' {
+            b[i] + 32
+        } else {
+            b[i]
+        };
         if ca != cb {
             return false;
         }
@@ -316,20 +323,32 @@ fn crc32(data: &[u8]) -> u32 {
 
 #[allow(dead_code)]
 fn le_u16(buf: &[u8], off: usize) -> u16 {
-    if off + 2 > buf.len() { return 0; }
+    if off + 2 > buf.len() {
+        return 0;
+    }
     u16::from_le_bytes([buf[off], buf[off + 1]])
 }
 
 fn le_u32(buf: &[u8], off: usize) -> u32 {
-    if off + 4 > buf.len() { return 0; }
+    if off + 4 > buf.len() {
+        return 0;
+    }
     u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
 
 fn le_u64(buf: &[u8], off: usize) -> u64 {
-    if off + 8 > buf.len() { return 0; }
+    if off + 8 > buf.len() {
+        return 0;
+    }
     u64::from_le_bytes([
-        buf[off], buf[off + 1], buf[off + 2], buf[off + 3],
-        buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7],
+        buf[off],
+        buf[off + 1],
+        buf[off + 2],
+        buf[off + 3],
+        buf[off + 4],
+        buf[off + 5],
+        buf[off + 6],
+        buf[off + 7],
     ])
 }
 
@@ -437,30 +456,62 @@ fn format_guid(g: &[u8; 16], buf: &mut [u8]) -> usize {
     }
     let mut h = [0u8; 2];
     // Group 1: bytes [3][2][1][0]
-    format_hex_u8_upper(g[3], &mut h); buf[0] = h[0]; buf[1] = h[1];
-    format_hex_u8_upper(g[2], &mut h); buf[2] = h[0]; buf[3] = h[1];
-    format_hex_u8_upper(g[1], &mut h); buf[4] = h[0]; buf[5] = h[1];
-    format_hex_u8_upper(g[0], &mut h); buf[6] = h[0]; buf[7] = h[1];
+    format_hex_u8_upper(g[3], &mut h);
+    buf[0] = h[0];
+    buf[1] = h[1];
+    format_hex_u8_upper(g[2], &mut h);
+    buf[2] = h[0];
+    buf[3] = h[1];
+    format_hex_u8_upper(g[1], &mut h);
+    buf[4] = h[0];
+    buf[5] = h[1];
+    format_hex_u8_upper(g[0], &mut h);
+    buf[6] = h[0];
+    buf[7] = h[1];
     buf[8] = b'-';
     // Group 2: bytes [5][4]
-    format_hex_u8_upper(g[5], &mut h); buf[9] = h[0]; buf[10] = h[1];
-    format_hex_u8_upper(g[4], &mut h); buf[11] = h[0]; buf[12] = h[1];
+    format_hex_u8_upper(g[5], &mut h);
+    buf[9] = h[0];
+    buf[10] = h[1];
+    format_hex_u8_upper(g[4], &mut h);
+    buf[11] = h[0];
+    buf[12] = h[1];
     buf[13] = b'-';
     // Group 3: bytes [7][6]
-    format_hex_u8_upper(g[7], &mut h); buf[14] = h[0]; buf[15] = h[1];
-    format_hex_u8_upper(g[6], &mut h); buf[16] = h[0]; buf[17] = h[1];
+    format_hex_u8_upper(g[7], &mut h);
+    buf[14] = h[0];
+    buf[15] = h[1];
+    format_hex_u8_upper(g[6], &mut h);
+    buf[16] = h[0];
+    buf[17] = h[1];
     buf[18] = b'-';
     // Group 4: bytes [8][9]
-    format_hex_u8_upper(g[8], &mut h); buf[19] = h[0]; buf[20] = h[1];
-    format_hex_u8_upper(g[9], &mut h); buf[21] = h[0]; buf[22] = h[1];
+    format_hex_u8_upper(g[8], &mut h);
+    buf[19] = h[0];
+    buf[20] = h[1];
+    format_hex_u8_upper(g[9], &mut h);
+    buf[21] = h[0];
+    buf[22] = h[1];
     buf[23] = b'-';
     // Group 5: bytes [10]..[15]
-    format_hex_u8_upper(g[10], &mut h); buf[24] = h[0]; buf[25] = h[1];
-    format_hex_u8_upper(g[11], &mut h); buf[26] = h[0]; buf[27] = h[1];
-    format_hex_u8_upper(g[12], &mut h); buf[28] = h[0]; buf[29] = h[1];
-    format_hex_u8_upper(g[13], &mut h); buf[30] = h[0]; buf[31] = h[1];
-    format_hex_u8_upper(g[14], &mut h); buf[32] = h[0]; buf[33] = h[1];
-    format_hex_u8_upper(g[15], &mut h); buf[34] = h[0]; buf[35] = h[1];
+    format_hex_u8_upper(g[10], &mut h);
+    buf[24] = h[0];
+    buf[25] = h[1];
+    format_hex_u8_upper(g[11], &mut h);
+    buf[26] = h[0];
+    buf[27] = h[1];
+    format_hex_u8_upper(g[12], &mut h);
+    buf[28] = h[0];
+    buf[29] = h[1];
+    format_hex_u8_upper(g[13], &mut h);
+    buf[30] = h[0];
+    buf[31] = h[1];
+    format_hex_u8_upper(g[14], &mut h);
+    buf[32] = h[0];
+    buf[33] = h[1];
+    format_hex_u8_upper(g[15], &mut h);
+    buf[34] = h[0];
+    buf[35] = h[1];
     36
 }
 
@@ -485,74 +536,254 @@ struct GptTypeEntry {
 
 /// 50+ known GPT partition type GUIDs.
 const GPT_TYPES: &[GptTypeEntry] = &[
-    GptTypeEntry { guid: parse_guid(b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B"), name: b"EFI System" },
-    GptTypeEntry { guid: parse_guid(b"024DEE41-33E7-11D3-9D69-0008C781F39F"), name: b"MBR partition scheme" },
-    GptTypeEntry { guid: parse_guid(b"21686148-6449-6E6F-744E-656564454649"), name: b"BIOS boot" },
-    GptTypeEntry { guid: parse_guid(b"D3BFE2DE-3DAF-11DF-BA40-E3A556D89593"), name: b"Intel Fast Flash" },
-    GptTypeEntry { guid: parse_guid(b"F4019732-066E-4E12-8273-346C5641494F"), name: b"Sony boot" },
-    GptTypeEntry { guid: parse_guid(b"BFBFAFE7-A34F-448A-9A5B-6213EB736C22"), name: b"Lenovo boot" },
+    GptTypeEntry {
+        guid: parse_guid(b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B"),
+        name: b"EFI System",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"024DEE41-33E7-11D3-9D69-0008C781F39F"),
+        name: b"MBR partition scheme",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"21686148-6449-6E6F-744E-656564454649"),
+        name: b"BIOS boot",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"D3BFE2DE-3DAF-11DF-BA40-E3A556D89593"),
+        name: b"Intel Fast Flash",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"F4019732-066E-4E12-8273-346C5641494F"),
+        name: b"Sony boot",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"BFBFAFE7-A34F-448A-9A5B-6213EB736C22"),
+        name: b"Lenovo boot",
+    },
     // Microsoft
-    GptTypeEntry { guid: parse_guid(b"E3C9E316-0B5C-4DB8-817D-F92DF00215AE"), name: b"Microsoft reserved" },
-    GptTypeEntry { guid: parse_guid(b"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"), name: b"Microsoft basic data" },
-    GptTypeEntry { guid: parse_guid(b"5808C8AA-7E8F-42E0-85D2-E1E90434CFB3"), name: b"Microsoft LDM metadata" },
-    GptTypeEntry { guid: parse_guid(b"AF9B60A0-1431-4F62-BC68-3311714A69AD"), name: b"Microsoft LDM data" },
-    GptTypeEntry { guid: parse_guid(b"DE94BBA4-06D1-4D40-A16A-BFD50179D6AC"), name: b"Windows recovery" },
-    GptTypeEntry { guid: parse_guid(b"37AFFC90-EF7D-4E96-91C3-2D7AE055B174"), name: b"IBM GPFS" },
-    GptTypeEntry { guid: parse_guid(b"E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D"), name: b"Microsoft Storage Spaces" },
-    GptTypeEntry { guid: parse_guid(b"558D43C5-A1AC-43C0-AAC8-D1472B2923D1"), name: b"Microsoft Storage Replica" },
+    GptTypeEntry {
+        guid: parse_guid(b"E3C9E316-0B5C-4DB8-817D-F92DF00215AE"),
+        name: b"Microsoft reserved",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"),
+        name: b"Microsoft basic data",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"5808C8AA-7E8F-42E0-85D2-E1E90434CFB3"),
+        name: b"Microsoft LDM metadata",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"AF9B60A0-1431-4F62-BC68-3311714A69AD"),
+        name: b"Microsoft LDM data",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"DE94BBA4-06D1-4D40-A16A-BFD50179D6AC"),
+        name: b"Windows recovery",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"37AFFC90-EF7D-4E96-91C3-2D7AE055B174"),
+        name: b"IBM GPFS",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D"),
+        name: b"Microsoft Storage Spaces",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"558D43C5-A1AC-43C0-AAC8-D1472B2923D1"),
+        name: b"Microsoft Storage Replica",
+    },
     // Linux
-    GptTypeEntry { guid: parse_guid(b"0FC63DAF-8483-4772-8E79-3D69D8477DE4"), name: b"Linux filesystem" },
-    GptTypeEntry { guid: parse_guid(b"A19D880F-05FC-4D3B-A006-743F0F84911E"), name: b"Linux RAID" },
-    GptTypeEntry { guid: parse_guid(b"44479540-F297-41B2-9AF7-D131D5F0458A"), name: b"Linux root (x86)" },
-    GptTypeEntry { guid: parse_guid(b"4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709"), name: b"Linux root (x86-64)" },
-    GptTypeEntry { guid: parse_guid(b"69DAD710-2CE4-4E3C-B16C-21A1D49ABED3"), name: b"Linux root (ARM)" },
-    GptTypeEntry { guid: parse_guid(b"B921B045-1DF0-41C3-AF44-4C6F280D3FAE"), name: b"Linux root (ARM64)" },
-    GptTypeEntry { guid: parse_guid(b"0657FD6D-A4AB-43C4-84E5-0933C84B4F4F"), name: b"Linux swap" },
-    GptTypeEntry { guid: parse_guid(b"E6D6D379-F507-44C2-A23C-238F2A3DF928"), name: b"Linux LVM" },
-    GptTypeEntry { guid: parse_guid(b"933AC7E1-2EB4-4F13-B844-0E14E2AEF915"), name: b"Linux /home" },
-    GptTypeEntry { guid: parse_guid(b"3B8F8425-20E0-4F3B-907F-1A25A76F98E8"), name: b"Linux /srv" },
-    GptTypeEntry { guid: parse_guid(b"7C3457EF-0000-11AA-AA11-00306543ECAC"), name: b"Linux dm-crypt" },
-    GptTypeEntry { guid: parse_guid(b"CA7D7CCB-63ED-4C53-861C-1742536059CC"), name: b"Linux LUKS" },
-    GptTypeEntry { guid: parse_guid(b"8DA63339-0007-60C0-C436-083AC8230908"), name: b"Linux reserved" },
+    GptTypeEntry {
+        guid: parse_guid(b"0FC63DAF-8483-4772-8E79-3D69D8477DE4"),
+        name: b"Linux filesystem",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"A19D880F-05FC-4D3B-A006-743F0F84911E"),
+        name: b"Linux RAID",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"44479540-F297-41B2-9AF7-D131D5F0458A"),
+        name: b"Linux root (x86)",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709"),
+        name: b"Linux root (x86-64)",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"69DAD710-2CE4-4E3C-B16C-21A1D49ABED3"),
+        name: b"Linux root (ARM)",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"B921B045-1DF0-41C3-AF44-4C6F280D3FAE"),
+        name: b"Linux root (ARM64)",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"0657FD6D-A4AB-43C4-84E5-0933C84B4F4F"),
+        name: b"Linux swap",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"E6D6D379-F507-44C2-A23C-238F2A3DF928"),
+        name: b"Linux LVM",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"933AC7E1-2EB4-4F13-B844-0E14E2AEF915"),
+        name: b"Linux /home",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"3B8F8425-20E0-4F3B-907F-1A25A76F98E8"),
+        name: b"Linux /srv",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"7C3457EF-0000-11AA-AA11-00306543ECAC"),
+        name: b"Linux dm-crypt",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"CA7D7CCB-63ED-4C53-861C-1742536059CC"),
+        name: b"Linux LUKS",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"8DA63339-0007-60C0-C436-083AC8230908"),
+        name: b"Linux reserved",
+    },
     // FreeBSD
-    GptTypeEntry { guid: parse_guid(b"83BD6B9D-7F41-11DC-BE0B-001560B84F0F"), name: b"FreeBSD boot" },
-    GptTypeEntry { guid: parse_guid(b"516E7CB4-6ECF-11D6-8FF8-00022D09712B"), name: b"FreeBSD data" },
-    GptTypeEntry { guid: parse_guid(b"516E7CB5-6ECF-11D6-8FF8-00022D09712B"), name: b"FreeBSD swap" },
-    GptTypeEntry { guid: parse_guid(b"516E7CB6-6ECF-11D6-8FF8-00022D09712B"), name: b"FreeBSD UFS" },
-    GptTypeEntry { guid: parse_guid(b"516E7CBA-6ECF-11D6-8FF8-00022D09712B"), name: b"FreeBSD ZFS" },
-    GptTypeEntry { guid: parse_guid(b"516E7CB8-6ECF-11D6-8FF8-00022D09712B"), name: b"FreeBSD Vinum" },
+    GptTypeEntry {
+        guid: parse_guid(b"83BD6B9D-7F41-11DC-BE0B-001560B84F0F"),
+        name: b"FreeBSD boot",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"516E7CB4-6ECF-11D6-8FF8-00022D09712B"),
+        name: b"FreeBSD data",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"516E7CB5-6ECF-11D6-8FF8-00022D09712B"),
+        name: b"FreeBSD swap",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"516E7CB6-6ECF-11D6-8FF8-00022D09712B"),
+        name: b"FreeBSD UFS",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"516E7CBA-6ECF-11D6-8FF8-00022D09712B"),
+        name: b"FreeBSD ZFS",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"516E7CB8-6ECF-11D6-8FF8-00022D09712B"),
+        name: b"FreeBSD Vinum",
+    },
     // Apple
-    GptTypeEntry { guid: parse_guid(b"48465300-0000-11AA-AA11-00306543ECAC"), name: b"Apple HFS+" },
-    GptTypeEntry { guid: parse_guid(b"55465300-0000-11AA-AA11-00306543ECAC"), name: b"Apple UFS" },
-    GptTypeEntry { guid: parse_guid(b"52414944-0000-11AA-AA11-00306543ECAC"), name: b"Apple RAID" },
-    GptTypeEntry { guid: parse_guid(b"52414944-5F4F-11AA-AA11-00306543ECAC"), name: b"Apple RAID offline" },
-    GptTypeEntry { guid: parse_guid(b"426F6F74-0000-11AA-AA11-00306543ECAC"), name: b"Apple boot" },
-    GptTypeEntry { guid: parse_guid(b"4C616265-6C00-11AA-AA11-00306543ECAC"), name: b"Apple label" },
-    GptTypeEntry { guid: parse_guid(b"5265636F-7665-11AA-AA11-00306543ECAC"), name: b"Apple TV recovery" },
-    GptTypeEntry { guid: parse_guid(b"53746F72-6167-11AA-AA11-00306543ECAC"), name: b"Apple Core Storage" },
-    GptTypeEntry { guid: parse_guid(b"7C3457EF-0000-11AA-AA11-00306543ECAC"), name: b"Apple APFS" },
+    GptTypeEntry {
+        guid: parse_guid(b"48465300-0000-11AA-AA11-00306543ECAC"),
+        name: b"Apple HFS+",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"55465300-0000-11AA-AA11-00306543ECAC"),
+        name: b"Apple UFS",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"52414944-0000-11AA-AA11-00306543ECAC"),
+        name: b"Apple RAID",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"52414944-5F4F-11AA-AA11-00306543ECAC"),
+        name: b"Apple RAID offline",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"426F6F74-0000-11AA-AA11-00306543ECAC"),
+        name: b"Apple boot",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"4C616265-6C00-11AA-AA11-00306543ECAC"),
+        name: b"Apple label",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"5265636F-7665-11AA-AA11-00306543ECAC"),
+        name: b"Apple TV recovery",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"53746F72-6167-11AA-AA11-00306543ECAC"),
+        name: b"Apple Core Storage",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"7C3457EF-0000-11AA-AA11-00306543ECAC"),
+        name: b"Apple APFS",
+    },
     // Solaris
-    GptTypeEntry { guid: parse_guid(b"6A82CB45-1DD2-11B2-99A6-080020736631"), name: b"Solaris boot" },
-    GptTypeEntry { guid: parse_guid(b"6A85CF4D-1DD2-11B2-99A6-080020736631"), name: b"Solaris root" },
-    GptTypeEntry { guid: parse_guid(b"6A87C46F-1DD2-11B2-99A6-080020736631"), name: b"Solaris swap" },
-    GptTypeEntry { guid: parse_guid(b"6A8B642B-1DD2-11B2-99A6-080020736631"), name: b"Solaris backup" },
-    GptTypeEntry { guid: parse_guid(b"6A898CC3-1DD2-11B2-99A6-080020736631"), name: b"Solaris /usr" },
-    GptTypeEntry { guid: parse_guid(b"6A8EF2E9-1DD2-11B2-99A6-080020736631"), name: b"Solaris /var" },
-    GptTypeEntry { guid: parse_guid(b"6A90BA39-1DD2-11B2-99A6-080020736631"), name: b"Solaris /home" },
+    GptTypeEntry {
+        guid: parse_guid(b"6A82CB45-1DD2-11B2-99A6-080020736631"),
+        name: b"Solaris boot",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"6A85CF4D-1DD2-11B2-99A6-080020736631"),
+        name: b"Solaris root",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"6A87C46F-1DD2-11B2-99A6-080020736631"),
+        name: b"Solaris swap",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"6A8B642B-1DD2-11B2-99A6-080020736631"),
+        name: b"Solaris backup",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"6A898CC3-1DD2-11B2-99A6-080020736631"),
+        name: b"Solaris /usr",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"6A8EF2E9-1DD2-11B2-99A6-080020736631"),
+        name: b"Solaris /var",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"6A90BA39-1DD2-11B2-99A6-080020736631"),
+        name: b"Solaris /home",
+    },
     // NetBSD
-    GptTypeEntry { guid: parse_guid(b"49F48D32-B10E-11DC-B99B-0019D1879648"), name: b"NetBSD swap" },
-    GptTypeEntry { guid: parse_guid(b"49F48D5A-B10E-11DC-B99B-0019D1879648"), name: b"NetBSD FFS" },
-    GptTypeEntry { guid: parse_guid(b"49F48D82-B10E-11DC-B99B-0019D1879648"), name: b"NetBSD LFS" },
-    GptTypeEntry { guid: parse_guid(b"2DB519C4-B10F-11DC-B99B-0019D1879648"), name: b"NetBSD concat" },
-    GptTypeEntry { guid: parse_guid(b"2DB519EC-B10F-11DC-B99B-0019D1879648"), name: b"NetBSD encrypted" },
-    GptTypeEntry { guid: parse_guid(b"49F48DAA-B10E-11DC-B99B-0019D1879648"), name: b"NetBSD RAID" },
+    GptTypeEntry {
+        guid: parse_guid(b"49F48D32-B10E-11DC-B99B-0019D1879648"),
+        name: b"NetBSD swap",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"49F48D5A-B10E-11DC-B99B-0019D1879648"),
+        name: b"NetBSD FFS",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"49F48D82-B10E-11DC-B99B-0019D1879648"),
+        name: b"NetBSD LFS",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"2DB519C4-B10F-11DC-B99B-0019D1879648"),
+        name: b"NetBSD concat",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"2DB519EC-B10F-11DC-B99B-0019D1879648"),
+        name: b"NetBSD encrypted",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"49F48DAA-B10E-11DC-B99B-0019D1879648"),
+        name: b"NetBSD RAID",
+    },
     // ChromeOS
-    GptTypeEntry { guid: parse_guid(b"FE3A2A5D-4F32-41A7-B725-ACCC3285A309"), name: b"ChromeOS kernel" },
-    GptTypeEntry { guid: parse_guid(b"3CB8E202-3B7E-47DD-8A3C-7FF2A13CFCEC"), name: b"ChromeOS rootfs" },
-    GptTypeEntry { guid: parse_guid(b"2E0A753D-9E48-43B0-8337-B15192CB1B5E"), name: b"ChromeOS reserved" },
+    GptTypeEntry {
+        guid: parse_guid(b"FE3A2A5D-4F32-41A7-B725-ACCC3285A309"),
+        name: b"ChromeOS kernel",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"3CB8E202-3B7E-47DD-8A3C-7FF2A13CFCEC"),
+        name: b"ChromeOS rootfs",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"2E0A753D-9E48-43B0-8337-B15192CB1B5E"),
+        name: b"ChromeOS reserved",
+    },
     // VMware
-    GptTypeEntry { guid: parse_guid(b"AA31E02A-400F-11DB-9590-000C2911D1B8"), name: b"VMware VMFS" },
-    GptTypeEntry { guid: parse_guid(b"9198EFFC-31C0-11DB-8F78-000C2911D1B8"), name: b"VMware reserved" },
+    GptTypeEntry {
+        guid: parse_guid(b"AA31E02A-400F-11DB-9590-000C2911D1B8"),
+        name: b"VMware VMFS",
+    },
+    GptTypeEntry {
+        guid: parse_guid(b"9198EFFC-31C0-11DB-8F78-000C2911D1B8"),
+        name: b"VMware reserved",
+    },
 ];
 
 /// Look up a GPT partition type GUID and return its human-readable name.
@@ -576,98 +807,374 @@ struct MbrTypeEntry {
 
 /// 50+ MBR partition type codes.
 const MBR_TYPES: &[MbrTypeEntry] = &[
-    MbrTypeEntry { id: 0x00, name: b"Empty" },
-    MbrTypeEntry { id: 0x01, name: b"FAT12" },
-    MbrTypeEntry { id: 0x02, name: b"XENIX root" },
-    MbrTypeEntry { id: 0x03, name: b"XENIX usr" },
-    MbrTypeEntry { id: 0x04, name: b"FAT16 <32M" },
-    MbrTypeEntry { id: 0x05, name: b"Extended" },
-    MbrTypeEntry { id: 0x06, name: b"FAT16" },
-    MbrTypeEntry { id: 0x07, name: b"HPFS/NTFS" },
-    MbrTypeEntry { id: 0x08, name: b"AIX" },
-    MbrTypeEntry { id: 0x09, name: b"AIX bootable" },
-    MbrTypeEntry { id: 0x0A, name: b"OS/2 Boot Manager" },
-    MbrTypeEntry { id: 0x0B, name: b"W95 FAT32" },
-    MbrTypeEntry { id: 0x0C, name: b"W95 FAT32 (LBA)" },
-    MbrTypeEntry { id: 0x0E, name: b"W95 FAT16 (LBA)" },
-    MbrTypeEntry { id: 0x0F, name: b"W95 Ext'd (LBA)" },
-    MbrTypeEntry { id: 0x10, name: b"OPUS" },
-    MbrTypeEntry { id: 0x11, name: b"Hidden FAT12" },
-    MbrTypeEntry { id: 0x12, name: b"Compaq diag" },
-    MbrTypeEntry { id: 0x14, name: b"Hidden FAT16 <32M" },
-    MbrTypeEntry { id: 0x16, name: b"Hidden FAT16" },
-    MbrTypeEntry { id: 0x17, name: b"Hidden HPFS/NTFS" },
-    MbrTypeEntry { id: 0x1B, name: b"Hidden W95 FAT32" },
-    MbrTypeEntry { id: 0x1C, name: b"Hidden W95 FAT32 (LBA)" },
-    MbrTypeEntry { id: 0x1E, name: b"Hidden W95 FAT16 (LBA)" },
-    MbrTypeEntry { id: 0x24, name: b"NEC DOS" },
-    MbrTypeEntry { id: 0x27, name: b"Hidden NTFS WinRE" },
-    MbrTypeEntry { id: 0x39, name: b"Plan 9" },
-    MbrTypeEntry { id: 0x3C, name: b"PartitionMagic" },
-    MbrTypeEntry { id: 0x40, name: b"Venix 80286" },
-    MbrTypeEntry { id: 0x41, name: b"PPC PReP Boot" },
-    MbrTypeEntry { id: 0x42, name: b"SFS / LDM" },
-    MbrTypeEntry { id: 0x4D, name: b"QNX4.x" },
-    MbrTypeEntry { id: 0x4E, name: b"QNX4.x 2nd" },
-    MbrTypeEntry { id: 0x4F, name: b"QNX4.x 3rd" },
-    MbrTypeEntry { id: 0x50, name: b"OnTrack DM" },
-    MbrTypeEntry { id: 0x51, name: b"OnTrack DM6 Aux1" },
-    MbrTypeEntry { id: 0x52, name: b"CP/M" },
-    MbrTypeEntry { id: 0x56, name: b"Golden Bow" },
-    MbrTypeEntry { id: 0x5C, name: b"Priam Edisk" },
-    MbrTypeEntry { id: 0x61, name: b"SpeedStor" },
-    MbrTypeEntry { id: 0x63, name: b"GNU HURD" },
-    MbrTypeEntry { id: 0x64, name: b"Novell Netware 286" },
-    MbrTypeEntry { id: 0x65, name: b"Novell Netware 386" },
-    MbrTypeEntry { id: 0x70, name: b"DiskSecure MultiBoot" },
-    MbrTypeEntry { id: 0x75, name: b"PC/IX" },
-    MbrTypeEntry { id: 0x80, name: b"Old Minix" },
-    MbrTypeEntry { id: 0x81, name: b"Minix / old Linux" },
-    MbrTypeEntry { id: 0x82, name: b"Linux swap" },
-    MbrTypeEntry { id: 0x83, name: b"Linux" },
-    MbrTypeEntry { id: 0x84, name: b"OS/2 hidden" },
-    MbrTypeEntry { id: 0x85, name: b"Linux extended" },
-    MbrTypeEntry { id: 0x86, name: b"NTFS volume set" },
-    MbrTypeEntry { id: 0x87, name: b"NTFS volume set" },
-    MbrTypeEntry { id: 0x88, name: b"Linux plaintext" },
-    MbrTypeEntry { id: 0x8E, name: b"Linux LVM" },
-    MbrTypeEntry { id: 0x93, name: b"Amoeba" },
-    MbrTypeEntry { id: 0x94, name: b"Amoeba BBT" },
-    MbrTypeEntry { id: 0x9F, name: b"BSD/OS" },
-    MbrTypeEntry { id: 0xA0, name: b"IBM Thinkpad hibernation" },
-    MbrTypeEntry { id: 0xA5, name: b"FreeBSD" },
-    MbrTypeEntry { id: 0xA6, name: b"OpenBSD" },
-    MbrTypeEntry { id: 0xA7, name: b"NeXTSTEP" },
-    MbrTypeEntry { id: 0xA8, name: b"Darwin UFS" },
-    MbrTypeEntry { id: 0xA9, name: b"NetBSD" },
-    MbrTypeEntry { id: 0xAB, name: b"Darwin boot" },
-    MbrTypeEntry { id: 0xAF, name: b"HFS / HFS+" },
-    MbrTypeEntry { id: 0xB7, name: b"BSDI fs" },
-    MbrTypeEntry { id: 0xB8, name: b"BSDI swap" },
-    MbrTypeEntry { id: 0xBB, name: b"Boot Wizard hidden" },
-    MbrTypeEntry { id: 0xBE, name: b"Solaris boot" },
-    MbrTypeEntry { id: 0xBF, name: b"Solaris" },
-    MbrTypeEntry { id: 0xC1, name: b"DRDOS FAT12" },
-    MbrTypeEntry { id: 0xC4, name: b"DRDOS FAT16 <32M" },
-    MbrTypeEntry { id: 0xC6, name: b"DRDOS FAT16" },
-    MbrTypeEntry { id: 0xDA, name: b"Non-FS data" },
-    MbrTypeEntry { id: 0xDB, name: b"CP/M / CTOS" },
-    MbrTypeEntry { id: 0xDE, name: b"Dell utility" },
-    MbrTypeEntry { id: 0xDF, name: b"BootIt" },
-    MbrTypeEntry { id: 0xE1, name: b"DOS access" },
-    MbrTypeEntry { id: 0xE3, name: b"DOS R/O" },
-    MbrTypeEntry { id: 0xE4, name: b"SpeedStor" },
-    MbrTypeEntry { id: 0xEB, name: b"BeOS fs" },
-    MbrTypeEntry { id: 0xEE, name: b"GPT protective" },
-    MbrTypeEntry { id: 0xEF, name: b"EFI System" },
-    MbrTypeEntry { id: 0xF0, name: b"Linux/PA-RISC boot" },
-    MbrTypeEntry { id: 0xF1, name: b"SpeedStor" },
-    MbrTypeEntry { id: 0xF2, name: b"DOS secondary" },
-    MbrTypeEntry { id: 0xFB, name: b"VMware VMFS" },
-    MbrTypeEntry { id: 0xFC, name: b"VMware swap" },
-    MbrTypeEntry { id: 0xFD, name: b"Linux RAID" },
-    MbrTypeEntry { id: 0xFE, name: b"LANstep" },
-    MbrTypeEntry { id: 0xFF, name: b"BBT" },
+    MbrTypeEntry {
+        id: 0x00,
+        name: b"Empty",
+    },
+    MbrTypeEntry {
+        id: 0x01,
+        name: b"FAT12",
+    },
+    MbrTypeEntry {
+        id: 0x02,
+        name: b"XENIX root",
+    },
+    MbrTypeEntry {
+        id: 0x03,
+        name: b"XENIX usr",
+    },
+    MbrTypeEntry {
+        id: 0x04,
+        name: b"FAT16 <32M",
+    },
+    MbrTypeEntry {
+        id: 0x05,
+        name: b"Extended",
+    },
+    MbrTypeEntry {
+        id: 0x06,
+        name: b"FAT16",
+    },
+    MbrTypeEntry {
+        id: 0x07,
+        name: b"HPFS/NTFS",
+    },
+    MbrTypeEntry {
+        id: 0x08,
+        name: b"AIX",
+    },
+    MbrTypeEntry {
+        id: 0x09,
+        name: b"AIX bootable",
+    },
+    MbrTypeEntry {
+        id: 0x0A,
+        name: b"OS/2 Boot Manager",
+    },
+    MbrTypeEntry {
+        id: 0x0B,
+        name: b"W95 FAT32",
+    },
+    MbrTypeEntry {
+        id: 0x0C,
+        name: b"W95 FAT32 (LBA)",
+    },
+    MbrTypeEntry {
+        id: 0x0E,
+        name: b"W95 FAT16 (LBA)",
+    },
+    MbrTypeEntry {
+        id: 0x0F,
+        name: b"W95 Ext'd (LBA)",
+    },
+    MbrTypeEntry {
+        id: 0x10,
+        name: b"OPUS",
+    },
+    MbrTypeEntry {
+        id: 0x11,
+        name: b"Hidden FAT12",
+    },
+    MbrTypeEntry {
+        id: 0x12,
+        name: b"Compaq diag",
+    },
+    MbrTypeEntry {
+        id: 0x14,
+        name: b"Hidden FAT16 <32M",
+    },
+    MbrTypeEntry {
+        id: 0x16,
+        name: b"Hidden FAT16",
+    },
+    MbrTypeEntry {
+        id: 0x17,
+        name: b"Hidden HPFS/NTFS",
+    },
+    MbrTypeEntry {
+        id: 0x1B,
+        name: b"Hidden W95 FAT32",
+    },
+    MbrTypeEntry {
+        id: 0x1C,
+        name: b"Hidden W95 FAT32 (LBA)",
+    },
+    MbrTypeEntry {
+        id: 0x1E,
+        name: b"Hidden W95 FAT16 (LBA)",
+    },
+    MbrTypeEntry {
+        id: 0x24,
+        name: b"NEC DOS",
+    },
+    MbrTypeEntry {
+        id: 0x27,
+        name: b"Hidden NTFS WinRE",
+    },
+    MbrTypeEntry {
+        id: 0x39,
+        name: b"Plan 9",
+    },
+    MbrTypeEntry {
+        id: 0x3C,
+        name: b"PartitionMagic",
+    },
+    MbrTypeEntry {
+        id: 0x40,
+        name: b"Venix 80286",
+    },
+    MbrTypeEntry {
+        id: 0x41,
+        name: b"PPC PReP Boot",
+    },
+    MbrTypeEntry {
+        id: 0x42,
+        name: b"SFS / LDM",
+    },
+    MbrTypeEntry {
+        id: 0x4D,
+        name: b"QNX4.x",
+    },
+    MbrTypeEntry {
+        id: 0x4E,
+        name: b"QNX4.x 2nd",
+    },
+    MbrTypeEntry {
+        id: 0x4F,
+        name: b"QNX4.x 3rd",
+    },
+    MbrTypeEntry {
+        id: 0x50,
+        name: b"OnTrack DM",
+    },
+    MbrTypeEntry {
+        id: 0x51,
+        name: b"OnTrack DM6 Aux1",
+    },
+    MbrTypeEntry {
+        id: 0x52,
+        name: b"CP/M",
+    },
+    MbrTypeEntry {
+        id: 0x56,
+        name: b"Golden Bow",
+    },
+    MbrTypeEntry {
+        id: 0x5C,
+        name: b"Priam Edisk",
+    },
+    MbrTypeEntry {
+        id: 0x61,
+        name: b"SpeedStor",
+    },
+    MbrTypeEntry {
+        id: 0x63,
+        name: b"GNU HURD",
+    },
+    MbrTypeEntry {
+        id: 0x64,
+        name: b"Novell Netware 286",
+    },
+    MbrTypeEntry {
+        id: 0x65,
+        name: b"Novell Netware 386",
+    },
+    MbrTypeEntry {
+        id: 0x70,
+        name: b"DiskSecure MultiBoot",
+    },
+    MbrTypeEntry {
+        id: 0x75,
+        name: b"PC/IX",
+    },
+    MbrTypeEntry {
+        id: 0x80,
+        name: b"Old Minix",
+    },
+    MbrTypeEntry {
+        id: 0x81,
+        name: b"Minix / old Linux",
+    },
+    MbrTypeEntry {
+        id: 0x82,
+        name: b"Linux swap",
+    },
+    MbrTypeEntry {
+        id: 0x83,
+        name: b"Linux",
+    },
+    MbrTypeEntry {
+        id: 0x84,
+        name: b"OS/2 hidden",
+    },
+    MbrTypeEntry {
+        id: 0x85,
+        name: b"Linux extended",
+    },
+    MbrTypeEntry {
+        id: 0x86,
+        name: b"NTFS volume set",
+    },
+    MbrTypeEntry {
+        id: 0x87,
+        name: b"NTFS volume set",
+    },
+    MbrTypeEntry {
+        id: 0x88,
+        name: b"Linux plaintext",
+    },
+    MbrTypeEntry {
+        id: 0x8E,
+        name: b"Linux LVM",
+    },
+    MbrTypeEntry {
+        id: 0x93,
+        name: b"Amoeba",
+    },
+    MbrTypeEntry {
+        id: 0x94,
+        name: b"Amoeba BBT",
+    },
+    MbrTypeEntry {
+        id: 0x9F,
+        name: b"BSD/OS",
+    },
+    MbrTypeEntry {
+        id: 0xA0,
+        name: b"IBM Thinkpad hibernation",
+    },
+    MbrTypeEntry {
+        id: 0xA5,
+        name: b"FreeBSD",
+    },
+    MbrTypeEntry {
+        id: 0xA6,
+        name: b"OpenBSD",
+    },
+    MbrTypeEntry {
+        id: 0xA7,
+        name: b"NeXTSTEP",
+    },
+    MbrTypeEntry {
+        id: 0xA8,
+        name: b"Darwin UFS",
+    },
+    MbrTypeEntry {
+        id: 0xA9,
+        name: b"NetBSD",
+    },
+    MbrTypeEntry {
+        id: 0xAB,
+        name: b"Darwin boot",
+    },
+    MbrTypeEntry {
+        id: 0xAF,
+        name: b"HFS / HFS+",
+    },
+    MbrTypeEntry {
+        id: 0xB7,
+        name: b"BSDI fs",
+    },
+    MbrTypeEntry {
+        id: 0xB8,
+        name: b"BSDI swap",
+    },
+    MbrTypeEntry {
+        id: 0xBB,
+        name: b"Boot Wizard hidden",
+    },
+    MbrTypeEntry {
+        id: 0xBE,
+        name: b"Solaris boot",
+    },
+    MbrTypeEntry {
+        id: 0xBF,
+        name: b"Solaris",
+    },
+    MbrTypeEntry {
+        id: 0xC1,
+        name: b"DRDOS FAT12",
+    },
+    MbrTypeEntry {
+        id: 0xC4,
+        name: b"DRDOS FAT16 <32M",
+    },
+    MbrTypeEntry {
+        id: 0xC6,
+        name: b"DRDOS FAT16",
+    },
+    MbrTypeEntry {
+        id: 0xDA,
+        name: b"Non-FS data",
+    },
+    MbrTypeEntry {
+        id: 0xDB,
+        name: b"CP/M / CTOS",
+    },
+    MbrTypeEntry {
+        id: 0xDE,
+        name: b"Dell utility",
+    },
+    MbrTypeEntry {
+        id: 0xDF,
+        name: b"BootIt",
+    },
+    MbrTypeEntry {
+        id: 0xE1,
+        name: b"DOS access",
+    },
+    MbrTypeEntry {
+        id: 0xE3,
+        name: b"DOS R/O",
+    },
+    MbrTypeEntry {
+        id: 0xE4,
+        name: b"SpeedStor",
+    },
+    MbrTypeEntry {
+        id: 0xEB,
+        name: b"BeOS fs",
+    },
+    MbrTypeEntry {
+        id: 0xEE,
+        name: b"GPT protective",
+    },
+    MbrTypeEntry {
+        id: 0xEF,
+        name: b"EFI System",
+    },
+    MbrTypeEntry {
+        id: 0xF0,
+        name: b"Linux/PA-RISC boot",
+    },
+    MbrTypeEntry {
+        id: 0xF1,
+        name: b"SpeedStor",
+    },
+    MbrTypeEntry {
+        id: 0xF2,
+        name: b"DOS secondary",
+    },
+    MbrTypeEntry {
+        id: 0xFB,
+        name: b"VMware VMFS",
+    },
+    MbrTypeEntry {
+        id: 0xFC,
+        name: b"VMware swap",
+    },
+    MbrTypeEntry {
+        id: 0xFD,
+        name: b"Linux RAID",
+    },
+    MbrTypeEntry {
+        id: 0xFE,
+        name: b"LANstep",
+    },
+    MbrTypeEntry {
+        id: 0xFF,
+        name: b"BBT",
+    },
 ];
 
 fn mbr_type_name(type_id: u8) -> &'static [u8] {
@@ -707,7 +1214,9 @@ impl MbrPartition {
     }
 
     fn end_lba(&self) -> u64 {
-        (self.lba_start as u64).saturating_add(self.lba_size as u64).saturating_sub(1)
+        (self.lba_start as u64)
+            .saturating_add(self.lba_size as u64)
+            .saturating_sub(1)
     }
 
     fn size_bytes(&self, sector_size: u64) -> u64 {
@@ -793,8 +1302,12 @@ enum DiskLabel {
 fn parse_mbr_entry(sector: &[u8], base: usize) -> MbrPartition {
     if base + 16 > sector.len() {
         return MbrPartition {
-            status: 0, chs_first: [0; 3], type_id: 0,
-            chs_last: [0; 3], lba_start: 0, lba_size: 0,
+            status: 0,
+            chs_first: [0; 3],
+            type_id: 0,
+            chs_last: [0; 3],
+            lba_start: 0,
+            lba_size: 0,
         };
     }
     MbrPartition {
@@ -817,13 +1330,15 @@ fn parse_mbr_entries(sector: &[u8]) -> [MbrPartition; 4] {
 }
 
 fn has_mbr_signature(sector: &[u8]) -> bool {
-    sector.len() >= 512
-        && sector[510] == 0x55
-        && sector[511] == 0xAA
+    sector.len() >= 512 && sector[510] == 0x55 && sector[511] == 0xAA
 }
 
 fn parse_gpt_header(sector: &[u8]) -> GptHeader {
-    let sig = if sector.len() >= 8 { &sector[0..8] } else { &[0u8; 8][..] };
+    let sig = if sector.len() >= 8 {
+        &sector[0..8]
+    } else {
+        &[0u8; 8][..]
+    };
     let valid = bytes_eq(sig, b"EFI PART");
 
     let revision = le_u32(sector, 8);
@@ -856,9 +1371,19 @@ fn parse_gpt_header(sector: &[u8]) -> GptHeader {
     };
 
     GptHeader {
-        valid, revision, header_size, header_crc, my_lba, alternate_lba,
-        first_usable_lba, last_usable_lba, disk_guid, partition_entry_lba,
-        num_partition_entries, partition_entry_size, partition_entries_crc,
+        valid,
+        revision,
+        header_size,
+        header_crc,
+        my_lba,
+        alternate_lba,
+        first_usable_lba,
+        last_usable_lba,
+        disk_guid,
+        partition_entry_lba,
+        num_partition_entries,
+        partition_entry_size,
+        partition_entries_crc,
         crc_valid,
     }
 }
@@ -881,7 +1406,11 @@ fn parse_gpt_entry(buf: &[u8]) -> GptPartition {
     // Name: UTF-16LE at offset 56, up to 72 bytes (36 code units).
     let mut name_buf = [0u8; 72];
     let mut name_len = 0;
-    let name_region = if buf.len() >= 128 { &buf[56..128] } else { &buf[56..] };
+    let name_region = if buf.len() >= 128 {
+        &buf[56..128]
+    } else {
+        &buf[56..]
+    };
     let mut ci = 0;
     while ci + 1 < name_region.len() {
         let lo = name_region[ci];
@@ -902,7 +1431,15 @@ fn parse_gpt_entry(buf: &[u8]) -> GptPartition {
         ci += 2;
     }
 
-    GptPartition { type_guid, unique_guid, first_lba, last_lba, attributes, name_buf, name_len }
+    GptPartition {
+        type_guid,
+        unique_guid,
+        first_lba,
+        last_lba,
+        attributes,
+        name_buf,
+        name_len,
+    }
 }
 
 /// Parse the partition table from raw disk bytes (at least 34*512 = 17408 bytes).
@@ -925,9 +1462,13 @@ fn parse_disk_label(raw: &[u8]) -> DiskLabel {
 
             // Build 128-entry array; unused slots are zero-initialized.
             let mut parts: [GptPartition; 128] = core::array::from_fn(|_| GptPartition {
-                type_guid: [0; 16], unique_guid: [0; 16],
-                first_lba: 0, last_lba: 0, attributes: 0,
-                name_buf: [0; 72], name_len: 0,
+                type_guid: [0; 16],
+                unique_guid: [0; 16],
+                first_lba: 0,
+                last_lba: 0,
+                attributes: 0,
+                name_buf: [0; 72],
+                name_len: 0,
             });
             let mut count = 0;
             let mut i = 0;
@@ -944,7 +1485,11 @@ fn parse_disk_label(raw: &[u8]) -> DiskLabel {
                 i += 1;
             }
 
-            return DiskLabel::Gpt { header, partitions: parts, partition_count: count };
+            return DiskLabel::Gpt {
+                header,
+                partitions: parts,
+                partition_count: count,
+            };
         }
     }
 
@@ -955,8 +1500,12 @@ fn parse_disk_label(raw: &[u8]) -> DiskLabel {
         if has_parts {
             // Parse logical partitions from extended partition chain.
             let empty_logical = MbrPartition {
-                status: 0, chs_first: [0; 3], type_id: 0,
-                chs_last: [0; 3], lba_start: 0, lba_size: 0,
+                status: 0,
+                chs_first: [0; 3],
+                type_id: 0,
+                chs_last: [0; 3],
+                lba_start: 0,
+                lba_size: 0,
             };
             let mut logical = [empty_logical; 60];
             let mut logical_count = 0;
@@ -1000,7 +1549,11 @@ fn parse_disk_label(raw: &[u8]) -> DiskLabel {
                 }
             }
 
-            return DiskLabel::Mbr { partitions: entries, logical, logical_count };
+            return DiskLabel::Mbr {
+                partitions: entries,
+                logical,
+                logical_count,
+            };
         }
     }
 
@@ -1075,7 +1628,11 @@ fn build_protective_mbr(disk_sectors: u64) -> [u8; 512] {
     // Size = min(disk_sectors - 1, 0xFFFFFFFF)
     let prot_size = if disk_sectors > 1 {
         let s = disk_sectors - 1;
-        if s > 0xFFFF_FFFF { 0xFFFF_FFFF_u32 } else { s as u32 }
+        if s > 0xFFFF_FFFF {
+            0xFFFF_FFFF_u32
+        } else {
+            s as u32
+        }
     } else {
         0
     };
@@ -1153,7 +1710,9 @@ fn serialize_gpt_entry(part: &GptPartition) -> [u8; 128] {
 /// Serialize a MBR partition entry to 16 bytes at offset in buf.
 #[allow(dead_code)]
 fn serialize_mbr_entry(buf: &mut [u8], off: usize, part: &MbrPartition) {
-    if off + 16 > buf.len() { return; }
+    if off + 16 > buf.len() {
+        return;
+    }
     buf[off] = part.status;
     buf[off + 1] = part.chs_first[0];
     buf[off + 2] = part.chs_first[1];
@@ -1181,9 +1740,10 @@ fn parse_type_code(s: &[u8]) -> Option<[u8; 16]> {
 
     // Full GUID (36 bytes with dashes)
     if s.len() == 36
-        && let Some(g) = parse_guid_runtime(s) {
-            return Some(g);
-        }
+        && let Some(g) = parse_guid_runtime(s)
+    {
+        return Some(g);
+    }
 
     // Hex MBR: "0x83" or "83"
     let hex_str = if starts_with(s, b"0x") || starts_with(s, b"0X") {
@@ -1191,12 +1751,15 @@ fn parse_type_code(s: &[u8]) -> Option<[u8; 16]> {
     } else {
         s
     };
-    if hex_str.len() <= 2 && !hex_str.is_empty() && is_all_hex(hex_str)
-        && let Some(val) = parse_hex_u8(hex_str) {
-            let mut result = [0u8; 16];
-            result[0] = val;
-            return Some(result);
-        }
+    if hex_str.len() <= 2
+        && !hex_str.is_empty()
+        && is_all_hex(hex_str)
+        && let Some(val) = parse_hex_u8(hex_str)
+    {
+        let mut result = [0u8; 16];
+        result[0] = val;
+        return Some(result);
+    }
 
     // Short names (case-insensitive)
     if bytes_eq_ci(s, b"linux") || bytes_eq_ci(s, b"linux-fs") {
@@ -1351,7 +1914,11 @@ fn parse_args(argc: i32, argv: *const *const u8) -> Opts {
     }
 
     let mut args: [&[u8]; 64] = [b""; 64];
-    let arg_count = if (argc as usize) < 64 { argc as usize } else { 64 };
+    let arg_count = if (argc as usize) < 64 {
+        argc as usize
+    } else {
+        64
+    };
     let mut ai = 0;
     while ai < arg_count {
         // SAFETY: argv is provided by the runtime, with argc valid entries.
@@ -1378,7 +1945,9 @@ fn parse_args(argc: i32, argv: *const *const u8) -> Opts {
             opts.show_bytes = true;
         } else if bytes_eq(arg, b"--json") || bytes_eq(arg, b"-J") {
             opts.json_output = true;
-        } else if bytes_eq(arg, b"--dump") || bytes_eq(arg, b"-d") && opts.personality == Personality::Sfdisk {
+        } else if bytes_eq(arg, b"--dump")
+            || bytes_eq(arg, b"-d") && opts.personality == Personality::Sfdisk
+        {
             opts.action = Action::Dump;
         } else if bytes_eq(arg, b"--new") {
             opts.action = Action::NewPartition;
@@ -1465,7 +2034,10 @@ struct OutBuf {
 
 impl OutBuf {
     fn new() -> Self {
-        Self { buf: [0u8; 8192], len: 0 }
+        Self {
+            buf: [0u8; 8192],
+            len: 0,
+        }
     }
 
     fn push(&mut self, data: &[u8]) {
@@ -1475,7 +2047,11 @@ impl OutBuf {
                 self.flush();
             }
             let space = self.buf.len() - self.len;
-            let chunk = if data.len() - i < space { data.len() - i } else { space };
+            let chunk = if data.len() - i < space {
+                data.len() - i
+            } else {
+                space
+            };
             self.buf[self.len..self.len + chunk].copy_from_slice(&data[i..i + chunk]);
             self.len += chunk;
             i += chunk;
@@ -1572,8 +2148,15 @@ fn json_push_escaped(out: &mut OutBuf, s: &[u8]) {
 
 // ── fdisk: Display Partition Table ───────────────────────────────────
 
-fn print_disk_header(out: &mut OutBuf, dev: &[u8], total_bytes: u64, total_sectors: u64,
-                     sector_size: u64, hw_sector_size: u64, show_bytes: bool) {
+fn print_disk_header(
+    out: &mut OutBuf,
+    dev: &[u8],
+    total_bytes: u64,
+    total_sectors: u64,
+    sector_size: u64,
+    hw_sector_size: u64,
+    show_bytes: bool,
+) {
     out.push(b"Disk ");
     out.push(dev);
     out.push(b": ");
@@ -1605,9 +2188,16 @@ fn print_disk_header(out: &mut OutBuf, dev: &[u8], total_bytes: u64, total_secto
 // struct without forcing GptHeader/parts into a wrapper that exists
 // only to satisfy this lint.
 #[allow(clippy::too_many_arguments)]
-fn print_gpt_listing(out: &mut OutBuf, dev: &[u8], header: &GptHeader,
-                     parts: &[GptPartition], count: usize,
-                     sector_size: u64, extended: bool, show_bytes: bool) {
+fn print_gpt_listing(
+    out: &mut OutBuf,
+    dev: &[u8],
+    header: &GptHeader,
+    parts: &[GptPartition],
+    count: usize,
+    sector_size: u64,
+    extended: bool,
+    show_bytes: bool,
+) {
     out.push(b"Disklabel type: gpt");
     out.push_newline();
     out.push(b"Disk identifier: ");
@@ -1742,9 +2332,16 @@ fn print_gpt_listing(out: &mut OutBuf, dev: &[u8], header: &GptHeader,
 // Same shape as print_gpt_listing above; the lint suggests collapsing
 // these into a context struct that exists only to satisfy it.
 #[allow(clippy::too_many_arguments)]
-fn print_mbr_listing(out: &mut OutBuf, dev: &[u8], parts: &[MbrPartition; 4],
-                     logical: &[MbrPartition], logical_count: usize,
-                     sector_size: u64, extended: bool, show_bytes: bool) {
+fn print_mbr_listing(
+    out: &mut OutBuf,
+    dev: &[u8],
+    parts: &[MbrPartition; 4],
+    logical: &[MbrPartition],
+    logical_count: usize,
+    sector_size: u64,
+    extended: bool,
+    show_bytes: bool,
+) {
     out.push(b"Disklabel type: dos");
     out.push_newline();
     out.push_newline();
@@ -1766,7 +2363,14 @@ fn print_mbr_listing(out: &mut OutBuf, dev: &[u8], parts: &[MbrPartition; 4],
     let mut li = 0;
     while li < logical_count {
         if !logical[li].is_empty() {
-            print_mbr_row(out, dev, 5 + li as u32, &logical[li], sector_size, show_bytes);
+            print_mbr_row(
+                out,
+                dev,
+                5 + li as u32,
+                &logical[li],
+                sector_size,
+                show_bytes,
+            );
         }
         li += 1;
     }
@@ -1781,9 +2385,17 @@ fn print_mbr_listing(out: &mut OutBuf, dev: &[u8], parts: &[MbrPartition; 4],
                 out.push(b"Partition ");
                 out.push_u32(pi as u32 + 1);
                 out.push(b": CHS start=");
-                out.push_u32(c); out.push(b"/"); out.push_u32(h); out.push(b"/"); out.push_u32(s);
+                out.push_u32(c);
+                out.push(b"/");
+                out.push_u32(h);
+                out.push(b"/");
+                out.push_u32(s);
                 out.push(b", CHS end=");
-                out.push_u32(ce); out.push(b"/"); out.push_u32(he); out.push(b"/"); out.push_u32(se);
+                out.push_u32(ce);
+                out.push(b"/");
+                out.push_u32(he);
+                out.push(b"/");
+                out.push_u32(se);
                 out.push_newline();
             }
             pi += 1;
@@ -1791,8 +2403,14 @@ fn print_mbr_listing(out: &mut OutBuf, dev: &[u8], parts: &[MbrPartition; 4],
     }
 }
 
-fn print_mbr_row(out: &mut OutBuf, dev: &[u8], num: u32, part: &MbrPartition,
-                 sector_size: u64, show_bytes: bool) {
+fn print_mbr_row(
+    out: &mut OutBuf,
+    dev: &[u8],
+    num: u32,
+    part: &MbrPartition,
+    sector_size: u64,
+    show_bytes: bool,
+) {
     // Device
     out.push(dev);
     out.push_u32(num);
@@ -1854,8 +2472,14 @@ fn print_mbr_row(out: &mut OutBuf, dev: &[u8], num: u32, part: &MbrPartition,
 
 // ── fdisk: JSON Output ───────────────────────────────────────────────
 
-fn print_json_listing(out: &mut OutBuf, dev: &[u8], label: &DiskLabel,
-                      total_bytes: u64, total_sectors: u64, sector_size: u64) {
+fn print_json_listing(
+    out: &mut OutBuf,
+    dev: &[u8],
+    label: &DiskLabel,
+    total_bytes: u64,
+    total_sectors: u64,
+    sector_size: u64,
+) {
     out.push(b"{\n");
     out.push(b"  \"partitiontable\": {\n");
     out.push(b"    \"device\": ");
@@ -1872,7 +2496,11 @@ fn print_json_listing(out: &mut OutBuf, dev: &[u8], label: &DiskLabel,
     out.push(b",\n");
 
     match label {
-        DiskLabel::Gpt { header, partitions, partition_count } => {
+        DiskLabel::Gpt {
+            header,
+            partitions,
+            partition_count,
+        } => {
             out.push(b"    \"label\": \"gpt\",\n");
             out.push(b"    \"id\": \"");
             out.push_guid(&header.disk_guid);
@@ -1928,7 +2556,11 @@ fn print_json_listing(out: &mut OutBuf, dev: &[u8], label: &DiskLabel,
             }
             out.push(b"    ]\n");
         }
-        DiskLabel::Mbr { partitions, logical, logical_count } => {
+        DiskLabel::Mbr {
+            partitions,
+            logical,
+            logical_count,
+        } => {
             out.push(b"    \"label\": \"dos\",\n");
             out.push(b"    \"partitions\": [\n");
 
@@ -2009,7 +2641,11 @@ fn print_mbr_json_entry(out: &mut OutBuf, num: u32, part: &MbrPartition, sector_
 
 fn print_sfdisk_dump(out: &mut OutBuf, dev: &[u8], label: &DiskLabel, sector_size: u64) {
     match label {
-        DiskLabel::Gpt { header, partitions, partition_count } => {
+        DiskLabel::Gpt {
+            header,
+            partitions,
+            partition_count,
+        } => {
             out.push(b"label: gpt\n");
             out.push(b"label-id: ");
             out.push_guid(&header.disk_guid);
@@ -2050,18 +2686,32 @@ fn print_sfdisk_dump(out: &mut OutBuf, dev: &[u8], label: &DiskLabel, sector_siz
                 }
                 if part.attributes != 0 {
                     out.push(b", attrs=\"");
-                    if part.attributes & 1 != 0 { out.push(b"RequiredPartition "); }
-                    if part.attributes & (1 << 2) != 0 { out.push(b"LegacyBIOSBootable "); }
-                    if part.attributes & (1 << 60) != 0 { out.push(b"ReadOnly "); }
-                    if part.attributes & (1 << 62) != 0 { out.push(b"Hidden "); }
-                    if part.attributes & (1 << 63) != 0 { out.push(b"DoNotAutomount "); }
+                    if part.attributes & 1 != 0 {
+                        out.push(b"RequiredPartition ");
+                    }
+                    if part.attributes & (1 << 2) != 0 {
+                        out.push(b"LegacyBIOSBootable ");
+                    }
+                    if part.attributes & (1 << 60) != 0 {
+                        out.push(b"ReadOnly ");
+                    }
+                    if part.attributes & (1 << 62) != 0 {
+                        out.push(b"Hidden ");
+                    }
+                    if part.attributes & (1 << 63) != 0 {
+                        out.push(b"DoNotAutomount ");
+                    }
                     out.push(b"\"");
                 }
                 out.push_newline();
                 pi += 1;
             }
         }
-        DiskLabel::Mbr { partitions, logical, logical_count } => {
+        DiskLabel::Mbr {
+            partitions,
+            logical,
+            logical_count,
+        } => {
             out.push(b"label: dos\n");
             out.push(b"device: ");
             out.push(dev);
@@ -2117,8 +2767,13 @@ fn print_sfdisk_dump(out: &mut OutBuf, dev: &[u8], label: &DiskLabel, sector_siz
 
 // ── cfdisk: Simple Curses-Style Display ──────────────────────────────
 
-fn print_cfdisk_display(out: &mut OutBuf, dev: &[u8], label: &DiskLabel,
-                        total_bytes: u64, sector_size: u64) {
+fn print_cfdisk_display(
+    out: &mut OutBuf,
+    dev: &[u8],
+    label: &DiskLabel,
+    total_bytes: u64,
+    sector_size: u64,
+) {
     out.push(b"                              Disk: ");
     out.push(dev);
     out.push_newline();
@@ -2130,7 +2785,11 @@ fn print_cfdisk_display(out: &mut OutBuf, dev: &[u8], label: &DiskLabel,
     out.push_newline();
 
     match label {
-        DiskLabel::Gpt { header, partitions, partition_count } => {
+        DiskLabel::Gpt {
+            header,
+            partitions,
+            partition_count,
+        } => {
             out.push(b"              Label: gpt, identifier: ");
             out.push_guid(&header.disk_guid);
             out.push_newline();
@@ -2178,7 +2837,11 @@ fn print_cfdisk_display(out: &mut OutBuf, dev: &[u8], label: &DiskLabel,
                 pi += 1;
             }
         }
-        DiskLabel::Mbr { partitions, logical, logical_count } => {
+        DiskLabel::Mbr {
+            partitions,
+            logical,
+            logical_count,
+        } => {
             out.push(b"              Label: dos");
             out.push_newline();
             out.push_newline();
@@ -2284,13 +2947,23 @@ fn print_cfdisk_display(out: &mut OutBuf, dev: &[u8], label: &DiskLabel,
 
 // ── gdisk: GPT-Only Display ─────────────────────────────────────────
 
-fn print_gdisk_listing(out: &mut OutBuf, dev: &[u8], label: &DiskLabel,
-                       total_bytes: u64, total_sectors: u64, sector_size: u64,
-                       show_bytes: bool) {
+fn print_gdisk_listing(
+    out: &mut OutBuf,
+    dev: &[u8],
+    label: &DiskLabel,
+    total_bytes: u64,
+    total_sectors: u64,
+    sector_size: u64,
+    show_bytes: bool,
+) {
     out.push(b"GPT fdisk (gdisk) version 0.1.0\n\n");
 
     match label {
-        DiskLabel::Gpt { header, partitions, partition_count } => {
+        DiskLabel::Gpt {
+            header,
+            partitions,
+            partition_count,
+        } => {
             out.push(b"Disk ");
             out.push(dev);
             out.push(b": ");
@@ -2599,13 +3272,13 @@ fn build_test_gpt_disk() -> ([u8; 17408], u64, u64) {
     let disk_guid = parse_guid(b"12345678-ABCD-EF01-2345-6789ABCDEF01");
     let header = build_gpt_header(
         &disk_guid,
-        1,                     // my_lba
-        total_sectors - 1,     // alternate_lba
-        34,                    // first_usable
-        total_sectors - 34,    // last_usable
-        2,                     // partition_entry_lba
-        128,                   // num_entries
-        128,                   // entry_size
+        1,                  // my_lba
+        total_sectors - 1,  // alternate_lba
+        34,                 // first_usable
+        total_sectors - 34, // last_usable
+        2,                  // partition_entry_lba
+        128,                // num_entries
+        128,                // entry_size
         entries_crc,
     );
     disk[512..1024].copy_from_slice(&header);
@@ -2622,17 +3295,25 @@ fn build_test_mbr_disk() -> ([u8; 512], u64, u64) {
 
     // Partition 1: FAT32, bootable
     mbr[446] = 0x80; // Bootable
-    mbr[447] = 0; mbr[448] = 1; mbr[449] = 0; // CHS start
+    mbr[447] = 0;
+    mbr[448] = 1;
+    mbr[449] = 0; // CHS start
     mbr[450] = 0x0C; // W95 FAT32 (LBA)
-    mbr[451] = 0xFE; mbr[452] = 0xFF; mbr[453] = 0xFF; // CHS end
+    mbr[451] = 0xFE;
+    mbr[452] = 0xFF;
+    mbr[453] = 0xFF; // CHS end
     write_le_u32(&mut mbr, 454, 2048);
     write_le_u32(&mut mbr, 458, 1048576);
 
     // Partition 2: Linux
     mbr[462] = 0x00;
-    mbr[463] = 0; mbr[464] = 0; mbr[465] = 0;
+    mbr[463] = 0;
+    mbr[464] = 0;
+    mbr[465] = 0;
     mbr[466] = 0x83; // Linux
-    mbr[467] = 0xFE; mbr[468] = 0xFF; mbr[469] = 0xFF;
+    mbr[467] = 0xFE;
+    mbr[468] = 0xFF;
+    mbr[469] = 0xFF;
     write_le_u32(&mut mbr, 470, 1050624);
     write_le_u32(&mut mbr, 474, 1046528);
 
@@ -2679,8 +3360,11 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         return 0;
     }
 
-    if dev.is_empty() && (opts.action == Action::List || opts.action == Action::Dump
-                          || opts.action == Action::JsonDump) {
+    if dev.is_empty()
+        && (opts.action == Action::List
+            || opts.action == Action::Dump
+            || opts.action == Action::JsonDump)
+    {
         // No device specified -- show help
         print_help(&mut out, opts.personality);
         out.flush();
@@ -2741,7 +3425,9 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 
     let label = parse_disk_label(&raw);
 
-    let total_sectors = if total_sectors > 0 { total_sectors } else {
+    let total_sectors = if total_sectors > 0 {
+        total_sectors
+    } else {
         // Estimate from label
         match &label {
             DiskLabel::Gpt { header, .. } => header.alternate_lba + 1,
@@ -2750,7 +3436,9 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                 let mut pi = 0;
                 while pi < 4 {
                     let end = partitions[pi].lba_start as u64 + partitions[pi].lba_size as u64;
-                    if end > max { max = end; }
+                    if end > max {
+                        max = end;
+                    }
                     pi += 1;
                 }
                 max
@@ -2765,20 +3453,56 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
             match opts.action {
                 Action::List => {
                     if opts.json_output {
-                        print_json_listing(&mut out, dev, &label, total_bytes, total_sectors, sector_size);
+                        print_json_listing(
+                            &mut out,
+                            dev,
+                            &label,
+                            total_bytes,
+                            total_sectors,
+                            sector_size,
+                        );
                     } else {
-                        print_disk_header(&mut out, dev, total_bytes, total_sectors,
-                                        sector_size, hw_sector_size, opts.show_bytes);
+                        print_disk_header(
+                            &mut out,
+                            dev,
+                            total_bytes,
+                            total_sectors,
+                            sector_size,
+                            hw_sector_size,
+                            opts.show_bytes,
+                        );
                         match &label {
-                            DiskLabel::Gpt { header, partitions, partition_count } => {
-                                print_gpt_listing(&mut out, dev, header, partitions,
-                                                *partition_count, sector_size,
-                                                opts.extended, opts.show_bytes);
+                            DiskLabel::Gpt {
+                                header,
+                                partitions,
+                                partition_count,
+                            } => {
+                                print_gpt_listing(
+                                    &mut out,
+                                    dev,
+                                    header,
+                                    partitions,
+                                    *partition_count,
+                                    sector_size,
+                                    opts.extended,
+                                    opts.show_bytes,
+                                );
                             }
-                            DiskLabel::Mbr { partitions, logical, logical_count } => {
-                                print_mbr_listing(&mut out, dev, partitions, logical,
-                                                *logical_count, sector_size,
-                                                opts.extended, opts.show_bytes);
+                            DiskLabel::Mbr {
+                                partitions,
+                                logical,
+                                logical_count,
+                            } => {
+                                print_mbr_listing(
+                                    &mut out,
+                                    dev,
+                                    partitions,
+                                    logical,
+                                    *logical_count,
+                                    sector_size,
+                                    opts.extended,
+                                    opts.show_bytes,
+                                );
                             }
                             DiskLabel::Unknown => {
                                 out.push(b"Disklabel type: unknown\n\n");
@@ -2788,16 +3512,47 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                 }
                 Action::Interactive => {
                     // Print the table then show menu hint
-                    print_disk_header(&mut out, dev, total_bytes, total_sectors,
-                                    sector_size, hw_sector_size, opts.show_bytes);
+                    print_disk_header(
+                        &mut out,
+                        dev,
+                        total_bytes,
+                        total_sectors,
+                        sector_size,
+                        hw_sector_size,
+                        opts.show_bytes,
+                    );
                     match &label {
-                        DiskLabel::Gpt { header, partitions, partition_count } => {
-                            print_gpt_listing(&mut out, dev, header, partitions,
-                                            *partition_count, sector_size, false, false);
+                        DiskLabel::Gpt {
+                            header,
+                            partitions,
+                            partition_count,
+                        } => {
+                            print_gpt_listing(
+                                &mut out,
+                                dev,
+                                header,
+                                partitions,
+                                *partition_count,
+                                sector_size,
+                                false,
+                                false,
+                            );
                         }
-                        DiskLabel::Mbr { partitions, logical, logical_count } => {
-                            print_mbr_listing(&mut out, dev, partitions, logical,
-                                            *logical_count, sector_size, false, false);
+                        DiskLabel::Mbr {
+                            partitions,
+                            logical,
+                            logical_count,
+                        } => {
+                            print_mbr_listing(
+                                &mut out,
+                                dev,
+                                partitions,
+                                logical,
+                                *logical_count,
+                                sector_size,
+                                false,
+                                false,
+                            );
                         }
                         DiskLabel::Unknown => {
                             out.push(b"Disklabel type: unknown\n");
@@ -2851,61 +3606,120 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                 _ => {}
             }
         }
-        Personality::Gdisk => {
-            match opts.action {
-                Action::List
-                    if opts.json_output => {
-                        print_json_listing(&mut out, dev, &label, total_bytes, total_sectors, sector_size);
+        Personality::Gdisk => match opts.action {
+            Action::List if opts.json_output => {
+                print_json_listing(
+                    &mut out,
+                    dev,
+                    &label,
+                    total_bytes,
+                    total_sectors,
+                    sector_size,
+                );
+            }
+            Action::Interactive => {
+                print_gdisk_listing(
+                    &mut out,
+                    dev,
+                    &label,
+                    total_bytes,
+                    total_sectors,
+                    sector_size,
+                    false,
+                );
+                out.push_newline();
+                out.push(b"Command (? for help): ");
+                print_gdisk_interactive_help(&mut out);
+            }
+            _ => {
+                print_gdisk_listing(
+                    &mut out,
+                    dev,
+                    &label,
+                    total_bytes,
+                    total_sectors,
+                    sector_size,
+                    opts.show_bytes,
+                );
+            }
+        },
+        Personality::Sfdisk => match opts.action {
+            Action::List => {
+                print_disk_header(
+                    &mut out,
+                    dev,
+                    total_bytes,
+                    total_sectors,
+                    sector_size,
+                    hw_sector_size,
+                    opts.show_bytes,
+                );
+                match &label {
+                    DiskLabel::Gpt {
+                        header,
+                        partitions,
+                        partition_count,
+                    } => {
+                        print_gpt_listing(
+                            &mut out,
+                            dev,
+                            header,
+                            partitions,
+                            *partition_count,
+                            sector_size,
+                            opts.extended,
+                            opts.show_bytes,
+                        );
                     }
-                Action::Interactive => {
-                    print_gdisk_listing(&mut out, dev, &label, total_bytes, total_sectors,
-                                       sector_size, false);
-                    out.push_newline();
-                    out.push(b"Command (? for help): ");
-                    print_gdisk_interactive_help(&mut out);
-                }
-                _ => {
-                    print_gdisk_listing(&mut out, dev, &label, total_bytes, total_sectors,
-                                       sector_size, opts.show_bytes);
+                    DiskLabel::Mbr {
+                        partitions,
+                        logical,
+                        logical_count,
+                    } => {
+                        print_mbr_listing(
+                            &mut out,
+                            dev,
+                            partitions,
+                            logical,
+                            *logical_count,
+                            sector_size,
+                            opts.extended,
+                            opts.show_bytes,
+                        );
+                    }
+                    DiskLabel::Unknown => {
+                        out.push(b"Disklabel type: unknown\n");
+                    }
                 }
             }
-        }
-        Personality::Sfdisk => {
-            match opts.action {
-                Action::List => {
-                    print_disk_header(&mut out, dev, total_bytes, total_sectors,
-                                    sector_size, hw_sector_size, opts.show_bytes);
-                    match &label {
-                        DiskLabel::Gpt { header, partitions, partition_count } => {
-                            print_gpt_listing(&mut out, dev, header, partitions,
-                                            *partition_count, sector_size,
-                                            opts.extended, opts.show_bytes);
-                        }
-                        DiskLabel::Mbr { partitions, logical, logical_count } => {
-                            print_mbr_listing(&mut out, dev, partitions, logical,
-                                            *logical_count, sector_size,
-                                            opts.extended, opts.show_bytes);
-                        }
-                        DiskLabel::Unknown => {
-                            out.push(b"Disklabel type: unknown\n");
-                        }
-                    }
-                }
-                Action::Dump => {
+            Action::Dump => {
+                print_sfdisk_dump(&mut out, dev, &label, sector_size);
+            }
+            Action::JsonDump => {
+                print_json_listing(
+                    &mut out,
+                    dev,
+                    &label,
+                    total_bytes,
+                    total_sectors,
+                    sector_size,
+                );
+            }
+            _ => {
+                if opts.json_output {
+                    print_json_listing(
+                        &mut out,
+                        dev,
+                        &label,
+                        total_bytes,
+                        total_sectors,
+                        sector_size,
+                    );
+                } else {
                     print_sfdisk_dump(&mut out, dev, &label, sector_size);
                 }
-                Action::JsonDump => {
-                    print_json_listing(&mut out, dev, &label, total_bytes, total_sectors, sector_size);
-                }
-                _ => {
-                    if opts.json_output {
-                        print_json_listing(&mut out, dev, &label, total_bytes, total_sectors, sector_size);
-                    } else {
-                        print_sfdisk_dump(&mut out, dev, &label, sector_size);
-                    }
-                }
             }
-        }
+        },
         Personality::Cfdisk => {
             print_cfdisk_display(&mut out, dev, &label, total_bytes, sector_size);
         }
@@ -3301,35 +4115,50 @@ mod tests {
     fn test_parse_type_code_guid() {
         let tc = parse_type_code(b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
         assert!(tc.is_some());
-        assert_eq!(tc.unwrap(), parse_guid(b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B"));
+        assert_eq!(
+            tc.unwrap(),
+            parse_guid(b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
+        );
     }
 
     #[test]
     fn test_parse_type_code_name_linux() {
         let tc = parse_type_code(b"linux");
         assert!(tc.is_some());
-        assert_eq!(tc.unwrap(), parse_guid(b"0FC63DAF-8483-4772-8E79-3D69D8477DE4"));
+        assert_eq!(
+            tc.unwrap(),
+            parse_guid(b"0FC63DAF-8483-4772-8E79-3D69D8477DE4")
+        );
     }
 
     #[test]
     fn test_parse_type_code_name_efi() {
         let tc = parse_type_code(b"efi");
         assert!(tc.is_some());
-        assert_eq!(tc.unwrap(), parse_guid(b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B"));
+        assert_eq!(
+            tc.unwrap(),
+            parse_guid(b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
+        );
     }
 
     #[test]
     fn test_parse_type_code_name_swap() {
         let tc = parse_type_code(b"swap");
         assert!(tc.is_some());
-        assert_eq!(tc.unwrap(), parse_guid(b"0657FD6D-A4AB-43C4-84E5-0933C84B4F4F"));
+        assert_eq!(
+            tc.unwrap(),
+            parse_guid(b"0657FD6D-A4AB-43C4-84E5-0933C84B4F4F")
+        );
     }
 
     #[test]
     fn test_parse_type_code_name_ntfs() {
         let tc = parse_type_code(b"ntfs");
         assert!(tc.is_some());
-        assert_eq!(tc.unwrap(), parse_guid(b"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"));
+        assert_eq!(
+            tc.unwrap(),
+            parse_guid(b"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")
+        );
     }
 
     #[test]
@@ -3405,7 +4234,10 @@ mod tests {
 
     #[test]
     fn test_personality_with_path_and_exe() {
-        assert_eq!(detect_personality(b"/usr/bin/cfdisk.exe"), Personality::Cfdisk);
+        assert_eq!(
+            detect_personality(b"/usr/bin/cfdisk.exe"),
+            Personality::Cfdisk
+        );
     }
 
     #[test]
@@ -3538,8 +4370,12 @@ mod tests {
     #[test]
     fn test_mbr_partition_end_lba() {
         let part = MbrPartition {
-            status: 0, chs_first: [0; 3], type_id: 0x83,
-            chs_last: [0; 3], lba_start: 2048, lba_size: 1048576,
+            status: 0,
+            chs_first: [0; 3],
+            type_id: 0x83,
+            chs_last: [0; 3],
+            lba_start: 2048,
+            lba_size: 1048576,
         };
         assert_eq!(part.end_lba(), 2048 + 1048576 - 1);
     }
@@ -3547,8 +4383,12 @@ mod tests {
     #[test]
     fn test_mbr_partition_size_bytes() {
         let part = MbrPartition {
-            status: 0, chs_first: [0; 3], type_id: 0x83,
-            chs_last: [0; 3], lba_start: 0, lba_size: 2048,
+            status: 0,
+            chs_first: [0; 3],
+            type_id: 0x83,
+            chs_last: [0; 3],
+            lba_start: 0,
+            lba_size: 2048,
         };
         assert_eq!(part.size_bytes(512), 2048 * 512);
     }
@@ -3556,20 +4396,36 @@ mod tests {
     #[test]
     fn test_mbr_is_extended() {
         let e1 = MbrPartition {
-            status: 0, chs_first: [0; 3], type_id: 0x05,
-            chs_last: [0; 3], lba_start: 0, lba_size: 100,
+            status: 0,
+            chs_first: [0; 3],
+            type_id: 0x05,
+            chs_last: [0; 3],
+            lba_start: 0,
+            lba_size: 100,
         };
         let e2 = MbrPartition {
-            status: 0, chs_first: [0; 3], type_id: 0x0F,
-            chs_last: [0; 3], lba_start: 0, lba_size: 100,
+            status: 0,
+            chs_first: [0; 3],
+            type_id: 0x0F,
+            chs_last: [0; 3],
+            lba_start: 0,
+            lba_size: 100,
         };
         let e3 = MbrPartition {
-            status: 0, chs_first: [0; 3], type_id: 0x85,
-            chs_last: [0; 3], lba_start: 0, lba_size: 100,
+            status: 0,
+            chs_first: [0; 3],
+            type_id: 0x85,
+            chs_last: [0; 3],
+            lba_start: 0,
+            lba_size: 100,
         };
         let enot = MbrPartition {
-            status: 0, chs_first: [0; 3], type_id: 0x83,
-            chs_last: [0; 3], lba_start: 0, lba_size: 100,
+            status: 0,
+            chs_first: [0; 3],
+            type_id: 0x83,
+            chs_last: [0; 3],
+            lba_start: 0,
+            lba_size: 100,
         };
         assert!(e1.is_extended());
         assert!(e2.is_extended());
@@ -3644,7 +4500,11 @@ mod tests {
         let (disk, _, _) = build_test_gpt_disk();
         let label = parse_disk_label(&disk);
         match &label {
-            DiskLabel::Gpt { header, partition_count, .. } => {
+            DiskLabel::Gpt {
+                header,
+                partition_count,
+                ..
+            } => {
                 assert!(header.valid);
                 assert_eq!(*partition_count, 2);
             }

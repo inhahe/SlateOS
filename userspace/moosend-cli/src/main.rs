@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("moosend-cli 0.1.0 (Greek-affordability personality build)"); }
+fn print_version() {
+    println!("moosend-cli 0.1.0 (Greek-affordability personality build)");
+}
 
 fn run_about() {
     println!("Moosend (Moosend Ltd, now a Sitecore brand).");

@@ -31,14 +31,14 @@ const DEFAULT_PRIORITY: i32 = -1;
 // Compatible with Linux swap header v1
 #[repr(C)]
 struct SwapHeader {
-    bootbits: [u8; 1024],      // reserved for boot sector
-    version: u32,               // swap version (1)
-    last_page: u32,             // last usable page index
-    nr_badpages: u32,           // number of bad pages
-    sws_uuid: [u8; UUID_LEN],  // UUID
+    bootbits: [u8; 1024],            // reserved for boot sector
+    version: u32,                    // swap version (1)
+    last_page: u32,                  // last usable page index
+    nr_badpages: u32,                // number of bad pages
+    sws_uuid: [u8; UUID_LEN],        // UUID
     sws_volume: [u8; MAX_LABEL_LEN], // volume label
-    padding: [u32; 117],       // padding to page boundary
-    badpages: [u32; 1],        // bad page list (variable length)
+    padding: [u32; 117],             // padding to page boundary
+    badpages: [u32; 1],              // bad page list (variable length)
 }
 
 // Swap entry in /proc/swaps style tracking
@@ -83,7 +83,8 @@ fn detect_personality(argv0: &[u8]) -> Personality {
     };
 
     // Strip .exe suffix if present
-    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe") {
+    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe")
+    {
         &basename[..basename.len() - 4]
     } else {
         basename
@@ -172,9 +173,10 @@ fn parse_mkswap_args(args: &[Vec<u8>]) -> MkswapArgs {
         } else if arg == b"-p" || arg == b"--pagesize" {
             i += 1;
             if i < args.len()
-                && let Some(ps) = parse_u64_bytes(&args[i]) {
-                    result.page_size = ps as u32;
-                }
+                && let Some(ps) = parse_u64_bytes(&args[i])
+            {
+                result.page_size = ps as u32;
+            }
         } else if arg == b"-f" || arg == b"--force" {
             result.force = true;
         } else if arg == b"-c" || arg == b"--check" {
@@ -217,9 +219,10 @@ fn parse_swapon_args(args: &[Vec<u8>]) -> SwaponArgs {
         } else if arg == b"-p" || arg == b"--priority" {
             i += 1;
             if i < args.len()
-                && let Some(p) = parse_i32_bytes(&args[i]) {
-                    result.priority = Some(p);
-                }
+                && let Some(p) = parse_i32_bytes(&args[i])
+            {
+                result.priority = Some(p);
+            }
         } else if arg == b"-d" || arg == b"--discard" {
             result.discard = true;
         } else if arg == b"-s" || arg == b"--summary" {
@@ -456,7 +459,8 @@ fn parse_proc_swaps(content: &[u8]) -> Vec<SwapEntry> {
             continue;
         }
 
-        let fields: Vec<&[u8]> = line.split(|&b| b == b' ' || b == b'\t')
+        let fields: Vec<&[u8]> = line
+            .split(|&b| b == b' ' || b == b'\t')
             .filter(|f| !f.is_empty())
             .collect();
 
@@ -502,7 +506,8 @@ fn parse_fstab(content: &[u8]) -> Vec<FstabEntry> {
             continue;
         }
 
-        let fields: Vec<&[u8]> = trimmed.split(|&b| b == b' ' || b == b'\t')
+        let fields: Vec<&[u8]> = trimmed
+            .split(|&b| b == b' ' || b == b'\t')
             .filter(|f| !f.is_empty())
             .collect();
 
@@ -511,9 +516,21 @@ fn parse_fstab(content: &[u8]) -> Vec<FstabEntry> {
                 device: fields[0].to_vec(),
                 mount_point: fields[1].to_vec(),
                 fs_type: fields[2].to_vec(),
-                options: if fields.len() > 3 { fields[3].to_vec() } else { b"defaults".to_vec() },
-                dump: if fields.len() > 4 { parse_u64_bytes(fields[4]).unwrap_or(0) as u32 } else { 0 },
-                pass: if fields.len() > 5 { parse_u64_bytes(fields[5]).unwrap_or(0) as u32 } else { 0 },
+                options: if fields.len() > 3 {
+                    fields[3].to_vec()
+                } else {
+                    b"defaults".to_vec()
+                },
+                dump: if fields.len() > 4 {
+                    parse_u64_bytes(fields[4]).unwrap_or(0) as u32
+                } else {
+                    0
+                },
+                pass: if fields.len() > 5 {
+                    parse_u64_bytes(fields[5]).unwrap_or(0) as u32
+                } else {
+                    0
+                },
             });
         }
     }
@@ -658,7 +675,13 @@ fn cmd_mkswap(args: &MkswapArgs) -> i32 {
     let device_size: u64 = 1024 * 1024 * 1024; // 1 GiB default for simulation
 
     let label_ref = args.label.as_deref();
-    match create_swap_header(device_size, label_ref, args.uuid, args.page_size, args.check) {
+    match create_swap_header(
+        device_size,
+        label_ref,
+        args.uuid,
+        args.page_size,
+        args.check,
+    ) {
         Ok(setup) => {
             // In real implementation: write header to device
             // write_all(fd, &setup.header)?;
@@ -896,9 +919,27 @@ fn parse_u64_bytes(s: &[u8]) -> Option<u64> {
                 has_digit = true;
                 result = result.checked_mul(10)?.checked_add((b - b'0') as u64)?;
             }
-            b'K' | b'k' => return if has_digit { Some(result.checked_mul(1024)?) } else { None },
-            b'M' | b'm' => return if has_digit { Some(result.checked_mul(1024 * 1024)?) } else { None },
-            b'G' | b'g' => return if has_digit { Some(result.checked_mul(1024 * 1024 * 1024)?) } else { None },
+            b'K' | b'k' => {
+                return if has_digit {
+                    Some(result.checked_mul(1024)?)
+                } else {
+                    None
+                };
+            }
+            b'M' | b'm' => {
+                return if has_digit {
+                    Some(result.checked_mul(1024 * 1024)?)
+                } else {
+                    None
+                };
+            }
+            b'G' | b'g' => {
+                return if has_digit {
+                    Some(result.checked_mul(1024 * 1024 * 1024)?)
+                } else {
+                    None
+                };
+            }
             _ => return None,
         }
     }
@@ -961,8 +1002,13 @@ fn format_i32(n: i32) -> Vec<u8> {
 }
 
 fn trim_bytes(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n').unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+    let start = s
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+        .unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
         .map(|p| p + 1)
         .unwrap_or(start);
     if start >= end { &[] } else { &s[start..end] }
@@ -1093,8 +1139,10 @@ mod tests {
 
     #[test]
     fn test_format_uuid() {
-        let uuid = [0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4,
-                     0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00];
+        let uuid = [
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ];
         let formatted = format_uuid(&uuid);
         assert_eq!(&formatted, b"550e8400-e29b-41d4-a716-446655440000");
     }
@@ -1155,13 +1203,9 @@ mod tests {
 
     #[test]
     fn test_read_swap_header() {
-        let setup = create_swap_header(
-            10 * 1024 * 1024,
-            Some(b"testlabel"),
-            None,
-            PAGE_SIZE,
-            false,
-        ).unwrap();
+        let setup =
+            create_swap_header(10 * 1024 * 1024, Some(b"testlabel"), None, PAGE_SIZE, false)
+                .unwrap();
 
         let (version, last_page, uuid, label) = read_swap_header(&setup.header).unwrap();
         assert_eq!(version, 1);
@@ -1173,7 +1217,8 @@ mod tests {
     #[test]
     fn test_create_header_with_custom_uuid() {
         let custom_uuid = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let setup = create_swap_header(1024 * 1024, None, Some(custom_uuid), PAGE_SIZE, false).unwrap();
+        let setup =
+            create_swap_header(1024 * 1024, None, Some(custom_uuid), PAGE_SIZE, false).unwrap();
         assert_eq!(setup.uuid, custom_uuid);
     }
 

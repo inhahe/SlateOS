@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_urbackup_client(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -18,7 +22,10 @@ fn run_urbackup_client(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("urbackupclientbackend v2.5 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("urbackupclientbackend v2.5 (Slate OS)");
+        return 0;
+    }
     println!("urbackupclientbackend: client daemon started");
     println!("  Server: autodiscover");
     println!("  File backup: enabled");
@@ -39,7 +46,10 @@ fn run_urbackup_ctl(args: &[String], _prog: &str) -> i32 {
         println!("  browse-backups      List available backups");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("urbackupclientctl v2.5 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("urbackupclientctl v2.5 (Slate OS)");
+        return 0;
+    }
     match args.first().map(|s| s.as_str()) {
         Some("status") => {
             println!("Status: idle");
@@ -68,7 +78,10 @@ fn run_urbackup_srv(args: &[String], _prog: &str) -> i32 {
         println!("  --no-consoletime  No console timestamps");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("urbackupsrv v2.5 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("urbackupsrv v2.5 (Slate OS)");
+        return 0;
+    }
     println!("urbackupsrv: server started");
     println!("  Web interface: http://localhost:55414");
     println!("  Clients: 4 connected");
@@ -78,7 +91,10 @@ fn run_urbackup_srv(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "urbackupclientbackend".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "urbackupclientbackend".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "urbackupclientctl" => run_urbackup_ctl(&rest, &prog),
@@ -90,7 +106,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_urbackup_client};
+    use super::{basename, run_urbackup_client, strip_ext};
 
     #[test]
     fn basename_strips_path() {

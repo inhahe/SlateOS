@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mapnik_render(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -24,10 +28,26 @@ fn run_mapnik_render(args: &[String]) -> i32 {
         println!("Mapnik 4.0.0 (Slate OS)");
         return 0;
     }
-    let stylesheet = args.iter().find(|a| a.ends_with(".xml")).map(|s| s.as_str()).unwrap_or("style.xml");
-    let output = args.iter().find(|a| a.ends_with(".png") || a.ends_with(".pdf") || a.ends_with(".svg")).map(|s| s.as_str()).unwrap_or("output.png");
-    let width = args.windows(2).find(|w| w[0] == "--width").map(|w| w[1].as_str()).unwrap_or("800");
-    let height = args.windows(2).find(|w| w[0] == "--height").map(|w| w[1].as_str()).unwrap_or("600");
+    let stylesheet = args
+        .iter()
+        .find(|a| a.ends_with(".xml"))
+        .map(|s| s.as_str())
+        .unwrap_or("style.xml");
+    let output = args
+        .iter()
+        .find(|a| a.ends_with(".png") || a.ends_with(".pdf") || a.ends_with(".svg"))
+        .map(|s| s.as_str())
+        .unwrap_or("output.png");
+    let width = args
+        .windows(2)
+        .find(|w| w[0] == "--width")
+        .map(|w| w[1].as_str())
+        .unwrap_or("800");
+    let height = args
+        .windows(2)
+        .find(|w| w[0] == "--height")
+        .map(|w| w[1].as_str())
+        .unwrap_or("600");
     println!("Mapnik 4.0.0 — rendering map");
     println!("  Stylesheet: {}", stylesheet);
     println!("  Output: {} ({}x{})", output, width, height);
@@ -43,7 +63,11 @@ fn run_mapnik_index(args: &[String]) -> i32 {
         println!("  Create spatial index for datasources");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("data.shp");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("data.shp");
     println!("Creating spatial index for: {}", file);
     println!("  1234 features indexed.");
     println!("  Index: {}.index", file);
@@ -76,7 +100,10 @@ fn run_mapnik_config(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mapnik-render".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mapnik-render".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "mapnik-index" => run_mapnik_index(&rest),
@@ -88,7 +115,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mapnik_render};
+    use super::{basename, run_mapnik_render, strip_ext};
 
     #[test]
     fn basename_strips_path() {

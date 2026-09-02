@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mcafee(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,13 +28,18 @@ fn run_mcafee(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("McAfee+ Advanced 16.0.55 R32 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("McAfee+ Advanced 16.0.55 R32 (Slate OS)");
+        return 0;
+    }
     println!("McAfee+ Advanced 16.0.55 R32 (Slate OS)");
     println!("  Brand history: McAfee Inc (1987) → Intel Security (2014) → McAfee (2017) →");
     println!("                 split 2022: McAfee (consumer) + Trellix (enterprise, w/ FireEye)");
     println!("  McAfee+ tiers: Basic, Essential, Premium, Advanced, Ultimate, Family");
     println!("  Features: AntiVirus, Firewall, Web Protection (WebAdvisor), VPN, Password Mgr,");
-    println!("            File Lock (encrypted vault), Shredder, Identity Monitoring, $1M ID coverage");
+    println!(
+        "            File Lock (encrypted vault), Shredder, Identity Monitoring, $1M ID coverage"
+    );
     println!("  Engines: signature, heuristics, behavioral, ML, Real Protect cloud lookup");
     println!("  Platforms: Windows, macOS, Android, iOS, ChromeOS");
     println!("  License: annual subscription (per device or unlimited family)");
@@ -39,7 +48,10 @@ fn run_mcafee(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mcafee".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mcafee".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mcafee(&rest, &_prog);
     process::exit(code);
@@ -47,7 +59,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mcafee};
+    use super::{basename, run_mcafee, strip_ext};
 
     #[test]
     fn basename_strips_path() {

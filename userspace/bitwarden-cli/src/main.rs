@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_desktop(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -20,7 +24,10 @@ fn run_desktop(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("bitwarden-desktop v2024.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("bitwarden-desktop v2024.1 (Slate OS)");
+        return 0;
+    }
     println!("bitwarden-desktop: password manager started");
     println!("  Vault: 120 items");
     println!("  Sync: last 10 min ago");
@@ -49,7 +56,9 @@ fn run_bw(args: &[String], _prog: &str) -> i32 {
         "status" => println!("{{\"status\":\"unlocked\",\"userEmail\":\"user@example.com\"}}"),
         "generate" => println!("Xk9#mP2$nL8@wQz4"),
         "sync" => println!("Syncing complete."),
-        "list" => println!("[{{\"name\":\"Gmail\",\"type\":1}},{{\"name\":\"GitHub\",\"type\":1}}]"),
+        "list" => {
+            println!("[{{\"name\":\"Gmail\",\"type\":1}},{{\"name\":\"GitHub\",\"type\":1}}]")
+        }
         _ => println!("bw: {}", cmd),
     }
     0
@@ -57,7 +66,10 @@ fn run_bw(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bitwarden-desktop".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bitwarden-desktop".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "bw" => run_bw(&rest, &prog),
@@ -68,7 +80,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_desktop};
+    use super::{basename, run_desktop, strip_ext};
 
     #[test]
     fn basename_strips_path() {

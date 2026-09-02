@@ -41,7 +41,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("glide-cli 0.1.0 (no-code-mobile-app-from-spreadsheet personality build)"); }
+fn print_version() {
+    println!("glide-cli 0.1.0 (no-code-mobile-app-from-spreadsheet personality build)");
+}
 
 fn run_about() {
     println!("Glide (Glide Apps, Inc.).");

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_concur(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,13 +27,18 @@ fn run_concur(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SAP Concur 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("SAP Concur 2024 (Slate OS)");
+        return 0;
+    }
     println!("SAP Concur 2024 (Slate OS)");
     println!("  Vendor: Concur Technologies, Inc. (a subsidiary of SAP SE)");
     println!("  History: founded 1993 by Steve Singh + Mike Hilton (Redmond, WA)");
     println!("          early packaged-software era (CD-ROM expense report tool!)");
     println!("          went public, then private (Steve Singh take-private)");
-    println!("          acquired by SAP Dec 2014 for $8.3B (one of SAP's biggest cloud acquisitions)");
+    println!(
+        "          acquired by SAP Dec 2014 for $8.3B (one of SAP's biggest cloud acquisitions)"
+    );
     println!("  Scale: 47,000+ customer companies, 80M+ users worldwide");
     println!("        most Fortune 500 use Concur — incumbent enterprise T&E");
     println!("  Strategy: T&E (travel + expense) integrated end-to-end with ERP/AP/Payroll/HR");
@@ -56,15 +65,22 @@ fn run_concur(args: &[String], _prog: &str) -> i32 {
     println!("    - Budget Insight (real-time spend visibility for managers)");
     println!("  Critique: notoriously bad UX — meme-tier 'Concur expense report nightmare'");
     println!("           UI feels stuck in 2010, mobile app slow + crashy");
-    println!("           Ramp / Brex / Airbase explicitly built to replace Concur for SMB/mid-market");
+    println!(
+        "           Ramp / Brex / Airbase explicitly built to replace Concur for SMB/mid-market"
+    );
     println!("           SAP integration is the only thing preventing mass enterprise migration");
-    println!("  Differentiator: deepest enterprise integrations + global compliance + travel coverage");
+    println!(
+        "  Differentiator: deepest enterprise integrations + global compliance + travel coverage"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "concur".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "concur".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_concur(&rest, &_prog);
     process::exit(code);
@@ -72,7 +88,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_concur};
+    use super::{basename, run_concur, strip_ext};
 
     #[test]
     fn basename_strips_path() {

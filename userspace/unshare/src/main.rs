@@ -38,14 +38,62 @@ const CLONE_NEWCGROUP: u64 = 0x0200_0000;
 const CLONE_NEWTIME: u64 = 0x0000_0080;
 
 const NS_TYPES: &[NsType] = &[
-    NsType { name: "mnt", short_flag: "-m", long_flag: "--mount", clone_flag: CLONE_NEWNS, description: "mount namespace" },
-    NsType { name: "uts", short_flag: "-u", long_flag: "--uts", clone_flag: CLONE_NEWUTS, description: "UTS namespace" },
-    NsType { name: "ipc", short_flag: "-i", long_flag: "--ipc", clone_flag: CLONE_NEWIPC, description: "IPC namespace" },
-    NsType { name: "net", short_flag: "-n", long_flag: "--net", clone_flag: CLONE_NEWNET, description: "network namespace" },
-    NsType { name: "pid", short_flag: "-p", long_flag: "--pid", clone_flag: CLONE_NEWPID, description: "PID namespace" },
-    NsType { name: "user", short_flag: "-U", long_flag: "--user", clone_flag: CLONE_NEWUSER, description: "user namespace" },
-    NsType { name: "cgroup", short_flag: "-C", long_flag: "--cgroup", clone_flag: CLONE_NEWCGROUP, description: "cgroup namespace" },
-    NsType { name: "time", short_flag: "-T", long_flag: "--time", clone_flag: CLONE_NEWTIME, description: "time namespace" },
+    NsType {
+        name: "mnt",
+        short_flag: "-m",
+        long_flag: "--mount",
+        clone_flag: CLONE_NEWNS,
+        description: "mount namespace",
+    },
+    NsType {
+        name: "uts",
+        short_flag: "-u",
+        long_flag: "--uts",
+        clone_flag: CLONE_NEWUTS,
+        description: "UTS namespace",
+    },
+    NsType {
+        name: "ipc",
+        short_flag: "-i",
+        long_flag: "--ipc",
+        clone_flag: CLONE_NEWIPC,
+        description: "IPC namespace",
+    },
+    NsType {
+        name: "net",
+        short_flag: "-n",
+        long_flag: "--net",
+        clone_flag: CLONE_NEWNET,
+        description: "network namespace",
+    },
+    NsType {
+        name: "pid",
+        short_flag: "-p",
+        long_flag: "--pid",
+        clone_flag: CLONE_NEWPID,
+        description: "PID namespace",
+    },
+    NsType {
+        name: "user",
+        short_flag: "-U",
+        long_flag: "--user",
+        clone_flag: CLONE_NEWUSER,
+        description: "user namespace",
+    },
+    NsType {
+        name: "cgroup",
+        short_flag: "-C",
+        long_flag: "--cgroup",
+        clone_flag: CLONE_NEWCGROUP,
+        description: "cgroup namespace",
+    },
+    NsType {
+        name: "time",
+        short_flag: "-T",
+        long_flag: "--time",
+        clone_flag: CLONE_NEWTIME,
+        description: "time namespace",
+    },
 ];
 
 // ============================================================================
@@ -223,7 +271,10 @@ fn print_help() {
     println!();
     println!("Options:");
     for ns in NS_TYPES {
-        println!("  {}, {:16}  Unshare {}", ns.short_flag, ns.long_flag, ns.description);
+        println!(
+            "  {}, {:16}  Unshare {}",
+            ns.short_flag, ns.long_flag, ns.description
+        );
     }
     println!("  -f, --fork              Fork before exec");
     println!("  -r, --map-root-user     Map current user to root in user ns");
@@ -275,11 +326,13 @@ fn cmd_unshare(args: &[String]) {
     let mut err = stderr.lock();
 
     // User namespace mapping.
-    if opts.namespaces & CLONE_NEWUSER != 0
-        && opts.map_root_user {
-            // Would write to /proc/self/uid_map and /proc/self/gid_map.
-            let _ = writeln!(err, "unshare: mapping current user to root in user namespace");
-        }
+    if opts.namespaces & CLONE_NEWUSER != 0 && opts.map_root_user {
+        // Would write to /proc/self/uid_map and /proc/self/gid_map.
+        let _ = writeln!(
+            err,
+            "unshare: mapping current user to root in user namespace"
+        );
+    }
 
     // Mount propagation.
     if opts.namespaces & CLONE_NEWNS != 0 {
@@ -289,10 +342,11 @@ fn cmd_unshare(args: &[String]) {
 
     // Time namespace offsets.
     if opts.namespaces & CLONE_NEWTIME != 0
-        && let Some(offset) = opts.monotonic {
-            // Would write to /proc/self/timens_offsets.
-            let _ = offset;
-        }
+        && let Some(offset) = opts.monotonic
+    {
+        // Would write to /proc/self/timens_offsets.
+        let _ = offset;
+    }
 
     // Build command.
     let command = if opts.command.is_empty() {
@@ -356,7 +410,12 @@ mod tests {
     fn test_clone_flags_are_powers() {
         // Each flag should be a single bit (power of 2), except CLONE_NEWTIME=0x80.
         for ns in NS_TYPES {
-            assert!(ns.clone_flag.count_ones() == 1, "Flag for {} is not a single bit: {:#x}", ns.name, ns.clone_flag);
+            assert!(
+                ns.clone_flag.count_ones() == 1,
+                "Flag for {} is not a single bit: {:#x}",
+                ns.name,
+                ns.clone_flag
+            );
         }
     }
 
@@ -427,11 +486,7 @@ mod tests {
 
     #[test]
     fn test_parse_root_dir() {
-        let args = vec![
-            "-m".to_string(),
-            "-R".to_string(),
-            "/newroot".to_string(),
-        ];
+        let args = vec!["-m".to_string(), "-R".to_string(), "/newroot".to_string()];
         let opts = parse_args(&args);
         assert_eq!(opts.root, Some("/newroot".to_string()));
     }
@@ -466,10 +521,7 @@ mod tests {
 
     #[test]
     fn test_parse_propagation() {
-        let args = vec![
-            "-m".to_string(),
-            "--propagation=shared".to_string(),
-        ];
+        let args = vec!["-m".to_string(), "--propagation=shared".to_string()];
         let opts = parse_args(&args);
         assert_eq!(opts.propagation, Some("shared".to_string()));
     }

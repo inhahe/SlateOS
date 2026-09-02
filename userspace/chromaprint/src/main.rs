@@ -29,7 +29,11 @@ fn run_fpcalc(args: Vec<String>) -> i32 {
 
     let json_mode = args.iter().any(|a| a == "-json");
     let raw_mode = args.iter().any(|a| a == "-raw");
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
 
     if files.is_empty() {
         eprintln!("ERROR: No input files.");
@@ -65,7 +69,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_fpcalc};
+    use super::run_fpcalc;
 
     #[test]
     fn help_exits_zero() {

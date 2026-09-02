@@ -23,11 +23,17 @@ fn run_gs(prog: &str, args: &[String]) -> i32 {
                 println!("Convert PostScript to PDF (Slate OS).");
                 return 0;
             }
-            let input = args.iter().find(|a| !a.starts_with('-'))
-                .map(|s| s.as_str()).unwrap_or("input.ps");
+            let input = args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("input.ps");
             let default_out = format!("{}.pdf", strip_ext(input));
-            let output = args.iter().filter(|a| !a.starts_with('-'))
-                .nth(1).map(|s| s.as_str())
+            let output = args
+                .iter()
+                .filter(|a| !a.starts_with('-'))
+                .nth(1)
+                .map(|s| s.as_str())
                 .unwrap_or(&default_out);
             println!("Converting {} -> {}", input, output);
             return 0;
@@ -38,11 +44,17 @@ fn run_gs(prog: &str, args: &[String]) -> i32 {
                 println!("Convert PDF to PostScript (Slate OS).");
                 return 0;
             }
-            let input = args.iter().find(|a| !a.starts_with('-'))
-                .map(|s| s.as_str()).unwrap_or("input.pdf");
+            let input = args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("input.pdf");
             let default_out = format!("{}.ps", strip_ext(input));
-            let output = args.iter().filter(|a| !a.starts_with('-'))
-                .nth(1).map(|s| s.as_str())
+            let output = args
+                .iter()
+                .filter(|a| !a.starts_with('-'))
+                .nth(1)
+                .map(|s| s.as_str())
                 .unwrap_or(&default_out);
             println!("Converting {} -> {}", input, output);
             return 0;
@@ -75,14 +87,19 @@ fn run_gs(prog: &str, args: &[String]) -> i32 {
         return 0;
     }
 
-    let device = args.iter().find(|a| a.starts_with("-sDEVICE="))
+    let device = args
+        .iter()
+        .find(|a| a.starts_with("-sDEVICE="))
         .map(|a| a.strip_prefix("-sDEVICE=").unwrap_or("pdfwrite"))
         .unwrap_or("pdfwrite");
-    let output = args.iter().find(|a| a.starts_with("-sOutputFile="))
+    let output = args
+        .iter()
+        .find(|a| a.starts_with("-sOutputFile="))
         .map(|a| a.strip_prefix("-sOutputFile=").unwrap_or("output"));
     let quiet = args.iter().any(|a| a == "-dQUIET");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -112,7 +129,8 @@ fn run_gs(prog: &str, args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "gs".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -122,7 +140,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gs};
+    use super::{basename, run_gs, strip_ext};
 
     #[test]
     fn basename_strips_path() {

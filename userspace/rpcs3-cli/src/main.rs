@@ -29,15 +29,21 @@ fn run_rpcs3(args: &[String]) -> i32 {
     }
 
     if args.iter().any(|a| a == "--installfw") {
-        let fw = args.windows(2).find(|w| w[0] == "--installfw")
-            .map(|w| w[1].as_str()).unwrap_or("PS3UPDAT.PUP");
+        let fw = args
+            .windows(2)
+            .find(|w| w[0] == "--installfw")
+            .map(|w| w[1].as_str())
+            .unwrap_or("PS3UPDAT.PUP");
         println!("[RPCS3] Installing firmware from: {}", fw);
         println!("[RPCS3] Firmware version: 4.90");
         println!("[RPCS3] Installation complete.");
         return 0;
     }
 
-    let game_path = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let game_path = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
 
     println!("[RPCS3] Version 0.0.31-16500-abcdef12 (Slate OS)");
     println!("[RPCS3] PPU Decoder: Recompiler (LLVM)");
@@ -70,7 +76,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_rpcs3};
+    use super::run_rpcs3;
 
     #[test]
     fn help_exits_zero() {

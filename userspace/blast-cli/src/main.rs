@@ -7,11 +7,18 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_blastn(args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+    {
         println!("USAGE");
         println!("  blastn [-query input] [-db database] [-out output]");
         println!("  -query FILE     Input FASTA file");
@@ -28,8 +35,16 @@ fn run_blastn(args: &[String]) -> i32 {
         println!(" Package: blast 2.15.0, build Jan 15 2024");
         return 0;
     }
-    let query = args.windows(2).find(|w| w[0] == "-query").map(|w| w[1].as_str()).unwrap_or("query.fasta");
-    let db = args.windows(2).find(|w| w[0] == "-db").map(|w| w[1].as_str()).unwrap_or("nt");
+    let query = args
+        .windows(2)
+        .find(|w| w[0] == "-query")
+        .map(|w| w[1].as_str())
+        .unwrap_or("query.fasta");
+    let db = args
+        .windows(2)
+        .find(|w| w[0] == "-db")
+        .map(|w| w[1].as_str())
+        .unwrap_or("nt");
     println!("BLASTN 2.15.0+");
     println!("Query: {}", query);
     println!("Database: {}", db);
@@ -45,7 +60,10 @@ fn run_blastn(args: &[String]) -> i32 {
 }
 
 fn run_blastp(args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+    {
         println!("USAGE");
         println!("  blastp [-query input] [-db database] [-out output]");
         return 0;
@@ -54,8 +72,16 @@ fn run_blastp(args: &[String]) -> i32 {
         println!("blastp: 2.15.0+");
         return 0;
     }
-    let query = args.windows(2).find(|w| w[0] == "-query").map(|w| w[1].as_str()).unwrap_or("query.fasta");
-    let db = args.windows(2).find(|w| w[0] == "-db").map(|w| w[1].as_str()).unwrap_or("nr");
+    let query = args
+        .windows(2)
+        .find(|w| w[0] == "-query")
+        .map(|w| w[1].as_str())
+        .unwrap_or("query.fasta");
+    let db = args
+        .windows(2)
+        .find(|w| w[0] == "-db")
+        .map(|w| w[1].as_str())
+        .unwrap_or("nr");
     println!("BLASTP 2.15.0+");
     println!("Query: {}", query);
     println!("Database: {}", db);
@@ -68,7 +94,11 @@ fn run_blastx(args: &[String]) -> i32 {
         println!("blastx: 2.15.0+");
         return 0;
     }
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") || args.is_empty() {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+        || args.is_empty()
+    {
         println!("USAGE: blastx [-query input] [-db database] [-out output]");
         return 0;
     }
@@ -79,7 +109,11 @@ fn run_blastx(args: &[String]) -> i32 {
 }
 
 fn run_makeblastdb(args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") || args.is_empty() {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+        || args.is_empty()
+    {
         println!("USAGE");
         println!("  makeblastdb [-in input] [-dbtype type] [-out db_name]");
         println!("  -in FILE       Input FASTA file");
@@ -92,13 +126,32 @@ fn run_makeblastdb(args: &[String]) -> i32 {
         println!("makeblastdb: 2.15.0+");
         return 0;
     }
-    let input = args.windows(2).find(|w| w[0] == "-in").map(|w| w[1].as_str()).unwrap_or("sequences.fasta");
-    let dbtype = args.windows(2).find(|w| w[0] == "-dbtype").map(|w| w[1].as_str()).unwrap_or("nucl");
-    let out = args.windows(2).find(|w| w[0] == "-out").map(|w| w[1].as_str()).unwrap_or("mydb");
+    let input = args
+        .windows(2)
+        .find(|w| w[0] == "-in")
+        .map(|w| w[1].as_str())
+        .unwrap_or("sequences.fasta");
+    let dbtype = args
+        .windows(2)
+        .find(|w| w[0] == "-dbtype")
+        .map(|w| w[1].as_str())
+        .unwrap_or("nucl");
+    let out = args
+        .windows(2)
+        .find(|w| w[0] == "-out")
+        .map(|w| w[1].as_str())
+        .unwrap_or("mydb");
     println!("Building a new DB, current ID: 0");
     println!("New DB name:   {}", out);
     println!("New DB title:  {}", input);
-    println!("Sequence type: {}", if dbtype == "prot" { "Protein" } else { "Nucleotide" });
+    println!(
+        "Sequence type: {}",
+        if dbtype == "prot" {
+            "Protein"
+        } else {
+            "Nucleotide"
+        }
+    );
     println!("Adding sequences from FASTA...");
     println!("  1234 sequences added.");
     println!("Database created successfully.");
@@ -106,7 +159,11 @@ fn run_makeblastdb(args: &[String]) -> i32 {
 }
 
 fn run_blastdbcmd(args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") || args.is_empty() {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+        || args.is_empty()
+    {
         println!("USAGE: blastdbcmd [-db database] [-entry id] [-info]");
         return 0;
     }
@@ -115,7 +172,11 @@ fn run_blastdbcmd(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-info") {
-        let db = args.windows(2).find(|w| w[0] == "-db").map(|w| w[1].as_str()).unwrap_or("nt");
+        let db = args
+            .windows(2)
+            .find(|w| w[0] == "-db")
+            .map(|w| w[1].as_str())
+            .unwrap_or("nt");
         println!("Database: {}", db);
         println!("  1,234 sequences; 456,789,012 total bases");
         println!("  Date: Jan 15 2024  12:00:00");
@@ -129,7 +190,10 @@ fn run_blastdbcmd(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "blastn".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "blastn".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "blastp" => run_blastp(&rest),
@@ -143,7 +207,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_blastn};
+    use super::{basename, run_blastn, strip_ext};
 
     #[test]
     fn basename_strips_path() {

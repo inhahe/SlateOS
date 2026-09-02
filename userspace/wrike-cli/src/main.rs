@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_wrike(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -18,32 +22,51 @@ fn run_wrike(args: &[String], _prog: &str) -> i32 {
         println!("  --team                 Team — $9.80/user/mo");
         println!("  --business             Business — $24.80/user/mo (most popular)");
         println!("  --enterprise           Enterprise — custom");
-        println!("  --pinnacle             Pinnacle — custom (advanced analytics, dependencies, BI)");
+        println!(
+            "  --pinnacle             Pinnacle — custom (advanced analytics, dependencies, BI)"
+        );
         println!("  --marketing            Wrike for Marketing (PSA-style add-on)");
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Wrike 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Wrike 2024 (Slate OS)");
+        return 0;
+    }
     println!("Wrike 2024 (Slate OS)");
     println!("  Vendor: Wrike, Inc. (San Jose, CA — owned by Citrix Systems, Symphony Tech)");
     println!("  Founders: Andrew Filev (CEO), 2006");
-    println!("          Filev started Wrike as a side project running another company (Imobix consultancy)");
+    println!(
+        "          Filev started Wrike as a side project running another company (Imobix consultancy)"
+    );
     println!("          one of earliest 'work management' (vs PM-only) positioned tools");
     println!("  Founded: 2006 in California");
     println!("          raised modest venture (~$26M) over years");
     println!("          acquired by Vista Equity Partners Jan 2019 for $800M");
     println!("          re-acquired by Citrix Feb 2021 for $2.25B (Vista 3x return)");
-    println!("          Citrix taken private Sep 2022 by Vista + Elliott (so Wrike now under Symphony Tech Group)");
+    println!(
+        "          Citrix taken private Sep 2022 by Vista + Elliott (so Wrike now under Symphony Tech Group)"
+    );
     println!("          ~30K customers, ~3M+ users, est. ~$200M ARR before Citrix");
-    println!("  Strategic position: 'enterprise work management for marketing + professional services + IT teams':");
-    println!("                    primary competitor: Asana, Monday.com, Smartsheet, ClickUp, Workfront (Adobe-owned)");
-    println!("                    Wrike's wedge: enterprise depth (custom workflows, approvals, request forms) + marketing-specific features");
-    println!("                    pitch shifted post-Citrix: 'work management for the digital workforce' (more enterprise IT angle)");
+    println!(
+        "  Strategic position: 'enterprise work management for marketing + professional services + IT teams':"
+    );
+    println!(
+        "                    primary competitor: Asana, Monday.com, Smartsheet, ClickUp, Workfront (Adobe-owned)"
+    );
+    println!(
+        "                    Wrike's wedge: enterprise depth (custom workflows, approvals, request forms) + marketing-specific features"
+    );
+    println!(
+        "                    pitch shifted post-Citrix: 'work management for the digital workforce' (more enterprise IT angle)"
+    );
     println!("                    Adobe's Workfront is closest enterprise-positioned competitor");
     println!("  Pricing (per user, transparent for SMB tiers):");
     println!("    Free — 2-5 users, basic task list");
     println!("    Team — $9.80/user/mo (custom fields, Gantt, time tracking)");
-    println!("    Business — $24.80/user/mo (most popular; project portfolios, request forms, approvals)");
+    println!(
+        "    Business — $24.80/user/mo (most popular; project portfolios, request forms, approvals)"
+    );
     println!("    Enterprise — custom (SSO, 2FA, audit, advanced security)");
     println!("    Pinnacle — custom (most expensive — adds AI workload, advanced analytics, BI)");
     println!("    Wrike for Marketing — typically Enterprise+ tier with PSA add-ons");
@@ -85,25 +108,48 @@ fn run_wrike(args: &[String], _prog: &str) -> i32 {
     println!("              Zapier + Make + native API + webhooks + custom Wrike Integrate iPaaS");
     println!("  Mobile + offline: iOS + Android apps, basic offline access");
     println!("  Customers: ~30K+ paying customers, ~3M users");
-    println!("            Hawaiian Airlines, Stanley Black & Decker, Tiffany & Co, Estée Lauder, L'Oreal");
-    println!("            Hootsuite, Sony Pictures TV, Lyft (some teams), Siemens, Verizon (departments)");
-    println!("            sweet spot: 100-5,000-employee enterprises with marketing, creative, or PS workflows");
+    println!(
+        "            Hawaiian Airlines, Stanley Black & Decker, Tiffany & Co, Estée Lauder, L'Oreal"
+    );
+    println!(
+        "            Hootsuite, Sony Pictures TV, Lyft (some teams), Siemens, Verizon (departments)"
+    );
+    println!(
+        "            sweet spot: 100-5,000-employee enterprises with marketing, creative, or PS workflows"
+    );
     println!("            historically strong: marketing teams in B2C brands");
     println!("            weaker: dev teams (Jira/Linear win), tiny SMBs (Asana/ClickUp win)");
-    println!("  Critique: UI complexity — Wrike has more features than most competitors but at the cost of intuitive UX");
-    println!("           learning curve significantly steeper than Asana or Trello (especially folder/project model)");
-    println!("           pricing opaque beyond Team/Business tiers — enterprise quotes vary wildly");
-    println!("           Pinnacle tier perception: 'we keep features for highest tier as enterprise pressure tactic'");
-    println!("           AI features lag Asana + ClickUp in marketing buzz, real depth catching up");
-    println!("           Citrix → Vista → Symphony ownership churn raises long-term roadmap concerns");
+    println!(
+        "  Critique: UI complexity — Wrike has more features than most competitors but at the cost of intuitive UX"
+    );
+    println!(
+        "           learning curve significantly steeper than Asana or Trello (especially folder/project model)"
+    );
+    println!(
+        "           pricing opaque beyond Team/Business tiers — enterprise quotes vary wildly"
+    );
+    println!(
+        "           Pinnacle tier perception: 'we keep features for highest tier as enterprise pressure tactic'"
+    );
+    println!(
+        "           AI features lag Asana + ClickUp in marketing buzz, real depth catching up"
+    );
+    println!(
+        "           Citrix → Vista → Symphony ownership churn raises long-term roadmap concerns"
+    );
     println!("           mobile app weaker than Asana, ClickUp, Monday");
-    println!("  Differentiator: deepest enterprise customization (folders/spaces/workflows/forms/approvals) + marketing-specific PSA features + Adobe Creative Cloud integration — for marketing + creative + PS teams in enterprises");
+    println!(
+        "  Differentiator: deepest enterprise customization (folders/spaces/workflows/forms/approvals) + marketing-specific PSA features + Adobe Creative Cloud integration — for marketing + creative + PS teams in enterprises"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "wrike".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "wrike".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_wrike(&rest, &_prog);
     process::exit(code);
@@ -111,7 +157,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_wrike};
+    use super::{basename, run_wrike, strip_ext};
 
     #[test]
     fn basename_strips_path() {

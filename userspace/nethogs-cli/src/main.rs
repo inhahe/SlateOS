@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_nethogs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -30,8 +34,11 @@ fn run_nethogs(args: &[String], _prog: &str) -> i32 {
         println!("nethogs 0.8.7 (Slate OS)");
         return 0;
     }
-    let device = args.iter().rfind(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("eth0");
+    let device = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("eth0");
     if args.iter().any(|a| a == "-t") {
         println!("Refreshing:");
         println!("/usr/bin/firefox/1234    0.850    2.340  KB/sec");
@@ -52,7 +59,10 @@ fn run_nethogs(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "nethogs".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "nethogs".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_nethogs(&rest, &prog);
     process::exit(code);
@@ -60,7 +70,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_nethogs};
+    use super::{basename, run_nethogs, strip_ext};
 
     #[test]
     fn basename_strips_path() {

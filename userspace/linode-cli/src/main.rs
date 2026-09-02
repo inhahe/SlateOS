@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn run_linode(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: linode-cli <COMMAND> [ACTION] [OPTIONS]");
         println!();
         println!("Linode CLI — manage Linode/Akamai cloud (Slate OS).");
@@ -58,7 +61,9 @@ fn run_linode(args: Vec<String>) -> i32 {
                 println!("│ 34567890 │ new-linode   │ us-east    │ 45.56.90.12   │ booting │");
                 println!("└──────────┴──────────────┴────────────┴───────────────┴─────────┘");
             }
-            _ => { println!("linode-cli linodes {}: see --help.", action); }
+            _ => {
+                println!("linode-cli linodes {}: see --help.", action);
+            }
         },
         "volumes" => {
             println!("┌─────────┬──────────┬──────┬────────────┬──────────┐");
@@ -85,7 +90,9 @@ fn run_linode(args: Vec<String>) -> i32 {
                 println!("│ 12345 │ my-cluster │ us-east │ 1.28        │");
                 println!("└───────┴────────────┴─────────┴─────────────┘");
             }
-            _ => { println!("linode-cli lke {}: see --help.", action); }
+            _ => {
+                println!("linode-cli lke {}: see --help.", action);
+            }
         },
         "account" => {
             println!("┌──────────────────────┬─────────────────┐");
@@ -114,7 +121,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_linode};
+    use super::run_linode;
 
     #[test]
     fn help_exits_zero() {

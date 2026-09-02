@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_gb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,7 +28,10 @@ fn run_gb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GarageBand 10.4.11 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("GarageBand 10.4.11 (Slate OS)");
+        return 0;
+    }
     println!("GarageBand 10.4.11 (Slate OS)");
     println!("  Vendor: Apple Inc. (bundled free with every Mac since 2004)");
     println!("  Origin: based on the Emagic Logic codebase (Apple acquired Emagic 2002), then");
@@ -39,7 +46,9 @@ fn run_gb(args: &[String], _prog: &str) -> i32 {
     println!("                  Learn to Play guitar/piano lessons (free downloadable courses),");
     println!("                  Live Loops (since GB 10.3), iOS-recorded tracks open natively");
     println!("  Notable users: Steve Lacy produced Internet hits on iPhone GarageBand,");
-    println!("                a song on Rihanna's ANTI album was produced entirely in GarageBand iOS,");
+    println!(
+        "                a song on Rihanna's ANTI album was produced entirely in GarageBand iOS,"
+    );
     println!("                Grimes produced demos in GarageBand");
     println!("  Use cases: beginners, songwriters, podcasters, hobbyists, kids");
     println!("  Differentiator: extremely accessible UI, free with every Apple device");
@@ -48,7 +57,10 @@ fn run_gb(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "garageband".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "garageband".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_gb(&rest, &_prog);
     process::exit(code);
@@ -56,7 +68,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gb};
+    use super::{basename, run_gb, strip_ext};
 
     #[test]
     fn basename_strips_path() {

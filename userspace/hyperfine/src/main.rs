@@ -39,7 +39,9 @@ fn run_hyperfine(args: Vec<String>) -> i32 {
         println!("  --export-markdown <FILE>     Export to Markdown");
         println!("  --export-orgmode <FILE>      Export to Emacs org-mode");
         println!("  --show-output                Show command stdout/stderr");
-        println!("  --output <WHERE>             Control command output (null/pipe/inherit/<FILE>)");
+        println!(
+            "  --output <WHERE>             Control command output (null/pipe/inherit/<FILE>)"
+        );
         println!("  --input <FILE>               Provide stdin from file");
         println!("  -n, --command-name <NAME>    Give a meaningful name to a command");
         println!("  -V, --version                Show version");
@@ -50,7 +52,8 @@ fn run_hyperfine(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let commands: Vec<&str> = args.iter()
+    let commands: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -68,7 +71,9 @@ fn run_hyperfine(args: Vec<String>) -> i32 {
 
     if commands.len() > 1 {
         println!("Benchmark 2: {}", commands[1]);
-        println!("  Time (mean +- sd):    152.3 ms +-  8.7 ms    [User: 138.1 ms, System: 12.4 ms]");
+        println!(
+            "  Time (mean +- sd):    152.3 ms +-  8.7 ms    [User: 138.1 ms, System: 12.4 ms]"
+        );
         println!("  Range (min ... max):  141.2 ms ... 168.9 ms    10 runs");
         println!();
         println!("Summary");
@@ -87,7 +92,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_hyperfine};
+    use super::run_hyperfine;
 
     #[test]
     fn help_exits_zero() {

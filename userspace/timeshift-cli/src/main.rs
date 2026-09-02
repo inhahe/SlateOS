@@ -48,7 +48,8 @@ fn run_timeshift(args: Vec<String>) -> i32 {
         println!("3    2024-01-07_10-30-00    W     Weekly auto-snapshot");
         println!("4    2024-01-01_10-30-00    M     Monthly auto-snapshot");
     } else if args.iter().any(|a| a == "--create") {
-        let comments = args.windows(2)
+        let comments = args
+            .windows(2)
             .find(|w| w[0] == "--comments")
             .map(|w| w[1].as_str())
             .unwrap_or("Manual snapshot");
@@ -94,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_timeshift};
+    use super::run_timeshift;
 
     #[test]
     fn help_exits_zero() {

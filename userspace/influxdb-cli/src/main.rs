@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn run_influx(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: influx [COMMAND] [OPTIONS]");
         println!();
         println!("influx — InfluxDB CLI (Slate OS).");
@@ -55,11 +58,16 @@ fn run_influx(args: Vec<String>) -> i32 {
                 println!("1234567890abcdef    _monitoring 168h       my-org");
             }
             "create" => {
-                let name = args.windows(2).find(|w| w[0] == "-n" || w[0] == "--name")
-                    .map(|w| w[1].as_str()).unwrap_or("new-bucket");
+                let name = args
+                    .windows(2)
+                    .find(|w| w[0] == "-n" || w[0] == "--name")
+                    .map(|w| w[1].as_str())
+                    .unwrap_or("new-bucket");
                 println!("Bucket \"{}\" created.", name);
             }
-            _ => { println!("influx bucket {}: see --help.", sub); }
+            _ => {
+                println!("influx bucket {}: see --help.", sub);
+            }
         },
         "query" => {
             println!("Result: _time                 _measurement  _field  _value");
@@ -75,14 +83,18 @@ fn run_influx(args: Vec<String>) -> i32 {
                 println!("ID                  Name");
                 println!("abcdef1234567890    my-org");
             }
-            _ => { println!("influx org {}: see --help.", sub); }
+            _ => {
+                println!("influx org {}: see --help.", sub);
+            }
         },
         "auth" => match sub {
             "list" | "" => {
                 println!("ID                  Description    User    Permissions");
                 println!("abcdef1234567890    admin token    admin   read/write");
             }
-            _ => { println!("influx auth {}: see --help.", sub); }
+            _ => {
+                println!("influx auth {}: see --help.", sub);
+            }
         },
         "delete" => {
             println!("Delete successful.");
@@ -107,7 +119,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_influx};
+    use super::run_influx;
 
     #[test]
     fn help_exits_zero() {

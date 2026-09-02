@@ -42,25 +42,42 @@ fn run_tshark(args: &[String]) -> i32 {
     }
 
     let reading = args.windows(2).any(|w| w[0] == "-r");
-    let file = args.windows(2)
+    let file = args
+        .windows(2)
         .find(|w| w[0] == "-r")
         .map(|w| w[1].as_str())
         .unwrap_or("capture.pcap");
 
     if reading {
-        println!("    1   0.000000 192.168.1.100 → 93.184.216.34  TCP      66 443 → 49152 [SYN] Seq=0 Win=65535");
-        println!("    2   0.023456 93.184.216.34  → 192.168.1.100 TCP      66 49152 → 443 [SYN, ACK] Seq=0 Ack=1");
-        println!("    3   0.023789 192.168.1.100 → 93.184.216.34  TCP      54 443 → 49152 [ACK] Seq=1 Ack=1");
+        println!(
+            "    1   0.000000 192.168.1.100 → 93.184.216.34  TCP      66 443 → 49152 [SYN] Seq=0 Win=65535"
+        );
+        println!(
+            "    2   0.023456 93.184.216.34  → 192.168.1.100 TCP      66 49152 → 443 [SYN, ACK] Seq=0 Ack=1"
+        );
+        println!(
+            "    3   0.023789 192.168.1.100 → 93.184.216.34  TCP      54 443 → 49152 [ACK] Seq=1 Ack=1"
+        );
         println!("    4   0.024012 192.168.1.100 → 93.184.216.34  TLS      234 Client Hello");
-        println!("    5   0.045678 93.184.216.34  → 192.168.1.100 TLS      1234 Server Hello, Certificate");
-        println!("    6   0.046123 192.168.1.100 → 93.184.216.34  TLS      178 Key Exchange, Change Cipher");
-        println!("    7   0.067890 93.184.216.34  → 192.168.1.100 TLS      89 Change Cipher Spec, Finished");
+        println!(
+            "    5   0.045678 93.184.216.34  → 192.168.1.100 TLS      1234 Server Hello, Certificate"
+        );
+        println!(
+            "    6   0.046123 192.168.1.100 → 93.184.216.34  TLS      178 Key Exchange, Change Cipher"
+        );
+        println!(
+            "    7   0.067890 93.184.216.34  → 192.168.1.100 TLS      89 Change Cipher Spec, Finished"
+        );
         println!("    8   0.068234 192.168.1.100 → 93.184.216.34  HTTP     567 GET / HTTP/1.1");
         println!("  (read from {})", file);
     } else {
         println!("Capturing on 'eth0'");
-        println!("    1   0.000000 192.168.1.100 → 8.8.8.8        DNS      74 Standard query A example.com");
-        println!("    2   0.015234 8.8.8.8        → 192.168.1.100 DNS      90 Standard query response A 93.184.216.34");
+        println!(
+            "    1   0.000000 192.168.1.100 → 8.8.8.8        DNS      74 Standard query A example.com"
+        );
+        println!(
+            "    2   0.015234 8.8.8.8        → 192.168.1.100 DNS      90 Standard query response A 93.184.216.34"
+        );
         println!("    3   0.016000 192.168.1.100 → 93.184.216.34  TCP      66 [SYN]");
         println!("  (press Ctrl+C to stop)");
     }
@@ -68,7 +85,8 @@ fn run_tshark(args: &[String]) -> i32 {
 }
 
 fn run_capinfos(args: &[String]) -> i32 {
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("capture.pcap");
@@ -93,7 +111,10 @@ fn run_capinfos(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("tshark"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("tshark"));
     let p = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
@@ -105,8 +126,14 @@ fn main() {
     let code = match p {
         "tshark" => run_tshark(&rest),
         "capinfos" => run_capinfos(&rest),
-        "editcap" => { println!("editcap: packet editing tool"); 0 }
-        "mergecap" => { println!("mergecap: merge pcap files"); 0 }
+        "editcap" => {
+            println!("editcap: packet editing tool");
+            0
+        }
+        "mergecap" => {
+            println!("mergecap: merge pcap files");
+            0
+        }
         _ => run_tshark(&rest),
     };
     process::exit(code);
@@ -114,7 +141,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_tshark};
+    use super::run_tshark;
 
     #[test]
     fn help_exits_zero() {

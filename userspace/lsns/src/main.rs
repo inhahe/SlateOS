@@ -72,9 +72,10 @@ fn enumerate_pids() -> Vec<u32> {
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && let Ok(pid) = name.parse::<u32>() {
-                    pids.push(pid);
-                }
+                && let Ok(pid) = name.parse::<u32>()
+            {
+                pids.push(pid);
+            }
         }
     }
     pids.sort_unstable();
@@ -101,7 +102,9 @@ fn read_proc_uid(pid: u32) -> u32 {
     if let Ok(content) = fs::read_to_string(format!("/proc/{pid}/status")) {
         for line in content.lines() {
             if let Some(val) = line.strip_prefix("Uid:") {
-                return val.split_whitespace().next()
+                return val
+                    .split_whitespace()
+                    .next()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             }
@@ -116,9 +119,10 @@ fn uid_to_name(uid: u32) -> String {
             let fields: Vec<&str> = line.split(':').collect();
             if fields.len() >= 3
                 && let Ok(file_uid) = fields[2].parse::<u32>()
-                    && file_uid == uid {
-                        return fields[0].to_string();
-                    }
+                && file_uid == uid
+            {
+                return fields[0].to_string();
+            }
         }
     }
     uid.to_string()
@@ -161,14 +165,23 @@ fn collect_namespaces(opts: &Options) -> Vec<NsInfo> {
         }
     }
 
-    let mut result: Vec<NsInfo> = ns_map.into_iter().map(|((ns_type, ns_inode), (nprocs, pid, uid, user, command))| {
-        NsInfo { ns_type, ns_inode, nprocs, pid, uid, user, command }
-    }).collect();
+    let mut result: Vec<NsInfo> = ns_map
+        .into_iter()
+        .map(
+            |((ns_type, ns_inode), (nprocs, pid, uid, user, command))| NsInfo {
+                ns_type,
+                ns_inode,
+                nprocs,
+                pid,
+                uid,
+                user,
+                command,
+            },
+        )
+        .collect();
 
     // Sort by namespace type, then inode.
-    result.sort_by(|a, b| {
-        a.ns_type.cmp(&b.ns_type).then(a.ns_inode.cmp(&b.ns_inode))
-    });
+    result.sort_by(|a, b| a.ns_type.cmp(&b.ns_type).then(a.ns_inode.cmp(&b.ns_inode)));
 
     result
 }
@@ -178,7 +191,14 @@ fn collect_namespaces(opts: &Options) -> Vec<NsInfo> {
 // ============================================================================
 
 fn default_columns() -> Vec<String> {
-    vec!["NS".into(), "TYPE".into(), "NPROCS".into(), "PID".into(), "USER".into(), "COMMAND".into()]
+    vec![
+        "NS".into(),
+        "TYPE".into(),
+        "NPROCS".into(),
+        "PID".into(),
+        "USER".into(),
+        "COMMAND".into(),
+    ]
 }
 
 fn column_value(ns: &NsInfo, col: &str) -> String {
@@ -195,19 +215,27 @@ fn column_value(ns: &NsInfo, col: &str) -> String {
 }
 
 fn print_table(out: &mut io::StdoutLock<'_>, entries: &[NsInfo], opts: &Options) {
-    let cols = if opts.columns.is_empty() { default_columns() } else { opts.columns.clone() };
+    let cols = if opts.columns.is_empty() {
+        default_columns()
+    } else {
+        opts.columns.clone()
+    };
     let mut widths: Vec<usize> = cols.iter().map(|c| c.len()).collect();
 
     for ns in entries {
         for (i, col) in cols.iter().enumerate() {
             let val = column_value(ns, col);
-            if val.len() > widths[i] { widths[i] = val.len(); }
+            if val.len() > widths[i] {
+                widths[i] = val.len();
+            }
         }
     }
 
     if !opts.no_header {
         for (i, col) in cols.iter().enumerate() {
-            if i > 0 { let _ = write!(out, " "); }
+            if i > 0 {
+                let _ = write!(out, " ");
+            }
             let _ = write!(out, "{:>width$}", col, width = widths[i]);
         }
         let _ = writeln!(out);
@@ -215,7 +243,9 @@ fn print_table(out: &mut io::StdoutLock<'_>, entries: &[NsInfo], opts: &Options)
 
     for ns in entries {
         for (i, col) in cols.iter().enumerate() {
-            if i > 0 { let _ = write!(out, " "); }
+            if i > 0 {
+                let _ = write!(out, " ");
+            }
             let val = column_value(ns, col);
             let _ = write!(out, "{:>width$}", val, width = widths[i]);
         }
@@ -228,15 +258,22 @@ fn print_json(out: &mut io::StdoutLock<'_>, entries: &[NsInfo]) {
     let _ = writeln!(out, "  \"namespaces\": [");
     for (i, ns) in entries.iter().enumerate() {
         let comma = if i + 1 < entries.len() { "," } else { "" };
-        let _ = writeln!(out, "    {{\"ns\": {}, \"type\": \"{}\", \"nprocs\": {}, \"pid\": {}, \"user\": \"{}\", \"command\": \"{}\"}}{comma}",
-            ns.ns_inode, ns.ns_type, ns.nprocs, ns.pid, ns.user, ns.command);
+        let _ = writeln!(
+            out,
+            "    {{\"ns\": {}, \"type\": \"{}\", \"nprocs\": {}, \"pid\": {}, \"user\": \"{}\", \"command\": \"{}\"}}{comma}",
+            ns.ns_inode, ns.ns_type, ns.nprocs, ns.pid, ns.user, ns.command
+        );
     }
     let _ = writeln!(out, "  ]");
     let _ = writeln!(out, "}}");
 }
 
 fn print_raw(out: &mut io::StdoutLock<'_>, entries: &[NsInfo], opts: &Options) {
-    let cols = if opts.columns.is_empty() { default_columns() } else { opts.columns.clone() };
+    let cols = if opts.columns.is_empty() {
+        default_columns()
+    } else {
+        opts.columns.clone()
+    };
     if !opts.no_header {
         let _ = writeln!(out, "{}", cols.join(" "));
     }
@@ -271,7 +308,9 @@ fn main() {
                 println!("List information about namespaces.");
                 println!();
                 println!("Options:");
-                println!("  -t, --type TYPE    Show only namespaces of TYPE (mnt,uts,ipc,pid,net,user,cgroup,time)");
+                println!(
+                    "  -t, --type TYPE    Show only namespaces of TYPE (mnt,uts,ipc,pid,net,user,cgroup,time)"
+                );
                 println!("  -p, --task PID     Show namespaces for PID only");
                 println!("  -J, --json         JSON output");
                 println!("  -r, --raw          Raw output");
@@ -287,7 +326,9 @@ fn main() {
             }
             "-t" | "--type" => {
                 i += 1;
-                if i < args.len() { opts.type_filter = Some(args[i].clone()); }
+                if i < args.len() {
+                    opts.type_filter = Some(args[i].clone());
+                }
             }
             "-p" | "--task" => {
                 i += 1;
@@ -304,7 +345,10 @@ fn main() {
             "-o" | "--output" => {
                 i += 1;
                 if i < args.len() {
-                    opts.columns = args[i].split(',').map(|s| s.trim().to_uppercase()).collect();
+                    opts.columns = args[i]
+                        .split(',')
+                        .map(|s| s.trim().to_uppercase())
+                        .collect();
                 }
             }
             other => {

@@ -8,7 +8,11 @@ use std::env;
 use std::process;
 
 fn run_ant(args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") || args.is_empty() {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+        || args.is_empty()
+    {
         println!("Usage: ant [OPTIONS] [TARGET [TARGET ...]]");
         println!("Apache Ant(TM) version 1.10.14 (Slate OS)");
         println!();
@@ -46,45 +50,86 @@ fn run_ant(args: &[String]) -> i32 {
         return 0;
     }
     let quiet = args.iter().any(|a| a == "-quiet" || a == "-q");
-    let targets: Vec<&str> = args.iter()
+    let targets: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
-    let actual_targets = if targets.is_empty() { vec!["build"] } else { targets };
+    let actual_targets = if targets.is_empty() {
+        vec!["build"]
+    } else {
+        targets
+    };
     println!("Buildfile: build.xml");
     for target in &actual_targets {
         match *target {
             "init" => {
-                if !quiet { println!("\ninit:"); }
-                if !quiet { println!("    [mkdir] Created dir: build/classes"); }
+                if !quiet {
+                    println!("\ninit:");
+                }
+                if !quiet {
+                    println!("    [mkdir] Created dir: build/classes");
+                }
             }
             "compile" | "build" => {
-                if !quiet { println!("\ninit:"); }
-                if !quiet { println!("\ncompile:"); }
-                if !quiet { println!("    [javac] Compiling 15 source files to build/classes"); }
+                if !quiet {
+                    println!("\ninit:");
+                }
+                if !quiet {
+                    println!("\ncompile:");
+                }
+                if !quiet {
+                    println!("    [javac] Compiling 15 source files to build/classes");
+                }
             }
             "test" => {
-                if !quiet { println!("\ntest:"); }
-                if !quiet { println!("    [junit] Running com.example.AppTest"); }
-                if !quiet { println!("    [junit] Tests run: 12, Failures: 0, Errors: 0, Time: 0.234s"); }
+                if !quiet {
+                    println!("\ntest:");
+                }
+                if !quiet {
+                    println!("    [junit] Running com.example.AppTest");
+                }
+                if !quiet {
+                    println!("    [junit] Tests run: 12, Failures: 0, Errors: 0, Time: 0.234s");
+                }
             }
             "jar" => {
-                if !quiet { println!("\njar:"); }
-                if !quiet { println!("    [jar] Building jar: dist/myapp.jar"); }
+                if !quiet {
+                    println!("\njar:");
+                }
+                if !quiet {
+                    println!("    [jar] Building jar: dist/myapp.jar");
+                }
             }
             "clean" => {
-                if !quiet { println!("\nclean:"); }
-                if !quiet { println!("   [delete] Deleting directory build/"); }
-                if !quiet { println!("   [delete] Deleting directory dist/"); }
+                if !quiet {
+                    println!("\nclean:");
+                }
+                if !quiet {
+                    println!("   [delete] Deleting directory build/");
+                }
+                if !quiet {
+                    println!("   [delete] Deleting directory dist/");
+                }
             }
             "dist" => {
-                if !quiet { println!("\ndist:"); }
-                if !quiet { println!("    [mkdir] Created dir: dist"); }
-                if !quiet { println!("    [jar] Building jar: dist/myapp-1.0.jar"); }
-                if !quiet { println!("    [copy] Copying 3 files to dist/lib"); }
+                if !quiet {
+                    println!("\ndist:");
+                }
+                if !quiet {
+                    println!("    [mkdir] Created dir: dist");
+                }
+                if !quiet {
+                    println!("    [jar] Building jar: dist/myapp-1.0.jar");
+                }
+                if !quiet {
+                    println!("    [copy] Copying 3 files to dist/lib");
+                }
             }
             _ => {
-                if !quiet { println!("\n{}:", target); }
+                if !quiet {
+                    println!("\n{}:", target);
+                }
             }
         }
     }
@@ -103,7 +148,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ant};
+    use super::run_ant;
 
     #[test]
     fn help_exits_zero() {

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_duf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -17,11 +21,15 @@ fn run_duf(args: &[String], _prog: &str) -> i32 {
         println!();
         println!("Options:");
         println!("  -all                 Show all filesystems");
-        println!("  -hide TYPE           Hide filesystems (local, network, fuse, special, loops, binds)");
+        println!(
+            "  -hide TYPE           Hide filesystems (local, network, fuse, special, loops, binds)"
+        );
         println!("  -only TYPE           Only show filesystems of type");
         println!("  -inodes              Show inode info");
         println!("  -json                JSON output");
-        println!("  -output FIELDS       Output fields (mountpoint,fstype,size,used,avail,usage,inodes,...)");
+        println!(
+            "  -output FIELDS       Output fields (mountpoint,fstype,size,used,avail,usage,inodes,...)"
+        );
         println!("  -sort FIELD          Sort by field");
         println!("  -style STYLE         Style (unicode, ascii)");
         println!("  -theme THEME         Theme (dark, light)");
@@ -35,7 +43,9 @@ fn run_duf(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-json") {
-        println!("[{{\"device\":\"/dev/sda1\",\"mount_point\":\"/\",\"fs_type\":\"ext4\",\"size\":536870912000,\"used\":128849018880,\"avail\":380461711360}}]");
+        println!(
+            "[{{\"device\":\"/dev/sda1\",\"mount_point\":\"/\",\"fs_type\":\"ext4\",\"size\":536870912000,\"used\":128849018880,\"avail\":380461711360}}]"
+        );
         return 0;
     }
     println!("╭──────────────────────────────────────────────────────────────╮");
@@ -53,7 +63,10 @@ fn run_duf(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "duf".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "duf".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_duf(&rest, &prog);
     process::exit(code);
@@ -61,7 +74,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_duf};
+    use super::{basename, run_duf, strip_ext};
 
     #[test]
     fn basename_strips_path() {

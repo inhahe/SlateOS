@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_cyberark(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -14,7 +18,9 @@ fn run_cyberark(args: &[String], _prog: &str) -> i32 {
         println!("CyberArk (Slate OS) — privileged access management market leader (NASDAQ:CYBR)");
         println!();
         println!("Options:");
-        println!("  --pam                  Privileged Access Manager (PAM Self-Hosted + Privilege Cloud)");
+        println!(
+            "  --pam                  Privileged Access Manager (PAM Self-Hosted + Privilege Cloud)"
+        );
         println!("  --secretsmanager       Conjur Secrets Manager (formerly Conjur Enterprise)");
         println!("  --workforce            Workforce Identity (Idaptive acquisition 2020)");
         println!("  --secureweb            Secure Web Sessions (privileged web access)");
@@ -22,9 +28,14 @@ fn run_cyberark(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("CyberArk 2024 (Slate OS) — cyberark CLI (REST + PSM-CLI)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("CyberArk 2024 (Slate OS) — cyberark CLI (REST + PSM-CLI)");
+        return 0;
+    }
     println!("CyberArk 2024 (Slate OS) — Privileged Access Management Market Leader");
-    println!("  Vendor: CyberArk Software Ltd. (Newton, MA US HQ; Petah Tikva, Israel — NASDAQ: CYBR)");
+    println!(
+        "  Vendor: CyberArk Software Ltd. (Newton, MA US HQ; Petah Tikva, Israel — NASDAQ: CYBR)"
+    );
     println!("  Founders: Udi Mokady + Alon Cohen, 1999");
     println!("          Udi Mokady: CEO 1999-2023 (24 years!), CISO before founding");
     println!("          Alon Cohen: CTO co-founder, cybersecurity engineer");
@@ -41,11 +52,21 @@ fn run_cyberark(args: &[String], _prog: &str) -> i32 {
     println!("    Cash flow: positive, growing margins");
     println!("    Strong free cash flow, premium valuation in identity sector");
     println!("  Strategic position: 'PAM (Privileged Access Management) market leader':");
-    println!("                    pitch: 'protect the privileged credentials, secrets, and access — the highest-value targets'");
-    println!("                    target: Fortune 1000, government, financial services, healthcare, critical infrastructure");
-    println!("                    primary competitor: Delinea (formerly Thycotic + Centrify merged), BeyondTrust, Saviynt");
-    println!("                    secondary: HashiCorp Vault (secrets), AWS Secrets Manager, Microsoft Entra PIM");
-    println!("                    CyberArk wedge: PAM category leader (Gartner MQ #1 every year since 2014)");
+    println!(
+        "                    pitch: 'protect the privileged credentials, secrets, and access — the highest-value targets'"
+    );
+    println!(
+        "                    target: Fortune 1000, government, financial services, healthcare, critical infrastructure"
+    );
+    println!(
+        "                    primary competitor: Delinea (formerly Thycotic + Centrify merged), BeyondTrust, Saviynt"
+    );
+    println!(
+        "                    secondary: HashiCorp Vault (secrets), AWS Secrets Manager, Microsoft Entra PIM"
+    );
+    println!(
+        "                    CyberArk wedge: PAM category leader (Gartner MQ #1 every year since 2014)"
+    );
     println!("                    + Conjur secrets manager for DevOps");
     println!("                    + Endpoint Privilege Manager for least-privilege endpoint");
     println!("                    + post-Idaptive expansion into workforce identity");
@@ -114,14 +135,18 @@ fn run_cyberark(args: &[String], _prog: &str) -> i32 {
     println!("       - Bring them into the vault, rotate, audit");
     println!("       - 'Find every privileged credential you didn't know existed'");
     println!("  The PAM market dominance:");
-    println!("    - Gartner Magic Quadrant for PAM: CyberArk in upper-right LEADER every year since launch (2018)");
+    println!(
+        "    - Gartner Magic Quadrant for PAM: CyberArk in upper-right LEADER every year since launch (2018)"
+    );
     println!("    - Forrester Wave PAM: CyberArk Leader every wave");
     println!("    - KuppingerCole PAM Leadership Compass: Overall Leader");
     println!("    - ~50% PAM market share (commonly cited)");
     println!("    - The 800-pound gorilla in PAM");
     println!("    - Decade-plus head start in PAM compliance + audit framework");
     println!("  The Israeli cybersecurity heritage:");
-    println!("    - CyberArk one of Israel's largest cybersecurity exports (alongside Check Point, Palo Alto, Wiz)");
+    println!(
+        "    - CyberArk one of Israel's largest cybersecurity exports (alongside Check Point, Palo Alto, Wiz)"
+    );
     println!("    - R&D centered in Petah Tikva (Tel Aviv tech hub)");
     println!("    - Founded out of Israeli cyber talent (former IDF Unit 8200 reservists common)");
     println!("    - 'Israeli cybersecurity excellence' brand");
@@ -141,9 +166,13 @@ fn run_cyberark(args: &[String], _prog: &str) -> i32 {
     println!("    - DLT: HashiCorp Vault co-existence (Conjur OSS migration option)");
     println!("  CyberArk CLI usage:");
     println!("    # REST API examples:");
-    println!("    curl -X POST https://cyberark.example.com/PasswordVault/API/auth/Cyberark/Logon \\");
+    println!(
+        "    curl -X POST https://cyberark.example.com/PasswordVault/API/auth/Cyberark/Logon \\"
+    );
     println!("         -d '{{\"username\":\"admin\",\"password\":\"...\"}}'");
-    println!("    curl -H 'Authorization: <token>' https://cyberark.example.com/PasswordVault/API/Accounts");
+    println!(
+        "    curl -H 'Authorization: <token>' https://cyberark.example.com/PasswordVault/API/Accounts"
+    );
     println!("    # Conjur CLI:");
     println!("    conjur init -u https://conjur.example.com -a my-account");
     println!("    conjur login -i admin -p <password>");
@@ -175,13 +204,18 @@ fn run_cyberark(args: &[String], _prog: &str) -> i32 {
     println!("           Idaptive workforce identity less competitive than Okta + Ping + Entra");
     println!("           upgrades + migrations are heavy lifts");
     println!("           Cloud-native DX feels bolted on (vs Vault's API-first heritage)");
-    println!("  Differentiator: PAM market leader since 1999 (Israel founded, US HQ Newton MA, NASDAQ:CYBR IPO Sep 2014, ~$895M revenue, Gartner MQ Leader every year since 2018) + Digital Vault patented vaulted credential storage (FIPS 140-2) + Privileged Access Manager Self-Hosted (the flagship vault + CPM password rotation + PSM session manager + PTA threat analytics) + Privilege Cloud (SaaS PAM) + Conjur Secrets Manager (acquired 2017, DevOps + Kubernetes secrets, competes with HashiCorp Vault) + Endpoint Privilege Manager (EPM, least-privilege endpoint) + Idaptive Workforce Identity (acquired 2020 $70M, SSO + MFA) + Secure Web Sessions (privileged web admin recording) + Vendor PAM + Service Account Manager + Identity Security Insights + Udi Mokady founder/CEO 1999-2023 + Matt Cohen CEO 2023+ + 9000+ customers + ~50% Fortune 500 + JPMorgan/Citi/Wells/HSBC/Lockheed/Raytheon/DoD/DHS/Pfizer/Shell-proven + 750+ marketplace integrations + Terraform provider + SAML/OIDC/Kerberos/AD auth + SIEM/SOAR/ITSM integrations + Israeli cybersecurity excellence heritage (alongside Check Point, Palo Alto, Wiz) + critical infrastructure (water, power, transit) + FedRAMP authorized + the original 'Digital Vault' patent — the PAM category-defining vendor that protects the privileged credentials, secrets, and sessions that are the highest-value targets in any breach");
+    println!(
+        "  Differentiator: PAM market leader since 1999 (Israel founded, US HQ Newton MA, NASDAQ:CYBR IPO Sep 2014, ~$895M revenue, Gartner MQ Leader every year since 2018) + Digital Vault patented vaulted credential storage (FIPS 140-2) + Privileged Access Manager Self-Hosted (the flagship vault + CPM password rotation + PSM session manager + PTA threat analytics) + Privilege Cloud (SaaS PAM) + Conjur Secrets Manager (acquired 2017, DevOps + Kubernetes secrets, competes with HashiCorp Vault) + Endpoint Privilege Manager (EPM, least-privilege endpoint) + Idaptive Workforce Identity (acquired 2020 $70M, SSO + MFA) + Secure Web Sessions (privileged web admin recording) + Vendor PAM + Service Account Manager + Identity Security Insights + Udi Mokady founder/CEO 1999-2023 + Matt Cohen CEO 2023+ + 9000+ customers + ~50% Fortune 500 + JPMorgan/Citi/Wells/HSBC/Lockheed/Raytheon/DoD/DHS/Pfizer/Shell-proven + 750+ marketplace integrations + Terraform provider + SAML/OIDC/Kerberos/AD auth + SIEM/SOAR/ITSM integrations + Israeli cybersecurity excellence heritage (alongside Check Point, Palo Alto, Wiz) + critical infrastructure (water, power, transit) + FedRAMP authorized + the original 'Digital Vault' patent — the PAM category-defining vendor that protects the privileged credentials, secrets, and sessions that are the highest-value targets in any breach"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "cyberark".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "cyberark".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_cyberark(&rest, &_prog);
     process::exit(code);
@@ -189,7 +223,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cyberark};
+    use super::{basename, run_cyberark, strip_ext};
 
     #[test]
     fn basename_strips_path() {

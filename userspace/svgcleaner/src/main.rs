@@ -52,7 +52,8 @@ fn run_svgcleaner(args: Vec<String>) -> i32 {
     let quiet = args.iter().any(|a| a == "--quiet");
     let multipass = args.iter().any(|a| a == "--multipass");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -80,7 +81,10 @@ fn run_svgcleaner(args: Vec<String>) -> i32 {
         if output == "-" {
             println!("  Result written to stdout");
         } else {
-            println!("  Output: {} (45,230 -> 36,891 bytes, 18.44% reduction)", output);
+            println!(
+                "  Output: {} (45,230 -> 36,891 bytes, 18.44% reduction)",
+                output
+            );
         }
     }
     0
@@ -95,7 +99,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_svgcleaner};
+    use super::run_svgcleaner;
 
     #[test]
     fn help_exits_zero() {

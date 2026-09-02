@@ -17,7 +17,9 @@ fn run_r(args: Vec<String>) -> i32 {
         println!("  --no-save        Don't save workspace");
         println!("  --restore        Restore saved workspace");
         println!("  --no-restore     Don't restore workspace");
-        println!("  --vanilla        Combine --no-save --no-restore --no-site-file --no-init-file --no-environ");
+        println!(
+            "  --vanilla        Combine --no-save --no-restore --no-site-file --no-init-file --no-environ"
+        );
         println!("  -e expr          Execute expression");
         println!("  -f file          Execute file");
         println!("  --quiet          Don't print startup message");
@@ -30,7 +32,9 @@ fn run_r(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let exec_expr = args.iter().position(|a| a == "-e")
+    let exec_expr = args
+        .iter()
+        .position(|a| a == "-e")
         .and_then(|i| args.get(i + 1));
     if let Some(expr) = exec_expr {
         println!("> {}", expr);
@@ -67,14 +71,19 @@ fn run_rscript(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let exec_expr = args.iter().position(|a| a == "-e")
+    let exec_expr = args
+        .iter()
+        .position(|a| a == "-e")
         .and_then(|i| args.get(i + 1));
     if let Some(expr) = exec_expr {
         println!("[1] ({})", expr);
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(f) = file {
         println!("(running script: {})", f);
     } else {
@@ -91,7 +100,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -106,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_r};
+    use super::run_r;
 
     #[test]
     fn help_exits_zero() {

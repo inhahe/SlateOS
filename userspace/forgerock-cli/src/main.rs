@@ -5,16 +5,24 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_forgerock(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: forgerock [OPTIONS]");
-        println!("ForgeRock (Slate OS) — identity platform (now part of Ping Identity, Thoma Bravo)");
+        println!(
+            "ForgeRock (Slate OS) — identity platform (now part of Ping Identity, Thoma Bravo)"
+        );
         println!();
         println!("Options:");
-        println!("  --identitycloud        ForgeRock Identity Cloud (SaaS, integrating with PingOne)");
+        println!(
+            "  --identitycloud        ForgeRock Identity Cloud (SaaS, integrating with PingOne)"
+        );
         println!("  --am                   Access Management (descendant of Sun OpenAM)");
         println!("  --idm                  Identity Management (descendant of Sun OpenIDM)");
         println!("  --ds                   Directory Services (descendant of Sun OpenDJ)");
@@ -22,14 +30,25 @@ fn run_forgerock(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ForgeRock 2024 (Slate OS) — forgerock-cli (Identity Cloud + AM admin)"); return 0; }
-    println!("ForgeRock 2024 (Slate OS) — Identity Platform (Sun OpenAM Heritage, Now Ping Identity)");
-    println!("  Vendor: ForgeRock Inc. (San Francisco, CA + Bristol, UK — now part of Ping Identity / Thoma Bravo)");
+    if args.iter().any(|a| a == "--version") {
+        println!("ForgeRock 2024 (Slate OS) — forgerock-cli (Identity Cloud + AM admin)");
+        return 0;
+    }
+    println!(
+        "ForgeRock 2024 (Slate OS) — Identity Platform (Sun OpenAM Heritage, Now Ping Identity)"
+    );
+    println!(
+        "  Vendor: ForgeRock Inc. (San Francisco, CA + Bristol, UK — now part of Ping Identity / Thoma Bravo)"
+    );
     println!("  Founders: Lasse Andresen + Jamie Nelson + Hermann Wittmann + others, 2010");
     println!("          Lasse Andresen: Norwegian, ex-Sun Microsystems identity engineer");
     println!("          Jamie Nelson: ex-Sun identity engineer");
-    println!("          Founded when Oracle acquired Sun (Apr 2009) + dropped Sun's open identity stack");
-    println!("          'When Oracle killed Sun's open-source identity stack, ForgeRock forked it'");
+    println!(
+        "          Founded when Oracle acquired Sun (Apr 2009) + dropped Sun's open identity stack"
+    );
+    println!(
+        "          'When Oracle killed Sun's open-source identity stack, ForgeRock forked it'"
+    );
     println!("          The forks: OpenAM, OpenIDM, OpenDJ, OpenIG");
     println!("          Built the company around continuing + commercializing the open Sun stack");
     println!("          Bristol UK + Norway + San Francisco distributed engineering");
@@ -47,18 +66,32 @@ fn run_forgerock(args: &[String], _prog: &str) -> i32 {
     println!("    - 2018: ForgeRock Identity Cloud SaaS launched");
     println!("    - 2021: IPO NYSE:FORG");
     println!("    - 2023: Thoma Bravo acquisition + Ping merger announced");
-    println!("    - 'ForgeRock' name = forging a new path from the rock-solid Sun identity heritage");
+    println!(
+        "    - 'ForgeRock' name = forging a new path from the rock-solid Sun identity heritage"
+    );
     println!("  Strategic position (pre-merger, now subsumed):");
-    println!("                    pitch (then): 'next-gen identity built on proven Sun open source heritage'");
-    println!("                    target: digital identity at scale (CIAM, IoT, employee, partner)");
-    println!("                    primary competitor: Okta, Ping Identity, Microsoft Entra, ForgeRock-now-Ping");
+    println!(
+        "                    pitch (then): 'next-gen identity built on proven Sun open source heritage'"
+    );
+    println!(
+        "                    target: digital identity at scale (CIAM, IoT, employee, partner)"
+    );
+    println!(
+        "                    primary competitor: Okta, Ping Identity, Microsoft Entra, ForgeRock-now-Ping"
+    );
     println!("                    secondary: Auth0, SAP IDS, Salesforce Identity");
-    println!("                    ForgeRock wedge: CIAM scale + identity tree visual flows + AI/ML insights");
+    println!(
+        "                    ForgeRock wedge: CIAM scale + identity tree visual flows + AI/ML insights"
+    );
     println!("                    + the only platform built from open-source identity heritage");
     println!("                    + intelligent authentication trees (drag-and-drop flow builder)");
     println!("                    + Norway/UK engineering + global open-source roots");
-    println!("                    Now: 'ForgeRock products being integrated into Ping Identity portfolio'");
-    println!("                    Post-merger combined entity: 'largest enterprise IDaaS outside Okta + Microsoft'");
+    println!(
+        "                    Now: 'ForgeRock products being integrated into Ping Identity portfolio'"
+    );
+    println!(
+        "                    Post-merger combined entity: 'largest enterprise IDaaS outside Okta + Microsoft'"
+    );
     println!("  Pricing (was, pre-merger):");
     println!("    Identity Cloud: ~$1-10/identity/year (CIAM tier-based)");
     println!("    AM/IDM/DS on-prem: per-host or per-identity subscription");
@@ -110,7 +143,9 @@ fn run_forgerock(args: &[String], _prog: &str) -> i32 {
     println!("       - Competes with: SailPoint AI Outliers, Saviynt");
     println!("    7. Intelligent Authentication Trees (the differentiator):");
     println!("       - Visual flow builder for auth journeys");
-    println!("       - Drag-and-drop nodes: 'Username? -> Password? -> MFA? -> Risk score? -> Allow/Deny'");
+    println!(
+        "       - Drag-and-drop nodes: 'Username? -> Password? -> MFA? -> Risk score? -> Allow/Deny'"
+    );
     println!("       - Conditional branching, A/B testing, progressive profiling");
     println!("       - One of the most flexible auth journey builders on the market");
     println!("       - 'Trees' became a buzzword in identity orchestration");
@@ -127,11 +162,17 @@ fn run_forgerock(args: &[String], _prog: &str) -> i32 {
     println!("  The Sun heritage (the open-source roots):");
     println!("    - Sun Microsystems had a strong identity team in early 2000s");
     println!("    - OpenSSO (later OpenAM) was THE open SAML federation server");
-    println!("    - When Oracle acquired Sun 2009 + slowed Sun's open identity development, ex-Sun engineers feared the projects would die");
-    println!("    - ForgeRock forked and commercialized: 'we'll keep the open identity stack alive'");
+    println!(
+        "    - When Oracle acquired Sun 2009 + slowed Sun's open identity development, ex-Sun engineers feared the projects would die"
+    );
+    println!(
+        "    - ForgeRock forked and commercialized: 'we'll keep the open identity stack alive'"
+    );
     println!("    - For 13 years, ForgeRock = commercial steward of Sun open identity heritage");
     println!("    - Massive customer install base from Sun era — telcos, governments, banks");
-    println!("    - 'When you have a Sun identity install, you eventually become a ForgeRock customer'");
+    println!(
+        "    - 'When you have a Sun identity install, you eventually become a ForgeRock customer'"
+    );
     println!("  The intelligent authentication trees (the killer feature):");
     println!("    - Visual flow builder for any auth journey");
     println!("    - 'Login -> Risk score -> if risky, MFA; if very risky, deny'");
@@ -191,13 +232,18 @@ fn run_forgerock(args: &[String], _prog: &str) -> i32 {
     println!("           migration to PingOne creates uncertainty for existing customers");
     println!("           Identity Gateway less popular than dedicated API gateways");
     println!("           Autonomous Identity less mature than SailPoint AI Outliers");
-    println!("  Differentiator: Sun OpenAM/OpenIDM/OpenDJ/OpenIG heritage (founded 2010 by ex-Sun engineers Lasse Andresen + Jamie Nelson when Oracle slowed Sun's open identity development after $7.4B Sun acq, ForgeRock forked + commercialized to keep the open identity stack alive) + 4-component platform (Access Management for SSO/MFA/federation, Identity Management for provisioning/sync, Directory Services for LDAP-scale directories, Identity Gateway for API/legacy proxy) + Identity Cloud SaaS (2018+) + Autonomous Identity (ML access analytics) + Intelligent Authentication Trees (drag-and-drop visual auth journey builder, the killer feature imitated by Okta Workflows + Auth0 Actions + PingOne DaVinci) + Identity Edge for IoT (billions of devices) + ForgeRock Authenticator mobile MFA + IPO Sep 2021 NYSE:FORG $275M + Thoma Bravo $2.3B Aug 2023 acquisition + merger with Ping Identity announced (Andre Durand returned as CEO of combined entity, ForgeRock products integrating into Ping portfolio) + BBC/Toyota/Geico/Comcast/T-Mobile/RBC/Lloyds/Telia/Telenor/Vodafone-proven + Norwegian government BankID + 1300+ enterprise customers + 80+ IDM connectors + Java-based + frodo open-source CLI + LDAPv3 directory scale to billions of identities + UK + Norway engineering heritage + the bridge from Sun's open identity legacy to modern cloud IDaaS — now subsumed into Ping Identity but still the visual auth orchestration leader and the commercial steward of Sun's identity heritage");
+    println!(
+        "  Differentiator: Sun OpenAM/OpenIDM/OpenDJ/OpenIG heritage (founded 2010 by ex-Sun engineers Lasse Andresen + Jamie Nelson when Oracle slowed Sun's open identity development after $7.4B Sun acq, ForgeRock forked + commercialized to keep the open identity stack alive) + 4-component platform (Access Management for SSO/MFA/federation, Identity Management for provisioning/sync, Directory Services for LDAP-scale directories, Identity Gateway for API/legacy proxy) + Identity Cloud SaaS (2018+) + Autonomous Identity (ML access analytics) + Intelligent Authentication Trees (drag-and-drop visual auth journey builder, the killer feature imitated by Okta Workflows + Auth0 Actions + PingOne DaVinci) + Identity Edge for IoT (billions of devices) + ForgeRock Authenticator mobile MFA + IPO Sep 2021 NYSE:FORG $275M + Thoma Bravo $2.3B Aug 2023 acquisition + merger with Ping Identity announced (Andre Durand returned as CEO of combined entity, ForgeRock products integrating into Ping portfolio) + BBC/Toyota/Geico/Comcast/T-Mobile/RBC/Lloyds/Telia/Telenor/Vodafone-proven + Norwegian government BankID + 1300+ enterprise customers + 80+ IDM connectors + Java-based + frodo open-source CLI + LDAPv3 directory scale to billions of identities + UK + Norway engineering heritage + the bridge from Sun's open identity legacy to modern cloud IDaaS — now subsumed into Ping Identity but still the visual auth orchestration leader and the commercial steward of Sun's identity heritage"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "forgerock".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "forgerock".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_forgerock(&rest, &_prog);
     process::exit(code);
@@ -205,7 +251,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_forgerock};
+    use super::{basename, run_forgerock, strip_ext};
 
     #[test]
     fn basename_strips_path() {

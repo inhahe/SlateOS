@@ -7,23 +7,36 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: monogame [OPTIONS]");
-        println!("MonoGame 3.8.2 (Slate OS) — Cross-platform .NET game framework (XNA spiritual successor)");
+        println!(
+            "MonoGame 3.8.2 (Slate OS) — Cross-platform .NET game framework (XNA spiritual successor)"
+        );
         println!();
         println!("Options:");
         println!("  --new TEMPLATE         New project (windowsdx/opengl/android/ios)");
-        println!("  --content              MonoGame Content Pipeline (asset preprocessor, .mgcb files)");
+        println!(
+            "  --content              MonoGame Content Pipeline (asset preprocessor, .mgcb files)"
+        );
         println!("  --mgcb-editor          MGCB Editor (GUI for content pipeline)");
-        println!("  --templates            dotnet new templates (mgwindowsdx / mgdesktopgl / etc.)");
+        println!(
+            "  --templates            dotnet new templates (mgwindowsdx / mgdesktopgl / etc.)"
+        );
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MonoGame 3.8.2.1105 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("MonoGame 3.8.2.1105 (Slate OS)");
+        return 0;
+    }
     println!("MonoGame 3.8.2.1105 (Slate OS)");
     println!("  License: MS-PL (Microsoft Public License) — fully open source");
     println!("  Repo: github.com/MonoGame/MonoGame");
@@ -31,8 +44,12 @@ fn run_mg(args: &[String], _prog: &str) -> i32 {
     println!("  Pricing: FREE — community foundation funded by donations / sponsorships");
     println!("  Origin: API-compatible reimplementation of Microsoft XNA Game Studio 4.0 (2010)");
     println!("         (XNA was discontinued by Microsoft 2013; MonoGame community took over)");
-    println!("  Language: C# (or any .NET language) — built on Mono / .NET 8 cross-platform runtime");
-    println!("  Targets: Windows (DX11), Linux/Mac (OpenGL), iOS, Android, console (PS4/5, Xbox, Switch via licensing)");
+    println!(
+        "  Language: C# (or any .NET language) — built on Mono / .NET 8 cross-platform runtime"
+    );
+    println!(
+        "  Targets: Windows (DX11), Linux/Mac (OpenGL), iOS, Android, console (PS4/5, Xbox, Switch via licensing)"
+    );
     println!("  Philosophy: code-first 2D/3D framework — no editor, no scene graph, just an API");
     println!("             you write Update() + Draw() loops, draw sprites + meshes manually");
     println!("  Famous MonoGame games:");
@@ -42,14 +59,21 @@ fn run_mg(args: &[String], _prog: &str) -> i32 {
     println!("    - Bastion (Supergiant, 2011) — Supergiant's first hit");
     println!("    - Streets of Rage 4 (Dotemu / Lizardcube, 2020)");
     println!("    - Owlboy, Salt and Sanctuary, Axiom Verge");
-    println!("  Differentiator: code-only, lightweight, full C# experience — preferred by 2D AAA-quality indies");
-    println!("  Compared to: Unity (heavyweight editor), Godot (different language), MonoGame is just C# + a render API");
+    println!(
+        "  Differentiator: code-only, lightweight, full C# experience — preferred by 2D AAA-quality indies"
+    );
+    println!(
+        "  Compared to: Unity (heavyweight editor), Godot (different language), MonoGame is just C# + a render API"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "monogame".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "monogame".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mg(&rest, &_prog);
     process::exit(code);
@@ -57,7 +81,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mg};
+    use super::{basename, run_mg, strip_ext};
 
     #[test]
     fn basename_strips_path() {

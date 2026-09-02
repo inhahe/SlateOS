@@ -239,27 +239,37 @@ fn decode_one(enc: Encoding, buf: &[u8]) -> DecodeResult {
         Encoding::Ascii => {
             let b = buf[0];
             if b > 127 {
-                DecodeResult::Invalid { bad_byte: b, consumed: 1 }
+                DecodeResult::Invalid {
+                    bad_byte: b,
+                    consumed: 1,
+                }
             } else {
-                DecodeResult::Codepoint { cp: u32::from(b), consumed: 1 }
+                DecodeResult::Codepoint {
+                    cp: u32::from(b),
+                    consumed: 1,
+                }
             }
         }
 
-        Encoding::Iso8859_1 => {
-            DecodeResult::Codepoint { cp: u32::from(buf[0]), consumed: 1 }
-        }
+        Encoding::Iso8859_1 => DecodeResult::Codepoint {
+            cp: u32::from(buf[0]),
+            consumed: 1,
+        },
 
-        Encoding::Iso8859_15 => {
-            DecodeResult::Codepoint { cp: iso8859_15_to_unicode(buf[0]), consumed: 1 }
-        }
+        Encoding::Iso8859_15 => DecodeResult::Codepoint {
+            cp: iso8859_15_to_unicode(buf[0]),
+            consumed: 1,
+        },
 
-        Encoding::Windows1252 => {
-            DecodeResult::Codepoint { cp: windows1252_to_unicode(buf[0]), consumed: 1 }
-        }
+        Encoding::Windows1252 => DecodeResult::Codepoint {
+            cp: windows1252_to_unicode(buf[0]),
+            consumed: 1,
+        },
 
-        Encoding::Koi8R => {
-            DecodeResult::Codepoint { cp: koi8r_to_unicode(buf[0]), consumed: 1 }
-        }
+        Encoding::Koi8R => DecodeResult::Codepoint {
+            cp: koi8r_to_unicode(buf[0]),
+            consumed: 1,
+        },
 
         Encoding::Utf8 => decode_utf8(buf),
         Encoding::Utf16Le => decode_utf16(buf, true),
@@ -273,7 +283,10 @@ fn decode_utf8(buf: &[u8]) -> DecodeResult {
     let b0 = buf[0];
 
     if b0 < 0x80 {
-        return DecodeResult::Codepoint { cp: u32::from(b0), consumed: 1 };
+        return DecodeResult::Codepoint {
+            cp: u32::from(b0),
+            consumed: 1,
+        };
     }
 
     let (expected_len, mut cp) = if b0 & 0xE0 == 0xC0 {
@@ -284,16 +297,24 @@ fn decode_utf8(buf: &[u8]) -> DecodeResult {
         (4, u32::from(b0 & 0x07))
     } else {
         // Invalid leading byte (10xxxxxx or 11111xxx).
-        return DecodeResult::Invalid { bad_byte: b0, consumed: 1 };
+        return DecodeResult::Invalid {
+            bad_byte: b0,
+            consumed: 1,
+        };
     };
 
     if buf.len() < expected_len {
-        return DecodeResult::Incomplete { needed: expected_len - buf.len() };
+        return DecodeResult::Incomplete {
+            needed: expected_len - buf.len(),
+        };
     }
 
     for &b in &buf[1..expected_len] {
         if b & 0xC0 != 0x80 {
-            return DecodeResult::Invalid { bad_byte: b0, consumed: 1 };
+            return DecodeResult::Invalid {
+                bad_byte: b0,
+                consumed: 1,
+            };
         }
         cp = (cp << 6) | u32::from(b & 0x3F);
     }
@@ -306,15 +327,23 @@ fn decode_utf8(buf: &[u8]) -> DecodeResult {
         _ => false,
     };
     if !valid || cp > 0x10FFFF || (0xD800..=0xDFFF).contains(&cp) {
-        return DecodeResult::Invalid { bad_byte: b0, consumed: 1 };
+        return DecodeResult::Invalid {
+            bad_byte: b0,
+            consumed: 1,
+        };
     }
 
-    DecodeResult::Codepoint { cp, consumed: expected_len }
+    DecodeResult::Codepoint {
+        cp,
+        consumed: expected_len,
+    }
 }
 
 fn decode_utf16(buf: &[u8], little_endian: bool) -> DecodeResult {
     if buf.len() < 2 {
-        return DecodeResult::Incomplete { needed: 2 - buf.len() };
+        return DecodeResult::Incomplete {
+            needed: 2 - buf.len(),
+        };
     }
 
     let unit = if little_endian {
@@ -326,7 +355,9 @@ fn decode_utf16(buf: &[u8], little_endian: bool) -> DecodeResult {
     // High surrogate: need a second code unit.
     if (0xD800..=0xDBFF).contains(&unit) {
         if buf.len() < 4 {
-            return DecodeResult::Incomplete { needed: 4 - buf.len() };
+            return DecodeResult::Incomplete {
+                needed: 4 - buf.len(),
+            };
         }
         let unit2 = if little_endian {
             u16::from_le_bytes([buf[2], buf[3]])
@@ -334,21 +365,32 @@ fn decode_utf16(buf: &[u8], little_endian: bool) -> DecodeResult {
             u16::from_be_bytes([buf[2], buf[3]])
         };
         if !(0xDC00..=0xDFFF).contains(&unit2) {
-            return DecodeResult::Invalid { bad_byte: buf[0], consumed: 2 };
+            return DecodeResult::Invalid {
+                bad_byte: buf[0],
+                consumed: 2,
+            };
         }
         let cp = 0x10000 + (u32::from(unit - 0xD800) << 10) + u32::from(unit2 - 0xDC00);
         DecodeResult::Codepoint { cp, consumed: 4 }
     } else if (0xDC00..=0xDFFF).contains(&unit) {
         // Lone low surrogate: invalid.
-        DecodeResult::Invalid { bad_byte: buf[0], consumed: 2 }
+        DecodeResult::Invalid {
+            bad_byte: buf[0],
+            consumed: 2,
+        }
     } else {
-        DecodeResult::Codepoint { cp: u32::from(unit), consumed: 2 }
+        DecodeResult::Codepoint {
+            cp: u32::from(unit),
+            consumed: 2,
+        }
     }
 }
 
 fn decode_utf32(buf: &[u8], little_endian: bool) -> DecodeResult {
     if buf.len() < 4 {
-        return DecodeResult::Incomplete { needed: 4 - buf.len() };
+        return DecodeResult::Incomplete {
+            needed: 4 - buf.len(),
+        };
     }
 
     let cp = if little_endian {
@@ -358,7 +400,10 @@ fn decode_utf32(buf: &[u8], little_endian: bool) -> DecodeResult {
     };
 
     if cp > 0x10FFFF || (0xD800..=0xDFFF).contains(&cp) {
-        DecodeResult::Invalid { bad_byte: buf[0], consumed: 4 }
+        DecodeResult::Invalid {
+            bad_byte: buf[0],
+            consumed: 4,
+        }
     } else {
         DecodeResult::Codepoint { cp, consumed: 4 }
     }
@@ -390,32 +435,41 @@ fn encode_one(enc: Encoding, cp: u32, out: &mut Vec<u8>) -> Result<usize, ()> {
             }
         }
 
-        Encoding::Iso8859_15 => {
-            match unicode_to_iso8859_15(cp) {
-                Some(b) => { out.push(b); Ok(1) }
-                None => Err(()),
+        Encoding::Iso8859_15 => match unicode_to_iso8859_15(cp) {
+            Some(b) => {
+                out.push(b);
+                Ok(1)
             }
-        }
+            None => Err(()),
+        },
 
-        Encoding::Windows1252 => {
-            match unicode_to_windows1252(cp) {
-                Some(b) => { out.push(b); Ok(1) }
-                None => Err(()),
+        Encoding::Windows1252 => match unicode_to_windows1252(cp) {
+            Some(b) => {
+                out.push(b);
+                Ok(1)
             }
-        }
+            None => Err(()),
+        },
 
-        Encoding::Koi8R => {
-            match unicode_to_koi8r(cp) {
-                Some(b) => { out.push(b); Ok(1) }
-                None => Err(()),
+        Encoding::Koi8R => match unicode_to_koi8r(cp) {
+            Some(b) => {
+                out.push(b);
+                Ok(1)
             }
-        }
+            None => Err(()),
+        },
 
         Encoding::Utf8 => Ok(encode_utf8(cp, out)),
         Encoding::Utf16Le => Ok(encode_utf16(cp, out, true)),
         Encoding::Utf16Be => Ok(encode_utf16(cp, out, false)),
-        Encoding::Utf32Le => { out.extend_from_slice(&cp.to_le_bytes()); Ok(4) }
-        Encoding::Utf32Be => { out.extend_from_slice(&cp.to_be_bytes()); Ok(4) }
+        Encoding::Utf32Le => {
+            out.extend_from_slice(&cp.to_le_bytes());
+            Ok(4)
+        }
+        Encoding::Utf32Be => {
+            out.extend_from_slice(&cp.to_be_bytes());
+            Ok(4)
+        }
     }
 }
 
@@ -444,15 +498,27 @@ fn encode_utf8(cp: u32, out: &mut Vec<u8>) -> usize {
 fn encode_utf16(cp: u32, out: &mut Vec<u8>, little_endian: bool) -> usize {
     if cp < 0x10000 {
         let unit = cp as u16;
-        let bytes = if little_endian { unit.to_le_bytes() } else { unit.to_be_bytes() };
+        let bytes = if little_endian {
+            unit.to_le_bytes()
+        } else {
+            unit.to_be_bytes()
+        };
         out.extend_from_slice(&bytes);
         2
     } else {
         let adjusted = cp - 0x10000;
         let high = (0xD800 + (adjusted >> 10)) as u16;
         let low = (0xDC00 + (adjusted & 0x3FF)) as u16;
-        let hb = if little_endian { high.to_le_bytes() } else { high.to_be_bytes() };
-        let lb = if little_endian { low.to_le_bytes() } else { low.to_be_bytes() };
+        let hb = if little_endian {
+            high.to_le_bytes()
+        } else {
+            high.to_be_bytes()
+        };
+        let lb = if little_endian {
+            low.to_le_bytes()
+        } else {
+            low.to_be_bytes()
+        };
         out.extend_from_slice(&hb);
         out.extend_from_slice(&lb);
         4
@@ -710,9 +776,7 @@ fn parse_args() -> Opts {
                             j = chars.len(); // consume all
                             continue;
                         } else if i + 1 < args.len() {
-                            from = Some(
-                                parse_encoding(&args[i + 1]).unwrap_or_else(|e| die(&e)),
-                            );
+                            from = Some(parse_encoding(&args[i + 1]).unwrap_or_else(|e| die(&e)));
                             i += 1;
                         } else {
                             die("-f requires an argument");
@@ -725,9 +789,7 @@ fn parse_args() -> Opts {
                             j = chars.len();
                             continue;
                         } else if i + 1 < args.len() {
-                            to = Some(
-                                parse_encoding(&args[i + 1]).unwrap_or_else(|e| die(&e)),
-                            );
+                            to = Some(parse_encoding(&args[i + 1]).unwrap_or_else(|e| die(&e)));
                             i += 1;
                         } else {
                             die("-t requires an argument");
@@ -812,7 +874,12 @@ fn convert_stream<R: Read, W: Write + ?Sized>(
     opts: &Opts,
     first_chunk: bool,
 ) -> io::Result<ConvStats> {
-    let mut stats = ConvStats { bytes_in: 0, bytes_out: 0, codepoints: 0, errors: 0 };
+    let mut stats = ConvStats {
+        bytes_in: 0,
+        bytes_out: 0,
+        codepoints: 0,
+        errors: 0,
+    };
 
     // We keep a buffer of un-consumed input (a remainder from the previous
     // read that ended in the middle of a multi-byte sequence, plus new data).
@@ -955,7 +1022,12 @@ fn main() {
         &mut stdout_handle.lock() as &mut dyn Write
     };
 
-    let mut total_stats = ConvStats { bytes_in: 0, bytes_out: 0, codepoints: 0, errors: 0 };
+    let mut total_stats = ConvStats {
+        bytes_in: 0,
+        bytes_out: 0,
+        codepoints: 0,
+        errors: 0,
+    };
     let mut had_error = false;
 
     if opts.input_files.is_empty() {
@@ -1773,7 +1845,11 @@ mod tests {
         (output, stats)
     }
 
-    fn convert_bytes_with_discard(input: &[u8], from: Encoding, to: Encoding) -> (Vec<u8>, ConvStats) {
+    fn convert_bytes_with_discard(
+        input: &[u8],
+        from: Encoding,
+        to: Encoding,
+    ) -> (Vec<u8>, ConvStats) {
         let opts = Opts {
             from,
             to,
@@ -1905,13 +1981,8 @@ mod tests {
     fn test_unicode_subst() {
         // U+20AC (Euro) is unmappable to ASCII.  Use unicode-subst.
         let input = "\u{20AC}".as_bytes(); // Euro sign in UTF-8
-        let (output, _) = convert_bytes_with_subst(
-            input,
-            Encoding::Utf8,
-            Encoding::Ascii,
-            None,
-            Some("U+%04X"),
-        );
+        let (output, _) =
+            convert_bytes_with_subst(input, Encoding::Utf8, Encoding::Ascii, None, Some("U+%04X"));
         assert_eq!(output, b"U+20AC");
     }
 
@@ -1956,7 +2027,11 @@ mod tests {
 
     impl<'a> ChunkedReader<'a> {
         fn new(data: &'a [u8], chunk_size: usize) -> Self {
-            Self { data, chunk_size, pos: 0 }
+            Self {
+                data,
+                chunk_size,
+                pos: 0,
+            }
         }
     }
 
@@ -1965,7 +2040,9 @@ mod tests {
             if self.pos >= self.data.len() {
                 return Ok(0);
             }
-            let end = (self.pos + self.chunk_size).min(self.data.len()).min(self.pos + buf.len());
+            let end = (self.pos + self.chunk_size)
+                .min(self.data.len())
+                .min(self.pos + buf.len());
             let n = end - self.pos;
             buf[..n].copy_from_slice(&self.data[self.pos..end]);
             self.pos += n;
@@ -1989,8 +2066,15 @@ mod tests {
         };
         let mut reader = ChunkedReader::new(input, 4);
         let mut output = Vec::new();
-        let stats = convert_stream(&mut reader, &mut output, Encoding::Utf8, Encoding::Utf8, &opts, true)
-            .expect("should succeed");
+        let stats = convert_stream(
+            &mut reader,
+            &mut output,
+            Encoding::Utf8,
+            Encoding::Utf8,
+            &opts,
+            true,
+        )
+        .expect("should succeed");
         assert_eq!(output, input.to_vec());
         assert_eq!(stats.codepoints, 4);
         assert_eq!(stats.errors, 0);
@@ -2012,8 +2096,15 @@ mod tests {
         };
         let mut reader = ChunkedReader::new(&input, 2);
         let mut output = Vec::new();
-        let stats = convert_stream(&mut reader, &mut output, Encoding::Utf16Be, Encoding::Utf32Be, &opts, true)
-            .expect("should succeed");
+        let stats = convert_stream(
+            &mut reader,
+            &mut output,
+            Encoding::Utf16Be,
+            Encoding::Utf32Be,
+            &opts,
+            true,
+        )
+        .expect("should succeed");
         assert_eq!(output, vec![0x00, 0x01, 0xF6, 0x00]);
         assert_eq!(stats.codepoints, 1);
         assert_eq!(stats.errors, 0);
@@ -2035,8 +2126,15 @@ mod tests {
         };
         let mut reader = ChunkedReader::new(input, 1);
         let mut output = Vec::new();
-        let stats = convert_stream(&mut reader, &mut output, Encoding::Utf8, Encoding::Utf8, &opts, true)
-            .expect("should succeed");
+        let stats = convert_stream(
+            &mut reader,
+            &mut output,
+            Encoding::Utf8,
+            Encoding::Utf8,
+            &opts,
+            true,
+        )
+        .expect("should succeed");
         assert_eq!(output, input.to_vec());
         assert_eq!(stats.codepoints, 3);
     }

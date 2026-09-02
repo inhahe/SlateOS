@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("softr-cli 0.1.0 (no-code-portal-on-airtable personality build)"); }
+fn print_version() {
+    println!("softr-cli 0.1.0 (no-code-portal-on-airtable personality build)");
+}
 
 fn run_about() {
     println!("Softr (Softr Studio GmbH).");
@@ -117,7 +119,9 @@ fn run_customers() {
     println!("  Geographic: heavy EU + US; growing APAC; particularly strong in the EU SMB");
     println!("  segment where 'data lives in Airtable' is already the default operations stack.");
     println!("  Common origin: 'I run my business out of Airtable + I need a public face for it'.");
-    println!("  Anti-segment: engineers (go to Bubble or write code) + enterprises (go to Retool).");
+    println!(
+        "  Anti-segment: engineers (go to Bubble or write code) + enterprises (go to Retool)."
+    );
 }
 
 fn run_nocode() {

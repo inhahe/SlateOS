@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_knife(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -41,7 +45,10 @@ fn run_knife(args: &[String]) -> i32 {
             println!("slateos-server-2.local");
         }
         ("node", "show") => {
-            let name = args.get(2).map(|s| s.as_str()).unwrap_or("slateos-desktop.local");
+            let name = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("slateos-desktop.local");
             println!("Node Name:   {}", name);
             println!("Environment: production");
             println!("FQDN:        {}", name);
@@ -61,8 +68,12 @@ fn run_knife(args: &[String]) -> i32 {
             println!("database");
         }
         ("status", _) => {
-            println!("1 hour ago, slateos-desktop.local, slateos-desktop.local, 192.168.1.100, slateos 1.0.");
-            println!("2 hours ago, slateos-server-1.local, slateos-server-1.local, 192.168.1.101, slateos 1.0.");
+            println!(
+                "1 hour ago, slateos-desktop.local, slateos-desktop.local, 192.168.1.100, slateos 1.0."
+            );
+            println!(
+                "2 hours ago, slateos-server-1.local, slateos-server-1.local, 192.168.1.101, slateos 1.0."
+            );
         }
         _ => println!("knife: {} {} completed", subcmd, sub2),
     }
@@ -85,11 +96,15 @@ fn run_chef_client(args: &[String]) -> i32 {
 
     println!("[2024-05-22T12:00:00+00:00] INFO: *** Chef Infra Client 18.3.0 ***");
     println!("[2024-05-22T12:00:00+00:00] INFO: Platform: x86_64-slateos");
-    println!("[2024-05-22T12:00:01+00:00] INFO: Setting the run_list to [\"recipe[base]\", \"recipe[nginx]\"]");
+    println!(
+        "[2024-05-22T12:00:01+00:00] INFO: Setting the run_list to [\"recipe[base]\", \"recipe[nginx]\"]"
+    );
     println!("[2024-05-22T12:00:02+00:00] INFO: Run List is [recipe[base], recipe[nginx]]");
     println!("[2024-05-22T12:00:03+00:00] INFO: Processing package[nginx] action install");
     println!("[2024-05-22T12:00:04+00:00] INFO: Processing service[nginx] action enable");
-    println!("[2024-05-22T12:00:05+00:00] INFO: Chef Infra Client finished, 2/8 resources updated in 5 seconds");
+    println!(
+        "[2024-05-22T12:00:05+00:00] INFO: Chef Infra Client finished, 2/8 resources updated in 5 seconds"
+    );
     0
 }
 
@@ -110,7 +125,10 @@ fn run_ohai(_args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "knife".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "knife".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "chef-client" => run_chef_client(&rest),
@@ -123,7 +141,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_knife};
+    use super::{basename, run_knife, strip_ext};
 
     #[test]
     fn basename_strips_path() {

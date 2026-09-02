@@ -29,16 +29,30 @@ fn run_clickhouse(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let host = args.windows(2).find(|w| w[0] == "--host")
-        .map(|w| w[1].as_str()).unwrap_or("localhost");
-    let port = args.windows(2).find(|w| w[0] == "--port")
-        .map(|w| w[1].as_str()).unwrap_or("9000");
-    let database = args.windows(2).find(|w| w[0] == "--database")
-        .map(|w| w[1].as_str()).unwrap_or("default");
-    let format = args.windows(2).find(|w| w[0] == "--format")
-        .map(|w| w[1].as_str()).unwrap_or("PrettyCompact");
+    let host = args
+        .windows(2)
+        .find(|w| w[0] == "--host")
+        .map(|w| w[1].as_str())
+        .unwrap_or("localhost");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "--port")
+        .map(|w| w[1].as_str())
+        .unwrap_or("9000");
+    let database = args
+        .windows(2)
+        .find(|w| w[0] == "--database")
+        .map(|w| w[1].as_str())
+        .unwrap_or("default");
+    let format = args
+        .windows(2)
+        .find(|w| w[0] == "--format")
+        .map(|w| w[1].as_str())
+        .unwrap_or("PrettyCompact");
 
-    let query = args.windows(2).find(|w| w[0] == "--query" || w[0] == "-q")
+    let query = args
+        .windows(2)
+        .find(|w| w[0] == "--query" || w[0] == "-q")
         .map(|w| w[1].as_str());
 
     if let Some(q) = query {
@@ -77,7 +91,9 @@ fn run_clickhouse(args: Vec<String>) -> i32 {
                     println!("│ 2024-01-14 │  42345 │         1.31 │");
                     println!("│ 2024-01-13 │  38901 │         1.28 │");
                     println!("└────────────┴────────┴──────────────┘");
-                    println!("3 rows in set. Elapsed: 0.045 sec. Processed 12.34 million rows, 98.7 MB (274.2 million rows/s., 2.19 GB/s.)");
+                    println!(
+                        "3 rows in set. Elapsed: 0.045 sec. Processed 12.34 million rows, 98.7 MB (274.2 million rows/s., 2.19 GB/s.)"
+                    );
                 }
             }
         } else {
@@ -103,7 +119,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_clickhouse};
+    use super::run_clickhouse;
 
     #[test]
     fn help_exits_zero() {

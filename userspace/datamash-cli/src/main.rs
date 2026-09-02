@@ -41,13 +41,16 @@ fn run_datamash(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let operations: Vec<&str> = args.iter()
+    let operations: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
 
     let has_group = args.iter().any(|a| a == "-g" || a == "--group");
-    let headers = args.iter().any(|a| a == "-H" || a == "--headers" || a == "--header-out");
+    let headers = args
+        .iter()
+        .any(|a| a == "-H" || a == "--headers" || a == "--header-out");
 
     if operations.is_empty() {
         eprintln!("datamash: no operation specified. See --help.");
@@ -112,7 +115,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_datamash};
+    use super::run_datamash;
 
     #[test]
     fn help_exits_zero() {

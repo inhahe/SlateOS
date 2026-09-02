@@ -40,9 +40,13 @@ fn run_xsel(args: Vec<String>) -> i32 {
     let clipboard = args.iter().any(|a| a == "-b" || a == "--clipboard");
     let secondary = args.iter().any(|a| a == "-s" || a == "--secondary");
 
-    let sel_name = if clipboard { "CLIPBOARD" }
-        else if secondary { "SECONDARY" }
-        else { "PRIMARY" };
+    let sel_name = if clipboard {
+        "CLIPBOARD"
+    } else if secondary {
+        "SECONDARY"
+    } else {
+        "PRIMARY"
+    };
 
     if clear {
         println!("xsel: {} selection cleared", sel_name);
@@ -64,7 +68,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_xsel};
+    use super::run_xsel;
 
     #[test]
     fn help_exits_zero() {

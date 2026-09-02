@@ -42,7 +42,8 @@ fn run_vector(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "validate" => {
-            let config = args.windows(2)
+            let config = args
+                .windows(2)
                 .find(|w| w[0] == "-c" || w[0] == "--config")
                 .map(|w| w[1].as_str())
                 .unwrap_or("vector.toml");
@@ -80,8 +81,12 @@ fn run_vector(args: Vec<String>) -> i32 {
             0
         }
         "top" => {
-            println!("  Component            Type        Events In  Events Out  Bytes In   Bytes Out");
-            println!("  ──────────────────── ────────── ────────── ────────── ────────── ──────────");
+            println!(
+                "  Component            Type        Events In  Events Out  Bytes In   Bytes Out"
+            );
+            println!(
+                "  ──────────────────── ────────── ────────── ────────── ────────── ──────────"
+            );
             println!("  file_source          source      12,345     12,345      5.6 MB     5.6 MB");
             println!("  parse_logs           transform   12,345     12,340      5.6 MB     4.8 MB");
             println!("  filter_errors        transform   12,340      2,345      4.8 MB     1.2 MB");
@@ -108,7 +113,8 @@ fn run_vector(args: Vec<String>) -> i32 {
         }
         _ => {
             // Default: start Vector
-            let config = args.windows(2)
+            let config = args
+                .windows(2)
                 .find(|w| w[0] == "-c" || w[0] == "--config")
                 .map(|w| w[1].as_str())
                 .unwrap_or("vector.toml");
@@ -132,7 +138,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_vector};
+    use super::run_vector;
 
     #[test]
     fn help_exits_zero() {

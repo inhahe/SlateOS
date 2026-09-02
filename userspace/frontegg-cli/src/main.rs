@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("frontegg-cli 0.1.0 (Admin-Portal personality build)"); }
+fn print_version() {
+    println!("frontegg-cli 0.1.0 (Admin-Portal personality build)");
+}
 
 fn run_about() {
     println!("Frontegg, Ltd.");

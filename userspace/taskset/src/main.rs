@@ -818,11 +818,10 @@ fn cmd_ionice(args: &IonicArgs) -> i32 {
             let class = args.class.unwrap_or(IOPRIO_CLASS_BE);
             let data = args.classdata.unwrap_or(4);
 
-            if (class == IOPRIO_CLASS_RT || class == IOPRIO_CLASS_BE)
-                && data >= IOPRIO_MAX_PRIO {
-                    print_err(b"ionice: classdata must be 0-7\n");
-                    return 1;
-                }
+            if (class == IOPRIO_CLASS_RT || class == IOPRIO_CLASS_BE) && data >= IOPRIO_MAX_PRIO {
+                print_err(b"ionice: classdata must be 0-7\n");
+                return 1;
+            }
 
             print_out(b"Setting I/O scheduling for PID ");
             print_out(&format_u64(pid as u64));

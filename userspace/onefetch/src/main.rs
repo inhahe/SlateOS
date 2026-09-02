@@ -40,7 +40,9 @@ fn run_onefetch(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let json = args.windows(2).any(|w| (w[0] == "-o" || w[0] == "--output") && w[1] == "json");
+    let json = args
+        .windows(2)
+        .any(|w| (w[0] == "-o" || w[0] == "--output") && w[1] == "json");
 
     if json {
         println!("{{");
@@ -49,8 +51,12 @@ fn run_onefetch(args: Vec<String>) -> i32 {
         println!("  \"head\": \"main\",");
         println!("  \"version\": \"1.0.0\",");
         println!("  \"created\": \"6 months ago\",");
-        println!("  \"languages\": [{{\"name\": \"Rust\", \"percentage\": 85.2}}, {{\"name\": \"TOML\", \"percentage\": 10.1}}, {{\"name\": \"Markdown\", \"percentage\": 4.7}}],");
-        println!("  \"authors\": [{{\"name\": \"Developer\", \"commits\": 342, \"percentage\": 100.0}}],");
+        println!(
+            "  \"languages\": [{{\"name\": \"Rust\", \"percentage\": 85.2}}, {{\"name\": \"TOML\", \"percentage\": 10.1}}, {{\"name\": \"Markdown\", \"percentage\": 4.7}}],"
+        );
+        println!(
+            "  \"authors\": [{{\"name\": \"Developer\", \"commits\": 342, \"percentage\": 100.0}}],"
+        );
         println!("  \"last_change\": \"2 hours ago\",");
         println!("  \"repo_url\": \"https://github.com/user/project\",");
         println!("  \"commits\": 342,");
@@ -92,7 +98,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_onefetch};
+    use super::run_onefetch;
 
     #[test]
     fn help_exits_zero() {

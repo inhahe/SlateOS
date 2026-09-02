@@ -111,9 +111,10 @@ fn enumerate_pids() -> Vec<u32> {
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && let Ok(pid) = name.parse::<u32>() {
-                    pids.push(pid);
-                }
+                && let Ok(pid) = name.parse::<u32>()
+            {
+                pids.push(pid);
+            }
         }
     }
     pids.sort_unstable();
@@ -148,9 +149,10 @@ fn uid_to_name(uid: u32) -> String {
             let fields: Vec<&str> = line.split(':').collect();
             if fields.len() >= 3
                 && let Ok(file_uid) = fields[2].parse::<u32>()
-                    && file_uid == uid {
-                        return fields[0].to_string();
-                    }
+                && file_uid == uid
+            {
+                return fields[0].to_string();
+            }
         }
     }
     uid.to_string()
@@ -448,7 +450,10 @@ fn parse_proc_net_file(path: &str, protocol: &str, is_v6: bool) -> Vec<NetEntry>
             String::new()
         };
 
-        let inode = fields.get(9).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let inode = fields
+            .get(9)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
 
         entries.push(NetEntry {
             protocol: protocol.to_string(),
@@ -527,10 +532,9 @@ fn port_to_service(port: u16) -> Option<&'static str> {
 
 /// Format a port number, optionally resolving to a service name.
 fn format_port(port: u16, resolve: bool) -> String {
-    if resolve
-        && let Some(name) = port_to_service(port) {
-            return name.to_string();
-        }
+    if resolve && let Some(name) = port_to_service(port) {
+        return name.to_string();
+    }
     port.to_string()
 }
 
@@ -540,21 +544,19 @@ fn format_net_name(entry: &NetEntry, no_hostname: bool, no_portname: bool) -> St
     let local_port_str = format_port(entry.local_port, resolve_port);
     let remote_port_str = format_port(entry.remote_port, resolve_port);
 
-    let local_addr = if !no_hostname
-        && (entry.local_addr == "0.0.0.0" || entry.local_addr == "::")
+    let local_addr = if !no_hostname && (entry.local_addr == "0.0.0.0" || entry.local_addr == "::")
     {
         "*".to_string()
     } else {
         entry.local_addr.clone()
     };
 
-    let remote_addr = if !no_hostname
-        && (entry.remote_addr == "0.0.0.0" || entry.remote_addr == "::")
-    {
-        "*".to_string()
-    } else {
-        entry.remote_addr.clone()
-    };
+    let remote_addr =
+        if !no_hostname && (entry.remote_addr == "0.0.0.0" || entry.remote_addr == "::") {
+            "*".to_string()
+        } else {
+            entry.remote_addr.clone()
+        };
 
     let local = format!("{local_addr}:{local_port_str}");
     let remote = format!("{remote_addr}:{remote_port_str}");
@@ -587,9 +589,10 @@ fn collect_process_files(
 
     // Apply filters.
     if let Some(ref filter_cmd) = config.filter_command
-        && !command.contains(filter_cmd.as_str()) {
-            return Vec::new();
-        }
+        && !command.contains(filter_cmd.as_str())
+    {
+        return Vec::new();
+    }
 
     if let Some(ref filter_user) = config.filter_user {
         // Try matching by name or numeric UID.
@@ -663,8 +666,7 @@ fn collect_process_files(
 
     // Memory-mapped files from /proc/<pid>/maps.
     if let Some(maps_content) = read_file(&format!("/proc/{pid}/maps")) {
-        let mut seen_paths: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
         for line in maps_content.lines() {
             // Format: addr perms offset dev inode pathname
             let fields: Vec<&str> = line.split_whitespace().collect();
@@ -708,12 +710,13 @@ fn collect_process_files(
 
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && let Ok(fd_num) = name.parse::<u32>() {
-                    let link_path = format!("{fd_dir}/{name}");
-                    if let Some(target) = read_fd_link(&link_path) {
-                        fd_entries.push((fd_num, target));
-                    }
+                && let Ok(fd_num) = name.parse::<u32>()
+            {
+                let link_path = format!("{fd_dir}/{name}");
+                if let Some(target) = read_fd_link(&link_path) {
+                    fd_entries.push((fd_num, target));
                 }
+            }
         }
 
         // Sort by fd number for stable output.
@@ -726,28 +729,28 @@ fn collect_process_files(
 
             // Check if this is a socket and resolve via net_map.
             if let Some(inode) = extract_inode_from_target(&target)
-                && let Some(net_entry) = net_map.get(&inode) {
-                    let net_type = if net_entry.protocol.contains('6') {
-                        "IPv6"
-                    } else {
-                        "IPv4"
-                    };
-                    let net_name =
-                        format_net_name(net_entry, config.no_hostname, config.no_portname);
-                    let proto_upper = net_entry.protocol.to_uppercase();
-                    files.push(OpenFile {
-                        command: command.clone(),
-                        pid,
-                        user: user.clone(),
-                        fd_col,
-                        file_type: net_type.to_string(),
-                        device: "0,0".to_string(),
-                        size_off: "0t0".to_string(),
-                        node: proto_upper.to_string(),
-                        name: net_name,
-                    });
-                    continue;
-                }
+                && let Some(net_entry) = net_map.get(&inode)
+            {
+                let net_type = if net_entry.protocol.contains('6') {
+                    "IPv6"
+                } else {
+                    "IPv4"
+                };
+                let net_name = format_net_name(net_entry, config.no_hostname, config.no_portname);
+                let proto_upper = net_entry.protocol.to_uppercase();
+                files.push(OpenFile {
+                    command: command.clone(),
+                    pid,
+                    user: user.clone(),
+                    fd_col,
+                    file_type: net_type.to_string(),
+                    device: "0,0".to_string(),
+                    size_off: "0t0".to_string(),
+                    node: proto_upper.to_string(),
+                    name: net_name,
+                });
+                continue;
+            }
 
             let (file_type, name) = classify_fd_target(&target);
             let device = if target.starts_with('/') {
@@ -812,9 +815,10 @@ fn apply_net_filter(files: &mut Vec<OpenFile>, filter: &NetFilter) {
 
         // Host filter: check if the name contains the host address.
         if let Some(ref host) = filter.host
-            && !f.name.contains(host.as_str()) {
-                return false;
-            }
+            && !f.name.contains(host.as_str())
+        {
+            return false;
+        }
 
         // Port filter: check if the name contains :port.
         if let Some(port) = filter.port {
@@ -1286,9 +1290,9 @@ mod tests {
 
     #[test]
     fn test_access_mode() {
-        assert_eq!(access_mode(0o0), 'r');   // O_RDONLY
-        assert_eq!(access_mode(0o1), 'w');   // O_WRONLY
-        assert_eq!(access_mode(0o2), 'u');   // O_RDWR
+        assert_eq!(access_mode(0o0), 'r'); // O_RDONLY
+        assert_eq!(access_mode(0o1), 'w'); // O_WRONLY
+        assert_eq!(access_mode(0o2), 'u'); // O_RDWR
         assert_eq!(access_mode(0o100), 'r'); // O_RDONLY with O_CREAT
         assert_eq!(access_mode(0o101), 'w'); // O_WRONLY with O_CREAT
         assert_eq!(access_mode(0o102), 'u'); // O_RDWR with O_CREAT

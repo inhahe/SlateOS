@@ -44,7 +44,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("watchguard-cli 0.1.0 (mid-market-security-bundle personality build)"); }
+fn print_version() {
+    println!("watchguard-cli 0.1.0 (mid-market-security-bundle personality build)");
+}
 
 fn run_about() {
     println!("WatchGuard Technologies, Inc.");

@@ -98,20 +98,48 @@ struct WatchOpts {
 
 fn event_flag_names(mask: u32) -> Vec<&'static str> {
     let mut names = Vec::new();
-    if mask & IN_ACCESS != 0 { names.push("ACCESS"); }
-    if mask & IN_MODIFY != 0 { names.push("MODIFY"); }
-    if mask & IN_ATTRIB != 0 { names.push("ATTRIB"); }
-    if mask & IN_CLOSE_WRITE != 0 { names.push("CLOSE_WRITE"); }
-    if mask & IN_CLOSE_NOWRITE != 0 { names.push("CLOSE_NOWRITE"); }
-    if mask & IN_OPEN != 0 { names.push("OPEN"); }
-    if mask & IN_MOVED_FROM != 0 { names.push("MOVED_FROM"); }
-    if mask & IN_MOVED_TO != 0 { names.push("MOVED_TO"); }
-    if mask & IN_CREATE != 0 { names.push("CREATE"); }
-    if mask & IN_DELETE != 0 { names.push("DELETE"); }
-    if mask & IN_DELETE_SELF != 0 { names.push("DELETE_SELF"); }
-    if mask & IN_MOVE_SELF != 0 { names.push("MOVE_SELF"); }
-    if mask & IN_UNMOUNT != 0 { names.push("UNMOUNT"); }
-    if mask & IN_ISDIR != 0 { names.push("ISDIR"); }
+    if mask & IN_ACCESS != 0 {
+        names.push("ACCESS");
+    }
+    if mask & IN_MODIFY != 0 {
+        names.push("MODIFY");
+    }
+    if mask & IN_ATTRIB != 0 {
+        names.push("ATTRIB");
+    }
+    if mask & IN_CLOSE_WRITE != 0 {
+        names.push("CLOSE_WRITE");
+    }
+    if mask & IN_CLOSE_NOWRITE != 0 {
+        names.push("CLOSE_NOWRITE");
+    }
+    if mask & IN_OPEN != 0 {
+        names.push("OPEN");
+    }
+    if mask & IN_MOVED_FROM != 0 {
+        names.push("MOVED_FROM");
+    }
+    if mask & IN_MOVED_TO != 0 {
+        names.push("MOVED_TO");
+    }
+    if mask & IN_CREATE != 0 {
+        names.push("CREATE");
+    }
+    if mask & IN_DELETE != 0 {
+        names.push("DELETE");
+    }
+    if mask & IN_DELETE_SELF != 0 {
+        names.push("DELETE_SELF");
+    }
+    if mask & IN_MOVE_SELF != 0 {
+        names.push("MOVE_SELF");
+    }
+    if mask & IN_UNMOUNT != 0 {
+        names.push("UNMOUNT");
+    }
+    if mask & IN_ISDIR != 0 {
+        names.push("ISDIR");
+    }
     names
 }
 
@@ -393,15 +421,21 @@ fn cmd_inotifywait(args: &[String]) {
             "--csv" => opts.csv = true,
             "--timefmt" => {
                 i += 1;
-                if i < args.len() { opts.timefmt = Some(args[i].clone()); }
+                if i < args.len() {
+                    opts.timefmt = Some(args[i].clone());
+                }
             }
             "--format" => {
                 i += 1;
-                if i < args.len() { opts.format = Some(args[i].clone()); }
+                if i < args.len() {
+                    opts.format = Some(args[i].clone());
+                }
             }
             "-t" | "--timeout" => {
                 i += 1;
-                if i < args.len() { opts.timeout = args[i].parse().ok(); }
+                if i < args.len() {
+                    opts.timeout = args[i].parse().ok();
+                }
             }
             "-e" | "--event" => {
                 i += 1;
@@ -415,15 +449,21 @@ fn cmd_inotifywait(args: &[String]) {
             }
             "--exclude" => {
                 i += 1;
-                if i < args.len() { opts.exclude.push(args[i].clone()); }
+                if i < args.len() {
+                    opts.exclude.push(args[i].clone());
+                }
             }
             "--include" => {
                 i += 1;
-                if i < args.len() { opts.include.push(args[i].clone()); }
+                if i < args.len() {
+                    opts.include.push(args[i].clone());
+                }
             }
             "--fromfile" => {
                 i += 1;
-                if i < args.len() { opts.from_file = Some(args[i].clone()); }
+                if i < args.len() {
+                    opts.from_file = Some(args[i].clone());
+                }
             }
             s if !s.starts_with('-') => {
                 opts.paths.push(s.to_string());
@@ -489,12 +529,13 @@ fn cmd_inotifywait(args: &[String]) {
     for event in &events {
         // Check timeout.
         if let Some(dur) = timeout_dur
-            && start.elapsed() >= dur {
-                if !opts.quiet {
-                    eprintln!("inotifywait: timeout");
-                }
-                process::exit(2);
+            && start.elapsed() >= dur
+        {
+            if !opts.quiet {
+                eprintln!("inotifywait: timeout");
             }
+            process::exit(2);
+        }
 
         // Apply filters.
         if should_exclude(&event.name, &opts.exclude, &opts.include) {
@@ -517,11 +558,13 @@ fn cmd_inotifywait(args: &[String]) {
         }
     }
 
-    if !opts.monitor && events.is_empty()
-        && let Some(_dur) = timeout_dur {
-            eprintln!("inotifywait: timeout");
-            process::exit(2);
-        }
+    if !opts.monitor
+        && events.is_empty()
+        && let Some(_dur) = timeout_dur
+    {
+        eprintln!("inotifywait: timeout");
+        process::exit(2);
+    }
 }
 
 // ============================================================================
@@ -565,7 +608,9 @@ fn cmd_inotifywatch(args: &[String]) {
             "-v" | "--verbose" => opts.verbose = true,
             "-t" | "--timeout" => {
                 i += 1;
-                if i < args.len() { opts.timeout = args[i].parse().ok(); }
+                if i < args.len() {
+                    opts.timeout = args[i].parse().ok();
+                }
             }
             "-e" | "--event" => {
                 i += 1;
@@ -579,7 +624,9 @@ fn cmd_inotifywatch(args: &[String]) {
             }
             "--exclude" => {
                 i += 1;
-                if i < args.len() { opts.exclude.push(args[i].clone()); }
+                if i < args.len() {
+                    opts.exclude.push(args[i].clone());
+                }
             }
             s if !s.starts_with('-') => {
                 opts.paths.push(s.to_string());

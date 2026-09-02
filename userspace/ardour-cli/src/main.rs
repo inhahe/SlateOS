@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ardour(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -28,7 +32,10 @@ fn run_ardour(args: &[String]) -> i32 {
         println!("  LV2, VST3, AudioUnit plugin support");
         return 0;
     }
-    let session = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let session = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(s) = session {
         println!("Ardour 8.4.0 — loading session: {}", s);
         println!("  Sample rate: 48000 Hz");
@@ -51,7 +58,11 @@ fn run_ardour_export(args: &[String]) -> i32 {
         return 0;
     }
     let session = args.first().map(|s| s.as_str()).unwrap_or("session");
-    let format = args.windows(2).find(|w| w[0] == "-f").map(|w| w[1].as_str()).unwrap_or("wav");
+    let format = args
+        .windows(2)
+        .find(|w| w[0] == "-f")
+        .map(|w| w[1].as_str())
+        .unwrap_or("wav");
     println!("Exporting session: {}", session);
     println!("  Format: {} (24-bit, 48000 Hz)", format);
     println!("  Mixdown...");
@@ -61,7 +72,10 @@ fn run_ardour_export(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "ardour".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "ardour".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "ardour-export" => run_ardour_export(&rest),
@@ -72,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ardour};
+    use super::{basename, run_ardour, strip_ext};
 
     #[test]
     fn basename_strips_path() {

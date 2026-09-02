@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_close(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,18 +29,25 @@ fn run_close(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Close 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Close 2024 (Slate OS)");
+        return 0;
+    }
     println!("Close 2024 (Slate OS)");
     println!("  Vendor: Close.io / Elastic Inc. dba Close (San Francisco — fully remote)");
     println!("  Founders: Steli Efti + Anthony Nemitz + Phil Freo + Thomas Steinacher (2013)");
-    println!("          Steli: famous sales evangelist, blog 'Close Blog', podcast 'The Startup Chat'");
+    println!(
+        "          Steli: famous sales evangelist, blog 'Close Blog', podcast 'The Startup Chat'"
+    );
     println!("          founded with revenue from ElasticSales (B2B sales-as-a-service)");
     println!("  Founded: 2013 — bootstrapped + profitable; no VC funding (deliberately)");
     println!("          remote-first since day one — distributed across 30+ countries");
     println!("          ~$50M+ ARR (estimated, private)");
     println!("  Pricing: Startup $59/user/mo (3 users included, 2,500 lead cap)");
     println!("          Professional $109/user/mo (Power Dialer, advanced reporting)");
-    println!("          Enterprise $149/user/mo (Predictive Dialer, custom roles, custom activities)");
+    println!(
+        "          Enterprise $149/user/mo (Predictive Dialer, custom roles, custom activities)"
+    );
     println!("          annual billing only at these rates; monthly +20%");
     println!("  Core thesis: 'CRMs for managers, Close is built for actual reps'");
     println!("            opinionated against bloated UI — minimize clicks per call/email");
@@ -64,22 +75,31 @@ fn run_close(args: &[String], _prog: &str) -> i32 {
     println!("            Custom Activities (track demos, contract reviews, etc.)");
     println!("            Opportunities pipeline (multiple pipelines per workspace)");
     println!("  Integrations: 100+ Zapier connectors + native: Gmail, Outlook, Twilio, Slack,");
-    println!("              Zoom, Calendly, HubSpot Marketing, Mailchimp, Intercom, Drift, Segment");
+    println!(
+        "              Zoom, Calendly, HubSpot Marketing, Mailchimp, Intercom, Drift, Segment"
+    );
     println!("              public REST API + webhooks");
-    println!("  Customers: high-volume inside sales teams (SaaS, real estate, professional services)");
+    println!(
+        "  Customers: high-volume inside sales teams (SaaS, real estate, professional services)"
+    );
     println!("            sweet spot: 3-100 rep teams cold-calling/emailing daily");
     println!("            ~4,000+ paying customers");
     println!("            FreshBooks, Backerkit, MakeMusic, Lemonade (early-stage)");
     println!("  Critique: not a fit for complex enterprise sales (long cycles, many stakeholders)");
     println!("           customization limited vs Salesforce — by design (opinionated UX)");
     println!("           pricing higher than Pipedrive at entry, harder sell for tiny teams");
-    println!("  Differentiator: only CRM where calling is a first-class citizen baked into the core UX");
+    println!(
+        "  Differentiator: only CRM where calling is a first-class citizen baked into the core UX"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "close".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "close".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_close(&rest, &_prog);
     process::exit(code);
@@ -87,7 +107,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_close};
+    use super::{basename, run_close, strip_ext};
 
     #[test]
     fn basename_strips_path() {

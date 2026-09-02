@@ -36,9 +36,15 @@ fn run_wmctrl(args: Vec<String>) -> i32 {
         let show_geom = args.iter().any(|a| a == "-G");
         let show_class = args.iter().any(|a| a == "-x");
         if show_pid && show_geom && show_class {
-            println!("0x01000001  0 1234  0    0    1920 1080 terminal.Terminal    hostname Terminal");
-            println!("0x02000001  0 5678  100  50   800  600  firefox.Firefox      hostname Mozilla Firefox");
-            println!("0x03000001  1 9012  200  100  1024 768  nautilus.Nautilus     hostname Files");
+            println!(
+                "0x01000001  0 1234  0    0    1920 1080 terminal.Terminal    hostname Terminal"
+            );
+            println!(
+                "0x02000001  0 5678  100  50   800  600  firefox.Firefox      hostname Mozilla Firefox"
+            );
+            println!(
+                "0x03000001  1 9012  200  100  1024 768  nautilus.Nautilus     hostname Files"
+            );
         } else if show_pid {
             println!("0x01000001  0 1234 hostname Terminal");
             println!("0x02000001  0 5678 hostname Mozilla Firefox");
@@ -68,7 +74,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_wmctrl};
+    use super::run_wmctrl;
 
     #[test]
     fn help_exits_zero() {

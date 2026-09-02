@@ -87,7 +87,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_orca};
+    use super::run_orca;
 
     #[test]
     fn help_exits_zero() {

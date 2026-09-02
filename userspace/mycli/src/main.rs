@@ -29,17 +29,30 @@ fn run_mycli(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let host = args.windows(2).find(|w| w[0] == "-h" || w[0] == "--host")
-        .map(|w| w[1].as_str()).unwrap_or("localhost");
-    let port = args.windows(2).find(|w| w[0] == "-P" || w[0] == "--port")
-        .map(|w| w[1].as_str()).unwrap_or("3306");
-    let user = args.windows(2).find(|w| w[0] == "-u" || w[0] == "--user")
-        .map(|w| w[1].as_str()).unwrap_or("root");
-    let db = args.windows(2).find(|w| w[0] == "-D" || w[0] == "--database")
+    let host = args
+        .windows(2)
+        .find(|w| w[0] == "-h" || w[0] == "--host")
+        .map(|w| w[1].as_str())
+        .unwrap_or("localhost");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "-P" || w[0] == "--port")
+        .map(|w| w[1].as_str())
+        .unwrap_or("3306");
+    let user = args
+        .windows(2)
+        .find(|w| w[0] == "-u" || w[0] == "--user")
+        .map(|w| w[1].as_str())
+        .unwrap_or("root");
+    let db = args
+        .windows(2)
+        .find(|w| w[0] == "-D" || w[0] == "--database")
         .map(|w| w[1].as_str())
         .or_else(|| args.last().map(|s| s.as_str()));
 
-    let execute = args.windows(2).find(|w| w[0] == "-e" || w[0] == "--execute")
+    let execute = args
+        .windows(2)
+        .find(|w| w[0] == "-e" || w[0] == "--execute")
         .map(|w| w[1].as_str());
 
     if let Some(query) = execute {
@@ -80,7 +93,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mycli};
+    use super::run_mycli;
 
     #[test]
     fn help_exits_zero() {

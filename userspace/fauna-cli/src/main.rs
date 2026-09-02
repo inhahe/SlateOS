@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version     Show version");
 }
 
-fn print_version() { println!("fauna-cli 0.1.0 (Calvin-protocol personality build)"); }
+fn print_version() {
+    println!("fauna-cli 0.1.0 (Calvin-protocol personality build)");
+}
 
 fn run_about() {
     println!("Fauna, Inc.");

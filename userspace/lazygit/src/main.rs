@@ -23,11 +23,15 @@ fn run_lazygit(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("commit=abc123, build date=2025-05-22, build source=Slate OS, version=0.42.0, os=slateos, arch=amd64");
+        println!(
+            "commit=abc123, build date=2025-05-22, build source=Slate OS, version=0.42.0, os=slateos, arch=amd64"
+        );
         return 0;
     }
 
-    let path = args.iter().position(|a| a == "-p" || a == "--path")
+    let path = args
+        .iter()
+        .position(|a| a == "-p" || a == "--path")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or(".");
@@ -46,7 +50,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_lazygit};
+    use super::run_lazygit;
 
     #[test]
     fn help_exits_zero() {

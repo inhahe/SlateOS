@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_amtool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -39,9 +43,15 @@ fn run_amtool(args: &[String], _prog: &str) -> i32 {
             match sub {
                 "query" => {
                     println!("Alertname       Severity  Instance         Status   StartsAt");
-                    println!("HighCPU         warning   web-01           active   2024-01-15T10:00:00Z");
-                    println!("DiskFull        critical  db-01            active   2024-01-15T09:30:00Z");
-                    println!("HighLatency     warning   api-gateway      active   2024-01-15T10:15:00Z");
+                    println!(
+                        "HighCPU         warning   web-01           active   2024-01-15T10:00:00Z"
+                    );
+                    println!(
+                        "DiskFull        critical  db-01            active   2024-01-15T09:30:00Z"
+                    );
+                    println!(
+                        "HighLatency     warning   api-gateway      active   2024-01-15T10:15:00Z"
+                    );
                 }
                 "add" => println!("Alert added successfully."),
                 _ => println!("amtool alert {}: completed", sub),
@@ -51,8 +61,12 @@ fn run_amtool(args: &[String], _prog: &str) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("query");
             match sub {
                 "query" => {
-                    println!("ID                    Matchers                    Ends                  CreatedBy   Comment");
-                    println!("abc123-def456         alertname=HighCPU           2024-01-16T10:00:00Z  admin       Maintenance");
+                    println!(
+                        "ID                    Matchers                    Ends                  CreatedBy   Comment"
+                    );
+                    println!(
+                        "abc123-def456         alertname=HighCPU           2024-01-16T10:00:00Z  admin       Maintenance"
+                    );
                 }
                 "add" => println!("Silence created: abc789-ghi012"),
                 "expire" => println!("Silence expired."),
@@ -89,7 +103,10 @@ fn run_amtool(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "amtool".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "amtool".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_amtool(&rest, &prog);
     process::exit(code);
@@ -97,7 +114,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_amtool};
+    use super::{basename, run_amtool, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -64,7 +64,10 @@ impl GroupEntry {
     fn format(&self) -> String {
         format!(
             "{}:{}:{}:{}",
-            self.name, self.passwd, self.gid, self.members.join(",")
+            self.name,
+            self.passwd,
+            self.gid,
+            self.members.join(",")
         )
     }
 }
@@ -119,7 +122,9 @@ impl ProtocolEntry {
         } else {
             format!(
                 "{:<24}{}  {}",
-                self.name, self.number, self.aliases.join(" ")
+                self.name,
+                self.number,
+                self.aliases.join(" ")
             )
         }
     }
@@ -139,7 +144,9 @@ impl NetworkEntry {
         } else {
             format!(
                 "{:<24}{}  {}",
-                self.name, self.number, self.aliases.join(" ")
+                self.name,
+                self.number,
+                self.aliases.join(" ")
             )
         }
     }
@@ -287,14 +294,15 @@ fn parse_services() -> Vec<ServiceEntry> {
         if parts.len() >= 2 {
             let port_proto: Vec<&str> = parts[1].split('/').collect();
             if port_proto.len() == 2
-                && let Ok(port) = port_proto[0].parse::<u16>() {
-                    entries.push(ServiceEntry {
-                        name: parts[0].to_string(),
-                        port,
-                        protocol: port_proto[1].to_string(),
-                        aliases: parts[2..].iter().map(|s| s.to_string()).collect(),
-                    });
-                }
+                && let Ok(port) = port_proto[0].parse::<u16>()
+            {
+                entries.push(ServiceEntry {
+                    name: parts[0].to_string(),
+                    port,
+                    protocol: port_proto[1].to_string(),
+                    aliases: parts[2..].iter().map(|s| s.to_string()).collect(),
+                });
+            }
         }
     }
     entries
@@ -319,13 +327,14 @@ fn parse_protocols() -> Vec<ProtocolEntry> {
         };
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 2
-            && let Ok(number) = parts[1].parse::<u32>() {
-                entries.push(ProtocolEntry {
-                    name: parts[0].to_string(),
-                    number,
-                    aliases: parts[2..].iter().map(|s| s.to_string()).collect(),
-                });
-            }
+            && let Ok(number) = parts[1].parse::<u32>()
+        {
+            entries.push(ProtocolEntry {
+                name: parts[0].to_string(),
+                number,
+                aliases: parts[2..].iter().map(|s| s.to_string()).collect(),
+            });
+        }
     }
     entries
 }

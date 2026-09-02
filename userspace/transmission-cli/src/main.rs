@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_daemon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_daemon(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("transmission-daemon v4.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("transmission-daemon v4.0 (Slate OS)");
+        return 0;
+    }
     println!("transmission-daemon: started on port 9091");
     println!("  Download dir: /home/user/Downloads");
     println!("  Peer port: 51413");
@@ -45,7 +52,10 @@ fn run_remote(args: &[String], _prog: &str) -> i32 {
         println!("  -si               Session info");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("transmission-remote v4.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("transmission-remote v4.0 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "-l") {
         println!("  ID   Done  ETA         Status       Name");
         println!("   1   100%  Done        Seeding      ubuntu-24.04.iso");
@@ -70,7 +80,10 @@ fn run_cli_mode(args: &[String], _prog: &str) -> i32 {
         println!("transmission-cli v4.0 (Slate OS) — Lightweight CLI client");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("transmission-cli v4.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("transmission-cli v4.0 (Slate OS)");
+        return 0;
+    }
     println!("transmission-cli: downloading...");
     0
 }
@@ -81,14 +94,20 @@ fn run_gtk(args: &[String], _prog: &str) -> i32 {
         println!("transmission-gtk v4.0 (Slate OS) — GTK BitTorrent client");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("transmission-gtk v4.0 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("transmission-gtk v4.0 (Slate OS)");
+        return 0;
+    }
     println!("transmission-gtk: BitTorrent client started");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "transmission-cli".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "transmission-cli".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "transmission-daemon" => run_daemon(&rest, &prog),
@@ -101,7 +120,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_daemon};
+    use super::{basename, run_daemon, strip_ext};
 
     #[test]
     fn basename_strips_path() {

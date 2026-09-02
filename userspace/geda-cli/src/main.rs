@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_gschem(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -19,7 +23,10 @@ fn run_gschem(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gschem v1.10 (Slate OS, gEDA)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("gschem v1.10 (Slate OS, gEDA)");
+        return 0;
+    }
     println!("gschem: schematic editor started");
     println!("  Symbol library: standard, SPICE, simulation");
     println!("  Hierarchical schematics supported");
@@ -37,7 +44,10 @@ fn run_gnetlist(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnetlist v1.10 (Slate OS, gEDA)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("gnetlist v1.10 (Slate OS, gEDA)");
+        return 0;
+    }
     println!("gnetlist: generating netlist...");
     0
 }
@@ -48,7 +58,10 @@ fn run_gattrib(args: &[String], _prog: &str) -> i32 {
         println!("gattrib v1.10 (Slate OS) — gEDA attribute spreadsheet editor");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gattrib v1.10 (Slate OS, gEDA)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("gattrib v1.10 (Slate OS, gEDA)");
+        return 0;
+    }
     println!("gattrib: attribute editor started");
     0
 }
@@ -59,14 +72,20 @@ fn run_gsch2pcb(args: &[String], _prog: &str) -> i32 {
         println!("gsch2pcb v1.10 (Slate OS) — Schematic to PCB layout bridge");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gsch2pcb v1.10 (Slate OS, gEDA)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("gsch2pcb v1.10 (Slate OS, gEDA)");
+        return 0;
+    }
     println!("gsch2pcb: generating PCB layout from schematic...");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "gschem".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "gschem".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "gnetlist" => run_gnetlist(&rest, &prog),
@@ -79,7 +98,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gschem};
+    use super::{basename, run_gschem, strip_ext};
 
     #[test]
     fn basename_strips_path() {

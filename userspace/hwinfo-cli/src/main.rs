@@ -44,7 +44,8 @@ fn run_hwinfo(args: &[String]) -> i32 {
     let gfx = args.iter().any(|a| a == "--gfxcard");
     let memory = args.iter().any(|a| a == "--memory");
     let netcard = args.iter().any(|a| a == "--netcard");
-    let show_all = args.iter().any(|a| a == "--all") || (!cpu && !disk && !gfx && !memory && !netcard);
+    let show_all =
+        args.iter().any(|a| a == "--all") || (!cpu && !disk && !gfx && !memory && !netcard);
 
     if short {
         if show_all || cpu {
@@ -177,7 +178,8 @@ fn run_lshw(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "hwinfo".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -191,7 +193,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_hwinfo};
+    use super::{basename, run_hwinfo, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_velero(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -46,7 +50,9 @@ fn run_velero(args: &[String], _prog: &str) -> i32 {
                     println!("Backup request \"{}\" submitted successfully.", name);
                 }
                 "get" => {
-                    println!("NAME       STATUS      ERRORS  WARNINGS  CREATED                EXPIRES");
+                    println!(
+                        "NAME       STATUS      ERRORS  WARNINGS  CREATED                EXPIRES"
+                    );
                     println!("backup-1   Completed   0       0         2024-01-15 10:00:00    29d");
                 }
                 "logs" => println!("velero: Fetching backup logs..."),
@@ -58,8 +64,12 @@ fn run_velero(args: &[String], _prog: &str) -> i32 {
             match sub {
                 "create" => println!("Restore request submitted successfully."),
                 "get" => {
-                    println!("NAME          BACKUP     STATUS      STARTED                COMPLETED");
-                    println!("restore-1     backup-1   Completed   2024-01-16 10:00:00    2024-01-16 10:05:00");
+                    println!(
+                        "NAME          BACKUP     STATUS      STARTED                COMPLETED"
+                    );
+                    println!(
+                        "restore-1     backup-1   Completed   2024-01-16 10:00:00    2024-01-16 10:05:00"
+                    );
                 }
                 _ => println!("velero restore {}: completed", sub),
             }
@@ -92,7 +102,10 @@ fn run_velero(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "velero".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "velero".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_velero(&rest, &prog);
     process::exit(code);
@@ -100,7 +113,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_velero};
+    use super::{basename, run_velero, strip_ext};
 
     #[test]
     fn basename_strips_path() {

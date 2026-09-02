@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_marketo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,21 +28,32 @@ fn run_marketo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Marketo 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Marketo 2024 (Slate OS)");
+        return 0;
+    }
     println!("Marketo Engage 2024 (Slate OS)");
     println!("  Vendor: Adobe (Marketo Engage division — part of Adobe Experience Cloud)");
     println!("        San Jose, CA + San Mateo (legacy Marketo HQ)");
     println!("  Originally Marketo, Inc. — founded 2006 in San Mateo, CA");
-    println!("  Founders: Phil Fernandez (CEO), Jon Miller (CMO/Product), David Morandi (CTO), 2006");
+    println!(
+        "  Founders: Phil Fernandez (CEO), Jon Miller (CMO/Product), David Morandi (CTO), 2006"
+    );
     println!("          all three ex-Epiphany (CRM, sold to SSA Global 2005)");
     println!("          Miller: later co-founded Engagio (ABM, also acquired by Demandbase)");
     println!("  Founded: 2006 → IPO May 2013 NYSE:MKTO ($13/share, popped to $30+)");
     println!("          went private Aug 2016 — Vista Equity for $1.79B");
     println!("          acquired by Adobe Oct 2018 for $4.75B");
     println!("          now integrated into Adobe Experience Cloud as 'Marketo Engage'");
-    println!("  Strategic position: enterprise B2B marketing automation leader (sales-led B2B, not B2C)");
-    println!("                    primary competitor: HubSpot (going upmarket) + Eloqua (Oracle) + Pardot (Salesforce)");
-    println!("                    Gartner Magic Quadrant Leader in B2B Marketing Automation 10+ years running");
+    println!(
+        "  Strategic position: enterprise B2B marketing automation leader (sales-led B2B, not B2C)"
+    );
+    println!(
+        "                    primary competitor: HubSpot (going upmarket) + Eloqua (Oracle) + Pardot (Salesforce)"
+    );
+    println!(
+        "                    Gartner Magic Quadrant Leader in B2B Marketing Automation 10+ years running"
+    );
     println!("  Pricing (notoriously opaque, list prices for reference):");
     println!("    Growth — from ~$895/mo (10K contacts base, climbs by database size)");
     println!("    Select — from ~$1,795/mo");
@@ -56,11 +71,17 @@ fn run_marketo(args: &[String], _prog: &str) -> i32 {
     println!("    - Landing pages + forms with progressive profiling");
     println!("    - Lead routing + assignment + SLA-based reminders");
     println!("    - Salesforce sync (deepest of any MAP — bidirectional, custom object support)");
-    println!("    - Munchkin tracking script (the equivalent of Google Tag Manager for B2B behavior)");
+    println!(
+        "    - Munchkin tracking script (the equivalent of Google Tag Manager for B2B behavior)"
+    );
     println!("  Marketo Measure (Bizible attribution):");
-    println!("    - Multi-touch attribution across all channels (display, paid social, content, events)");
+    println!(
+        "    - Multi-touch attribution across all channels (display, paid social, content, events)"
+    );
     println!("    - Pipeline + revenue impact analysis");
-    println!("    - Custom attribution models (first-touch, last-touch, W-shaped, U-shaped, custom-weighted)");
+    println!(
+        "    - Custom attribution models (first-touch, last-touch, W-shaped, U-shaped, custom-weighted)"
+    );
     println!("    - Pulls cost data from Google Ads + Facebook + LinkedIn ad platforms");
     println!("  ABM (Account-Based Marketing):");
     println!("    - Target Account Lists (sync from CRM or Engagio)");
@@ -80,20 +101,31 @@ fn run_marketo(args: &[String], _prog: &str) -> i32 {
     println!("  Customers: ~6,000+ paying enterprise customers");
     println!("            Microsoft, Adobe (uses itself), GE, Panasonic, Charles Schwab, Symantec");
     println!("            CenturyLink, HSBC, RBC, Pearson, Lufthansa Group");
-    println!("            sweet spot: B2B enterprises with 1K-50K employees, complex multi-product/region marketing");
+    println!(
+        "            sweet spot: B2B enterprises with 1K-50K employees, complex multi-product/region marketing"
+    );
     println!("            heavy in tech, financial services, manufacturing, professional services");
-    println!("  Critique: famously difficult to administer — Marketo admins are a specialist role + cert track");
+    println!(
+        "  Critique: famously difficult to administer — Marketo admins are a specialist role + cert track"
+    );
     println!("           UI rebuilt incrementally — still patches of dated UX inside modern shell");
     println!("           AI features lag HubSpot's velocity since Adobe acquisition");
-    println!("           pricing total cost (with Measure, ABM) reaches $250K+/yr fast for serious teams");
+    println!(
+        "           pricing total cost (with Measure, ABM) reaches $250K+/yr fast for serious teams"
+    );
     println!("           ecosystem lock-in to Adobe Experience Cloud — exits painful");
-    println!("  Differentiator: deepest B2B-specific marketing automation feature set + most-cert'd admin community + Adobe Experience Cloud integration");
+    println!(
+        "  Differentiator: deepest B2B-specific marketing automation feature set + most-cert'd admin community + Adobe Experience Cloud integration"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "marketo".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "marketo".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_marketo(&rest, &_prog);
     process::exit(code);
@@ -101,7 +133,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_marketo};
+    use super::{basename, run_marketo, strip_ext};
 
     #[test]
     fn basename_strips_path() {

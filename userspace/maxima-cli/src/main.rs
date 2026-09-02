@@ -28,11 +28,17 @@ fn run_maxima(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let batch = args.windows(2).find(|w| w[0] == "--batch")
+    let batch = args
+        .windows(2)
+        .find(|w| w[0] == "--batch")
         .map(|w| w[1].as_str());
-    let batch_string = args.windows(2).find(|w| w[0] == "--batch-string" || w[0] == "-r" || w[0] == "--run-string")
+    let batch_string = args
+        .windows(2)
+        .find(|w| w[0] == "--batch-string" || w[0] == "-r" || w[0] == "--run-string")
         .map(|w| w[1].as_str());
-    let quiet = args.iter().any(|a| a == "-q" || a == "--quiet" || a == "--very-quiet");
+    let quiet = args
+        .iter()
+        .any(|a| a == "-q" || a == "--quiet" || a == "--very-quiet");
 
     if let Some(s) = batch_string {
         println!("(%i1) {}", s);
@@ -66,7 +72,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_maxima};
+    use super::run_maxima;
 
     #[test]
     fn help_exits_zero() {

@@ -35,11 +35,13 @@ fn run_dmidecode(args: &[String]) -> i32 {
         return 0;
     }
 
-    let type_filter = args.windows(2)
+    let type_filter = args
+        .windows(2)
         .find(|w| w[0] == "-t")
         .map(|w| w[1].as_str());
 
-    let keyword = args.windows(2)
+    let keyword = args
+        .windows(2)
         .find(|w| w[0] == "-s")
         .map(|w| w[1].as_str());
 
@@ -140,7 +142,8 @@ fn run_vpddecode(_args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "dmidecode".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -155,7 +158,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dmidecode};
+    use super::{basename, run_dmidecode, strip_ext};
 
     #[test]
     fn basename_strips_path() {

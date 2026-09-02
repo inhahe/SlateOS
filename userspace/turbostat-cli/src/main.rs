@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_turbostat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_turbostat(args: &[String], _prog: &str) -> i32 {
         println!("Reports CPU C-states, P-states, temperature, and power.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("turbostat v2024.01 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("turbostat v2024.01 (Slate OS)");
+        return 0;
+    }
     println!("Core CPU   Avg_MHz Busy%   Bzy_MHz TSC_MHz   CPU%c1  CPU%c6  PkgTmp  PkgWatt");
     println!("  -    -       125  3.47     3600    3600     4.53   92.00     42      15.2");
     println!("  0    0       200  5.56     3600    3600     6.44   88.00     42      ");
@@ -37,7 +44,10 @@ fn run_turbostat(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "turbostat".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "turbostat".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_turbostat(&rest, &prog);
     process::exit(code);
@@ -45,7 +55,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_turbostat};
+    use super::{basename, run_turbostat, strip_ext};
 
     #[test]
     fn basename_strips_path() {

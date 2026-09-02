@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_psensor(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_psensor(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("psensor v1.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("psensor v1.2 (Slate OS)");
+        return 0;
+    }
     println!("psensor: hardware temperature monitor started");
     println!("  Sensors detected: 4");
     println!("  CPU Core 0: 45.0\u{00b0}C");
@@ -42,7 +49,10 @@ fn run_server(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("psensor-server v1.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("psensor-server v1.2 (Slate OS)");
+        return 0;
+    }
     println!("psensor-server: listening on port 3131");
     println!("  Serving sensor data via JSON API");
     0
@@ -50,7 +60,10 @@ fn run_server(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "psensor".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "psensor".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "psensor-server" => run_server(&rest, &prog),
@@ -61,7 +74,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_psensor};
+    use super::{basename, run_psensor, strip_ext};
 
     #[test]
     fn basename_strips_path() {

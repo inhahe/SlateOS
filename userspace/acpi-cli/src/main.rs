@@ -61,8 +61,14 @@ fn run_acpi(args: &[String]) -> i32 {
     }
     if thermal || everything {
         println!("Thermal 0: ok, {}", temp(45.0));
-        println!("Thermal 0: trip point 0 switches to mode critical at temperature {}", temp(110.0));
-        println!("Thermal 0: trip point 1 switches to mode passive at temperature {}", temp(100.0));
+        println!(
+            "Thermal 0: trip point 0 switches to mode critical at temperature {}",
+            temp(110.0)
+        );
+        println!(
+            "Thermal 0: trip point 1 switches to mode passive at temperature {}",
+            temp(100.0)
+        );
         println!("Thermal 1: ok, {}", temp(38.0));
     }
     if cooling || everything {
@@ -92,7 +98,8 @@ fn run_acpi_listen(_args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "acpi".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -107,7 +114,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_acpi};
+    use super::{basename, run_acpi, strip_ext};
 
     #[test]
     fn basename_strips_path() {

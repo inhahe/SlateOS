@@ -67,9 +67,13 @@ fn run_handbrake(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let input = args.windows(2).find(|w| w[0] == "-i" || w[0] == "--input")
+    let input = args
+        .windows(2)
+        .find(|w| w[0] == "-i" || w[0] == "--input")
         .map(|w| w[1].as_str());
-    let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output")
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o" || w[0] == "--output")
         .map(|w| w[1].as_str());
 
     if args.iter().any(|a| a == "--scan") {
@@ -92,10 +96,16 @@ fn run_handbrake(args: Vec<String>) -> i32 {
 
     let src = input.unwrap_or("input.mkv");
     let dst = output.unwrap_or("output.mp4");
-    let encoder = args.windows(2).find(|w| w[0] == "-e" || w[0] == "--encoder")
-        .map(|w| w[1].as_str()).unwrap_or("x264");
-    let quality = args.windows(2).find(|w| w[0] == "-q" || w[0] == "--quality")
-        .map(|w| w[1].as_str()).unwrap_or("20");
+    let encoder = args
+        .windows(2)
+        .find(|w| w[0] == "-e" || w[0] == "--encoder")
+        .map(|w| w[1].as_str())
+        .unwrap_or("x264");
+    let quality = args
+        .windows(2)
+        .find(|w| w[0] == "-q" || w[0] == "--quality")
+        .map(|w| w[1].as_str())
+        .unwrap_or("20");
 
     println!("HandBrake has exited.");
     println!("Encoding: {} -> {}", src, dst);
@@ -118,7 +128,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_handbrake};
+    use super::run_handbrake;
 
     #[test]
     fn help_exits_zero() {

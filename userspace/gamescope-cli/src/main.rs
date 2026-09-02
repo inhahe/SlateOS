@@ -36,12 +36,36 @@ fn run_gamescope(args: &[String]) -> i32 {
         return 0;
     }
 
-    let width = args.windows(2).find(|w| w[0] == "-w").map(|w| w[1].as_str()).unwrap_or("1920");
-    let height_val = args.windows(2).find(|w| w[0] == "-h" && w[1].chars().all(|c| c.is_ascii_digit())).map(|w| w[1].as_str()).unwrap_or("1080");
-    let out_w = args.windows(2).find(|w| w[0] == "-W").map(|w| w[1].as_str()).unwrap_or("3840");
-    let out_h = args.windows(2).find(|w| w[0] == "-H").map(|w| w[1].as_str()).unwrap_or("2160");
-    let refresh = args.windows(2).find(|w| w[0] == "-r").map(|w| w[1].as_str()).unwrap_or("60");
-    let filter = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].as_str()).unwrap_or("fsr");
+    let width = args
+        .windows(2)
+        .find(|w| w[0] == "-w")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1920");
+    let height_val = args
+        .windows(2)
+        .find(|w| w[0] == "-h" && w[1].chars().all(|c| c.is_ascii_digit()))
+        .map(|w| w[1].as_str())
+        .unwrap_or("1080");
+    let out_w = args
+        .windows(2)
+        .find(|w| w[0] == "-W")
+        .map(|w| w[1].as_str())
+        .unwrap_or("3840");
+    let out_h = args
+        .windows(2)
+        .find(|w| w[0] == "-H")
+        .map(|w| w[1].as_str())
+        .unwrap_or("2160");
+    let refresh = args
+        .windows(2)
+        .find(|w| w[0] == "-r")
+        .map(|w| w[1].as_str())
+        .unwrap_or("60");
+    let filter = args
+        .windows(2)
+        .find(|w| w[0] == "-F")
+        .map(|w| w[1].as_str())
+        .unwrap_or("fsr");
 
     println!("[gamescope] Starting compositor");
     println!("[gamescope] Render resolution: {}x{}", width, height_val);
@@ -75,7 +99,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gamescope};
+    use super::run_gamescope;
 
     #[test]
     fn help_exits_zero() {

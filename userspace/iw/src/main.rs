@@ -56,22 +56,37 @@ const RFKILL_NFC: u8 = 7;
 
 fn print_out(msg: &[u8]) {
     #[cfg(not(test))]
-    { use std::io::Write; let _ = std::io::stdout().write_all(msg); }
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(msg);
+    }
     #[cfg(test)]
-    { let _ = msg; }
+    {
+        let _ = msg;
+    }
 }
 
 fn print_err(msg: &[u8]) {
     #[cfg(not(test))]
-    { use std::io::Write; let _ = std::io::stderr().write_all(msg); }
+    {
+        use std::io::Write;
+        let _ = std::io::stderr().write_all(msg);
+    }
     #[cfg(test)]
-    { let _ = msg; }
+    {
+        let _ = msg;
+    }
 }
 
 // ── Data Types ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Tool { Iw, Iwconfig, Iwlist, Rfkill }
+enum Tool {
+    Iw,
+    Iwconfig,
+    Iwlist,
+    Rfkill,
+}
 
 #[derive(Clone, Copy)]
 struct WifiInterface {
@@ -82,26 +97,35 @@ struct WifiInterface {
     if_type: u8,
     mac: [u8; 6],
     channel: u16,
-    frequency: u32,  // MHz
-    tx_power: i16,   // dBm * 100
+    frequency: u32, // MHz
+    tx_power: i16,  // dBm * 100
     connected: bool,
     ssid: [u8; 33],
     ssid_len: usize,
     bssid: [u8; 6],
-    signal: i16,     // dBm
-    bitrate: u32,    // Mbps * 10
+    signal: i16,  // dBm
+    bitrate: u32, // Mbps * 10
     band: u8,
 }
 
 impl WifiInterface {
     fn new() -> Self {
         Self {
-            name: [0u8; MAX_NAME], name_len: 0,
-            phy_index: 0, if_index: 0, if_type: IFTYPE_MANAGED,
-            mac: [0u8; 6], channel: 0, frequency: 0,
-            tx_power: 2000, connected: false,
-            ssid: [0u8; 33], ssid_len: 0,
-            bssid: [0u8; 6], signal: 0, bitrate: 0,
+            name: [0u8; MAX_NAME],
+            name_len: 0,
+            phy_index: 0,
+            if_index: 0,
+            if_type: IFTYPE_MANAGED,
+            mac: [0u8; 6],
+            channel: 0,
+            frequency: 0,
+            tx_power: 2000,
+            connected: false,
+            ssid: [0u8; 33],
+            ssid_len: 0,
+            bssid: [0u8; 6],
+            signal: 0,
+            bitrate: 0,
             band: BAND_24GHZ,
         }
     }
@@ -124,10 +148,16 @@ struct ScanResult {
 impl ScanResult {
     fn new() -> Self {
         Self {
-            bssid: [0u8; 6], ssid: [0u8; 33], ssid_len: 0,
-            frequency: 0, channel: 0, signal: 0,
-            security: SEC_OPEN, band: BAND_24GHZ,
-            bitrate_max: 0, beacon_interval: 100,
+            bssid: [0u8; 6],
+            ssid: [0u8; 33],
+            ssid_len: 0,
+            frequency: 0,
+            channel: 0,
+            signal: 0,
+            security: SEC_OPEN,
+            band: BAND_24GHZ,
+            bitrate_max: 0,
+            beacon_interval: 100,
         }
     }
 }
@@ -145,9 +175,12 @@ struct RfkillDevice {
 impl RfkillDevice {
     fn new() -> Self {
         Self {
-            index: 0, dev_type: RFKILL_WIFI,
-            name: [0u8; MAX_NAME], name_len: 0,
-            soft_blocked: false, hard_blocked: false,
+            index: 0,
+            dev_type: RFKILL_WIFI,
+            name: [0u8; MAX_NAME],
+            name_len: 0,
+            soft_blocked: false,
+            hard_blocked: false,
         }
     }
 }
@@ -173,11 +206,16 @@ impl Options {
     fn new(tool: Tool) -> Self {
         Self {
             tool,
-            iface: [0u8; MAX_NAME], iface_len: 0,
-            subcmd: [0u8; 32], subcmd_len: 0,
-            subcmd2: [0u8; 32], subcmd2_len: 0,
-            rfkill_cmd: [0u8; 16], rfkill_cmd_len: 0,
-            rfkill_type: [0u8; 16], rfkill_type_len: 0,
+            iface: [0u8; MAX_NAME],
+            iface_len: 0,
+            subcmd: [0u8; 32],
+            subcmd_len: 0,
+            subcmd2: [0u8; 32],
+            subcmd2_len: 0,
+            rfkill_cmd: [0u8; 16],
+            rfkill_cmd_len: 0,
+            rfkill_type: [0u8; 16],
+            rfkill_type_len: 0,
             verbose: false,
         }
     }
@@ -186,27 +224,52 @@ impl Options {
 // ── String/Number Helpers ──────────────────────────────────────────────
 
 unsafe fn cstr_to_slice(ptr: *const u8) -> &'static [u8] {
-    if ptr.is_null() { return b""; }
+    if ptr.is_null() {
+        return b"";
+    }
     let mut len = 0usize;
     unsafe {
-        while *ptr.add(len) != 0 { len += 1; if len >= 4096 { break; } }
+        while *ptr.add(len) != 0 {
+            len += 1;
+            if len >= 4096 {
+                break;
+            }
+        }
         core::slice::from_raw_parts(ptr, len)
     }
 }
 
 fn format_u64(val: u64, buf: &mut [u8]) -> usize {
-    if val == 0 { if !buf.is_empty() { buf[0] = b'0'; } return 1; }
+    if val == 0 {
+        if !buf.is_empty() {
+            buf[0] = b'0';
+        }
+        return 1;
+    }
     let mut tmp = [0u8; 20];
-    let mut n = val; let mut i = 0;
-    while n > 0 { if let Some(s) = tmp.get_mut(i) { *s = b'0' + (n % 10) as u8; } n /= 10; i += 1; }
+    let mut n = val;
+    let mut i = 0;
+    while n > 0 {
+        if let Some(s) = tmp.get_mut(i) {
+            *s = b'0' + (n % 10) as u8;
+        }
+        n /= 10;
+        i += 1;
+    }
     let len = i.min(buf.len());
-    for j in 0..len { if let (Some(d), Some(s)) = (buf.get_mut(j), tmp.get(i-1-j)) { *d = *s; } }
+    for j in 0..len {
+        if let (Some(d), Some(s)) = (buf.get_mut(j), tmp.get(i - 1 - j)) {
+            *d = *s;
+        }
+    }
     len
 }
 
 fn format_i16(val: i16, buf: &mut [u8]) -> usize {
     if val < 0 {
-        if buf.is_empty() { return 0; }
+        if buf.is_empty() {
+            return 0;
+        }
         buf[0] = b'-';
         format_u64((-val) as u64, &mut buf[1..]) + 1
     } else {
@@ -216,13 +279,21 @@ fn format_i16(val: i16, buf: &mut [u8]) -> usize {
 
 fn copy_bytes(dst: &mut [u8], pos: usize, src: &[u8]) -> usize {
     let mut p = pos;
-    for &c in src { if p < dst.len() { dst[p] = c; p += 1; } }
+    for &c in src {
+        if p < dst.len() {
+            dst[p] = c;
+            p += 1;
+        }
+    }
     p
 }
 
 fn pad_right(buf: &mut [u8], start: usize, width: usize) -> usize {
     let mut pos = start;
-    while pos < width && pos < buf.len() { buf[pos] = b' '; pos += 1; }
+    while pos < width && pos < buf.len() {
+        buf[pos] = b' ';
+        pos += 1;
+    }
     pos
 }
 
@@ -233,7 +304,9 @@ fn set_field(dst: &mut [u8], len: &mut usize, src: &[u8]) {
 }
 
 fn starts_with(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.len() > haystack.len() { return false; }
+    if needle.len() > haystack.len() {
+        return false;
+    }
     &haystack[..needle.len()] == needle
 }
 
@@ -241,10 +314,15 @@ fn format_mac(mac: &[u8; 6], buf: &mut [u8]) -> usize {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut pos = 0;
     for i in 0..6 {
-        if i > 0 && pos < buf.len() { buf[pos] = b':'; pos += 1; }
+        if i > 0 && pos < buf.len() {
+            buf[pos] = b':';
+            pos += 1;
+        }
         if pos + 1 < buf.len() {
-            buf[pos] = HEX[(mac[i] >> 4) as usize]; pos += 1;
-            buf[pos] = HEX[(mac[i] & 0xF) as usize]; pos += 1;
+            buf[pos] = HEX[(mac[i] >> 4) as usize];
+            pos += 1;
+            buf[pos] = HEX[(mac[i] & 0xF) as usize];
+            pos += 1;
         }
     }
     pos
@@ -299,28 +377,45 @@ fn band_str(b: u8) -> &'static [u8] {
 
 fn detect_tool(argv0: &[u8]) -> Tool {
     let mut start = 0;
-    for (i, b) in argv0.iter().enumerate() { if *b == b'/' || *b == b'\\' { start = i + 1; } }
+    for (i, b) in argv0.iter().enumerate() {
+        if *b == b'/' || *b == b'\\' {
+            start = i + 1;
+        }
+    }
     let name = &argv0[start..];
-    if starts_with(name, b"iwconfig") { Tool::Iwconfig }
-    else if starts_with(name, b"iwlist") { Tool::Iwlist }
-    else if starts_with(name, b"rfkill") { Tool::Rfkill }
-    else { Tool::Iw }
+    if starts_with(name, b"iwconfig") {
+        Tool::Iwconfig
+    } else if starts_with(name, b"iwlist") {
+        Tool::Iwlist
+    } else if starts_with(name, b"rfkill") {
+        Tool::Rfkill
+    } else {
+        Tool::Iw
+    }
 }
 
 // ── Argument Parsing ───────────────────────────────────────────────────
 
 fn parse_args(argc: i32, argv: *const *const u8) -> Result<Options, i32> {
     let args = unsafe { core::slice::from_raw_parts(argv, argc as usize) };
-    let argv0 = if !args.is_empty() { unsafe { cstr_to_slice(args[0]) } } else { b"iw" };
+    let argv0 = if !args.is_empty() {
+        unsafe { cstr_to_slice(args[0]) }
+    } else {
+        b"iw"
+    };
     let tool = detect_tool(argv0);
     let mut opts = Options::new(tool);
 
     let mut i = 1;
     while i < args.len() {
         let arg = unsafe { cstr_to_slice(args[i]) };
-        if arg == b"--help" || arg == b"-h" || arg == b"help" { show_help(tool); return Err(0); }
-        else if arg == b"--version" || arg == b"-V" {
-            print_out(tool_name(tool)); print_out(b" 0.1.0 (Slate OS)\n"); return Err(0);
+        if arg == b"--help" || arg == b"-h" || arg == b"help" {
+            show_help(tool);
+            return Err(0);
+        } else if arg == b"--version" || arg == b"-V" {
+            print_out(tool_name(tool));
+            print_out(b" 0.1.0 (Slate OS)\n");
+            return Err(0);
         }
 
         match tool {
@@ -363,7 +458,12 @@ fn parse_args(argc: i32, argv: *const *const u8) -> Result<Options, i32> {
 }
 
 fn tool_name(tool: Tool) -> &'static [u8] {
-    match tool { Tool::Iw => b"iw", Tool::Iwconfig => b"iwconfig", Tool::Iwlist => b"iwlist", Tool::Rfkill => b"rfkill" }
+    match tool {
+        Tool::Iw => b"iw",
+        Tool::Iwconfig => b"iwconfig",
+        Tool::Iwlist => b"iwlist",
+        Tool::Rfkill => b"rfkill",
+    }
 }
 
 fn show_help(tool: Tool) {
@@ -429,16 +529,72 @@ fn get_scan_results() -> ([ScanResult; MAX_SSIDS], usize) {
 
     type ScanFixture<'a> = (&'a [u8], [u8; 6], u32, u16, i16, u8, u8, u32);
     let networks: &[ScanFixture] = &[
-        (b"MyHomeNetwork", [0xAA,0xBB,0xCC,0xDD,0xEE,0xFF], 5180, 36, -45, SEC_WPA2, BAND_5GHZ, 8667),
-        (b"MyHomeNetwork", [0xAA,0xBB,0xCC,0xDD,0xEE,0x01], 2437, 6, -55, SEC_WPA2, BAND_24GHZ, 1440),
-        (b"Neighbor_5G", [0x11,0x22,0x33,0x44,0x55,0x66], 5240, 48, -62, SEC_WPA3, BAND_5GHZ, 5760),
-        (b"CoffeeShop", [0x22,0x33,0x44,0x55,0x66,0x77], 2412, 1, -70, SEC_OPEN, BAND_24GHZ, 540),
-        (b"Office_Secure", [0x33,0x44,0x55,0x66,0x77,0x88], 5500, 100, -58, SEC_WPA2, BAND_5GHZ, 8667),
-        (b"Guest_Network", [0x44,0x55,0x66,0x77,0x88,0x99], 2462, 11, -75, SEC_WPA, BAND_24GHZ, 540),
+        (
+            b"MyHomeNetwork",
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            5180,
+            36,
+            -45,
+            SEC_WPA2,
+            BAND_5GHZ,
+            8667,
+        ),
+        (
+            b"MyHomeNetwork",
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01],
+            2437,
+            6,
+            -55,
+            SEC_WPA2,
+            BAND_24GHZ,
+            1440,
+        ),
+        (
+            b"Neighbor_5G",
+            [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            5240,
+            48,
+            -62,
+            SEC_WPA3,
+            BAND_5GHZ,
+            5760,
+        ),
+        (
+            b"CoffeeShop",
+            [0x22, 0x33, 0x44, 0x55, 0x66, 0x77],
+            2412,
+            1,
+            -70,
+            SEC_OPEN,
+            BAND_24GHZ,
+            540,
+        ),
+        (
+            b"Office_Secure",
+            [0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
+            5500,
+            100,
+            -58,
+            SEC_WPA2,
+            BAND_5GHZ,
+            8667,
+        ),
+        (
+            b"Guest_Network",
+            [0x44, 0x55, 0x66, 0x77, 0x88, 0x99],
+            2462,
+            11,
+            -75,
+            SEC_WPA,
+            BAND_24GHZ,
+            540,
+        ),
     ];
 
     for &(ssid, bssid, freq, ch, sig, sec, band, rate) in networks {
-        if count >= MAX_SSIDS { break; }
+        if count >= MAX_SSIDS {
+            break;
+        }
         set_field(&mut results[count].ssid, &mut results[count].ssid_len, ssid);
         results[count].bssid = bssid;
         results[count].frequency = freq;
@@ -456,11 +612,13 @@ fn get_rfkill_devices() -> ([RfkillDevice; 8], usize) {
     let mut devs = [RfkillDevice::new(); 8];
     let mut count = 0;
 
-    devs[count].index = 0; devs[count].dev_type = RFKILL_WIFI;
+    devs[count].index = 0;
+    devs[count].dev_type = RFKILL_WIFI;
     set_field(&mut devs[count].name, &mut devs[count].name_len, b"phy0");
     count += 1;
 
-    devs[count].index = 1; devs[count].dev_type = RFKILL_BT;
+    devs[count].index = 1;
+    devs[count].dev_type = RFKILL_BT;
     set_field(&mut devs[count].name, &mut devs[count].name_len, b"hci0");
     count += 1;
 
@@ -479,7 +637,9 @@ fn cmd_iw(opts: &Options) {
         show_iw_scan(opts);
     } else if subcmd == b"dev" && subcmd2 == b"link" {
         show_iw_link(opts);
-    } else if subcmd == b"list" || (subcmd == b"dev" && opts.subcmd2_len == 0 && opts.iface_len == 0) {
+    } else if subcmd == b"list"
+        || (subcmd == b"dev" && opts.subcmd2_len == 0 && opts.iface_len == 0)
+    {
         show_iw_list();
     } else if subcmd == b"reg" {
         show_iw_reg();
@@ -494,7 +654,9 @@ fn show_iw_dev_info(opts: &Options) {
     let mut buf = [0u8; 256];
 
     for w in ifaces.iter().take(count) {
-        if opts.iface_len > 0 && &w.name[..w.name_len] != target { continue; }
+        if opts.iface_len > 0 && &w.name[..w.name_len] != target {
+            continue;
+        }
 
         let mut pos = copy_bytes(&mut buf, 0, b"Interface ");
         pos = copy_bytes(&mut buf, pos, &w.name[..w.name_len]);
@@ -571,7 +733,9 @@ fn show_iw_link(opts: &Options) {
     let mut buf = [0u8; 256];
 
     for w in ifaces.iter().take(count) {
-        if opts.iface_len > 0 && &w.name[..w.name_len] != target { continue; }
+        if opts.iface_len > 0 && &w.name[..w.name_len] != target {
+            continue;
+        }
         if !w.connected {
             print_out(b"Not connected.\n");
             return;
@@ -601,7 +765,8 @@ fn show_iw_link(opts: &Options) {
         let whole = w.bitrate / 10;
         let frac = w.bitrate % 10;
         pos += format_u64(whole as u64, &mut buf[pos..]);
-        buf[pos] = b'.'; pos += 1;
+        buf[pos] = b'.';
+        pos += 1;
         pos += format_u64(frac as u64, &mut buf[pos..]);
         pos = copy_bytes(&mut buf, pos, b" MBit/s\n");
         print_out(&buf[..pos]);
@@ -648,7 +813,9 @@ fn cmd_iwconfig(opts: &Options) {
     let mut buf = [0u8; 256];
 
     for w in ifaces.iter().take(count) {
-        if opts.iface_len > 0 && &w.name[..w.name_len] != target { continue; }
+        if opts.iface_len > 0 && &w.name[..w.name_len] != target {
+            continue;
+        }
 
         let mut pos = copy_bytes(&mut buf, 0, &w.name[..w.name_len]);
         pos = copy_bytes(&mut buf, pos, b"    IEEE 802.11  ");
@@ -663,7 +830,8 @@ fn cmd_iwconfig(opts: &Options) {
 
         pos = copy_bytes(&mut buf, 0, b"          Mode:Managed  Frequency:");
         pos += format_u64((w.frequency / 1000) as u64, &mut buf[pos..]);
-        buf[pos] = b'.'; pos += 1;
+        buf[pos] = b'.';
+        pos += 1;
         pos += format_u64(((w.frequency % 1000) / 100) as u64, &mut buf[pos..]);
         pos = copy_bytes(&mut buf, pos, b" GHz  Access Point: ");
         if w.connected {
@@ -678,7 +846,8 @@ fn cmd_iwconfig(opts: &Options) {
         let whole = w.bitrate / 10;
         let frac = w.bitrate % 10;
         pos += format_u64(whole as u64, &mut buf[pos..]);
-        buf[pos] = b'.'; pos += 1;
+        buf[pos] = b'.';
+        pos += 1;
         pos += format_u64(frac as u64, &mut buf[pos..]);
         pos = copy_bytes(&mut buf, pos, b" Mb/s   Tx-Power=");
         pos += format_i16(w.tx_power / 100, &mut buf[pos..]);
@@ -695,7 +864,11 @@ fn cmd_iwconfig(opts: &Options) {
 fn cmd_iwlist(opts: &Options) {
     let subcmd = &opts.subcmd[..opts.subcmd_len];
     if subcmd == b"scan" || subcmd == b"scanning" {
-        let iface = if opts.iface_len > 0 { &opts.iface[..opts.iface_len] } else { b"wlan0" as &[u8] };
+        let iface = if opts.iface_len > 0 {
+            &opts.iface[..opts.iface_len]
+        } else {
+            b"wlan0" as &[u8]
+        };
         print_out(iface);
         print_out(b"    Scan completed :\n");
 
@@ -716,20 +889,33 @@ fn cmd_iwlist(opts: &Options) {
 
             pos = copy_bytes(&mut buf, 0, b"                    Frequency:");
             pos += format_u64((r.frequency / 1000) as u64, &mut buf[pos..]);
-            buf[pos] = b'.'; pos += 1;
+            buf[pos] = b'.';
+            pos += 1;
             pos += format_u64(((r.frequency % 1000) / 100) as u64, &mut buf[pos..]);
             pos = copy_bytes(&mut buf, pos, b" GHz (Channel ");
             pos += format_u64(r.channel as u64, &mut buf[pos..]);
             pos = copy_bytes(&mut buf, pos, b")\n");
             print_out(&buf[..pos]);
 
-            pos = copy_bytes(&mut buf, 0, b"                    Quality=70/100  Signal level=");
+            pos = copy_bytes(
+                &mut buf,
+                0,
+                b"                    Quality=70/100  Signal level=",
+            );
             pos += format_i16(r.signal, &mut buf[pos..]);
             pos = copy_bytes(&mut buf, pos, b" dBm\n");
             print_out(&buf[..pos]);
 
             pos = copy_bytes(&mut buf, 0, b"                    Encryption key:");
-            pos = copy_bytes(&mut buf, pos, if r.security == SEC_OPEN { b"off\n" } else { b"on\n" });
+            pos = copy_bytes(
+                &mut buf,
+                pos,
+                if r.security == SEC_OPEN {
+                    b"off\n"
+                } else {
+                    b"on\n"
+                },
+            );
             print_out(&buf[..pos]);
         }
     } else {
@@ -753,11 +939,19 @@ fn cmd_rfkill(opts: &Options) {
             print_out(&buf[..pos]);
 
             pos = copy_bytes(&mut buf, 0, b"\tSoft blocked: ");
-            pos = copy_bytes(&mut buf, pos, if d.soft_blocked { b"yes\n" } else { b"no\n" });
+            pos = copy_bytes(
+                &mut buf,
+                pos,
+                if d.soft_blocked { b"yes\n" } else { b"no\n" },
+            );
             print_out(&buf[..pos]);
 
             pos = copy_bytes(&mut buf, 0, b"\tHard blocked: ");
-            pos = copy_bytes(&mut buf, pos, if d.hard_blocked { b"yes\n" } else { b"no\n" });
+            pos = copy_bytes(
+                &mut buf,
+                pos,
+                if d.hard_blocked { b"yes\n" } else { b"no\n" },
+            );
             print_out(&buf[..pos]);
         }
     } else if cmd == b"block" {

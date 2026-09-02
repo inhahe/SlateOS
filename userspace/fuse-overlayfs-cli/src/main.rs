@@ -7,13 +7,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_fuse_overlayfs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fuse-overlayfs [OPTIONS] MOUNTPOINT");
-        println!("fuse-overlayfs v1.13 (Slate OS) — FUSE overlay filesystem for rootless containers");
+        println!(
+            "fuse-overlayfs v1.13 (Slate OS) — FUSE overlay filesystem for rootless containers"
+        );
         println!();
         println!("Options:");
         println!("  -o lowerdir=DIR    Lower (read-only) directories (colon-separated)");
@@ -27,9 +33,14 @@ fn run_fuse_overlayfs(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fuse-overlayfs v1.13 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("fuse-overlayfs v1.13 (Slate OS)");
+        return 0;
+    }
     println!("fuse-overlayfs v1.13 (Slate OS)");
-    println!("  Lower: /var/lib/containers/storage/overlay/l1:/var/lib/containers/storage/overlay/l2");
+    println!(
+        "  Lower: /var/lib/containers/storage/overlay/l1:/var/lib/containers/storage/overlay/l2"
+    );
     println!("  Upper: /var/lib/containers/storage/overlay/upper");
     println!("  Work: /var/lib/containers/storage/overlay/work");
     println!("  Mount: /var/lib/containers/storage/overlay/merged");
@@ -39,7 +50,10 @@ fn run_fuse_overlayfs(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "fuse-overlayfs".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "fuse-overlayfs".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_fuse_overlayfs(&rest, &_prog);
     process::exit(code);
@@ -47,7 +61,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fuse_overlayfs};
+    use super::{basename, run_fuse_overlayfs, strip_ext};
 
     #[test]
     fn basename_strips_path() {
@@ -64,7 +78,10 @@ mod tests {
 
     #[test]
     fn help_exits_zero() {
-        assert_eq!(run_fuse_overlayfs(&["--help".to_string()], "fuse-overlayfs"), 0);
+        assert_eq!(
+            run_fuse_overlayfs(&["--help".to_string()], "fuse-overlayfs"),
+            0
+        );
         assert_eq!(run_fuse_overlayfs(&["-h".to_string()], "fuse-overlayfs"), 0);
         let _ = run_fuse_overlayfs(&["--version".to_string()], "fuse-overlayfs");
     }

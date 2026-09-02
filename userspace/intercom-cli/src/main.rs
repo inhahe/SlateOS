@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_intercom(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -27,7 +31,10 @@ fn run_intercom(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Intercom 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Intercom 2024 (Slate OS)");
+        return 0;
+    }
     println!("Intercom 2024 (Slate OS)");
     println!("  Vendor: Intercom, Inc. (San Francisco, CA — private)");
     println!("  Founders: Eoghan McCabe, Des Traynor, Ciaran Lee, David Barrett (2011, Dublin)");
@@ -38,9 +45,13 @@ fn run_intercom(args: &[String], _prog: &str) -> i32 {
     println!("  Funding: $240M+ raised, last round 2018 Series D at ~$1.275B valuation");
     println!("          Index Ventures, Bessemer, GV, ICONIQ, Kleiner Perkins");
     println!("          revenue rumored ~$300M ARR (private)");
-    println!("  2022-2024 AI pivot: McCabe returned, fired ~25% of workforce, full company refocused on AI");
+    println!(
+        "  2022-2024 AI pivot: McCabe returned, fired ~25% of workforce, full company refocused on AI"
+    );
     println!("                     'Fin' AI agent launched March 2023 (GPT-4-powered)");
-    println!("                     repositioned from 'conversational marketing' to 'AI-first customer service'");
+    println!(
+        "                     repositioned from 'conversational marketing' to 'AI-first customer service'"
+    );
     println!("  Fin AI agent (the bet that defines them now):");
     println!("    - Powered by OpenAI GPT-4 + Anthropic Claude (multi-model)");
     println!("    - Answers from your help center + macros + private docs");
@@ -79,19 +90,32 @@ fn run_intercom(args: &[String], _prog: &str) -> i32 {
     println!("              data warehouse exports to Snowflake/BigQuery/Redshift");
     println!("              REST API + webhooks + Canvas Kit for custom embedded apps");
     println!("  Customers: 25,000+ businesses");
-    println!("            Atlassian, Amazon, Microsoft, Lyft, Shopify, Coda, Linktree, Notion (early)");
+    println!(
+        "            Atlassian, Amazon, Microsoft, Lyft, Shopify, Coda, Linktree, Notion (early)"
+    );
     println!("            sweet spot: SaaS startups + e-commerce, 10-2,000 employees");
     println!("  Critique: pricing got punishingly expensive going up tiers");
-    println!("           lots of customer goodwill burned during the 2022-2023 layoffs + product refocus");
-    println!("           Fin AI great but $0.99/resolution adds up at scale (vs flat-fee competitors)");
-    println!("           less ticketing-power-user friendly than Zendesk for enterprise support orgs");
-    println!("  Differentiator: most aggressive bet on AI replacing tier-1 support — Fin's success-based pricing");
+    println!(
+        "           lots of customer goodwill burned during the 2022-2023 layoffs + product refocus"
+    );
+    println!(
+        "           Fin AI great but $0.99/resolution adds up at scale (vs flat-fee competitors)"
+    );
+    println!(
+        "           less ticketing-power-user friendly than Zendesk for enterprise support orgs"
+    );
+    println!(
+        "  Differentiator: most aggressive bet on AI replacing tier-1 support — Fin's success-based pricing"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "intercom".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "intercom".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_intercom(&rest, &_prog);
     process::exit(code);
@@ -99,7 +123,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_intercom};
+    use super::{basename, run_intercom, strip_ext};
 
     #[test]
     fn basename_strips_path() {

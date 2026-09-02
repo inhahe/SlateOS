@@ -39,7 +39,8 @@ fn run_mdcat(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -63,8 +64,12 @@ fn run_mdcat(args: Vec<String>) -> i32 {
     println!("\x1b[1m\x1b[36m## Code Example\x1b[0m");
     println!();
     println!("  \x1b[2m┌─────────────────────────────────┐\x1b[0m");
-    println!("  \x1b[2m│\x1b[0m \x1b[34mfn\x1b[0m \x1b[33mmain\x1b[0m() {{                    \x1b[2m│\x1b[0m");
-    println!("  \x1b[2m│\x1b[0m     \x1b[35mprintln!\x1b[0m(\x1b[32m\"Hello, world!\"\x1b[0m); \x1b[2m│\x1b[0m");
+    println!(
+        "  \x1b[2m│\x1b[0m \x1b[34mfn\x1b[0m \x1b[33mmain\x1b[0m() {{                    \x1b[2m│\x1b[0m"
+    );
+    println!(
+        "  \x1b[2m│\x1b[0m     \x1b[35mprintln!\x1b[0m(\x1b[32m\"Hello, world!\"\x1b[0m); \x1b[2m│\x1b[0m"
+    );
     println!("  \x1b[2m│\x1b[0m }}                              \x1b[2m│\x1b[0m");
     println!("  \x1b[2m└─────────────────────────────────┘\x1b[0m");
     println!();
@@ -81,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mdcat};
+    use super::run_mdcat;
 
     #[test]
     fn help_exits_zero() {

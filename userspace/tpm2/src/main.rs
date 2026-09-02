@@ -136,7 +136,13 @@ impl HashAlgorithm {
 /// Simulated SHA-1 hash. Produces deterministic output from input bytes.
 /// Not cryptographically secure -- for CLI simulation only.
 fn sim_sha1(data: &[u8]) -> [u8; SHA1_DIGEST_LEN] {
-    let mut state: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+    let mut state: [u32; 5] = [
+        0x6745_2301,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
     for (i, &b) in data.iter().enumerate() {
         let idx = i % 5;
         state[idx] = state[idx].wrapping_add(u32::from(b).wrapping_mul(31));
@@ -164,8 +170,14 @@ fn sim_sha1(data: &[u8]) -> [u8; SHA1_DIGEST_LEN] {
 /// Simulated SHA-256 hash.
 fn sim_sha256(data: &[u8]) -> [u8; SHA256_DIGEST_LEN] {
     let mut state: [u32; 8] = [
-        0x6A09_E667, 0xBB67_AE85, 0x3C6E_F372, 0xA54F_F53A,
-        0x510E_527F, 0x9B05_688C, 0x1F83_D9AB, 0x5BE0_CD19,
+        0x6A09_E667,
+        0xBB67_AE85,
+        0x3C6E_F372,
+        0xA54F_F53A,
+        0x510E_527F,
+        0x9B05_688C,
+        0x1F83_D9AB,
+        0x5BE0_CD19,
     ];
     for (i, &b) in data.iter().enumerate() {
         let idx = i % 8;
@@ -193,9 +205,12 @@ fn sim_sha256(data: &[u8]) -> [u8; SHA256_DIGEST_LEN] {
 /// Simulated SHA-384 hash.
 fn sim_sha384(data: &[u8]) -> [u8; SHA384_DIGEST_LEN] {
     let mut state: [u64; 6] = [
-        0xCBBB_9D5D_C105_9ED8, 0x629A_292A_367C_D507,
-        0x9159_015A_3070_DD17, 0x152F_ECD8_F70E_5939,
-        0x6733_2667_FFC0_0B31, 0x8EB4_4A87_6858_1511,
+        0xCBBB_9D5D_C105_9ED8,
+        0x629A_292A_367C_D507,
+        0x9159_015A_3070_DD17,
+        0x152F_ECD8_F70E_5939,
+        0x6733_2667_FFC0_0B31,
+        0x8EB4_4A87_6858_1511,
     ];
     for (i, &b) in data.iter().enumerate() {
         let idx = i % 6;
@@ -222,10 +237,14 @@ fn sim_sha384(data: &[u8]) -> [u8; SHA384_DIGEST_LEN] {
 /// Simulated SHA-512 hash.
 fn sim_sha512(data: &[u8]) -> [u8; SHA512_DIGEST_LEN] {
     let mut state: [u64; 8] = [
-        0x6A09_E667_F3BC_C908, 0xBB67_AE85_84CA_A73B,
-        0x3C6E_F372_FE94_F82B, 0xA54F_F53A_5F1D_36F1,
-        0x510E_527F_ADE6_82D1, 0x9B05_688C_2B3E_6C1F,
-        0x1F83_D9AB_FB41_BD6B, 0x5BE0_CD19_137E_2179,
+        0x6A09_E667_F3BC_C908,
+        0xBB67_AE85_84CA_A73B,
+        0x3C6E_F372_FE94_F82B,
+        0xA54F_F53A_5F1D_36F1,
+        0x510E_527F_ADE6_82D1,
+        0x9B05_688C_2B3E_6C1F,
+        0x1F83_D9AB_FB41_BD6B,
+        0x5BE0_CD19_137E_2179,
     ];
     for (i, &b) in data.iter().enumerate() {
         let idx = i % 8;
@@ -274,8 +293,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 const HEX_CHARS: [char; 16] = [
-    '0', '1', '2', '3', '4', '5', '6', '7',
-    '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
 ];
 
 /// Decode a hex string to bytes. Returns None if the string is invalid.
@@ -316,7 +334,11 @@ struct SimPrng {
 
 impl SimPrng {
     fn new(seed: u64) -> Self {
-        let state = if seed == 0 { 0xDEAD_BEEF_CAFE_BABE } else { seed };
+        let state = if seed == 0 {
+            0xDEAD_BEEF_CAFE_BABE
+        } else {
+            seed
+        };
         Self { state }
     }
 
@@ -494,13 +516,27 @@ impl KeyAttributes {
 
     fn to_bits(self) -> u32 {
         let mut bits = 0u32;
-        if self._fixed_tpm { bits |= 1 << 1; }
-        if self._fixed_parent { bits |= 1 << 4; }
-        if self._sensitive_data_origin { bits |= 1 << 5; }
-        if self._user_with_auth { bits |= 1 << 6; }
-        if self._sign_encrypt { bits |= 1 << 18; }
-        if self._decrypt { bits |= 1 << 17; }
-        if self._restricted { bits |= 1 << 16; }
+        if self._fixed_tpm {
+            bits |= 1 << 1;
+        }
+        if self._fixed_parent {
+            bits |= 1 << 4;
+        }
+        if self._sensitive_data_origin {
+            bits |= 1 << 5;
+        }
+        if self._user_with_auth {
+            bits |= 1 << 6;
+        }
+        if self._sign_encrypt {
+            bits |= 1 << 18;
+        }
+        if self._decrypt {
+            bits |= 1 << 17;
+        }
+        if self._restricted {
+            bits |= 1 << 16;
+        }
         bits
     }
 }
@@ -624,7 +660,10 @@ impl PcrBank {
     fn new(algorithm: HashAlgorithm) -> Self {
         let digest_len = algorithm.digest_len();
         let registers = (0..PCR_COUNT).map(|_| vec![0u8; digest_len]).collect();
-        Self { algorithm, registers }
+        Self {
+            algorithm,
+            registers,
+        }
     }
 
     /// Read a PCR register value.
@@ -656,7 +695,9 @@ impl PcrBank {
 
     /// Check if a PCR is all zeros (not yet extended).
     fn is_zero(&self, index: usize) -> bool {
-        self.registers.get(index).is_some_and(|v| v.iter().all(|&b| b == 0))
+        self.registers
+            .get(index)
+            .is_some_and(|v| v.iter().all(|&b| b == 0))
     }
 }
 
@@ -706,14 +747,30 @@ impl NvAttributes {
 
     fn to_bits(self) -> u32 {
         let mut bits = 0u32;
-        if self._owner_write { bits |= 1 << 0; }
-        if self._owner_read { bits |= 1 << 1; }
-        if self._auth_write { bits |= 1 << 2; }
-        if self._auth_read { bits |= 1 << 3; }
-        if self._write_locked { bits |= 1 << 10; }
-        if self._read_locked { bits |= 1 << 11; }
-        if self._written { bits |= 1 << 29; }
-        if self._platform_create { bits |= 1 << 30; }
+        if self._owner_write {
+            bits |= 1 << 0;
+        }
+        if self._owner_read {
+            bits |= 1 << 1;
+        }
+        if self._auth_write {
+            bits |= 1 << 2;
+        }
+        if self._auth_read {
+            bits |= 1 << 3;
+        }
+        if self._write_locked {
+            bits |= 1 << 10;
+        }
+        if self._read_locked {
+            bits |= 1 << 11;
+        }
+        if self._written {
+            bits |= 1 << 29;
+        }
+        if self._platform_create {
+            bits |= 1 << 30;
+        }
         bits
     }
 }
@@ -801,8 +858,18 @@ enum TpmError {
     NvSizeTooLarge(usize),
     NvWriteLocked(u32),
     NvReadLocked(u32),
-    NvWriteOutOfBounds { index: u32, offset: usize, len: usize, size: usize },
-    NvReadOutOfBounds { index: u32, offset: usize, len: usize, size: usize },
+    NvWriteOutOfBounds {
+        index: u32,
+        offset: usize,
+        len: usize,
+        size: usize,
+    },
+    NvReadOutOfBounds {
+        index: u32,
+        offset: usize,
+        len: usize,
+        size: usize,
+    },
     NvTooManyIndices,
     KeyNotFound(u32),
     TooManyKeys,
@@ -823,11 +890,25 @@ impl TpmError {
             Self::NvSizeTooLarge(s) => format!("NV size {s} exceeds maximum {NV_MAX_SIZE}"),
             Self::NvWriteLocked(i) => format!("NV index 0x{i:08X} is write-locked"),
             Self::NvReadLocked(i) => format!("NV index 0x{i:08X} is read-locked"),
-            Self::NvWriteOutOfBounds { index, offset, len, size } => {
-                format!("NV write out of bounds: index=0x{index:08X} offset={offset} len={len} size={size}")
+            Self::NvWriteOutOfBounds {
+                index,
+                offset,
+                len,
+                size,
+            } => {
+                format!(
+                    "NV write out of bounds: index=0x{index:08X} offset={offset} len={len} size={size}"
+                )
             }
-            Self::NvReadOutOfBounds { index, offset, len, size } => {
-                format!("NV read out of bounds: index=0x{index:08X} offset={offset} len={len} size={size}")
+            Self::NvReadOutOfBounds {
+                index,
+                offset,
+                len,
+                size,
+            } => {
+                format!(
+                    "NV read out of bounds: index=0x{index:08X} offset={offset} len={len} size={size}"
+                )
             }
             Self::NvTooManyIndices => "too many NV indices defined".to_string(),
             Self::KeyNotFound(h) => format!("key handle 0x{h:08X} not found"),
@@ -945,21 +1026,29 @@ impl TpmContext {
     }
 
     fn pcr_read(&self, alg: HashAlgorithm, index: usize) -> Result<Vec<u8>, TpmError> {
-        let bank = self.pcr_bank(alg)
+        let bank = self
+            .pcr_bank(alg)
             .ok_or_else(|| TpmError::UnknownAlgorithm(alg.name().to_string()))?;
         bank.read(index)
             .map(|v| v.to_vec())
             .ok_or(TpmError::InvalidPcrIndex(index))
     }
 
-    fn pcr_extend(&mut self, alg: HashAlgorithm, index: usize, data: &[u8]) -> Result<(), TpmError> {
-        let bank = self.pcr_bank_mut(alg)
+    fn pcr_extend(
+        &mut self,
+        alg: HashAlgorithm,
+        index: usize,
+        data: &[u8],
+    ) -> Result<(), TpmError> {
+        let bank = self
+            .pcr_bank_mut(alg)
             .ok_or_else(|| TpmError::UnknownAlgorithm(alg.name().to_string()))?;
         bank.extend(index, data)
     }
 
     fn pcr_read_all(&self, alg: HashAlgorithm) -> Result<Vec<(usize, Vec<u8>)>, TpmError> {
-        let bank = self.pcr_bank(alg)
+        let bank = self
+            .pcr_bank(alg)
             .ok_or_else(|| TpmError::UnknownAlgorithm(alg.name().to_string()))?;
         let mut results = Vec::new();
         for i in 0..PCR_COUNT {
@@ -991,14 +1080,18 @@ impl TpmContext {
     }
 
     fn nv_write(&mut self, index: u32, offset: usize, data: &[u8]) -> Result<(), TpmError> {
-        let nv = self.nv_indices.iter_mut()
+        let nv = self
+            .nv_indices
+            .iter_mut()
             .find(|nv| nv.index == index)
             .ok_or(TpmError::NvIndexNotFound(index))?;
         nv.write(offset, data)
     }
 
     fn nv_read(&self, index: u32, offset: usize, len: usize) -> Result<Vec<u8>, TpmError> {
-        let nv = self.nv_indices.iter()
+        let nv = self
+            .nv_indices
+            .iter()
             .find(|nv| nv.index == index)
             .ok_or(TpmError::NvIndexNotFound(index))?;
         nv.read(offset, len).map(|s| s.to_vec())
@@ -1009,7 +1102,9 @@ impl TpmContext {
     }
 
     fn _nv_undefine(&mut self, index: u32) -> Result<(), TpmError> {
-        let pos = self.nv_indices.iter()
+        let pos = self
+            .nv_indices
+            .iter()
             .position(|nv| nv.index == index)
             .ok_or(TpmError::NvIndexNotFound(index))?;
         self.nv_indices.remove(pos);
@@ -1041,7 +1136,9 @@ impl TpmContext {
         usage: &str,
     ) -> Result<(Vec<u8>, Vec<u8>), TpmError> {
         // Verify parent exists
-        let parent = self.keys.iter()
+        let parent = self
+            .keys
+            .iter()
             .find(|k| k.handle == parent_handle)
             .ok_or(TpmError::KeyNotFound(parent_handle))?;
         let hierarchy = parent._hierarchy;
@@ -1050,7 +1147,13 @@ impl TpmContext {
         }
         let handle = self.alloc_handle();
         let key = KeyObject::new_child(
-            handle, key_type, hierarchy, hash_alg, parent_handle, usage, &mut self.prng,
+            handle,
+            key_type,
+            hierarchy,
+            hash_alg,
+            parent_handle,
+            usage,
+            &mut self.prng,
         );
         let pub_key = key.pub_key.clone();
         let priv_key = key.priv_key.clone();
@@ -1067,7 +1170,9 @@ impl TpmContext {
         hash_alg: HashAlgorithm,
     ) -> Result<u32, TpmError> {
         // Verify parent exists
-        let parent = self.keys.iter()
+        let parent = self
+            .keys
+            .iter()
             .find(|k| k.handle == parent_handle)
             .ok_or(TpmError::KeyNotFound(parent_handle))?;
         let hierarchy = parent._hierarchy;
@@ -1097,19 +1202,19 @@ impl TpmContext {
     }
 
     fn sign(&self, handle: u32, data: &[u8]) -> Result<Vec<u8>, TpmError> {
-        let key = self.find_key(handle)
-            .ok_or(TpmError::KeyNotFound(handle))?;
+        let key = self.find_key(handle).ok_or(TpmError::KeyNotFound(handle))?;
         Ok(key.sign(data))
     }
 
     fn verify(&self, handle: u32, data: &[u8], signature: &[u8]) -> Result<bool, TpmError> {
-        let key = self.find_key(handle)
-            .ok_or(TpmError::KeyNotFound(handle))?;
+        let key = self.find_key(handle).ok_or(TpmError::KeyNotFound(handle))?;
         Ok(key.verify(data, signature))
     }
 
     fn _flush_key(&mut self, handle: u32) -> Result<(), TpmError> {
-        let pos = self.keys.iter()
+        let pos = self
+            .keys
+            .iter()
             .position(|k| k.handle == handle)
             .ok_or(TpmError::KeyNotFound(handle))?;
         self.keys.remove(pos);
@@ -1126,9 +1231,10 @@ impl TpmContext {
                 let test_data = b"TPM2 self-test data";
                 let hash = sim_hash(*alg, test_data);
                 if hash.len() != alg.digest_len() {
-                    return Err(TpmError::SelfTestFailed(
-                        format!("digest length mismatch for {}", alg.name()),
-                    ));
+                    return Err(TpmError::SelfTestFailed(format!(
+                        "digest length mismatch for {}",
+                        alg.name()
+                    )));
                 }
             }
         }
@@ -1172,21 +1278,29 @@ impl TpmContext {
 
     fn get_capability(&self, cap_type: CapabilityType) -> Vec<String> {
         match cap_type {
-            CapabilityType::Algorithms => {
-                HashAlgorithm::all().iter().map(|a| {
-                    format!("  {}:  value: 0x{:04X}  hash-size: {}",
-                        a.name(), a.alg_id(), a.digest_len())
-                }).collect()
-            }
+            CapabilityType::Algorithms => HashAlgorithm::all()
+                .iter()
+                .map(|a| {
+                    format!(
+                        "  {}:  value: 0x{:04X}  hash-size: {}",
+                        a.name(),
+                        a.alg_id(),
+                        a.digest_len()
+                    )
+                })
+                .collect(),
             CapabilityType::Handles => {
                 let mut lines = Vec::new();
                 for key in &self.keys {
-                    lines.push(format!("  0x{:08X}  type: {}  primary: {}",
-                        key.handle, key.key_type.name(), key._is_primary));
+                    lines.push(format!(
+                        "  0x{:08X}  type: {}  primary: {}",
+                        key.handle,
+                        key.key_type.name(),
+                        key._is_primary
+                    ));
                 }
                 for nv in &self.nv_indices {
-                    lines.push(format!("  0x{:08X}  nv-index  size: {}",
-                        nv.index, nv.size));
+                    lines.push(format!("  0x{:08X}  nv-index  size: {}", nv.index, nv.size));
                 }
                 lines
             }
@@ -1223,16 +1337,20 @@ impl TpmContext {
                     format!("  TPM2_PT_PCR_COUNT:          {PCR_COUNT}"),
                 ]
             }
-            CapabilityType::PcrBanks => {
-                self.pcr_banks.iter().map(|bank| {
-                    let active_count = (0..PCR_COUNT)
-                        .filter(|&i| !bank.is_zero(i))
-                        .count();
-                    format!("  {}:  id: 0x{:04X}  active-pcrs: {}/{}",
-                        bank.algorithm.name(), bank.algorithm.alg_id(),
-                        active_count, PCR_COUNT)
-                }).collect()
-            }
+            CapabilityType::PcrBanks => self
+                .pcr_banks
+                .iter()
+                .map(|bank| {
+                    let active_count = (0..PCR_COUNT).filter(|&i| !bank.is_zero(i)).count();
+                    format!(
+                        "  {}:  id: 0x{:04X}  active-pcrs: {}/{}",
+                        bank.algorithm.name(),
+                        bank.algorithm.alg_id(),
+                        active_count,
+                        PCR_COUNT
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -1293,10 +1411,24 @@ fn positional_args(args: &[String]) -> Vec<&str> {
             if !arg.contains('=') {
                 // Check if it's a known value-flag
                 let known_value_flags = [
-                    "--size", "--hash-algorithm", "--hierarchy", "--key-algorithm",
-                    "--parent", "--usage", "--handle", "--offset", "--count",
-                    "--index", "--capability", "--input", "--signature", "--ticket",
-                    "--public", "--private", "--message", "--format",
+                    "--size",
+                    "--hash-algorithm",
+                    "--hierarchy",
+                    "--key-algorithm",
+                    "--parent",
+                    "--usage",
+                    "--handle",
+                    "--offset",
+                    "--count",
+                    "--index",
+                    "--capability",
+                    "--input",
+                    "--signature",
+                    "--ticket",
+                    "--public",
+                    "--private",
+                    "--message",
+                    "--format",
                 ];
                 if known_value_flags.contains(&arg.as_str()) && i + 1 < args.len() {
                     skip_next = true;
@@ -1325,10 +1457,20 @@ fn format_hex_dump(bytes: &[u8]) -> String {
     for (i, chunk) in bytes.chunks(16).enumerate() {
         let offset = i * 16;
         let hex_part: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-        let ascii_part: String = chunk.iter().map(|&b| {
-            if (0x20..=0x7E).contains(&b) { b as char } else { '.' }
-        }).collect();
-        lines.push(format!("{offset:08x}: {:<48}  {ascii_part}", hex_part.join(" ")));
+        let ascii_part: String = chunk
+            .iter()
+            .map(|&b| {
+                if (0x20..=0x7E).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        lines.push(format!(
+            "{offset:08x}: {:<48}  {ascii_part}",
+            hex_part.join(" ")
+        ));
     }
     lines.join("\n")
 }
@@ -1384,9 +1526,11 @@ fn cmd_getrandom(ctx: &mut TpmContext, args: &[String]) -> i32 {
 
     let bytes = ctx.get_random(count);
 
-    let format = find_flag(args, "--format").unwrap_or(
-        if has_flag(args, "--raw") { "raw" } else { "hex" }
-    );
+    let format = find_flag(args, "--format").unwrap_or(if has_flag(args, "--raw") {
+        "raw"
+    } else {
+        "hex"
+    });
 
     match format {
         "raw" => {
@@ -1551,7 +1695,10 @@ fn cmd_pcrextend(ctx: &mut TpmContext, args: &[String]) -> i32 {
 
     let parts: Vec<&str> = pos[1].splitn(2, ':').collect();
     if parts.len() != 2 {
-        eprintln!("tpm2_pcrextend: expected format ALG:HASH_HEX, got: {}", pos[1]);
+        eprintln!(
+            "tpm2_pcrextend: expected format ALG:HASH_HEX, got: {}",
+            pos[1]
+        );
         return 1;
     }
 
@@ -1574,7 +1721,9 @@ fn cmd_pcrextend(ctx: &mut TpmContext, args: &[String]) -> i32 {
     if hash_bytes.len() != alg.digest_len() {
         eprintln!(
             "tpm2_pcrextend: hash length {} does not match {} digest length {}",
-            hash_bytes.len(), alg.name(), alg.digest_len()
+            hash_bytes.len(),
+            alg.name(),
+            alg.digest_len()
         );
         return 1;
     }
@@ -1599,9 +1748,13 @@ fn cmd_createprimary(ctx: &mut TpmContext, args: &[String]) -> i32 {
         println!("Create a primary key in the specified hierarchy.");
         println!();
         println!("Options:");
-        println!("  --hierarchy H         Hierarchy: owner, endorsement, platform, null (default: owner)");
+        println!(
+            "  --hierarchy H         Hierarchy: owner, endorsement, platform, null (default: owner)"
+        );
         println!("  --hash-algorithm ALG  Hash algorithm (default: sha256)");
-        println!("  --key-algorithm ALG   Key algorithm: rsa, rsa2048, rsa3072, ecc, ecc256, ecc384 (default: rsa2048)");
+        println!(
+            "  --key-algorithm ALG   Key algorithm: rsa, rsa2048, rsa3072, ecc, ecc256, ecc384 (default: rsa2048)"
+        );
         println!("  --help, -h            Show this help");
         println!("  --version             Show version");
         return 0;
@@ -1651,11 +1804,18 @@ fn cmd_createprimary(ctx: &mut TpmContext, args: &[String]) -> i32 {
             println!("  raw: 0x{:04X}", hash_alg.alg_id());
             println!("attributes:");
             println!("  value: fixedTPM|fixedParent|sensitiveDO|userWithAuth|restricted|decrypt");
-            println!("  raw: 0x{:08X}", KeyAttributes::default_primary().to_bits());
+            println!(
+                "  raw: 0x{:08X}",
+                KeyAttributes::default_primary().to_bits()
+            );
             println!("type:");
             println!("  value: {}", key_type.name());
             println!("hierarchy:");
-            println!("  value: {} (0x{:08X})", hierarchy.name(), hierarchy.handle_value());
+            println!(
+                "  value: {} (0x{:08X})",
+                hierarchy.name(),
+                hierarchy.handle_value()
+            );
             println!("handle: 0x{handle:08X}");
             0
         }
@@ -2173,7 +2333,10 @@ fn cmd_nvwrite(ctx: &mut TpmContext, args: &[String]) -> i32 {
 
     match ctx.nv_write(index, offset, &data) {
         Ok(()) => {
-            println!("NV index 0x{index:08X}: wrote {} bytes at offset {offset}.", data.len());
+            println!(
+                "NV index 0x{index:08X}: wrote {} bytes at offset {offset}.",
+                data.len()
+            );
             0
         }
         Err(e) => {
@@ -2250,17 +2413,13 @@ fn cmd_nvread(ctx: &mut TpmContext, args: &[String]) -> i32 {
                 return 1;
             }
         },
-        None => {
-            match ctx.nv_find(index) {
-                Some(nv) => {
-                    nv.size.saturating_sub(offset)
-                }
-                None => {
-                    eprintln!("tpm2_nvread: NV index 0x{index:08X} not found");
-                    return 1;
-                }
+        None => match ctx.nv_find(index) {
+            Some(nv) => nv.size.saturating_sub(offset),
+            None => {
+                eprintln!("tpm2_nvread: NV index 0x{index:08X} not found");
+                return 1;
             }
-        }
+        },
     };
 
     match ctx.nv_read(index, offset, read_size) {
@@ -2361,11 +2520,14 @@ fn cmd_selftest(ctx: &mut TpmContext, args: &[String]) -> i32 {
         Ok(()) => {
             let test_type = if full { "full" } else { "incremental" };
             println!("self-test ({test_type}): PASSED");
-            println!("status: {}", match ctx.self_test_state() {
-                SelfTestState::NotRun => "not-run",
-                SelfTestState::Passed => "passed",
-                SelfTestState::_Failed => "failed",
-            });
+            println!(
+                "status: {}",
+                match ctx.self_test_state() {
+                    SelfTestState::NotRun => "not-run",
+                    SelfTestState::Passed => "passed",
+                    SelfTestState::_Failed => "failed",
+                }
+            );
             0
         }
         Err(e) => {
@@ -2479,7 +2641,10 @@ fn tpm2_dispatch(ctx: &mut TpmContext, rest: Vec<String>) -> i32 {
         "getcap" => cmd_getcap(ctx, &cmd_args),
         "selftest" => cmd_selftest(ctx, &cmd_args),
         "clear" => cmd_clear(ctx, &cmd_args),
-        "help" => { tpm2_help(); 0 }
+        "help" => {
+            tpm2_help();
+            0
+        }
         other => {
             eprintln!("tpm2: unknown command: {other}");
             eprintln!("Run 'tpm2 --help' for available commands.");
@@ -2715,9 +2880,18 @@ mod tests {
     fn test_sim_hash_via_alg_enum() {
         let data = b"test";
         assert_eq!(sim_hash(HashAlgorithm::Sha1, data).len(), SHA1_DIGEST_LEN);
-        assert_eq!(sim_hash(HashAlgorithm::Sha256, data).len(), SHA256_DIGEST_LEN);
-        assert_eq!(sim_hash(HashAlgorithm::Sha384, data).len(), SHA384_DIGEST_LEN);
-        assert_eq!(sim_hash(HashAlgorithm::Sha512, data).len(), SHA512_DIGEST_LEN);
+        assert_eq!(
+            sim_hash(HashAlgorithm::Sha256, data).len(),
+            SHA256_DIGEST_LEN
+        );
+        assert_eq!(
+            sim_hash(HashAlgorithm::Sha384, data).len(),
+            SHA384_DIGEST_LEN
+        );
+        assert_eq!(
+            sim_hash(HashAlgorithm::Sha512, data).len(),
+            SHA512_DIGEST_LEN
+        );
     }
 
     // === HashAlgorithm tests ===
@@ -2749,9 +2923,18 @@ mod tests {
     #[test]
     fn test_hash_alg_from_str_valid() {
         assert_eq!(HashAlgorithm::from_str("sha1"), Some(HashAlgorithm::Sha1));
-        assert_eq!(HashAlgorithm::from_str("SHA256"), Some(HashAlgorithm::Sha256));
-        assert_eq!(HashAlgorithm::from_str("Sha384"), Some(HashAlgorithm::Sha384));
-        assert_eq!(HashAlgorithm::from_str("sha512"), Some(HashAlgorithm::Sha512));
+        assert_eq!(
+            HashAlgorithm::from_str("SHA256"),
+            Some(HashAlgorithm::Sha256)
+        );
+        assert_eq!(
+            HashAlgorithm::from_str("Sha384"),
+            Some(HashAlgorithm::Sha384)
+        );
+        assert_eq!(
+            HashAlgorithm::from_str("sha512"),
+            Some(HashAlgorithm::Sha512)
+        );
     }
 
     #[test]
@@ -2825,7 +3008,10 @@ mod tests {
     fn test_hierarchy_from_str() {
         assert_eq!(Hierarchy::from_str("owner"), Some(Hierarchy::Owner));
         assert_eq!(Hierarchy::from_str("o"), Some(Hierarchy::Owner));
-        assert_eq!(Hierarchy::from_str("endorsement"), Some(Hierarchy::Endorsement));
+        assert_eq!(
+            Hierarchy::from_str("endorsement"),
+            Some(Hierarchy::Endorsement)
+        );
         assert_eq!(Hierarchy::from_str("e"), Some(Hierarchy::Endorsement));
         assert_eq!(Hierarchy::from_str("platform"), Some(Hierarchy::Platform));
         assert_eq!(Hierarchy::from_str("p"), Some(Hierarchy::Platform));
@@ -3118,14 +3304,16 @@ mod tests {
     #[test]
     fn test_tpm_nv_define() {
         let mut ctx = TpmContext::new();
-        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false).unwrap();
+        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false)
+            .unwrap();
         assert_eq!(ctx.nv_indices.len(), 1);
     }
 
     #[test]
     fn test_tpm_nv_define_duplicate() {
         let mut ctx = TpmContext::new();
-        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false).unwrap();
+        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false)
+            .unwrap();
         let result = ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false);
         assert!(result.is_err());
     }
@@ -3134,7 +3322,8 @@ mod tests {
     fn test_tpm_nv_define_too_many() {
         let mut ctx = TpmContext::new();
         for i in 0..NV_MAX_INDICES {
-            ctx.nv_define(0x01000000 + i as u32, 8, HashAlgorithm::Sha256, false).unwrap();
+            ctx.nv_define(0x01000000 + i as u32, 8, HashAlgorithm::Sha256, false)
+                .unwrap();
         }
         let result = ctx.nv_define(0x02000000, 8, HashAlgorithm::Sha256, false);
         assert!(result.is_err());
@@ -3143,7 +3332,8 @@ mod tests {
     #[test]
     fn test_tpm_nv_write_read() {
         let mut ctx = TpmContext::new();
-        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false).unwrap();
+        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false)
+            .unwrap();
         ctx.nv_write(0x01000001, 0, &[0xAA, 0xBB]).unwrap();
         let data = ctx.nv_read(0x01000001, 0, 2).unwrap();
         assert_eq!(data, vec![0xAA, 0xBB]);
@@ -3166,7 +3356,8 @@ mod tests {
     #[test]
     fn test_tpm_nv_find() {
         let mut ctx = TpmContext::new();
-        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false).unwrap();
+        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false)
+            .unwrap();
         assert!(ctx.nv_find(0x01000001).is_some());
         assert!(ctx.nv_find(0x01000002).is_none());
     }
@@ -3174,7 +3365,8 @@ mod tests {
     #[test]
     fn test_tpm_nv_undefine() {
         let mut ctx = TpmContext::new();
-        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false).unwrap();
+        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false)
+            .unwrap();
         ctx._nv_undefine(0x01000001).unwrap();
         assert!(ctx.nv_find(0x01000001).is_none());
     }
@@ -3191,7 +3383,9 @@ mod tests {
     #[test]
     fn test_tpm_create_primary() {
         let mut ctx = TpmContext::new();
-        let handle = ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
+        let handle = ctx
+            .create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
         assert!(handle >= 0x8000_0000);
         assert_eq!(ctx.keys.len(), 1);
     }
@@ -3199,9 +3393,16 @@ mod tests {
     #[test]
     fn test_tpm_create_primary_different_types() {
         let mut ctx = TpmContext::new();
-        ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
-        ctx.create_primary(KeyType::Ecc256, Hierarchy::Endorsement, HashAlgorithm::Sha384).unwrap();
-        ctx.create_primary(KeyType::Rsa3072, Hierarchy::Platform, HashAlgorithm::Sha512).unwrap();
+        ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
+        ctx.create_primary(
+            KeyType::Ecc256,
+            Hierarchy::Endorsement,
+            HashAlgorithm::Sha384,
+        )
+        .unwrap();
+        ctx.create_primary(KeyType::Rsa3072, Hierarchy::Platform, HashAlgorithm::Sha512)
+            .unwrap();
         assert_eq!(ctx.keys.len(), 3);
     }
 
@@ -3209,7 +3410,8 @@ mod tests {
     fn test_tpm_create_primary_too_many() {
         let mut ctx = TpmContext::new();
         for _ in 0..KEY_MAX_OBJECTS {
-            ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
+            ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+                .unwrap();
         }
         let result = ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256);
         assert!(result.is_err());
@@ -3218,8 +3420,12 @@ mod tests {
     #[test]
     fn test_tpm_create_child() {
         let mut ctx = TpmContext::new();
-        let parent = ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
-        let (pub_key, priv_key) = ctx.create_child(parent, KeyType::Rsa2048, HashAlgorithm::Sha256, "sign").unwrap();
+        let parent = ctx
+            .create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
+        let (pub_key, priv_key) = ctx
+            .create_child(parent, KeyType::Rsa2048, HashAlgorithm::Sha256, "sign")
+            .unwrap();
         assert!(!pub_key.is_empty());
         assert!(!priv_key.is_empty());
     }
@@ -3234,10 +3440,20 @@ mod tests {
     #[test]
     fn test_tpm_load_key() {
         let mut ctx = TpmContext::new();
-        let parent = ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
+        let parent = ctx
+            .create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
         let pub_key = vec![0xAA; 256];
         let priv_key = vec![0xBB; 128];
-        let handle = ctx.load_key(parent, &pub_key, &priv_key, KeyType::Rsa2048, HashAlgorithm::Sha256).unwrap();
+        let handle = ctx
+            .load_key(
+                parent,
+                &pub_key,
+                &priv_key,
+                KeyType::Rsa2048,
+                HashAlgorithm::Sha256,
+            )
+            .unwrap();
         assert!(handle >= 0x8000_0000);
     }
 
@@ -3246,14 +3462,22 @@ mod tests {
         let mut ctx = TpmContext::new();
         let pub_key = vec![0xAA; 256];
         let priv_key = vec![0xBB; 128];
-        let result = ctx.load_key(0xDEAD, &pub_key, &priv_key, KeyType::Rsa2048, HashAlgorithm::Sha256);
+        let result = ctx.load_key(
+            0xDEAD,
+            &pub_key,
+            &priv_key,
+            KeyType::Rsa2048,
+            HashAlgorithm::Sha256,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_tpm_find_key() {
         let mut ctx = TpmContext::new();
-        let handle = ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
+        let handle = ctx
+            .create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
         assert!(ctx.find_key(handle).is_some());
         assert!(ctx.find_key(0xDEAD).is_none());
     }
@@ -3261,7 +3485,9 @@ mod tests {
     #[test]
     fn test_tpm_flush_key() {
         let mut ctx = TpmContext::new();
-        let handle = ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
+        let handle = ctx
+            .create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
         ctx._flush_key(handle).unwrap();
         assert!(ctx.find_key(handle).is_none());
     }
@@ -3278,7 +3504,9 @@ mod tests {
     #[test]
     fn test_tpm_sign_verify_rsa() {
         let mut ctx = TpmContext::new();
-        let handle = ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
+        let handle = ctx
+            .create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
         let data = b"test message";
         let sig = ctx.sign(handle, data).unwrap();
         assert_eq!(sig.len(), KeyType::Rsa2048.sig_size());
@@ -3289,7 +3517,9 @@ mod tests {
     #[test]
     fn test_tpm_sign_verify_ecc() {
         let mut ctx = TpmContext::new();
-        let handle = ctx.create_primary(KeyType::Ecc256, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
+        let handle = ctx
+            .create_primary(KeyType::Ecc256, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
         let data = b"test message ecc";
         let sig = ctx.sign(handle, data).unwrap();
         assert_eq!(sig.len(), KeyType::Ecc256.sig_size());
@@ -3300,7 +3530,9 @@ mod tests {
     #[test]
     fn test_tpm_verify_wrong_data() {
         let mut ctx = TpmContext::new();
-        let handle = ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
+        let handle = ctx
+            .create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
         let data = b"original message";
         let sig = ctx.sign(handle, data).unwrap();
         let valid = ctx.verify(handle, b"tampered message", &sig).unwrap();
@@ -3310,7 +3542,9 @@ mod tests {
     #[test]
     fn test_tpm_verify_wrong_sig() {
         let mut ctx = TpmContext::new();
-        let handle = ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
+        let handle = ctx
+            .create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
         let data = b"test message";
         let wrong_sig = vec![0xFF; KeyType::Rsa2048.sig_size()];
         let valid = ctx.verify(handle, data, &wrong_sig).unwrap();
@@ -3387,9 +3621,12 @@ mod tests {
     fn test_tpm_clear() {
         let mut ctx = TpmContext::new();
         // Set up some state
-        ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
-        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false).unwrap();
-        ctx.pcr_extend(HashAlgorithm::Sha256, 0, &[0xAA; 32]).unwrap();
+        ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
+        ctx.nv_define(0x01000001, 32, HashAlgorithm::Sha256, false)
+            .unwrap();
+        ctx.pcr_extend(HashAlgorithm::Sha256, 0, &[0xAA; 32])
+            .unwrap();
         ctx.self_test(true).unwrap();
 
         ctx.clear().unwrap();
@@ -3444,7 +3681,8 @@ mod tests {
     #[test]
     fn test_tpm_getcap_handles_with_keys() {
         let mut ctx = TpmContext::new();
-        ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256).unwrap();
+        ctx.create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
         let lines = ctx.get_capability(CapabilityType::Handles);
         assert_eq!(lines.len(), 1);
     }
@@ -3453,14 +3691,38 @@ mod tests {
 
     #[test]
     fn test_capability_type_from_str() {
-        assert_eq!(CapabilityType::from_str("algorithms"), Some(CapabilityType::Algorithms));
-        assert_eq!(CapabilityType::from_str("algs"), Some(CapabilityType::Algorithms));
-        assert_eq!(CapabilityType::from_str("handles"), Some(CapabilityType::Handles));
-        assert_eq!(CapabilityType::from_str("commands"), Some(CapabilityType::Commands));
-        assert_eq!(CapabilityType::from_str("cmds"), Some(CapabilityType::Commands));
-        assert_eq!(CapabilityType::from_str("properties"), Some(CapabilityType::Properties));
-        assert_eq!(CapabilityType::from_str("props"), Some(CapabilityType::Properties));
-        assert_eq!(CapabilityType::from_str("pcrs"), Some(CapabilityType::PcrBanks));
+        assert_eq!(
+            CapabilityType::from_str("algorithms"),
+            Some(CapabilityType::Algorithms)
+        );
+        assert_eq!(
+            CapabilityType::from_str("algs"),
+            Some(CapabilityType::Algorithms)
+        );
+        assert_eq!(
+            CapabilityType::from_str("handles"),
+            Some(CapabilityType::Handles)
+        );
+        assert_eq!(
+            CapabilityType::from_str("commands"),
+            Some(CapabilityType::Commands)
+        );
+        assert_eq!(
+            CapabilityType::from_str("cmds"),
+            Some(CapabilityType::Commands)
+        );
+        assert_eq!(
+            CapabilityType::from_str("properties"),
+            Some(CapabilityType::Properties)
+        );
+        assert_eq!(
+            CapabilityType::from_str("props"),
+            Some(CapabilityType::Properties)
+        );
+        assert_eq!(
+            CapabilityType::from_str("pcrs"),
+            Some(CapabilityType::PcrBanks)
+        );
         assert_eq!(CapabilityType::from_str("unknown"), None);
     }
 
@@ -3536,7 +3798,11 @@ mod tests {
     #[test]
     fn test_positional_args() {
         let args: Vec<String> = vec![
-            "--size".into(), "64".into(), "myarg".into(), "--help".into(), "other".into(),
+            "--size".into(),
+            "64".into(),
+            "myarg".into(),
+            "--help".into(),
+            "other".into(),
         ];
         let pos = positional_args(&args);
         assert_eq!(pos, vec!["myarg", "other"]);
@@ -3673,7 +3939,11 @@ mod tests {
     fn test_key_object_sign_deterministic() {
         let mut prng = SimPrng::new(42);
         let key = KeyObject::new_primary(
-            0x80000000, KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256, &mut prng,
+            0x80000000,
+            KeyType::Rsa2048,
+            Hierarchy::Owner,
+            HashAlgorithm::Sha256,
+            &mut prng,
         );
         let sig1 = key.sign(b"hello");
         let sig2 = key.sign(b"hello");
@@ -3684,7 +3954,11 @@ mod tests {
     fn test_key_object_sign_different_messages() {
         let mut prng = SimPrng::new(42);
         let key = KeyObject::new_primary(
-            0x80000000, KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256, &mut prng,
+            0x80000000,
+            KeyType::Rsa2048,
+            Hierarchy::Owner,
+            HashAlgorithm::Sha256,
+            &mut prng,
         );
         let sig1 = key.sign(b"hello");
         let sig2 = key.sign(b"world");
@@ -3695,7 +3969,11 @@ mod tests {
     fn test_key_object_verify_correct() {
         let mut prng = SimPrng::new(42);
         let key = KeyObject::new_primary(
-            0x80000000, KeyType::Ecc256, Hierarchy::Owner, HashAlgorithm::Sha256, &mut prng,
+            0x80000000,
+            KeyType::Ecc256,
+            Hierarchy::Owner,
+            HashAlgorithm::Sha256,
+            &mut prng,
         );
         let sig = key.sign(b"test data");
         assert!(key.verify(b"test data", &sig));
@@ -3705,7 +3983,11 @@ mod tests {
     fn test_key_object_verify_tampered() {
         let mut prng = SimPrng::new(42);
         let key = KeyObject::new_primary(
-            0x80000000, KeyType::Ecc256, Hierarchy::Owner, HashAlgorithm::Sha256, &mut prng,
+            0x80000000,
+            KeyType::Ecc256,
+            Hierarchy::Owner,
+            HashAlgorithm::Sha256,
+            &mut prng,
         );
         let sig = key.sign(b"test data");
         assert!(!key.verify(b"tampered data", &sig));
@@ -3715,8 +3997,13 @@ mod tests {
     fn test_key_object_child_sign_verify() {
         let mut prng = SimPrng::new(99);
         let key = KeyObject::new_child(
-            0x80000001, KeyType::Rsa3072, Hierarchy::Owner,
-            HashAlgorithm::Sha384, 0x80000000, "sign", &mut prng,
+            0x80000001,
+            KeyType::Rsa3072,
+            Hierarchy::Owner,
+            HashAlgorithm::Sha384,
+            0x80000000,
+            "sign",
+            &mut prng,
         );
         let data = b"child key test";
         let sig = key.sign(data);
@@ -3728,8 +4015,13 @@ mod tests {
     fn test_key_object_storage_usage() {
         let mut prng = SimPrng::new(99);
         let key = KeyObject::new_child(
-            0x80000001, KeyType::Rsa2048, Hierarchy::Owner,
-            HashAlgorithm::Sha256, 0x80000000, "storage", &mut prng,
+            0x80000001,
+            KeyType::Rsa2048,
+            Hierarchy::Owner,
+            HashAlgorithm::Sha256,
+            0x80000000,
+            "storage",
+            &mut prng,
         );
         assert!(key._attributes._decrypt);
         assert!(!key._attributes._sign_encrypt);
@@ -3764,9 +4056,12 @@ mod tests {
     #[test]
     fn test_multiple_nv_indices() {
         let mut ctx = TpmContext::new();
-        ctx.nv_define(0x01000001, 16, HashAlgorithm::Sha256, false).unwrap();
-        ctx.nv_define(0x01000002, 32, HashAlgorithm::Sha256, false).unwrap();
-        ctx.nv_define(0x01000003, 64, HashAlgorithm::Sha256, true).unwrap();
+        ctx.nv_define(0x01000001, 16, HashAlgorithm::Sha256, false)
+            .unwrap();
+        ctx.nv_define(0x01000002, 32, HashAlgorithm::Sha256, false)
+            .unwrap();
+        ctx.nv_define(0x01000003, 64, HashAlgorithm::Sha256, true)
+            .unwrap();
 
         ctx.nv_write(0x01000001, 0, &[0xAA; 16]).unwrap();
         ctx.nv_write(0x01000002, 0, &[0xBB; 32]).unwrap();
@@ -3787,7 +4082,8 @@ mod tests {
     fn test_pcr_banks_isolated() {
         let mut ctx = TpmContext::new();
         let sha256_data = vec![0xAA; SHA256_DIGEST_LEN];
-        ctx.pcr_extend(HashAlgorithm::Sha256, 5, &sha256_data).unwrap();
+        ctx.pcr_extend(HashAlgorithm::Sha256, 5, &sha256_data)
+            .unwrap();
 
         // SHA-1 bank PCR 5 should still be zero
         let sha1_val = ctx.pcr_read(HashAlgorithm::Sha1, 5).unwrap();
@@ -3813,14 +4109,14 @@ mod tests {
         assert_eq!(random.len(), 32);
 
         // 3. Create a primary key
-        let primary = ctx.create_primary(
-            KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256
-        ).unwrap();
+        let primary = ctx
+            .create_primary(KeyType::Rsa2048, Hierarchy::Owner, HashAlgorithm::Sha256)
+            .unwrap();
 
         // 4. Create a child signing key
-        let (_pub_key, _priv_key) = ctx.create_child(
-            primary, KeyType::Ecc256, HashAlgorithm::Sha256, "sign"
-        ).unwrap();
+        let (_pub_key, _priv_key) = ctx
+            .create_child(primary, KeyType::Ecc256, HashAlgorithm::Sha256, "sign")
+            .unwrap();
 
         // 5. Sign and verify
         let child_handle = ctx.keys.last().unwrap().handle;
@@ -3831,12 +4127,14 @@ mod tests {
 
         // 6. Extend a PCR
         let extend_data = sim_hash(HashAlgorithm::Sha256, message);
-        ctx.pcr_extend(HashAlgorithm::Sha256, 0, &extend_data).unwrap();
+        ctx.pcr_extend(HashAlgorithm::Sha256, 0, &extend_data)
+            .unwrap();
         let pcr_val = ctx.pcr_read(HashAlgorithm::Sha256, 0).unwrap();
         assert!(!pcr_val.iter().all(|&b| b == 0));
 
         // 7. NV storage
-        ctx.nv_define(0x01500001, 64, HashAlgorithm::Sha256, false).unwrap();
+        ctx.nv_define(0x01500001, 64, HashAlgorithm::Sha256, false)
+            .unwrap();
         ctx.nv_write(0x01500001, 0, &sig[..64]).unwrap();
         let nv_data = ctx.nv_read(0x01500001, 0, 64).unwrap();
         assert_eq!(&nv_data[..], &sig[..64]);

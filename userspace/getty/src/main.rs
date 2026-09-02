@@ -143,43 +143,27 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             "-8" | "--8bits" => {} // accept but no-op in our implementation
             "-a" | "--autologin" => {
                 i += 1;
-                cfg.autologin_user = Some(
-                    args.get(i)
-                        .ok_or("-a requires a username")?
-                        .clone(),
-                );
+                cfg.autologin_user = Some(args.get(i).ok_or("-a requires a username")?.clone());
             }
             "-c" | "--noreset" => cfg.no_reset = true,
             "-E" | "--remote" => {} // accept, no-op
             "-f" | "--issue-file" => {
                 i += 1;
-                cfg.issue_file = PathBuf::from(
-                    args.get(i).ok_or("-f requires a filename")?,
-                );
+                cfg.issue_file = PathBuf::from(args.get(i).ok_or("-f requires a filename")?);
             }
             "-H" | "--host" => {
                 i += 1;
-                cfg.host = Some(
-                    args.get(i)
-                        .ok_or("-H requires a hostname")?
-                        .clone(),
-                );
+                cfg.host = Some(args.get(i).ok_or("-H requires a hostname")?.clone());
             }
             "-i" | "--noissue" => cfg.no_issue = true,
             "-I" | "--init-string" => {
                 i += 1;
-                cfg.init_string = Some(
-                    args.get(i)
-                        .ok_or("-I requires a string")?
-                        .clone(),
-                );
+                cfg.init_string = Some(args.get(i).ok_or("-I requires a string")?.clone());
             }
             "-J" | "--noclear" => cfg.no_clear = true,
             "-l" | "--login-program" => {
                 i += 1;
-                cfg.login_program = PathBuf::from(
-                    args.get(i).ok_or("-l requires a program path")?,
-                );
+                cfg.login_program = PathBuf::from(args.get(i).ok_or("-l requires a program path")?);
             }
             "-L" | "--local-line" => cfg.local_line = true,
             "-m" | "--extract-baud" => cfg.keep_baud = true,
@@ -189,9 +173,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             "-p" | "--login-pause" => cfg.login_pause = true,
             "-r" | "--chroot" => {
                 i += 1;
-                cfg.chroot_dir = Some(PathBuf::from(
-                    args.get(i).ok_or("-r requires a directory")?,
-                ));
+                cfg.chroot_dir = Some(PathBuf::from(args.get(i).ok_or("-r requires a directory")?));
             }
             "-R" | "--hangup" => {} // accept, no-op
             "-s" | "--keep-baud" => cfg.keep_baud = true,
@@ -205,8 +187,8 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 );
             }
             "-U" | "--detect-case" => {} // accept, no-op
-            "-w" | "--wait-cr" => {} // accept, no-op
-            "--nohints" => {} // accept, no-op
+            "-w" | "--wait-cr" => {}     // accept, no-op
+            "--nohints" => {}            // accept, no-op
             "--nohostname" => cfg.no_hostname = true,
             "--erase-chars" => {
                 i += 1;
@@ -280,7 +262,13 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 // ---------------------------------------------------------------------------
 
 /// Process /etc/issue escape sequences
-fn process_issue_line(line: &str, hostname: &str, tty_name: &str, os_name: &str, os_release: &str) -> String {
+fn process_issue_line(
+    line: &str,
+    hostname: &str,
+    tty_name: &str,
+    os_name: &str,
+    os_release: &str,
+) -> String {
     let mut result = String::with_capacity(line.len());
     let mut chars = line.chars();
 
@@ -596,8 +584,7 @@ fn run_getty(
 
     // Login pause
     if cfg.login_pause {
-        write!(writer, "Press any key to continue...")
-            .map_err(|e| format!("write: {e}"))?;
+        write!(writer, "Press any key to continue...").map_err(|e| format!("write: {e}"))?;
         writer.flush().map_err(|e| format!("flush: {e}"))?;
         let mut one = [0u8; 1];
         let _ = std::io::stdin().read(&mut one);
@@ -721,10 +708,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_basic() {
-        let args = vec![
-            "getty".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "tty1".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.port, "tty1");
         assert_eq!(cfg.personality, Personality::Getty);
@@ -757,11 +741,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_noissue() {
-        let args = vec![
-            "getty".to_string(),
-            "-i".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "-i".to_string(), "tty1".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_issue);
     }
@@ -804,33 +784,21 @@ mod tests {
 
     #[test]
     fn test_parse_args_skip_login() {
-        let args = vec![
-            "getty".to_string(),
-            "-n".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "-n".to_string(), "tty1".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.skip_login);
     }
 
     #[test]
     fn test_parse_args_noclear() {
-        let args = vec![
-            "getty".to_string(),
-            "-J".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "-J".to_string(), "tty1".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_clear);
     }
 
     #[test]
     fn test_parse_args_noreset() {
-        let args = vec![
-            "getty".to_string(),
-            "-c".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "-c".to_string(), "tty1".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_reset);
     }
@@ -862,39 +830,27 @@ mod tests {
 
     #[test]
     fn test_parse_args_unknown_option() {
-        let args = vec![
-            "getty".to_string(),
-            "--badopt".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "--badopt".to_string()];
         assert!(parse_args(&args).is_err());
     }
 
     #[test]
     fn test_parse_args_help() {
-        let args = vec![
-            "getty".to_string(),
-            "--help".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "--help".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.show_help);
     }
 
     #[test]
     fn test_parse_args_version() {
-        let args = vec![
-            "getty".to_string(),
-            "-V".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "-V".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.show_version);
     }
 
     #[test]
     fn test_parse_args_mingetty() {
-        let args = vec![
-            "mingetty".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = vec!["mingetty".to_string(), "tty1".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.personality, Personality::Mingetty);
         assert_eq!(cfg.port, "tty1");
@@ -1206,55 +1162,35 @@ mod tests {
 
     #[test]
     fn test_parse_args_keep_baud() {
-        let args = vec![
-            "getty".to_string(),
-            "-s".to_string(),
-            "ttyS0".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "-s".to_string(), "ttyS0".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.keep_baud);
     }
 
     #[test]
     fn test_parse_args_local_line() {
-        let args = vec![
-            "getty".to_string(),
-            "-L".to_string(),
-            "ttyS0".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "-L".to_string(), "ttyS0".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.local_line);
     }
 
     #[test]
     fn test_parse_args_nonewline() {
-        let args = vec![
-            "getty".to_string(),
-            "-N".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "-N".to_string(), "tty1".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_newline);
     }
 
     #[test]
     fn test_parse_args_login_pause() {
-        let args = vec![
-            "getty".to_string(),
-            "-p".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "-p".to_string(), "tty1".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.login_pause);
     }
 
     #[test]
     fn test_parse_args_long_hostname() {
-        let args = vec![
-            "getty".to_string(),
-            "-o".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = vec!["getty".to_string(), "-o".to_string(), "tty1".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.long_hostname);
     }

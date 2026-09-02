@@ -44,7 +44,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("barracuda-cli 0.1.0 (smb-security-and-backup-portfolio personality build)"); }
+fn print_version() {
+    println!("barracuda-cli 0.1.0 (smb-security-and-backup-portfolio personality build)");
+}
 
 fn run_about() {
     println!("Barracuda Networks, Inc.");
@@ -95,7 +97,9 @@ fn run_backup() {
 
 fn run_cloudgen() {
     println!("CloudGen Firewall + secure-access SD-WAN.");
-    println!("  CloudGen Firewall: NGFW appliances + virtual + cloud (AWS / Azure / GCP) firewalls.");
+    println!(
+        "  CloudGen Firewall: NGFW appliances + virtual + cloud (AWS / Azure / GCP) firewalls."
+    );
     println!("  Secure SD-WAN: built into the CloudGen Firewall — purpose-built for");
     println!("                 distributed-branch + retail customers.");
     println!("  Strong Microsoft Azure integration heritage — Barracuda was an early Azure");

@@ -86,7 +86,13 @@ fn days_in_month(y: i64, m: u32) -> u32 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap_year(y) { 29 } else { 28 },
+        2 => {
+            if is_leap_year(y) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 30,
     }
 }
@@ -129,7 +135,14 @@ fn unix_to_broken(unix_secs: u64) -> BrokenTime {
     }
     let day = remaining_days as u32 + 1;
 
-    BrokenTime { year: y, month, day, hour, minute, weekday }
+    BrokenTime {
+        year: y,
+        month,
+        day,
+        hour,
+        minute,
+        weekday,
+    }
 }
 
 fn format_time(bt: &BrokenTime) -> String {
@@ -195,13 +208,19 @@ impl CronField {
 
         // Step: */N or N-M/S
         if let Some((base_part, step_str)) = s.split_once('/') {
-            let step: u32 = step_str.parse().map_err(|_| format!("bad step: {step_str}"))?;
+            let step: u32 = step_str
+                .parse()
+                .map_err(|_| format!("bad step: {step_str}"))?;
             if base_part == "*" {
                 return Ok(CronField::Step(min, step));
             }
             if let Some((lo_str, hi_str)) = base_part.split_once('-') {
-                let lo: u32 = lo_str.parse().map_err(|_| format!("bad range start: {lo_str}"))?;
-                let hi: u32 = hi_str.parse().map_err(|_| format!("bad range end: {hi_str}"))?;
+                let lo: u32 = lo_str
+                    .parse()
+                    .map_err(|_| format!("bad range start: {lo_str}"))?;
+                let hi: u32 = hi_str
+                    .parse()
+                    .map_err(|_| format!("bad range end: {hi_str}"))?;
                 // Expand range with step into values.
                 let mut vals = Vec::new();
                 let mut v = lo;
@@ -211,7 +230,9 @@ impl CronField {
                 }
                 return Ok(CronField::Values(vals));
             }
-            let base: u32 = base_part.parse().map_err(|_| format!("bad step base: {base_part}"))?;
+            let base: u32 = base_part
+                .parse()
+                .map_err(|_| format!("bad step base: {base_part}"))?;
             return Ok(CronField::Step(base, step));
         }
 
@@ -219,7 +240,10 @@ impl CronField {
         if s.contains(',') {
             let mut vals = Vec::new();
             for part in s.split(',') {
-                let v: u32 = part.trim().parse().map_err(|_| format!("bad value: {part}"))?;
+                let v: u32 = part
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("bad value: {part}"))?;
                 if v < min || v > max {
                     return Err(format!("value {v} out of range [{min}-{max}]"));
                 }
@@ -232,8 +256,12 @@ impl CronField {
 
         // Range: N-M
         if let Some((lo_str, hi_str)) = s.split_once('-') {
-            let lo: u32 = lo_str.parse().map_err(|_| format!("bad range start: {lo_str}"))?;
-            let hi: u32 = hi_str.parse().map_err(|_| format!("bad range end: {hi_str}"))?;
+            let lo: u32 = lo_str
+                .parse()
+                .map_err(|_| format!("bad range start: {lo_str}"))?;
+            let hi: u32 = hi_str
+                .parse()
+                .map_err(|_| format!("bad range end: {hi_str}"))?;
             return Ok(CronField::Range(lo, hi));
         }
 
@@ -329,33 +357,52 @@ impl CronJob {
 
         let (minute, hour, day, month, weekday, at_reboot) = match keyword {
             "@reboot" => (
-                CronField::Any, CronField::Any, CronField::Any,
-                CronField::Any, CronField::Any, true,
+                CronField::Any,
+                CronField::Any,
+                CronField::Any,
+                CronField::Any,
+                CronField::Any,
+                true,
             ),
             "@yearly" | "@annually" => (
-                CronField::Values(vec![0]), CronField::Values(vec![0]),
-                CronField::Values(vec![1]), CronField::Values(vec![1]),
-                CronField::Any, false,
+                CronField::Values(vec![0]),
+                CronField::Values(vec![0]),
+                CronField::Values(vec![1]),
+                CronField::Values(vec![1]),
+                CronField::Any,
+                false,
             ),
             "@monthly" => (
-                CronField::Values(vec![0]), CronField::Values(vec![0]),
-                CronField::Values(vec![1]), CronField::Any,
-                CronField::Any, false,
+                CronField::Values(vec![0]),
+                CronField::Values(vec![0]),
+                CronField::Values(vec![1]),
+                CronField::Any,
+                CronField::Any,
+                false,
             ),
             "@weekly" => (
-                CronField::Values(vec![0]), CronField::Values(vec![0]),
-                CronField::Any, CronField::Any,
-                CronField::Values(vec![0]), false,
+                CronField::Values(vec![0]),
+                CronField::Values(vec![0]),
+                CronField::Any,
+                CronField::Any,
+                CronField::Values(vec![0]),
+                false,
             ),
             "@daily" | "@midnight" => (
-                CronField::Values(vec![0]), CronField::Values(vec![0]),
-                CronField::Any, CronField::Any,
-                CronField::Any, false,
+                CronField::Values(vec![0]),
+                CronField::Values(vec![0]),
+                CronField::Any,
+                CronField::Any,
+                CronField::Any,
+                false,
             ),
             "@hourly" => (
-                CronField::Values(vec![0]), CronField::Any,
-                CronField::Any, CronField::Any,
-                CronField::Any, false,
+                CronField::Values(vec![0]),
+                CronField::Any,
+                CronField::Any,
+                CronField::Any,
+                CronField::Any,
+                false,
             ),
             other => return Err(format!("unknown special: {other}")),
         };
@@ -407,7 +454,10 @@ impl Crontab {
             }
         }
 
-        Crontab { jobs, path: path.to_path_buf() }
+        Crontab {
+            jobs,
+            path: path.to_path_buf(),
+        }
     }
 
     fn save(&self) -> Result<(), String> {
@@ -655,7 +705,10 @@ fn cmd_remove(num: usize) {
     let mut tab = Crontab::load(&user_tab_path);
 
     if num == 0 || num > tab.jobs.len() {
-        eprintln!("error: entry {num} does not exist (have {} entries)", tab.jobs.len());
+        eprintln!(
+            "error: entry {num} does not exist (have {} entries)",
+            tab.jobs.len()
+        );
         process::exit(1);
     }
 
@@ -705,7 +758,10 @@ fn cmd_next(count: usize) {
     let tab = Crontab::load(&user_tab_path);
     let system_jobs = load_system_jobs();
 
-    let all_jobs: Vec<&CronJob> = tab.jobs.iter().chain(system_jobs.iter())
+    let all_jobs: Vec<&CronJob> = tab
+        .jobs
+        .iter()
+        .chain(system_jobs.iter())
         .filter(|j| !j.at_reboot)
         .collect();
 
@@ -773,7 +829,14 @@ fn cmd_status() {
         false
     };
 
-    println!("  Status:    {}", if running { "running (PID file exists)" } else { "not running" });
+    println!(
+        "  Status:    {}",
+        if running {
+            "running (PID file exists)"
+        } else {
+            "not running"
+        }
+    );
 
     // Count jobs.
     let user_tab_path = PathBuf::from(SPOOL_DIR).join(DEFAULT_USER);

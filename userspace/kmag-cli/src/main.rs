@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_kmag(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,11 +28,22 @@ fn run_kmag(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kmag v24.05 (Slate OS)"); return 0; }
-    let mode = args.iter().skip_while(|a| a.as_str() != "--mode").nth(1)
-        .map(|s| s.as_str()).unwrap_or("follow-mouse");
-    let zoom = args.iter().skip_while(|a| a.as_str() != "--zoom").nth(1)
-        .map(|s| s.as_str()).unwrap_or("2");
+    if args.iter().any(|a| a == "--version") {
+        println!("kmag v24.05 (Slate OS)");
+        return 0;
+    }
+    let mode = args
+        .iter()
+        .skip_while(|a| a.as_str() != "--mode")
+        .nth(1)
+        .map(|s| s.as_str())
+        .unwrap_or("follow-mouse");
+    let zoom = args
+        .iter()
+        .skip_while(|a| a.as_str() != "--zoom")
+        .nth(1)
+        .map(|s| s.as_str())
+        .unwrap_or("2");
     println!("kmag: mode={}, zoom={}x", mode, zoom);
     if args.iter().any(|a| a == "--invert") {
         println!("  Color inversion enabled");
@@ -38,7 +53,10 @@ fn run_kmag(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "kmag".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "kmag".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_kmag(&rest, &prog);
     process::exit(code);
@@ -46,7 +64,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_kmag};
+    use super::{basename, run_kmag, strip_ext};
 
     #[test]
     fn basename_strips_path() {

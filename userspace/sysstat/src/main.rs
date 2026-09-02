@@ -89,7 +89,10 @@ fn format_timestamp() -> String {
         0 => 12,
         h => h,
     };
-    format!("{:02}:{:02}:{:02} {}", display_hour, minutes, seconds, am_pm)
+    format!(
+        "{:02}:{:02}:{:02} {}",
+        display_hour, minutes, seconds, am_pm
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -100,11 +103,7 @@ fn read_file_lines(path: &str) -> Option<Vec<String>> {
     let file = std::fs::File::open(path).ok()?;
     let reader = io::BufReader::new(file);
     let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines)
-    }
+    if lines.is_empty() { None } else { Some(lines) }
 }
 
 // ---------------------------------------------------------------------------
@@ -378,7 +377,10 @@ fn parse_diskstat_line(line: &str) -> Option<DiskStat> {
 
 fn read_diskstats() -> Vec<DiskStat> {
     if let Some(lines) = read_file_lines("/proc/diskstats") {
-        let stats: Vec<DiskStat> = lines.iter().filter_map(|l| parse_diskstat_line(l)).collect();
+        let stats: Vec<DiskStat> = lines
+            .iter()
+            .filter_map(|l| parse_diskstat_line(l))
+            .collect();
         if !stats.is_empty() {
             return stats;
         }
@@ -509,27 +511,28 @@ struct LoadAvg {
 
 fn read_loadavg() -> LoadAvg {
     if let Some(lines) = read_file_lines("/proc/loadavg")
-        && let Some(line) = lines.first() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 5 {
-                let (running, total) = if let Some(slash) = parts.get(3) {
-                    let rparts: Vec<&str> = slash.split('/').collect();
-                    (
-                        rparts.first().and_then(|s| s.parse().ok()).unwrap_or(1),
-                        rparts.get(1).and_then(|s| s.parse().ok()).unwrap_or(100),
-                    )
-                } else {
-                    (1, 100)
-                };
-                return LoadAvg {
-                    one: parts.first().and_then(|s| s.parse().ok()).unwrap_or(0.5),
-                    five: parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.4),
-                    fifteen: parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.3),
-                    running,
-                    total,
-                };
-            }
+        && let Some(line) = lines.first()
+    {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 5 {
+            let (running, total) = if let Some(slash) = parts.get(3) {
+                let rparts: Vec<&str> = slash.split('/').collect();
+                (
+                    rparts.first().and_then(|s| s.parse().ok()).unwrap_or(1),
+                    rparts.get(1).and_then(|s| s.parse().ok()).unwrap_or(100),
+                )
+            } else {
+                (1, 100)
+            };
+            return LoadAvg {
+                one: parts.first().and_then(|s| s.parse().ok()).unwrap_or(0.5),
+                five: parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.4),
+                fifteen: parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.3),
+                running,
+                total,
+            };
         }
+    }
     LoadAvg {
         one: 0.50,
         five: 0.35,
@@ -578,7 +581,11 @@ fn parse_proc_stat(pid: u64) -> Option<ProcessStat> {
         utime: parts.get(11).and_then(|s| s.parse().ok()).unwrap_or(0),
         stime: parts.get(12).and_then(|s| s.parse().ok()).unwrap_or(0),
         _num_threads: parts.get(17).and_then(|s| s.parse().ok()).unwrap_or(1),
-        vsize_kb: parts.get(20).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0) / 1024,
+        vsize_kb: parts
+            .get(20)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+            / 1024,
         rss_pages: parts.get(21).and_then(|s| s.parse().ok()).unwrap_or(0),
         cpu_num: parts.get(36).and_then(|s| s.parse().ok()).unwrap_or(0),
         read_bytes: 0,
@@ -907,19 +914,12 @@ fn print_disk_header(out: &mut impl Write) {
     );
 }
 
-fn print_disk_row(
-    out: &mut impl Write,
-    ts: &str,
-    prev: &DiskStat,
-    curr: &DiskStat,
-    interval: f64,
-) {
+fn print_disk_row(out: &mut impl Write, ts: &str, prev: &DiskStat, curr: &DiskStat, interval: f64) {
     let rtps = (curr.reads_completed.saturating_sub(prev.reads_completed)) as f64 / interval;
     let wtps = (curr.writes_completed.saturating_sub(prev.writes_completed)) as f64 / interval;
     let tps = rtps + wtps;
     let rkb = ((curr.sectors_read.saturating_sub(prev.sectors_read)) as f64 / interval) * 0.5;
-    let wkb =
-        ((curr.sectors_written.saturating_sub(prev.sectors_written)) as f64 / interval) * 0.5;
+    let wkb = ((curr.sectors_written.saturating_sub(prev.sectors_written)) as f64 / interval) * 0.5;
     let total_ios = (curr.reads_completed.saturating_sub(prev.reads_completed))
         + (curr.writes_completed.saturating_sub(prev.writes_completed));
     let areq_sz = if total_ios > 0 {
@@ -929,9 +929,11 @@ fn print_disk_row(
     } else {
         0.0
     };
-    let aqu_sz =
-        (curr.weighted_io_time_ms.saturating_sub(prev.weighted_io_time_ms)) as f64 / 1000.0
-            / interval;
+    let aqu_sz = (curr
+        .weighted_io_time_ms
+        .saturating_sub(prev.weighted_io_time_ms)) as f64
+        / 1000.0
+        / interval;
     let _ = writeln!(
         out,
         "{:<12} {:>10} {:>8.2} {:>12.2} {:>12.2} {:>12.2} {:>12.2}",
@@ -1020,8 +1022,7 @@ fn print_io_transfer_row(
             total_rtps += (c.reads_completed.saturating_sub(p.reads_completed)) as f64 / interval;
             total_wtps += (c.writes_completed.saturating_sub(p.writes_completed)) as f64 / interval;
             total_bread += (c.sectors_read.saturating_sub(p.sectors_read)) as f64 / interval;
-            total_bwrtn +=
-                (c.sectors_written.saturating_sub(p.sectors_written)) as f64 / interval;
+            total_bwrtn += (c.sectors_written.saturating_sub(p.sectors_written)) as f64 / interval;
         }
     }
     let total_tps = total_rtps + total_wtps;
@@ -1115,9 +1116,10 @@ fn parse_sar_args(args: &[String]) -> SarOptions {
     if has_flag(args, "-n") {
         // Check for -n DEV etc.
         if let Some(kind) = get_flag_arg(args, "-n")
-            && (kind == "DEV" || kind == "dev" || kind == "ALL" || kind == "all") {
-                opts.net = true;
-            }
+            && (kind == "DEV" || kind == "dev" || kind == "ALL" || kind == "all")
+        {
+            opts.net = true;
+        }
     }
     if has_flag(args, "-d") {
         opts.disk = true;
@@ -1149,9 +1151,10 @@ fn run_sar(args: &[String], out: &mut impl Write) {
 
     loop {
         if let Some(count) = opts.count
-            && iteration >= count {
-                break;
-            }
+            && iteration >= count
+        {
+            break;
+        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(opts.interval));
@@ -1289,7 +1292,10 @@ fn parse_iostat_args(args: &[String]) -> IostatOptions {
 }
 
 fn print_iostat_cpu(out: &mut impl Write, prev: &[CpuStat], curr: &[CpuStat]) {
-    let _ = writeln!(out, "avg-cpu:  %user   %nice %system %iowait  %steal   %idle");
+    let _ = writeln!(
+        out,
+        "avg-cpu:  %user   %nice %system %iowait  %steal   %idle"
+    );
     if let (Some(p), Some(c)) = (prev.first(), curr.first()) {
         let u = compute_cpu_usage(p, c);
         let _ = writeln!(
@@ -1351,10 +1357,8 @@ fn print_iostat_device_row(
     let total_write = curr.sectors_written as f64 * 512.0 / divisor;
 
     if extended {
-        let rrqm =
-            (curr.reads_merged.saturating_sub(prev.reads_merged)) as f64 / interval;
-        let wrqm =
-            (curr.writes_merged.saturating_sub(prev.writes_merged)) as f64 / interval;
+        let rrqm = (curr.reads_merged.saturating_sub(prev.reads_merged)) as f64 / interval;
+        let wrqm = (curr.writes_merged.saturating_sub(prev.writes_merged)) as f64 / interval;
         let total_ios = (curr.reads_completed.saturating_sub(prev.reads_completed))
             + (curr.writes_completed.saturating_sub(prev.writes_completed));
         let avgrq = if total_ios > 0 {
@@ -1362,7 +1366,9 @@ fn print_iostat_device_row(
         } else {
             0.0
         };
-        let avgqu = (curr.weighted_io_time_ms.saturating_sub(prev.weighted_io_time_ms)) as f64
+        let avgqu = (curr
+            .weighted_io_time_ms
+            .saturating_sub(prev.weighted_io_time_ms)) as f64
             / 1000.0
             / interval;
         let io_time_delta = curr.io_time_ms.saturating_sub(prev.io_time_ms);
@@ -1411,9 +1417,10 @@ fn run_iostat(args: &[String], out: &mut impl Write) {
 
     loop {
         if let Some(count) = opts.count
-            && iteration >= count {
-                break;
-            }
+            && iteration >= count
+        {
+            break;
+        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(opts.interval));
@@ -1481,9 +1488,10 @@ fn parse_mpstat_args(args: &[String]) -> MpstatOptions {
     }
 
     if let Some(mode) = get_flag_arg(args, "-I")
-        && (mode == "SUM" || mode == "sum" || mode == "ALL" || mode == "all") {
-            opts.irq_summary = true;
-        }
+        && (mode == "SUM" || mode == "sum" || mode == "ALL" || mode == "all")
+    {
+        opts.irq_summary = true;
+    }
 
     let (interval, count) = parse_interval_count(args);
     opts.interval = interval;
@@ -1496,7 +1504,17 @@ fn print_mpstat_header(out: &mut impl Write) {
     let _ = writeln!(
         out,
         "{:<12} {:>5} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "Time", "CPU", "%usr", "%nice", "%sys", "%iowait", "%irq", "%soft", "%steal", "%guest", "%idle"
+        "Time",
+        "CPU",
+        "%usr",
+        "%nice",
+        "%sys",
+        "%iowait",
+        "%irq",
+        "%soft",
+        "%steal",
+        "%guest",
+        "%idle"
     );
 }
 
@@ -1525,16 +1543,8 @@ fn print_mpstat_row(out: &mut impl Write, ts: &str, usage: &CpuUsage) {
 
 fn print_irq_summary(out: &mut impl Write, ts: &str) {
     // Read /proc/interrupts or use fallback
-    let _ = writeln!(
-        out,
-        "\n{:<12} {:>5} {:>12}",
-        "Time", "CPU", "intr/s"
-    );
-    let _ = writeln!(
-        out,
-        "{:<12} {:>5} {:>12.2}",
-        ts, "all", 1250.0
-    );
+    let _ = writeln!(out, "\n{:<12} {:>5} {:>12}", "Time", "CPU", "intr/s");
+    let _ = writeln!(out, "{:<12} {:>5} {:>12.2}", ts, "all", 1250.0);
 }
 
 fn run_mpstat(args: &[String], out: &mut impl Write) {
@@ -1546,9 +1556,10 @@ fn run_mpstat(args: &[String], out: &mut impl Write) {
 
     loop {
         if let Some(count) = opts.count
-            && iteration >= count {
-                break;
-            }
+            && iteration >= count
+        {
+            break;
+        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(opts.interval));
@@ -1731,15 +1742,15 @@ fn run_pidstat(args: &[String], out: &mut impl Write) {
     print_system_header(out, "pidstat");
 
     let mut prev_procs = read_process_stats(opts.target_pid);
-    let prev_map: HashMap<u64, ProcessStat> =
-        prev_procs.drain(..).map(|p| (p.pid, p)).collect();
+    let prev_map: HashMap<u64, ProcessStat> = prev_procs.drain(..).map(|p| (p.pid, p)).collect();
     let mut iteration = 0u64;
 
     loop {
         if let Some(count) = opts.count
-            && iteration >= count {
-                break;
-            }
+            && iteration >= count
+        {
+            break;
+        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(opts.interval));
@@ -1763,7 +1774,15 @@ fn run_pidstat(args: &[String], out: &mut impl Write) {
                     ..ProcessStat::default()
                 };
                 let prev = prev_map.get(&proc_stat.pid).unwrap_or(&default_prev);
-                print_pidstat_cpu_row(out, &ts, prev, proc_stat, 100, interval_secs, opts.show_threads);
+                print_pidstat_cpu_row(
+                    out,
+                    &ts,
+                    prev,
+                    proc_stat,
+                    100,
+                    interval_secs,
+                    opts.show_threads,
+                );
             }
         }
 
@@ -1805,20 +1824,17 @@ fn run_cifsiostat(args: &[String], out: &mut impl Write) {
 
     loop {
         if let Some(c) = count
-            && iteration >= c {
-                break;
-            }
+            && iteration >= c
+        {
+            break;
+        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(interval));
         }
 
         let ts = format_timestamp();
-        let interval_secs = if iteration == 0 {
-            1.0
-        } else {
-            interval as f64
-        };
+        let interval_secs = if iteration == 0 { 1.0 } else { interval as f64 };
         let curr_stats = read_cifs_stats();
 
         let _ = writeln!(out);
@@ -1837,8 +1853,7 @@ fn run_cifsiostat(args: &[String], out: &mut impl Write) {
             let rops = (c.reads.saturating_sub(p.reads)) as f64 / interval_secs;
             let rkb = (c.read_bytes.saturating_sub(p.read_bytes)) as f64 / 1024.0 / interval_secs;
             let wops = (c.writes.saturating_sub(p.writes)) as f64 / interval_secs;
-            let wkb =
-                (c.write_bytes.saturating_sub(p.write_bytes)) as f64 / 1024.0 / interval_secs;
+            let wkb = (c.write_bytes.saturating_sub(p.write_bytes)) as f64 / 1024.0 / interval_secs;
             let open_s = (c.opens.saturating_sub(p.opens)) as f64 / interval_secs;
             let close_s = (c.closes.saturating_sub(p.closes)) as f64 / interval_secs;
             let _ = writeln!(
@@ -1866,20 +1881,17 @@ fn run_tapestat(args: &[String], out: &mut impl Write) {
 
     loop {
         if let Some(c) = count
-            && iteration >= c {
-                break;
-            }
+            && iteration >= c
+        {
+            break;
+        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(interval));
         }
 
         let ts = format_timestamp();
-        let interval_secs = if iteration == 0 {
-            1.0
-        } else {
-            interval as f64
-        };
+        let interval_secs = if iteration == 0 { 1.0 } else { interval as f64 };
         let curr_stats = read_tape_stats();
 
         let _ = writeln!(out);
@@ -2351,8 +2363,15 @@ mod tests {
             ..CpuStat::default()
         };
         let usage = compute_cpu_usage(&prev, &curr);
-        let sum = usage.usr + usage.nice + usage.sys + usage.iowait + usage.irq
-            + usage.soft + usage.steal + usage.guest + usage.idle;
+        let sum = usage.usr
+            + usage.nice
+            + usage.sys
+            + usage.iowait
+            + usage.irq
+            + usage.soft
+            + usage.steal
+            + usage.guest
+            + usage.idle;
         assert!((sum - 100.0).abs() < 0.1);
     }
 
@@ -2419,7 +2438,10 @@ mod tests {
 
     #[test]
     fn test_parse_meminfo_value() {
-        assert_eq!(parse_meminfo_value("MemTotal:       16384000 kB"), Some(16384000));
+        assert_eq!(
+            parse_meminfo_value("MemTotal:       16384000 kB"),
+            Some(16384000)
+        );
     }
 
     #[test]

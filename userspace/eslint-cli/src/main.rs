@@ -47,11 +47,15 @@ fn run_eslint(args: Vec<String>) -> i32 {
     println!("  3:10  error    'useState' is defined but never used  no-unused-vars");
     println!("  15:5  error    Unexpected console statement           no-console");
     if !quiet {
-        println!("  22:1  warning  Missing return type on function        @typescript-eslint/explicit-function-return-type");
+        println!(
+            "  22:1  warning  Missing return type on function        @typescript-eslint/explicit-function-return-type"
+        );
     }
     println!();
     println!("src/utils/helpers.ts");
-    println!("  8:3   error    'any' is not allowed as a type          @typescript-eslint/no-explicit-any");
+    println!(
+        "  8:3   error    'any' is not allowed as a type          @typescript-eslint/no-explicit-any"
+    );
     if !quiet {
         println!("  12:1  warning  Prefer const over let                   prefer-const");
     }
@@ -79,7 +83,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_eslint};
+    use super::run_eslint;
 
     #[test]
     fn help_exits_zero() {

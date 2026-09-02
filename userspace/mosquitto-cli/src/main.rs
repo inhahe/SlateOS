@@ -35,16 +35,31 @@ fn run_pub(args: &[String]) -> i32 {
         return 0;
     }
 
-    let host = args.windows(2).find(|w| w[0] == "-h")
-        .map(|w| w[1].as_str()).unwrap_or("localhost");
-    let port = args.windows(2).find(|w| w[0] == "-p")
-        .map(|w| w[1].as_str()).unwrap_or("1883");
-    let topic = args.windows(2).find(|w| w[0] == "-t")
-        .map(|w| w[1].as_str()).unwrap_or("test/topic");
-    let message = args.windows(2).find(|w| w[0] == "-m")
-        .map(|w| w[1].as_str()).unwrap_or("hello");
-    let qos = args.windows(2).find(|w| w[0] == "-q")
-        .map(|w| w[1].as_str()).unwrap_or("0");
+    let host = args
+        .windows(2)
+        .find(|w| w[0] == "-h")
+        .map(|w| w[1].as_str())
+        .unwrap_or("localhost");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "-p")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1883");
+    let topic = args
+        .windows(2)
+        .find(|w| w[0] == "-t")
+        .map(|w| w[1].as_str())
+        .unwrap_or("test/topic");
+    let message = args
+        .windows(2)
+        .find(|w| w[0] == "-m")
+        .map(|w| w[1].as_str())
+        .unwrap_or("hello");
+    let qos = args
+        .windows(2)
+        .find(|w| w[0] == "-q")
+        .map(|w| w[1].as_str())
+        .unwrap_or("0");
     let retain = args.iter().any(|a| a == "-r");
 
     println!("Publishing to {}:{}", host, port);
@@ -76,12 +91,21 @@ fn run_sub(args: &[String]) -> i32 {
         return 0;
     }
 
-    let host = args.windows(2).find(|w| w[0] == "-h")
-        .map(|w| w[1].as_str()).unwrap_or("localhost");
-    let port = args.windows(2).find(|w| w[0] == "-p")
-        .map(|w| w[1].as_str()).unwrap_or("1883");
-    let topic = args.windows(2).find(|w| w[0] == "-t")
-        .map(|w| w[1].as_str()).unwrap_or("#");
+    let host = args
+        .windows(2)
+        .find(|w| w[0] == "-h")
+        .map(|w| w[1].as_str())
+        .unwrap_or("localhost");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "-p")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1883");
+    let topic = args
+        .windows(2)
+        .find(|w| w[0] == "-t")
+        .map(|w| w[1].as_str())
+        .unwrap_or("#");
     let verbose = args.iter().any(|a| a == "-v");
 
     println!("Subscribing to {}:{}", host, port);
@@ -102,7 +126,9 @@ fn run_sub(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string())
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "mosquitto_pub".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
@@ -114,7 +140,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pub};
+    use super::{basename, run_pub, strip_ext};
 
     #[test]
     fn basename_strips_path() {

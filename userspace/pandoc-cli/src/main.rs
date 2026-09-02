@@ -40,29 +40,71 @@ fn run_pandoc(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--list-input-formats") {
-        for fmt in &["commonmark", "creole", "csv", "docbook", "docx", "epub",
-                      "gfm", "html", "json", "latex", "markdown", "mediawiki",
-                      "org", "rst", "rtf", "textile", "typst"] {
+        for fmt in &[
+            "commonmark",
+            "creole",
+            "csv",
+            "docbook",
+            "docx",
+            "epub",
+            "gfm",
+            "html",
+            "json",
+            "latex",
+            "markdown",
+            "mediawiki",
+            "org",
+            "rst",
+            "rtf",
+            "textile",
+            "typst",
+        ] {
             println!("{}", fmt);
         }
         return 0;
     }
     if args.iter().any(|a| a == "--list-output-formats") {
-        for fmt in &["asciidoc", "beamer", "commonmark", "docbook", "docx",
-                      "epub", "gfm", "html", "json", "latex", "markdown",
-                      "odt", "pdf", "plain", "pptx", "rst", "rtf", "typst"] {
+        for fmt in &[
+            "asciidoc",
+            "beamer",
+            "commonmark",
+            "docbook",
+            "docx",
+            "epub",
+            "gfm",
+            "html",
+            "json",
+            "latex",
+            "markdown",
+            "odt",
+            "pdf",
+            "plain",
+            "pptx",
+            "rst",
+            "rtf",
+            "typst",
+        ] {
             println!("{}", fmt);
         }
         return 0;
     }
 
-    let from = args.windows(2).find(|w| w[0] == "-f" || w[0] == "--from")
-        .map(|w| w[1].as_str()).unwrap_or("markdown");
-    let to = args.windows(2).find(|w| w[0] == "-t" || w[0] == "--to")
-        .map(|w| w[1].as_str()).unwrap_or("html");
-    let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output")
+    let from = args
+        .windows(2)
+        .find(|w| w[0] == "-f" || w[0] == "--from")
+        .map(|w| w[1].as_str())
+        .unwrap_or("markdown");
+    let to = args
+        .windows(2)
+        .find(|w| w[0] == "-t" || w[0] == "--to")
+        .map(|w| w[1].as_str())
+        .unwrap_or("html");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o" || w[0] == "--output")
         .map(|w| w[1].as_str());
-    let input_files: Vec<&str> = args.iter()
+    let input_files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -107,7 +149,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pandoc};
+    use super::run_pandoc;
 
     #[test]
     fn help_exits_zero() {

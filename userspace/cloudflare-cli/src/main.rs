@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_cf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cloudflare [OPTIONS]");
-        println!("Cloudflare (Slate OS) — connectivity cloud (CDN + security + Workers + AI, NYSE:NET)");
+        println!(
+            "Cloudflare (Slate OS) — connectivity cloud (CDN + security + Workers + AI, NYSE:NET)"
+        );
         println!();
         println!("Options:");
         println!("  --workers              Workers (serverless edge compute, V8 isolates)");
@@ -24,11 +30,16 @@ fn run_cf(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cloudflare 2024 (Slate OS) — wrangler 3.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Cloudflare 2024 (Slate OS) — wrangler 3.x");
+        return 0;
+    }
     println!("Cloudflare 2024 (Slate OS) — Connectivity Cloud");
     println!("  Vendor: Cloudflare, Inc. (San Francisco, CA — NYSE:NET since 2019)");
     println!("  Founders: Matthew Prince (CEO) + Lee Holloway + Michelle Zatlyn, 2009");
-    println!("          founded as Project Honey Pot (spam tracking) → pivoted to Cloudflare (DDoS+CDN)");
+    println!(
+        "          founded as Project Honey Pot (spam tracking) → pivoted to Cloudflare (DDoS+CDN)"
+    );
     println!("          Matthew Prince: long-time CEO + co-founder, regular industry voice");
     println!("          Michelle Zatlyn: co-founder + President");
     println!("          Lee Holloway: co-founder + former CTO (left due to illness)");
@@ -40,14 +51,26 @@ fn run_cf(args: &[String], _prog: &str) -> i32 {
     println!("         FY2024 revenue: ~$1.67B (+30% YoY)");
     println!("         Market cap: $30-40B range");
     println!("         Strongest growth profile of any pure-play security/infra company");
-    println!("  Strategic position: 'connectivity cloud — security + performance + compute + AI at the edge':");
-    println!("                    pitch: 'one unified platform to make everything you connect to faster, safer, smarter'");
+    println!(
+        "  Strategic position: 'connectivity cloud — security + performance + compute + AI at the edge':"
+    );
+    println!(
+        "                    pitch: 'one unified platform to make everything you connect to faster, safer, smarter'"
+    );
     println!("                    target: everyone — from indie dev to Fortune 100 + government");
-    println!("                    primary competitor: AWS CloudFront, Akamai, Fastly (CDN); Zscaler, Palo Alto (Zero Trust)");
+    println!(
+        "                    primary competitor: AWS CloudFront, Akamai, Fastly (CDN); Zscaler, Palo Alto (Zero Trust)"
+    );
     println!("                    secondary: Cloudflare Workers vs Vercel/Netlify/Lambda@Edge");
-    println!("                    Cloudflare's wedge: massive global anycast network (300+ cities) + every-layer-stack platform");
-    println!("                    network effect: more users on Cloudflare = better DDoS data + threat intel");
-    println!("                    'Internet's immune system' positioning resonates with security buyers");
+    println!(
+        "                    Cloudflare's wedge: massive global anycast network (300+ cities) + every-layer-stack platform"
+    );
+    println!(
+        "                    network effect: more users on Cloudflare = better DDoS data + threat intel"
+    );
+    println!(
+        "                    'Internet's immune system' positioning resonates with security buyers"
+    );
     println!("  Pricing (notably aggressive free tier + transparent paid tiers):");
     println!("    Free: 50,000 Workers requests/day, 100K DNS queries, unlimited DDoS protection");
     println!("    Pro: $20/mo per domain (faster propagation, image optimization, etc.)");
@@ -154,18 +177,25 @@ fn run_cf(args: &[String], _prog: &str) -> i32 {
     println!("  Critique: Workers' JS-only sandbox limits some use cases (no arbitrary binaries)");
     println!("           AWS Lambda + CloudFront bundling for AWS-native shops");
     println!("           D1 + R2 + Workers AI all relatively young vs AWS equivalents");
-    println!("           Cloudflare One (Zero Trust) less mature than Zscaler/Netskope at enterprise scale");
+    println!(
+        "           Cloudflare One (Zero Trust) less mature than Zscaler/Netskope at enterprise scale"
+    );
     println!("           customer support quality variable for free + Pro tiers");
     println!("           DNS resolver (1.1.1.1) generally free = no direct revenue from it");
     println!("           data residency/sovereignty challenges for EU/regulated customers");
     println!("           Email Security (Area 1) integration ongoing");
-    println!("  Differentiator: 300+ city anycast network (largest CDN footprint) + V8 isolate Workers (5ms cold start vs 100-500ms Lambda) + R2 (zero-egress object storage — disruptive to AWS S3) + Workers AI (open-source LLM inference at edge) + 1.1.1.1 DNS resolver + Cloudflare One Zero Trust + 30%+ Fortune 1000 customer base + $1.67B revenue with 30%+ growth + 'connectivity cloud' multi-product platform — the every-layer infrastructure provider that nearly every Internet user touches every day even if they don't know it");
+    println!(
+        "  Differentiator: 300+ city anycast network (largest CDN footprint) + V8 isolate Workers (5ms cold start vs 100-500ms Lambda) + R2 (zero-egress object storage — disruptive to AWS S3) + Workers AI (open-source LLM inference at edge) + 1.1.1.1 DNS resolver + Cloudflare One Zero Trust + 30%+ Fortune 1000 customer base + $1.67B revenue with 30%+ growth + 'connectivity cloud' multi-product platform — the every-layer infrastructure provider that nearly every Internet user touches every day even if they don't know it"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "cloudflare".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "cloudflare".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_cf(&rest, &_prog);
     process::exit(code);
@@ -173,7 +203,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cf};
+    use super::{basename, run_cf, strip_ext};
 
     #[test]
     fn basename_strips_path() {

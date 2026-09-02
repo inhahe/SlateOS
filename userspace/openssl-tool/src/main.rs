@@ -149,7 +149,9 @@ fn run_fips() {
     println!("  OpenSSL FIPS Object Module — a separately-built libcrypto subset");
     println!("  that has been validated by a NIST-accredited lab against");
     println!("  FIPS 140-2 (and now 140-3).");
-    println!("  OpenSSL 1.0.2: classic FIPS Object Module 2.0 (long-running, end-of-validity 2026).");
+    println!(
+        "  OpenSSL 1.0.2: classic FIPS Object Module 2.0 (long-running, end-of-validity 2026)."
+    );
     println!("  OpenSSL 3.0:   FIPS provider — validation cert #4282 (2022).");
     println!("  Activation:    /etc/ssl/openssl.cnf provider section + .fipsinstall config.");
     println!("                 Once enabled, only FIPS-approved algorithms are available;");

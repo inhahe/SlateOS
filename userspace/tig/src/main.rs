@@ -96,7 +96,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_tig};
+    use super::run_tig;
 
     #[test]
     fn help_exits_zero() {

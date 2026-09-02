@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_dar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -30,7 +34,10 @@ fn run_dar(args: &[String], _prog: &str) -> i32 {
         println!("  --version   Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dar v2.7 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("dar v2.7 (Slate OS)");
+        return 0;
+    }
     println!("dar: archive operation");
     println!("  Files: 1,234");
     println!("  Total size: 256 MiB");
@@ -44,7 +51,10 @@ fn run_dar_manager(args: &[String], _prog: &str) -> i32 {
         println!("dar_manager v2.7 (Slate OS) — DAR archive catalog manager");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dar_manager v2.7 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("dar_manager v2.7 (Slate OS)");
+        return 0;
+    }
     println!("dar_manager: catalog database");
     println!("  Archives: 5 (2 full, 3 differential)");
     0
@@ -56,14 +66,20 @@ fn run_dar_xform(args: &[String], _prog: &str) -> i32 {
         println!("dar_xform v2.7 (Slate OS) — Transform DAR archive slicing");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dar_xform v2.7 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("dar_xform v2.7 (Slate OS)");
+        return 0;
+    }
     println!("dar_xform: re-slicing archive");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "dar".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "dar".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "dar_manager" => run_dar_manager(&rest, &prog),
@@ -75,7 +91,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dar};
+    use super::{basename, run_dar, strip_ext};
 
     #[test]
     fn basename_strips_path() {

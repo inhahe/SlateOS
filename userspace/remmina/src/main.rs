@@ -32,10 +32,14 @@ fn run_remmina(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let connect = args.iter().find_map(|a| a.strip_prefix("--connect=")
-        .or_else(|| a.strip_prefix("-c")));
+    let connect = args.iter().find_map(|a| {
+        a.strip_prefix("--connect=")
+            .or_else(|| a.strip_prefix("-c"))
+    });
     let server = args.iter().find_map(|a| a.strip_prefix("--server="));
-    let protocol = args.iter().find_map(|a| a.strip_prefix("--protocol="))
+    let protocol = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--protocol="))
         .unwrap_or("RDP");
 
     if let Some(file) = connect {
@@ -58,7 +62,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_remmina};
+    use super::run_remmina;
 
     #[test]
     fn help_exits_zero() {

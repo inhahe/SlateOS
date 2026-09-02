@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_toad(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_toad(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Quest Toad for Oracle 17.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Quest Toad for Oracle 17.2 (Slate OS)");
+        return 0;
+    }
     println!("Quest Toad for Oracle 17.2 (Slate OS)");
     println!("  Editions: Toad for Oracle / SQL Server / IBM Db2 / MySQL / PostgreSQL");
     println!("  Toad Data Point (cross-platform query/reporting on 50+ data sources)");
@@ -37,7 +44,10 @@ fn run_toad(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "toad".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "toad".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_toad(&rest, &_prog);
     process::exit(code);
@@ -45,7 +55,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_toad};
+    use super::{basename, run_toad, strip_ext};
 
     #[test]
     fn basename_strips_path() {

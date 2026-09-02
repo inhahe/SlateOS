@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_informatica(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,9 +27,14 @@ fn run_informatica(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Informatica IDMC 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Informatica IDMC 2024 (Slate OS)");
+        return 0;
+    }
     println!("Informatica 2024 (Slate OS) — Intelligent Data Management Cloud (IDMC)");
-    println!("  Vendor: Informatica, LLC (Redwood City, CA — NYSE:INFA 2021-2025, Salesforce acq pending)");
+    println!(
+        "  Vendor: Informatica, LLC (Redwood City, CA — NYSE:INFA 2021-2025, Salesforce acq pending)"
+    );
     println!("  Founder: Gaurav Dhillon + Diaz Nesamoney, 1993");
     println!("          founded as data integration pioneer — defined the ETL category");
     println!("          PowerCenter (1998) was the dominant enterprise ETL tool for 2 decades");
@@ -39,22 +48,38 @@ fn run_informatica(args: &[String], _prog: &str) -> i32 {
     println!("         FY2024 revenue: ~$1.6B (largest pure-play data integration vendor)");
     println!("         Market cap: ~$8-9B");
     println!("         Salesforce announced acquisition May 2025 for ~$8B");
-    println!("         Strategic fit: Salesforce 'Data + AI' play with MuleSoft + Tableau + Data Cloud + Informatica");
+    println!(
+        "         Strategic fit: Salesforce 'Data + AI' play with MuleSoft + Tableau + Data Cloud + Informatica"
+    );
     println!("         Cited as Salesforce's biggest data-fabric move since MuleSoft 2018 ($6.5B)");
     println!("  Strategic position: '#1 in enterprise data management — cloud, on-prem, hybrid':");
-    println!("                    pitch: 'the data management leader for the AI era — IDMC + CLAIRE for everything'");
+    println!(
+        "                    pitch: 'the data management leader for the AI era — IDMC + CLAIRE for everything'"
+    );
     println!("                    target: large enterprise (Fortune 500 sweet spot)");
-    println!("                    primary competitor: Talend (acquired by Qlik), Microsoft Fabric, AWS Glue, Fivetran (modern stack)");
-    println!("                    secondary: Matillion, dbt, Snowflake (overlap on ELT), MuleSoft (iPaaS), Boomi (iPaaS)");
-    println!("                    Informatica's wedge: largest enterprise install base + CLAIRE AI metadata + breadth of capabilities");
-    println!("                    challenge: cloud-native disruption from Fivetran/dbt/modern stack");
+    println!(
+        "                    primary competitor: Talend (acquired by Qlik), Microsoft Fabric, AWS Glue, Fivetran (modern stack)"
+    );
+    println!(
+        "                    secondary: Matillion, dbt, Snowflake (overlap on ELT), MuleSoft (iPaaS), Boomi (iPaaS)"
+    );
+    println!(
+        "                    Informatica's wedge: largest enterprise install base + CLAIRE AI metadata + breadth of capabilities"
+    );
+    println!(
+        "                    challenge: cloud-native disruption from Fivetran/dbt/modern stack"
+    );
     println!("  Pricing:");
     println!("    PowerCenter (on-prem): $100K-$5M+/yr (legacy, declining)");
-    println!("    IDMC (cloud): $50K-$3M+/yr — consumption-based 'IPU' (Informatica Processing Unit) model");
+    println!(
+        "    IDMC (cloud): $50K-$3M+/yr — consumption-based 'IPU' (Informatica Processing Unit) model"
+    );
     println!("    MDM: $200K-$5M+/yr");
     println!("    Cloud Data Quality: $50K-$1M+/yr");
     println!("    Axon Data Governance: $100K-$2M+/yr");
-    println!("    typically the most expensive per-seat in data integration — enterprise-grade premium");
+    println!(
+        "    typically the most expensive per-seat in data integration — enterprise-grade premium"
+    );
     println!("  Product portfolio (IDMC = Intelligent Data Management Cloud):");
     println!("    1. Cloud Data Integration (CDI — ETL/ELT):");
     println!("       - Cloud-native ETL/ELT pipelines");
@@ -119,20 +144,29 @@ fn run_informatica(args: &[String], _prog: &str) -> i32 {
     println!("    - International: heavy in Europe + Japan");
     println!("    - sweet spot: Fortune 1000 + global 2000 + government");
     println!("  Critique: cloud transition still incomplete — ~30% PowerCenter legacy revenue");
-    println!("           cloud-native disruptors (Fivetran, dbt, Matillion) eating modern-stack share");
-    println!("           Microsoft Fabric + AWS Glue + Azure Data Factory threaten cloud-only customers");
+    println!(
+        "           cloud-native disruptors (Fivetran, dbt, Matillion) eating modern-stack share"
+    );
+    println!(
+        "           Microsoft Fabric + AWS Glue + Azure Data Factory threaten cloud-only customers"
+    );
     println!("           IDMC pricing (IPU) confusion for buyers");
     println!("           CLAIRE marketing exceeds capabilities reality");
     println!("           Salesforce acquisition 2025 = integration risk + go-to-market disruption");
     println!("           innovation pace slower than newer modern-stack vendors");
     println!("           Talend, IBM, Microsoft, AWS bundling pressure on prices");
-    println!("  Differentiator: largest enterprise data integration vendor + IDMC unified platform (ETL + MDM + DQ + governance + iPaaS + privacy) + CLAIRE AI metadata engine + 5,000+ data source connectivity (including mainframe + legacy) + 87% Fortune 100 install base + $1.6B revenue + Salesforce acquisition 2025 ($8B) for 'Data + AI' strategy alongside MuleSoft + Tableau + Data Cloud — the data management leader that big enterprises trust for cloud + on-prem + hybrid + legacy data integration");
+    println!(
+        "  Differentiator: largest enterprise data integration vendor + IDMC unified platform (ETL + MDM + DQ + governance + iPaaS + privacy) + CLAIRE AI metadata engine + 5,000+ data source connectivity (including mainframe + legacy) + 87% Fortune 100 install base + $1.6B revenue + Salesforce acquisition 2025 ($8B) for 'Data + AI' strategy alongside MuleSoft + Tableau + Data Cloud — the data management leader that big enterprises trust for cloud + on-prem + hybrid + legacy data integration"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "informatica".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "informatica".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_informatica(&rest, &_prog);
     process::exit(code);
@@ -140,7 +174,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_informatica};
+    use super::{basename, run_informatica, strip_ext};
 
     #[test]
     fn basename_strips_path() {

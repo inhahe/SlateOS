@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_f360(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -19,11 +23,16 @@ fn run_f360(args: &[String], _prog: &str) -> i32 {
         println!("  --open FILE            Open design or project URL");
         println!("  --script FILE          Run Python add-in/script");
         println!("  --headless             Run without UI");
-        println!("  --workspace WS         Switch workspace (Design/Render/Animation/Simulation/Manufacture/Drawing)");
+        println!(
+            "  --workspace WS         Switch workspace (Design/Render/Animation/Simulation/Manufacture/Drawing)"
+        );
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Autodesk Fusion 360 v2.0.20294 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Autodesk Fusion 360 v2.0.20294 (Slate OS)");
+        return 0;
+    }
     println!("Autodesk Fusion 360 v2.0.20294 (Slate OS)");
     println!("  Workspaces: Design, Render, Animation, Simulation, Manufacture, Drawing");
     println!("  Cloud: Auto-saves to Autodesk cloud, version history, sharing");
@@ -37,7 +46,10 @@ fn run_f360(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "fusion360".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "fusion360".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_f360(&rest, &_prog);
     process::exit(code);
@@ -45,7 +57,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_f360};
+    use super::{basename, run_f360, strip_ext};
 
     #[test]
     fn basename_strips_path() {

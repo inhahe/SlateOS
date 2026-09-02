@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn run_lame(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "--longhelp") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "--longhelp")
+    {
         println!("Usage: lame [OPTIONS] INPUT [OUTPUT]");
         println!();
         println!("LAME — MP3 encoder (Slate OS).");
@@ -46,7 +49,8 @@ fn run_lame(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -57,14 +61,25 @@ fn run_lame(args: Vec<String>) -> i32 {
     }
 
     let input = files[0];
-    let output = if files.len() > 1 { files[1] } else { "output.mp3" };
+    let output = if files.len() > 1 {
+        files[1]
+    } else {
+        "output.mp3"
+    };
 
-    let bitrate = args.windows(2).find(|w| w[0] == "-b")
+    let bitrate = args
+        .windows(2)
+        .find(|w| w[0] == "-b")
         .map(|w| w[1].as_str());
-    let vbr = args.windows(2).find(|w| w[0] == "-V")
+    let vbr = args
+        .windows(2)
+        .find(|w| w[0] == "-V")
         .map(|w| w[1].as_str());
-    let mode = args.windows(2).find(|w| w[0] == "-m")
-        .map(|w| w[1].as_str()).unwrap_or("j");
+    let mode = args
+        .windows(2)
+        .find(|w| w[0] == "-m")
+        .map(|w| w[1].as_str())
+        .unwrap_or("j");
 
     println!("LAME 3.100 64bits (Slate OS)");
     println!("Autodetecting input: {}", input);
@@ -104,7 +119,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_lame};
+    use super::run_lame;
 
     #[test]
     fn help_exits_zero() {

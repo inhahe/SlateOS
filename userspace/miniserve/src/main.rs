@@ -29,7 +29,9 @@ fn run_miniserve(args: Vec<String>) -> i32 {
         println!("  -r, --enable-tar             Enable tar archive download");
         println!("  -z, --enable-tar-gz          Enable tar.gz archive download");
         println!("  -Z, --enable-zip             Enable zip archive download");
-        println!("  -c, --color-scheme <SCHEME>  Color scheme (squirrel/archlinux/zenburn/monokai)");
+        println!(
+            "  -c, --color-scheme <SCHEME>  Color scheme (squirrel/archlinux/zenburn/monokai)"
+        );
         println!("  -d, --color-scheme-dark <S>  Dark color scheme");
         println!("  --spa                        Single-page app mode");
         println!("  -t, --title <TITLE>          Page title");
@@ -51,12 +53,15 @@ fn run_miniserve(args: Vec<String>) -> i32 {
     }
 
     // Parse port
-    let port = args.windows(2)
+    let port = args
+        .windows(2)
         .find(|w| w[0] == "-p" || w[0] == "--port")
         .and_then(|w| w[1].parse::<u16>().ok())
         .unwrap_or(8080);
 
-    let path = args.iter().rfind(|a| !a.starts_with('-'))
+    let path = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(".");
 
@@ -101,7 +106,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_miniserve};
+    use super::run_miniserve;
 
     #[test]
     fn help_exits_zero() {

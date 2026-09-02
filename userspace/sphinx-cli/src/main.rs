@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sphinx_build(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -24,7 +28,11 @@ fn run_sphinx_build(args: &[String]) -> i32 {
         println!("sphinx-build 7.2.6 (Slate OS)");
         return 0;
     }
-    let builder = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].as_str()).unwrap_or("html");
+    let builder = args
+        .windows(2)
+        .find(|w| w[0] == "-b")
+        .map(|w| w[1].as_str())
+        .unwrap_or("html");
     println!("Running Sphinx v7.2.6");
     println!("loading pickled environment... done");
     println!("building [{}]: targets for 12 source files", builder);
@@ -45,7 +53,11 @@ fn run_sphinx_quickstart(args: &[String]) -> i32 {
         println!("  --sep         Separate source and build dirs");
         return 0;
     }
-    let path = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("docs");
+    let path = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("docs");
     println!("Creating Sphinx project in: {}/", path);
     println!("  Created: {}/conf.py", path);
     println!("  Created: {}/index.rst", path);
@@ -73,7 +85,10 @@ fn run_sphinx_apidoc(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sphinx-build".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "sphinx-build".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "sphinx-quickstart" => run_sphinx_quickstart(&rest),
@@ -85,7 +100,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sphinx_build};
+    use super::{basename, run_sphinx_build, strip_ext};
 
     #[test]
     fn basename_strips_path() {

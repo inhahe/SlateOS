@@ -39,7 +39,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("payoneer-cli 0.1.0 (marketplace-receivable personality build)"); }
+fn print_version() {
+    println!("payoneer-cli 0.1.0 (marketplace-receivable personality build)");
+}
 
 fn run_about() {
     println!("Payoneer Global Inc.");

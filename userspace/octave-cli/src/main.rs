@@ -27,9 +27,13 @@ fn run_octave(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let eval = args.windows(2).find(|w| w[0] == "--eval")
+    let eval = args
+        .windows(2)
+        .find(|w| w[0] == "--eval")
         .map(|w| w[1].as_str());
-    let quiet = args.iter().any(|a| a == "--silent" || a == "--quiet" || a == "-q");
+    let quiet = args
+        .iter()
+        .any(|a| a == "--silent" || a == "--quiet" || a == "-q");
 
     if let Some(code) = eval {
         if code.contains("disp") || code.contains("printf") {
@@ -61,7 +65,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_octave};
+    use super::run_octave;
 
     #[test]
     fn help_exits_zero() {

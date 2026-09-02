@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_squeekboard(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,10 +28,17 @@ fn run_squeekboard(args: &[String], _prog: &str) -> i32 {
         println!("Automatically shows/hides when text input is focused.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("squeekboard v1.22 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("squeekboard v1.22 (Slate OS)");
+        return 0;
+    }
 
-    let layout = args.iter().skip_while(|a| a.as_str() != "--layout").nth(1)
-        .map(|s| s.as_str()).unwrap_or("us");
+    let layout = args
+        .iter()
+        .skip_while(|a| a.as_str() != "--layout")
+        .nth(1)
+        .map(|s| s.as_str())
+        .unwrap_or("us");
     println!("squeekboard: on-screen keyboard active (layout={})", layout);
     println!("  Listening for text-input-v3 focus events");
     println!("  Keyboard will auto-show when text field is focused");
@@ -36,7 +47,10 @@ fn run_squeekboard(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "squeekboard".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "squeekboard".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_squeekboard(&rest, &prog);
     process::exit(code);
@@ -44,7 +58,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_squeekboard};
+    use super::{basename, run_squeekboard, strip_ext};
 
     #[test]
     fn basename_strips_path() {

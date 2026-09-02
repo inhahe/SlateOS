@@ -48,12 +48,16 @@ fn run_tokei(args: Vec<String>) -> i32 {
     }
 
     let json_out = args.iter().any(|a| a == "-o" || a == "--output")
-        && args.windows(2).any(|w| (w[0] == "-o" || w[0] == "--output") && w[1] == "json");
+        && args
+            .windows(2)
+            .any(|w| (w[0] == "-o" || w[0] == "--output") && w[1] == "json");
     let show_files = args.iter().any(|a| a == "-f" || a == "--files");
     let compact = args.iter().any(|a| a == "-C" || a == "--compact");
 
     if json_out {
-        println!("{{\"Rust\":{{\"blanks\":245,\"code\":3892,\"comments\":412,\"reports\":[]}},\"TOML\":{{\"blanks\":12,\"code\":85,\"comments\":8,\"reports\":[]}},\"Markdown\":{{\"blanks\":42,\"code\":156,\"comments\":0,\"reports\":[]}}}}");
+        println!(
+            "{{\"Rust\":{{\"blanks\":245,\"code\":3892,\"comments\":412,\"reports\":[]}},\"TOML\":{{\"blanks\":12,\"code\":85,\"comments\":8,\"reports\":[]}},\"Markdown\":{{\"blanks\":42,\"code\":156,\"comments\":0,\"reports\":[]}}}}"
+        );
         return 0;
     }
 
@@ -87,7 +91,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_tokei};
+    use super::run_tokei;
 
     #[test]
     fn help_exits_zero() {

@@ -28,7 +28,8 @@ fn run_godoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-http") {
-        let addr = args.windows(2)
+        let addr = args
+            .windows(2)
             .find(|w| w[0] == "-http")
             .map(|w| w[1].as_str())
             .unwrap_or(":6060");
@@ -36,11 +37,13 @@ fn run_godoc(args: &[String]) -> i32 {
         println!("godoc: serving documentation at http://localhost{}", addr);
         return 0;
     }
-    let pkg = args.iter()
+    let pkg = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("fmt");
-    let sym = args.iter()
+    let sym = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .nth(1)
         .map(|s| s.as_str());
@@ -70,7 +73,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_godoc};
+    use super::run_godoc;
 
     #[test]
     fn help_exits_zero() {

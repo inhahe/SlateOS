@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("replicate-cli 0.1.0 (per-second-GPU personality build)"); }
+fn print_version() {
+    println!("replicate-cli 0.1.0 (per-second-GPU personality build)");
+}
 
 fn run_about() {
     println!("Replicate (Replicate Inc.).");

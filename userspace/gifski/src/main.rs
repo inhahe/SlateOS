@@ -35,17 +35,20 @@ fn run_gifski(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let output = args.windows(2)
+    let output = args
+        .windows(2)
         .find(|w| w[0] == "-o" || w[0] == "--output")
         .map(|w| w[1].as_str())
         .unwrap_or("output.gif");
 
-    let fps: u32 = args.windows(2)
+    let fps: u32 = args
+        .windows(2)
         .find(|w| w[0] == "--fps")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(20);
 
-    let quality: u32 = args.windows(2)
+    let quality: u32 = args
+        .windows(2)
         .find(|w| w[0] == "--quality")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(90);
@@ -53,7 +56,8 @@ fn run_gifski(args: Vec<String>) -> i32 {
     let fast = args.iter().any(|a| a == "--fast");
     let quiet = args.iter().any(|a| a == "-q" || a == "--quiet");
 
-    let frames: Vec<&str> = args.iter()
+    let frames: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -93,7 +97,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gifski};
+    use super::run_gifski;
 
     #[test]
     fn help_exits_zero() {

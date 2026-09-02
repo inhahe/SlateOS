@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_grpcurl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -52,7 +56,9 @@ fn run_grpcurl(args: &[String]) -> i32 {
         println!("myapp.v1.UserService is a service:");
         println!("service UserService {{");
         println!("  rpc GetUser ( .myapp.v1.GetUserRequest ) returns ( .myapp.v1.User );");
-        println!("  rpc ListUsers ( .myapp.v1.ListUsersRequest ) returns ( .myapp.v1.ListUsersResponse );");
+        println!(
+            "  rpc ListUsers ( .myapp.v1.ListUsersRequest ) returns ( .myapp.v1.ListUsersResponse );"
+        );
         println!("  rpc CreateUser ( .myapp.v1.CreateUserRequest ) returns ( .myapp.v1.User );");
         println!("}}");
     } else {
@@ -78,7 +84,9 @@ fn run_grpc_health_probe(args: &[String]) -> i32 {
         return 0;
     }
 
-    let addr = args.windows(2).find(|w| w[0] == "-addr")
+    let addr = args
+        .windows(2)
+        .find(|w| w[0] == "-addr")
         .map(|w| w[1].as_str())
         .unwrap_or("localhost:50051");
     println!("status: SERVING ({})", addr);
@@ -87,7 +95,10 @@ fn run_grpc_health_probe(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "grpcurl".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "grpcurl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "grpc_health_probe" => run_grpc_health_probe(&rest),
@@ -99,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_grpcurl};
+    use super::{basename, run_grpcurl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

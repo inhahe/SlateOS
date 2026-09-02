@@ -33,14 +33,19 @@ fn run_perl(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let exec_str = args.iter().position(|a| a == "-e")
+    let exec_str = args
+        .iter()
+        .position(|a| a == "-e")
         .and_then(|i| args.get(i + 1));
     if let Some(code) = exec_str {
         println!("(executing: {})", code);
         return 0;
     }
 
-    let script = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let script = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(file) = script {
         println!("(running {})", file);
     } else {
@@ -57,7 +62,10 @@ fn run_cpan(args: Vec<String>) -> i32 {
         println!("  -D module Module details");
         return 0;
     }
-    let module = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let module = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(m) = module {
         println!("Installing {}... done (simulated)", m);
     } else {
@@ -71,7 +79,11 @@ fn run_perldoc(args: Vec<String>) -> i32 {
         println!("Usage: perldoc [-h] [-v] [-t] [-u] [-m] [-l] PageName|ModuleName|ProgramName");
         return 0;
     }
-    let page = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("perl");
+    let page = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("perl");
     println!("(displaying documentation for: {} — simulated)", page);
     0
 }
@@ -83,7 +95,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -99,7 +113,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_perl};
+    use super::run_perl;
 
     #[test]
     fn help_exits_zero() {

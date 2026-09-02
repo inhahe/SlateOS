@@ -42,12 +42,22 @@ fn run_fd(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let pattern = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("");
+    let pattern = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("");
     let detailed = args.iter().any(|a| a == "-l" || a == "--list-details");
     let abs = args.iter().any(|a| a == "-a" || a == "--absolute-path");
 
     let results = if pattern.is_empty() {
-        vec!["Cargo.toml", "src/main.rs", "src/lib.rs", "tests/integration.rs", "README.md"]
+        vec![
+            "Cargo.toml",
+            "src/main.rs",
+            "src/lib.rs",
+            "tests/integration.rs",
+            "README.md",
+        ]
     } else {
         vec!["src/main.rs", "tests/main_test.rs"]
     };
@@ -73,7 +83,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_fd};
+    use super::run_fd;
 
     #[test]
     fn help_exits_zero() {

@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bigeye(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,11 +25,16 @@ fn run_bigeye(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Bigeye 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Bigeye 2024 (Slate OS)");
+        return 0;
+    }
     println!("Bigeye 2024 (Slate OS) — Data Observability");
     println!("  Vendor: Bigeye Inc. (San Francisco)");
     println!("  Founders: Kyle Kirwan (CEO) + Egor Gryaznov (CTO), 2019");
-    println!("          both: ex-Uber data team — built Databook, Uber's internal data catalog (2017-2019)");
+    println!(
+        "          both: ex-Uber data team — built Databook, Uber's internal data catalog (2017-2019)"
+    );
     println!("          Databook influence: deep understanding of metadata-at-scale problems");
     println!("          Kyle: also ex-Yahoo data team");
     println!("          founded Bigeye to take Uber's data observability ideas public");
@@ -34,17 +43,29 @@ fn run_bigeye(args: &[String], _prog: &str) -> i32 {
     println!("         Series A Jul 2021: $17M led by Sequoia");
     println!("         seed 2020: Costanoa Ventures, Sequoia angels");
     println!("  Strategic position: 'observability for data engineers, by data engineers':");
-    println!("                    pitch: 'Bigeye finds the metrics that matter and watches them automatically'");
+    println!(
+        "                    pitch: 'Bigeye finds the metrics that matter and watches them automatically'"
+    );
     println!("                    target: data engineering teams at mid-large enterprise");
-    println!("                    primary competitor: Monte Carlo (broader), Anomalo (ML focus), Soda (OSS)");
-    println!("                    Bigeye's wedge: 200+ pre-built metrics library + Autometrics ML + Slack UX");
-    println!("                    Uber-engineering-veteran credibility for selling to data eng leads");
+    println!(
+        "                    primary competitor: Monte Carlo (broader), Anomalo (ML focus), Soda (OSS)"
+    );
+    println!(
+        "                    Bigeye's wedge: 200+ pre-built metrics library + Autometrics ML + Slack UX"
+    );
+    println!(
+        "                    Uber-engineering-veteran credibility for selling to data eng leads"
+    );
     println!("  Pricing: enterprise sales-led, $50K-$500K+/yr typical");
     println!("         free trial / pilot then annual contract");
     println!("         priced per table/asset monitored");
     println!("  Core platform:");
-    println!("    - 200+ pre-built data quality metrics (Bigeye's open-source 'Toretto' framework)");
-    println!("    - Examples: percent_null, percent_unique, mean, p99, count_distinct, regex_match");
+    println!(
+        "    - 200+ pre-built data quality metrics (Bigeye's open-source 'Toretto' framework)"
+    );
+    println!(
+        "    - Examples: percent_null, percent_unique, mean, p99, count_distinct, regex_match"
+    );
     println!("    - Apply any metric to any column with one click — no SQL needed");
     println!("    - Thresholds auto-set via ML (Autometrics) or manual");
     println!("    - Schema drift detection + freshness + volume monitoring");
@@ -64,7 +85,9 @@ fn run_bigeye(args: &[String], _prog: &str) -> i32 {
     println!("    - Engineers don't leave the chat tool");
     println!("    - One of Bigeye's UX bets — less context-switching than Monte Carlo dashboard");
     println!("  Integrations (40+):");
-    println!("    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Postgres, MySQL");
+    println!(
+        "    - Warehouses: Snowflake, BigQuery, Databricks, Redshift, Synapse, Postgres, MySQL"
+    );
     println!("    - Lakehouse: Iceberg, Delta (2024)");
     println!("    - dbt + Airflow + Dagster + Prefect");
     println!("    - BI: Looker, Tableau, Mode, Sigma (lineage)");
@@ -90,13 +113,18 @@ fn run_bigeye(args: &[String], _prog: &str) -> i32 {
     println!("           growth slower than peak — data-observability category cooling slightly");
     println!("           less developed catalog/governance features than Atlan / Collibra");
     println!("           dbt-tests-as-baseline question (free) — must justify premium");
-    println!("  Differentiator: Uber-data-team founders + 200+ pre-built metrics library + Slack-native incident UX + Autometrics ML + open-source Toretto library — the data observability platform built by engineers, for engineers");
+    println!(
+        "  Differentiator: Uber-data-team founders + 200+ pre-built metrics library + Slack-native incident UX + Autometrics ML + open-source Toretto library — the data observability platform built by engineers, for engineers"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bigeye".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bigeye".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_bigeye(&rest, &_prog);
     process::exit(code);
@@ -104,7 +132,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bigeye};
+    use super::{basename, run_bigeye, strip_ext};
 
     #[test]
     fn basename_strips_path() {

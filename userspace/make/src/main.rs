@@ -162,9 +162,10 @@ fn parse_args(args: &[String]) -> (Options, Vec<(String, String)>) {
         } else if arg == "-j" {
             i += 1;
             if i < args.len()
-                && let Ok(n) = args[i].parse::<usize>() {
-                    opts.jobs = n;
-                }
+                && let Ok(n) = args[i].parse::<usize>()
+            {
+                opts.jobs = n;
+            }
         } else if arg == "-C" {
             i += 1;
             if i < args.len() {
@@ -226,10 +227,8 @@ fn expand_vars_depth(
             if next == b'(' || next == b'{' {
                 let close = if next == b'(' { b')' } else { b'}' };
                 if let Some(end) = find_matching_close(bytes, i + 2, close) {
-                    let var_expr =
-                        std::str::from_utf8(&bytes[i + 2..end]).unwrap_or("");
-                    let expanded_name =
-                        expand_vars_depth(var_expr, db, auto_vars, depth + 1);
+                    let var_expr = std::str::from_utf8(&bytes[i + 2..end]).unwrap_or("");
+                    let expanded_name = expand_vars_depth(var_expr, db, auto_vars, depth + 1);
                     let val = lookup_var(&expanded_name, db, auto_vars);
                     let resolved = resolve_var_value(&val, db, auto_vars, depth);
                     out.push_str(&resolved);
@@ -258,11 +257,7 @@ fn expand_vars_depth(
 }
 
 /// Look up a variable by name, checking auto vars first, then the database.
-fn lookup_var(
-    name: &str,
-    db: &MakeDb,
-    auto_vars: &HashMap<String, String>,
-) -> Option<Variable> {
+fn lookup_var(name: &str, db: &MakeDb, auto_vars: &HashMap<String, String>) -> Option<Variable> {
     if let Some(v) = auto_vars.get(name) {
         return Some(Variable {
             value: v.clone(),
@@ -467,11 +462,7 @@ fn parse_lines(
                 // Only flip if the enclosing scope is active.  Check the
                 // *parent* — if the parent is inactive the else branch stays
                 // inactive too.
-                let parent_active = if len >= 2 {
-                    cond_stack[len - 2]
-                } else {
-                    true
-                };
+                let parent_active = if len >= 2 { cond_stack[len - 2] } else { true };
                 if parent_active {
                     let top = &mut cond_stack[len - 1];
                     *top = !*top;
@@ -528,83 +519,76 @@ fn parse_lines(
         }
 
         // --- rule line ---
-        if !is_recipe
-            && let Some(colon_pos) = find_rule_colon(stripped) {
-                let target_part = stripped[..colon_pos].trim();
-                let prereq_part = stripped[colon_pos + 1..].trim();
+        if !is_recipe && let Some(colon_pos) = find_rule_colon(stripped) {
+            let target_part = stripped[..colon_pos].trim();
+            let prereq_part = stripped[colon_pos + 1..].trim();
 
-                // Collect recipe lines (tab-indented lines that follow).
-                let mut recipe: Vec<String> = Vec::new();
+            // Collect recipe lines (tab-indented lines that follow).
+            let mut recipe: Vec<String> = Vec::new();
+            idx += 1;
+            while idx < lines.len() && lines[idx].starts_with('\t') {
+                recipe.push(lines[idx][1..].to_string());
                 idx += 1;
-                while idx < lines.len() && lines[idx].starts_with('\t') {
-                    recipe.push(lines[idx][1..].to_string());
-                    idx += 1;
+            }
+
+            let targets: Vec<&str> = target_part.split_whitespace().collect();
+            let prereqs: Vec<String> = prereq_part
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+
+            // Check for .PHONY
+            if targets.len() == 1 && targets[0] == ".PHONY" {
+                for p in &prereqs {
+                    db.phony_targets.insert(p.clone());
                 }
-
-                let targets: Vec<&str> =
-                    target_part.split_whitespace().collect();
-                let prereqs: Vec<String> = prereq_part
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect();
-
-                // Check for .PHONY
-                if targets.len() == 1 && targets[0] == ".PHONY" {
-                    for p in &prereqs {
-                        db.phony_targets.insert(p.clone());
-                    }
-                    // Mark any existing rules for these targets as phony.
-                    for rule in &mut db.rules {
-                        if db.phony_targets.contains(&rule.target) {
-                            rule.phony = true;
-                        }
-                    }
-                    continue;
-                }
-
-                // Pattern rule vs concrete rule.
-                for tgt in &targets {
-                    if tgt.contains('%') {
-                        db.pattern_rules.push(PatternRule {
-                            target_pat: tgt.to_string(),
-                            prereq_pats: prereqs.clone(),
-                            recipe: recipe.clone(),
-                        });
-                    } else {
-                        let is_phony = db.phony_targets.contains(*tgt);
-                        // Check if this rule merges with an existing one.
-                        let existing = db
-                            .rules
-                            .iter_mut()
-                            .find(|r| r.target == *tgt);
-                        if let Some(existing_rule) = existing {
-                            // Merge prerequisites.
-                            for p in &prereqs {
-                                if !existing_rule.prerequisites.contains(p) {
-                                    existing_rule.prerequisites.push(p.clone());
-                                }
-                            }
-                            // Replace recipe only if the new one is non-empty.
-                            if !recipe.is_empty() {
-                                existing_rule.recipe = recipe.clone();
-                            }
-                        } else {
-                            db.rules.push(Rule {
-                                target: tgt.to_string(),
-                                prerequisites: prereqs.clone(),
-                                recipe: recipe.clone(),
-                                phony: is_phony,
-                            });
-                        }
-                        if db.default_target.is_none()
-                            && !tgt.starts_with('.')
-                        {
-                            db.default_target = Some(tgt.to_string());
-                        }
+                // Mark any existing rules for these targets as phony.
+                for rule in &mut db.rules {
+                    if db.phony_targets.contains(&rule.target) {
+                        rule.phony = true;
                     }
                 }
                 continue;
             }
+
+            // Pattern rule vs concrete rule.
+            for tgt in &targets {
+                if tgt.contains('%') {
+                    db.pattern_rules.push(PatternRule {
+                        target_pat: tgt.to_string(),
+                        prereq_pats: prereqs.clone(),
+                        recipe: recipe.clone(),
+                    });
+                } else {
+                    let is_phony = db.phony_targets.contains(*tgt);
+                    // Check if this rule merges with an existing one.
+                    let existing = db.rules.iter_mut().find(|r| r.target == *tgt);
+                    if let Some(existing_rule) = existing {
+                        // Merge prerequisites.
+                        for p in &prereqs {
+                            if !existing_rule.prerequisites.contains(p) {
+                                existing_rule.prerequisites.push(p.clone());
+                            }
+                        }
+                        // Replace recipe only if the new one is non-empty.
+                        if !recipe.is_empty() {
+                            existing_rule.recipe = recipe.clone();
+                        }
+                    } else {
+                        db.rules.push(Rule {
+                            target: tgt.to_string(),
+                            prerequisites: prereqs.clone(),
+                            recipe: recipe.clone(),
+                            phony: is_phony,
+                        });
+                    }
+                    if db.default_target.is_none() && !tgt.starts_with('.') {
+                        db.default_target = Some(tgt.to_string());
+                    }
+                }
+            }
+            continue;
+        }
 
         idx += 1;
     }
@@ -631,11 +615,7 @@ fn try_parse_variable(line: &str) -> Option<(String, String, VarFlavour)> {
             // Conditional: only set if not yet defined.  We signal this with
             // a special flavour that the caller handles.  For simplicity we
             // return Recursive and let `apply_variable` check for conditional.
-            return Some((
-                format!("?{}", name),
-                val.to_string(),
-                VarFlavour::Recursive,
-            ));
+            return Some((format!("?{}", name), val.to_string(), VarFlavour::Recursive));
         }
     }
     // `+=` — append.
@@ -643,11 +623,7 @@ fn try_parse_variable(line: &str) -> Option<(String, String, VarFlavour)> {
         let name = trimmed[..pos].trim();
         if !name.is_empty() && is_var_name(name) {
             let val = trimmed[pos + 2..].trim();
-            return Some((
-                format!("+{}", name),
-                val.to_string(),
-                VarFlavour::Recursive,
-            ));
+            return Some((format!("+{}", name), val.to_string(), VarFlavour::Recursive));
         }
     }
     // Plain `=` — recursive.
@@ -715,9 +691,10 @@ fn apply_variable(
 
     // Don't override a higher-priority binding (e.g. command-line beats file).
     if let Some(existing) = db.variables.get(raw_name)
-        && existing.origin > origin {
-            return;
-        }
+        && existing.origin > origin
+    {
+        return;
+    }
 
     // For simple assignment, expand immediately.
     let final_val = if flavour == VarFlavour::Simple {
@@ -755,11 +732,14 @@ fn find_rule_colon(line: &str) -> Option<usize> {
             return Some(i);
         }
         // Skip `$(...)`
-        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'('
-            && let Some(close) = find_matching_close(bytes, i + 2, b')') {
-                i = close + 1;
-                continue;
-            }
+        if bytes[i] == b'$'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b'('
+            && let Some(close) = find_matching_close(bytes, i + 2, b')')
+        {
+            i = close + 1;
+            continue;
+        }
         i += 1;
     }
     None
@@ -859,9 +839,10 @@ fn is_up_to_date(target: &str, prereqs: &[String], phony: bool) -> bool {
     };
     for p in prereqs {
         if let Some(p_mtime) = file_mtime(p)
-            && p_mtime > target_mtime {
-                return false;
-            }
+            && p_mtime > target_mtime
+        {
+            return false;
+        }
         // If the prereq doesn't exist as a file, we still consider it; the
         // build for it may create it.
     }
@@ -875,10 +856,7 @@ fn file_mtime(path: &str) -> Option<SystemTime> {
 
 /// Find the rule (or synthesise one via pattern rules) that can build
 /// `target`.  Returns `(prerequisites, recipe, is_phony)`.
-fn find_rule_for(
-    target: &str,
-    db: &MakeDb,
-) -> Option<(Vec<String>, Vec<String>, bool)> {
+fn find_rule_for(target: &str, db: &MakeDb) -> Option<(Vec<String>, Vec<String>, bool)> {
     // Concrete rules first.
     for rule in &db.rules {
         if rule.target == target {
@@ -905,10 +883,7 @@ fn find_rule_for(
 
 /// Build the full list of targets in dependency order (topological sort).
 /// Returns the ordered list, or an error if there is a cycle.
-fn topo_sort(
-    goals: &[String],
-    db: &MakeDb,
-) -> Result<Vec<String>, String> {
+fn topo_sort(goals: &[String], db: &MakeDb) -> Result<Vec<String>, String> {
     let mut order: Vec<String> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
     let mut in_stack: HashSet<String> = HashSet::new();
@@ -988,20 +963,14 @@ fn exec_recipe_line(
         return Ok(());
     }
 
-    let status = process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(cmd)
-        .status();
+    let status = process::Command::new("/bin/sh").arg("-c").arg(cmd).status();
 
     match status {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => {
             let code = s.code().unwrap_or(1);
             if flags.ignore_error {
-                eprintln!(
-                    "make: [{}] Error {} (ignored)",
-                    cmd, code
-                );
+                eprintln!("make: [{}] Error {} (ignored)", cmd, code);
                 Ok(())
             } else {
                 Err(code)
@@ -1055,10 +1024,7 @@ fn run_build(db: &MakeDb, opts: &Options) -> i32 {
                 if Path::new(target).exists() {
                     continue;
                 }
-                eprintln!(
-                    "make: *** No rule to make target `{}`.  Stop.",
-                    target
-                );
+                eprintln!("make: *** No rule to make target `{}`.  Stop.", target);
                 if opts.keep_going {
                     any_failure = true;
                     continue;
@@ -1073,8 +1039,7 @@ fn run_build(db: &MakeDb, opts: &Options) -> i32 {
             .map(|p| expand_vars(p, db, &HashMap::new()))
             .collect();
 
-        let up_to_date = !opts.always_make
-            && is_up_to_date(target, &expanded_prereqs, phony);
+        let up_to_date = !opts.always_make && is_up_to_date(target, &expanded_prereqs, phony);
 
         if opts.question_mode {
             if !up_to_date {
@@ -1119,10 +1084,7 @@ fn run_build(db: &MakeDb, opts: &Options) -> i32 {
 
         for recipe_line in &recipe {
             if let Err(code) = exec_recipe_line(recipe_line, opts, db, &auto_vars) {
-                eprintln!(
-                    "make: *** [{}] Error {}",
-                    target, code
-                );
+                eprintln!("make: *** [{}] Error {}", target, code);
                 if opts.keep_going {
                     any_failure = true;
                     break;
@@ -1132,11 +1094,7 @@ fn run_build(db: &MakeDb, opts: &Options) -> i32 {
         }
     }
 
-    if any_failure {
-        2
-    } else {
-        0
-    }
+    if any_failure { 2 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,10 +1167,10 @@ fn populate_defaults(db: &mut MakeDb) {
     // Import environment variables (lower priority than file assignments).
     for (key, val) in env::vars() {
         db.variables.entry(key).or_insert(Variable {
-                    value: val,
-                    flavour: VarFlavour::Recursive,
-                    origin: VarOrigin::Environment,
-                });
+            value: val,
+            flavour: VarFlavour::Recursive,
+            origin: VarOrigin::Environment,
+        });
     }
 
     // Built-in pattern rules.
@@ -1255,17 +1213,16 @@ fn main() {
 
     // Change directory if requested.
     if let Some(ref dir) = opts.directory
-        && let Err(e) = env::set_current_dir(dir) {
-            eprintln!("make: *** {}: {}.  Stop.", dir, e);
-            process::exit(2);
-        }
+        && let Err(e) = env::set_current_dir(dir)
+    {
+        eprintln!("make: *** {}: {}.  Stop.", dir, e);
+        process::exit(2);
+    }
 
     let mf_path = match find_makefile(&opts) {
         Some(p) => p,
         None => {
-            eprintln!(
-                "make: *** No makefile found (Makefile, makefile).  Stop."
-            );
+            eprintln!("make: *** No makefile found (Makefile, makefile).  Stop.");
             process::exit(2);
         }
     };
@@ -1554,8 +1511,7 @@ mod tests {
             "\tgcc -o all main.o utils.o".to_string(),
         ];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert_eq!(db.rules.len(), 1);
         assert_eq!(db.rules[0].target, "all");
         assert_eq!(
@@ -1574,21 +1530,16 @@ mod tests {
             "\tgcc -o build src.o".to_string(),
         ];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert_eq!(db.rules[0].recipe.len(), 2);
     }
 
     #[test]
     fn parse_rule_no_prereqs() {
         let mut db = MakeDb::new();
-        let lines = vec![
-            "clean:".to_string(),
-            "\trm -f *.o".to_string(),
-        ];
+        let lines = vec!["clean:".to_string(), "\trm -f *.o".to_string()];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert_eq!(db.rules[0].target, "clean");
         assert!(db.rules[0].prerequisites.is_empty());
     }
@@ -1596,13 +1547,9 @@ mod tests {
     #[test]
     fn parse_multiple_targets() {
         let mut db = MakeDb::new();
-        let lines = vec![
-            "foo bar: baz".to_string(),
-            "\techo done".to_string(),
-        ];
+        let lines = vec!["foo bar: baz".to_string(), "\techo done".to_string()];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert_eq!(db.rules.len(), 2);
         assert_eq!(db.rules[0].target, "foo");
         assert_eq!(db.rules[1].target, "bar");
@@ -1614,10 +1561,7 @@ mod tests {
 
     #[test]
     fn pattern_match_basic() {
-        assert_eq!(
-            match_pattern("%.o", "foo.o"),
-            Some("foo".to_string())
-        );
+        assert_eq!(match_pattern("%.o", "foo.o"), Some("foo".to_string()));
     }
 
     #[test]
@@ -1627,10 +1571,7 @@ mod tests {
 
     #[test]
     fn pattern_match_prefix() {
-        assert_eq!(
-            match_pattern("lib%.a", "libfoo.a"),
-            Some("foo".to_string())
-        );
+        assert_eq!(match_pattern("lib%.a", "libfoo.a"), Some("foo".to_string()));
     }
 
     #[test]
@@ -1642,13 +1583,9 @@ mod tests {
     #[test]
     fn parse_pattern_rule() {
         let mut db = MakeDb::new();
-        let lines = vec![
-            "%.o: %.c".to_string(),
-            "\t$(CC) -c $< -o $@".to_string(),
-        ];
+        let lines = vec!["%.o: %.c".to_string(), "\t$(CC) -c $< -o $@".to_string()];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert!(db.rules.is_empty());
         assert_eq!(db.pattern_rules.len(), 1);
         assert_eq!(db.pattern_rules[0].target_pat, "%.o");
@@ -1670,8 +1607,7 @@ mod tests {
             "\trm -f *.o".to_string(),
         ];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert!(db.phony_targets.contains("clean"));
         assert!(db.phony_targets.contains("all"));
     }
@@ -1764,9 +1700,7 @@ mod tests {
         });
         let result = topo_sort(&["a".into()], &db);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("circular dependency"));
+        assert!(result.unwrap_err().contains("circular dependency"));
     }
 
     #[test]
@@ -1788,11 +1722,7 @@ mod tests {
 
     #[test]
     fn nonexistent_target_not_up_to_date() {
-        assert!(!is_up_to_date(
-            "/nonexistent/target/file",
-            &[],
-            false
-        ));
+        assert!(!is_up_to_date("/nonexistent/target/file", &[], false));
     }
 
     #[test]
@@ -1902,8 +1832,7 @@ mod tests {
             "endif".to_string(),
         ];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert_eq!(db.variables.get("RESULT").unwrap().value, "yes");
     }
 
@@ -1918,8 +1847,7 @@ mod tests {
             "endif".to_string(),
         ];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert_eq!(db.variables.get("RESULT").unwrap().value, "yes");
     }
 
@@ -1934,8 +1862,7 @@ mod tests {
             "endif".to_string(),
         ];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert_eq!(db.variables.get("RESULT").unwrap().value, "no");
     }
 
@@ -1958,8 +1885,7 @@ mod tests {
             "endif".to_string(),
         ];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert_eq!(db.variables.get("OPT").unwrap().value, "-O2");
     }
 
@@ -1982,8 +1908,7 @@ mod tests {
             "endif".to_string(),
         ];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert_eq!(db.variables.get("OPT").unwrap().value, "-O0");
     }
 
@@ -2000,12 +1925,7 @@ mod tests {
         // Pre-insert a path as already included.
         included.insert(PathBuf::from("/fake/Makefile"));
         // This should be a no-op since it's already included.
-        let result = parse_makefile(
-            Path::new("/fake/Makefile"),
-            &mut db,
-            &mut included,
-            &[],
-        );
+        let result = parse_makefile(Path::new("/fake/Makefile"), &mut db, &mut included, &[]);
         // It returns Ok because it short-circuits on the included set,
         // never actually reading the file.
         assert!(result.is_ok());
@@ -2018,26 +1938,18 @@ mod tests {
     #[test]
     fn default_target_is_first() {
         let mut db = MakeDb::new();
-        let lines = vec![
-            "first: a b".to_string(),
-            "second: c d".to_string(),
-        ];
+        let lines = vec!["first: a b".to_string(), "second: c d".to_string()];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert_eq!(db.default_target, Some("first".to_string()));
     }
 
     #[test]
     fn default_target_skips_dot_prefix() {
         let mut db = MakeDb::new();
-        let lines = vec![
-            ".PHONY: all".to_string(),
-            "all: main".to_string(),
-        ];
+        let lines = vec![".PHONY: all".to_string(), "all: main".to_string()];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
         assert_eq!(db.default_target, Some("all".to_string()));
     }
 
@@ -2059,11 +1971,10 @@ mod tests {
 
     #[test]
     fn parse_args_makefile() {
-        let args: Vec<String> =
-            vec!["-f", "build.mk"]
-                .into_iter()
-                .map(String::from)
-                .collect();
+        let args: Vec<String> = vec!["-f", "build.mk"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         let (opts, _) = parse_args(&args);
         assert_eq!(opts.makefile, Some("build.mk".to_string()));
     }
@@ -2098,16 +2009,14 @@ mod tests {
 
     #[test]
     fn parse_args_jobs() {
-        let args: Vec<String> =
-            vec!["-j", "4"].into_iter().map(String::from).collect();
+        let args: Vec<String> = vec!["-j", "4"].into_iter().map(String::from).collect();
         let (opts, _) = parse_args(&args);
         assert_eq!(opts.jobs, 4);
     }
 
     #[test]
     fn parse_args_directory() {
-        let args: Vec<String> =
-            vec!["-C", "/tmp"].into_iter().map(String::from).collect();
+        let args: Vec<String> = vec!["-C", "/tmp"].into_iter().map(String::from).collect();
         let (opts, _) = parse_args(&args);
         assert_eq!(opts.directory, Some("/tmp".to_string()));
     }
@@ -2130,12 +2039,10 @@ mod tests {
 
     #[test]
     fn parse_args_mixed() {
-        let args: Vec<String> = vec![
-            "-f", "build.mk", "-n", "-k", "CC=clang", "all", "install",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let args: Vec<String> = vec!["-f", "build.mk", "-n", "-k", "CC=clang", "all", "install"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         let (opts, over) = parse_args(&args);
         assert_eq!(opts.makefile, Some("build.mk".to_string()));
         assert!(opts.dry_run);
@@ -2193,7 +2100,13 @@ mod tests {
     #[test]
     fn apply_conditional_var_not_set() {
         let mut db = MakeDb::new();
-        apply_variable(&mut db, "?CC", "gcc", VarFlavour::Recursive, VarOrigin::File);
+        apply_variable(
+            &mut db,
+            "?CC",
+            "gcc",
+            VarFlavour::Recursive,
+            VarOrigin::File,
+        );
         assert_eq!(db.variables.get("CC").unwrap().value, "gcc");
     }
 
@@ -2208,14 +2121,26 @@ mod tests {
                 origin: VarOrigin::File,
             },
         );
-        apply_variable(&mut db, "?CC", "gcc", VarFlavour::Recursive, VarOrigin::File);
+        apply_variable(
+            &mut db,
+            "?CC",
+            "gcc",
+            VarFlavour::Recursive,
+            VarOrigin::File,
+        );
         assert_eq!(db.variables.get("CC").unwrap().value, "clang");
     }
 
     #[test]
     fn apply_append_var_empty() {
         let mut db = MakeDb::new();
-        apply_variable(&mut db, "+CFLAGS", "-Wall", VarFlavour::Recursive, VarOrigin::File);
+        apply_variable(
+            &mut db,
+            "+CFLAGS",
+            "-Wall",
+            VarFlavour::Recursive,
+            VarOrigin::File,
+        );
         assert_eq!(db.variables.get("CFLAGS").unwrap().value, "-Wall");
     }
 
@@ -2230,7 +2155,13 @@ mod tests {
                 origin: VarOrigin::File,
             },
         );
-        apply_variable(&mut db, "+CFLAGS", "-Werror", VarFlavour::Recursive, VarOrigin::File);
+        apply_variable(
+            &mut db,
+            "+CFLAGS",
+            "-Werror",
+            VarFlavour::Recursive,
+            VarOrigin::File,
+        );
         assert_eq!(db.variables.get("CFLAGS").unwrap().value, "-Wall -Werror");
     }
 
@@ -2368,8 +2299,7 @@ mod tests {
             "\trm -f hello hello.o".to_string(),
         ];
         let mut included = HashSet::new();
-        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile"))
-            .unwrap();
+        parse_lines(&lines, &mut db, &mut included, &[], Path::new("Makefile")).unwrap();
 
         assert_eq!(db.variables.get("CC").unwrap().value, "gcc");
         assert_eq!(db.variables.get("CFLAGS").unwrap().value, "-Wall");

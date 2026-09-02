@@ -43,7 +43,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("zeplin-cli 0.1.0 (design-handoff-and-systems personality build)"); }
+fn print_version() {
+    println!("zeplin-cli 0.1.0 (design-handoff-and-systems personality build)");
+}
 
 fn run_about() {
     println!("Zeplin, Inc.");

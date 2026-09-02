@@ -84,9 +84,8 @@ const WINDOWS_ILLEGAL: &[char] = &[':', '*', '?', '"', '<', '>', '|', '\\'];
 
 /// Windows reserved names (case-insensitive).
 const WINDOWS_RESERVED: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL",
-    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
 /// Sanitize a single filename (not the full path — just the name component).
@@ -163,7 +162,9 @@ fn sanitize_name(name: &str, config: &Config) -> String {
     result = collapse_repeats(&result, '-');
 
     // Strip leading/trailing dots and spaces.
-    result = result.trim_matches(|c: char| c == '.' || c == ' ').to_string();
+    result = result
+        .trim_matches(|c: char| c == '.' || c == ' ')
+        .to_string();
 
     // Handle Windows reserved names.
     if config.mode == SanitizeMode::Windows || config.mode == SanitizeMode::Strict {
@@ -313,23 +314,28 @@ fn process_single(path: &Path, config: &Config, stats: &mut Stats) {
             }
         };
 
-        println!("  rename: {file_name} → {}", final_path.file_name().unwrap_or_default().to_string_lossy());
+        println!(
+            "  rename: {file_name} → {}",
+            final_path.file_name().unwrap_or_default().to_string_lossy()
+        );
 
         if !config.dry_run
-            && let Err(e) = fs::rename(path, &final_path) {
-                eprintln!("    error: {e}");
-                stats.errors += 1;
-                return;
-            }
+            && let Err(e) = fs::rename(path, &final_path)
+        {
+            eprintln!("    error: {e}");
+            stats.errors += 1;
+            return;
+        }
     } else {
         println!("  rename: {file_name} → {sanitized}");
 
         if !config.dry_run
-            && let Err(e) = fs::rename(path, &new_path) {
-                eprintln!("    error: {e}");
-                stats.errors += 1;
-                return;
-            }
+            && let Err(e) = fs::rename(path, &new_path)
+        {
+            eprintln!("    error: {e}");
+            stats.errors += 1;
+            return;
+        }
     }
 
     stats.renamed += 1;
@@ -337,9 +343,10 @@ fn process_single(path: &Path, config: &Config, stats: &mut Stats) {
 
 fn split_name_ext(name: &str) -> (String, String) {
     if let Some(dot_pos) = name.rfind('.')
-        && dot_pos > 0 {
-            return (name[..dot_pos].to_string(), name[dot_pos + 1..].to_string());
-        }
+        && dot_pos > 0
+    {
+        return (name[..dot_pos].to_string(), name[dot_pos + 1..].to_string());
+    }
     (name.to_string(), String::new())
 }
 
@@ -501,8 +508,10 @@ fn main() {
     }
 
     println!();
-    println!("Scanned: {}, Renamed: {}, Skipped: {}, Errors: {}",
-        stats.scanned, stats.renamed, stats.skipped, stats.errors);
+    println!(
+        "Scanned: {}, Renamed: {}, Skipped: {}, Errors: {}",
+        stats.scanned, stats.renamed, stats.skipped, stats.errors
+    );
 
     if config.dry_run && stats.renamed > 0 {
         println!("(dry run — run without -n to apply changes)");

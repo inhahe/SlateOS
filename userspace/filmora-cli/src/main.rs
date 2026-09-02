@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_fil(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,12 +28,17 @@ fn run_fil(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Wondershare Filmora 14.0.11 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Wondershare Filmora 14.0.11 (Slate OS)");
+        return 0;
+    }
     println!("Wondershare Filmora 14.0.11 (Slate OS)");
     println!("  Vendor: Wondershare Technology (HQ Shenzhen, China — founded 2003)");
     println!("  Founder: Wu Taibing (CEO)");
     println!("  Platforms: Windows, macOS, iOS, iPadOS, Android (cross-platform parity)");
-    println!("  Pricing: Annual $49.99/yr, Cross-Platform $79.99/yr, Perpetual $79.99 (Win/Mac one-time)");
+    println!(
+        "  Pricing: Annual $49.99/yr, Cross-Platform $79.99/yr, Perpetual $79.99 (Win/Mac one-time)"
+    );
     println!("  Free tier: yes, with watermark + export limits");
     println!("  Education: free for students/teachers");
     println!("  Engine: GPU-accelerated, supports 8K, vertical/9:16 export for TikTok/Reels");
@@ -38,19 +47,28 @@ fn run_fil(args: &[String], _prog: &str) -> i32 {
     println!("    - AI Smart Cutout (rotoscope auto-mask)");
     println!("    - AI Music Generator (royalty-free, mood/genre input)");
     println!("    - AI Text-to-Video (script → assembled cut)");
-    println!("    - AI Vocal Remover, AI Audio Stretch, AI Translation, AI Image gen, AI Background Removal");
+    println!(
+        "    - AI Vocal Remover, AI Audio Stretch, AI Translation, AI Image gen, AI Background Removal"
+    );
     println!("  Target users: YouTubers, TikTok/Reels creators, hobbyists — pitched at the");
     println!("               'better than iMovie, friendlier than Premiere' middle ground");
-    println!("  Companion apps: Filmstock (asset library), Filmora Mobile, FilmoraGo (renamed Filmora)");
+    println!(
+        "  Companion apps: Filmstock (asset library), Filmora Mobile, FilmoraGo (renamed Filmora)"
+    );
     println!("  Other Wondershare: PDFelement, MobileTrans, Recoverit, EdrawMax, UniConverter");
     println!("  Controversy: 2020 SafeBreach reported Wondershare bundling, since cleaned up");
-    println!("  Differentiator: heavy AI feature roll-out + good price/feature ratio at consumer tier");
+    println!(
+        "  Differentiator: heavy AI feature roll-out + good price/feature ratio at consumer tier"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "filmora".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "filmora".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_fil(&rest, &_prog);
     process::exit(code);
@@ -58,7 +76,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fil};
+    use super::{basename, run_fil, strip_ext};
 
     #[test]
     fn basename_strips_path() {

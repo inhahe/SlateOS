@@ -5,13 +5,19 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_chronosphere(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: chronosphere [OPTIONS]");
-        println!("Chronosphere (Slate OS) — cloud-native observability built on M3 + OpenTelemetry");
+        println!(
+            "Chronosphere (Slate OS) — cloud-native observability built on M3 + OpenTelemetry"
+        );
         println!();
         println!("Options:");
         println!("  --metrics              Metrics platform (M3-based, Prometheus-compatible)");
@@ -22,7 +28,10 @@ fn run_chronosphere(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Chronosphere 2024 (Slate OS) — M3 v1.x"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Chronosphere 2024 (Slate OS) — M3 v1.x");
+        return 0;
+    }
     println!("Chronosphere 2024 (Slate OS) — Cloud-Native Observability Platform");
     println!("  Vendor: Chronosphere, Inc. (New York City, NY — private unicorn)");
     println!("  Founders: Martin Mao (CEO) + Rob Skillington (CTO), 2019");
@@ -33,15 +42,23 @@ fn run_chronosphere(args: &[String], _prog: &str) -> i32 {
     println!("  Private funding:");
     println!("         Series D Apr 2024: $115M at $1.6B valuation (Greylock Founders Fund)");
     println!("         total raised: ~$450M");
-    println!("         Greylock, General Atlantic, Bessemer, Lux Capital, Founders Fund, Glynn backers");
+    println!(
+        "         Greylock, General Atlantic, Bessemer, Lux Capital, Founders Fund, Glynn backers"
+    );
     println!("         estimated $150M+ ARR (private, growing rapidly)");
     println!("         IPO discussed 2025-2026 (depends on market)");
     println!("  Strategic position: 'cloud-native observability that doesn't kill your budget':");
-    println!("                    pitch: 'observability for Kubernetes + microservices — predictable cost + 100% OSS-compatible'");
+    println!(
+        "                    pitch: 'observability for Kubernetes + microservices — predictable cost + 100% OSS-compatible'"
+    );
     println!("                    target: cloud-native enterprises (K8s + microservices heavy)");
-    println!("                    primary competitor: Datadog, Dynatrace, New Relic, Grafana Cloud");
+    println!(
+        "                    primary competitor: Datadog, Dynatrace, New Relic, Grafana Cloud"
+    );
     println!("                    secondary: Splunk, Logz.io, Honeycomb, Coralogix");
-    println!("                    Chronosphere's wedge: M3 cardinality + Control Plane cost mgmt + 100% OSS-API-compatible");
+    println!(
+        "                    Chronosphere's wedge: M3 cardinality + Control Plane cost mgmt + 100% OSS-API-compatible"
+    );
     println!("                    'Predictable observability cost' is the killer talking point");
     println!("                    Datadog cardinality bill horror stories drive sales");
     println!("  Pricing:");
@@ -49,7 +66,9 @@ fn run_chronosphere(args: &[String], _prog: &str) -> i32 {
     println!("    Calyptia / Logs: $0.05-$0.50/GB based on retention");
     println!("    Traces: per-span pricing");
     println!("    Control Plane (cost mgmt) is differentiator: customers self-shape costs");
-    println!("    typically 30-60% cheaper than Datadog for similar scale (per customer testimonials)");
+    println!(
+        "    typically 30-60% cheaper than Datadog for similar scale (per customer testimonials)"
+    );
     println!("  Product portfolio:");
     println!("    1. Chronosphere Metrics (M3-based):");
     println!("       - PromQL-compatible — drop-in for Prometheus");
@@ -57,7 +76,9 @@ fn run_chronosphere(args: &[String], _prog: &str) -> i32 {
     println!("       - Long-term retention (~13 months default) at affordable cost");
     println!("       - Aggregation rules + downsampling at ingest time");
     println!("    2. Chronosphere Logs (acquired Calyptia 2024):");
-    println!("       - Built on Fluent Bit pipeline (Calyptia is the Fluent Bit creators' company)");
+    println!(
+        "       - Built on Fluent Bit pipeline (Calyptia is the Fluent Bit creators' company)"
+    );
     println!("       - Cost-optimized log management with shaping");
     println!("       - Strategic 2024 acquisition to compete with Splunk + Datadog Logs");
     println!("    3. Chronosphere Tracing (OpenTelemetry-native):");
@@ -94,7 +115,9 @@ fn run_chronosphere(args: &[String], _prog: &str) -> i32 {
     println!("    - Calyptia = company founded by Fluent Bit + Fluentd creators");
     println!("    - Acquired May 2024 to expand into logs market");
     println!("    - Strategic: matches Datadog's logs + metrics + traces bundle");
-    println!("    - Fluent Bit (used by ~95% of Kubernetes deployments) becomes Chronosphere advantage");
+    println!(
+        "    - Fluent Bit (used by ~95% of Kubernetes deployments) becomes Chronosphere advantage"
+    );
     println!("  Open-source commitment:");
     println!("    - M3 (Apache 2.0) — public open-source TSDB");
     println!("    - Fluent Bit + Fluentd (post-Calyptia, CNCF projects)");
@@ -113,7 +136,9 @@ fn run_chronosphere(args: &[String], _prog: &str) -> i32 {
     println!("  Chronosphere CLI usage:");
     println!("    chronosphere login --tenant my-org");
     println!("    chronosphere metrics query 'rate(http_requests_total[5m])' --range 1h");
-    println!("    chronosphere shaping-rule create --target 'k8s_pod_*' --action aggregate --interval 1m");
+    println!(
+        "    chronosphere shaping-rule create --target 'k8s_pod_*' --action aggregate --interval 1m"
+    );
     println!("    chronosphere alert create --query @alert.promql --severity critical");
     println!("    chronosphere dashboard import --file grafana-dashboard.json");
     println!("    chronosphere slo create --name 'API Availability' --target 99.95");
@@ -134,13 +159,18 @@ fn run_chronosphere(args: &[String], _prog: &str) -> i32 {
     println!("           PromQL learning curve for non-Prometheus shops");
     println!("           Datadog brand awareness + sales engine still dominant");
     println!("           IPO timing uncertain in current market");
-    println!("  Differentiator: M3-based metrics platform (built at Uber for billions of high-cardinality time-series) + Control Plane (the cost-shaping governance layer — unique among observability vendors) + 100% OpenTelemetry + Prometheus + Grafana compatibility (no lock-in) + Calyptia acquisition (Fluent Bit creators) + Kubernetes-native focus + $1.6B unicorn valuation + ex-Uber engineering pedigree — the observability platform that ex-Datadog customers migrate to when their Datadog bill becomes unbearable and they need predictable cardinality cost");
+    println!(
+        "  Differentiator: M3-based metrics platform (built at Uber for billions of high-cardinality time-series) + Control Plane (the cost-shaping governance layer — unique among observability vendors) + 100% OpenTelemetry + Prometheus + Grafana compatibility (no lock-in) + Calyptia acquisition (Fluent Bit creators) + Kubernetes-native focus + $1.6B unicorn valuation + ex-Uber engineering pedigree — the observability platform that ex-Datadog customers migrate to when their Datadog bill becomes unbearable and they need predictable cardinality cost"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "chronosphere".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "chronosphere".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_chronosphere(&rest, &_prog);
     process::exit(code);
@@ -148,7 +178,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_chronosphere};
+    use super::{basename, run_chronosphere, strip_ext};
 
     #[test]
     fn basename_strips_path() {

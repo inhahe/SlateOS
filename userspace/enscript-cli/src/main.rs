@@ -35,15 +35,20 @@ fn run_enscript(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output" || w[0] == "-p")
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o" || w[0] == "--output" || w[0] == "-p")
         .map(|w| w[1].as_str());
-    let highlight = args.windows(2).find(|w| w[0] == "-E" || w[0] == "--highlight")
+    let highlight = args
+        .windows(2)
+        .find(|w| w[0] == "-E" || w[0] == "--highlight")
         .map(|w| w[1].as_str());
     let landscape = args.iter().any(|a| a == "-r" || a == "--landscape");
     let fancy = args.iter().any(|a| a == "-G");
     let line_numbers = args.iter().any(|a| a == "--line-numbers");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -55,9 +60,15 @@ fn run_enscript(args: Vec<String>) -> i32 {
     if let Some(lang) = highlight {
         print!(" [highlight: {}]", lang);
     }
-    if landscape { print!(" [landscape]"); }
-    if fancy { print!(" [fancy header]"); }
-    if line_numbers { print!(" [line-numbers]"); }
+    if landscape {
+        print!(" [landscape]");
+    }
+    if fancy {
+        print!(" [fancy header]");
+    }
+    if line_numbers {
+        print!(" [line-numbers]");
+    }
     println!();
 
     let pages = if files.is_empty() { 1 } else { 3 };
@@ -74,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_enscript};
+    use super::run_enscript;
 
     #[test]
     fn help_exits_zero() {

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_nmon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") {
@@ -35,11 +39,20 @@ fn run_nmon(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-f") {
-        let interval = args.windows(2).find(|w| w[0] == "-s")
-            .map(|w| w[1].as_str()).unwrap_or("5");
-        let count = args.windows(2).find(|w| w[0] == "-c")
-            .map(|w| w[1].as_str()).unwrap_or("60");
-        println!("nmon: Recording to file, interval={}s, count={}", interval, count);
+        let interval = args
+            .windows(2)
+            .find(|w| w[0] == "-s")
+            .map(|w| w[1].as_str())
+            .unwrap_or("5");
+        let count = args
+            .windows(2)
+            .find(|w| w[0] == "-c")
+            .map(|w| w[1].as_str())
+            .unwrap_or("60");
+        println!(
+            "nmon: Recording to file, interval={}s, count={}",
+            interval, count
+        );
         return 0;
     }
     println!("nmon: Interactive performance monitor");
@@ -53,7 +66,10 @@ fn run_nmon(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "nmon".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "nmon".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_nmon(&rest, &prog);
     process::exit(code);
@@ -61,7 +77,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_nmon};
+    use super::{basename, run_nmon, strip_ext};
 
     #[test]
     fn basename_strips_path() {

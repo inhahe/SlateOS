@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_lw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_lw(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Lacework 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Lacework 2024 (Slate OS)");
+        return 0;
+    }
     println!("Lacework 2024 (Slate OS) — Cloud Security Platform");
     println!("  Vendor: Lacework, Inc. (San Jose) — ACQUIRED by Fortinet Aug 2024 for ~$150-250M");
     println!("  Founders: Vikram Kapoor + Sanjay Kalra, 2014");
@@ -38,17 +45,31 @@ fn run_lw(args: &[String], _prog: &str) -> i32 {
     println!("  Fortinet acquisition Aug 2024:");
     println!("         Fortinet announced acquisition (terms undisclosed)");
     println!("         Estimated $150-250M deal value — vast loss for late-stage investors");
-    println!("         Strategic fit: Fortinet wanted CNAPP capability to compete with Palo Alto Prisma + Crowdstrike");
-    println!("         Fortinet stock NASDAQ:FTNT (one of the largest pure-play security companies)");
+    println!(
+        "         Strategic fit: Fortinet wanted CNAPP capability to compete with Palo Alto Prisma + Crowdstrike"
+    );
+    println!(
+        "         Fortinet stock NASDAQ:FTNT (one of the largest pure-play security companies)"
+    );
     println!("         Lacework operates as 'Fortinet Lacework Cloud Security'");
     println!("         Co-founders departed during acquisition transition");
     println!("  Strategic position (pre-acquisition):");
-    println!("                    pitch: 'Polygraph Data Platform — anomaly detection via behavioral baselines'");
+    println!(
+        "                    pitch: 'Polygraph Data Platform — anomaly detection via behavioral baselines'"
+    );
     println!("                    target: cloud-native engineering teams + cloud-first companies");
-    println!("                    primary competitor: Wiz, Palo Alto Prisma Cloud, CrowdStrike Falcon Cloud, Orca");
-    println!("                    Lacework's wedge: Polygraph behavioral ML + Snowflake-native architecture");
-    println!("                    lost ground to Wiz 2022-2024 due to slower agentless transition + product gaps");
-    println!("                    'we got Wizzed' became industry shorthand for Lacework's competitive struggles");
+    println!(
+        "                    primary competitor: Wiz, Palo Alto Prisma Cloud, CrowdStrike Falcon Cloud, Orca"
+    );
+    println!(
+        "                    Lacework's wedge: Polygraph behavioral ML + Snowflake-native architecture"
+    );
+    println!(
+        "                    lost ground to Wiz 2022-2024 due to slower agentless transition + product gaps"
+    );
+    println!(
+        "                    'we got Wizzed' became industry shorthand for Lacework's competitive struggles"
+    );
     println!("  Pricing (pre-Fortinet integration):");
     println!("    Enterprise — $50K-$2M+/yr typical");
     println!("    Pricing per workload + per cloud account");
@@ -90,25 +111,34 @@ fn run_lw(args: &[String], _prog: &str) -> i32 {
     println!("  Customers (pre-acquisition, ~1,500 paying):");
     println!("    - VMware, Snowflake (which also invested $$$), Snap, BlueVoyant, Drift");
     println!("    - Many cloud-native scale-ups + some Fortune 500");
-    println!("    - sweet spot: cloud-native engineering orgs (less Fortune 500 dominance than Wiz)");
+    println!(
+        "    - sweet spot: cloud-native engineering orgs (less Fortune 500 dominance than Wiz)"
+    );
     println!("    - heavy in: tech, SaaS, fintech, healthcare");
     println!("    - Post-Fortinet: customers migrating + new wins flow through Fortinet sales");
     println!("  Critique (legacy + acquisition era):");
     println!("           lost to Wiz on agentless + product velocity 2022-2024");
-    println!("           valuation collapse from $8.3B (2021) to <$300M (Fortinet acq) — 96%+ drop");
+    println!(
+        "           valuation collapse from $8.3B (2021) to <$300M (Fortinet acq) — 96%+ drop"
+    );
     println!("           management churn — co-founders departed pre/post acquisition");
     println!("           UX behind Wiz + Orca");
     println!("           Polygraph was great tech but couldn't overcome slow product execution");
     println!("           Fortinet integration may take 1-2 years for full Security Fabric fit");
     println!("           customers worry about Fortinet bundling pricing pressure");
     println!("           cautionary tale of late-stage zirp overvaluation in security");
-    println!("  Differentiator (legacy + Fortinet era): Polygraph behavioral ML approach + Snowflake-native data architecture + now backed by Fortinet's Security Fabric distribution and customer base — the cloud security platform absorbed into a major network-security vendor's portfolio");
+    println!(
+        "  Differentiator (legacy + Fortinet era): Polygraph behavioral ML approach + Snowflake-native data architecture + now backed by Fortinet's Security Fabric distribution and customer base — the cloud security platform absorbed into a major network-security vendor's portfolio"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "lacework".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "lacework".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_lw(&rest, &_prog);
     process::exit(code);
@@ -116,7 +146,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lw};
+    use super::{basename, run_lw, strip_ext};
 
     #[test]
     fn basename_strips_path() {

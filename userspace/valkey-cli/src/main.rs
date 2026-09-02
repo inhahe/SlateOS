@@ -57,7 +57,8 @@ fn run_valkey_cli(args: &[String]) -> i32 {
         return 0;
     }
 
-    let cmd: Vec<&str> = args.iter()
+    let cmd: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -97,8 +98,11 @@ fn run_valkey_server(args: &[String]) -> i32 {
         return 0;
     }
 
-    let port = args.windows(2).find(|w| w[0] == "--port")
-        .map(|w| w[1].as_str()).unwrap_or("6379");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "--port")
+        .map(|w| w[1].as_str())
+        .unwrap_or("6379");
     println!("oO0OoO0OoO0Oo Valkey is starting oO0OoO0OoO0Oo");
     println!("Valkey version=8.0.0, bits=64, pid=1234");
     println!("Server initialized");
@@ -135,7 +139,8 @@ fn run_valkey_benchmark(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "valkey-cli".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -150,7 +155,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_valkey_cli};
+    use super::{basename, run_valkey_cli, strip_ext};
 
     #[test]
     fn basename_strips_path() {

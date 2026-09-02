@@ -57,8 +57,15 @@ fn run_mkinitcpio(args: &[String]) -> i32 {
         return 0;
     }
 
-    let version = args.windows(2).find(|w| w[0] == "-k").map(|w| w[1].as_str()).unwrap_or("1.0.0");
-    let output = args.windows(2).find(|w| w[0] == "-g").map(|w| w[1].as_str())
+    let version = args
+        .windows(2)
+        .find(|w| w[0] == "-k")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1.0.0");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-g")
+        .map(|w| w[1].as_str())
         .unwrap_or("/boot/initramfs-1.0.0.img");
 
     println!("==> Building image from preset: /etc/mkinitcpio.d/slateos.preset: 'default'");
@@ -96,7 +103,11 @@ fn run_update_initramfs(args: &[String]) -> i32 {
     let create = args.iter().any(|a| a == "-c");
     let update = args.iter().any(|a| a == "-u");
     let delete = args.iter().any(|a| a == "-d");
-    let version = args.windows(2).find(|w| w[0] == "-k").map(|w| w[1].as_str()).unwrap_or("1.0.0");
+    let version = args
+        .windows(2)
+        .find(|w| w[0] == "-k")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1.0.0");
 
     if create {
         println!("update-initramfs: Generating /boot/initrd.img-{}", version);
@@ -113,7 +124,8 @@ fn run_update_initramfs(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "mkinitcpio".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -127,7 +139,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mkinitcpio};
+    use super::{basename, run_mkinitcpio, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn run_vultr(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: vultr-cli <COMMAND> [OPTIONS]");
         println!();
         println!("vultr-cli — Vultr cloud CLI (Slate OS).");
@@ -40,21 +43,37 @@ fn run_vultr(args: Vec<String>) -> i32 {
     match cmd {
         "instance" => match sub {
             "list" => {
-                println!("ID                                      IP              LABEL          OS              STATUS  REGION  CPU  RAM     DISK    BANDWIDTH");
-                println!("abcdef12-3456-7890-abcd-ef1234567890    149.28.123.45   my-instance    Ubuntu 22.04    active  ewr     1    1024    25      1000");
+                println!(
+                    "ID                                      IP              LABEL          OS              STATUS  REGION  CPU  RAM     DISK    BANDWIDTH"
+                );
+                println!(
+                    "abcdef12-3456-7890-abcd-ef1234567890    149.28.123.45   my-instance    Ubuntu 22.04    active  ewr     1    1024    25      1000"
+                );
             }
             "create" => {
-                println!("ID                                      IP              LABEL          STATUS");
-                println!("12345678-abcd-efgh-ijkl-123456789012    pending         new-instance   pending");
+                println!(
+                    "ID                                      IP              LABEL          STATUS"
+                );
+                println!(
+                    "12345678-abcd-efgh-ijkl-123456789012    pending         new-instance   pending"
+                );
             }
-            _ => { println!("vultr-cli instance {}: see --help.", sub); }
+            _ => {
+                println!("vultr-cli instance {}: see --help.", sub);
+            }
         },
         "kubernetes" => match sub {
             "list" => {
-                println!("ID                                      LABEL          REGION  VERSION    STATUS");
-                println!("abcdef12-3456-7890-abcd-ef1234567890    my-vke         ewr     v1.28.2    active");
+                println!(
+                    "ID                                      LABEL          REGION  VERSION    STATUS"
+                );
+                println!(
+                    "abcdef12-3456-7890-abcd-ef1234567890    my-vke         ewr     v1.28.2    active"
+                );
             }
-            _ => { println!("vultr-cli kubernetes {}: see --help.", sub); }
+            _ => {
+                println!("vultr-cli kubernetes {}: see --help.", sub);
+            }
         },
         "regions" | "regions list" => {
             println!("ID     CITY                COUNTRY   CONTINENT");
@@ -79,10 +98,16 @@ fn run_vultr(args: Vec<String>) -> i32 {
         }
         "snapshot" => match sub {
             "list" => {
-                println!("ID                                      DESCRIPTION       STATUS      SIZE    DATE CREATED");
-                println!("abcdef12-3456-7890-abcd-ef1234567890    daily-backup      complete    25      2024-01-15");
+                println!(
+                    "ID                                      DESCRIPTION       STATUS      SIZE    DATE CREATED"
+                );
+                println!(
+                    "abcdef12-3456-7890-abcd-ef1234567890    daily-backup      complete    25      2024-01-15"
+                );
             }
-            _ => { println!("vultr-cli snapshot {}: see --help.", sub); }
+            _ => {
+                println!("vultr-cli snapshot {}: see --help.", sub);
+            }
         },
         _ => {
             if cmd.is_empty() {
@@ -104,7 +129,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_vultr};
+    use super::run_vultr;
 
     #[test]
     fn help_exits_zero() {

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_gnuradio(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -38,11 +42,17 @@ fn run_gnuradio(args: &[String], prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GNU Radio v3.10.9 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("GNU Radio v3.10.9 (Slate OS)");
+        return 0;
+    }
     match prog {
         "grcc" => {
             let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-            if files.is_empty() { eprintln!("grcc: error: no input file"); return 1; }
+            if files.is_empty() {
+                eprintln!("grcc: error: no input file");
+                return 1;
+            }
             println!("grcc: compiling {}", files[0]);
             println!("  Blocks: 12");
             println!("  Connections: 15");
@@ -63,7 +73,10 @@ fn run_gnuradio(args: &[String], prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "gnuradio-companion".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "gnuradio-companion".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_gnuradio(&rest, &prog);
     process::exit(code);
@@ -71,7 +84,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gnuradio};
+    use super::{basename, run_gnuradio, strip_ext};
 
     #[test]
     fn basename_strips_path() {

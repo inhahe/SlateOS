@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_testdisk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_testdisk(args: &[String], _prog: &str) -> i32 {
         println!("recovers FAT/NTFS/ext boot sectors, rebuilds partition tables.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("testdisk v7.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("testdisk v7.2 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "/list") {
         println!("Disk /dev/sda - 500 GiB");
         println!("  Partition 1: EFI System   512 MiB");
@@ -53,7 +60,10 @@ fn run_photorec(args: &[String], _prog: &str) -> i32 {
         println!("Works even after reformatting or severe filesystem damage.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("photorec v7.2 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("photorec v7.2 (Slate OS)");
+        return 0;
+    }
     println!("photorec: file recovery utility");
     println!("  Supported formats: jpg, png, gif, bmp, tiff, pdf, doc,");
     println!("    xls, ppt, zip, mp3, mp4, avi, mov, and 480+ more");
@@ -62,7 +72,10 @@ fn run_photorec(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "testdisk".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "testdisk".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "photorec" => run_photorec(&rest, &prog),
@@ -73,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_testdisk};
+    use super::{basename, run_testdisk, strip_ext};
 
     #[test]
     fn basename_strips_path() {

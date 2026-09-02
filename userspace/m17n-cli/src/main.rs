@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_m17n_db(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -21,7 +25,10 @@ fn run_m17n_db(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("m17n-db v1.8 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("m17n-db v1.8 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "--list") {
         println!("Available m17n input methods:");
         println!("  ar-kbd      Arabic keyboard");
@@ -50,14 +57,20 @@ fn run_m17n_conv(args: &[String], _prog: &str) -> i32 {
         println!("  --list-coding     List supported encodings");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("m17n-conv v1.8 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("m17n-conv v1.8 (Slate OS)");
+        return 0;
+    }
     println!("m17n-conv: converting...");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "m17n-db".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "m17n-db".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "m17n-conv" => run_m17n_conv(&rest, &prog),
@@ -68,7 +81,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_m17n_db};
+    use super::{basename, run_m17n_db, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -40,7 +40,9 @@ fn print_help(prog: &str) {
     println!("    version     Show version");
 }
 
-fn print_version() { println!("xata-cli 0.1.0 (post-pivot branchable Postgres build)"); }
+fn print_version() {
+    println!("xata-cli 0.1.0 (post-pivot branchable Postgres build)");
+}
 
 fn run_about() {
     println!("Xata, Inc.");

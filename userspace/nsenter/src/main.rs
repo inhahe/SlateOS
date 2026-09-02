@@ -30,14 +30,62 @@ struct NsSpec {
 }
 
 const NS_SPECS: &[NsSpec] = &[
-    NsSpec { ns_type: "mnt", flag: "-m", long_flag: "--mount", proc_name: "mnt", description: "mount namespace" },
-    NsSpec { ns_type: "uts", flag: "-u", long_flag: "--uts", proc_name: "uts", description: "UTS namespace (hostname)" },
-    NsSpec { ns_type: "ipc", flag: "-i", long_flag: "--ipc", proc_name: "ipc", description: "IPC namespace" },
-    NsSpec { ns_type: "net", flag: "-n", long_flag: "--net", proc_name: "net", description: "network namespace" },
-    NsSpec { ns_type: "pid", flag: "-p", long_flag: "--pid", proc_name: "pid", description: "PID namespace" },
-    NsSpec { ns_type: "user", flag: "-U", long_flag: "--user", proc_name: "user", description: "user namespace" },
-    NsSpec { ns_type: "cgroup", flag: "-C", long_flag: "--cgroup", proc_name: "cgroup", description: "cgroup namespace" },
-    NsSpec { ns_type: "time", flag: "-T", long_flag: "--time", proc_name: "time", description: "time namespace" },
+    NsSpec {
+        ns_type: "mnt",
+        flag: "-m",
+        long_flag: "--mount",
+        proc_name: "mnt",
+        description: "mount namespace",
+    },
+    NsSpec {
+        ns_type: "uts",
+        flag: "-u",
+        long_flag: "--uts",
+        proc_name: "uts",
+        description: "UTS namespace (hostname)",
+    },
+    NsSpec {
+        ns_type: "ipc",
+        flag: "-i",
+        long_flag: "--ipc",
+        proc_name: "ipc",
+        description: "IPC namespace",
+    },
+    NsSpec {
+        ns_type: "net",
+        flag: "-n",
+        long_flag: "--net",
+        proc_name: "net",
+        description: "network namespace",
+    },
+    NsSpec {
+        ns_type: "pid",
+        flag: "-p",
+        long_flag: "--pid",
+        proc_name: "pid",
+        description: "PID namespace",
+    },
+    NsSpec {
+        ns_type: "user",
+        flag: "-U",
+        long_flag: "--user",
+        proc_name: "user",
+        description: "user namespace",
+    },
+    NsSpec {
+        ns_type: "cgroup",
+        flag: "-C",
+        long_flag: "--cgroup",
+        proc_name: "cgroup",
+        description: "cgroup namespace",
+    },
+    NsSpec {
+        ns_type: "time",
+        flag: "-T",
+        long_flag: "--time",
+        proc_name: "time",
+        description: "time namespace",
+    },
 ];
 
 // ============================================================================
@@ -86,7 +134,8 @@ fn parse_args(args: &[String]) -> NsenterOpts {
             let prefix = format!("{}=", spec.long_flag);
             if let Some(file) = arg.strip_prefix(prefix.as_str()) {
                 opts.namespaces.push(spec.ns_type.to_string());
-                opts.ns_files.push((spec.ns_type.to_string(), file.to_string()));
+                opts.ns_files
+                    .push((spec.ns_type.to_string(), file.to_string()));
                 matched_ns_file = true;
                 break;
             }
@@ -119,11 +168,19 @@ fn parse_args(args: &[String]) -> NsenterOpts {
             "--preserve-credentials" => opts.preserve_creds = true,
             "-r" | "--root" => {
                 i += 1;
-                opts.root = if i < args.len() { Some(args[i].clone()) } else { Some("/".to_string()) };
+                opts.root = if i < args.len() {
+                    Some(args[i].clone())
+                } else {
+                    Some("/".to_string())
+                };
             }
             "-w" | "--wd" => {
                 i += 1;
-                opts.wd = if i < args.len() { Some(args[i].clone()) } else { None };
+                opts.wd = if i < args.len() {
+                    Some(args[i].clone())
+                } else {
+                    None
+                };
             }
             "-W" | "--wdns" => opts.wd_fd = true,
             "-S" | "--setuid" => {
@@ -170,7 +227,10 @@ fn print_help() {
     println!("  -t, --target PID    Target process for namespaces");
     println!("  -a, --all           Enter all namespaces of target");
     for spec in NS_SPECS {
-        println!("  {}, {:16}  Enter {} [=FILE]", spec.flag, spec.long_flag, spec.description);
+        println!(
+            "  {}, {:16}  Enter {} [=FILE]",
+            spec.flag, spec.long_flag, spec.description
+        );
     }
     println!("  -r, --root [DIR]    Set root directory");
     println!("  -w, --wd [DIR]      Set working directory");
@@ -227,7 +287,10 @@ fn cmd_nsenter(args: &[String]) {
     // Verify target process exists.
     if pid > 0 {
         let proc_path = format!("/proc/{pid}");
-        if !fs::metadata(&proc_path).map(|m| m.is_dir()).unwrap_or(false) {
+        if !fs::metadata(&proc_path)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
             eprintln!("nsenter: cannot open /proc/{pid}/ns/: No such process");
             process::exit(1);
         }
@@ -248,7 +311,10 @@ fn cmd_nsenter(args: &[String]) {
 
         // Verify namespace file exists.
         if fs::symlink_metadata(&ns_path).is_err() {
-            let _ = writeln!(err, "nsenter: cannot open {ns_path}: No such file or directory");
+            let _ = writeln!(
+                err,
+                "nsenter: cannot open {ns_path}: No such file or directory"
+            );
             process::exit(1);
         }
 
@@ -259,9 +325,7 @@ fn cmd_nsenter(args: &[String]) {
     // Build command.
     let command = if opts.command.is_empty() {
         // Default: run user's shell.
-        vec![
-            env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
-        ]
+        vec![env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())]
     } else {
         opts.command.clone()
     };

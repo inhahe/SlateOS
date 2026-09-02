@@ -55,7 +55,9 @@ fn run_powertop(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("PowerTOP 2.15 (Slate OS)     Overview   Idle stats   Frequency stats   Device stats   Tunables");
+    println!(
+        "PowerTOP 2.15 (Slate OS)     Overview   Idle stats   Frequency stats   Device stats   Tunables"
+    );
     println!();
     println!("Summary: 120.0 wakeups/second, 0 GPU ops/second, 0 VFS ops/second");
     println!();
@@ -73,7 +75,8 @@ fn run_powertop(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first()
+    let _prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "powertop".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -84,7 +87,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_powertop};
+    use super::{basename, run_powertop, strip_ext};
 
     #[test]
     fn basename_strips_path() {

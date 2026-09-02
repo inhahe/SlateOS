@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_hurl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -34,7 +38,8 @@ fn run_hurl(args: &[String]) -> i32 {
         return 0;
     }
     let test_mode = args.iter().any(|a| a == "--test");
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| a.ends_with(".hurl") || (!a.starts_with('-') && !a.contains('=')))
         .map(|s| s.as_str())
         .collect();
@@ -48,8 +53,14 @@ fn run_hurl(args: &[String]) -> i32 {
         }
         println!();
         println!("--------------------------------------------------------------");
-        println!("Executed files:  {}", if files.is_empty() { 1 } else { files.len() });
-        println!("Succeeded files: {}", if files.is_empty() { 1 } else { files.len() });
+        println!(
+            "Executed files:  {}",
+            if files.is_empty() { 1 } else { files.len() }
+        );
+        println!(
+            "Succeeded files: {}",
+            if files.is_empty() { 1 } else { files.len() }
+        );
         println!("Failed files:    0");
         println!("Duration:        234 ms");
     } else if files.is_empty() {
@@ -76,7 +87,11 @@ fn run_hurlfmt(args: &[String]) -> i32 {
         return 0;
     }
     let check = args.iter().any(|a| a == "--check");
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("test.hurl");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("test.hurl");
     if check {
         println!("{}: already formatted", file);
     } else {
@@ -87,7 +102,10 @@ fn run_hurlfmt(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "hurl".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "hurl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "hurlfmt" => run_hurlfmt(&rest),
@@ -98,7 +116,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_hurl};
+    use super::{basename, run_hurl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

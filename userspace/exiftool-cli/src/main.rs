@@ -8,7 +8,10 @@ use std::env;
 use std::process;
 
 fn run_exiftool(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+    {
         println!("Usage: exiftool [OPTIONS] FILE...");
         println!();
         println!("ExifTool — read/write metadata in files (Slate OS).");
@@ -37,7 +40,8 @@ fn run_exiftool(args: Vec<String>) -> i32 {
     let groups = args.iter().any(|a| a == "-G");
     let remove_all = args.iter().any(|a| a == "-all=");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -88,14 +92,23 @@ fn run_exiftool(args: Vec<String>) -> i32 {
             println!("{}Image Height                    : 3024", prefix);
             println!("{}Make                            : Apple", prefix);
             println!("{}Model                           : iPhone 15 Pro", prefix);
-            println!("{}Date/Time Original              : 2024:01:15 14:23:45", prefix);
+            println!(
+                "{}Date/Time Original              : 2024:01:15 14:23:45",
+                prefix
+            );
             println!("{}Exposure Time                   : 1/120", prefix);
             println!("{}F Number                        : 1.8", prefix);
             println!("{}ISO                             : 64", prefix);
             println!("{}Focal Length                    : 6.8 mm", prefix);
             let prefix = if groups { "[GPS]           " } else { "" };
-            println!("{}GPS Latitude                    : 37 deg 46' 29.64\" N", prefix);
-            println!("{}GPS Longitude                   : 122 deg 25' 9.84\" W", prefix);
+            println!(
+                "{}GPS Latitude                    : 37 deg 46' 29.64\" N",
+                prefix
+            );
+            println!(
+                "{}GPS Longitude                   : 122 deg 25' 9.84\" W",
+                prefix
+            );
         }
     }
     0
@@ -110,7 +123,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_exiftool};
+    use super::run_exiftool;
 
     #[test]
     fn help_exits_zero() {

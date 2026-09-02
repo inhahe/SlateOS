@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_inspectrum(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_inspectrum(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("inspectrum v0.2.3 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("inspectrum v0.2.3 (Slate OS)");
+        return 0;
+    }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if files.is_empty() {
         println!("inspectrum v0.2.3 (Slate OS) — Signal Analyzer");
@@ -31,7 +38,11 @@ fn run_inspectrum(args: &[String], _prog: &str) -> i32 {
         println!("  Status: waiting for file");
         return 0;
     }
-    let rate = args.windows(2).find(|w| w[0] == "-r").map(|w| w[1].as_str()).unwrap_or("2400000");
+    let rate = args
+        .windows(2)
+        .find(|w| w[0] == "-r")
+        .map(|w| w[1].as_str())
+        .unwrap_or("2400000");
     println!("inspectrum: analyzing {}", files[0]);
     println!("  Sample rate: {} Hz", rate);
     println!("  Format: cf32 (complex float32)");
@@ -43,7 +54,10 @@ fn run_inspectrum(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "inspectrum".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "inspectrum".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_inspectrum(&rest, &_prog);
     process::exit(code);
@@ -51,7 +65,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_inspectrum};
+    use super::{basename, run_inspectrum, strip_ext};
 
     #[test]
     fn basename_strips_path() {

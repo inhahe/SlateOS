@@ -28,7 +28,8 @@ fn run_units(args: Vec<String>) -> i32 {
     }
 
     let terse = args.iter().any(|a| a == "-t" || a == "--terse");
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -60,7 +61,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_units};
+    use super::run_units;
 
     #[test]
     fn help_exits_zero() {

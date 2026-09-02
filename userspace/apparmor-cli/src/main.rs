@@ -102,7 +102,11 @@ fn run_apparmor_parser(args: &[String]) -> i32 {
         println!("AppArmor parser version 4.0.1 (Slate OS)");
         return 0;
     }
-    let profile = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("profile");
+    let profile = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("profile");
     let replace = args.iter().any(|a| a == "-r" || a == "--replace");
     if replace {
         println!("Replacement of profile {} succeeded.", profile);
@@ -114,7 +118,8 @@ fn run_apparmor_parser(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "aa-status".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -124,7 +129,11 @@ fn main() {
         "aa-complain" => run_aa_complain(&rest),
         "aa-disable" => run_aa_disable(&rest),
         "aa-genprof" => run_aa_genprof(&rest),
-        "aa-logprof" => { println!("Reading log entries..."); println!("No new events found."); 0 }
+        "aa-logprof" => {
+            println!("Reading log entries...");
+            println!("No new events found.");
+            0
+        }
         "apparmor_parser" => run_apparmor_parser(&rest),
         _ => run_aa_status(&rest),
     };
@@ -133,7 +142,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_aa_enforce};
+    use super::{basename, run_aa_enforce, strip_ext};
 
     #[test]
     fn basename_strips_path() {

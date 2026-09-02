@@ -229,12 +229,8 @@ fn read_utmp_user_count(path: &str) -> Option<u32> {
     while offset + UTMP_RECORD_SIZE <= data.len() {
         // Read ut_type as a little-endian i32.
         let type_bytes = data.get(offset + UT_TYPE_OFFSET..offset + UT_TYPE_OFFSET + 4)?;
-        let ut_type = i32::from_le_bytes([
-            type_bytes[0],
-            type_bytes[1],
-            type_bytes[2],
-            type_bytes[3],
-        ]);
+        let ut_type =
+            i32::from_le_bytes([type_bytes[0], type_bytes[1], type_bytes[2], type_bytes[3]]);
 
         if ut_type == USER_PROCESS {
             count = count.saturating_add(1);
@@ -429,10 +425,7 @@ fn json_escape(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             c if c.is_control() => {
                 for unit in c.encode_utf16(&mut [0u16; 2]) {
-                    let _ = std::fmt::Write::write_fmt(
-                        &mut out,
-                        format_args!("\\u{unit:04x}"),
-                    );
+                    let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\\u{unit:04x}"));
                 }
             }
             c => out.push(c),
@@ -514,18 +507,9 @@ fn print_json(info: &SystemInfo) {
     println!("  \"hours\": {},", parts.hours);
     println!("  \"minutes\": {},", parts.minutes);
     println!("  \"seconds\": {},", parts.seconds);
-    println!(
-        "  \"pretty\": \"{}\",",
-        json_escape(&pretty)
-    );
-    println!(
-        "  \"boot_time\": \"{}\",",
-        json_escape(&boot_dt)
-    );
-    println!(
-        "  \"current_time\": \"{}\",",
-        json_escape(&current_dt)
-    );
+    println!("  \"pretty\": \"{}\",", json_escape(&pretty));
+    println!("  \"boot_time\": \"{}\",", json_escape(&boot_dt));
+    println!("  \"current_time\": \"{}\",", json_escape(&current_dt));
     println!("  \"users\": {},", info.user_count);
 
     match &info.load {

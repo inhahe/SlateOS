@@ -38,7 +38,9 @@ fn print_help(prog: &str) {
     println!("    version       Show version");
 }
 
-fn print_version() { println!("unleash-cli 0.1.0 (FINN.no-lineage personality build)"); }
+fn print_version() {
+    println!("unleash-cli 0.1.0 (FINN.no-lineage personality build)");
+}
 
 fn run_about() {
     println!("Unleash (Bricks Software AS)");

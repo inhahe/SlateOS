@@ -69,9 +69,13 @@ fn run_just(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--dump") {
-        let json_fmt = args.windows(2).any(|w| w[0] == "--dump-format" && w[1] == "json");
+        let json_fmt = args
+            .windows(2)
+            .any(|w| w[0] == "--dump-format" && w[1] == "json");
         if json_fmt {
-            println!("{{\"recipes\":{{\"build\":{{\"body\":[\"cargo build\"],\"dependencies\":[\"lint\"]}}}}}}");
+            println!(
+                "{{\"recipes\":{{\"build\":{{\"body\":[\"cargo build\"],\"dependencies\":[\"lint\"]}}}}}}"
+            );
         } else {
             println!("# Project justfile");
             println!();
@@ -135,7 +139,8 @@ fn run_just(args: Vec<String>) -> i32 {
     }
 
     let dry_run = args.iter().any(|a| a == "-n" || a == "--dry-run");
-    let recipe = args.iter()
+    let recipe = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("build");
@@ -185,7 +190,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_just};
+    use super::run_just;
 
     #[test]
     fn help_exits_zero() {

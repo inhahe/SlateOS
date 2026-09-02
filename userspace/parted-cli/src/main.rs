@@ -52,15 +52,23 @@ fn run_parted(args: Vec<String>) -> i32 {
             println!("Disk Flags: ");
             println!();
             println!("Number  Start   End     Size    File system  Name                  Flags");
-            println!(" 1      1049kB  538MB   537MB   fat32        EFI System Partition   boot, esp");
+            println!(
+                " 1      1049kB  538MB   537MB   fat32        EFI System Partition   boot, esp"
+            );
             println!(" 2      538MB   54.2GB  53.7GB  ext4");
             println!(" 3      54.2GB  500GB   446GB   ext4");
         }
     } else {
-        let device = args.iter().find(|a| !a.starts_with('-'))
-            .map(|s| s.as_str()).unwrap_or("/dev/sda");
-        let cmd = args.iter().filter(|a| !a.starts_with('-'))
-            .nth(1).map(|s| s.as_str());
+        let device = args
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .unwrap_or("/dev/sda");
+        let cmd = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .nth(1)
+            .map(|s| s.as_str());
 
         match cmd {
             Some("print") | None => {
@@ -74,7 +82,10 @@ fn run_parted(args: Vec<String>) -> i32 {
                 println!(" 2      538MB   54.2GB  53.7GB  ext4");
                 println!(" 3      54.2GB  500GB   446GB   ext4");
             }
-            Some("mklabel") => println!("Warning: This will destroy all data on {}. Continue?", device),
+            Some("mklabel") => println!(
+                "Warning: This will destroy all data on {}. Continue?",
+                device
+            ),
             Some("mkpart") => println!("Information: Partition created."),
             Some("rm") => println!("Information: Partition deleted."),
             Some(other) => println!("parted: {}: see parted --help.", other),
@@ -92,7 +103,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_parted};
+    use super::run_parted;
 
     #[test]
     fn help_exits_zero() {

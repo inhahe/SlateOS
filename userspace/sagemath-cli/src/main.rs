@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sage(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_sage(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sage v10.3 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("sage v10.3 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "-n" || a == "--notebook") {
         println!("sage: launching Jupyter notebook interface...");
         return 0;
@@ -45,14 +52,20 @@ fn run_notebook(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sage-notebook v10.3 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("sage-notebook v10.3 (Slate OS)");
+        return 0;
+    }
     println!("sage-notebook: server started at http://localhost:8888");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sage".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "sage".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "sage-notebook" => run_notebook(&rest, &prog),
@@ -63,7 +76,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sage};
+    use super::{basename, run_sage, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -40,7 +40,11 @@ fn run_kak(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     if files.is_empty() {
         println!("Kakoune v2024.05.22 (Slate OS) — modal code editor");
         println!("(TUI launched — simulated)");
@@ -62,7 +66,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_kak};
+    use super::run_kak;
 
     #[test]
     fn help_exits_zero() {

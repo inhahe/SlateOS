@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_zabbix_agentd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_zabbix_agentd(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("zabbix_agentd v6.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("zabbix_agentd v6.4 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "-p") {
         println!("agent.hostname     [s|hostname]");
         println!("agent.ping         [u|1]");
@@ -50,7 +57,10 @@ fn run_zabbix_sender(args: &[String], _prog: &str) -> i32 {
         println!("  -o VALUE      Item value");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("zabbix_sender v6.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("zabbix_sender v6.4 (Slate OS)");
+        return 0;
+    }
     println!("info from server: \"processed: 1; failed: 0; total: 1\"");
     println!("sent: 1; skipped: 0; total: 1");
     0
@@ -62,14 +72,20 @@ fn run_zabbix_get(args: &[String], _prog: &str) -> i32 {
         println!("zabbix_get v6.4 (Slate OS) — Get data from Zabbix agent");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("zabbix_get v6.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("zabbix_get v6.4 (Slate OS)");
+        return 0;
+    }
     println!("0.150000");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "zabbix_agentd".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "zabbix_agentd".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "zabbix_sender" => run_zabbix_sender(&rest, &prog),
@@ -81,7 +97,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_zabbix_agentd};
+    use super::{basename, run_zabbix_agentd, strip_ext};
 
     #[test]
     fn basename_strips_path() {

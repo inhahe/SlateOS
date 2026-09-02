@@ -36,16 +36,26 @@ fn run_wrk(args: Vec<String>, is_wrk2: bool) -> i32 {
         return 0;
     }
 
-    let url = args.iter().rfind(|a| a.starts_with("http")).map(|s| s.as_str()).unwrap_or("http://localhost:8080");
-    let threads = args.iter().position(|a| a == "-t" || a == "--threads")
+    let url = args
+        .iter()
+        .rfind(|a| a.starts_with("http"))
+        .map(|s| s.as_str())
+        .unwrap_or("http://localhost:8080");
+    let threads = args
+        .iter()
+        .position(|a| a == "-t" || a == "--threads")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("2");
-    let connections = args.iter().position(|a| a == "-c" || a == "--connections")
+    let connections = args
+        .iter()
+        .position(|a| a == "-c" || a == "--connections")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("10");
-    let duration = args.iter().position(|a| a == "-d" || a == "--duration")
+    let duration = args
+        .iter()
+        .position(|a| a == "-d" || a == "--duration")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("10s");
@@ -81,7 +91,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -94,7 +106,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_wrk};
+    use super::run_wrk;
 
     #[test]
     fn help_exits_zero() {

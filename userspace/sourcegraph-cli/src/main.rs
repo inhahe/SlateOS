@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +27,10 @@ fn run_sg(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Sourcegraph 5.7 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Sourcegraph 5.7 (Slate OS)");
+        return 0;
+    }
     println!("Sourcegraph 5.7 (Slate OS)");
     println!("  Vendor: Sourcegraph, Inc. (San Francisco, founded 2013)");
     println!("  Founders: Quinn Slack + Beyang Liu (Stanford CS)");
@@ -34,12 +41,22 @@ fn run_sg(args: &[String], _prog: &str) -> i32 {
     println!("          Pro $59/user/mo (Cody Pro included)");
     println!("          Enterprise — custom (large orgs, on-prem deploys)");
     println!("  Core features:");
-    println!("    - Universal code search across ALL your code (github + gitlab + bitbucket + self-hosted)");
-    println!("    - Regex, literal, AND structural search (pattern matching on AST shape, not text)");
-    println!("    - Code intelligence — go-to-definition + find-references across repos (using LSIF/SCIP indexes)");
+    println!(
+        "    - Universal code search across ALL your code (github + gitlab + bitbucket + self-hosted)"
+    );
+    println!(
+        "    - Regex, literal, AND structural search (pattern matching on AST shape, not text)"
+    );
+    println!(
+        "    - Code intelligence — go-to-definition + find-references across repos (using LSIF/SCIP indexes)"
+    );
     println!("    - Batch Changes — author large-scale changes across many repos with a YAML spec");
-    println!("    - Code Insights — dashboards tracking 'how many repos still use deprecated_function?'");
-    println!("    - Code monitors — alerts on code matching a query (security scanning, dep drift)");
+    println!(
+        "    - Code Insights — dashboards tracking 'how many repos still use deprecated_function?'"
+    );
+    println!(
+        "    - Code monitors — alerts on code matching a query (security scanning, dep drift)"
+    );
     println!("  Cody (AI assistant since 2023):");
     println!("    - Chat with your codebase using GPT-4 / Claude / Gemini");
     println!("    - Repo-wide context (RAG over your entire indexed codebase)");
@@ -47,16 +64,25 @@ fn run_sg(args: &[String], _prog: &str) -> i32 {
     println!("    - IDE extensions: VS Code, JetBrains, Neovim, Emacs");
     println!("    - Free Cody tier: 200 messages + 500 autocompletes/mo");
     println!("  Customers: Uber, Lyft, Yelp, GE, Indeed, Plaid — large polyrepo orgs");
-    println!("  History: started as a developer's side project after Quinn struggled to navigate huge codebases at Palantir");
+    println!(
+        "  History: started as a developer's side project after Quinn struggled to navigate huge codebases at Palantir"
+    );
     println!("  Critique: enterprise license model expensive at scale");
-    println!("           code intelligence depends on language-specific indexers (good for Go/JS/TS/Python/Java)");
-    println!("  Differentiator: built for monorepos AND polyrepos — search ALL your code in one place");
+    println!(
+        "           code intelligence depends on language-specific indexers (good for Go/JS/TS/Python/Java)"
+    );
+    println!(
+        "  Differentiator: built for monorepos AND polyrepos — search ALL your code in one place"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sourcegraph".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "sourcegraph".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_sg(&rest, &_prog);
     process::exit(code);
@@ -64,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sg};
+    use super::{basename, run_sg, strip_ext};
 
     #[test]
     fn basename_strips_path() {

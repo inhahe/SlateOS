@@ -39,7 +39,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_lazydocker};
+    use super::run_lazydocker;
 
     #[test]
     fn help_exits_zero() {

@@ -5,8 +5,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -24,12 +28,19 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("BigCommerce 2024 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("BigCommerce 2024 (Slate OS)");
+        return 0;
+    }
     println!("BigCommerce 2024 (Slate OS)");
     println!("  Vendor: BigCommerce Holdings, Inc. (Austin, TX — NASDAQ:BIGC)");
     println!("  Founders: Eddie Machaalani + Mitchell Harper, 2009");
-    println!("          both Australian — built original BigCommerce in Sydney before relocating to Austin");
-    println!("          'opposite of Shopify' positioning from very early days: open APIs, no lock-in");
+    println!(
+        "          both Australian — built original BigCommerce in Sydney before relocating to Austin"
+    );
+    println!(
+        "          'opposite of Shopify' positioning from very early days: open APIs, no lock-in"
+    );
     println!("  Founded: 2009 in Sydney, then HQ to Austin TX");
     println!("          IPO Aug 2020 NASDAQ:BIGC at $24 (peaked ~$160 in early 2021)");
     println!("          now ~$5-7, market cap ~$400M (rough years 2022-2024)");
@@ -38,8 +49,12 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
     println!("  Strategic position: 'open SaaS' — the headless-friendly Shopify alternative:");
     println!("                    primary head-to-head competitor: Shopify (much larger)");
     println!("                    enterprise: Salesforce Commerce Cloud, Adobe Commerce");
-    println!("                    headless/composable: commercetools (more enterprise), Saleor, Medusa, Vue Storefront");
-    println!("                    differentiator: no transaction fees ever, fewer locked-down APIs, multi-storefront from one backend");
+    println!(
+        "                    headless/composable: commercetools (more enterprise), Saleor, Medusa, Vue Storefront"
+    );
+    println!(
+        "                    differentiator: no transaction fees ever, fewer locked-down APIs, multi-storefront from one backend"
+    );
     println!("                    pitch: 'composable' commerce for mid-market + enterprise");
     println!("  Pricing (transparent, simpler than Shopify):");
     println!("    Standard — $39/mo (sales threshold $50K/yr)");
@@ -51,7 +66,9 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
     println!("    Multi-storefront pricing: typically Enterprise-only add-on");
     println!("  Open APIs + extensibility (the big differentiator):");
     println!("    - REST + GraphQL Storefront API (no rate limits as restrictive as Shopify)");
-    println!("    - 'Open SaaS' philosophy: fewer restrictions on checkout customization vs Shopify");
+    println!(
+        "    - 'Open SaaS' philosophy: fewer restrictions on checkout customization vs Shopify"
+    );
     println!("    - Storefront fully customizable on Standard tier (Shopify gates this to Plus)");
     println!("    - Webhooks for orders, inventory, customer, abandoned cart, etc.");
     println!("    - Stencil theme framework (Handlebars-based templating)");
@@ -74,7 +91,9 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
     println!("    - Punchout catalogs (CXML, OCI integration with SAP Ariba, Coupa, Oracle)");
     println!("    - This is BigCommerce's strongest 'beats Shopify' moat — Plus B2B is newer");
     println!("  Payment processing:");
-    println!("    - Use any processor: Stripe, PayPal, Braintree, Adyen, Klarna, Affirm, Authorize.net");
+    println!(
+        "    - Use any processor: Stripe, PayPal, Braintree, Adyen, Klarna, Affirm, Authorize.net"
+    );
     println!("    - 100+ payment gateways supported");
     println!("    - No proprietary 'BigCommerce Payments' that locks merchants in");
     println!("  Channel integrations:");
@@ -83,23 +102,34 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
     println!("    - Channel manager built-in (Shopify acquired Channable + Shop App for this)");
     println!("    - POS via Square integration (no first-party POS unlike Shopify)");
     println!("  Customers: ~45,000 stores, ~6,000 enterprise ($600K+ GMV)");
-    println!("            Ben & Jerry's, Skullcandy, Toyota, Burrow, Solo Stove, SC Johnson, Yeti (B2B)");
-    println!("            sweet spot: B2B brands, multi-brand holdcos, mid-market wanting headless flexibility");
+    println!(
+        "            Ben & Jerry's, Skullcandy, Toyota, Burrow, Solo Stove, SC Johnson, Yeti (B2B)"
+    );
+    println!(
+        "            sweet spot: B2B brands, multi-brand holdcos, mid-market wanting headless flexibility"
+    );
     println!("            very weak in: indie maker/SMB (Shopify dominates here)");
-    println!("  Critique: smaller app/theme ecosystem than Shopify (1,200 vs 8,000+ apps, 100 vs 1,000+ themes)");
+    println!(
+        "  Critique: smaller app/theme ecosystem than Shopify (1,200 vs 8,000+ apps, 100 vs 1,000+ themes)"
+    );
     println!("           growth has stalled — single-digit % YoY while Shopify still 25%+");
     println!("           brand recognition far weaker than Shopify outside enterprise B2B circles");
     println!("           stock down ~90% from peak, raising concerns about long-term independence");
     println!("           rumors of take-private/acquisition perennial (no deal announced)");
     println!("           UI/admin feels dated vs Shopify's polish");
     println!("           Catalyst + Page Builder + Makeswift integration still maturing");
-    println!("  Differentiator: open APIs, no transaction fees, native B2B + multi-storefront, headless-friendly — the platform mid-market enterprises pick over Shopify Plus");
+    println!(
+        "  Differentiator: open APIs, no transaction fees, native B2B + multi-storefront, headless-friendly — the platform mid-market enterprises pick over Shopify Plus"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bigcommerce".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bigcommerce".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_bc(&rest, &_prog);
     process::exit(code);
@@ -107,7 +137,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bc};
+    use super::{basename, run_bc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

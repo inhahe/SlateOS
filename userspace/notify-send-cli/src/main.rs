@@ -31,7 +31,8 @@ fn run_notify_send(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -44,17 +45,20 @@ fn run_notify_send(args: Vec<String>) -> i32 {
     let summary = positional[0];
     let body = positional.get(1).unwrap_or(&"");
 
-    let urgency = args.windows(2)
+    let urgency = args
+        .windows(2)
         .find(|w| w[0] == "-u" || w[0] == "--urgency")
         .map(|w| w[1].as_str())
         .unwrap_or("normal");
 
-    let app_name = args.windows(2)
+    let app_name = args
+        .windows(2)
         .find(|w| w[0] == "-a" || w[0] == "--app-name")
         .map(|w| w[1].as_str())
         .unwrap_or("notify-send");
 
-    let icon = args.windows(2)
+    let icon = args
+        .windows(2)
         .find(|w| w[0] == "-i" || w[0] == "--icon")
         .map(|w| w[1].as_str());
 
@@ -81,7 +85,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_notify_send};
+    use super::run_notify_send;
 
     #[test]
     fn help_exits_zero() {

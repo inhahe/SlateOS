@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_fig(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,7 +29,10 @@ fn run_fig(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Figma 124.13.0 Desktop (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("Figma 124.13.0 Desktop (Slate OS)");
+        return 0;
+    }
     println!("Figma 124.13.0 (Slate OS)");
     println!("  Vendor: Figma, Inc. (San Francisco, founded 2012)");
     println!("  Founders: Dylan Field (CEO), Evan Wallace (CTO)");
@@ -35,10 +42,14 @@ fn run_fig(args: &[String], _prog: &str) -> i32 {
     println!("  Engine: in-browser WebGL/WebAssembly C++ rendering — Figma's tech moat");
     println!("  Multiplayer: CRDT-based real-time collaboration, presence cursors, live comments");
     println!("  Products: Figma (Design), FigJam (whiteboard), Slides, Dev Mode, Figma Make (AI)");
-    println!("  Plans: Free (3 files, 3 pages), Professional $15/editor/mo, Organization $45/editor,");
+    println!(
+        "  Plans: Free (3 files, 3 pages), Professional $15/editor/mo, Organization $45/editor,"
+    );
     println!("        Enterprise $75/editor — SSO, audit, advanced design system tooling");
     println!("  Design Systems: Variables (tokens), Components, Auto Layout, Variants, Branching");
-    println!("  Dev handoff: Inspect → Dev Mode — CSS/iOS/Android/Compose code, design tokens export");
+    println!(
+        "  Dev handoff: Inspect → Dev Mode — CSS/iOS/Android/Compose code, design tokens export"
+    );
     println!("  Plugins: 1500+ in community; First-Party plugins use C++/WASM sandbox");
     println!("  Market: industry default for digital product design, especially mobile/web UX");
     0
@@ -46,7 +57,10 @@ fn run_fig(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "figma".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "figma".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_fig(&rest, &_prog);
     process::exit(code);
@@ -54,7 +68,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fig};
+    use super::{basename, run_fig, strip_ext};
 
     #[test]
     fn basename_strips_path() {

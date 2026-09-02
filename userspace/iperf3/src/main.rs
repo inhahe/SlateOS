@@ -25,7 +25,9 @@ fn run_iperf3(args: Vec<String>) -> i32 {
         println!("Client:");
         println!("  -c, --client <host>       Run in client mode, connecting to <host>");
         println!("  -u, --udp                 Use UDP rather than TCP");
-        println!("  -b, --bitrate <n>[KMGT]   Target bitrate (0 for unlimited, default 1 Mbit/s UDP)");
+        println!(
+            "  -b, --bitrate <n>[KMGT]   Target bitrate (0 for unlimited, default 1 Mbit/s UDP)"
+        );
         println!("  -t, --time <secs>         Time in seconds to transmit for (default 10 secs)");
         println!("  -n, --bytes <n>[KMGT]     Number of bytes to transmit");
         println!("  -P, --parallel <n>        Number of parallel client streams");
@@ -40,7 +42,9 @@ fn run_iperf3(args: Vec<String>) -> i32 {
 
     let is_server = args.iter().any(|a| a == "-s" || a == "--server");
     let is_udp = args.iter().any(|a| a == "-u" || a == "--udp");
-    let port = args.iter().position(|a| a == "-p" || a == "--port")
+    let port = args
+        .iter()
+        .position(|a| a == "-p" || a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(5201);
@@ -50,7 +54,10 @@ fn run_iperf3(args: Vec<String>) -> i32 {
         println!("Server listening on {}", port);
         println!("-----------------------------------------------------------");
         println!("Accepted connection from 192.168.1.100, port 49876");
-        println!("[  5] local 0.0.0.0 port {} connected to 192.168.1.100 port 49876", port);
+        println!(
+            "[  5] local 0.0.0.0 port {} connected to 192.168.1.100 port 49876",
+            port
+        );
         println!("[ ID] Interval           Transfer     Bitrate");
         println!("[  5]   0.00-1.00   sec  1.10 GBytes  9.42 Gbits/sec");
         println!("[  5]   1.00-2.00   sec  1.09 GBytes  9.38 Gbits/sec");
@@ -61,35 +68,58 @@ fn run_iperf3(args: Vec<String>) -> i32 {
         println!("Server listening on {}", port);
         println!("-----------------------------------------------------------");
     } else {
-        let host = args.iter().position(|a| a == "-c" || a == "--client")
+        let host = args
+            .iter()
+            .position(|a| a == "-c" || a == "--client")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("localhost");
-        let parallel = args.iter().position(|a| a == "-P" || a == "--parallel")
+        let parallel = args
+            .iter()
+            .position(|a| a == "-P" || a == "--parallel")
             .and_then(|i| args.get(i + 1))
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(1);
         let proto = if is_udp { "UDP" } else { "TCP" };
         println!("Connecting to host {}, port {}", host, port);
-        println!("[  5] local 0.0.0.0 port 49876 connected to {} port {}", host, port);
+        println!(
+            "[  5] local 0.0.0.0 port 49876 connected to {} port {}",
+            host, port
+        );
         println!("[ ID] Interval           Transfer     Bitrate         Retr  Cwnd");
         if is_udp {
             println!("[  5]   0.00-1.00   sec   125 KBytes  1.02 Mbits/sec  0");
             println!("[  5]   1.00-2.00   sec   125 KBytes  1.02 Mbits/sec  0");
             println!("- - - - - - - - - - - - - - - - - - - - - - - - -");
             println!("[  5]   0.00-10.00  sec  1.22 MBytes  1.02 Mbits/sec  0             sender");
-            println!("[  5]   0.00-10.04  sec  1.21 MBytes  1.01 Mbits/sec                receiver");
+            println!(
+                "[  5]   0.00-10.04  sec  1.21 MBytes  1.01 Mbits/sec                receiver"
+            );
             println!();
-            println!("iperf Done. ({}, {} stream{})", proto, parallel, if parallel > 1 { "s" } else { "" });
+            println!(
+                "iperf Done. ({}, {} stream{})",
+                proto,
+                parallel,
+                if parallel > 1 { "s" } else { "" }
+            );
         } else {
             println!("[  5]   0.00-1.00   sec  1.10 GBytes  9.42 Gbits/sec    0   3.12 MBytes");
             println!("[  5]   1.00-2.00   sec  1.09 GBytes  9.38 Gbits/sec    0   3.12 MBytes");
             println!("[  5]   2.00-3.00   sec  1.10 GBytes  9.44 Gbits/sec    0   3.12 MBytes");
             println!("- - - - - - - - - - - - - - - - - - - - - - - - -");
-            println!("[  5]   0.00-10.00  sec  10.9 GBytes  9.41 Gbits/sec    0             sender");
-            println!("[  5]   0.00-10.04  sec  10.9 GBytes  9.39 Gbits/sec                  receiver");
+            println!(
+                "[  5]   0.00-10.00  sec  10.9 GBytes  9.41 Gbits/sec    0             sender"
+            );
+            println!(
+                "[  5]   0.00-10.04  sec  10.9 GBytes  9.39 Gbits/sec                  receiver"
+            );
             println!();
-            println!("iperf Done. ({}, {} stream{})", proto, parallel, if parallel > 1 { "s" } else { "" });
+            println!(
+                "iperf Done. ({}, {} stream{})",
+                proto,
+                parallel,
+                if parallel > 1 { "s" } else { "" }
+            );
         }
     }
     0
@@ -104,7 +134,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_iperf3};
+    use super::run_iperf3;
 
     #[test]
     fn help_exits_zero() {

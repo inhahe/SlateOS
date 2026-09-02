@@ -1126,6 +1126,41 @@ EOF
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Every gate below asks a Python checker whether the tree is clean, and until
+# 2026-09-01 each asked with a bare `if "$py" .../check-thing.py`, which cannot
+# tell "I found violations" from "I raised an exception" -- both exit 1.  So a
+# checker that fell over was answered with the gate's own refusal text, over an
+# empty finding list, telling the reader to fix code that had never been looked
+# at.  Measured that day: `check-selftest-format-wording.py` died of
+# `MemoryError` in `strip_noise` while two other lanes were building, and this
+# script printed "Each report above is a self-test assertion demanding text that
+# no string literal in the kernel can produce" with no reports above it.
+#
+# `run_checker` is the shared answer, also sourced by scripts/hooks/pre-push --
+# one implementation, because this is the same line of code written twice.  It
+# is sourced before any gate runs so that a gate can never reach an undefined
+# function: that is "command not found", which exits non-zero, which every gate
+# reads as a finding.
+BOOT_CHECKER_LIB="$SCRIPT_DIR/run-checker.sh"
+if [ ! -f "$BOOT_CHECKER_LIB" ]; then
+    echo "ERROR: refusing to build.  Cannot find $BOOT_CHECKER_LIB." >&2
+    echo "Without it no gate below can tell a finding from a crash." >&2
+    exit 1
+fi
+# Quoted because `boot-test` unquoted reads as the subtraction `boot - test`
+# to shellcheck (SC2100), and a warning nobody can act on is a warning everyone
+# learns to scroll past.
+CHECKER_PROG='boot-test'
+CHECKER_REFUSING='build'
+CHECKER_LOGDIR="$(git -C "$PROJECT_ROOT" rev-parse --absolute-git-dir 2>/dev/null)" || CHECKER_LOGDIR=""
+[ -n "$CHECKER_LOGDIR" ] && [ -d "$CHECKER_LOGDIR" ] || CHECKER_LOGDIR="${TMPDIR:-/tmp}"
+export CHECKER_PROG CHECKER_REFUSING CHECKER_LOGDIR
+# The directive has to sit immediately above the `.`, not above the block: it
+# annotates the next source command, and from twelve lines up it annotates
+# nothing (SC1090).
+# shellcheck source=run-checker.sh
+. "$BOOT_CHECKER_LIB"
+
 # Announce the tree under test, first line of the log, before anything else.
 #
 # PROJECT_ROOT comes from `dirname "$0"`, so with three worktrees on this
@@ -2666,7 +2701,7 @@ check_requests_not_deleted() {
     fi
 
     echo "=== Checking that no request file was deleted ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-requests-not-deleted.py"; then
+    if run_checker check-requests-not-deleted "$py" "$PROJECT_ROOT/scripts/check-requests-not-deleted.py"; then
         return 0
     fi
 
@@ -2721,7 +2756,7 @@ check_self_tests_wired() {
     # (committing while a boot test runs is normal here), so re-deriving the
     # markers twenty minutes later could describe a main.rs that never booted.
     mkdir -p "$PROJECT_ROOT/build"
-    if "$py" "$PROJECT_ROOT/scripts/check-self-tests-wired.py" \
+    if run_checker check-self-tests-wired "$py" "$PROJECT_ROOT/scripts/check-self-tests-wired.py" \
             --emit-markers "$GATED_MARKERS"; then
         GATED_MARKERS_FRESH=1
         return 0
@@ -2770,7 +2805,7 @@ check_recursive_locks() {
     # hide a lock-order inversion for as long as `kshell.rs` contained a `'"'`.
     # Run its own cases first so a parser regression is reported as one.
     echo "=== Checking the shared Rust source scanner ==="
-    if ! "$py" "$PROJECT_ROOT/scripts/check-recursive-locks.py" --self-test; then
+    if ! run_checker check-recursive-locks-selftest "$py" "$PROJECT_ROOT/scripts/check-recursive-locks.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  The scanner that backs the lock, VFS" >&2
         echo "and self-test gates mis-parses a Rust literal form.  Until it is" >&2
@@ -2780,7 +2815,7 @@ check_recursive_locks() {
     fi
 
     echo "=== Checking for guards held across a re-acquiring call ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-recursive-locks.py"; then
+    if run_checker check-recursive-locks "$py" "$PROJECT_ROOT/scripts/check-recursive-locks.py"; then
         return 0
     fi
 
@@ -2831,7 +2866,7 @@ check_vfs_lock_order() {
     fi
 
     echo "=== Checking for module locks held across a call into the VFS ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-vfs-under-lock.py"; then
+    if run_checker check-vfs-under-lock "$py" "$PROJECT_ROOT/scripts/check-vfs-under-lock.py"; then
         return 0
     fi
 
@@ -2877,7 +2912,7 @@ check_user_access_sites() {
     fi
 
     echo "=== Checking kernel writes to user memory ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-user-access-sites.py"; then
+    if run_checker check-user-access-sites "$py" "$PROJECT_ROOT/scripts/check-user-access-sites.py"; then
         return 0
     fi
 
@@ -2921,7 +2956,7 @@ check_vfs_permission_gate() {
     fi
 
     echo "=== Checking the VFS permission gate ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-vfs-permission-gate.py"; then
+    if run_checker check-vfs-permission-gate "$py" "$PROJECT_ROOT/scripts/check-vfs-permission-gate.py"; then
         return 0
     fi
 
@@ -2972,7 +3007,7 @@ check_usage_status() {
     fi
 
     echo "=== Checking that usage messages report failure ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-usage-status.py"; then
+    if run_checker check-usage-status "$py" "$PROJECT_ROOT/scripts/check-usage-status.py"; then
         return 0
     fi
 
@@ -3016,7 +3051,7 @@ check_query_status() {
     fi
 
     echo "=== Checking that answering a query reports success ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-query-status.py"; then
+    if run_checker check-query-status "$py" "$PROJECT_ROOT/scripts/check-query-status.py"; then
         return 0
     fi
 
@@ -3059,7 +3094,7 @@ check_option_refusal() {
     fi
 
     echo "=== Checking that an option word is refused, not discarded ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-option-refusal.py"; then
+    if run_checker check-option-refusal "$py" "$PROJECT_ROOT/scripts/check-option-refusal.py"; then
         return 0
     fi
 
@@ -3113,7 +3148,7 @@ check_live_counter_reads() {
     fi
 
     echo "=== Checking that no self-test compares two readings of one counter ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-live-counter-reads.py"; then
+    if run_checker check-live-counter-reads "$py" "$PROJECT_ROOT/scripts/check-live-counter-reads.py"; then
         return 0
     fi
 
@@ -3178,7 +3213,7 @@ check_selftest_skips() {
     # whole file, too narrow and it grades nothing.  Its fixture runs first so
     # either collapse is reported as a gate fault rather than as a clean tree.
     echo "=== Checking the self-test skip gate against its fixture ==="
-    if ! "$py" "$PROJECT_ROOT/scripts/check-selftest-skips.py" --self-test; then
+    if ! run_checker check-selftest-skips-selftest "$py" "$PROJECT_ROOT/scripts/check-selftest-skips.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  The self-test skip gate no longer" >&2
         echo "agrees with its own fixture, so its verdict on the tree means" >&2
@@ -3188,7 +3223,7 @@ check_selftest_skips() {
     fi
 
     echo "=== Checking that self-test skips are looked up and reported ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-selftest-skips.py"; then
+    if run_checker check-selftest-skips "$py" "$PROJECT_ROOT/scripts/check-selftest-skips.py"; then
         return 0
     fi
 
@@ -3255,7 +3290,7 @@ check_selftest_wording() {
     # that has lost the ability to catch the one bug it was written for says so
     # here, instead of nodding a broken tree through to an eleven-minute boot.
     echo "=== Checking the self-test wording gate against its fixture ==="
-    if ! "$py" "$PROJECT_ROOT/scripts/check-selftest-wording.py" --self-test; then
+    if ! run_checker check-selftest-wording-selftest "$py" "$PROJECT_ROOT/scripts/check-selftest-wording.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  The self-test wording gate no longer" >&2
         echo "agrees with its own fixture, so its verdict on the tree means" >&2
@@ -3265,7 +3300,7 @@ check_selftest_wording() {
     fi
 
     echo "=== Checking that self-test assertions name text their command prints ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-selftest-wording.py"; then
+    if run_checker check-selftest-wording "$py" "$PROJECT_ROOT/scripts/check-selftest-wording.py"; then
         return 0
     fi
 
@@ -3326,7 +3361,7 @@ check_selftest_format_wording() {
     # makes findings *disappear*, and it reports that in the same words as a
     # clean tree.
     echo "=== Checking the self-test format wording gate against its fixtures ==="
-    if ! "$py" "$PROJECT_ROOT/scripts/check-selftest-format-wording.py" --self-test; then
+    if ! run_checker check-selftest-format-wording-selftest "$py" "$PROJECT_ROOT/scripts/check-selftest-format-wording.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  The self-test format wording gate no" >&2
         echo "longer agrees with its own fixtures, so its verdict on the tree" >&2
@@ -3336,7 +3371,7 @@ check_selftest_format_wording() {
     fi
 
     echo "=== Checking that self-test assertions name text some literal produces ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-selftest-format-wording.py"; then
+    if run_checker check-selftest-format-wording "$py" "$PROJECT_ROOT/scripts/check-selftest-format-wording.py"; then
         return 0
     fi
 
@@ -3380,7 +3415,7 @@ check_selftest_rung_numbers() {
     fi
 
     echo "=== Checking the rung-numbering gate against its fixture ==="
-    if ! "$py" "$PROJECT_ROOT/scripts/check-selftest-rung-numbers.py" --self-test; then
+    if ! run_checker check-selftest-rung-numbers-selftest "$py" "$PROJECT_ROOT/scripts/check-selftest-rung-numbers.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  The rung-numbering gate no longer agrees" >&2
         echo "with its own fixture, so its verdict means nothing -- it reports a" >&2
@@ -3389,7 +3424,7 @@ check_selftest_rung_numbers() {
     fi
 
     echo "=== Checking that self-test rungs are numbered uniquely and in order ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-selftest-rung-numbers.py"; then
+    if run_checker check-selftest-rung-numbers "$py" "$PROJECT_ROOT/scripts/check-selftest-rung-numbers.py"; then
         return 0
     fi
 
@@ -3434,7 +3469,7 @@ check_shell_message_names() {
     fi
 
     echo "=== Checking the message-name gate against its fixture ==="
-    if ! "$py" "$PROJECT_ROOT/scripts/check-shell-message-names.py" --self-test; then
+    if ! run_checker check-shell-message-names-selftest "$py" "$PROJECT_ROOT/scripts/check-shell-message-names.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  The message-name gate no longer agrees" >&2
         echo "with its own fixture, so its verdict means nothing -- it reports a" >&2
@@ -3443,7 +3478,7 @@ check_shell_message_names() {
     fi
 
     echo "=== Checking that each shell diagnostic names its own command ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-shell-message-names.py"; then
+    if run_checker check-shell-message-names "$py" "$PROJECT_ROOT/scripts/check-shell-message-names.py"; then
         return 0
     fi
 
@@ -3479,7 +3514,7 @@ check_shell_noun_article() {
     fi
 
     echo "=== Checking the noun-article gate against its fixture ==="
-    if ! "$py" "$PROJECT_ROOT/scripts/check-shell-noun-article.py" --self-test; then
+    if ! run_checker check-shell-noun-article-selftest "$py" "$PROJECT_ROOT/scripts/check-shell-noun-article.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  The noun-article gate no longer agrees" >&2
         echo "with its own fixture, so its verdict means nothing -- it reports a" >&2
@@ -3488,7 +3523,7 @@ check_shell_noun_article() {
     fi
 
     echo "=== Checking that an operand noun states an article spelling cannot pick ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-shell-noun-article.py"; then
+    if run_checker check-shell-noun-article "$py" "$PROJECT_ROOT/scripts/check-shell-noun-article.py"; then
         return 0
     fi
 
@@ -3548,7 +3583,7 @@ check_variant_lists() {
     # having 12 of its 13 variants, because the pass that collapses struct and
     # tuple variants ate `[default]` and left a bare `#` glued to `Arrow`.
     echo "=== Checking the variant list gate against its fixture ==="
-    if ! "$py" "$PROJECT_ROOT/scripts/check-variant-lists.py" --self-test; then
+    if ! run_checker check-variant-lists-selftest "$py" "$PROJECT_ROOT/scripts/check-variant-lists.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  The variant list gate no longer" >&2
         echo "agrees with its own fixture, so its verdict on the tree means" >&2
@@ -3558,7 +3593,7 @@ check_variant_lists() {
     fi
 
     echo "=== Checking that every ALL list still names every variant ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-variant-lists.py"; then
+    if run_checker check-variant-lists "$py" "$PROJECT_ROOT/scripts/check-variant-lists.py"; then
         return 0
     fi
 
@@ -3624,7 +3659,7 @@ check_tick_wiring() {
     # comments and `#[cfg(test)]` items before searching, and the fixture pins
     # that behaviour.
     echo "=== Checking the tick wiring gate against its fixture ==="
-    if ! "$py" "$PROJECT_ROOT/scripts/check-tick-wiring.py" --self-test; then
+    if ! run_checker check-tick-wiring-selftest "$py" "$PROJECT_ROOT/scripts/check-tick-wiring.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  The tick wiring gate no longer agrees" >&2
         echo "with its own fixture, so its verdict on the tree means nothing --" >&2
@@ -3634,7 +3669,7 @@ check_tick_wiring() {
     fi
 
     echo "=== Checking that apps which keep time receive the clock ==="
-    if "$py" "$PROJECT_ROOT/scripts/check-tick-wiring.py"; then
+    if run_checker check-tick-wiring "$py" "$PROJECT_ROOT/scripts/check-tick-wiring.py"; then
         return 0
     fi
 
@@ -3680,7 +3715,7 @@ check_production_unwrap() {
     fi
 
     echo "=== Checking for unwrap/expect in kernel production paths ==="
-    if "$py" "$PROJECT_ROOT/scripts/scan-unwrap.py" --summary; then
+    if run_checker scan-unwrap "$py" "$PROJECT_ROOT/scripts/scan-unwrap.py" --summary; then
         return 0
     fi
 
@@ -3736,7 +3771,7 @@ check_orphan_modules() {
     # directory with no modules in it.  Treated as failure along with 1, and
     # deliberately so: the script spells "cannot fire" differently from
     # "passed" precisely so that a caller can refuse both.
-    if "$py" "$PROJECT_ROOT/scripts/scan-orphan-modules.py" --check; then
+    if run_checker scan-orphan-modules "$py" "$PROJECT_ROOT/scripts/scan-orphan-modules.py" --check; then
         return 0
     fi
 
@@ -3985,6 +4020,16 @@ check_python_suites() {
         # tick to `?`, which is readable everywhere.  Set here rather than in
         # each suite because this line is what creates the pipe, and it covers
         # suites added later that have not thought about it.
+        #
+        # THE ONE CHECKER INVOCATION IN THIS FILE THAT DOES NOT GO THROUGH
+        # `run_checker`, deliberately.  Both halves of the defect run_checker
+        # exists for are already answered here: the *whole* output is printed on
+        # failure (not a tail), so no evidence is lost, and the advice a failure
+        # gives -- "reproduce with `python scripts/<suite>`" -- is the right next
+        # step for a crashed suite as much as a failing one.  What run_checker
+        # would cost is this loop's readable shape: it echoes everything a
+        # checker prints, and forty-odd suites' full output in place of the
+        # one-line-per-suite table below is a worse log, not a better one.
         out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
         if [ "$rc" -eq 0 ]; then
             printf '    %-32s %s\n' "$(basename "$f")" "$(printf '%s\n' "$out" | tail -1)"
@@ -4052,26 +4097,27 @@ check_design_decisions_bands() {
     fi
 
     echo "=== Checking design-decisions.md numbering bands ==="
-    local out rc
-    out="$("$py" -u "$PROJECT_ROOT/scripts/check-design-decisions-bands.py" 2>&1)" && rc=0 || rc=$?
-    printf '%s\n' "$out"
+    local rc
+    run_checker check-design-decisions-bands "$py" -u \
+        "$PROJECT_ROOT/scripts/check-design-decisions-bands.py" && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         return 0
     fi
 
+    # No `rc -eq 2` arm any more: this gate used to carry its own "a broken
+    # checker, not a broken document" branch, which was the right instinct and
+    # covered one exit code out of all the ways a checker can fail to reach a
+    # verdict -- an uncaught exception exits *1*, so it landed in the accusing
+    # branch below.  run_checker now makes that distinction for every gate in
+    # the file, and never returns anything but 0 or 1, so the arm would be dead
+    # code claiming a guarantee it no longer provides.
     echo "" >&2
-    if [ "$rc" -eq 2 ]; then
-        echo "ERROR: refusing to build.  The design-decisions.md band checker" >&2
-        echo "could not run (exit 2) -- that is a broken checker, not a broken" >&2
-        echo "document.  Fix the checker or its baseline before continuing." >&2
-    else
-        echo "ERROR: refusing to build.  design-decisions.md violates the" >&2
-        echo "per-lane numbering bands.  Two lanes sharing a section number is" >&2
-        echo "invisible to git, which is why this is a gate.  The rule is in" >&2
-        echo "the file's own 'Numbering and file order' header; run" >&2
-        echo "    python scripts/check-design-decisions-bands.py" >&2
-        echo "for your lane's next number and the line to insert after." >&2
-    fi
+    echo "ERROR: refusing to build.  design-decisions.md violates the" >&2
+    echo "per-lane numbering bands.  Two lanes sharing a section number is" >&2
+    echo "invisible to git, which is why this is a gate.  The rule is in" >&2
+    echo "the file's own 'Numbering and file order' header; run" >&2
+    echo "    python scripts/check-design-decisions-bands.py" >&2
+    echo "for your lane's next number and the line to insert after." >&2
     exit 1
 }
 
@@ -4106,24 +4152,21 @@ check_boot_skips() {
     fi
 
     echo "=== Checking for self-tests that skip on every recorded boot ==="
-    local out rc
-    out="$("$py" -u "$PROJECT_ROOT/scripts/check-boot-skips.py" 2>&1)" && rc=0 || rc=$?
-    printf '%s\n' "$out"
+    local rc
+    run_checker check-boot-skips "$py" -u \
+        "$PROJECT_ROOT/scripts/check-boot-skips.py" && rc=0 || rc=$?
     [ "$rc" -eq 0 ] && return 0
 
+    # The `rc -eq 2` arm this used to carry is gone; run_checker makes that
+    # distinction for every gate now and never returns 2.  See the note in
+    # check_design_decisions_bands.
     echo "" >&2
-    if [ "$rc" -eq 2 ]; then
-        echo "ERROR: refusing to build.  The never-running self-test checker" >&2
-        echo "could not read bench/boot-history.jsonl (exit 2) -- a broken" >&2
-        echo "checker, not a broken tree.  Fix the checker first." >&2
-    else
-        echo "ERROR: refusing to build.  A self-test has announced SKIP on" >&2
-        echo "every recorded boot, which means its section has never run while" >&2
-        echo "the suite above it reported PASSED.  The lines above name each" >&2
-        echo "one and the three ways to resolve it; run" >&2
-        echo "    python scripts/check-boot-skips.py --list" >&2
-        echo "for the full per-skip standing." >&2
-    fi
+    echo "ERROR: refusing to build.  A self-test has announced SKIP on" >&2
+    echo "every recorded boot, which means its section has never run while" >&2
+    echo "the suite above it reported PASSED.  The lines above name each" >&2
+    echo "one and the three ways to resolve it; run" >&2
+    echo "    python scripts/check-boot-skips.py --list" >&2
+    echo "for the full per-skip standing." >&2
     exit 1
 }
 
@@ -4155,26 +4198,22 @@ check_gated_selftests() {
     fi
 
     echo "=== Checking for gated self-tests that have never announced themselves ==="
-    local out rc
-    out="$("$py" -u "$PROJECT_ROOT/scripts/check-gated-selftests.py" 2>&1)" \
-        && rc=0 || rc=$?
-    printf '%s\n' "$out"
+    local rc
+    run_checker check-gated-selftests "$py" -u \
+        "$PROJECT_ROOT/scripts/check-gated-selftests.py" && rc=0 || rc=$?
     [ "$rc" -eq 0 ] && return 0
 
+    # The `rc -eq 2` arm this used to carry is gone; run_checker makes that
+    # distinction for every gate now and never returns 2.  See the note in
+    # check_design_decisions_bands.
     echo "" >&2
-    if [ "$rc" -eq 2 ]; then
-        echo "ERROR: refusing to build.  The never-ran gated self-test checker" >&2
-        echo "could not read bench/boot-history.jsonl (exit 2) -- a broken" >&2
-        echo "checker, not a broken tree.  Fix the checker first." >&2
-    else
-        echo "ERROR: refusing to build.  A self-test that is called from inside" >&2
-        echo "a conditional in kernel/src/main.rs has never once printed the" >&2
-        echo "line it declares with RAN-IF, so it has never run -- while every" >&2
-        echo "summary above it counts it as coverage.  The lines above name" >&2
-        echo "each one and the three ways to resolve it; run" >&2
-        echo "    python scripts/check-gated-selftests.py --list" >&2
-        echo "for the full per-marker standing." >&2
-    fi
+    echo "ERROR: refusing to build.  A self-test that is called from inside" >&2
+    echo "a conditional in kernel/src/main.rs has never once printed the" >&2
+    echo "line it declares with RAN-IF, so it has never run -- while every" >&2
+    echo "summary above it counts it as coverage.  The lines above name" >&2
+    echo "each one and the three ways to resolve it; run" >&2
+    echo "    python scripts/check-gated-selftests.py --list" >&2
+    echo "for the full per-marker standing." >&2
     exit 1
 }
 

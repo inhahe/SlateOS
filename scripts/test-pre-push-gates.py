@@ -187,11 +187,27 @@ def test_the_request_deletion_gate_judges_the_commit(text):
           "check-requests-not-deleted.py" in code, True)
     check("gate 9 passes --head so it judges the pushed commit",
           re.search(r'--head\s+"\$sha"', code) is not None, True)
-    # As a *condition*, not merely present: the failure branch runs the
-    # self-test a second time to show its output, so a bare "is the string
-    # here" assertion stays green when the guard itself is removed.
+    # As a *condition*, not merely present: `--selftest` appears in the gate's
+    # prose and its failure message too, so a bare "is the string here"
+    # assertion stays green when the guard itself is removed.
+    #
+    # The invocation goes through `run_checker` (design-decisions.md 746), which
+    # is what tells a checker that *found* something from one that fell over.
+    # Matching that helper rather than a bare `"$py"` is deliberate: reverting a
+    # gate to the direct call is the regression this line should catch, and
+    # `test-pre-push-run-checker.py` group 7 asserts the same rule for all
+    # eleven gates at once.
+    #
+    # `"$py"` is matched between the label and the script because the helper
+    # moved to `scripts/run-checker.sh`, shared with `boot-test.sh`, and takes
+    # the interpreter as an ordinary argument rather than reading an ambient
+    # `$py` from the caller's scope. boot-test declares `local py` inside each
+    # of its gates, so the ambient form would have worked there only for as long
+    # as no call site was a subshell.
     check("gate 9 self-tests the checker before believing it",
-          re.search(r'if\s*!\s*"\$py"\s+"\$reqdel"\s+--selftest', code) is not None,
+          re.search(r'if\s*!\s*run_checker\s+\S+\s+"\$py"\s+"\$reqdel"\s+--selftest',
+                    code)
+          is not None,
           True)
     check("gate 9 collects the refs being pushed",
           "pushed_shas" in code, True)

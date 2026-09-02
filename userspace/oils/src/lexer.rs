@@ -3614,10 +3614,11 @@ fn alias_candidate(tok: &Tok) -> Option<&Str> {
 /// Only a single unquoted-literal word in command position is a candidate. Its
 /// value is pushed onto the reader's input in front of the rest of the text and
 /// the whole thing read again from there, so the value's first word is itself a
-/// candidate (guarded by [`AliasScan::active`], which is what makes `alias
-/// ls='ls -l'` terminate) and anything written across the seam is read as one
-/// thing. If a value ends in a blank, the word after the pop is a candidate too
-/// (bash's `PST_ALEXPNEXT`, which is what enables `alias sudo='sudo '`).
+/// candidate (guarded by [`AliasScan::being_expanded`], which is what makes
+/// `alias ls='ls -l'` terminate) and anything written across the seam is read
+/// as one thing. If a value ends in a blank, the word after the pop is a
+/// candidate too (bash's `PST_ALEXPNEXT`, which is what enables
+/// `alias sudo='sudo '`).
 ///
 /// `starts` and `ends` are parallel to `toks`: where in `text` each token begins
 /// and ends. Both are needed — `ends` so that a diagnostic raised while the

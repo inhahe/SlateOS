@@ -11,16 +11,18 @@
 //! into the AST — literals, here-doc delimiters, substitution bodies, function
 //! names — is [`Str`], and the source itself arrives as [`BStr`].
 //!
-//! Two things stay `String`, deliberately:
+//! One thing stays `String`, deliberately:
 //!
 //! * **Names.** Variable, alias and reserved-word namespaces are text by
 //!   construction (`[A-Za-z_][A-Za-z0-9_]*`), so a name that is not UTF-8 is not
 //!   a name at all. Those sites go through [`bytes::as_str`] and reject — or
 //!   defer to a run-time "bad substitution" — when it returns `None`, which is
 //!   the honest answer rather than a mangled approximation.
-//! * **Diagnostics.** [`ParseError::msg`] is still `String`; the word being
-//!   complained about is rendered by [`shown`]. Step 10 of TD-OILS-BYTE-STRINGS
-//!   converts the diagnostic layer and deletes that helper.
+//!
+//! Diagnostics do not: [`ParseError::msgs`] is a `Vec<Str>`, so a message that
+//! quotes the offending construct back quotes the bytes the user actually wrote
+//! rather than a decode of them. That was step 10 of TD-OILS-BYTE-STRINGS, which
+//! also retired the lossy `shown` helper this layer used to render words with.
 //!
 //! Syntax comparisons scan [`Ch`] but are written against an ASCII `char` view
 //! ([`syn`]/[`syn_at`], mirroring the lexer's), so a non-ASCII character or a

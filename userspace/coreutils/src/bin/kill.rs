@@ -8,7 +8,7 @@
 //!
 //! Our OS uses IPC messages rather than Unix signals for process *control*,
 //! but it implements POSIX signals for compatibility, so `kill` is a thin
-//! wrapper over the POSIX layer's [`kill(2)`]. That layer does the real work,
+//! wrapper over the POSIX layer's `kill(2)`. That layer does the real work,
 //! including the whole process-group fanout; see `posix/src/signal.rs`.
 //!
 //! # The signal spec is the *first* argument, and only the first

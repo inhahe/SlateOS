@@ -314,7 +314,16 @@ ENVV=()
 # else in the suite can tell a `cp` that repairs that stripping from one that
 # does not.
 UMASK=
-reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); UMASK=''; }
+# Words placed in front of `cp` itself, for a case that needs the program to run
+# somewhere this shell is not. One case uses it — section 17's unmapped-owner
+# one — and its value is [`DIFF_USERNS`], the wrapper that puts `cp` in a user
+# namespace so a chown can fail in the one way the diagnostic is guarded on.
+#
+# In front of `cp` and behind `env`, so what is wrapped is the program and not
+# the environment builder; and inside `timeout`, so a wrapper that hangs is
+# bounded by the same 30 seconds as everything else.
+WRAP=()
+reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); UMASK=''; WRAP=(); }
 reset_knobs
 
 # The two sides run in two different directories, and a case that names an
@@ -350,7 +359,7 @@ run_one() {
     [ -z "$UMASK" ] || umask "$UMASK"
     # `env` and not an assignment prefix, so that [`ENVV`] can hold a variable
     # whose *name* is chosen by the case rather than by this line.
-    diff_run timeout -k 2 30 env "${ENVV[@]}" cp "$@" >"$out" 2>"$err"
+    diff_run timeout -k 2 30 env "${ENVV[@]}" "${WRAP[@]}" cp "$@" >"$out" 2>"$err"
   ) <"$answers"
   echo $? >"$rcf"
   return 0
@@ -397,6 +406,7 @@ compare() {
   [ "$TREE" = mktree ] || label="$label   [tree: $TREE]"
   [ ${#ENVV[@]} -eq 0 ] || label="$label   [env: ${ENVV[*]}]"
   [ -z "$UMASK" ] || label="$label   [umask: $UMASK]"
+  [ ${#WRAP[@]} -eq 0 ] || label="$label   [wrap: ${WRAP[*]}]"
   run_one ours "$o_dir" "$o_out" "$o_err" "$o_rc" "$@"
   run_one gnu  "$g_dir" "$g_out" "$g_err" "$g_rc" "$@"
   judge "$o_dir" "$g_dir" "$o_out" "$g_out" \
@@ -479,6 +489,15 @@ elif [ "$DIFF_ACL_REF" != yes ]; then
   echo "  acl:   $DIFF_SETFACL, but the reference lacks USE_ACL"
 else
   echo "  acl:   $DIFF_SETFACL, reference has USE_ACL"
+fi
+# The one case that can reach `failed to preserve ownership for %s`. Announced
+# for the same reason as the two above: without a line here, a host where user
+# namespaces are switched off reports the identical count while checking one
+# fewer thing — and this is the diagnostic a divergence already hid in once.
+if [ -z "$DIFF_USERNS" ]; then
+  echo "  userns: NOT EXERCISED -- no unprivileged user namespace with a foreign-owned link"
+else
+  echo "  userns: $DIFF_USERNS, unmapped owner from $DIFF_FOREIGN_LINK"
 fi
 
 # =============================================================================
@@ -1700,6 +1719,47 @@ STAMPS=1 TREE='mkstamped'
 run_case -P -p tree/link dst
 STAMPS=1 TREE='mkstamped'
 run_case -p -r tree dst2
+
+# The link's *owner*, when it cannot be taken. This is the only case in the
+# suite that reaches `failed to preserve ownership for %s`, and it exists
+# because a divergence lived in that sentence undetected: GNU quotes the name
+# for a file and a directory and leaves it bare for a symlink, and ours quoted
+# all three. Every other case here fails a chown with EPERM, which
+# `chown_failure_ok` forgives, so both sides said nothing and agreed.
+#
+# What makes it speak is in `diff-wsl.sh`: inside a user namespace the euid is
+# 0, so the forgiveness is withdrawn, and the source link's owner is unmapped,
+# so the chown fails EINVAL instead of EPERM. Both sides then print
+#
+#   cp: failed to preserve ownership for out: Invalid argument
+#
+# and exit 1. Skipped where the arrangement is unavailable, which the header
+# says out loud rather than leaving as a silently smaller run.
+#
+# Exit 1 and not 0 because every `cp` option that turns ownership on also sets
+# `require_preserve` — `-p`, `--preserve=`, and `-a` alike (`cp.c:1018`, `1089`,
+# `1098`) — so the error is always the fatal kind here and GNU takes its
+# `goto un_backup`. That is why the times are never reached on either side, and
+# why `mv`, whose `cp_option_init` leaves `require_preserve` false
+# (`mv.c:143`), is the only member of the family that can exercise the
+# *surviving* branch. Its harness does not reach this yet.
+#
+# No `STAMPS`. It would look like it asserted that the times were not preserved
+# and would assert nothing: `fold_now` rewrites every timestamp later than 2011
+# as the word `now`, and the source link's own mtime is later than 2011, so a
+# side that preserved the times and one that did not would print the same word.
+#
+# The source is outside the case directory and identical for both sides, so it
+# needs no `scrub`; it appears in no diagnostic, since the name in this one is
+# the destination's.
+if [ -n "$DIFF_USERNS" ]; then
+  # shellcheck disable=SC2206  # deliberately word-split: it is a command, not a path
+  WRAP=($DIFF_USERNS)
+  run_case -P -p "$DIFF_FOREIGN_LINK" out
+  # shellcheck disable=SC2206
+  WRAP=($DIFF_USERNS)
+  run_case -P --preserve=ownership "$DIFF_FOREIGN_LINK" out
+fi
 
 # --no-preserve. On a destination this run created it is not the same as not
 # having asked: `--no-preserve=mode` gives 0666 (0777 for a directory) less the

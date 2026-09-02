@@ -45,7 +45,7 @@
 //! through the same [`coreutils::human`] entry point, so `BLOCK_SIZE=K` in a
 //! profile means one thing to both. `df` adds a wrinkle `du` has not: the
 //! *header* is derived from the block size too, which is why `df -B K` says
-//! `1K-blocks` and `df -B 1K` says `1024-blocks`. See [`get_header`].
+//! `1K-blocks` and `df -B 1K` says `1024-blocks`. See [`Df::get_header`].
 //!
 //! # Not implemented
 //!
@@ -179,7 +179,7 @@ struct FieldSpec {
     arg: &'static [u8],
     kind: Kind,
     /// The heading in the default (non-`-i`, non-`-P`, non-`-h`) mode. Four of
-    /// the twelve are rewritten by [`get_header`]; the rest are used as they
+    /// the twelve are rewritten by [`Df::get_header`]; the rest are used as they
     /// stand.
     caption: &'static str,
     /// The `width` column of upstream's `field_data[]`: a *floor*, not a fixed
@@ -198,7 +198,7 @@ struct FieldSpec {
 /// `field_data[]`, in declaration order.
 ///
 /// `size`'s caption is a placeholder: it is *always* replaced by
-/// [`get_header`], because its text is derived from the block size. It is
+/// [`Df::get_header`], because its text is derived from the block size. It is
 /// spelled here as upstream spells it so that a reader comparing the two
 /// tables does not have to wonder.
 #[rustfmt::skip]
@@ -250,7 +250,7 @@ impl Field {
 /// A column of the table being built: a [`FieldSpec`] plus the width it has
 /// grown to.
 ///
-/// The caption is owned rather than borrowed because [`get_header`] computes
+/// The caption is owned rather than borrowed because [`Df::get_header`] computes
 /// four of them (`1K-blocks`, `Size`, `1024-blocks`, …) at run time from the
 /// block size.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -840,7 +840,7 @@ trait System {
     fn sync(&self);
 
     /// Whether standard output is a terminal, which decides how an unprintable
-    /// byte in a cell is replaced. See [`Df::replace_problematic_chars`].
+    /// byte in a cell is replaced. See [`Df::scrub`].
     fn stdout_is_tty(&self) -> bool;
 
     /// gnulib's `find_mount_point`: the nearest ancestor of `point` that is on

@@ -197,7 +197,7 @@ fn fail(bracket: bool, e: &Fail) -> ExitCode {
     ExitCode::from(SYNTAX)
 }
 
-/// Whether argv[0] names this program under its bracket alias.
+/// Whether argv\[0\] names this program under its bracket alias.
 ///
 /// The `.exe` strip is for the development host only; on the target the name is
 /// exactly `[`.

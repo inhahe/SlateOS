@@ -46,7 +46,7 @@
 //! crate's library is here: `cp -u` and `mv -u` are documented as the same
 //! option, and the only difference between them is one line — the flag that
 //! selects the truncation, which GNU computes as `preserve_timestamps &&
-//! !(move_mode && dst_dev == src_dev)` at `copy.c:2358`. For `mv` that reduces
+//! !(move_mode && dst_dev == src_dev)` at `copy.c:2359`. For `mv` that reduces
 //! to "the move crosses a filesystem boundary"; for `cp -p` it is always true.
 //! Today only `mv` calls it, because `cp --update` is still refused by name;
 //! when it lands it needs this and not a second copy of it.
@@ -355,6 +355,16 @@ mod unix {
         // one nanosecond; kept because that constant is the thing that would
         // change on a platform without `utimensat`, and a reader comparing this
         // against `utimecmp.c` should find every line of it.
+        // `clippy::modulo_one` is right that `% 1` is zero, and that is the very
+        // point the comment above makes; it is allowed rather than obeyed
+        // because deleting the line would silently make this module wrong on the
+        // day `SYSCALL_RESOLUTION` stops being 1, and the deletion would leave
+        // nothing behind to notice. It is `deny`-level under
+        // `#![deny(clippy::all)]`, and it fires only where `cfg(unix)` is true —
+        // which is the *shipping* target (`toolchain/x86_64-slateos.json` sets
+        // `"target-family": ["unix"]`) and not the Windows build host, so a
+        // clippy run on the host cannot see it.
+        #[allow(clippy::modulo_one)]
         let src_m = Stamp {
             sec: src_m.sec,
             nsec: src_m.nsec - src_m.nsec % SYSCALL_RESOLUTION,

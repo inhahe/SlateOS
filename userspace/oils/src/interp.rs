@@ -5171,7 +5171,7 @@ pub struct Shell {
     /// external command inheriting fd 0) consume successive input. `None` = the
     /// shell's real stdin. Consulted wherever [`StdinSrc::Inherit`] is the base
     /// input ([`Shell::read_line`], [`Shell::read_record_input`],
-    /// [`Shell::read_all_bytes`], and [`Shell::run_external`]). A subshell clone
+    /// [`Shell::read_records`], and [`Shell::run_external`]). A subshell clone
     /// inherits a snapshot of the *remaining* bytes (independent offset — reads
     /// in the subshell do not advance the parent's cursor; a minor deviation
     /// from bash's shared-fd semantics, acceptable because our subshells already
@@ -13923,7 +13923,7 @@ impl Shell {
     /// calls `without_job_control`, which empties the table, and that covers a
     /// `( … )`, an `&` job, a coproc, and a pipeline stage that is a compound
     /// command / function call / `eval`·`.`·`source` — so those start empty
-    /// ([`Shell::clone_for_subshell`], [`Shell::enter_stage_subshell`]). What is
+    /// ([`Shell::clone_for_subshell`], [`Shell::settle_stage`]). What is
     /// left is a plain pipeline stage and a command substitution, and those are
     /// exactly the two callers here.
     fn inherit_jobs(&mut self, from: &Shell) {
@@ -22472,7 +22472,7 @@ impl Shell {
     ///   newname = (v == 0) ? nameref_transform_name (name, flags) : name;
     /// ```
     ///
-    /// The second question — [`Shell::global_chain_reaches_var`] — is whether
+    /// The second question — [`Shell::global_chain_end`] — is whether
     /// the *global* binding of the name reaches a variable at all. Where it does
     /// not (there is no global of that name, or its reference chain runs into a
     /// name nothing answers to, or into a cycle) bash does not bind the name: it
@@ -22497,7 +22497,7 @@ impl Shell {
     ///
     /// `compound` names are the operands assigned a **compound literal**, which
     /// is a different command from the builtin the rest of the word list is —
-    /// and finds the name it binds its own way. See [`Shell::global_bind_name`].
+    /// and finds the name it binds its own way. See [`Shell::global_bind_names`].
     fn enter_global_scope(
         &mut self,
         names: &[String],
@@ -46133,39 +46133,6 @@ impl Shell {
         status
     }
 
-    /// Follow an `export`/`readonly` operand that carries the nameref attribute
-    /// to what it points at, the way bash does before it marks anything:
-    ///
-    /// ```sh
-    /// w=5; declare -n r=w
-    /// export r      # declare -x w="5",  and r is still declare -n r="w"
-    /// readonly r=9  # declare -r w="9"
-    /// export -a r=9 # declare -ax w=([0]="9")
-    /// ```
-    ///
-    /// Unlike `declare`, there is no operand here that is *about* the
-    /// reference — neither builtin has a `-n`, and `export -n` (which takes the
-    /// export attribute away) follows the reference like everything else — so
-    /// this is unconditional.
-    ///
-    /// The two ways it can fail to name something markable are both quiet about
-    /// the status:
-    ///
-    /// * A **circular** chain points at nothing. The warning is out;
-    ///   `export a` reports 0, and only the *store* a valued operand wanted
-    ///   fails, so `export a=5` reports 1. Unless the operand *makes an array*
-    ///   (`export -a a=5`), which is a write and so falls back on the
-    ///   reference's own name — see [`Self::resolve_ref_array_write`] — leaving
-    ///   `declare -ax a=([0]="5")` and breaking the cycle.
-    /// * An **element** reference (`declare -n r=arr[1]`) names no variable, and
-    ///   a subscript is exactly what these two builtins refuse — so the
-    ///   marking is refused with `` export: `arr[1]': not a valid identifier ``.
-    ///   The *store* still happens, through the reference and with the append
-    ///   form intact (`export r+=9` leaves `arr[1]="29"`), and the status is
-    ///   still 0. `declare` differs: it marks `arr` and stores into `arr[1]`.
-    ///
-    /// How many times the chain is walked — and so how many times a circular one
-    /// is reported — is [`AttrRefRule::use_walks`].
     /// How many times an `export`/`readonly` operand walks its nameref chain,
     /// and so how many times a circular one is reported.
     ///
@@ -46217,6 +46184,39 @@ impl Shell {
         store + 1 + retry
     }
 
+    /// Follow an `export`/`readonly` operand that carries the nameref attribute
+    /// to what it points at, the way bash does before it marks anything:
+    ///
+    /// ```sh
+    /// w=5; declare -n r=w
+    /// export r      # declare -x w="5",  and r is still declare -n r="w"
+    /// readonly r=9  # declare -r w="9"
+    /// export -a r=9 # declare -ax w=([0]="9")
+    /// ```
+    ///
+    /// Unlike `declare`, there is no operand here that is *about* the
+    /// reference — neither builtin has a `-n`, and `export -n` (which takes the
+    /// export attribute away) follows the reference like everything else — so
+    /// this is unconditional.
+    ///
+    /// The two ways it can fail to name something markable are both quiet about
+    /// the status:
+    ///
+    /// * A **circular** chain points at nothing. The warning is out;
+    ///   `export a` reports 0, and only the *store* a valued operand wanted
+    ///   fails, so `export a=5` reports 1. Unless the operand *makes an array*
+    ///   (`export -a a=5`), which is a write and so falls back on the
+    ///   reference's own name — see [`Self::resolve_ref_array_write`] — leaving
+    ///   `declare -ax a=([0]="5")` and breaking the cycle.
+    /// * An **element** reference (`declare -n r=arr[1]`) names no variable, and
+    ///   a subscript is exactly what these two builtins refuse — so the
+    ///   marking is refused with `` export: `arr[1]': not a valid identifier ``.
+    ///   The *store* still happens, through the reference and with the append
+    ///   form intact (`export r+=9` leaves `arr[1]="29"`), and the status is
+    ///   still 0. `declare` differs: it marks `arr` and stores into `arr[1]`.
+    ///
+    /// How many times the chain is walked — and so how many times a circular one
+    /// is reported — is [`Shell::attr_ref_walks`].
     fn attr_nameref(
         &mut self,
         tag: &str,
@@ -70366,7 +70366,7 @@ mod tests {
         /// They spell it by its [`base`](Self::base) and pass [`test_cwd`] as
         /// the glob's cwd, which keeps the pattern relative while resolving it
         /// somewhere that is not the source tree. The process cwd is not
-        /// involved, so no [`cwd_guard`] is needed either.
+        /// involved, so there is nothing here to serialise against either.
         fn relative(tag: &str) -> Self {
             Self::fresh(bytes::bytes_to_path(&test_cwd()).join(uniq_name(tag)))
         }
@@ -100977,8 +100977,8 @@ st=1
     /// A unique scratch *file* path, in the forward-slash form a script needs.
     ///
     /// Absolute, under the temp dir: that makes these tests independent of the
-    /// process cwd, so they never race the cwd-mutating ones (`cd`/`pushd`) even
-    /// though they don't hold [`cwd_guard`]. Unlike [`ScratchDir`] there is
+    /// process cwd, which nothing moves — `cd` and `pushd` walk a [`Shell`]'s
+    /// own `cwd` and never the process's. Unlike [`ScratchDir`] there is
     /// nothing to remove afterwards — the caller writes one file, and the temp
     /// dir is the system's to sweep.
     fn uniq_path(tag: &str) -> String {

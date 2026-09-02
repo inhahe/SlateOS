@@ -42,7 +42,7 @@
 //! The two arrive by different doors and have to be answered separately, which
 //! is why this module has two halves.
 //!
-//! ## Answering the first: [`guard_std_fds!`]
+//! ## Answering the first: [`crate::guard_std_fds!`]
 //!
 //! By the time any Rust code you wrote runs, the answer is already gone —
 //! `fcntl(1, F_GETFD)` succeeds, because 1 is now `/dev/null`. The one window
@@ -81,7 +81,7 @@
 //! utility's output with its diagnostics matches what the same program does
 //! under glibc.
 //!
-//! ## The same question about descriptor 2: [`diag!`] and [`close_stderr`]
+//! ## The same question about descriptor 2: [`crate::diag!`] and [`close_stderr`]
 //!
 //! `eprintln!` has a third failure of its own, and it is louder than either of
 //! the above: it *panics* when the write fails. The panic handler then tries to
@@ -104,7 +104,7 @@
 //! where it is otherwise 2. Measured, for a closed descriptor and a full one
 //! alike.
 //!
-//! So [`diag!`] replaces `eprintln!` — same shape, raw `write(2)`, no panic —
+//! So [`crate::diag!`] replaces `eprintln!` — same shape, raw `write(2)`, no panic —
 //! and records a lost diagnostic in one process-global flag, which is exactly
 //! what `ferror (stderr)` is. [`close_stderr`] turns that flag into upstream's
 //! verdict and belongs around `main` itself — one wrapper per binary, standing
@@ -114,7 +114,7 @@
 //! ## Descriptor 1's buffer is process-global, as stdio's is
 //!
 //! [`Stream::stdout`] hands back a *handle* onto one shared buffer rather than
-//! a buffer of its own, which is what makes [`diag!`] able to flush standard
+//! a buffer of its own, which is what makes [`crate::diag!`] able to flush standard
 //! output before it writes — glibc's `error()` opens with `fflush (stdout)`,
 //! and without that
 //!
@@ -341,7 +341,7 @@ macro_rules! guard_std_fds {
 /// was actually invoked with.
 ///
 /// Call this as the first statement of `main`, in a binary that has expanded
-/// [`guard_std_fds!`]. Calling it without the macro is harmless and does
+/// [`crate::guard_std_fds!`]. Calling it without the macro is harmless and does
 /// nothing, which is the failure mode you want if someone forgets: the program
 /// keeps the pre-existing behaviour rather than closing a descriptor it should
 /// not have.
@@ -357,7 +357,7 @@ pub fn restore() {
 /// [`restore`] answers, kept available for a utility that must act on it
 /// rather than merely propagate it.
 ///
-/// Always `false` without [`guard_std_fds!`], and off Linux.
+/// Always `false` without [`crate::guard_std_fds!`], and off Linux.
 #[must_use]
 pub fn was_closed_at_startup(fd: i32) -> bool {
     imp::was_closed_at_startup(fd)
@@ -429,7 +429,7 @@ static DIAGNOSTIC_LOST: AtomicBool = AtomicBool::new(false);
 
 /// Write one diagnostic to descriptor 2, remembering it if it does not arrive.
 ///
-/// The whole of what [`diag!`] does; call it directly only where the message is
+/// The whole of what [`crate::diag!`] does; call it directly only where the message is
 /// already a `String`. Nothing is added but the trailing newline — the program
 /// name and its colon belong to the caller, as they do in `error(3)`.
 ///
@@ -601,7 +601,7 @@ pub fn close_stdout_with(program: &str, out: Stream, earned: ExitCode, failure: 
 
 /// The last word on the exit status: gnulib's `close_stream (stderr)`.
 ///
-/// Returns `failure` if any diagnostic was lost — see [`diag!`] — and `earned`
+/// Returns `failure` if any diagnostic was lost — see [`crate::diag!`] — and `earned`
 /// otherwise. `failure` is upstream's `exit_failure`; 1 for most of the family.
 ///
 /// # Wrap `main` with it; do not sprinkle it
@@ -638,7 +638,7 @@ pub fn close_stdout_with(program: &str, out: Stream, earned: ExitCode, failure: 
 /// `eprintln!` or through `io::stderr()` sets no flag — worse, both *lie* about
 /// having arrived, since the runtime maps `EBADF` on a standard descriptor to
 /// success and a `let _ =` throws away the `ENOSPC`. So every diagnostic must
-/// leave through [`diag!`], [`diag_line`], [`diag_bytes`] or a [`Stream`] on
+/// leave through [`crate::diag!`], [`diag_line`], [`diag_bytes`] or a [`Stream`] on
 /// descriptor 2 (whose `record` sets the same flag), or this wrapper will hand
 /// back `earned` for a run whose complaint went nowhere. `pwd` is the worked
 /// example: `pwd foo` warns and exits 0, so with a lost warning GNU's 1 is the
@@ -742,7 +742,7 @@ impl Inner {
     ///
     /// A `Stream` on descriptor 2 is another way of writing one — `nohup` and
     /// `env` build their messages that way — so a failure here has to reach the
-    /// same flag [`diag!`] sets, or the status would depend on which of the two
+    /// same flag [`crate::diag!`] sets, or the status would depend on which of the two
     /// spellings the utility happened to use.
     fn record(&mut self, fd: i32, e: io::Error) {
         if fd == 2 {

@@ -426,7 +426,7 @@ pub fn source_is_dst_backup(
     }
 }
 
-/// GNU's `un_backup` label (`copy.c:3364`): an operation that failed *after* its
+/// GNU's `un_backup` label (`copy.c:3350`): an operation that failed *after* its
 /// destination had been renamed away must put the destination back.
 ///
 /// Without it a failed `cp -b a b` leaves no `b` at all — the copy did not
@@ -486,7 +486,7 @@ pub fn un_backup(
 }
 
 /// Whether the source's last component is `.` or `..`, which upstream's
-/// `dot_or_dotdot` asks before it backs anything up (`copy.c:2516`).
+/// `dot_or_dotdot` asks before it backs anything up (`copy.c:2520`).
 ///
 /// `cp -rb a/. d` copies `a`'s *contents* into an existing `d`, so backing up
 /// `d` would move away the very directory the copy is about to fill. `mv` asks

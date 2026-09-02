@@ -2,7 +2,7 @@
 //! its extended attributes — and reading the same four off the source they are
 //! being copied from.
 //!
-//! `std` can read all three and write almost none of them. [`fs::set_permissions`]
+//! `std` can read all three and write almost none of them. [`std::fs::set_permissions`]
 //! is the one exception, and even it takes the mode through an opaque
 //! [`Permissions`](std::fs::Permissions) that cannot be constructed portably; there is
 //! no path form of `utimensat` at all — [`File::set_times`](std::fs::File::set_times)
@@ -18,7 +18,7 @@
 //!
 //! `cp -p` restores timestamps, ownership, extended attributes and mode, in
 //! that order and for the two reasons GNU gives where it does it: "chown turns
-//! off set[ug]id bits for non-root, so do the chmod last" (`copy.c:3245`), and
+//! off set\[ug\]id bits for non-root, so do the chmod last" (`copy.c:3245`), and
 //! "set xattrs after ownership as changing owners will clear capabilities"
 //! (`copy.c:3279`). Splitting them across four modules would put the halves of
 //! one ordering constraint in four files, and the ordering is the part that is
@@ -484,7 +484,7 @@ pub enum GroupRetry {
     /// the original `errno`, because whether it worked changes nothing about
     /// what to say next.
     Yes,
-    /// Do not. GNU's symlink arm (`copy.c:3178`) is a bare `lchownat` with no
+    /// Do not. GNU's symlink arm (`copy.c:3180`) is a bare `lchownat` with no
     /// retry, unlike `copy_reg` and the shared tail, and the difference is
     /// visible in `ls -l` on the copied link.
     No,
@@ -522,7 +522,7 @@ pub enum Ownership {
 /// Give `on` the owner and group in `want`, with GNU's retry and GNU's reading
 /// of what a refusal means.
 ///
-/// The whole of `set_owner` (`copy.c:895`) bar two things the caller keeps: the
+/// The whole of `set_owner` (`copy.c:897`) bar two things the caller keeps: the
 /// diagnostic, whose wording differs between programs, and the narrowing of an
 /// *existing* destination's mode before the handover, which `cp` alone reaches
 /// — `mv`'s cross-device fallback has always just unlinked the destination, so
@@ -580,7 +580,7 @@ pub fn is_denied_ownership(e: &io::Error) -> bool {
 ///
 /// Its own `geteuid` binding, rather than a call to
 /// [`can_write_any_file`](crate::overwrite::can_write_any_file), because
-/// upstream keeps them apart too — this is `copy.c:3018` and that is
+/// upstream keeps them apart too — this is `copy.c:3447` and that is
 /// `lib/write-any-file.c`, each with its own `geteuid () == ROOT_UID`. The
 /// expressions coincide; the questions do not, and folding them would make a
 /// future divergence in either one silently change the other.
@@ -951,7 +951,7 @@ impl XattrStep {
 ///
 /// *Which* of three volumes a caller wants is not decided here, because it is
 /// not the same question for the two callers. gnulib picks one of three error
-/// callbacks (`copy.c:3700`), which reads as two booleans and is three
+/// callbacks (`copy.c:782`), which reads as two booleans and is three
 /// behaviours:
 ///
 /// | Asked for | Printed | Exit status |
@@ -986,7 +986,7 @@ pub fn errno_unsupported(e: &io::Error) -> bool {
 /// The *destination* refusing is different and is reported, because there the
 /// source did have attributes and they have been dropped. `cp` then decides what
 /// to make of it: `--preserve=xattr` treats it as fatal, plain `-a` suppresses
-/// the message (GNU's `copy_attr_error` vs `copy_attr_allerror`, `copy.c:707`).
+/// the message (GNU's `copy_attr_error` vs `copy_attr_allerror`, `copy.c:708`).
 ///
 /// # The link is never followed, for `cp`
 ///

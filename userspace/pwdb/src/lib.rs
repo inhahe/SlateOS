@@ -7,7 +7,7 @@
 //! `chpasswd`, `useradd`, `getent`, `id`, `who`, `w`, `last`, `htop`, `lsof`,
 //! `fuser`, `pgrep`, `pstree`, `lsns`, `loginctl`, `install`, `mktemp`,
 //! `audit`, `selinux`, `sshd`, `ftpd`. That is the same shape as the four
-//! chmod-string parsers that became [`modechange`] and the six temp-directory
+//! chmod-string parsers that became `modechange` and the six temp-directory
 //! helpers that became `scratchdir`, and it has the same consequence: a format
 //! with twenty-six implementations is a format with no definition, so two
 //! programs shown the same file can disagree about who a uid is.

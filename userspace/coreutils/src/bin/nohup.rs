@@ -308,7 +308,7 @@ fn stdout_message(ignoring_input: bool, target: &std::path::Path) -> String {
 /// The message printed when stderr was redirected.
 ///
 /// Suppressed entirely when stdout was *also* redirected, because
-/// [`redirect_message`] has already said so and upstream does not repeat
+/// [`stdout_message`] has already said so and upstream does not repeat
 /// itself. Measured: with both a terminal, the only line is
 /// `ignoring input and appending output to 'nohup.out'`.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

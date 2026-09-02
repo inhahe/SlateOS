@@ -4660,12 +4660,35 @@ check_kernel_clippy
 #
 # `x86_64-unknown-linux-gnu`, NOT `x86_64-slateos`: the latter needs
 # `-Zbuild-std` and is far slower, and for `cfg(unix)` coverage the two are
-# equivalent.  `check` rather than `build` means nothing is linked, so no
+# equivalent.  `clippy` rather than `build` means nothing is linked, so no
 # cross-linker is needed on a Windows host.
 #
-# COST: ~10 s warm, measured (5m22s on the first, cold run that populates
-# target/x86_64-unknown-linux-gnu).  Lane B estimated "under three minutes";
-# it is an order cheaper than that once the cache exists.
+# WHY `clippy` AND NOT `check`.  Several crates here declare
+# `#![deny(clippy::all)]`, which makes a lint a hard error *on the target that
+# ships*.  Nothing outside clippy reads that attribute, so a `cargo check` of a
+# `cfg(unix)` arm containing a denied lint exits 0 -- and this gate then prints
+# "every cfg(unix) arm compiles", which is true, and which every reader takes
+# to mean the arms are checked.  That is the failure this gate exists to
+# prevent, one level up: half a gate that reads like a whole one.  Requested
+# with a full in-situ measurement in
+# requests/b-a-cfg-unix-gate-should-lint-as-well-as-compile.md; taken in
+# design-decisions.md §678, which also records the risk accepted.
+#
+# COST, measured 2026-09-02 in os-lane-a (all three exit 0):
+#
+#     cargo clippy, cold  793 s   |   cargo check, cold  336 s
+#     cargo clippy, warm  156 s   |   in-situ `check` historically 9-416 s
+#
+# Lane B measured `clippy` in situ in a full boot test at 236 s.  So the
+# steady-state price of the verb is roughly +2 min per boot test, plus a
+# one-time ~13 min in each lane's worktree the first time it runs.
+#
+# The two columns do not share artifacts and never will: clippy sets
+# `RUSTC_WORKSPACE_WRAPPER`, which is hashed into every workspace unit's
+# fingerprint, so a clippy run neither reuses nor invalidates a check run --
+# it maintains a parallel set.  That is why the cold column is not a
+# first-run artifact that goes away, and why the numbers above were taken
+# with clippy running twice *before* check: check still had nothing to reuse.
 check_cfg_unix() {
     if ! rustup target list --installed 2>/dev/null \
         | grep -qx "x86_64-unknown-linux-gnu"; then
@@ -4674,29 +4697,45 @@ check_cfg_unix() {
         return 0
     fi
 
-    echo "=== Checking that every #[cfg(unix)] arm compiles ==="
+    echo "=== Checking that every #[cfg(unix)] arm compiles and lints ==="
     local log start rc
     log="$PROJECT_ROOT/build/check-cfg-unix.log"
     start="$(date +%s)"
     # Same `&& rc=0 || rc=$?` reasoning as check_shellcheck: this file runs
     # under `set -e`, so a bare `if ! cargo ...` is fine but a plain command
     # whose status we want to read is not.
-    "$CARGO" check --workspace --target x86_64-unknown-linux-gnu \
+    "$CARGO" clippy --workspace --target x86_64-unknown-linux-gnu \
         --message-format=short > "$log" 2>&1 && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
-        echo "cfg(unix) OK ($(( $(date +%s) - start ))s, every cfg(unix) arm compiles)."
+        echo "cfg(unix) OK ($(( $(date +%s) - start ))s, every cfg(unix) arm compiles and lints)."
         return 0
     fi
 
     echo "" >&2
     echo "ERROR: refusing to build.  Code guarded by #[cfg(unix)] does not" >&2
-    echo "compile for a unix target.  This is invisible to every other check" >&2
-    echo "here, because they all run for the Windows host -- and it is the arm" >&2
-    echo "that ships, because SlateOS sets target-family = [\"unix\"]." >&2
+    echo "compile, or does not lint, for a unix target.  This is invisible to" >&2
+    echo "every other check here, because they all run for the Windows host --" >&2
+    echo "and it is the arm that ships, because SlateOS sets" >&2
+    echo "target-family = [\"unix\"]." >&2
     echo "" >&2
     grep -E '^[^ ].*: error' "$log" >&2 || true
     echo "" >&2
     echo "Full output: $log" >&2
+    echo "" >&2
+    echo "HOW TO READ THAT LOG.  A good run of this gate prints on the order of" >&2
+    echo "18,000 pedantic-level warnings and still exits 0.  Warnings are NOT" >&2
+    echo "why this failed -- clippy exits non-zero only at deny level, so do not" >&2
+    echo "go hunting through them.  Only the lines above, which say \"error\"," >&2
+    echo "matter, and they come in two kinds:" >&2
+    echo "" >&2
+    echo "  error[E0433]: ...   a compile failure.  The cfg(unix) arm is broken" >&2
+    echo "                      Rust -- a name that does not resolve, a type that" >&2
+    echo "                      does not exist on unix, a syntax error." >&2
+    echo "  error: <lint text>  a clippy denial, with no bracketed code.  The" >&2
+    echo "                      code compiles; the crate says #![deny(clippy::all)]" >&2
+    echo "                      and this lint fired inside the cfg(unix) arm.  It" >&2
+    echo "                      is fatal on the shipping target for that reason" >&2
+    echo "                      and for no other." >&2
     echo "" >&2
     echo "If you arrived here from a warning-cleanup sweep, suspect the sweep:" >&2
     echo "an \"unused variable\" that is real on Windows is often read only by" >&2

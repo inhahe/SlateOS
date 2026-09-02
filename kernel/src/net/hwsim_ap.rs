@@ -402,11 +402,12 @@ impl MockAp {
             key_data: &[],
         };
         // Message 1 carries no MIC: the station cannot have a PTK yet.
-        let mut body = [0u8; BUF_LEN];
-        let n = eapol::write(&mut body, 2, &fields, eapol::MIC_LEN_DEFAULT)
+        // `eapol::write` emits the whole frame, header included — not the body.
+        let mut frame = [0u8; BUF_LEN];
+        let n = eapol::write(&mut frame, 2, &fields, eapol::MIC_LEN_DEFAULT)
             .ok_or(KernelError::InternalError)?;
         let sta = self.sta.ok_or(KernelError::NotConnected)?;
-        self.send_eapol(sta, body.get(..n).ok_or(KernelError::InternalError)?)
+        self.send_eapol(sta, frame.get(..n).ok_or(KernelError::InternalError)?)
     }
 
     fn send_m3(&mut self) -> KernelResult<()> {
@@ -447,12 +448,12 @@ impl MockAp {
             rsc: [0u8; eapol::RSC_LEN],
             key_data: &wrapped,
         };
-        let mut body = [0u8; BUF_LEN];
-        let n = eapol::write(&mut body, 2, &fields, eapol::MIC_LEN_DEFAULT)
+        let mut frame = [0u8; BUF_LEN];
+        let n = eapol::write(&mut frame, 2, &fields, eapol::MIC_LEN_DEFAULT)
             .ok_or(KernelError::InternalError)?;
-        self.mic_in_place(&mut body, n)?;
+        self.mic_in_place(&mut frame, n)?;
         self.m3_sent = self.m3_sent.saturating_add(1);
-        self.send_eapol(sta, body.get(..n).ok_or(KernelError::InternalError)?)
+        self.send_eapol(sta, frame.get(..n).ok_or(KernelError::InternalError)?)
     }
 
     fn send_group_m1(&mut self) -> KernelResult<()> {
@@ -487,18 +488,22 @@ impl MockAp {
             rsc: [0u8; eapol::RSC_LEN],
             key_data: &wrapped,
         };
-        let mut body = [0u8; BUF_LEN];
-        let n = eapol::write(&mut body, 2, &fields, eapol::MIC_LEN_DEFAULT)
+        let mut frame = [0u8; BUF_LEN];
+        let n = eapol::write(&mut frame, 2, &fields, eapol::MIC_LEN_DEFAULT)
             .ok_or(KernelError::InternalError)?;
-        self.mic_in_place(&mut body, n)?;
-        self.send_eapol(sta, body.get(..n).ok_or(KernelError::InternalError)?)
+        self.mic_in_place(&mut frame, n)?;
+        self.send_eapol(sta, frame.get(..n).ok_or(KernelError::InternalError)?)
     }
 
     /// Compute the MIC over the finished frame and write it into the frame.
-    fn mic_in_place(&self, body: &mut [u8], n: usize) -> KernelResult<()> {
+    ///
+    /// `buf` is the whole EAPOL frame as `eapol::write` left it — header
+    /// included — and not the body: both `kdf::compute_mic` and
+    /// `eapol::set_mic` index from the start of the frame.
+    fn mic_in_place(&self, buf: &mut [u8], n: usize) -> KernelResult<()> {
         let ptk = self.ptk.as_ref().ok_or(KernelError::NotConnected)?;
         let mut mic = [0u8; eapol::MIC_LEN_DEFAULT];
-        let frame = body.get(..n).ok_or(KernelError::InternalError)?;
+        let frame = buf.get(..n).ok_or(KernelError::InternalError)?;
         kdf::compute_mic(
             MicAlgo::HmacSha1,
             &ptk.kck,
@@ -507,7 +512,7 @@ impl MockAp {
             &mut mic,
         )
         .ok_or(KernelError::InternalError)?;
-        let frame = body.get_mut(..n).ok_or(KernelError::InternalError)?;
+        let frame = buf.get_mut(..n).ok_or(KernelError::InternalError)?;
         eapol::set_mic(frame, &mic).ok_or(KernelError::InternalError)?;
         Ok(())
     }
@@ -518,6 +523,26 @@ impl MockAp {
         // negotiated AKM, and the parser has to be told which. This AP offers
         // PSK only, so it is always the default 16.
         let key = eapol::KeyFrame::parse(body, eapol::MIC_LEN_DEFAULT)
+            .ok_or(KernelError::InvalidArgument)?;
+
+        // The two halves of `net80211`'s EAPOL API take *different* slices, and
+        // the difference is invisible at the call site because both are `&[u8]`:
+        // `KeyFrame::parse` takes the body, while everything MIC-related indexes
+        // with `eapol::MIC_OFFSET`, which is documented as an offset "from the
+        // start of the EAPOL frame (that is, including the 4-octet EAPOL
+        // header)". Handing the body to `verify_mic` shifts every hashed range
+        // by 4 octets, and the only symptom is a MIC that never verifies —
+        // indistinguishable from a wrong passphrase. This AP shipped with
+        // exactly that bug; `frame` exists so the distinction has a name.
+        //
+        // Trimmed to the length the header declares rather than passed whole:
+        // an EAPOL frame rides inside an 802.11 data frame, so the buffer may
+        // carry padding past the body, and the sender's MIC did not cover it.
+        let frame_len = eapol::HEADER_LEN
+            .checked_add(body.len())
+            .ok_or(KernelError::InvalidArgument)?;
+        let frame = eapol_frame
+            .get(..frame_len)
             .ok_or(KernelError::InvalidArgument)?;
 
         match self.phase {
@@ -538,7 +563,7 @@ impl MockAp {
                 )
                 .ok_or(KernelError::InternalError)?;
 
-                if !kdf::verify_mic(MicAlgo::HmacSha1, &ptk.kck, body, eapol::MIC_LEN_DEFAULT) {
+                if !kdf::verify_mic(MicAlgo::HmacSha1, &ptk.kck, frame, eapol::MIC_LEN_DEFAULT) {
                     // A bad MIC is a wrong passphrase, not a protocol error.
                     // Dropping it silently is what a real AP does; here it
                     // would look like "no progress", so say so.
@@ -552,7 +577,7 @@ impl MockAp {
             }
             ApPhase::FourWayM4 => {
                 let ptk = self.ptk.as_ref().ok_or(KernelError::NotConnected)?;
-                if !kdf::verify_mic(MicAlgo::HmacSha1, &ptk.kck, body, eapol::MIC_LEN_DEFAULT) {
+                if !kdf::verify_mic(MicAlgo::HmacSha1, &ptk.kck, frame, eapol::MIC_LEN_DEFAULT) {
                     crate::serial_println!("[hwsim-ap]   message 4 MIC did not verify");
                     return Err(KernelError::PermissionDenied);
                 }
@@ -561,7 +586,7 @@ impl MockAp {
             }
             ApPhase::Rekeying => {
                 let ptk = self.ptk.as_ref().ok_or(KernelError::NotConnected)?;
-                if !kdf::verify_mic(MicAlgo::HmacSha1, &ptk.kck, body, eapol::MIC_LEN_DEFAULT) {
+                if !kdf::verify_mic(MicAlgo::HmacSha1, &ptk.kck, frame, eapol::MIC_LEN_DEFAULT) {
                     crate::serial_println!("[hwsim-ap]   group message 2 MIC did not verify");
                     return Err(KernelError::PermissionDenied);
                 }

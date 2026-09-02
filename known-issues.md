@@ -91599,13 +91599,34 @@ the no-op line (it is the line that stops being a no-op the day
 `SYSCALL_RESOLUTION` changes, and gnulib has it).
 
 **So: say `clippy`, not `check`.** `cargo clippy` runs everything `cargo check`
-runs and then the lints, on the same artifacts, so substituting it costs
-essentially nothing and covers both halves. `--all-targets` matters too: without
-it the `#[cfg(test)]` modules — which is where most `cfg(unix)` test code lives
-in `userspace/**` — go unlinted for the target as well. Neither `cargo check` nor
-plain `cargo build` for `x86_64-slateos` would have caught this either, because
-`deny(clippy::…)` is inert outside clippy; the only thing that sees it is a
-clippy run with a unix-family target.
+runs and then the lints, so substituting it covers both halves. Neither `cargo
+check` nor plain `cargo build` for `x86_64-slateos` would have caught this
+either, because `deny(clippy::…)` is inert outside clippy; the only thing that
+sees it is a clippy run with a unix-family target.
+
+**Update 2026-09-02 (lane B) — done, and the `--all-targets` half of the
+prescription above was wrong.** `scripts/boot-test.sh`'s `check_cfg_unix` now
+runs `cargo clippy` rather than `cargo check`, so this is closed for non-test
+code in every lane. Verified by mutation rather than by a green run: with
+`utimecmp.rs`'s `#[allow(clippy::modulo_one)]` removed, the gate's exact command
+exits 101 and names the site. See design-decisions.md §747.
+
+The sentence above claiming "`--all-targets` matters too" was written from
+reasoning, not measurement, and the measurement says it cannot be done
+workspace-wide at all: `--all-targets` builds a test harness for every crate
+including `kernel`, which is `no_std` and defines its own `#[panic_handler]`, so
+linking it against a hosted target's libtest is `E0152: found duplicate lang
+item panic_impl`. Measured 2026-09-02: exit 101 at `kernel/src/main.rs:7923`
+after 218 s, having linted nothing.
+
+So the residue of this entry is narrower than it was and is stated exactly:
+**`cfg(unix)` code inside `#[cfg(test)]` modules is still unlinted for a unix
+target.** Closing that needs a per-crate `--all-targets` sweep that excludes the
+`no_std` crates — a crate list, which is a thing that drifts, which is why it is
+not in the gate. Anyone touching `cfg(unix)` test code should run
+`cargo clippy -p <crate> --target x86_64-unknown-linux-gnu --all-targets` by
+hand; it works fine for a single userspace crate, and it is only the workspace
+sweep that the kernel makes impossible.
 
 ## `B-POSIX-SEVENTEEN-TESTS-ASSERT-THE-SLATEOS-KERNEL-AND-GET-THE-HOST-KERNEL` (lane B, 2026-08-26) — **CLOSED 2026-08-26, and the diagnosis below was wrong**
 

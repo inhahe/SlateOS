@@ -83,6 +83,38 @@
 //! Saying more would be the same failure as an empty extension list: an
 //! application that sees 1.1 is entitled to call `vkGetPhysicalDeviceProperties2`
 //! and get a pointer back, and this loader would answer null.
+//!
+//! # The limit of the extension answer, stated where the promise is made
+//!
+//! The version paragraph above names a failure this module then commits, and
+//! the honest thing is to say so here rather than let a reader find it: **the
+//! loader reports extensions whose commands it cannot hand out.** An
+//! application that reads `VK_KHR_surface` from this union, enables it, and
+//! asks [`crate::entry::get_instance_proc_addr`] for
+//! `vkGetPhysicalDeviceSurfaceSupportKHR` gets null, because
+//! [`crate::physical`] knows exactly the nine core Vulkan 1.0 names and no
+//! others.
+//!
+//! Why it cannot be fixed by forwarding is [`crate::physical`]'s argument
+//! restated: a `VkPhysicalDevice` this loader hands out is a loader-owned
+//! object the driver has never seen, so passing an unknown command straight
+//! through would hand a driver a pointer to a `crate::instance::PhysicalDevice`
+//! where it expects its own handle. Every command needs its first argument
+//! unwrapped, and the loader has no signature for a command it has never heard
+//! of.
+//!
+//! Why it must not be fixed by narrowing this list either: many instance
+//! extensions add no commands at all — `VK_KHR_portability_enumeration` is a
+//! flag and nothing else — so reporting only what the loader can dispatch would
+//! deny an application extensions that need no dispatching, and for the rest it
+//! would rebuild exactly the empty-list stub this module exists to avoid.
+//!
+//! The fix is a generic trampoline that swaps argument zero and tail-jumps,
+//! which is what `vk_icdGetPhysicalDeviceProcAddr` exists for and what
+//! [`crate::physical`] already asks through first. It is written up as
+//! `C-VKLOADER-ADVERTISES-EXTENSIONS-WHOSE-ENTRY-POINTS-IT-ANSWERS-NULL-FOR` in
+//! `known-issues.md`, with the instance-level half — which needs a fan-out
+//! policy per command and so cannot be mechanised — recorded as the harder one.
 
 use crate::vk::{ExtensionProperties, MAX_EXTENSION_NAME_SIZE};
 use alloc::vec::Vec;

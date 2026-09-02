@@ -29,13 +29,20 @@
 #
 # EDITING THIS FILE? RUN `scripts/test-pre-push-*.py` BEFORE YOU COMMIT.
 # ---------------------------------------------------------------------
-# Three suites test this file, and one of them -- test-pre-push-identity-gate.py
-# -- installs it into a throwaway repository and drives real `git push` calls
-# through it end to end. That coupling is invisible from here, and on 2026-09-01
-# it cost two boot-test cycles: a change to how the file locates
-# `run-checker.sh` was correct for the trampoline install and left a *copied*
-# install refusing every push, which only the identity suite exercises. The
-# three together take about a minute.
+# Four suites test this file, and two of them -- test-pre-push-identity-gate.py
+# and test-pre-push-fmt-gate.py -- install it into a throwaway repository and
+# drive real `git push` calls through it end to end. That coupling is invisible
+# from here, and on 2026-09-01 it cost two boot-test cycles: a change to how the
+# file locates `run-checker.sh` was correct for the trampoline install and left
+# a *copied* install refusing every push, which only the identity suite
+# exercises. The four together take about two minutes.
+#
+# The newest of them is worth a sentence on why, because it is the argument for
+# the other three. test-pre-push-gates.py checks this file's *shape*, and gate 7
+# kept its shape perfectly while reading the working tree instead of the commit
+# being pushed -- which put two unformatted commits on origin/lane-b. A gate can
+# be structurally impeccable and answer the wrong question. Each suite added
+# since has been a behavioural one for that reason.
 #
 # There is deliberately no twelfth gate running them at push time. The boot test
 # already runs every tooling suite and is required before any merge to `main`,
@@ -838,6 +845,49 @@ fi
 # in the tree is edition 2024 (checked: 2933 Cargo.toml files, one value), so
 # the edition can be a constant.
 #
+# WHICH TREE THE BYTES COME FROM, and why it is worth this much machinery
+# ----------------------------------------------------------------------
+# This gate used to name its files from the pushed commits and then read their
+# *contents* off the working tree. Those are two different trees the moment you
+# commit and keep editing, and the consequence is not theoretical: commits
+# 861f4d80e and 09a436956 reached origin/lane-b unformatted, because the
+# working tree was tidied after they were committed but before the push ran.
+# The gate passed on bytes it would have rejected. (Proven, not inferred:
+# `git show 09a436956:userspace/zip/src/main.rs` diffed against its own rustfmt
+# output shows three chained calls the gate never saw.) The mirror-symmetric
+# failure is a false *fail* -- unrelated uncommitted drift in a file this push
+# happens to touch blocks a clean commit -- which makes the reassurance printed
+# below ("never complaining about someone else's code") untrue in both
+# directions at once.
+#
+# So everything below reads from a mirror: the pushed bytes of each file, laid
+# out at its real relative path under one temp root. Gate 1 already does the
+# same thing the same way (`git cat-file -e "$local_sha:$path"`), so this is a
+# consistency fix rather than a new idea.
+#
+# Materialising the *whole* pushed tree would be simpler and was measured
+# first: `git archive HEAD` is 86s/204MB, and narrowing it to one directory
+# does not help, because archive walks the whole tree regardless of pathspec
+# (userspace/zip/src -- 80KB of output -- still took 23s). `cp -al` of a crate
+# is 13-53s and fails outright on this filesystem. Per-file `git cat-file blob`
+# is ~0.7s, so the mirror costs about a second per pushed .rs file and nothing
+# for files nobody touched. That is why it is built a file at a time.
+#
+# The one thing a lone file loses is `mod` resolution: rustfmt loads submodules
+# relative to the file it is handed, and refuses outright if one is missing
+# ("failed to resolve mod `backup`"). Siblings that are themselves in the push
+# are in the mirror already; the rest get a one-byte stub, which is also what
+# makes the documented scope finally true -- a stub contributes no diff, so a
+# module root can no longer drag its untouched children into this gate's
+# verdict. Measured on the only two roots big enough to matter:
+# userspace/coreutils/src/lib.rs (27 stubs) checks in 261ms, posix/src/lib.rs
+# (2304 stubs) in 3.1s. Module roots are rare -- 12 files out of lane B's 5238
+# -- so almost every file skips the stub pass entirely.
+#
+# The stub is `\n` and not an empty file, because rustfmt reports a diff on a
+# zero-byte file (it wants the trailing newline) and would have blamed every
+# stub it created.
+#
 # Bypass: ALLOW_FMT_DRIFT=1 git push origin <branch>
 # ---------------------------------------------------------------------------
 
@@ -880,6 +930,10 @@ note_gate rustfmt "$skip_fmt"
 # for a module root — always a small file — is a real diff.
 fmt_report_one() {
     fmt_one=$1
+    # Every path handed to rustfmt lives in the mirror, but no message may say
+    # so: a diff headed /tmp/pre-push-fmt-mirror.1234/... names a file the
+    # pusher cannot open and cannot fix. Strip the root back off for display.
+    fmt_shown=${fmt_one#"$fmt_mirror/"}
     fmt_tmp="${TMPDIR:-/tmp}/pre-push-fmt.$$.rs"
     if cp "$fmt_one" "$fmt_tmp" 2>/dev/null &&
         rustfmt --edition 2024 "$fmt_tmp" >/dev/null 2>&1
@@ -889,19 +943,72 @@ fmt_report_one() {
             # Fine on its own; something else in the batch was not.
             return 0
         fi
-        printf '\nDiff in %s:\n' "$fmt_one" >&2
+        printf '\nDiff in %s:\n' "$fmt_shown" >&2
         if command -v diff >/dev/null 2>&1; then
-            diff -u "$fmt_one" "$fmt_tmp" >&2
+            diff -u --label "$fmt_shown" --label "$fmt_shown (rustfmt)" \
+                "$fmt_one" "$fmt_tmp" >&2
         else
             printf '  (no `diff` on this machine — run: rustfmt --edition 2024 %s)\n' \
-                "$fmt_one" >&2
+                "$fmt_shown" >&2
         fi
         rm -f "$fmt_tmp"
         return 1
     fi
     rm -f "$fmt_tmp"
+    # The lone copy did not parse, so fall back to the mirror path itself,
+    # where the stubs seeded by fmt_materialise let `mod` resolution succeed.
+    # Its report still names mirror paths, hence the note.
     rustfmt --edition 2024 --check "$fmt_one" >&2 && return 0
+    printf '  (paths above are the mirror; the file to fix is %s)\n' "$fmt_shown" >&2
     return 1
+}
+
+# Give a materialised file the submodules rustfmt will look for.
+#
+# Only the `mod name;` form is handled, and only by text match. That is
+# deliberate rather than lazy: the alternative is a shell approximation of
+# rustc's module resolution -- `#[path = "..."]`, `cfg`-gated arms, `mod` nested
+# inside an inline `mod` -- and an approximation that is *wrong* would seed a
+# stub that shadows a real sibling and silently drop it from the check. A form
+# this does not recognise instead leaves rustfmt unable to resolve it, which is
+# loud: the batch fails, fmt_report_one prints rustfmt's own complaint, and the
+# push stops. Failing visibly on an unhandled shape beats guessing at it.
+fmt_seed_stubs() {
+    fmt_root_file=$1
+    fmt_root_dir=${fmt_root_file%/*}
+    # SC2013 wants a `while read` loop so whitespace in a "line" survives. The
+    # capture group here is [A-Za-z_][A-Za-z0-9_]*, so a match cannot contain
+    # whitespace and word-splitting is exactly the right tool.
+    # shellcheck disable=SC2013
+    for fmt_mod in $(sed -n \
+        's/^[[:space:]]*\(pub[^ ]*[[:space:]]\{1,\}\)\{0,1\}mod[[:space:]]\{1,\}\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*;.*/\2/p' \
+        "$fmt_root_file" 2>/dev/null | sort -u); do
+        # Never overwrite: a sibling already in the mirror is a real pushed
+        # file and must keep its own bytes and its own verdict.
+        [ -e "$fmt_root_dir/$fmt_mod.rs" ] && continue
+        [ -e "$fmt_root_dir/$fmt_mod/mod.rs" ] && continue
+        printf '\n' > "$fmt_root_dir/$fmt_mod.rs" 2>/dev/null || :
+    done
+}
+
+# Copy one file's *pushed* bytes into the mirror; echo where they landed.
+#
+# Returns 1 when the path is not in the tip at all. `--diff-filter=ACMR`
+# excludes deletions, but a file added by one commit in this push and deleted
+# by a later one still appears in the enumeration; the old code dropped it with
+# `[ -f ]` against the working tree, which happened to work and stopped working
+# the moment the two trees could differ. `git cat-file` answers the question
+# that was actually being asked.
+fmt_materialise() {
+    fmt_rel=$1
+    fmt_dst="$fmt_mirror/$fmt_rel"
+    mkdir -p "${fmt_dst%/*}" 2>/dev/null || return 1
+    if ! git cat-file blob "HEAD:$fmt_rel" > "$fmt_dst" 2>/dev/null; then
+        rm -f "$fmt_dst"
+        return 1
+    fi
+    fmt_seed_stubs "$fmt_dst"
+    printf '%s\n' "$fmt_dst"
 }
 
 # One batch of paths. A function is how a POSIX shell passes a built-up
@@ -934,6 +1041,21 @@ fmt_check() {
 }
 
 fmt_failed=0
+fmt_mirror=""
+if [ "$skip_fmt" != "1" ]; then
+    fmt_mirror="${TMPDIR:-/tmp}/pre-push-fmt-mirror.$$"
+    rm -rf "$fmt_mirror"
+    if ! mkdir -p "$fmt_mirror" 2>/dev/null; then
+        # Loud, not silent. A gate that cannot read the bytes it is meant to
+        # judge has to say which of the two it is doing, and this one is not
+        # falling back to the working tree — that fallback is the bug.
+        printf 'pre-push: cannot create %s — formatting check skipped.\n' \
+            "$fmt_mirror" >&2
+        fmt_mirror=""
+        skip_fmt=1
+    fi
+fi
+
 if [ "$skip_fmt" != "1" ]; then
     # `set --` builds the argument list one path at a time so a filename
     # containing a space survives; plain word-splitting on `$(...)` would tear
@@ -944,10 +1066,6 @@ if [ "$skip_fmt" != "1" ]; then
     # something that does not name a file — this repository has utilities whose
     # whole purpose is handling those names, so its own hook had better not
     # choke on one.
-    #
-    # `--diff-filter=ACMR` excludes deletions, but a file added by one commit in
-    # this push and deleted by a later one still appears; the `[ -f ]` test is
-    # what drops it.
     fmt_old_ifs=$IFS
     IFS='
 '
@@ -955,8 +1073,8 @@ if [ "$skip_fmt" != "1" ]; then
     for fmt_file in $(git -c core.quotePath=false log --name-only --pretty=format: \
                           --diff-filter=ACMR HEAD --not --remotes="$remote_name" \
                           -- '*.rs' 2>/dev/null | sort -u); do
-        [ -f "$repo_root/$fmt_file" ] || continue
-        set -- "$@" "$repo_root/$fmt_file"
+        fmt_mirrored=$(fmt_materialise "$fmt_file") || continue
+        set -- "$@" "$fmt_mirrored"
         # Drain in batches: the command line is finite, and a push that lands a
         # whole subsystem can carry hundreds of files. (Measured: handing
         # rustfmt all 5214 of lane B's .rs paths at once fails outright with
@@ -973,6 +1091,8 @@ if [ "$skip_fmt" != "1" ]; then
 
     fmt_check "$@" || fmt_failed=1
 fi
+
+[ -n "$fmt_mirror" ] && rm -rf "$fmt_mirror"
 
 if [ "$fmt_failed" = "1" ]; then
     cat >&2 <<EOF
@@ -992,12 +1112,17 @@ or, for exactly the files listed above and nothing else:
 
     rustfmt --edition 2024 <file>...
 
-then \`git add\` them and amend or add a commit. Formatting-only changes are
-worth their own commit — mixed into a real change they hide it.
+then \`git add\` them and COMMIT. Fixing the working tree is not enough: this
+gate reads the bytes you are about to publish, not the ones on disk, so an
+uncommitted fix changes nothing it can see. (It used to read the working tree,
+and that is precisely how two unformatted commits reached origin.) Formatting-
+only changes are worth their own commit — mixed into a real change they hide it.
 
 Only the files this push adds or modifies are checked, so this is never
-complaining about someone else's code. If rustfmt failed to *parse* a file
-rather than reporting a diff, the file does not compile either; fix that first.
+complaining about someone else's code, and never about your uncommitted work.
+A module root's untouched submodules are stubbed out rather than checked, for
+the same reason. If rustfmt failed to *parse* a file rather than reporting a
+diff, the file does not compile either; fix that first.
 
 To push anyway:
     ALLOW_FMT_DRIFT=1 git push $remote_name ...

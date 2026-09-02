@@ -106955,3 +106955,120 @@ rather than letting a run produce numbers from a harness that had just failed
 its own test.
 
 ---
+## TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH
+
+**Filed:** 2026-09-02 by Lane B, out of the gate-7 fix (`dcdd711fe`).
+**Status:** open. Not blocking; every gate still fails safe in the common case.
+
+**In short:** the push hook is supposed to answer "is the code I am about to
+publish OK?" Seven of its eleven gates actually answer "is the code on my disk
+right now OK?" Those are the same question until you commit something and then
+keep editing, at which point the hook can wave through a bad commit — or block a
+good one — and its own error text will confidently tell you it did neither.
+
+### What is actually wrong
+
+Every gate names the files it cares about from the pushed commit range
+(`git log … HEAD --not --remotes=origin`). Only two of them then *read* from
+that range:
+
+| Gate | Reads | How |
+|---|---|---|
+| 1 private-file | pushed tip | `git cat-file -e "$local_sha:$path"` |
+| 9 request-deletion | pushed tip | checker takes `--head "$sha"` |
+| 7 rustfmt | pushed tip | mirror of pushed blobs — **fixed 2026-09-02** |
+| 2 unreachable-command | working tree | `--check`, checker walks the filesystem |
+| 3 raced-global | working tree | same |
+| 4 argv-utf8 | working tree | same |
+| 5 getopt-table | working tree | same |
+| 6 host-errmsg | working tree | same |
+| 8 quote-names | working tree | same |
+| 11 doc-links | working tree | same, over whole directories |
+
+Gate 7 is not on that list any more, and it is the proof the rest matter: it had
+exactly this defect and it published two unformatted commits (`861f4d80e`,
+`09a436956`) to `origin/lane-b` on 2026-09-02. Nobody predicted it; it was found
+by diffing a published blob against its own rustfmt output.
+
+Two failure shapes, both real:
+
+- **False pass.** Commit a violation, fix it in the worktree, push without
+  committing the fix. The gate reads the fix and approves the violation, which
+  is then on origin forever. This is the one that happened.
+- **False fail.** Commit clean code, start editing the same file, push. The gate
+  reads your unfinished edit and blocks a commit that is fine. Every one of
+  these gates prints some version of "this is never complaining about someone
+  else's code" — which is true, and beside the point, because it is complaining
+  about work you have not committed.
+
+### Why gate 7's fix does not just get copied
+
+Gate 7's unit of work is a **file**, so its fix was to materialise each pushed
+blob into a temp mirror at its real relative path (~0.7 s per file, nothing for
+files nobody touched) and hand rustfmt that. Files whose submodules are not in
+the push get a one-byte stub, which is sound because *rustfmt's verdict on a
+file does not depend on its children.*
+
+That last clause is what does not generalise:
+
+- **Gate 11 (doc-links) resolves names across a whole crate.** A link in `a.rs`
+  is satisfied by a definition in `b.rs`. Stub out `b.rs` and the checker
+  reports every link in the crate as dead — not a false fail at the margin, a
+  gate that fails everything. It needs the *whole pushed crate*, not a file.
+- **Gates 2–6 and 8** are per-file in principle, but each checker opens files
+  itself and there is no seam to hand it bytes.
+
+Whole-tree materialisation was measured on this machine before gate 7 was
+written, and it is not viable as a per-push cost:
+
+| Approach | Measured |
+|---|---|
+| `git archive HEAD` (whole tree) | 86 s, 204 MB |
+| `git archive HEAD -- userspace/zip/src` (80 KB of output) | 23 s — archive walks the whole tree regardless of pathspec |
+| `git archive HEAD -- posix/src` | 11 s |
+| `cp -al posix/src <tmp>` | 53 s, and **fails outright** on this filesystem |
+| `git cat-file blob` per file | ~0.7 s each |
+| `git ls-tree -r` per directory | 1.5–4 s |
+
+So per-crate mirroring for gate 11 costs ~0.7 s × the crate's file count:
+`userspace/coreutils/src` is 124 files (~90 s), `posix/src` is 2305 (~27 min).
+Unacceptable at the push boundary.
+
+### What the proper fix looks like
+
+Give the checkers the seam gate 9's checker already has. `check-request-deletion.py`
+takes `--head <sha>` and reads blobs out of git rather than off the disk, and
+`test-pre-push-gates.py` has a test asserting it is passed (`gate 9 passes
+--head so it judges the pushed commit`) — so the pattern, the precedent and even
+the regression test all exist. The work is:
+
+1. A shared helper — `scripts/gittree.py` — exposing `list(rev, pathspec)` and
+   `read(rev, path)` over one long-lived `git cat-file --batch`, so N files cost
+   one process rather than N × 0.7 s. This is the piece that makes the whole
+   thing affordable and does not exist yet.
+2. Convert each checker's file access to go through it, with `--head <sha>`
+   selecting git and its absence keeping today's filesystem walk (the checkers
+   are also run by hand and by the boot test, where the working tree is right).
+3. Pass `--head` from the hook, and extend `test-pre-push-gates.py`'s existing
+   assertion to all eight gates instead of just gate 9.
+4. Behavioural coverage, per `test-pre-push-fmt-gate.py`: for each gate, the
+   false-pass and false-fail cases specifically. **Baseline cases are worthless
+   here** — committed-clean-passes and committed-dirty-is-refused are green
+   against the broken code, which is exactly why this survived in gate 7.
+
+### Why it is not done yet
+
+It is eight checkers, a new shared module and a per-gate behavioural suite, on
+the one file all three lanes push through — a scope that deserves its own task
+rather than being tacked onto a one-gate fix, and a blast radius (a mistake
+blocks every lane's pushes) that argues for doing it deliberately. Gate 7 was
+split out and landed alone because it had a *proven* escape, not merely a
+possible one.
+
+**If it is never done:** the gates keep working correctly whenever the worktree
+matches the commit, which is most pushes. The exposure is bounded and does not
+grow with time. It bites exactly when someone commits, tidies, and pushes
+without committing the tidy — which is a common enough sequence that it has
+already cost this project two published-unformatted commits.
+
+---

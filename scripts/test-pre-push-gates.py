@@ -286,6 +286,37 @@ def test_a_head_reading_gate_skips_when_nothing_is_being_pushed(text):
           len(guards), len(loops))
 
 
+def test_the_path_scope_is_taken_from_the_push_not_from_head(text):
+    """`touches()` decides whether six gates run at all. Ask it about the push.
+
+    It used to ask `git rev-list HEAD`, which is a question about whichever
+    branch is checked out. `git push origin feature` while standing on `main` is
+    an ordinary thing to do, and in that push HEAD's commits are all already on
+    the remote — so every gate scoped by this helper found nothing under its
+    paths, skipped itself, and let `feature` go out unjudged. Silently: the
+    tally printed "skipped", which is also what an honest documentation-only
+    push prints, so the two readings are indistinguishable.
+
+    This is the `--head` defect one level up. Converting the checkers to judge
+    the pushed sha, while leaving the predicate that decides whether they run
+    keyed to HEAD, would have left a single way to skip past all of them at
+    once. `test-checkers-honour-head.py` pins the behaviour by pushing a branch
+    it is not standing on; this catches the reintroduction without a fixture.
+    """
+    code = _joined(code_only(text))
+    body = re.search(r"^touches\(\)\s*\{(.*?)^\}", code, re.MULTILINE | re.DOTALL)
+    check("the hook still has a `touches` helper", body is not None, True)
+    if body is None:
+        return
+    inner = body.group(1)
+    check("the path scope is taken from the shas being pushed",
+          "rev-list $pushed_shas" in inner, True)
+    # Not merely "does it mention pushed_shas": a helper that passed both would
+    # still be answering about HEAD, since `rev-list A B` unions the two.
+    check("...and not from whichever branch happens to be checked out",
+          re.search(r"\bHEAD\b", inner) is not None, False)
+
+
 def test_no_gate_hands_a_push_sized_list_to_argv(text):
     """A scope derived from the pushed files must not travel as arguments.
 

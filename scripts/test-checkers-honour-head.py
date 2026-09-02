@@ -370,7 +370,7 @@ def _push_fixture(tmp: str, name: str) -> str:
     return work
 
 
-def _push(work: str) -> tuple[str, str]:
+def _push(work: str, ref: str = "main") -> tuple[str, str]:
     """(verdict, output). `allowed`, `refused`, or `error:<...>`.
 
     Only *gate 2's* refusal counts as `refused`. A suite that accepted any
@@ -384,9 +384,18 @@ def _push(work: str) -> tuple[str, str]:
     """
     env = gitenv.clean_env()
     env["ALLOW_FMT_DRIFT"] = "1"
-    proc = subprocess.run(["git", "push", "origin", "main"], cwd=work, env=env,
+    proc = subprocess.run(["git", "push", "origin", ref], cwd=work, env=env,
                           capture_output=True, text=True, check=False)
+    # Redact the fixture's own paths before anyone matches on the output. git
+    # prints `To <remote>` and the hook prints its log path, so a case asserting
+    # `"<alias>" in blob` can be satisfied by the *directory name* instead of by
+    # anything a gate said. That is not hypothetical: a fixture called
+    # `g2push-offbranch` made `"offbranch" in blob` true while the gate had
+    # skipped itself entirely, and the case read as a pass.
+    root = os.path.dirname(work)
     blob = proc.stdout + proc.stderr
+    for spelling in (root, root.replace(os.sep, "/")):
+        blob = blob.replace(spelling, "<fixture>")
     if proc.returncode == 0:
         return "allowed", blob
     # One line's worth: the refusal is a hand-wrapped paragraph, so a
@@ -441,6 +450,38 @@ def case_gate2_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -
           True)
 
 
+def case_gate2_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` while checked out on `main`.
+
+    The two cases above both push the checked-out branch, so `HEAD` and the sha
+    being pushed are the same commit -- which means neither of them can tell
+    "read the sha" apart from "read HEAD". Every gate here decides *whether to
+    run* through the `touches` helper, and a helper that asks its question about
+    HEAD asks it about the wrong branch the moment the two differ: `main` has
+    nothing unpushed under `userspace/`, so the gate skips itself and the alias
+    on `feature` is published unjudged.
+
+    That is the same defect the whole suite is about -- judging what is on hand
+    rather than what is being sent -- one level up from the checker, in the
+    predicate that decides if the checker runs at all. It is silent, and it is
+    reached by a wholly ordinary push.
+    """
+    work = _push_fixture(tmp, "g2push-offbranch")
+    git(work, "checkout", "--quiet", "-b", "feature")
+    write(work, "userspace/real/src/main.rs", _DISPATCH % "offbranch")
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "an alias on a branch we will leave")
+    # Back to a branch whose every commit is already on the remote, so a
+    # HEAD-scoped `touches` finds nothing under userspace/ and skips the gate.
+    git(work, "checkout", "--quiet", "main")
+
+    verdict, blob = _push(work, "feature")
+    check("gate 2 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    check("gate 2 end to end: ...naming the alias on that other branch",
+          "offbranch" in blob, True)
+
+
 def case_gate2_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
     """Exit 2, not 1.
 
@@ -464,6 +505,7 @@ CASES = (
     case_gate2_a_crate_absent_from_the_disk_is_still_judged,
     case_gate2_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate2_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate2_the_hook_judges_a_branch_it_is_not_standing_on,
     case_gate2_an_unopenable_revision_is_not_a_finding,
 )
 
@@ -471,9 +513,9 @@ CASES = (
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 9:
+    if len(CASES) < 10:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 9. The list is broken, not the code.")
+              f"least 10. The list is broken, not the code.")
         return 1
     # ...and at least one of them must go through the real hook. A floor on the
     # count alone would be met by nine direct-invocation cases, which is the

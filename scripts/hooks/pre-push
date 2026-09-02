@@ -139,11 +139,10 @@ remote_name="${1:-origin}"
 violations=""
 
 # The commits this push would publish, collected by the gate-1 loop below.
-# Gate 9 needs them and cannot re-read stdin: git feeds the ref list once, and
-# the loop consumes it. Every other gate keys off HEAD via `touches()`, which is
-# right for gates asking "did this working branch introduce X"; gate 9 asks
-# "does the commit being published delete a request", and those differ whenever
-# a ref other than HEAD is pushed.
+# Every gate needs them and none can re-read stdin: git feeds the ref list once,
+# and the loop consumes it. `touches()` scopes the path-gated gates by this
+# list, and the gates that have been converted to `--head` judge each sha in it
+# — so this variable, not HEAD, is what the hook means by "the push".
 pushed_shas=""
 
 # The bypass skips gate 1 only -- it must not `exit 0` out of the script, or
@@ -272,8 +271,30 @@ py=$(command -v python3 || command -v python) || skip=1
 [ -n "${py:-}" ] || skip=1
 
 # Does this push add commits touching any of the given paths?
+#
+# WHY THE REFS BEING PUSHED, NOT HEAD. This used to ask `git rev-list HEAD`,
+# which is a question about the branch that happens to be checked out — and
+# `git push origin feature` while standing on `main` is an ordinary thing to do.
+# In that push HEAD's commits are all already on the remote, so every gate
+# scoped by this helper found nothing to do and skipped itself, and `feature`'s
+# contents went out unjudged. Silently: the tally said "skipped", which is also
+# what an honest documentation-only push says.
+#
+# That is the same defect as the one the `--head` conversion exists to fix
+# (judging what is on hand rather than what is being sent), one level up — in
+# the predicate that decides whether the checker runs at all. Fixing the
+# checkers while leaving this alone would have left a way to skip past all of
+# them at once.
+#
+# The word-splitting of `$pushed_shas` is the point, so SC2086 stays disabled:
+# the list is one sha per ref being pushed, built by the gate-1 loop from git's
+# own stdin, and every element is a positive revision here. If nothing is being
+# published the list is empty, `rev-list` has no positive ref, prints nothing,
+# and every gate skips — which is the right answer to "judge nothing".
 touches() {
-    [ -n "$(git rev-list HEAD --not --remotes="$remote_name" -- "$@" 2>/dev/null | head -n 1)" ]
+    # shellcheck disable=SC2086
+    [ -n "$(git rev-list $pushed_shas --not --remotes="$remote_name" \
+                -- "$@" 2>/dev/null | head -n 1)" ]
 }
 
 # Where run_checker parks a failing checker's output. Inside the git dir, which

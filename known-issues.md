@@ -108354,6 +108354,40 @@ the regression test all exist. The work is:
    checker free to answer "does anything produce this name?" from the disk, and
    that half decides the verdict just as completely. Whatever the next checker
    reads, every input it reads must be made to differ.
+   **Extended 2026-09-02** past the checker to the hook. The seven cases above
+   all invoke the checker directly, which leaves the hook↔checker seam untested
+   — and *both* defects these gates have actually suffered lived in that seam
+   (gate 11 handed its scope to argv and died of a length limit; gate 7
+   enumerated the commit and read the disk). Three cases now push for real,
+   through the real hook in `.git/hooks/`, against a commit and a worktree that
+   disagree. Verified by mutating the wiring: dropping `--head "$sha"`, pinning
+   it to `--head HEAD`, iterating the `$pushed_shas` loop over nothing,
+   discarding the checker's exit status, and skipping the gate outright are all
+   caught. Two traps found while writing them, both recorded in the suite: an
+   empty directory is a legitimate `WorkTree`/`RevTree` divergence (git has no
+   empty directories), and a fixture whose *directory name* contains the alias
+   makes `"<alias>" in output` true while the gate has skipped — `_push` now
+   redacts the fixture's paths so no case can pass that way.
+
+5. **The path scope itself had the same defect, one level up.** Six gates decide
+   whether to run at all through the hook's `touches()` helper, which asked
+   `git rev-list HEAD --not --remotes=origin -- <paths>`. That is a question
+   about the branch that happens to be checked out. `git push origin feature`
+   while standing on `main` is an ordinary thing to do, and in that push HEAD's
+   commits are all already on the remote — so `touches` found nothing under
+   `userspace/`, every gate scoped by it skipped itself, and `feature`'s
+   contents went out unjudged. Silently: the tally printed `skipped`, which is
+   also what an honest documentation-only push prints, so the two are
+   indistinguishable from the output. **Fixed 2026-09-02**: the helper now
+   scopes by `$pushed_shas`, the same list the converted gates judge. Pinned by
+   `test-checkers-honour-head.py`'s off-branch push case and by
+   `test-pre-push-gates.py` →
+   `test_the_path_scope_is_taken_from_the_push_not_from_head`, which also
+   forbids unioning HEAD back in (`rev-list A B` is the union, so mentioning
+   `$pushed_shas` is not on its own enough). Found by mutation testing, not by
+   review: `--head HEAD` survived every end-to-end case, and the reason it did
+   was that no case could push a branch it was not standing on — because
+   `touches` would have skipped the gate.
 
 ### Why it is not done yet
 

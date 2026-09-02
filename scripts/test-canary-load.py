@@ -285,6 +285,53 @@ with tempfile.TemporaryDirectory() as tmpdir:
           record["during_names"], [f"bench_{i:02d}" for i in range(6, 40)])
 
 
+# The stop-file must not discard lines that are already on disk.
+#
+# Every other replay test above hands the controller 0.3 s of quiet before
+# stopping it, which is three poll intervals -- so they pass whether or not
+# the controller reads the tail one last time.  This one removes that grace
+# on purpose, because the production case has none either: the wrapper writes
+# the stop-file the instant `wait "$BOOT_PID"` returns, so a `--until` on the
+# last benchmark of a suite is separated from the stop by microseconds.
+#
+# Shape of the reproduction: let the trigger land through a normal poll (slow
+# lines, then a pause long enough that a poll certainly happened), then dump
+# the entire rest of the suite in one burst and stop immediately.  That burst
+# is what a starved controller effectively sees -- lines written while it was
+# not scheduled -- and before 2026-09-02 it was thrown away unread, taking the
+# `--until` release with it and voiding the run as `until-never-matched`.
+#
+# `completions_seen` is the assertion to believe: it is 40 only if nothing was
+# discarded, and it holds under every interleaving of the burst with a poll.
+# `drained_after_stop` is deliberately NOT asserted to be non-zero -- a poll
+# can legitimately land inside the burst, and pinning a number that depends on
+# that would make this test the very kind of race it exists to close.
+with tempfile.TemporaryDirectory() as tmpdir:
+    serial = os.path.join(tmpdir, "serial.txt")
+
+    def start_replay_burst():
+        replay(serial, SUITE[:6], per_line=0.03).join()
+        # Long enough that the controller has certainly polled and fired.
+        time.sleep(0.4)
+        replay(serial, SUITE[6:], per_line=0.0, preamble=False).join()
+
+    record, rc, out = run_controller(
+        serial, ["--at", "bench_05", "--until", "bench_20"],
+        wait_for=start_replay_burst, delay=0.0)
+
+    check("a line written just before the stop-file is still read",
+          record["completions_seen"], len(SUITE))
+    check("the --until in that burst still releases the load",
+          record["released"], True)
+    check("so the run is not voided as until-never-matched",
+          record.get("problem"), None)
+    check("and the window is the whole (at, until] range",
+          record["during_names"], [f"bench_{i:02d}" for i in range(6, 21)])
+    check("exit code 0", rc, 0)
+    check_true("the drain is reported rather than silent",
+               "drained_after_stop" in record, record.keys())
+
+
 # --------------------------------------------------------------------------
 # 4. Spinners cannot outlive the controller
 # --------------------------------------------------------------------------

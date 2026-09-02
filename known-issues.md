@@ -106791,7 +106791,49 @@ backgrounded `cargo` is not free concurrency here — it is a second job competi
 for a page file that cannot cover both, and it corrupts the result of the job
 you were actually waiting on.
 
-**What to do when either recurs.** Do *not* re-run until green and move on.
+**Failure 4 — `git push` refused by gate 8, and the same tree passed it minutes
+later.** Same day, same session. `git push origin lane-b` was backgrounded
+*while the boot test was still building* — the exact thing the rule above had
+just been written to forbid — and exited 1 with gate 8's refusal:
+
+```
+pre-push: REFUSING to push — a diagnostic above puts a file name straight into
+its message.
+...
+To push anyway:
+    ALLOW_UNQUOTED_NAMES=1 git push origin ...
+```
+
+Run afterwards on the unchanged tree, `scripts/quote-names.py --selftest`
+passed 56/56 and `--check` reported `ok -- 0 known sites in 0 files`; the push
+then succeeded with all ten gates green. Nothing was edited in between.
+
+*The cause could not be determined, and that is the finding.* The background
+task's output file keeps only its tail, so `head -60` and `tail -25` returned
+the same block of boilerplate — the gate's standing explanation of what
+unquoted names are — and the lines that would have said *which file and which
+site* had scrolled off. Two hypotheses remain live and the evidence to separate
+them is gone: either the checker crashed (a `MemoryError` or a failed read under
+the same host pressure as failures 1–3), or it genuinely found a violation in a
+source file that a concurrent process had left half-written when
+`Path.read_text` reached it. The cost was not the lost push: it was two hours
+spent designing a fix for a defect in newly-written `cp` code that, it turned
+out, was never there.
+
+*One real defect did fall out of the post-mortem, independent of which
+hypothesis is right.* Every gate asks its checker `if ! "$py" "$script"
+--check`, and a Python script that dies of an uncaught exception exits 1 —
+the same code it uses for "I found violations." So a checker that **crashes**
+is reported to the operator as a **defect in their code**, in the gate's own
+confident wording, and the only remedy the message offers is the bypass
+(`ALLOW_UNQUOTED_NAMES=1`), which would push with that gate disabled. A gate
+that cannot tell "your code is wrong" from "I fell over" spends its credibility
+on the wrong verdict and trains its reader toward the bypass — which is
+precisely the failure the hook's own comments elsewhere say a gate must not
+have. Fixed by `scripts/hooks/pre-push`'s `run_checker` helper, tested by
+`scripts/test-pre-push-run-checker.py`; see design-decisions.md 746.
+
+**What to do when any of these recurs.** Do *not* re-run until green and move on.
 
 1. Capture the run's output to a file in full rather than reading a truncated
    background-task tail — `./scripts/boot-test.sh 2>&1 | tee /tmp/boot.log` —

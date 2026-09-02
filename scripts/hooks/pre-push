@@ -232,6 +232,104 @@ touches() {
     [ -n "$(git rev-list HEAD --not --remotes="$remote_name" -- "$@" 2>/dev/null | head -n 1)" ]
 }
 
+# Where run_checker parks a failing checker's output. Inside the git dir, which
+# for a worktree is that worktree's own, so three lanes pushing at once do not
+# overwrite each other's evidence. A fixed, derivable path on purpose: see the
+# "kept, not streamed away" note in run_checker.
+hook_logdir=$(git rev-parse --absolute-git-dir 2>/dev/null) || hook_logdir=""
+[ -n "$hook_logdir" ] && [ -d "$hook_logdir" ] || hook_logdir="${TMPDIR:-/tmp}"
+
+# run_checker <gate-name> <script> [args...]
+#
+# Runs one gate's checker in place of a bare `"$py" "$script" --check`, and
+# returns 0 when the tree is clean and 1 when the checker found something —
+# so a call site keeps the shape it had. What it adds is a third outcome that
+# the bare form cannot express, and a copy of the output that outlives the
+# console.
+#
+# ## Why a checker that crashes must not be reported as a finding
+#
+# A Python script that dies of an uncaught exception exits 1 — the same code it
+# uses for "I found violations". Every gate here asked `if ! "$py" ...`, so the
+# two were indistinguishable, and the gate answered a crash with its own
+# confident refusal text: *your* diagnostic names a file without quoting it,
+# *your* option table disagrees with GNU's. That is a false accusation, and the
+# only remedy the refusal offers is the gate's bypass — which does not fix
+# anything, it switches off the check that never actually ran. A gate that
+# spends its credibility on a verdict it did not reach is a gate that teaches
+# its reader to bypass it, which is the one failure these gates cannot survive.
+#
+# It is not hypothetical: 2026-09-01, gate 8 refused a push whose tree passed
+# `quote-names.py --check` cleanly minutes later, unchanged. Two hours went into
+# looking for a defect in `cp` that was never there. See known-issues.md ->
+# B-TOOLING-INTERMITTENT-HOST-FAILURES-LOSE-THEIR-OWN-EVIDENCE.
+#
+# So: exit 0 is clean, exit 1 *without* a Python traceback is a finding, and
+# anything else — a traceback, a usage error, a signal, an interpreter killed
+# by the memory manager — is "no verdict". No verdict does not return to the
+# call site at all; it exits the hook, because there is no gate for which
+# "the checker fell over" is a reason to publish. Should a checker ever print
+# the traceback banner as part of a legitimate finding, it lands here too, and
+# the push is still refused — the misclassification costs a confusing message,
+# never a missed defect.
+#
+# ## Kept, not streamed away
+#
+# The output is written to a file first and echoed after, rather than streamed.
+# That costs liveness on a slow checker and buys the thing whose absence made
+# the 2026-09-01 failure undiagnosable: the console it was read from keeps only
+# the last N lines, so the refusal boilerplate survived and the lines naming the
+# offending site did not. The file is deleted when the gate passes and kept when
+# it does not, at a path that can be found without having read the message that
+# names it.
+run_checker() {
+    _rc_gate=$1
+    shift
+    _rc_log="$hook_logdir/pre-push-$_rc_gate.log"
+    # `$*` joins on IFS's first character, and one caller (gate 11) sets IFS to
+    # a newline to split a path list — which would render the "re-run it" line
+    # one argument per line. Build the command string under a known IFS.
+    _rc_oldifs=$IFS
+    IFS=' '
+    _rc_cmd="$py $*"
+    IFS=$_rc_oldifs
+
+    "$py" "$@" >"$_rc_log" 2>&1
+    _rc=$?
+    cat "$_rc_log" >&2
+
+    if [ "$_rc" = "0" ]; then
+        rm -f "$_rc_log"
+        return 0
+    fi
+    if [ "$_rc" = "1" ] && ! grep -q '^Traceback (most recent call last):' "$_rc_log"; then
+        echo "pre-push: $_rc_gate: full output kept at $_rc_log" >&2
+        return 1
+    fi
+
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — the $_rc_gate checker never reached a verdict.
+
+It exited $_rc, so it did not say whether your code is clean or not. This is
+NOT a finding against your code, and the gate's bypass is the wrong reaction to
+it: the bypass turns the gate off, and the question the gate asks is still
+unanswered.
+
+Its full output is at
+    $_rc_log
+and re-running it directly is the next step:
+    $_rc_cmd
+
+On this host the usual cause is a second rustc-heavy job running concurrently
+and exhausting memory; see known-issues.md ->
+B-TOOLING-INTERMITTENT-HOST-FAILURES-LOSE-THEIR-OWN-EVIDENCE. Re-run it alone
+before concluding anything.
+
+EOF
+    exit 1
+}
+
 if [ "${ALLOW_UNREACHABLE_ALIAS:-0}" = "1" ]; then
     echo "pre-push: ALLOW_UNREACHABLE_ALIAS=1 set — alias check skipped." >&2
     skip_alias=1
@@ -246,7 +344,7 @@ touches userspace/ || skip_alias=1
 note_gate unreachable-command "$skip_alias"
 
 alias_failed=0
-if [ "$skip_alias" != "1" ] && ! "$py" "$checker" --check; then
+if [ "$skip_alias" != "1" ] && ! run_checker unreachable-command "$checker" --check; then
     alias_failed=1
 fi
 
@@ -325,10 +423,10 @@ if [ "$skip_raced" != "1" ]; then
     # tree, and each is a regex a future edit can break silently. A broken
     # detector does not report a broken tree -- it reports a clean one, so
     # --check passing means nothing unless --selftest passed first.
-    if ! "$py" "$raced" --selftest; then
+    if ! run_checker raced-global-selftest "$raced" --selftest; then
         echo "pre-push: raced-globals.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         raced_failed=1
-    elif ! "$py" "$raced" --check; then
+    elif ! run_checker raced-global "$raced" --check; then
         raced_failed=1
     fi
 fi
@@ -411,10 +509,10 @@ if [ "$skip_argv" != "1" ]; then
     # and more sharply here, because this defect cannot be reproduced on the
     # development host at all. Nothing but --selftest stands between a broken
     # regex and a permanently green gate.
-    if ! "$py" "$argv" --selftest; then
+    if ! run_checker argv-utf8-selftest "$argv" --selftest; then
         echo "pre-push: argv-utf8.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         argv_failed=1
-    elif ! "$py" "$argv" --check; then
+    elif ! run_checker argv-utf8 "$argv" --check; then
         argv_failed=1
     fi
 fi
@@ -564,20 +662,20 @@ if [ "$skip_getopt_eff" != "1" ]; then
     # That path cannot be exercised by the sweep: `ed` agrees with GNU today,
     # and a broken comparison would look exactly like that agreement.
     # --selftest is the only thing that tells the two apart.
-    if ! "$py" "$gopt" --selftest; then
+    if ! run_checker getopt-table-selftest "$gopt" --selftest; then
         echo "pre-push: getopt-ambiguity-check.py --selftest failed" >&2
         exit 1
     fi
 fi
 if [ "$skip_getopt" != "1" ]; then
     if [ "$run_all" = "1" ]; then
-        "$py" "$gopt" || getopt_failed=1
+        run_checker getopt-table "$gopt" || getopt_failed=1
     elif [ -n "$bins" ]; then
         # Deliberately unquoted: `$bins` is a list of utility names to pass as
         # separate arguments, and they are shell-safe by construction (they are
         # Rust source file stems).
         # shellcheck disable=SC2086
-        "$py" "$gopt" $bins || getopt_failed=1
+        run_checker getopt-table "$gopt" $bins || getopt_failed=1
     fi
 fi
 
@@ -670,10 +768,10 @@ if [ "$skip_errmsg" != "1" ]; then
     # of the three to failing silently: its signal lives *inside* a string
     # literal, so the obvious Rust lexer to reach for -- the one the other gates
     # share, which blanks literals -- would make every file look clean.
-    if ! "$py" "$errmsg" --selftest; then
+    if ! run_checker host-errmsg-selftest "$errmsg" --selftest; then
         echo "pre-push: host-errmsg.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         errmsg_failed=1
-    elif ! "$py" "$errmsg" --check; then
+    elif ! run_checker host-errmsg "$errmsg" --check; then
         errmsg_failed=1
     fi
 fi
@@ -977,10 +1075,10 @@ if [ "$skip_quote" != "1" ]; then
     # As with gate 6, check the checker first: this detector's signal is also
     # inside a string literal, so a rewrite that reached for a Rust lexer would
     # blank out the very text it searches and report a clean tree.
-    if ! "$py" "$quote" --selftest; then
+    if ! run_checker quote-names-selftest "$quote" --selftest; then
         echo "pre-push: quote-names.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         quote_failed=1
-    elif ! "$py" "$quote" --check; then
+    elif ! run_checker quote-names "$quote" --check; then
         quote_failed=1
     fi
 fi
@@ -1081,13 +1179,22 @@ note_gate request-deletion "$skip_reqdel"
 
 reqdel_failed=0
 if [ "$skip_reqdel" != "1" ]; then
-    if ! "$py" "$reqdel" --selftest >/dev/null; then
+    # Unlike its neighbours this self-test used to run twice — once with stdout
+    # discarded, then again to stderr if the first had failed — to keep a
+    # passing self-test quiet. The second run is gone, for a reason that
+    # outweighs the quiet: a checker that fails *intermittently* passes the
+    # retry, so the operator was shown a clean self-test underneath the line
+    # saying it had failed. Its one line of chatter now prints on success, which
+    # is what every other gate here already does.
+    if ! run_checker request-deletion-selftest "$reqdel" --selftest; then
         echo "pre-push: check-requests-not-deleted.py FAILED ITS OWN SELF-TEST — its result is not trustworthy." >&2
-        "$py" "$reqdel" --selftest >&2
         reqdel_failed=1
     else
         for sha in $pushed_shas; do
-            if ! "$py" "$reqdel" --head "$sha"; then
+            # Per-sha gate name: this is the one gate that calls its checker
+            # more than once, and a shared name would let a later clean sha
+            # delete the kept log of an earlier failing one.
+            if ! run_checker "request-deletion-$sha" "$reqdel" --head "$sha"; then
                 reqdel_failed=1
             fi
         done
@@ -1336,7 +1443,7 @@ if [ "$skip_doclinks" != "1" ]; then
     # reports nothing at all. Neither is distinguishable from a correct run by
     # looking at the exit code, so the self-test runs first and its failure
     # disqualifies the verdict rather than being reported alongside it.
-    if ! "$py" "$doclinks" --selftest; then
+    if ! run_checker doc-links-selftest "$doclinks" --selftest; then
         echo "pre-push: check-doc-links.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         doclinks_failed=1
     else
@@ -1347,7 +1454,7 @@ if [ "$skip_doclinks" != "1" ]; then
         # (git reports them one per line, and the loop above already dropped
         # anything that is not an existing directory).
         # shellcheck disable=SC2086
-        "$py" "$doclinks" --check $doclink_dirs || doclinks_failed=1
+        run_checker doc-links "$doclinks" --check $doclink_dirs || doclinks_failed=1
         IFS=$doclink_old_ifs
     fi
 fi

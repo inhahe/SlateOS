@@ -315,6 +315,132 @@ def case_gate2_a_crate_absent_from_the_disk_is_still_judged(tmp: str) -> None:
           "ghostalias" in rev.stdout + rev.stderr, True)
 
 
+# --------------------------------------------------------------------------
+# The hook, not the checker.
+#
+# Everything above runs the checker directly, which leaves the seam between the
+# hook and the checker untested -- and that seam is where the last two defects
+# in these gates actually lived: gate 11 handed its scope to argv and died of a
+# length limit before reading a file, and gate 7 read the disk while
+# enumerating the commit. Neither is visible from either side alone.
+#
+# So this pushes for real, through the real hook, with a commit and a worktree
+# that disagree. If `--head "$sha"` is ever dropped from the invocation, or the
+# `$pushed_shas` loop iterates zero times, these two cases are what say so.
+# --------------------------------------------------------------------------
+
+HOOK = os.path.join(REPO_ROOT, "scripts", "hooks", "pre-push")
+LIB = os.path.join(REPO_ROOT, "scripts", "run-checker.sh")
+
+
+def _push_fixture(tmp: str, name: str) -> str:
+    """A repository with a remote and the real hook and checker installed."""
+    root = os.path.join(tmp, name)
+    remote = os.path.join(root, "remote.git")
+    work = os.path.join(root, "w")
+    os.makedirs(root)
+    git(root, "init", "--quiet", "--bare", remote)
+    git(root, "init", "--quiet", "-b", "main", work)
+    git(work, "config", "user.name", "Real Person")
+    git(work, "config", "user.email", "real@example.org.uk")
+    # An inherited `commit.gpgsign=true` would fail every commit below and
+    # surface as a gate verdict rather than as what it is.
+    git(work, "config", "commit.gpgsign", "false")
+
+    hooks = os.path.join(work, ".git", "hooks")
+    os.makedirs(hooks, exist_ok=True)
+    for src, dst in ((HOOK, os.path.join(hooks, "pre-push")),
+                     (LIB, os.path.join(work, "scripts", "run-checker.sh")),
+                     (os.path.join(HERE, "multicall-aliases.py"),
+                      os.path.join(work, "scripts", "multicall-aliases.py")),
+                     (os.path.join(HERE, "gittree.py"),
+                      os.path.join(work, "scripts", "gittree.py"))):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(src, encoding="utf-8", newline="") as fh:
+            body = fh.read()
+        with open(dst, "w", encoding="utf-8", newline="") as fh:
+            fh.write(body)
+    os.chmod(os.path.join(hooks, "pre-push"), 0o755)
+
+    git(work, "remote", "add", "origin", remote)
+    write(work, "scripts/multicall-aliases-baseline.txt", _EMPTY_BASELINE)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "install the gate")
+    git(work, "push", "--quiet", "origin", "main")
+    return work
+
+
+def _push(work: str) -> tuple[str, str]:
+    """(verdict, output). `allowed`, `refused`, or `error:<...>`.
+
+    Only *gate 2's* refusal counts as `refused`. A suite that accepted any
+    refusal would pass on a fixture that trips some other gate and never reach
+    the thing it is about.
+
+    `ALLOW_FMT_DRIFT=1` because the fixture's `.rs` files are hand-written and
+    gate 7 would rustfmt them; `test-pre-push-fmt-gate.py` covers that gate
+    properly. Nothing else is bypassed -- the other gates skip themselves
+    because this fixture does not install their checkers.
+    """
+    env = gitenv.clean_env()
+    env["ALLOW_FMT_DRIFT"] = "1"
+    proc = subprocess.run(["git", "push", "origin", "main"], cwd=work, env=env,
+                          capture_output=True, text=True, check=False)
+    blob = proc.stdout + proc.stderr
+    if proc.returncode == 0:
+        return "allowed", blob
+    # One line's worth: the refusal is a hand-wrapped paragraph, so a
+    # whole-sentence probe never matches and a correct refusal would read as an
+    # unrelated error.
+    if "command name exists that nothing can run" in blob:
+        return "refused", blob
+    return "error:" + blob.strip().replace("\n", " | ")[:600], blob
+
+
+def case_gate2_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) -> None:
+    """End to end: the false pass, through the real hook.
+
+    This is the shape that published two unformatted commits from gate 7 --
+    commit the defect, tidy the worktree, push. The gate reads the tidy disk
+    and approves what is actually being sent.
+    """
+    work = _push_fixture(tmp, "g2push-hide")
+    write(work, "userspace/real/src/main.rs", _DISPATCH % "ghosttool")
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "add a personality with no producer")
+    write(work, "userspace/real/src/main.rs", "fn main() {}\n")
+
+    verdict, blob = _push(work)
+    check("gate 2 end to end: the push is refused", verdict, "refused")
+    check("gate 2 end to end: ...naming the alias only the commit has",
+          "ghosttool" in blob, True)
+
+
+def case_gate2_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -> None:
+    """End to end: the false fail, through the real hook.
+
+    Mirror of the case above, and the one that decides whether anyone keeps the
+    gate switched on: a refusal here names code that is not being pushed, and
+    the only remedy the message offers is the bypass -- which turns the gate off
+    for the commits it should be judging.
+    """
+    work = _push_fixture(tmp, "g2push-wip")
+    write(work, "userspace/real/src/main.rs", "fn main() {}\n")
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a clean crate under userspace/")
+    write(work, "userspace/real/src/main.rs", _DISPATCH % "wipname")
+
+    verdict, blob = _push(work)
+    check("gate 2 end to end: an uncommitted personality does not block",
+          verdict, "allowed")
+    # That it was *allowed* is not enough on its own: a gate that skipped
+    # itself would also allow it, and would allow the case above too. The
+    # hook's own tally is what distinguishes the two.
+    check("gate 2 end to end: ...and the gate actually ran",
+          "ran:" in blob and "unreachable-command" in blob.split("skipped:")[0],
+          True)
+
+
 def case_gate2_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
     """Exit 2, not 1.
 
@@ -336,6 +462,8 @@ CASES = (
     case_gate2_a_missing_producer_directory_is_not_a_crash,
     case_gate2_every_producer_kind_is_read_from_the_tree,
     case_gate2_a_crate_absent_from_the_disk_is_still_judged,
+    case_gate2_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate2_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate2_an_unopenable_revision_is_not_a_finding,
 )
 
@@ -343,9 +471,17 @@ CASES = (
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 5:
+    if len(CASES) < 9:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 5. The list is broken, not the code.")
+              f"least 9. The list is broken, not the code.")
+        return 1
+    # ...and at least one of them must go through the real hook. A floor on the
+    # count alone would be met by nine direct-invocation cases, which is the
+    # arrangement that left the hook->checker seam untested in the first place.
+    end_to_end = [c for c in CASES if "the_hook" in c.__name__]
+    if len(end_to_end) < 2:
+        print(f"FATAL: {len(end_to_end)} end-to-end case(s) registered; the "
+              f"suite has at least 2. The list is broken, not the code.")
         return 1
     with tempfile.TemporaryDirectory() as tmp:
         for case in CASES:

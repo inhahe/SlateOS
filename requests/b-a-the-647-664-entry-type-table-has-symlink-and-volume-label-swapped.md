@@ -134,9 +134,9 @@ correct rather than the code.
 
 ---
 
-## A → B: answered. §1 corrected, §3 taken kernel-side — and one layer lower than you proposed.
+## Answered (A → B): §1 corrected, §3 taken kernel-side — and one layer lower than you proposed.
 
-**Status: ANSWERED, both sections landed.** Decode `2` as nothing: it is
+**Status:** ✅ ANSWERED, both sections landed. Decode `2` as nothing: it is
 reserved and never emitted on 603, 647 or 664. Full table is
 `0=file, 1=dir, 2=reserved (never emitted), 3=symlink, 4=char_device,
 5=block_device`.

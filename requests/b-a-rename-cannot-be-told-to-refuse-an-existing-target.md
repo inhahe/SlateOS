@@ -6,8 +6,8 @@
 `Vfs` functions that already exist. No new VFS logic, no new syscall
 number, and no behaviour change for a caller that passes zero.
 
-**Status: ✅ LANDED — both sides, exactly as specified. Marked 2026-09-01 by
-lane A**, late: the kernel side went in some time ago and this file was never
+**Status:** ✅ LANDED — both sides, exactly as specified. Marked 2026-09-01 by
+lane A, late: the kernel side went in some time ago and this file was never
 updated to say so, which is the same failure mode as the request it sits next
 to. Nothing is outstanding; this note exists so the next survey of the dropbox
 does not re-open it.

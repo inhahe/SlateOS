@@ -36,6 +36,13 @@ pub type VkResult = i32;
 /// `VK_SUCCESS`.
 pub const VK_SUCCESS: VkResult = 0;
 
+/// `VK_INCOMPLETE`. A *success*, not an error: the array the caller supplied
+/// was too small, and as much as fitted was written.
+///
+/// It is positive, which is the whole reason [`crate::instance::outcome`]
+/// treats "non-negative" rather than "equal to `VK_SUCCESS`" as success.
+pub const VK_INCOMPLETE: VkResult = 5;
+
 /// `VK_ERROR_OUT_OF_HOST_MEMORY`.
 pub const VK_ERROR_OUT_OF_HOST_MEMORY: VkResult = -1;
 
@@ -89,6 +96,42 @@ pub type GetInstanceProcAddrFn =
 /// through a pointer the driver never exported.
 pub type GetPhysicalDeviceProcAddrFn =
     unsafe extern "C" fn(instance: Handle, name: *const c_char) -> VoidFn;
+
+/// `PFN_vkCreateInstance`.
+///
+/// The two structure pointers are `*const c_void` rather than declared types
+/// because the loader does not read either of them — it hands both to every
+/// driver exactly as the application gave them. Declaring `VkInstanceCreateInfo`
+/// here would mean promising a layout the loader never checks, which is the
+/// kind of promise this module exists to avoid making.
+///
+/// # Safety
+///
+/// `create_info` must be a valid `VkInstanceCreateInfo*` for the callee,
+/// `allocator` a valid `VkAllocationCallbacks*` or null, and `out` a writable
+/// handle slot.
+pub type CreateInstanceFn = unsafe extern "C" fn(
+    create_info: *const c_void,
+    allocator: *const c_void,
+    out: *mut Handle,
+) -> VkResult;
+
+/// `PFN_vkDestroyInstance`.
+///
+/// # Safety
+///
+/// `instance` must be null or a handle the callee created and has not already
+/// destroyed; `allocator` must match the one creation was given.
+pub type DestroyInstanceFn = unsafe extern "C" fn(instance: Handle, allocator: *const c_void);
+
+/// `PFN_vkEnumeratePhysicalDevices`.
+///
+/// # Safety
+///
+/// `instance` must be a handle the callee created, `count` a writable `u32`,
+/// and `out` either null or an array of at least `*count` handles.
+pub type EnumeratePhysicalDevicesFn =
+    unsafe extern "C" fn(instance: Handle, count: *mut u32, out: *mut Handle) -> VkResult;
 
 /// `PFN_vk_icdNegotiateLoaderICDInterfaceVersion`.
 ///

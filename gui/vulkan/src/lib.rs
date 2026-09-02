@@ -22,14 +22,17 @@
 //! | [`icd`] | Which interface version the loader and a driver settle on, and what each version entitles either side to assume. |
 //! | [`dispatch`] | The layout of a *dispatchable handle* — the first word of every `VkInstance`, `VkDevice`, `VkQueue` and `VkCommandBuffer` — and the check that must precede writing to it. |
 //! | [`registry`] | The drivers this loader knows about: the handshake with each, the version it settled on, and — kept rather than discarded — the ones that were rejected and why. |
+//! | [`instance`] | What one `vkCreateInstance` means across several drivers: which failure the application is told about, and the loader's own dispatchable instance and physical-device objects. |
+//! | [`entry`] | The exported symbols, the process-wide driver registry, and the dispatch table their addresses come from. |
 //! | [`vk`] | The few Vulkan C types the loader's own signatures cannot avoid naming. Not a binding, and not becoming one. |
 //!
-//! Both are pure: they decide things, and something else does the FFI. That
-//! split is deliberate and is argued for in each module's own documentation.
-//! The short version is that the parts of a loader that get this wrong are the
-//! parts that are hard to test, so this crate keeps the policy in functions
-//! that take values and return values, and confines the raw-pointer work to a
-//! thin layer around them.
+//! Every module above [`entry`] is pure: it decides things, and something else
+//! does the FFI. That split is deliberate and is argued for in each module's
+//! own documentation. The short version is that the parts of a loader that get
+//! this wrong are the parts that are hard to test, so this crate keeps the
+//! policy in functions that take values and return values, and confines the
+//! raw-pointer work to a thin layer around them — which is [`entry`], and is
+//! why it is the only module that names a `static`.
 //!
 //! # Why drivers are registered rather than discovered
 //!
@@ -57,17 +60,30 @@
 //!
 //! # What is deliberately not here yet
 //!
-//! No Vulkan entry points are exported. A loader that exports
-//! `vkCreateInstance` before it can dispatch it is a tool that reports
-//! success for work it never did, which is a defect this tree has been
-//! filing bugs about, not a milestone. The entry points land once the ICD
-//! registry and instance fan-out can actually service them.
+//! The exported symbols are `vkGetInstanceProcAddr`, `vkCreateInstance`,
+//! `vkDestroyInstance` and `vkEnumeratePhysicalDevices`, plus SlateOS's own
+//! `vk_slateosRegisterDriver`. That is the whole list, and the omissions are
+//! omissions rather than stubs: `vkEnumerateInstanceExtensionProperties`,
+//! `vkEnumerateInstanceLayerProperties` and `vkEnumerateInstanceVersion` are
+//! *not exported at all*, so an application that needs one fails to link with
+//! that symbol named.
+//!
+//! Exporting them to return an empty list would be the alternative, and it is
+//! the defect this tree has been filing bugs about — a tool that reports
+//! success for work it never did. A link error names the missing thing; an
+//! empty extension list produces a bug report about the driver.
+//!
+//! Device-level Vulkan — `vkCreateDevice` and everything a `VkDevice`
+//! dispatches — is the next layer, and needs a device dispatch table per driver
+//! rather than the one instance-level table [`entry`] has today.
 
 #![no_std]
 
 extern crate alloc;
 
 pub mod dispatch;
+pub mod entry;
 pub mod icd;
+pub mod instance;
 pub mod registry;
 pub mod vk;

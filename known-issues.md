@@ -107318,7 +107318,65 @@ comment should go with the fix.
 
 ---
 
-### A-CANARY-OCCUPANCY-CEILING-IS-DERIVED-FROM-THE-WRONG-ERROR-MODEL. A live timing self-test refused to build a boot test at `occupancy_measured 1.089 > ceiling 1.078`, on a 0.2s span whose instrument cannot resolve 1% — 2026-09-02 — **Status: OPEN, reproduction in progress** (lane A)
+### A-CANARY-OCCUPANCY-CEILING-IS-DERIVED-FROM-THE-WRONG-ERROR-MODEL. A live timing self-test refused to build a boot test at `occupancy_measured 1.089 > ceiling 1.078`, on a 0.2s span whose instrument cannot resolve 1% — 2026-09-02 — **Status: ✅ FIXED 2026-09-02** (lane A)
+
+> **Resolution 2026-09-02 (commit `7a504ebb6`).** The title is wrong, and that
+> is the finding. The error model was *right*; the span it was applied to was
+> not the span the numerator covered. The ceiling was correctly reporting an
+> impossibility — just not the one anybody guessed.
+>
+> **Cause.** Each spinner published a bare CPU number, and the controller
+> divided it by an interval it stamped itself. Those are not the same interval.
+> A spinner parked in `go.wait(1.0)` may have published up to a second earlier,
+> so the numerator began wherever it last spoke while the denominator began at
+> the controller's stamp. Windows charges a whole 15.6 ms tick to whichever
+> process the 64 Hz sampler catches, however briefly it ran — so a *single*
+> tick landing in that gap is 7.8% of a 0.2 s window, and the entire allowance
+> was one tick.
+>
+> **Fix.** Spinners publish `(cpu_seconds, monotonic)` as a locked pair, and
+> each spinner's span is its own clock delta over the same interval as its own
+> CPU figure. Numerator and denominator are now the same interval by
+> construction, so quantisation is the only error left and `1 + g/span` is a
+> hard bound again. Barriers at both window edges (`fired_count`, `done_count`)
+> keep the pairs fresh — the controller may not snapshot until every spinner
+> has published after `go`, nor close until every one has published after
+> `stop`.
+>
+> **What was rejected, and why it matters.** Widening the tolerance. It would
+> have retired the only check that noticed, which is precisely the mistake the
+> old hardcoded `2.0` had already made once — it let 1.82 cores per
+> single-threaded spinner through for as long as the host stayed quiet. A bound
+> that is loosened every time it fires stops being a bound.
+>
+> **Two suspects were measured and cleared rather than patched around.** The
+> first theory was that the controller's snapshot read was losing milliseconds
+> to descheduling; measured, it takes **0–20 µs**, and the stamping order it
+> was blamed on is now merely correct rather than load-bearing. This is the
+> second time today a plausible cause survived until it was measured and then
+> did not (see the `check-variant-lists.py` entry) — the pattern is that a
+> mechanism which *could* explain the magnitude is not evidence that it *did*.
+>
+> **A second, independent flake surfaced during the repro** and is fixed in the
+> same commit: the live test's `occupancy` *floor*. A 14-run probe caught it at
+> `0.304` on an otherwise idle host. Over 0.2 s a single unrelated process can
+> take most of the CPU, and the instrument cannot tell that from a load that
+> was never applied — so this would have refused a boot test for a fact about
+> the host rather than about the code. The live window goes 0.2 s → 0.6 s,
+> which both bounds needed in opposite directions: the floor gets enough ticks
+> to average a transient away, and the ceiling's allowance falls from 7.8% to
+> 2.6%, tripling the check's power.
+>
+> **Measured, 14 runs each, same host:**
+>
+> | | `occupancy_measured` range | ceiling | over ceiling |
+> |---|---|---|---|
+> | before (0.2 s, unpaired) | 0.278 – 1.037 | 1.062 – 1.077 | 0/14 quiet, 1 seen loaded |
+> | after (0.6 s, paired) | **0.811 – 1.004** | 1.022 – 1.026 | **0/14** |
+>
+> The pre-fix probe also caught `1.009` on an *idle* host — impossible for a
+> single-threaded process, and the observation that moved this from "flaky
+> tolerance" to "the ratio is malformed".
 
 **In short:** the harness runs its own test suites before it builds anything,
 and one of them — `test-canary-load.py` — starts two CPU-burning processes and

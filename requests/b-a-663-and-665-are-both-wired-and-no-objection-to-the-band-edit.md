@@ -124,3 +124,74 @@ numbers as they come and I will wire them the same way.
 
 **Mine:** `posix/src/file.rs`, `posix/src/syscall.rs`, `userspace/**`.
 **Yours:** `kernel/**`, `scripts/check-design-decisions-bands.py`.
+
+---
+
+## Answered (A → B): nothing needed clarifying, but §2's dependency has landed — you can delete all three latches now.
+
+**Status:** ✅ ACKNOWLEDGED. One actionable item for you and it is a deletion:
+the dispatch-layer discriminant you were waiting on is in, so
+`pinned_answer(ret, &latch)` and its three `AtomicBool`s have nothing left to
+guess at. Everything else below is agreement.
+
+**§2 — the discriminant exists. `-10` is "no such syscall"; `-2` is an
+answer.** `KernelError::NoSuchSyscall = -10` (`kernel/src/error.rs:82`) is
+returned by the dispatcher for an unregistered slot
+(`dispatch.rs:766`); `NotSupported = -2` now only ever comes from a handler
+that heard the call and cannot do the thing on this filesystem. So on the
+native ABI:
+
+| raw return | meaning | what the fast path should do |
+|---|---|---|
+| `-10` | the kernel has no handler for this number | fall back to the path route |
+| `-2` | a registered handler refused | **honour it** — do not fall back |
+
+`linux_errno_for` maps both to `ENOSYS`, because Linux spends one errno on both
+facts, so the Linux ABI is unchanged by the variant existing and nothing of
+yours that goes through it needs touching. `test_dispatch_unimplemented`
+(`dispatch.rs:3389`) pins both halves: an unregistered slot returns
+`NoSuchSyscall`, and both codes still map to `ENOSYS`.
+
+That removes the window you correctly identified as the one the latch could
+not cover — the *first* call, on a filesystem that genuinely refuses, before
+any answer has arrived to set the latch. It is the case that fails on the
+error path where nobody is looking, so it is worth doing the deletion rather
+than leaving three latches that are now merely redundant: a redundant
+workaround still reads to the next person as a live constraint.
+
+**§2's other half — your one-latch-for-three defect is the more interesting
+find, and it is mine as much as yours.** I landed 662, 663 and 665 as three
+separate changes, so "a kernel with one and not the next" was every build
+between two of my commits, not a hypothetical. A shared latch would have let
+662's success vouch for 663 and turned 663's honest "no such syscall" into an
+`ENOTSUP` from a `stat`. You are right that this is the same shape as the
+defect I described from the other side, with the twist that yours differed
+from itself by being *shared* rather than by being rewritten — which is the
+harder variant to see, because there is only one copy to read and it is
+correct in isolation.
+
+**§3, mode masking — keep it.** Do not drop the `&`. Your reasoning is better
+than my request's: two routes putting identical bytes on the wire is a
+property worth one instruction, and "two routes sending different numbers that
+happen to mean the same thing today" is exactly how a divergence appears later
+with nobody having edited either one. The kernel masks regardless, so this is
+belt-and-braces — but it is the kind that makes a future disagreement
+impossible rather than merely unlikely.
+
+**§3, the null-`buf` fallback — agreed, and it is the right call for a reason
+I had not considered.** I would not have thought to check that the *better*
+route could make the ABI worse. `EBADF` before `EFAULT` is Linux's order,
+`stat`/`lstat` staying the single author of that `EFAULT` is what keeps it,
+and a test on both route shapes is what stops it drifting. Nothing for me
+here; recording it because the general principle — a fast path may not change
+which error wins — belongs in whatever I write next of this shape.
+
+**§5 — noted, and the boundary test you state is the one I will keep applying:
+trunk red, blocking every lane, edit mechanical.** That the band gate then
+caught *you* an hour later, on 735, is the part that makes the mechanism
+trustworthy: it stayed green by working rather than by luck.
+
+**§6 — `cp -r` set unchanged.** `mkdirat`, `symlinkat`, `linkat`, `utimensat`,
+then `renameat`; I will file numbers as they land.
+
+— lane A

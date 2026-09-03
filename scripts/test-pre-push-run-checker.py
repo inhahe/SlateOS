@@ -212,19 +212,45 @@ def code_lines(text: str) -> list[str]:
     return [li for li in text.splitlines() if not li.lstrip().startswith("#")]
 
 
-# `run_checker <label>`, with the label optionally quoted because several are
-# interpolated (`"request-deletion-$sha"`).
-LABEL_RE = re.compile(r"\brun_checker\s+\"?([a-z0-9$-]+)")
+# `run_checker <label>` in *command position*, with the label optionally quoted
+# because several are interpolated (`"request-deletion-$sha"`). The three
+# accepted prefixes are the only shapes boot-test.sh and the hook actually use,
+# measured rather than assumed: a bare call, `if run_checker`, and
+# `if ! run_checker`. If a fourth shape is ever introduced, the
+# "runs every checker through it" count assertion below drops and says so --
+# which is the intended failure, and better than a regex that quietly accepts
+# anything and goes back to matching prose.
+LABEL_RE = re.compile(
+    r"^[ \t]*(?:if[ \t]+)?(?:![ \t]*)?run_checker[ \t]+\"?([a-z0-9$-]+)",
+    re.MULTILINE,
+)
 
 
 def run_checker_labels(text: str) -> list[str]:
     """Every label passed to `run_checker`, ignoring prose that names it.
 
-    Read off code lines only. The converted gates carry comments saying things
-    like "run_checker makes that distinction for every gate now", and reading
-    those as calls invented a phantom gate labelled `makes` -- twice, so the
-    duplicate-label check below reported a collision that did not exist. A
-    structural test that reads comments is testing the comments.
+    Two filters, because the prose that names `run_checker` has twice turned
+    up somewhere the previous filter did not look.
+
+    1. Code lines only. The converted gates carry comments saying things like
+       "run_checker makes that distinction for every gate now", and reading
+       those as calls invented a phantom gate labelled `makes` -- twice, so
+       the duplicate-label check below reported a collision that did not
+       exist. A structural test that reads comments is testing the comments.
+
+    2. Command position only. That was not enough, and the same bug came back
+       wearing different clothes: `check-gates-are-wired`'s own refusal text
+       is printed by `echo "  * a run_checker call whose script argument
+       could not be resolved," >&2`, on three separate lines. Those are code
+       -- filter 1 keeps them, correctly -- but the words inside the string
+       are still prose, and they yielded a phantom gate labelled `call`,
+       three times, failing the duplicate check on an unmodified tree.
+
+       The generalisation of both: a structural test that reads a file's
+       *English* is testing the English. What makes a call a call is that the
+       word starts a command, so that is what is matched, and a mention
+       anywhere else on the line -- comment, echo, heredoc, error message --
+       cannot be one.
     """
     return LABEL_RE.findall("\n".join(code_lines(text)))
 
@@ -396,6 +422,67 @@ def main() -> int:
         check("aborts the run", r.returncode == 1, f"rc={r.returncode}")
         check("says no verdict was reached", "never reached a verdict" in flat)
         check("reports the exit code it saw", "exited 2" in flat)
+        # The negative half of group 4b's discrimination, and it has to live
+        # here rather than there: a patch that printed the launch-failure
+        # reading for *every* non-verdict code would satisfy every assertion
+        # in 4b while being exactly as wrong as the bug 4b exists to prevent.
+        # This is the line that fails on such a patch.
+        check("still gives the contention advice for an ordinary code",
+              "Re-run it alone before concluding anything" in flat)
+        check("does not offer the launch-failure reading",
+              "could not execute it" not in flat
+              and "could not run it at all" not in flat)
+        log.unlink(missing_ok=True)
+
+        # ------------------------------------------------------------------
+        # 126 and 127 are the shell's codes for "never launched", and no
+        # checker in this tree returns either as a verdict. Advising the
+        # reader to re-run a checker alone is right for an OOM kill and wrong
+        # here: `Argument list too long` is a limit on the command, not on the
+        # machine, so the retry reaches the identical wall. See
+        # known-issues.md -> B-A-CHECKER-THAT-CANNOT-BE-LAUNCHED-IS-REPORTED-
+        # AS-A-RESOURCE-SHORTAGE.
+        print("group 4b: a checker that could not be launched")
+        toolong = fake_checker(
+            tmp_root,
+            "toolong",
+            "import sys\n"
+            "print('/usr/bin/sh: Argument list too long')\n"
+            "sys.exit(126)\n",
+        )
+        r = run(tmp_root, func, toolong)
+        flat = flatten(r.stdout + r.stderr)
+        check("aborts the run", r.returncode == 1, f"rc={r.returncode}")
+        check("reports the exit code it saw", "exited 126" in flat)
+        check("reads 126 as a launch failure", "could not execute it" in flat)
+        check("quotes the checker's own first line",
+              "Argument list too long" in flat)
+        check("says the retry is futile", "identical wall" in flat)
+        # The whole point of the fix: the old message ended here with advice
+        # to re-run it alone, which for E2BIG costs a full push to learn
+        # nothing.
+        check("does NOT give the contention advice",
+              "Re-run it alone before concluding anything" not in flat)
+        log.unlink(missing_ok=True)
+
+        # 127 is deliberately NOT the mirror of 126. A fork() refused by the
+        # Windows commit limit surfaces as 127 on this host (boot-history.py,
+        # HARNESS_ABORT_EXITS), so the retry advice is right for one of its
+        # two causes. The message must offer both readings rather than pick.
+        notfound = fake_checker(
+            tmp_root,
+            "notfound",
+            "import sys\nprint('sh: nosuchtool: not found')\nsys.exit(127)\n",
+        )
+        r = run(tmp_root, func, notfound)
+        flat = flatten(r.stdout + r.stderr)
+        check("aborts the run", r.returncode == 1, f"rc={r.returncode}")
+        check("reports the exit code it saw", "exited 127" in flat)
+        check("reads 127 as a launch failure",
+              "could not run it at all" in flat)
+        check("quotes the checker's own first line", "not found" in flat)
+        check("keeps the commit-limit reading too", "commit limit" in flat)
+        check("says which output tells them apart", "tells them apart" in flat)
         log.unlink(missing_ok=True)
 
         # ------------------------------------------------------------------
@@ -492,6 +579,27 @@ def main() -> int:
         check("the hook sources the library", "run-checker.sh" in hook)
         check("boot-test sources the library", "run-checker.sh" in boot)
 
+        # The extractor is itself a checker, so it gets the treatment every
+        # other checker here gets: one input it must find and one it must
+        # not. Twice now a mention of `run_checker` in prose has been counted
+        # as a call -- once in a comment, once inside an `echo` -- and both
+        # times the symptom was a duplicate-label failure on a tree where no
+        # duplicate existed. Asserting only that real calls are found would
+        # pass in both of those states.
+        probe = "\n".join([
+            "run_checker alpha \"$py\" scripts/check-a.py",
+            "if run_checker beta \"$py\" scripts/check-b.py; then :; fi",
+            "if ! run_checker gamma \"$py\" scripts/check-c.py; then :; fi",
+            "# run_checker makes that distinction for every gate now",
+            'echo "  * a run_checker call whose argument could not be resolved" >&2',
+            'echo "Add a run_checker call for the gate, or pin it" >&2',
+        ])
+        found = run_checker_labels(probe)
+        check("the label extractor finds calls in every shape used",
+              found == ["alpha", "beta", "gamma"], f"found {found}")
+        check("the label extractor ignores run_checker named in prose",
+              "makes" not in found and "call" not in found, f"found {found}")
+
         hook_gates = run_checker_labels(hook)
         check("every pre-push call is named", all(hook_gates),
               f"found {len(hook_gates)} calls")
@@ -508,6 +616,36 @@ def main() -> int:
         # would have the second delete the first's evidence.
         dupes = sorted({g for g in boot_gates if boot_gates.count(g) > 1})
         check("boot-test's labels are distinct", not dupes, ", ".join(dupes))
+
+        # The same invariant for the hook, which until 2026-09-02 was not
+        # checked at all -- the assertion above was written for boot-test and
+        # never extended, so a label collision at the push boundary (the more
+        # expensive of the two to diagnose, since its evidence is what the
+        # kept log *is*) would have gone unreported.
+        #
+        # It cannot simply be `not dupes`, because the hook has one legitimate
+        # repeat: `getopt-table` is called from the two arms of an `if/elif`
+        # (run_all versus a named list of binaries), so it is one gate spelled
+        # twice and exactly one arm ever executes. Nothing is overwritten.
+        #
+        # Pinned rather than exempted-by-pattern: "duplicates are fine when
+        # the calls are mutually exclusive" is true but not decidable from
+        # shell text without evaluating it, and a rule the checker cannot
+        # actually apply is one that silently permits the real collisions too.
+        # A named pin is a claim someone verified once, and a new duplicate --
+        # which is the case that loses evidence -- still fails here.
+        HOOK_DUPES_OK = {"getopt-table"}
+        hook_dupes = sorted({g for g in hook_gates if hook_gates.count(g) > 1})
+        unexpected = [g for g in hook_dupes if g not in HOOK_DUPES_OK]
+        check("the hook has no unpinned duplicate labels",
+              not unexpected, ", ".join(unexpected))
+        # The pin is itself a claim about the tree, so it expires when it stops
+        # being true rather than sitting there forever protecting nothing.
+        stale = [g for g in HOOK_DUPES_OK if g not in hook_dupes]
+        check("the duplicate-label pin has no stale entries",
+              not stale,
+              f"{', '.join(stale)} is pinned but no longer duplicated -- "
+              "drop it from HOOK_DUPES_OK")
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 

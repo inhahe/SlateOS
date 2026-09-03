@@ -546,8 +546,20 @@ def main():
     # cannot run the rest of this file at all.
     _assert_tables_are_not_gutted()
     assert_port_matches_rust()
-    print("port verified against shellquote.rs")
+    # Both checks above run before the transport check and neither needs WSL:
+    # a gutted table or a drifted port is worth reporting on a host that cannot
+    # run the rest of this file at all, and both exit 1, which is a finding.
+    #
+    # Their *success* lines, though, are printed after it. `run_checker
+    # --may-skip` takes the checker's FIRST line of output as the reason it
+    # skipped, so anything printed before the decline becomes the explanation
+    # in the transcript -- and "port verified against shellquote.rs" as the
+    # reason a gate did not run reads like a pass, in the one place whose job
+    # is to say that nothing was checked. Today the ordering survives by
+    # accident (stdout block-buffers into the log and stderr does not), which
+    # is exactly the kind of accident that ends when someone adds `-u`.
     bashprobe.assert_transport_is_faithful()
+    print("port verified against shellquote.rs")
     print("transport verified faithful\n")
 
     fails = score_cases(CASES)

@@ -112490,6 +112490,36 @@ report produced by a check that was not performed.
 
 ## TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED (lane B, 2026-09-03)
 
+**RESOLVED 2026-09-03.** All four steps of the proper fix below landed, in the
+order it prescribed, and the four `PINNED` entries were deleted in the same
+commit that wired the gates. `boot-test.sh` now runs them as
+`check_bash_oracles`: the **gates** carry `--may-skip`, so a host without WSL
+skips them loudly instead of failing the build, and the **self-tests do not**,
+because a self-test reads only fixtures the checker carries in its own source
+and therefore needs no WSL by construction. That asymmetry is the point — on a
+WSL-less host these four still check their own tables, their floors, the port
+of `shellquote.rs` and the transcription of the rung literals. Only the half
+that genuinely requires bash skips.
+
+Two things were learned doing it that were not in the plan:
+
+- **A floor breach must not be skippable, and is not.** `--may-skip` only
+  accepts exit 2; a gutted table raises `SystemExit` and exits 1, so it still
+  aborts the build with the flag present. Verified for all four.
+- **The decline must be the checker's *first* line of output**, because
+  `run_checker` takes that line as the reason it skipped. Two of the four
+  printed a success line ("port verified against shellquote.rs") before the
+  transport check, which would have made the reason a gate did not run read
+  like a pass. It survived by accident — stdout block-buffers into the log and
+  stderr does not — which is the kind of accident that ends the day someone
+  adds `-u`. Both now print their preconditions' success *after* the transport
+  check, while still *running* them before it, so a drifted port is still a
+  finding on a host that cannot ask bash anything.
+
+Kept rather than deleted because the reasoning below is what a future pin
+should be argued against, and because the "three defects" list is the record of
+why an unrun gate was preferred to a wrongly-wired one for as long as it was.
+
 **In short:** four checkers that verify kshell's quoting rules against *real
 bash* are not run by anything. They are now pinned as deliberately-unwired so
 the build is honest about it, but pinned is not the destination — they should
@@ -112511,7 +112541,10 @@ entry is the other half of it.
 
 **Why they cannot simply be wired.** Three defects, in the order they bite:
 
-1. **An absent WSL is reported as a finding.** `bashprobe.assert_transport_is_faithful()`
+1. ~~**An absent WSL is reported as a finding.**~~ **DONE 2026-09-03.**
+   `bashprobe` now raises `NoBash` and declines via exit 2 with a spoken
+   reason that does not begin `usage:`. Original text follows.
+   `bashprobe.assert_transport_is_faithful()`
    leaves via `raise SystemExit(msg)`, which exits **1**. So "this host has no
    WSL, I could not ask bash" arrives in the same channel as "bash disagrees
    with kshell" — a machine with no WSL is told its shell quoting is wrong. This
@@ -112527,7 +112560,12 @@ entry is the other half of it.
    output carries a `usage:` banner, because **argparse also exits 2** — so
    whatever bashprobe prints on a missing WSL must not begin `usage:`, or the
    gate will abort rather than skip.
-3. **None of the four has a `--self-test`.** Lane C's request flags this from
+3. ~~**None of the four has a `--self-test`.**~~ **DONE 2026-09-03.** All four
+   have one, each with a true-positive fixture and a floor; the shellquote
+   one found a real hole while being mutation-tested — the file pinned
+   `DQ_ESCAPABLE` against the Rust and nothing checked that the scanner ever
+   *read* it. Original text follows.
+   Lane C's request flags this from
    direct experience: three of the five gates it wired the same day shipped an
    unrun `--self-test`, and a scanner that has stopped scanning reports zero
    findings exactly as a clean tree does. These four scan `kernel/src/kshell.rs`

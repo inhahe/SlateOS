@@ -3978,6 +3978,125 @@ check_selftest_rung_numbers() {
 
 check_selftest_rung_numbers
 
+# The four bash oracles: where kshell's quoting rules actually come from.
+#
+# Every other shell gate here reads kshell's source and checks it against a rule
+# written down in this repository.  These four check the *rule* -- they hand the
+# same bytes to real bash through WSL and compare.  A disagreement means our
+# model of the shell is wrong, which no amount of internal consistency would
+# ever reveal: the rest of the gates would go on agreeing with each other about
+# the wrong answer.
+#
+# They were pinned as unwired from the day they were written, for a good reason
+# that has now been dealt with: the boot test must run on a host carrying only
+# the Rust toolchain and QEMU, and on a host without WSL these gates cannot ask
+# bash anything at all.  Aborting the build there would make a quoting checker
+# the reason all three lanes could not build.  Two things had to land first, and
+# both have (2026-09-03): bashprobe now *declines* (exit 2) rather than
+# reporting a finding (exit 1) when WSL is absent, and `run_checker` grew the
+# per-call-site `--may-skip` channel that turns that decline into a loud skip.
+#
+# So the gates are `--may-skip` and the self-tests are NOT, and that asymmetry
+# is the whole design rather than an oversight.  A self-test needs no WSL by
+# construction -- it reads only fixtures the checker carries in its own source
+# (lane A's rule, requests/a-b-yes-to-the-self-test-rule-and-one-half-it-does-
+# not-cover.md §4) -- so on a WSL-less host these four still check their own
+# tables, their floors, the port of shellquote.rs, and the transcription of the
+# rung literals.  That is most of what can go wrong with them, and it is checked
+# on every host.  What skips is only the half that genuinely requires bash.
+check_bash_oracles() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== bash oracles: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # A self-test failure is never skippable: it means the checker disagrees
+    # with fixtures it carries itself, so its verdict on anything else is
+    # worthless -- and unlike the gate, it cannot have been prevented from
+    # looking by a missing tool.
+    echo "=== Checking the four bash oracles against their own fixtures ==="
+    if ! run_checker check-shellquote-vs-bash-selftest "$py" "$PROJECT_ROOT/scripts/check-shellquote-vs-bash.py" --self-test; then
+        _bash_oracle_selftest_died check-shellquote-vs-bash.py
+    fi
+    if ! run_checker check-ansic-quoting-vs-bash-selftest "$py" "$PROJECT_ROOT/scripts/check-ansic-quoting-vs-bash.py" --self-test; then
+        _bash_oracle_selftest_died check-ansic-quoting-vs-bash.py
+    fi
+    if ! run_checker check-kshell-pipeline-vs-bash-selftest "$py" "$PROJECT_ROOT/scripts/check-kshell-pipeline-vs-bash.py" --self-test; then
+        _bash_oracle_selftest_died check-kshell-pipeline-vs-bash.py
+    fi
+    if ! run_checker check-kshell-rungs-vs-bash-selftest "$py" "$PROJECT_ROOT/scripts/check-kshell-rungs-vs-bash.py" --self-test; then
+        _bash_oracle_selftest_died check-kshell-rungs-vs-bash.py
+    fi
+
+    local ran=0 skipped=0
+    echo "=== Asking real bash whether these are bash's rules ==="
+    if run_checker --may-skip check-shellquote-vs-bash "$py" "$PROJECT_ROOT/scripts/check-shellquote-vs-bash.py"; then
+        if [ -n "$RUN_CHECKER_SKIPPED" ]; then skipped=$((skipped + 1)); else ran=$((ran + 1)); fi
+    else
+        _bash_oracle_disagreed check-shellquote-vs-bash.py "kernel/src/shellquote.rs"
+    fi
+    if run_checker --may-skip check-ansic-quoting-vs-bash "$py" "$PROJECT_ROOT/scripts/check-ansic-quoting-vs-bash.py"; then
+        if [ -n "$RUN_CHECKER_SKIPPED" ]; then skipped=$((skipped + 1)); else ran=$((ran + 1)); fi
+    else
+        _bash_oracle_disagreed check-ansic-quoting-vs-bash.py "the \$'...' rules recorded in its own docstring"
+    fi
+    if run_checker --may-skip check-kshell-pipeline-vs-bash "$py" "$PROJECT_ROOT/scripts/check-kshell-pipeline-vs-bash.py"; then
+        if [ -n "$RUN_CHECKER_SKIPPED" ]; then skipped=$((skipped + 1)); else ran=$((ran + 1)); fi
+    else
+        _bash_oracle_disagreed check-kshell-pipeline-vs-bash.py "kshell's expansion pipeline (sites 4/5/6/7)"
+    fi
+    if run_checker --may-skip check-kshell-rungs-vs-bash "$py" "$PROJECT_ROOT/scripts/check-kshell-rungs-vs-bash.py"; then
+        if [ -n "$RUN_CHECKER_SKIPPED" ]; then skipped=$((skipped + 1)); else ran=$((ran + 1)); fi
+    else
+        _bash_oracle_disagreed check-kshell-rungs-vs-bash.py "the assertions in kshell self-test rungs 115 and 117"
+    fi
+
+    if [ "$skipped" -gt 0 ]; then
+        echo "=== bash oracles: $ran asked bash, $skipped skipped (no WSL on this host) ==="
+    else
+        echo "=== bash oracles: all $ran agree with real bash ==="
+    fi
+}
+
+_bash_oracle_selftest_died() {
+    echo "" >&2
+    echo "ERROR: refusing to build.  $1 no longer agrees with the" >&2
+    echo "fixtures it carries in its own source." >&2
+    echo "" >&2
+    echo "This is not a WSL problem and skipping it would be wrong: a self-test" >&2
+    echo "needs no bash, so it did look, and what it found was that the checker" >&2
+    echo "is broken.  Until it is fixed, that gate's verdict about kshell -- on" >&2
+    echo "every host, including the ones that do have WSL -- means nothing." >&2
+    exit 1
+}
+
+_bash_oracle_disagreed() {
+    echo "" >&2
+    echo "ERROR: refusing to build.  Real bash disagrees with $1." >&2
+    echo "" >&2
+    echo "Read the direction of this carefully before changing anything: bash is" >&2
+    echo "the oracle here, not the subject.  A failure means $2" >&2
+    echo "is wrong, and the expectation written in the gate was our belief about" >&2
+    echo "the shell rather than a fact about it.  Fix the Rust, or -- if the" >&2
+    echo "divergence is deliberate -- move the case into that file's DIVERGENCES" >&2
+    echo "list, where BOTH answers are pinned and it starts failing again if" >&2
+    echo "either side changes.  Do not adjust the expectation to match our code:" >&2
+    echo "that converts the one gate measuring reality into another one agreeing" >&2
+    echo "with us." >&2
+    echo "" >&2
+    echo "If instead the gate says the transport is not faithful, nothing about" >&2
+    echo "kshell has been tested at all -- the bytes reaching bash were not the" >&2
+    echo "bytes written down.  See scripts/bashprobe.py." >&2
+    exit 1
+}
+
+check_bash_oracles
+
 # A diagnostic that names the wrong command is caught by nothing else.
 #
 # The operand helpers are handed their command's name as a bare string literal:

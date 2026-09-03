@@ -130,39 +130,13 @@ PINNED: dict[str, str] = {
         "worktree without a fresh sysroot. Needs an opt-in skip channel in "
         "run-checker.sh first. See known-issues.md -> "
         "TD-B-TEN-GATES-ARE-NEVER-ASKED",
-    # The four bash oracles, all lane B, all pinned for one reason, and all
-    # four due to be unpinned together -- see below for what has to be true
-    # first. Kept as separate entries rather than one because this dict is
-    # keyed by filename and pruning it one gate at a time is the point.
-    **{
-        _bash_oracle: (
-            "lane B, and unwired for now because it asks *real bash* for the "
-            "answer: it shells out to `wsl -d Ubuntu` via scripts/bashprobe.py. "
-            "The boot test must run on a host carrying only the Rust toolchain "
-            "and QEMU, so on a host without WSL this gate would be the reason "
-            "all three lanes could not build. Two things have to change before "
-            "it can be wired, and neither is done yet (2026-09-03): (1) an "
-            "absent or broken WSL currently leaves bashprobe via `raise "
-            "SystemExit(msg)`, which exits *1* -- reporting 'I could not ask "
-            "bash' in the same channel as 'bash disagrees with us', the exact "
-            "no-verdict-vs-finding confusion gates 2/3/4/6/11 were converted to "
-            "avoid; it must exit 2. (2) run_checker must gain the opt-in skip "
-            "channel that check-libc-shape.py above is also waiting on, so a "
-            "WSL-less host skips the gate loudly instead of aborting the build. "
-            "Until then these are run by hand when a quoting rule is written, "
-            "and their verdicts are carried into kshell's own self-test rungs, "
-            "which is what makes the evidence survive onto a host with no bash "
-            "at all. Answering "
-            "requests/c-b-four-of-your-new-shell-gates-are-unwired-and-main-is-red.md; "
-            "see known-issues.md -> TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED"
-        )
-        for _bash_oracle in (
-            "check-ansic-quoting-vs-bash.py",
-            "check-kshell-pipeline-vs-bash.py",
-            "check-kshell-rungs-vs-bash.py",
-            "check-shellquote-vs-bash.py",
-        )
-    },
+    # The four `check-*-vs-bash.py` oracles were pinned here from the day they
+    # were written and were unpinned on 2026-09-03, when both of the things
+    # their entry said had to change had changed: bashprobe now exits 2 (a
+    # declined verdict) rather than 1 (a finding) when WSL is absent, and
+    # run_checker grew the per-call-site `--may-skip` channel. They are wired
+    # into boot-test.sh as check_bash_oracles -- gates skippable, self-tests
+    # not. See known-issues.md -> TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED.
 }
 
 _GATE = re.compile(r"(check-[A-Za-z0-9_.-]+\.py)")

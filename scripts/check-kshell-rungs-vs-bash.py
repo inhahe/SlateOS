@@ -274,8 +274,16 @@ def main():
     # actually contains, or every answer below is about a different string.
     _assert_tables_are_not_gutted()
     assert_rust_src_is_verbatim()
-    print(f"all {len(CASES)} rust_src literals found verbatim in kshell.rs")
+    # Both checks above run before the transport check and neither needs WSL:
+    # a gutted table or a mistranscribed literal is worth reporting on a host
+    # that cannot run the rest of this file, and both exit 1, which is a
+    # finding. Their *success* lines are printed after it, because `run_checker
+    # --may-skip` takes the checker's FIRST line of output as the reason it
+    # skipped -- and "all 13 rust_src literals found verbatim" as the reason a
+    # gate did not run reads like a pass, in the one place whose job is to say
+    # that nothing was checked.
     bashprobe.assert_transport_is_faithful()
+    print(f"all {len(CASES)} rust_src literals found verbatim in kshell.rs")
     print("transport verified faithful\n")
     fails = 0
     for rust_src, line, want in CASES:

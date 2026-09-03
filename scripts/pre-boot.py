@@ -30,6 +30,29 @@ cross-worktree boot lock is held, but that lock is taken for the QEMU phase --
 it does not cover the gate and build phases, so the check is a courtesy, not a
 guarantee.  If you started a boot test, wait for it.
 
+Three outcomes per gate, not two
+--------------------------------
+A gate can pass (`ok`), fail (`FAIL`), or run and reach no verdict (`SKIP`).
+The third is the child exiting **2**, which is what these gates already return
+when they cannot look at the thing they grade -- a directory that is not there,
+a file they cannot parse, a build artifact older than the sources it was built
+from.  `run-checker.sh` and `boot-test.sh`'s exit-code header have spelled it
+that way for longer than this script has existed; `_report` was binary anyway,
+which forced every such case to claim either a pass or a defect.  See `_report`
+for what that cost in practice.
+
+Measured 2026-09-02, before this change: of the 21 scripts run below, **20**
+already used 2 for "could not look".  The one that did not is
+`check-generated-tables.py`, which used it for a genuine failure -- so this
+change turns that gate from blocking into non-blocking, which is a decision
+about lane C's subsystem rather than about this runner.  It is asked in
+`requests/b-c-check-generated-tables-returns-2-which-now-means-no-verdict.md`
+and is a one-line answer either way.  Anyone auditing a gate's meaning against
+this section should re-measure rather than trust the count.
+
+A SKIP is printed with the child's explanation, is counted separately, and
+suppresses the "all clear" line -- it is not a failure, and it is not nothing.
+
 Order, and why it is not "stop at the first failure"
 ----------------------------------------------------
 The cheap gates -- rustfmt, the `check-*.py` suite, the unwrap scan -- all run
@@ -236,17 +259,48 @@ def _unix_check_paths(out: str):
 
 
 def _report(label, rc, out, elapsed):
-    """Print one result line; on failure print the captured output too."""
+    """Print one result line; on anything but a pass, the captured output too.
+
+    THREE OUTCOMES, NOT TWO. A gate can pass, can fail, and can decline to
+    answer -- and the third is not a variant of either. `run-checker.sh` has
+    spelled it that way since it was written (0 clean, 1 finding, anything else
+    no verdict), and boot-test.sh's own exit-code header says the reason
+    plainly: a gate that "ran, produced no judgement, must not be read as
+    having produced a clean one."
+
+    This function used to be binary, which forced every no-verdict into a lie
+    in one direction or the other. `check-libc-shape.py` is where that bit:
+    it grades an untracked build artifact, so a lane that has never built
+    `posix` was either given a red gate it could not clear by any edit to its
+    own code, or -- had it returned 0 to avoid that, which is what
+    requests/c-b-check-libc-shape-... proposed -- printed `ok` here while the
+    captured explanation was discarded, since a passing gate's output is not
+    shown. "OK" from that gate means "a GNU package will link"; nothing may
+    claim it without having looked.
+
+    So exit 2 prints SKIP, shows the child's reason, and is not counted a
+    failure. Note the asymmetry with `run-checker.sh`, and that it is
+    deliberate: there, an unrecognised status is a no-verdict because the
+    caller is a *push gate* and the safe reading of an unknown status is "we do
+    not know." Here only 2 is a skip and every other non-zero stays a failure,
+    because these are `check-*.py` scripts this repo owns and a checker dying of
+    an unhandled exception (Python's exit 1) or being unlaunchable (126/127)
+    must not be quietly absorbed into "not applicable."
+    """
     if rc == 0:
         # ASCII only: this prints to a console whose code page is not UTF-8.
         print(f"ok    {label}  ({elapsed:.0f}s)")
-        return True
-    print(f"FAIL  {label}  ({elapsed:.0f}s)")
+        return "ok"
+    verdict = "skip" if rc == 2 else "fail"
+    if verdict == "skip":
+        print(f"SKIP  {label}  ({elapsed:.0f}s) -- ran, but reached no verdict")
+    else:
+        print(f"FAIL  {label}  ({elapsed:.0f}s)")
     print()
     for line in out.splitlines():
         print(f"    {line}")
     print()
-    return False
+    return verdict
 
 
 def main() -> int:
@@ -285,20 +339,27 @@ def main() -> int:
         return 2
 
     failures = 0
+    # Counted apart from failures, and reported apart, because "did not run"
+    # and "ran and found nothing" are different facts and only one of them is
+    # evidence about the code.  A summary that folded skips into either column
+    # would be the same lie this script's `_report` used to be forced into.
+    skipped = 0
 
     # rustfmt first: it rewrites files, so anything after it sees the final text.
     if not args.no_fmt:
         t = time.monotonic()
         rc, out = _run([cargo, "fmt", "-p", "kernel"])
-        if not _report("cargo fmt -p kernel", rc, out, time.monotonic() - t):
-            failures += 1
+        verdict = _report("cargo fmt -p kernel", rc, out, time.monotonic() - t)
+        failures += verdict == "fail"
+        skipped += verdict == "skip"
 
     # The .py gate suite, in the same order boot-test.sh globs it.
     for path in sorted(SCRIPTS.glob("check-*.py")):
         t = time.monotonic()
         rc, out = _run([sys.executable, str(path)])
-        if not _report(path.name, rc, out, time.monotonic() - t):
-            failures += 1
+        verdict = _report(path.name, rc, out, time.monotonic() - t)
+        failures += verdict == "fail"
+        skipped += verdict == "skip"
 
     # The scan-*.py gates are not check-*.py, so the glob above misses them --
     # which is exactly the kind of gap this script exists to close.  Each also
@@ -314,8 +375,9 @@ def main() -> int:
             continue
         t = time.monotonic()
         rc, out = _run([sys.executable, str(scan), flag])
-        if not _report(f"{name} {flag}  ({why})", rc, out, time.monotonic() - t):
-            failures += 1
+        verdict = _report(f"{name} {flag}  ({why})", rc, out, time.monotonic() - t)
+        failures += verdict == "fail"
+        skipped += verdict == "skip"
 
     # The one gate here that boot-test.sh does NOT run -- see the long note
     # above _LANE_BY_PREFIX.  Deliberately not added to boot-test.sh: that is
@@ -384,7 +446,18 @@ def main() -> int:
     if failures:
         print()
         print(f"[pre-boot] {failures} gate(s) failed -- fix them before the boot test.")
+        if skipped:
+            print(f"[pre-boot] {skipped} more reached no verdict; those are not "
+                  f"among the failures.")
         return 1
+
+    if skipped:
+        # Said before the all-clear rather than after, because the all-clear is
+        # the line people read.  It must not be able to mean "every gate passed"
+        # when some of them declined to answer.
+        print()
+        print(f"[pre-boot] {skipped} gate(s) reached no verdict (SKIP above).  "
+              f"Nothing they cover was checked.")
 
     if args.quick:
         print("[pre-boot] --quick: skipped clippy.  The boot test still runs it.")
@@ -450,7 +523,11 @@ def main() -> int:
     )
 
     print()
-    print("[pre-boot] all clear -- the boot test's gate phase will pass.")
+    if skipped:
+        print(f"[pre-boot] no gate failed, but {skipped} reached no verdict -- "
+              f"this is not an all-clear.")
+    else:
+        print("[pre-boot] all clear -- the boot test's gate phase will pass.")
     return 0
 
 

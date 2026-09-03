@@ -45,10 +45,10 @@
 //! not be shareable; it would just be empty.
 //!
 //! * **Stage 3, opening the destination** — [`open_destination`] and the
-//!   [`Dest`]/[`Clobber`]/[`Opened`]/[`DestError`] vocabulary around it. This
-//!   is the one step where the two programs had genuinely *diverged* rather
-//!   than merely been written twice, and all three differences ran the same
-//!   way: `cp` knew something `mv` did not. See that function's table.
+//!   [`Dest`]/[`Opened`]/[`DestError`] vocabulary around it. This is the one
+//!   step where the two programs had genuinely *diverged* rather than merely
+//!   been written twice, and all three differences ran the same way: `cp` knew
+//!   something `mv` did not. See that function's table.
 //!
 //! What is **not** here yet is the walk that decides what to copy at all, which
 //! is stage 4's, and which is still `cp`'s. Everything in this module is
@@ -654,21 +654,24 @@ pub fn create_dir_with_mode(path: &Path, _mode: u32) -> io::Result<()> {
 }
 
 /// What the caller found at the destination's name, which is GNU's `new_dst`
-/// (`copy.c:1456`) with the thing that may be done about it attached.
-///
-/// The two are one value because the second is only ever consulted inside the
-/// first. `-f`'s unlink is reached from the arm where a destination exists and
-/// would not open; there is no such thing as unlinking a destination that is
-/// not there. Two independent parameters would spell a fourth combination —
-/// "nothing is there, and you may remove it" — that the code would have to
-/// ignore and the reader would have to work out was impossible.
+/// (`copy.c:1456`).
 ///
 /// **Which arm is taken is decided by the caller's `stat`, not by what the
 /// first open answers.** GNU branches on `new_dst`, and deriving it instead
 /// from a failed `O_EXCL` would work for a plain file and get an *opaque*
 /// destination wrong — a name that is occupied by something a `stat` could not
 /// describe is still occupied.
-pub enum Dest<'a> {
+///
+/// This carried a second value until 2026-09-03 — a `Clobber` saying whether
+/// `-f` might unlink a destination that would not open, and carrying the
+/// stdout to announce the removal on. Both are now read from the [`Run`] that
+/// [`open_destination`] takes, because both were always *options*, and an
+/// option that travels in the argument the caller computes is an option the
+/// caller can get wrong. The old shape existed only because `cp`'s options and
+/// its stdout lived on the same `Job`, so a function asking for both would
+/// have taken two mutable borrows of one value; [`Run`] holds them as two
+/// fields of one struct, which is exactly the thing that dissolves that.
+pub enum Dest {
     /// GNU's `new_dst == true`: nothing is at the name, or the caller has
     /// already unlinked what was. A move is always this, but *not* because of
     /// [`Opts::unlink_dest_before_opening`], which `mv` sets false
@@ -681,41 +684,7 @@ pub enum Dest<'a> {
     /// Something is at the name, and it is to be truncated in place rather
     /// than recreated: an existing file's mode is not a copy's to narrow, even
     /// for an instant.
-    Exists(Clobber<'a>),
-}
-
-/// What may be done with a destination that exists but will not open, and
-/// where to say it was done.
-///
-/// The removal and the announcement are one thing rather than two flags,
-/// because the announcement is meaningless without the removal: GNU prints
-/// `removed %s` from inside the `unlink_dest_after_failed_open` branch, and
-/// nowhere else.
-pub enum Clobber<'a> {
-    /// GNU's `unlink_dest_after_failed_open = false` (`mv.c:128`): a
-    /// destination that will not open is an error to report, not something to
-    /// remove. Every move is this, and so is every `cp` without `-f`.
-    Never,
-    /// `cp -f`: unlink it and try the create again.
-    ///
-    /// `verbose` is `cp -v`, and the sentence goes out *after* the removal and
-    /// *after* the caller's own `'a' -> 'ro'` announcement — which is what puts
-    /// `removed 'ro'` below that line where `--remove-destination` puts it
-    /// above. GNU prints it from this same point inside `copy_reg`.
-    Unlink {
-        /// Whether to say so.
-        verbose: bool,
-        /// Standard output.
-        ///
-        /// `dyn` where [`Run::err`] is generic, and the reason is the opposite
-        /// of that one rather than an inconsistency. Making this generic would
-        /// put a writer type parameter on [`Dest`], which every [`Dest::New`]
-        /// construction would then have to name — and a move has no stdout
-        /// here to name, so it would have to invent one. A type parameter
-        /// satisfied by a fiction is worse than a vtable dispatch taken at most
-        /// once per operand and only under `-f`.
-        out: &'a mut dyn Write,
-    },
+    Exists,
 }
 
 /// A destination that is open and ready to be written through.
@@ -801,24 +770,24 @@ const OWNER_WRITE: u32 = 0o200;
 ///   `cp -f` over a `0400` destination leaves the *source's* mode behind rather
 ///   than the one it removed.
 ///
-/// `preserve_xattr` is taken as a bare `bool` rather than as an [`Opts`], for
-/// [`ModeDebt::new`]'s reason and one of its own: `cp`'s caller holds its
-/// options and its stdout on the same `Job`, so asking for both an `Opts` and
-/// the [`Clobber::Unlink`] writer would be two mutable borrows of one value.
+/// The options and both output streams arrive together, in the [`Run`]. That
+/// is what lets `-f`'s unlink and the `removed %s` it prints be read from the
+/// same place every other option is read from, rather than being precomputed
+/// into the `dest` argument by each caller.
 ///
 /// # Errors
 ///
 /// [`DestError::Dangling`] for a destination symlink that points at nothing,
 /// [`DestError::Remove`] for an unlink `-f` could not do, and
 /// [`DestError::Io`] for every other failure to open.
-pub fn open_destination(
+pub fn open_destination<E: Write>(
     dst: &Path,
     src_mode: u32,
-    dest: Dest<'_>,
-    preserve_xattr: bool,
+    dest: Dest,
+    run: &mut Run<'_, E>,
     debt: &mut ModeDebt,
 ) -> Result<Opened, DestError> {
-    if let Dest::Exists(clobber) = dest {
+    if matches!(dest, Dest::Exists) {
         match open_truncating(dst) {
             // Nothing was withheld, because nothing was created: an existing
             // file's mode is not a copy's to narrow even for an instant. GNU
@@ -832,26 +801,36 @@ pub fn open_destination(
             // reaches its `O_CREAT` arm in exactly this case too
             // (`dest_errno == ENOENT`), so a race loses nothing.
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => match clobber {
-                Clobber::Never => return Err(DestError::Io(e)),
-                Clobber::Unlink { verbose, out } => {
-                    if let Err(e) = fs::remove_file(dst)
-                        && e.kind() != io::ErrorKind::NotFound
-                    {
-                        return Err(DestError::Remove(e));
-                    }
-                    if verbose {
-                        let _ = writeln!(out, "removed {}", quoteaf_os(dst));
-                    }
+            Err(e) => {
+                // GNU's `unlink_dest_after_failed_open = false` (`mv.c:128`):
+                // a destination that will not open is an error to report, not
+                // something to remove. Every move is this, and so is every
+                // `cp` without `-f`.
+                if !run.opts.unlink_dest_after_failed_open {
+                    return Err(DestError::Io(e));
                 }
-            },
+                if let Err(e) = fs::remove_file(dst)
+                    && e.kind() != io::ErrorKind::NotFound
+                {
+                    return Err(DestError::Remove(e));
+                }
+                // The sentence goes out *after* the removal and *after* the
+                // caller's own `'a' -> 'ro'` announcement — which is what puts
+                // `removed 'ro'` below that line where `--remove-destination`
+                // puts it above. GNU prints it from this same point inside
+                // `copy_reg`, and nowhere else: the announcement is meaningless
+                // without the removal, which is why the two are one branch.
+                if run.opts.verbose {
+                    let _ = writeln!(run.out, "removed {}", quoteaf_os(dst));
+                }
+            }
         }
     }
 
     // GNU's `open_mode` (`copy.c:1451`), whose second half is the whole reason
     // `cp --preserve=xattr` of a read-only file works at all. See
     // [`ModeDebt::extra`].
-    debt.extra = if preserve_xattr && !chown_privileges() {
+    debt.extra = if run.opts.preserve_xattr && !chown_privileges() {
         OWNER_WRITE
     } else {
         0
@@ -2954,62 +2933,44 @@ fn copy_regular_file<E: Write>(
         }
     };
 
-    // [`Clobber::Unlink`] borrows the stdout it would announce the removal on,
-    // and the two options read beside it are *different fields* of the same
-    // [`Run`] — which is why all three can be read in one expression. Before
-    // stage 4 they could not be: the options lived on `cp`'s `Job` and this
-    // code had to hoist each one into a local first, because the value it read
-    // them through was the same one already borrowed for its stdout.
-    let dest = if dest_exists {
-        Dest::Exists(if run.opts.unlink_dest_after_failed_open {
-            Clobber::Unlink {
-                verbose: run.opts.verbose,
-                out: &mut *run.out,
+    // Inlined as the scrutinee, which it could not be until `Dest` stopped
+    // carrying a writer: the old `Dest::Exists(Clobber::Unlink { out, .. })`
+    // held a live borrow of `run.out`, and a scrutinee's temporaries live to
+    // the end of the `match` — whose arms want `run.err`. So this needed a
+    // `let` first. A fieldless `Dest` ends that: the `&mut *run` reborrowed for
+    // the call is not kept alive, because nothing in the returned
+    // `Result<Opened, DestError>` borrows from it. Verified by compiling it
+    // both ways rather than by reasoning about it.
+    let dest = if dest_exists { Dest::Exists } else { Dest::New };
+    let (mut output, new_dst) =
+        match open_destination(dst, permission_bits(src_meta), dest, run, &mut debt) {
+            Ok(Opened { file, new }) => (file, new),
+            Err(DestError::Dangling(_)) => {
+                // The `EEXIST` is dropped: GNU's sentence for this names no error
+                // at all, because the failure is not the open's — the name resolved
+                // to nothing and writing through it would be a race.
+                let _ = writeln!(
+                    run.err,
+                    "{prog}: not writing through dangling symlink {}",
+                    quoteaf_os(dst)
+                );
+                return false;
             }
-        } else {
-            Clobber::Never
-        })
-    } else {
-        Dest::New
-    };
-    // On its own statement rather than as the `match` scrutinee: the borrow of
-    // `run.out` inside `dest` ends when the call returns, and a scrutinee's
-    // temporaries live to the end of the `match` — whose arms want `run.err`.
-    let opened = open_destination(
-        dst,
-        permission_bits(src_meta),
-        dest,
-        run.opts.preserve_xattr,
-        &mut debt,
-    );
-    let (mut output, new_dst) = match opened {
-        Ok(Opened { file, new }) => (file, new),
-        Err(DestError::Dangling(_)) => {
-            // The `EEXIST` is dropped: GNU's sentence for this names no error
-            // at all, because the failure is not the open's — the name resolved
-            // to nothing and writing through it would be a race.
-            let _ = writeln!(
-                run.err,
-                "{prog}: not writing through dangling symlink {}",
-                quoteaf_os(dst)
-            );
-            return false;
-        }
-        Err(DestError::Remove(e)) => {
-            let why = strerror(&e);
-            let _ = writeln!(run.err, "{prog}: cannot remove {}: {why}", quoteaf_os(dst));
-            return false;
-        }
-        Err(DestError::Io(e)) => {
-            let why = strerror(&e);
-            let _ = writeln!(
-                run.err,
-                "{prog}: cannot create regular file {}: {why}",
-                quoteaf_os(dst)
-            );
-            return false;
-        }
-    };
+            Err(DestError::Remove(e)) => {
+                let why = strerror(&e);
+                let _ = writeln!(run.err, "{prog}: cannot remove {}: {why}", quoteaf_os(dst));
+                return false;
+            }
+            Err(DestError::Io(e)) => {
+                let why = strerror(&e);
+                let _ = writeln!(
+                    run.err,
+                    "{prog}: cannot create regular file {}: {why}",
+                    quoteaf_os(dst)
+                );
+                return false;
+            }
+        };
 
     // The engine's body rather than a loop here, which is what makes this arm
     // and `mv`'s cross-device arm the same code. The gain is not only the

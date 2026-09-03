@@ -2727,40 +2727,38 @@ fn copy_across_devices<E: Write>(
     // it. Note that this is *not* `unlink_dest_before_opening`, which `mv` sets
     // false (`mv.c:127`) — upstream's general unlink is guarded by `!
     // x->move_mode` (`copy.c:2571`) and it is the EXDEV fallback that clears
-    // and sets `new_dst` instead (`copy.c:2869-2892`). That is also why
-    // `Clobber::Never` is right: `unlink_dest_after_failed_open` is false for a
-    // move (`mv.c:128`), there being nothing left to unlink.
-    let mut dest = copy::open_destination(
-        target,
-        mode,
-        copy::Dest::New,
-        run.opts.preserve_xattr,
-        &mut debt,
-    )
-    .map(|opened| opened.file)
-    .map_err(|e| {
-        // All three variants collapse to one sentence, which is the one a move
-        // printed before this became shared code.
-        //
-        // `Remove` is unreachable — it is `-f`'s unlink, and the call above
-        // passes `Clobber::Never`. `Dangling` is reachable only in a race: the
-        // destination was unlinked a moment ago, so for it to be a dangling
-        // symlink now, something else must have created one. `cp` has GNU's
-        // separate sentence for that; `mv` has none, and inventing one here
-        // would be a divergence from upstream rather than a fix — `mv.c` never
-        // reaches `copy_reg`'s dangling branch either, because it always
-        // arrives with `new_dst`. Reporting the underlying `File exists` is
-        // exactly what the hand-written open did, which is why
-        // [`copy::DestError::Dangling`] carries the error rather than dropping
-        // it: a synthesised `io::Error` has no `errno` for `strerror` to name.
-        let err = match e {
-            copy::DestError::Io(e) | copy::DestError::Dangling(e) | copy::DestError::Remove(e) => e,
-        };
-        Failed::new(
-            format!("cannot create regular file {}", quoteaf_os(target)),
-            err,
-        )
-    })?;
+    // and sets `new_dst` instead (`copy.c:2869-2892`). It is also why `-f`'s
+    // unlink cannot fire inside the call: that arm is reached only from
+    // `Dest::Exists`, and `mv` sets `unlink_dest_after_failed_open` false
+    // besides (`mv.c:128`), there being nothing left to unlink.
+    let mut dest = copy::open_destination(target, mode, copy::Dest::New, run, &mut debt)
+        .map(|opened| opened.file)
+        .map_err(|e| {
+            // All three variants collapse to one sentence, which is the one a move
+            // printed before this became shared code.
+            //
+            // `Remove` is unreachable — it is `-f`'s unlink, which is inside the
+            // `Dest::Exists` arm the call above does not take. `Dangling` is
+            // reachable only in a race: the destination was unlinked a moment
+            // ago, so for it to be a dangling symlink now, something else must
+            // have created one. `cp` has GNU's separate sentence for that; `mv`
+            // has none, and inventing one here would be a divergence from
+            // upstream rather than a fix — `mv.c` never reaches `copy_reg`'s
+            // dangling branch either, because it always arrives with `new_dst`.
+            // Reporting the underlying `File exists` is exactly what the
+            // hand-written open did, which is why [`copy::DestError::Dangling`]
+            // carries the error rather than dropping it: a synthesised
+            // `io::Error` has no `errno` for `strerror` to name.
+            let err = match e {
+                copy::DestError::Io(e)
+                | copy::DestError::Dangling(e)
+                | copy::DestError::Remove(e) => e,
+            };
+            Failed::new(
+                format!("cannot create regular file {}", quoteaf_os(target)),
+                err,
+            )
+        })?;
 
     // The engine's body, which is the same call `cp` makes. It was `io::copy`
     // here and a 64 KiB read/write loop there, each missing exactly what the

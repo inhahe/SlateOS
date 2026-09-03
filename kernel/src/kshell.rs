@@ -153,18 +153,41 @@ pub fn capture_command(cmd: &str) -> Vec<u8> {
 /// disk error — would otherwise be laundered into an empty buffer and the
 /// file overwritten with just the new output, which is the same destruction
 /// arriving by a different route.
+///
+/// `path` is the *raw* text from the command line. Unquoting and resolution
+/// happen here, for the same reason the append logic does: all four call
+/// sites had to get it right and none of them did. `echo hi > "my file"`
+/// created a file whose name began with a quote character, and `echo hi > f`
+/// in `/tmp` wrote to `/f` rather than `/tmp/f`, because the raw text went
+/// straight to `Vfs::write_file` — which resolves nothing. The *input* side
+/// (`execute_input_redirect`) did call `resolve_path`, so a single command
+/// with both redirections read from one directory and wrote to another.
 fn redirect_write(path: &str, output: &[u8], append: bool) -> crate::error::KernelResult<()> {
     use crate::fs::vfs::Vfs;
+    let resolved = redirect_path(path);
     if !append {
-        return Vfs::write_file(path, output);
+        return Vfs::write_file(&resolved, output);
     }
-    let mut combined = match Vfs::read_file(path) {
+    let mut combined = match Vfs::read_file(&resolved) {
         Ok(existing) => existing,
         Err(crate::error::KernelError::NotFound) => Vec::new(),
         Err(e) => return Err(e),
     };
     combined.extend_from_slice(output);
-    Vfs::write_file(path, &combined)
+    Vfs::write_file(&resolved, &combined)
+}
+
+/// Turn the raw text of a redirection target into the path it names.
+///
+/// A redirection target is a word, so it carries quoting like any other word
+/// and has to have it removed before it names a file — `> "my file"` means the
+/// two-word name, not a name starting with `"`. Resolution against the working
+/// directory then makes it absolute, which the VFS does not do for us.
+///
+/// Both halves are here rather than at the call sites so that the input and
+/// output sides of a redirection cannot drift apart again.
+fn redirect_path(raw: &str) -> PathBuf {
+    resolve_path(remove_quotes(raw.trim()))
 }
 
 /// Write a string to the shell output destination.
@@ -5882,7 +5905,11 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
     let text_before = line.get(..cursor).unwrap_or("");
 
     // Determine if we're completing a command (first word) or a path.
-    let first_space = text_before.find(' ');
+    //
+    // A *bare* space, so a quoted or escaped one does not end the first word:
+    // with `find(' ')` the line `'my prog'` looked like a command plus an
+    // argument, and tab completed a filename where a command was wanted.
+    let first_space = shellquote::find_bare_space(text_before.as_bytes());
 
     if first_space.is_none() {
         // Completing a command name.
@@ -5910,9 +5937,34 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
         (suffix, display)
     } else {
         // Completing a file path argument.
-        // Find the start of the current word (last space before cursor).
-        let word_start = text_before.rfind(' ').map(|i| i + 1).unwrap_or(0);
-        let partial_path = text_before.get(word_start..).unwrap_or("");
+        //
+        // The word being completed starts after the last *bare* blank, not the
+        // last blank: `cat "My Doc` was treated as the word `Doc`, so the
+        // candidate list was drawn from a prefix the user never typed and the
+        // completion, if accepted, landed in the middle of their quoted name.
+        // Escapes have the same effect -- `cat My\ Doc` was one word to every
+        // other stage of the shell and two to this one.
+        //
+        // What this does NOT yet fix is the other half: the text inserted is
+        // still the raw filename, so completing `My Doc.txt` yields two
+        // arguments. shellquote::quote_word exists for that; it is TD-KSHELL
+        // (d) because it also has to decide what to do about the quote the
+        // user has already opened.
+        let word_start = shellquote::word_start_at(text_before.as_bytes(), text_before.len());
+
+        // The word as typed still carries its quoting, and no file is named
+        // `"My`, so it has to come off before the name is looked up -- finding
+        // the word boundary correctly and then searching for the quote
+        // characters would only move the failure. `remove_quotes` is the same
+        // stage the dispatcher applies to a finished command, so completion
+        // now searches for exactly the name the command would receive.
+        //
+        // The quote is deliberately allowed to be unterminated: the user is
+        // mid-word by definition, so `cat "My Fi` must complete. The scanner
+        // treats end-of-input inside a quote as the end of the region, which
+        // is the reading that makes that work.
+        let partial_owned = remove_quotes(text_before.get(word_start..).unwrap_or(""));
+        let partial_path = partial_owned.as_str();
 
         // Determine the directory to search and the prefix to match.
         // For relative paths, resolve against the current working directory.
@@ -5952,6 +6004,17 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
             if first.entry_type == crate::fs::EntryType::Directory {
                 result.push('/');
             } else {
+                // The word is finished, so a quote the user opened to type it
+                // has to be closed before the separating space -- otherwise
+                // completing `cat "My Fi` produced `cat "My File.txt `, whose
+                // unterminated quote swallows the rest of the line. The
+                // completion is only correct if the line is still parseable
+                // after it.
+                match shellquote::trailing_context(text_before.as_bytes()) {
+                    shellquote::Ctx::Single => result.push('\''),
+                    shellquote::Ctx::Double => result.push('"'),
+                    shellquote::Ctx::Unquoted => {}
+                }
                 result.push(' ');
             }
             return (result, Vec::new());
@@ -6724,7 +6787,11 @@ fn parse_input_redirect(line: &str) -> Option<(&str, &str)> {
 ///
 /// Reads the file contents and feeds them as piped input to the command.
 fn execute_input_redirect(command: &str, path: &str) {
-    let resolved = resolve_path(path);
+    // `redirect_path`, not `resolve_path`: this side already resolved, but it
+    // did not unquote, so `sort < "my file"` looked for a file whose name
+    // began with a quote character. The output side is now the same call, so
+    // the two cannot disagree about what a target word means.
+    let resolved = redirect_path(path);
     let data = match crate::fs::vfs::Vfs::read_file(&resolved) {
         Ok(d) => d,
         Err(e) => {
@@ -22107,6 +22174,166 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "interior spacing survives, which is why this stage does not rejoin words"
         );
         assert_eq!(expand_braces("{a}"), "{a}", "no comma is not a brace expansion");
+    }
+
+    // --- 116: tab completion reads the same words as the rest of the shell.
+    //
+    // This rung needs real directory entries, so unlike 115 it builds a
+    // fixture. The names are prefixed `zz_tc` so that a leftover from a
+    // failed run cannot be mistaken for anything else, and every one of them
+    // is removed at the end -- a stray `/tmp/zz_tc*` would change the answer
+    // this rung gets on the *next* boot, which is the kind of self-inflicted
+    // flake that costs an afternoon.
+    //
+    // The cursor is always at the end of the text, which is what the line
+    // editor passes when Tab is pressed at the end of a line.
+    {
+        const UNIQ: &str = "/tmp/zz_tc_uniq.txt";
+        const SPACED: &str = "/tmp/zz_tc two.txt";
+        let made_uniq = crate::fs::Vfs::write_file(UNIQ, b"x").is_ok();
+        let made_spaced = crate::fs::Vfs::write_file(SPACED, b"x").is_ok();
+        assert!(made_uniq && made_spaced, "could not build the rung-116 fixture");
+
+        // Baseline: an unquoted path completes as it always did.
+        let (suffix, _) = tab_complete("cat /tmp/zz_tc_uni", 18);
+        assert_eq!(suffix, "q.txt ", "an unquoted path still completes");
+
+        // The path is quoted. Before the shared scanner this returned nothing
+        // at all: the leading `"` stayed on the word, so the directory looked
+        // up was one literally named `"/tmp`.
+        let (suffix, _) = tab_complete("cat \"/tmp/zz_tc_uni", 19);
+        assert_eq!(
+            suffix, "q.txt\" ",
+            "a quoted path completes, and the quote is closed before the space"
+        );
+        let (suffix, _) = tab_complete("cat '/tmp/zz_tc_uni", 19);
+        assert_eq!(suffix, "q.txt' ", "the closing quote matches the one opened");
+
+        // The decisive case: a space *inside* the quotes. The old scan took
+        // the word to start after the last space of any kind, so it searched
+        // the working directory for names beginning `t` -- a prefix the user
+        // never typed, in a directory they never named.
+        let (suffix, _) = tab_complete("cat \"/tmp/zz_tc t", 17);
+        assert_eq!(
+            suffix, "wo.txt\" ",
+            "a quoted space does not start a new word for completion"
+        );
+        // An escaped space is the same word by the same rule, and the suffix
+        // is unquoted because the user's quoting style is theirs, not ours.
+        let (suffix, _) = tab_complete("cat /tmp/zz_tc\\ t", 17);
+        assert_eq!(suffix, "wo.txt ", "an escaped space does not start a new word");
+
+        // A quoted blank does not end the *first* word either, so this is
+        // still command completion and finds no command by that name.
+        let (suffix, candidates) = tab_complete("'zz no such cmd", 15);
+        assert!(
+            suffix.is_empty() && candidates.is_empty(),
+            "a quoted blank does not turn the command word into an argument"
+        );
+
+        let cleaned_uniq = crate::fs::Vfs::remove(UNIQ).is_ok();
+        let cleaned_spaced = crate::fs::Vfs::remove(SPACED).is_ok();
+        assert!(
+            cleaned_uniq && cleaned_spaced,
+            "the rung-116 fixture outlived the rung; a later boot would see it"
+        );
+    }
+
+    // --- 117: awk's print-argument splitter obeys awk's escape rule.
+    //
+    // Deliberately *not* the shared shellquote scanner: awk is a different
+    // language, and the two rules disagree about the apostrophe. The second
+    // assertion is the control that proves the difference matters -- swap in
+    // the shell scanner and the first case starts passing and this one starts
+    // failing, which is a wash, not a fix.
+    //
+    // The oracle here is awk, not bash. Measured before it was written down
+    // (`scripts/check-kshell-rungs-vs-bash.py`, AWK_CASES): real awk prints
+    // `a"b c` for the first and `it's x` for the second, so both are two
+    // arguments joined by OFS -- which is exactly the arity asserted below.
+    {
+        // `print "a\"b", c` -- the escaped quote does not close the string, so
+        // the comma that follows is a separator and not part of it. Before the
+        // escape was understood the whole line came back as one argument,
+        // which `awk_eval_expr` then rejected as unrecognised.
+        let parts = awk_split_print_args("\"a\\\"b\", c");
+        assert_eq!(parts.len(), 2, "an escaped quote does not end the string");
+        assert_eq!(
+            parts.first().map(alloc::string::String::as_str),
+            Some("\"a\\\"b\""),
+            "the escape is kept for the evaluator"
+        );
+        assert_eq!(parts.get(1).map(alloc::string::String::as_str), Some(" c"));
+
+        // In awk an apostrophe is an ordinary character. A shell scanner would
+        // read this as opening a quoted region and stop splitting.
+        let parts = awk_split_print_args("\"it's\", x");
+        assert_eq!(parts.len(), 2, "an apostrophe is not a quote in awk");
+        assert_eq!(
+            parts.first().map(alloc::string::String::as_str),
+            Some("\"it's\"")
+        );
+
+        // A comma genuinely inside a string is still not a separator.
+        assert_eq!(awk_split_print_args("\"a,b\"").len(), 1);
+        // And one outside a string still is.
+        assert_eq!(awk_split_print_args("$1, $2").len(), 2);
+        // A backslash with nothing after it escapes nothing and must not read
+        // off the end of the program text.
+        assert_eq!(awk_split_print_args("\"a\\").len(), 1);
+    }
+
+    // --- 118: a redirection target is a word, and names a file after
+    // unquoting and resolution.
+    //
+    // Both halves were missing on the output side. `> "my file"` created a
+    // file whose name literally began with a quote, and a relative target was
+    // handed to the VFS unresolved, so it landed at the root no matter what
+    // the working directory was. The input side already resolved (but did not
+    // unquote), so `cmd < a > b` could read and write in different
+    // directories -- which is the shape of bug that looks like a filesystem
+    // fault rather than a shell one.
+    {
+        let saved_cwd = CWD.lock().clone();
+        *CWD.lock() = PathBuf::from("/tmp");
+
+        assert_eq!(
+            redirect_path("\"zz rd.txt\"").to_str(),
+            Some("/tmp/zz rd.txt"),
+            "quotes come off, and the name they protected survives"
+        );
+        assert_eq!(
+            redirect_path("zz\\ rd.txt").to_str(),
+            Some("/tmp/zz rd.txt"),
+            "an escape is the same word by the same rule"
+        );
+        assert_eq!(
+            redirect_path("rel.txt").to_str(),
+            Some("/tmp/rel.txt"),
+            "a relative target resolves against the working directory"
+        );
+        assert_eq!(
+            redirect_path("  /tmp/abs.txt  ").to_str(),
+            Some("/tmp/abs.txt"),
+            "the blanks the parser leaves around the target are not part of it"
+        );
+
+        // End to end: the file that appears is the one the user named.
+        let raw = "\"zz rd end to end.txt\"";
+        redirect_write(raw, b"hi", false)?;
+        let named = "/tmp/zz rd end to end.txt";
+        assert_eq!(
+            crate::fs::Vfs::read_file(named)?.as_slice(),
+            &b"hi"[..],
+            "the redirection wrote to the unquoted, resolved name"
+        );
+        // Append must reach the same file, or `>>` would create a second one.
+        redirect_write(raw, b"!", true)?;
+        assert_eq!(crate::fs::Vfs::read_file(named)?.as_slice(), &b"hi!"[..]);
+        let cleaned = crate::fs::Vfs::remove(named).is_ok();
+
+        *CWD.lock() = saved_cwd;
+        assert!(cleaned, "the rung-118 fixture outlived the rung");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -141470,8 +141697,35 @@ fn awk_split_print_args(expr: &str) -> alloc::vec::Vec<alloc::string::String> {
     let bytes = expr.as_bytes();
     let mut i = 0;
 
-    while i < bytes.len() {
-        match bytes[i] {
+    while let Some(&b) = bytes.get(i) {
+        // awk's string escape, which this splitter did not know about: inside
+        // `"..."` a backslash makes the next byte literal. Without it, the `"`
+        // of `print "a\"b", c` closed the string, and the comma that followed
+        // -- which is *inside* the string -- split the argument in two, so awk
+        // printed `a"b` and ` c` as separate arguments.
+        //
+        // Note this is awk's rule, not the shell's: the shared shellquote
+        // scanner is deliberately NOT used here, because in awk `'` is not a
+        // quote character at all. Substituting the shell scanner would fix
+        // this case and simultaneously break `print "it's"`, which is a wash
+        // dressed up as progress. See A-KSHELL-AWK-PRINT-SPLITS-INSIDE-AN-
+        // ESCAPED-QUOTE in known-issues.md.
+        //
+        // Both bytes are kept verbatim, exactly as the quotes are: this stage
+        // only decides where the commas are, and `awk_eval_expr` is the one
+        // that interprets `\"` when it unwraps the literal.
+        if b == b'\\' && in_quote {
+            if let Some(&next) = bytes.get(i.saturating_add(1)) {
+                current.push(b'\\');
+                current.push(next);
+                i = i.saturating_add(2);
+                continue;
+            }
+            // A backslash at the very end escapes nothing. awk would reject
+            // the program; keeping the byte is the reading that does not
+            // invent an escape out of the end of the string.
+        }
+        match b {
             b'"' => {
                 in_quote = !in_quote;
                 current.push(b'"');
@@ -141483,10 +141737,10 @@ fn awk_split_print_args(expr: &str) -> alloc::vec::Vec<alloc::string::String> {
                 ));
             }
             _ => {
-                current.push(bytes[i]);
+                current.push(b);
             }
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
     if !current.is_empty() {
         parts.push(finish_ascii_scan(current, "awk print argument"));

@@ -109047,7 +109047,7 @@ re-exec belongs immediately after the `set -u`/`SCRIPT_DIR` preamble).
 
 ---
 
-## A-KSHELL-REDIRECT-MISSED-WHEN-AN-APOSTROPHE-PRECEDES-IT, and the eleven — no, twelve — disagreeing quote scanners behind it — **Status: OPEN, NARROWED 2026-09-03 (the shared scanner exists as `kernel/src/shellquote.rs`; six of the twelve sites use it, including both redirect bugs. Six remain, one of them the `$HOME` symptom below. See "Narrowed 2026-09-03" at the end.)** — 2026-09-02
+## A-KSHELL-REDIRECT-MISSED-WHEN-AN-APOSTROPHE-PRECEDES-IT, and the eleven — no, twelve — disagreeing quote scanners behind it — **Status: FIXED 2026-09-03 (all eleven shell scanners now go through `kernel/src/shellquote.rs`; the twelfth, `awk_split_print_args`, was never a shell scanner and was fixed with awk's own escape rule instead. See "Closed 2026-09-03" at the end. `TD-SHELLQUOTE-NO-ANSI-C-QUOTING` remains open, as do TD-KSHELL (b')/(c)/(d).)** — 2026-09-02
 
 **Lane:** A. **Severity:** silent wrong behaviour on an ordinary line; the
 output goes to the terminal instead of the file and the shell reports success.
@@ -109285,3 +109285,65 @@ stay a separate scanner; what it should *not* stay is wrong.
   is not a shell scanner, so the shared-scanner goal is eleven sites, not
   twelve. The agreement property proposed above becomes true by construction
   over those eleven; site #10 is outside it on purpose.
+
+### Closed 2026-09-03: eleven of eleven, plus the two bugs found on the way
+
+**In short:** every shell quote scanner in kshell now goes through
+`kernel/src/shellquote.rs`. The awk splitter — the one site that was never a
+shell scanner — was fixed with awk's own rule instead. Two further bugs turned
+up while converting the last sites and are fixed in the same batch: tab
+completion did not know what a word was, and a redirection target was never
+unquoted or resolved.
+
+**`A-KSHELL-AWK-PRINT-SPLITS-INSIDE-AN-ESCAPED-QUOTE` — FIXED.**
+`awk_split_print_args` now honours awk's string escape: inside `"…"` a
+backslash makes the next byte literal, and both bytes are kept verbatim for
+`awk_eval_expr`, which already knew how to unwrap `\"`. Before, the `"` of
+`print "a\"b", c` closed the string and the comma after it — which is inside
+the string — split the argument, so the two halves were printed as separate
+arguments. It is still *not* the shared scanner, and rung 117 carries the
+control that says why: `print "it's", x` must keep splitting, which the shell
+scanner would stop doing.
+
+**`A-KSHELL-TAB-COMPLETION-DOES-NOT-KNOW-WHAT-A-WORD-IS` — FIXED (found
+2026-09-03 while converting site #11).** `tab_complete` found the start of the
+word with `rfind(' ')` and the end of the command word with `find(' ')`, so:
+
+| Typed | Was looked up | Now |
+|---|---|---|
+| `cat "My Fi` | name `Fi` in the **working directory** | name `My Fi` in the working directory |
+| `cat "/tmp/zz a` | name `a` in the working directory | name `zz a` in `/tmp` |
+| `cat My\ Fi` | name `Fi` in the working directory | name `My Fi` in the working directory |
+| `'my prog` | a *filename* completion | a *command* completion |
+
+Three separate defects, one cause: a quoted or escaped blank ended a word for
+this stage and for no other. Finding the boundary was not sufficient on its
+own — the word still carried its quotes, and no file is named `"My`, so
+`remove_quotes` is applied before the lookup. A unique file match now also
+closes a quote the user left open, because a completion that leaves the line
+unparseable is not a completion.
+
+- *Still open:* the text **inserted** is the raw filename, so completing
+  `My Doc.txt` still produces two words. `shellquote::quote_word` exists for
+  it; it is TD-KSHELL (d), separate because it also has to decide what to do
+  about a quote the user has already opened.
+
+**`A-KSHELL-REDIRECT-TARGET-IS-NEITHER-UNQUOTED-NOR-RESOLVED` — FIXED (found
+2026-09-03).** The raw text after `>` went straight to `Vfs::write_file`, which
+resolves nothing:
+
+- `echo hi > "my file"` created a file whose name began with a quote character.
+- `echo hi > f` in `/tmp` wrote `/f`, not `/tmp/f`.
+- The *input* side did call `resolve_path` (but did not unquote), so a single
+  `cmd < a > b` read from one directory and wrote to another — a divergence
+  that reads as a filesystem fault rather than a shell one.
+
+Both sides now call one `redirect_path`, which trims, unquotes and resolves.
+`redirect_write` is the single chokepoint for all four output call sites, for
+the same reason it already was for the append read-modify-write. Rung 118
+covers it end to end, including that `>>` reaches the same file `>` created.
+
+**Count closed out.** Sites #1, #2, #3, #8, #9, #12 went in `eaed9854e`; #4,
+#5, #6, #7 in `450c60109`; #11 in this batch. #10 is awk's and stays its own
+scanner. `TD-SHELLQUOTE-NO-ANSI-C-QUOTING` remains open and is the only known
+gap in the shared model.

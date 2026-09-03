@@ -139,7 +139,7 @@ pub struct QuoteScan<'a> {
     pending_escape: bool,
 }
 
-impl<'a> QuoteScan<'a> {
+impl QuoteScan<'_> {
     /// The quoting context in effect *after* everything yielded so far.
     ///
     /// After the iterator is exhausted this is [`Ctx::Unquoted`] iff the line
@@ -301,6 +301,25 @@ pub fn scan(bytes: &[u8]) -> QuoteScan<'_> {
         ctx: Ctx::Unquoted,
         pending_escape: false,
     }
+}
+
+/// The quoting context left open at the end of `bytes`.
+///
+/// [`Ctx::Unquoted`] means the quotes balanced. Anything else means a region
+/// was opened and never closed, which is not an error on its own: a line
+/// being *typed* is unbalanced most of the time it is looked at. Tab
+/// completion uses this to close the quote it is completing inside, and the
+/// continuation prompt will use it to decide it needs a second line.
+///
+/// A trailing backslash is not reported here — it escapes the byte that has
+/// not been typed yet, which is a question about the *next* line rather than
+/// about the context of this one.
+#[must_use]
+pub fn trailing_context(bytes: &[u8]) -> Ctx {
+    let mut sc = scan(bytes);
+    // Drain it: the context is only final once every byte has been read.
+    for _ in sc.by_ref() {}
+    sc.context()
 }
 
 /// Offset of the first bare (unquoted, unescaped) occurrence of `needle`.

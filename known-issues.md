@@ -15922,6 +15922,69 @@ and exits 1; `echo` still runs). `bytestr::self_test` section 6 pairs every
 before/after by stashing only the two touched files: **93 warnings before, 93
 after, identical multisets.**
 
+**[A] 2026-09-02 — stage (b) is three commits, not one, because the shell has
+no backslash escape *at all*: `echo \'` silently disables `$VAR` expansion
+for the rest of the line.**
+
+**In short:** in a shell, a backslash means "the next character is an ordinary
+character, not punctuation" — `echo it\'s ok` should print `it's ok`. kshell
+does not implement that anywhere. The backslash is passed through as a literal
+character, and the `'` it was supposed to neutralise is read as *opening a
+quoted region* that then never closes. Everything after it on the line is
+treated as quoted, so `$HOME` and friends stop expanding. Nothing warns; the
+line just quietly does something else.
+
+This was found by reading, not by a failure, while scoping stage (b). Three
+places implement the same grammar and all three are blind to it:
+
+| Where | Line | What it gets wrong |
+|---|---|---|
+| `expand_vars_bytes` | 881 | Tracks `in_single_quote` without consulting backslashes, so `\'` flips the state. Also expands `"\$HOME"`, which bash does not. |
+| `remove_quotes` | 1469 | `a\'b` → `a\b` (backslash leaks *and* the quote opens). Bash: `a'b`. |
+| `split_words` | 3383 | `cp a\ b dst` splits into three words, so a file whose name contains a space becomes two missing files. |
+
+**The state-inversion in `expand_vars_bytes` is the same bug, in the same
+function, that the `$'…'` arm at line 1051 was written to fix** — that arm's
+comment already spells out the failure mode ("inverting quoting for the entire
+rest of the line: `$'a' $HOME` stopped expanding `$HOME`"). `$'…'` was one of
+two constructs that can put an unbalanced-looking `'` in the byte stream. `\'`
+is the other, and it was missed.
+
+**Layering, so the fix does not double-unescape.** Expansion *preserves*
+quoting and dispatch *removes* it — that separation already exists and is why
+`expand_braces` can see `'b,c'` as quoted. The backslash must follow the same
+rule: `expand_vars_bytes` copies the `\` and the byte it protects through
+unchanged (expanding nothing in between, and not letting the protected byte
+change quote state), and the escape is honoured exactly once, later, at the
+quote-removal stage. Verified 2026-09-02 that `expand_vars_bytes` consumes a
+backslash *only* inside `$'…'` (line 1078, which copies the pair verbatim by
+design), so adding the pass-through does not double-process.
+
+**Sequenced as three commits**, because they are three separable behaviours
+and the third can change argument counts:
+
+1. `expand_vars_bytes`: a backslash protects the next byte from expansion and
+   from quote-state tracking; both bytes are copied through.
+2. `remove_quotes` and `split_words`: honour the escape, via one shared helper
+   so the two cannot drift. The three contexts have different rules and all
+   three matter — unquoted `\c` → `c`; inside `"…"` a backslash is special
+   only before `"`, `` ` ``, `$`, `\`, so `"C:\dir"` must keep its backslash;
+   inside `'…'` there are no escapes at all.
+3. `split_words`: an explicitly quoted empty string is a word. `cmd ''`
+   currently passes *no* argument, because the accumulator is empty and empty
+   accumulators are dropped. This is last because it changes arity at 15 call
+   sites, two of which (`kshell.rs:139412`, `:140259`) branch on
+   `split_words(args).is_empty()`.
+
+**A false invariant found in passing, to fix with (2).** The comment at
+`kshell.rs:7159` justifies `dispatch_with_input`'s fallback arm with "that is
+a no-op, since a dequoted string has no quotes left to remove". That is not
+true — the suite's own `remove_quotes("\"it's\"") == "it's"` at line 10926
+leaves a quote in the result, and dequoting *that* again yields `its`. The
+code is nevertheless correct, for a different reason: the fallback passes
+`line`, the original, not `args`. The comment should say so, because someone
+who believes the stated reason could "simplify" it into a real bug.
+
 ### B-KSHELL-APPEND-TRUNCATES-BINARY-FILES. `cmd >> file` silently discarded the entire existing contents of any file that was not valid UTF-8, and reported success — 2026-08-24 — ✅ FIXED 2026-08-24 by lane A (`kernel/src/kshell.rs`, `redirect_write`)
 
 **Where:** `kernel/src/kshell.rs`. Four duplicated copies of the append path,

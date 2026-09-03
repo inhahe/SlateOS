@@ -31638,6 +31638,70 @@ width of `INT_MIN`, which allocated two gigabytes and stopped responding
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
+**Status: OPEN — all four items done. Only the per-line shaped cache (step (b),
+a cost concern) and the arrow keys (C-Q2, the operator's call) remain.**
+
+**Update 2026-09-03 — items 1 and 2 are fixed, and `measure_prefix` is gone.**
+
+`caret_offset_px` was `measure(line[..col])` — `width_upto` under another name,
+the quantity `TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL` was renamed away from
+precisely because it is not a caret position. It is now `text::caret_x`, which
+walks the shaped run. Hit-testing was a loop comparing prefix widths at every
+character boundary; it is now `text::cursor_at`, which walks the caret stops in
+*screen* order. The selection band was one rectangle between two measured
+prefixes; it is now `text::selection_boxes`, a list, because a range contiguous
+in the string need not be contiguous on screen — the single span painted the
+gap between the pieces, telling the user they had selected text they had not.
+
+`Document` gained `cursor_affinity` beside `cursor_col`, and
+`Document::set_cursor` is the one place a hit-test's answer becomes the caret,
+so dropping the affinity is something someone has to *do* rather than something
+that happens by writing `cursor_col = col` and forgetting the other field. It is
+a companion field rather than a `TextCursor` replacing `cursor_col` because
+every edit in the file is arithmetic on a byte offset — 99 sites — and none of
+them has an opinion about direction; only drawing and hit-testing do.
+
+**The click path was already live, and this entry said otherwise.** The earlier
+note that `apps/editor` "has no live input loop" is true of `main()` and false
+of `input.rs`, which has `handle_mouse` with press, double-click and drag. All
+three went through `caret_position_at`; all three now go through
+`caret_cursor_at` and `set_cursor`, so a real click's affinity reaches the caret
+it draws. Worth recording as a correction: the belief that nothing called the
+hit test nearly led to it being left alone.
+
+**`measure_prefix` is deleted, and `-D dead_code` is what proved the job was
+complete.** It had exactly two callers, the caret and the hit test, and when
+both were converted the lint reported it unused — a stronger statement than "I
+looked and found no others": the prefix-width measurement is gone from the
+editor rather than merely unused by the two sites that were examined.
+
+**Seven tests**, in `caret_tests`, on the string `guitk::pathbar` uses — two
+Latin letters, two Hebrew, two Latin — the smallest text where a prefix width
+and a caret position are different numbers. The bidirectional caret is asserted
+to *differ* from the prefix width, because that disagreement is the entire
+content of the bug and asserting a specific x would pin the font's metrics
+instead. A left-to-right regression test pins the ordinary case, which is every
+line of every source file anyone will actually open. A click sweep asserts the
+caret is drawn back within one character of where it was clicked, at points
+across the whole run including inside the right-to-left stretch — a click that
+does not land where the caret appears is the most immediately visible bug an
+editor can have. And two affinities at one boundary are asserted to be two
+screen positions, which is what makes the new field load-bearing rather than
+noise.
+
+Mutation-checked: restoring the prefix measurement fails exactly the three
+bidirectional tests and leaves the left-to-right one green.
+
+**What is left.** Step (b), the per-line shaped cache, which is a *cost*
+concern and not a correctness one — `caret_x`, `cursor_at` and
+`selection_boxes` each shape internally, so they were never waiting on it.
+Worth doing when something measures the editor as slow, with a clock rather
+than a profiler. And the arrow keys still step logically, which is C-Q2 and
+remains the operator's call; this entry was never blocked on it, since where a
+caret is *drawn* is wrong under either answer.
+
+The original status line follows.
+
 **Status: OPEN — items 3 and 4 (steps (c) and (d)) done 2026-08-17; 1 and 2
 remain.**
 

@@ -761,6 +761,15 @@ class _Args:
     # and boot-test.sh omits the flag, so the key must stay out of the record
     # rather than land as a 0 that reads like an instant build.
     build_seconds = None
+    # Same shape, and the same reason: a run whose floor check was disabled with
+    # --min-free-gb=0, or whose `df` was unreadable, did not observe zero GiB
+    # free. These must match argparse's own defaults (None and "") or the stub
+    # stops standing in for a real parse -- which is exactly how it failed:
+    # 034dffe2c taught build_record() to read args.free_gb_min without adding
+    # it here, so every test calling build_record() died on AttributeError
+    # rather than reporting anything about boot history.
+    free_gb_min = None
+    free_gb_phase = ""
     # Empty, as argparse leaves them when boot-test.sh does not pass them, so
     # build_record() takes the git fallback -- which is the path these tests
     # were written against.

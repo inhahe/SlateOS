@@ -596,6 +596,12 @@ def main(argv: list[str] | None = None) -> int:
     # somebody deliberately grading a different file -- a saved copy, another
     # lane's, one under bisection -- and comparing *that* to this checkout's
     # posix/ would be answering a question nobody asked.
+    #
+    # The concrete case, and the reason this exemption is load-bearing rather
+    # than tidy: toolchain/build-sysroot.ps1:148 invokes this script with the
+    # path it has *just built*. That caller must never see a staleness skip --
+    # it is the one context where the archive is guaranteed current, and where
+    # a skip would mean the sysroot build stopped checking its own output.
     if not args.archive and not args.ignore_age:
         stale, newest = stale_against_sources(path)
         if stale:

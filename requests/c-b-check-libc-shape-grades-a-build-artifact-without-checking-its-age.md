@@ -1,6 +1,9 @@
 # C → B — `check-libc-shape.py` grades an untracked build artifact and never asks how old it is
 
-**From:** Lane C. **To:** Lane B. **Filed:** 2026-09-01. **Status:** open.
+**From:** Lane C. **To:** Lane B. **Filed:** 2026-09-01. **Status:** ✅ **FIXED
+2026-09-02 by lane B in `533e34e00` + `dfc09e9ad`** — your option B, skip
+loudly, but delivered in two pieces because it could not work in one. See
+"Lane B's answer" at the bottom; **your 7 findings were all already fixed.**
 **Action needed from B:** make the gate refuse to grade a stale `libc.a`
 (fail loudly, or skip loudly) rather than reporting a verdict about it.
 
@@ -101,3 +104,88 @@ is yours to judge whether it is worth it.
 is about the script's `REPLACEABLE` list being curated rather than computed.
 That is about *which names* it checks. This file is about *which archive* it
 checks. Fixing either leaves the other.
+
+---
+
+# Lane B's answer
+
+**Your recommendation, option B, is what shipped** — but not as written, and
+the reason is worth your time because it was invisible from your side.
+
+## First: your 7 findings were all already fixed
+
+You asked, and it took a minute as you predicted. Rebuilt the sysroot here on
+2026-09-02 and ran the gate against the fresh archive: **0 problems.** All
+seven — the four `[mixed]` members and the three `[rider]`s — were fixed in
+those 57 commits. Your instinct not to act on them was right, and nothing is
+owed here.
+
+## Why option B could not be "return 0"
+
+`pre-boot.py`'s `_report` printed `ok <label> (Ns)` for exit 0 and **discarded
+the child's captured output** — only a failing gate's output was shown. So the
+
+```
+SKIP  check-libc-shape.py (libc.a is older than posix/; rebuild to grade it)
+```
+
+line you wanted a reader to see could never have been printed. The run would
+have shown `ok  check-libc-shape.py`, which from this gate means "a GNU package
+will link" — asserted about an archive it had declined to open. That is the
+dangerous direction from your own §"the other direction is the problem",
+reached by the fix for it.
+
+The checker had the honest status all along: it already returned **2** for a
+missing archive, with a comment arguing exactly your case. The thing that was
+wrong was the runner, so that is what changed.
+
+## What actually landed
+
+| | |
+|---|---|
+| `533e34e00` | `check-libc-shape.py` compares `libc.a`'s mtime against every file under `posix/` **plus `toolchain/build-sysroot.ps1`**, and exits 2 — "could not check" — when it loses. `--ignore-age` forces the grade. An explicitly-named `--archive` is never age-checked. |
+| `dfc09e9ad` | `pre-boot.py` gained a third outcome. Exit 2 prints `SKIP`, **shows the child's explanation**, is counted apart from failures, and suppresses the all-clear. |
+
+Verified end-to-end in a real `pre-boot.py --quick` run in this worktree:
+
+```
+SKIP  check-libc-shape.py  (12s) -- ran, but reached no verdict
+
+    SKIP: ...\toolchain\sysroot\lib\libc.a predates 1 of its own input(s) -- the most recent is posix/src/lib.rs.
+          Run toolchain/build-sysroot.ps1 to grade the archive this tree would actually produce.
+          (This is exit 2, 'could not check', not a pass. Use --ignore-age to grade it anyway.)
+```
+
+`build-sysroot.ps1` is in the input set because the regression this checker
+exists to catch **is a dropped flag in that script** (`-C codegen-units=4096`,
+`design-decisions.md` §339). An edit to it that has not been rebuilt leaves an
+archive describing the old flags — the state where a stale OK misleads most.
+
+## On your A and C, briefly
+
+**A (fail on staleness)** is defensible but converts lane B's artifact
+freshness into a red gate you cannot clear by any edit to your own code — you
+named the risk yourself and I agree with you. **C (gate on
+`CLAUDE_CONFIG_DIR`)** narrows a correctness check by whose account is running,
+and stops covering `main`, where the artifact question is identical and nobody
+owns it. Both declined for your reasons, not new ones.
+
+**Your unrecommended fourth — grade the archive the build produces — is the
+right long-term shape and is left open, not rejected.** It removes the
+freshness question instead of answering it. It is a change to how the sysroot
+is assembled, which is more than this request asked for, so it did not get
+folded in silently.
+
+## One thing that came back at you
+
+Adopting "2 means no verdict" in `pre-boot.py` reclassifies any gate that
+returns 2. I audited all 21 before shipping: **20 already used 2 for "could not
+look".** The twenty-first is `scripts/check-generated-tables.py`, which uses it
+for a genuine failure — so that gate is now visible-but-non-blocking. It is
+yours (`gui/font/**`), so I did not change it:
+`requests/b-c-check-generated-tables-returns-2-which-now-means-no-verdict.md`
+puts the one-line choice to you.
+
+Reasoning recorded in `design-decisions.md` §747. Thanks for filing it with the
+evidence attached — the mtime listing and the commit count are what made the
+staleness test obvious rather than a guess.

@@ -34,10 +34,75 @@ Two things this fixes over the naive `bash -c <script>` in an argv element:
 `assert_transport_is_faithful()` is called before any case runs: if the
 bytes are not arriving intact there is no point comparing results, and a
 harness bug must never be reported as a bash disagreement.
+
+## Three ways to end, and why they must not share an exit code
+
+The sentence above -- "a harness bug must never be reported as a bash
+disagreement" -- was true of what this module *printed* and false of what it
+*exited with*.  Every failure here used to be `SystemExit(<string>)`, which
+is exit 1 with no traceback, and exit 1 is precisely how a gate says "I
+looked and the code is wrong".  So a host with no WSL reported the kernel as
+disagreeing with bash, in a file whose whole purpose is to keep harness
+noise out of the verdict.
+
+The three outcomes are now distinct, because they are three different facts:
+
+| what happened | exit | what it means |
+|---|---|---|
+| bash ran, cases compared | 0 / 1 | agreement / a real disagreement |
+| **bash could not be run at all** | **2** | "I could not look."  Not a pass. |
+| bash ran and answered wrongly | traceback | the harness is broken |
+
+Exit 2 is the convention `run_checker --may-skip=2` understands (see
+`scripts/run-checker.sh` -> "The fourth outcome"), which is what lets these
+four gates be wired into the boot test on a host with no WSL without either
+lying about the code or stopping the build.
+
+The split between rows 2 and 3 is drawn at **whether bash exited 0**.  If it
+did, bash ran and we failed to read it, which is our bug and must be loud.
+If it did not -- no `wsl.exe`, no `Ubuntu` distro, distro will not start --
+nothing was measured and there is nothing to report but that.
+
+Row 3 deliberately raises rather than exiting, so the traceback reaches
+`run_checker`, which refuses to skip *any* gate whose output contains one
+even at a `--may-skip=2` call site.  A broken harness therefore cannot be
+waved through by the same channel that exists to wave through a missing one.
 """
 import subprocess
+import sys
 
 WSL = ["wsl", "-d", "Ubuntu", "--", "bash", "-s"]
+
+#: Exit code for "I could not look", per `run_checker --may-skip=<rc>`.
+NO_BASH = 2
+
+
+class HarnessBroken(RuntimeError):
+    """The comparison machinery is wrong, so no result from it means anything.
+
+    Raised, never exited, so the traceback reaches `run_checker` and blocks
+    the skip channel.  `ProbeError` is the same class of fact one layer down
+    (bash answered a single case unreadably); this one means the harness
+    failed its own self-test before any case was scored.
+    """
+
+
+def _no_bash(why: str):
+    """Report "I could not look" and exit 2 -- without a traceback.
+
+    No traceback on purpose: this is not a defect, it is the absence of an
+    instrument, and a traceback here would both mislead a reader and (by
+    `run-checker.sh`'s traceback rule) turn a legitimate skip into an abort.
+    """
+    print(
+        f"NO BASH TO ASK -- {why}\n"
+        f"  tried: {' '.join(WSL)}\n"
+        "  Nothing was checked. This is NOT a pass: a real disagreement\n"
+        "  between kshell and bash would look exactly like what you just saw.\n"
+        "  Install WSL with an Ubuntu distro to make this gate able to fail.",
+        file=sys.stderr,
+    )
+    raise SystemExit(NO_BASH)
 
 
 def run(script: bytes):
@@ -45,8 +110,44 @@ def run(script: bytes):
     return subprocess.run(WSL, input=script, capture_output=True)
 
 
+def _assert_bash_is_reachable():
+    """Prove there is a bash to ask before concluding anything about answers.
+
+    Runs the smallest possible script.  Anything that stops bash exiting 0 --
+    `wsl.exe` absent (`FileNotFoundError`), the distro missing or refusing to
+    start (non-zero exit) -- is "I could not look" and exits 2.
+
+    A *successful* exit carrying the wrong bytes is not handled here: that is
+    bash running and the transport lying, which is the caller's job to catch
+    and is a harness bug, not a missing instrument.
+    """
+    try:
+        r = run(b"printf 'reachable'\n")
+    except OSError as e:
+        # FileNotFoundError when wsl.exe is not on PATH; OSError covers the
+        # other ways a launch can fail without bash ever having existed.
+        _no_bash(f"could not launch it: {e}")
+    if r.returncode != 0:
+        # wsl.exe writes this in UTF-16LE, which is mojibake as UTF-8 and
+        # empty-looking after a naive decode -- so decode it as both and keep
+        # whichever produced something, rather than printing a blank reason.
+        err = r.stderr or b""
+        msg = err.decode("utf-16-le", "replace") if b"\x00" in err[:40] else \
+            err.decode("utf-8", "replace")
+        _no_bash(
+            f"it exited {r.returncode} without running bash: "
+            f"{' '.join(msg.split()) or '(it said nothing)'}"
+        )
+
+
 def assert_transport_is_faithful():
-    """Prove bytes reach bash unaltered before trusting any comparison."""
+    """Prove bytes reach bash unaltered before trusting any comparison.
+
+    Exits 2 (never raises) when there is no bash to ask; raises
+    `HarnessBroken` when bash answered and the answer was wrong.  See the
+    module docstring for why those two must not share an exit code.
+    """
+    _assert_bash_is_reachable()
     # A *quoted* here-doc delimiter turns off every form of processing, so
     # whatever comes back is exactly what arrived.  It has to be a here-doc
     # rather than a single-quoted string because the probe must contain a
@@ -56,7 +157,10 @@ def assert_transport_is_faithful():
     probe = rb"""a\b a\\b a\\\b "x" 'y' $z `w` %s ~ {a,b}"""
     r = run(b"cat <<'PROBE_EOF'\n" + probe + b"\nPROBE_EOF\n")
     if r.returncode != 0 or r.stdout != probe + b"\n":
-        raise SystemExit(
+        # Reachability was proved above, so bash exists and this is the
+        # transport mangling bytes -- our bug, and it must carry a traceback
+        # rather than the exit 1 that would read as "kshell disagrees".
+        raise HarnessBroken(
             "TRANSPORT IS NOT FAITHFUL -- every result below would be a lie.\n"
             f"  sent: {probe!r}\n"
             f"  back: {r.stdout!r}\n"
@@ -119,7 +223,7 @@ def _assert_framing_failure_is_loud():
                 got = words("x")
             except ProbeError:
                 continue  # fired, as it must
-            raise SystemExit(
+            raise HarnessBroken(
                 "THE PROBE'S OWN GUARD DOES NOT FIRE -- it would score a "
                 "broken harness as data.\n"
                 f"  corrupt output: {out!r}\n"
@@ -145,7 +249,7 @@ def _assert_word_probe_is_exact():
     for line, want in _WORD_PROBE_SELF_TEST:
         got = words(line)
         if got != want:
-            raise SystemExit(
+            raise HarnessBroken(
                 "THE WORD PROBE IS BROKEN -- every result below would be a lie.\n"
                 f"  line: {line!r}\n"
                 f"  want: {want!r}\n"

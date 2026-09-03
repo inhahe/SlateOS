@@ -193,8 +193,198 @@ fn assert_one(p: &Palette, label: &str, c: Color, derived: &[Color], what: &str)
     );
 }
 
+// ---------------------------------------------------------------------------
+// The legibility sweep
+// ---------------------------------------------------------------------------
+
+/// One text command, the colour composited behind it, and their contrast.
+///
+/// Produced by [`text_on_background`]. `ratio` is the WCAG 2 contrast between
+/// [`ink`](Self::ink) and [`behind`](Self::behind), on the scale the
+/// accessibility floors are quoted in: 4.5 for body text (SC 1.4.3), 3.0 for a
+/// graphical object (SC 1.4.11).
+#[derive(Clone, Debug)]
+pub struct TextOn {
+    /// Index into the command list, so a failure names the site.
+    pub index: usize,
+    /// The string being drawn, for the failure message.
+    pub text: String,
+    /// The colour the glyphs are drawn in. For a
+    /// [`RichText`](RenderCommand::RichText) this is whichever of its inks
+    /// measured *worst* against the background, since a run is only as legible
+    /// as its least legible span.
+    pub ink: Color,
+    /// Everything painted underneath, composited down to one colour.
+    pub behind: Color,
+    /// The WCAG 2 contrast ratio between the two.
+    pub ratio: f32,
+    /// The size the glyphs are drawn at, because the floor that applies to text
+    /// depends on it: SC 1.4.3 allows 3:1 for "large" text, which is 18pt
+    /// (24px) regular or 14pt (18.66px) bold.
+    pub font_size: f32,
+}
+
+/// Every text command in `cmds`, paired with what is behind it.
+///
+/// **Why this exists.** [`assert_drawn_from`] proves a module's colours came
+/// out of the palette. It cannot prove they are *legible*, because legibility
+/// is not a property of a colour — it is a property of a pair, and which pair
+/// depends on what was painted underneath. A module can draw `p.text` on
+/// `p.surface2` using nothing but palette roles and still put text on the
+/// screen at 3.69:1. See known-issues.md
+/// `TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR`.
+///
+/// **How the background is decided.** Commands paint in order, so the colour
+/// behind a glyph is `root` with every earlier `FillRect` covering the sample
+/// point composited over it, in order, by `Color::over`. Alpha is therefore
+/// handled rather than ignored — which matters, because a wash at alpha 50 over
+/// a card is a different colour from either, and it is the one the eye sees.
+///
+/// `root` is what lies beneath the module's own drawing: pass `p.base` for a
+/// panel that fills its window, since that is what the window is. Text painted
+/// before any rectangle is measured against `root` alone.
+///
+/// **What is deliberately not background.** A `StrokeRect` is an outline, not a
+/// fill, and treating its colour as the background of everything inside it
+/// would report the border colour for the whole card. A `BoxShadow` falls
+/// outside the box it belongs to. An `Image` has pixels this crate cannot know
+/// — text over an image is a real legibility question that this function cannot
+/// answer, so it answers about whatever was painted before the image instead.
+/// That is a known limitation rather than a silent one: the alternative is to
+/// skip such text, which would hide sites rather than approximate them.
+///
+/// **Where it samples.** One point, just inside the start of the run and
+/// halfway down its line box. A string spanning two backgrounds — the tail of a
+/// label running off a selected row onto the card behind it — is measured
+/// against the first. Measuring the whole run would need the shaped width of
+/// the string, which is a font question, and the sites this is looking for are
+/// cards with uniform fills.
+#[must_use]
+pub fn text_on_background(cmds: &[RenderCommand], root: Color) -> Vec<TextOn> {
+    /// A rectangle already painted, in absolute coordinates.
+    struct Painted {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: Color,
+    }
+
+    let mut painted: Vec<Painted> = Vec::new();
+    let mut found = Vec::new();
+    let (mut dx, mut dy) = (0.0_f32, 0.0_f32);
+    let mut translates: Vec<(f32, f32)> = Vec::new();
+    let mut fonts: Vec<guitk::render::FontFamily> = Vec::new();
+
+    for (index, cmd) in cmds.iter().enumerate() {
+        match cmd {
+            RenderCommand::PushTranslate { dx: tx, dy: ty } => {
+                translates.push((dx, dy));
+                dx += tx;
+                dy += ty;
+            }
+            RenderCommand::PopTranslate => {
+                // An unbalanced pop is a caller bug, but not one a measurement
+                // should turn into a panic; fall back to the untranslated
+                // origin, as `content_bottom` does for the same reason.
+                let (px, py) = translates.pop().unwrap_or((0.0, 0.0));
+                dx = px;
+                dy = py;
+            }
+            RenderCommand::PushFont { family } => fonts.push(*family),
+            RenderCommand::PopFont => {
+                fonts.pop();
+            }
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } => painted.push(Painted {
+                x: dx + x,
+                y: dy + y,
+                w: *width,
+                h: *height,
+                color: *color,
+            }),
+            RenderCommand::Text {
+                x,
+                y,
+                text,
+                color,
+                font_size,
+                font_weight,
+                ..
+            }
+            | RenderCommand::RichText {
+                x,
+                y,
+                text,
+                color,
+                font_size,
+                font_weight,
+                ..
+            } => {
+                let family = fonts.last().copied().unwrap_or_default();
+                let line = guitk::text::line_height_in(*font_size, *font_weight, family);
+                // Just inside the start of the run, halfway down its line box:
+                // the half-pixel keeps the sample off the exact boundary, where
+                // a card's left edge and the text's origin often coincide.
+                let sx = dx + x + 0.5;
+                let sy = dy + y + line / 2.0;
+
+                let behind = painted
+                    .iter()
+                    .filter(|r| sx >= r.x && sx < r.x + r.w && sy >= r.y && sy < r.y + r.h)
+                    .fold(root, |below, r| r.color.over(below));
+
+                // A rich run is only as legible as its least legible span, so
+                // the worst ink is the one worth reporting. A plain `Text` has
+                // one ink and this reduces to it.
+                let mut inks = vec![*color];
+                if let RenderCommand::RichText { spans, .. } = cmd {
+                    inks.extend(spans.iter().map(|s| s.color));
+                }
+                let Some((ink, ratio)) = inks
+                    .into_iter()
+                    .map(|ink| (ink, appearance::contrast_ratio(ink, behind)))
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                else {
+                    continue;
+                };
+
+                found.push(TextOn {
+                    index,
+                    text: text.clone(),
+                    ink,
+                    behind,
+                    ratio,
+                    font_size: *font_size,
+                });
+            }
+            RenderCommand::StrokeRect { .. }
+            | RenderCommand::Line { .. }
+            | RenderCommand::BoxShadow { .. }
+            | RenderCommand::Image { .. }
+            | RenderCommand::PushClip { .. }
+            | RenderCommand::PopClip => {}
+        }
+    }
+
+    found
+}
+
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes. Indexing a result the test has
+    // just asserted the length of is the clearest way to say what is expected;
+    // `.get(0).unwrap()` would panic identically with a worse message.
+    #![allow(clippy::indexing_slicing)]
+
     use super::*;
 
     /// The sweep's own proof: it must reject the thing it exists to find.
@@ -366,6 +556,190 @@ mod tests {
                     assert_colours_from(&p, &named, &[], "probe");
                 }
             }
+        }
+    }
+    // -- The legibility sweep's own proof ---------------------------------
+
+    fn fill(x: f32, y: f32, w: f32, h: f32, color: Color) -> RenderCommand {
+        RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color,
+            corner_radii: guitk::style::CornerRadii::ZERO,
+        }
+    }
+
+    fn label(x: f32, y: f32, color: Color) -> RenderCommand {
+        RenderCommand::Text {
+            x,
+            y,
+            text: String::from("label"),
+            color,
+            font_size: 14.0,
+            font_weight: guitk::render::FontWeightHint::Regular,
+            max_width: None,
+            overflow: guitk::render::TextOverflow::Clip,
+        }
+    }
+
+    /// The colour reported is the card the text sits on, not the window behind
+    /// it and not a card it misses.
+    #[test]
+    fn the_background_of_a_glyph_is_the_rectangle_it_is_actually_over() {
+        let p = Palette::for_mode(false);
+        let cmds = vec![
+            fill(0.0, 0.0, 200.0, 200.0, p.base),
+            fill(10.0, 10.0, 50.0, 30.0, p.surface2),
+            label(12.0, 12.0, p.text),  // inside the surface2 card
+            label(120.0, 12.0, p.text), // past its right edge, on base
+        ];
+        let found = text_on_background(&cmds, p.base);
+        assert_eq!(found.len(), 2, "both runs should be measured");
+        assert_eq!(found[0].behind, p.surface2, "the card under the glyph");
+        assert_eq!(
+            found[1].behind, p.base,
+            "a run past the card is on the base"
+        );
+    }
+
+    /// A translucent wash is composited, not ignored.
+    ///
+    /// This is the case that a "which role is underneath" check cannot answer:
+    /// a selection wash at alpha 50 over a card is a third colour, present in
+    /// no palette, and it is the one the reader's eye has to cope with.
+    #[test]
+    fn a_wash_over_a_card_is_measured_as_the_colour_the_eye_sees() {
+        let p = Palette::for_mode(false);
+        let washed = guitk::theme::with_alpha(p.accent, 50);
+        let cmds = vec![
+            fill(0.0, 0.0, 200.0, 200.0, p.base),
+            fill(0.0, 0.0, 100.0, 40.0, washed),
+            label(4.0, 4.0, p.text),
+        ];
+        let found = text_on_background(&cmds, p.base);
+        assert_eq!(found.len(), 1);
+        let behind = found[0].behind;
+        assert_ne!(behind, p.base, "the wash was ignored");
+        assert_ne!(behind, washed, "the wash was taken neat, not composited");
+        assert_eq!(
+            behind,
+            washed.over(p.base),
+            "the composite is what `Color::over` says it is"
+        );
+    }
+
+    /// A translate moves the text and the card together, so the pairing holds.
+    #[test]
+    fn a_translated_card_and_its_text_still_find_each_other() {
+        let p = Palette::for_mode(false);
+        let cmds = vec![
+            fill(0.0, 0.0, 400.0, 400.0, p.base),
+            RenderCommand::PushTranslate {
+                dx: 100.0,
+                dy: 50.0,
+            },
+            fill(0.0, 0.0, 60.0, 30.0, p.surface1),
+            label(2.0, 2.0, p.text),
+            RenderCommand::PopTranslate,
+            // Same local coordinates, but now untranslated: a different card.
+            label(2.0, 2.0, p.text),
+        ];
+        let found = text_on_background(&cmds, p.base);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].behind, p.surface1, "the translated pair");
+        assert_eq!(
+            found[1].behind, p.base,
+            "an untranslated run must not inherit the translated card"
+        );
+    }
+
+    /// A rich run is reported at its *worst* span, not its fallback colour.
+    #[test]
+    fn a_rich_run_is_only_as_legible_as_its_least_legible_span() {
+        let p = Palette::for_mode(false);
+        let cmds = vec![
+            fill(0.0, 0.0, 200.0, 200.0, p.surface0),
+            RenderCommand::RichText {
+                x: 4.0,
+                y: 4.0,
+                text: String::from("highlighted"),
+                spans: vec![guitk::render::TextSpan {
+                    end: 4,
+                    color: p.overlay0,
+                }],
+                color: p.text,
+                font_size: 14.0,
+                font_weight: guitk::render::FontWeightHint::Regular,
+                max_width: None,
+                overflow: guitk::render::TextOverflow::Clip,
+            },
+        ];
+        let found = text_on_background(&cmds, p.base);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].ink, p.overlay0,
+            "the faint span is the one that decides whether the run is legible"
+        );
+        assert!(
+            found[0].ratio < appearance::contrast_ratio(p.text, p.surface0),
+            "reporting the fallback ink would have flattered this run"
+        );
+    }
+
+    /// The measurement agrees with the palette's own arithmetic.
+    ///
+    /// Not a tautology: it is what pins the reported `ratio` to the pair the
+    /// entry in known-issues.md is stated in, so a regression in the sampling
+    /// shows up here rather than as a plausible-looking wrong number.
+    #[test]
+    fn the_reported_ratio_is_the_contrast_of_the_pair_it_reports() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let cmds = vec![
+                fill(0.0, 0.0, 100.0, 100.0, p.surface2),
+                label(1.0, 1.0, p.text),
+            ];
+            let found = text_on_background(&cmds, p.base);
+            assert_eq!(found.len(), 1);
+            let f = &found[0];
+            assert!(
+                (f.ratio - appearance::contrast_ratio(f.ink, f.behind)).abs() < 1e-6,
+                "ratio {} does not match contrast_ratio({:?}, {:?})",
+                f.ratio,
+                f.ink,
+                f.behind
+            );
+        }
+    }
+
+    /// The pair that `TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR`
+    /// is about, measured through this function rather than by hand.
+    ///
+    /// The entry quotes 4.39 for light `surface1` and 3.69 for light
+    /// `surface2`. Those numbers were computed directly from the palette; this
+    /// asserts the sweep that will police them reproduces the same two, so a
+    /// later fix to the palette can be checked against the entry it closes.
+    #[test]
+    fn the_two_pale_surfaces_measure_what_the_known_issue_says_they_do() {
+        let p = Palette::for_mode(true);
+        for (name, card, want) in [
+            ("surface1", p.surface1, 4.39),
+            ("surface2", p.surface2, 3.69),
+        ] {
+            let cmds = vec![fill(0.0, 0.0, 100.0, 100.0, card), label(1.0, 1.0, p.text)];
+            let found = text_on_background(&cmds, p.base);
+            assert_eq!(found.len(), 1);
+            assert!(
+                (f64::from(found[0].ratio) - want).abs() < 0.01,
+                "light `{name}` measures {:.2}:1, the known-issue says {want}",
+                found[0].ratio
+            );
+            assert!(
+                found[0].ratio < 4.5,
+                "`{name}` is supposed to be the failing case"
+            );
         }
     }
 }

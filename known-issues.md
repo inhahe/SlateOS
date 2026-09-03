@@ -108725,7 +108725,18 @@ Not turned into a ratchet, deliberately. Pinning fifteen entries that all say
 is a ratchet on *new* gates — no newly added `check-*.py` may ship without a
 self-test — which stops the debt growing without demanding fifteen retrofits
 first. That is a policy affecting all three lanes' files, so it belongs in a
-request to A and C rather than a unilateral lane-B gate; **not yet filed.**
+request to A and C rather than a unilateral lane-B gate. **Filed `c2ab2c30c`**
+as `requests/b-ac-should-a-new-gate-be-allowed-to-ship-without-a-self-test.md`,
+asking for agreement or objection to one rule: *a newly added
+`scripts/check-*.py` ships a `--self-test` covering at least one true positive
+and one true negative, plus a call that runs it.* "One of each" is the
+load-bearing half — positives alone pass a checker that reports everything,
+negatives alone one that reports nothing.
+
+If that request is never answered, nothing breaks and nothing improves: lane B
+applies the rule to its own new gates, the fifteen stay untested, and the count
+drifts upward as gates are added — which is the status quo, and is exactly how
+it reached fifteen.
 
 ---
 ## TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH

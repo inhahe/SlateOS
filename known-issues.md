@@ -109047,7 +109047,7 @@ re-exec belongs immediately after the `set -u`/`SCRIPT_DIR` preamble).
 
 ---
 
-## A-KSHELL-REDIRECT-MISSED-WHEN-AN-APOSTROPHE-PRECEDES-IT, and the eleven disagreeing quote scanners behind it — OPEN 2026-09-02
+## A-KSHELL-REDIRECT-MISSED-WHEN-AN-APOSTROPHE-PRECEDES-IT, and the eleven — no, twelve — disagreeing quote scanners behind it — **Status: OPEN, NARROWED 2026-09-03 (the shared scanner exists as `kernel/src/shellquote.rs`; six of the twelve sites use it, including both redirect bugs. Six remain, one of them the `$HOME` symptom below. See "Narrowed 2026-09-03" at the end.)** — 2026-09-02
 
 **Lane:** A. **Severity:** silent wrong behaviour on an ordinary line; the
 output goes to the terminal instead of the file and the shell reports success.
@@ -109182,3 +109182,60 @@ and a `"` is ordinary. A one-bit model cannot express either half.
 The third row is worth a rung of its own — it is the line where both defects
 fire together, and a fix that repaired only one of them would still get it
 wrong while looking greener.
+
+### Narrowed 2026-09-03 — the scanner exists; six of twelve sites converted
+
+**In short:** the single shared scanner this entry asked for is written
+(`kernel/src/shellquote.rs`, commit `6f8564967`) and six of the copies now call
+it instead of scanning for themselves (`eaed9854e`). Both redirect bugs in the
+repro table are fixed. `echo "it's $HOME"` is **not** yet fixed — that is site
+#7, still to convert.
+
+**There were twelve, not eleven.** `parse_here_string` (`<<<`) is a thirteenth
+scan of the same grammar and a twelfth hand-rolled copy; it was found only by
+doing the substitution, which is itself an argument for the substitution. The
+count in the table above is left as written — it is what was known on 2026-09-02
+— and this section is the correction.
+
+**Converted (6):**
+
+| # | Site | Now calls |
+|---|---|---|
+| 1 | `unquoted_positions` | `shellquote::bare_positions` |
+| 2 | `first_unquoted_space` | `shellquote::find_bare_space` |
+| 3 | `split_unquoted` | `shellquote::split_bare_ranges` |
+| 8 | `parse_redirect` | `shellquote::find_bare` — **bug fixed** |
+| 9 | `parse_input_redirect` | `shellquote::scan` + `is_bare` — **bug fixed** |
+| 12 | `parse_here_string` | `shellquote::scan` + `is_bare` |
+
+**Remaining (6):** #4 `expand_braces`, #5 `remove_quotes`, #6 `split_words`,
+#7 `expand_vars_bytes` (the `$HOME` symptom), #10 `awk_split_print_args`,
+#11 `tab_complete`.
+
+**One rule was wrong in this entry's own statement of the fix, and real bash
+found it.** The section above says the scanner must expose "three context
+rules". It must, but a caller that asks only *"which context is this byte
+in?"* still gets `"\$HOME"` wrong: the `$` there genuinely **is** in the
+double-quoted context, and what suppresses the expansion is the backslash, not
+the context. The correct predicate is `ctx != Single && !escaped`. This was
+found by porting the Rust scanner to Python and diffing it against real bash
+over 32 cases (`printf '%s\n' <word>`, which prints one line per word after
+bash has done quote removal) — not by re-reading the Rust, which looked right.
+`shellquote` therefore answers the question itself, as `Tok::expands()`, rather
+than leaving site #7 to restate a rule that this entry stated incompletely.
+
+**The verification this entry asked for is partly built.** `shellquote`'s
+`self_test()` covers all three contexts, backslash handling in each, delimiter
+visibility, word splitting including the quoted empty word, `quote_word`
+round-tripping arbitrary bytes, and the bare-vs-expands distinction. The
+cross-scanner *agreement property* the entry proposes is not yet written and
+cannot be until all twelve sites share the scanner — at which point it becomes
+trivially true by construction, which is the better outcome than a test.
+
+**One pre-existing bug surfaced while writing the new rung and is deliberately
+not fixed here:** redirect paths are never unquoted. `echo hi > "out.txt"`
+creates a file literally named `"out.txt"`, quotes included, and always has —
+`parse_redirect` returns the raw slice and `resolve_path` does not strip
+quotes. Rung 114 asserts the *parser's* contract (split the line) rather than
+papering over this, because unquoting belongs to the executor
+(`execute_redirect` / `execute_input_redirect`) and is its own commit.

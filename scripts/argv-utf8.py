@@ -299,8 +299,8 @@ def stale_entries(known: set[str], gated: set[str]) -> list[str]:
     return sorted(known - gated)
 
 
-def _no_corpus(tree: gittree.Tree) -> bool:
-    """True when the tree being judged has no gated sources in it at all.
+def _inputs_missing(tree: gittree.Tree, needs_baseline: bool) -> str | None:
+    """Why this tree cannot be judged at all, or `None` if it can.
 
     Every rule in `--selftest` proves the detector classifies a *given* file
     correctly. None of them would notice if `GATED_REL` named a directory that
@@ -310,14 +310,39 @@ def _no_corpus(tree: gittree.Tree) -> bool:
     this tool exists to prevent -- a clean report produced by accident -- so it
     is worth one explicit question.
 
+    The baseline is the second input, and until 2026-09-03 it had no such
+    question. It fails the other way, loudly: unreadable through the seam it
+    comes back as an *empty backlog* rather than as an error, so `--check`
+    calls every baselined bin NEW and refuses the push with a paragraph each,
+    all of them naming bins the author never touched -- while on a clean tree
+    the same read calls every baseline line stale, which reads as "the backlog
+    was fixed" by a commit that fixed nothing. Both are false accusations over
+    a file that moved, which `scripts/run-checker.sh` argues is the worst thing
+    a gate can do. `needs_baseline` is false only for `--write-baseline`, which
+    creates the file and so must be allowed to run without it; gate 6's
+    equivalent also excuses `--list`, a mode this checker does not have.
+
     Asked of the tree under judgement rather than of the disk, because that is
-    where the risk is: a commit that moves `userspace/coreutils` disarms the
-    gate *for that commit*, and a disk-side check would answer for a working
-    tree that still has the directory. Non-emptiness rather than a count: a
-    threshold would be a claim about this repository, and this checker is run
-    against fixtures too.
+    where the risk is: a commit that moves either path disarms the gate *for
+    that commit*, and a disk-side check would answer for a working tree that
+    still has both. Non-emptiness rather than a count: a threshold would be a
+    claim about this repository, and this checker is run against fixtures too.
+
+    Named and shaped to match `scripts/host-errmsg.py`'s `_inputs_missing`
+    deliberately -- these are one rule enforced at two gates, and two spellings
+    of one rule is one rule that drifts. This function was `_no_corpus` until
+    the baseline half was added; see `known-issues.md` ->
+    `TD-B-GATE-4-CANNOT-TELL-AN-EMPTY-BACKLOG-FROM-A-MISSING-ONE`.
     """
-    return not rust_files(tree, GATED_REL)
+    if not rust_files(tree, GATED_REL):
+        return (f"no .rs files under {GATED_REL} -- the gate has nothing to "
+                f"judge, which is not the same as a clean tree. Has the "
+                f"directory moved?")
+    if needs_baseline and tree.read_text(BASELINE_REL, errors="strict") is None:
+        return (f"cannot read {BASELINE_REL} -- without the backlog every "
+                f"baselined bin reads as a new finding, so this would refuse "
+                f"the push over a file that moved rather than over any code.")
+    return None
 
 
 def selftest() -> int:
@@ -498,8 +523,11 @@ fn main() {
     # for that commit while a disk-side self-test says all is well -- and a
     # threshold of fifty is a fact about this checkout, so the checker could not
     # be self-tested anywhere else, which is exactly what its own end-to-end
-    # cases do. It now lives in [`main`], asked of whichever tree is being
-    # judged, where both of those stop being true. See `_no_corpus`.
+    # cases do. It now lives in `main`, asked of whichever tree is being
+    # judged, where both of those stop being true. See `_inputs_missing`, which
+    # since 2026-09-03 asks the same of the *baseline* -- the input this comment
+    # did not think to mention, and the one whose absence is loud rather than
+    # silent.
     for f in failures:
         print(f"selftest FAIL {f}")
     print(f"selftest: {len(rules) - len({f.split(':')[0] for f in failures})}"
@@ -535,11 +563,10 @@ def main() -> int:
         # finding about anybody's code, and printing gate 4's refusal over it
         # would tell the author their utility panics on a legal filename when
         # what actually happened is that the gate lost its subject.
-        if _no_corpus(tree):
+        why = _inputs_missing(tree, needs_baseline=not write)
+        if why is not None:
             where = f"in {args.head}" if args.head else "in the working tree"
-            print(f"argv-utf8: no .rs files under {GATED_REL} {where} -- the "
-                  f"gate has nothing to judge, which is not the same as a "
-                  f"clean tree. Has the directory moved?", file=sys.stderr)
+            print(f"argv-utf8: {where}, {why}", file=sys.stderr)
             return 2
 
         gated = findings(tree, GATED_REL)

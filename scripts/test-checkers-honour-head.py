@@ -900,6 +900,63 @@ def case_gate4_a_tree_with_no_gated_sources_is_not_a_clean_tree(tmp: str) -> Non
           "nothing to judge" in rev.stderr, True)
 
 
+def case_gate4_a_baseline_absent_from_the_tree_is_not_four_new_findings(tmp: str) -> None:
+    """The second input's version of the guard above, failing the other way.
+
+    A missing corpus goes silent; a missing *baseline* goes loud and wrong. It
+    reads back as an empty backlog rather than as an error, so every bin the
+    real file forgives becomes a NEW finding and the push is refused with gate
+    4's whole nine-paragraph refusal over a list of bins nobody touched -- the
+    false accusation `scripts/run-checker.sh` exists to argue is the worst
+    thing a gate can do. On a clean tree the same read calls every baseline
+    line stale instead, which reads as "the backlog is fixed" over a commit
+    that fixed nothing.
+
+    Gate 4 shipped its `--head` conversion with the corpus half of this guard
+    and not this half; gate 6 was converted the next day with both, and this
+    case is the one that was missing transposed back. Per-tree for the corpus
+    guard's reason: a commit moves the path, and the disk still has it.
+
+    `--write-baseline` is excluded from the guard because it *creates* the
+    file, and is asserted here so the exclusion cannot be dropped: a bootstrap
+    that refuses to bootstrap would be found only by whoever next moved the
+    baseline, who is the person this guard is protecting.
+    """
+    # The backlog must be non-empty, or this case cannot see the failure it is
+    # named for. Against an *empty* baseline a missing one is merely a silent
+    # false pass -- caught by the status, but the assertion below that no bin
+    # is accused would then hold just as well against a checker with no guard
+    # at all. So the fixture forgives a real finding, and taking the baseline
+    # away turns that finding into an accusation.
+    root = _argv_repo(tmp, "g4m")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _ARGV_PANIC)
+    write(root, "scripts/argv-utf8-baseline.txt", _AU_BASELINE + _AU_KEY + "\n")
+    commit(root)
+    remove(root, "scripts/argv-utf8-baseline.txt")
+    sha = commit(root, "the baseline goes somewhere else")
+    write(root, "scripts/argv-utf8-baseline.txt", _AU_BASELINE + _AU_KEY + "\n")
+
+    disk = run_checker(root, "argv-utf8.py", "--check")
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: the disk's baseline still forgives the finding it names",
+          disk.returncode, 0)
+    check("gate 4: the commit's is gone, which is no verdict", rev.returncode, 2)
+    check("gate 4: ...naming the file rather than blaming a bin",
+          "argv-utf8-baseline.txt" in rev.stderr, True)
+    # The load-bearing negative. Without the guard this run does not go quiet,
+    # it goes *wrong*: the forgiven finding reads as new and the author is told
+    # a bin they never touched dies on a legal filename.
+    check("gate 4: ...and the forgiven bin is not accused of being new",
+          "tool.rs" in rev.stdout, False)
+    # The guard must not stop the one mode whose job is to create the file.
+    # Checked on the disk arm: --write-baseline writes the working tree and is
+    # refused outright with --head, so the revision arm cannot express this.
+    remove(root, "scripts/argv-utf8-baseline.txt")
+    boot = run_checker(root, "argv-utf8.py", "--write-baseline")
+    check("gate 4: a bootstrap run still creates the baseline it lacks",
+          boot.returncode, 0)
+
+
 def case_gate4_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
     """Exit 2, not 1 -- the same contract gates 2 and 3 have with run-checker.sh.
 
@@ -1808,6 +1865,7 @@ CASES = (
     case_gate4_the_ungated_survey_reads_the_same_tree,
     case_gate4_build_output_is_skipped_on_the_side_that_can_see_it,
     case_gate4_a_tree_with_no_gated_sources_is_not_a_clean_tree,
+    case_gate4_a_baseline_absent_from_the_tree_is_not_four_new_findings,
     case_gate4_an_unopenable_revision_is_not_a_finding,
     case_gate4_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate4_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
@@ -1832,9 +1890,9 @@ CASES = (
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 49:
+    if len(CASES) < 50:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 49. The list is broken, not the code.")
+              f"least 50. The list is broken, not the code.")
         return 1
     # ...and each converted gate must be represented, through the real hook as
     # well as directly. A floor on the count alone would be met by any number of
@@ -1843,7 +1901,7 @@ def main() -> int:
     # as each remaining checker is converted; they are the thing that notices a
     # gate's cases being deleted along with the gate's own wiring.
     for gate, floor, e2e_floor in (("gate2", 10, 3), ("gate3", 13, 4),
-                                   ("gate4", 12, 3), ("gate6", 14, 3)):
+                                   ("gate4", 13, 3), ("gate6", 14, 3)):
         named = [c for c in CASES if c.__name__.startswith(f"case_{gate}_")]
         hooked = [c for c in named if "the_hook" in c.__name__]
         if len(named) < floor or len(hooked) < e2e_floor:

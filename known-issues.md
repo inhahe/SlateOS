@@ -109149,9 +109149,11 @@ the regression test all exist. The work is:
    set for an unreadable baseline with nothing said). Same defect, four
    baseline lines rather than two. Filed as
    `TD-B-GATE-4-CANNOT-TELL-AN-EMPTY-BACKLOG-FROM-A-MISSING-ONE` rather than
-   fixed here: it needs its own honour-head case and its own mutant to be worth
-   anything, and neither belongs in a commit about gate 6. Gates 5, 8 and 11
-   should get **both** halves when they are converted.
+   fixed here — it needs its own honour-head case and its own mutant to be
+   worth anything, and neither belongs in a commit about gate 6 — and **fixed
+   the same day** in the commit after next, which also renamed gate 4's
+   `_no_corpus` to `_inputs_missing` so the two gates spell one rule one way.
+   Gates 5, 8 and 11 get **both** halves when they are converted.
 
    `needs_baseline` is false for two modes and both exclusions are load-bearing
    in opposite directions: `--write-baseline` *creates* the file and must run
@@ -109999,8 +110001,25 @@ ones.
 ## TD-B-GATE-4-CANNOT-TELL-AN-EMPTY-BACKLOG-FROM-A-MISSING-ONE (lane B)
 
 **Filed:** 2026-09-03 by lane B, out of gate 6's `--head` conversion.
-**Status:** open. Latent — it needs a commit that moves the baseline file, and
-nothing has moved it yet.
+**Status: FIXED 2026-09-03**, the same day, by the plan below. `_no_corpus`
+became `_inputs_missing(tree, needs_baseline)` — the same name and shape as
+`scripts/host-errmsg.py`'s, because these are one rule enforced at two gates
+and two spellings of one rule is one rule that drifts. `--check` on the real
+tree is unchanged (`4 finding(s); 0 not in the baseline; 0 baseline line(s) now
+stale`, exit 0) and `--selftest` still reports 7/7.
+
+**The case that pins it needed a second draft, and the first one is the more
+useful thing to record.** Written against the existing fixture — whose baseline
+is the empty `# nothing known-panicking yet` — it caught the mutant, but for the
+wrong reason: with nothing forgiven, a missing baseline is a *silent* false pass
+(exit 0), so the status assertion fired while the assertion that no bin is
+accused would have held equally against a checker with no guard at all. The
+fixture now forgives a real finding, so removing the baseline turns that finding
+into an accusation — and the mutant's failure is the documented harm rather than
+a proxy for it: exit **1** with `tool.rs` named as new. Three assertions fire
+where two did.
+
+The original report follows unchanged.
 
 **In short:** pre-push gate 4 forgives four known-bad utilities by listing them
 in a file. If a commit ever moves or deletes that file, gate 4 does not say so —

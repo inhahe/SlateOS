@@ -357,6 +357,9 @@ def main(argv):
 
     unaccounted = []
     seen_conflated = {}
+    # Which ALLOWED exemptions were actually used. See the staleness check at
+    # the end for why an unused one is a defect and not merely tidy-up.
+    seen_allowed = set()
     # Matched per *statement*, not per line. `USAGE` requires the literal to
     # follow `shell_println!(` immediately, and when the synopsis is long
     # `cargo fmt` puts the literal on its own line -- at which point the regex
@@ -423,7 +426,12 @@ def main(argv):
         # found. Reported from the same text rather than from `lines[i]`,
         # because for a wrapped call `lines[i]` is a bare `shell_println!(`,
         # which tells the reader nothing about which message was flagged.
-        if any(fn == f and frag in stmt for (f, frag) in ALLOWED):
+        allowed_by = next(
+            ((f, frag) for (f, frag) in ALLOWED if fn == f and frag in stmt),
+            None,
+        )
+        if allowed_by is not None:
+            seen_allowed.add(allowed_by)
             continue
         if seen_conflated.get(fn, 0) < KNOWN_CONFLATED.get(fn, 0):
             seen_conflated[fn] = seen_conflated.get(fn, 0) + 1
@@ -439,11 +447,39 @@ def main(argv):
         if seen_conflated.get(fn, 0) < n
     ]
 
+    # The same rule, applied to ALLOWED -- which is where it actually bites now.
+    #
+    # The staleness check above has guarded nothing since KNOWN_CONFLATED became
+    # empty: all 33 conflations were split and the table emptied with them. The
+    # guard was load-bearing only while the debt existed, so paying the debt off
+    # silently removed it, and nothing replaced it. This checker consequently
+    # PASSED when handed an empty file -- rc=0, "every usage diagnostic sets a
+    # failure status" -- so a renamed, moved or truncated kshell.rs, or a broken
+    # `strip_noise`, would have reported the gate green. A gate that discovers
+    # nothing reports no failures, which reads exactly like a pass; boot-test.sh
+    # already refuses to run when it discovers fewer than ten suites for this
+    # reason, and this file needed the same floor.
+    #
+    # ALLOWED supplies it, because it is non-empty (32 entries) and its entries
+    # must all still match: an exemption is a claim that a specific site exists
+    # and is correct. If it matches nothing, either the site was fixed or
+    # renamed -- and a stale (function, fragment) pair is not inert, it is a
+    # hole. `("cmd_x", "Usage:")` left behind after cmd_x was rewritten will
+    # silently exempt whatever *new* usage message cmd_x grows next. That is
+    # precisely the "allowlist that grows holes on its own" that the
+    # KNOWN_CONFLATED comment above already warns about, and the reason that
+    # table pins counts rather than being a set of names.
+    #
+    # So this both restores the discovery floor (an empty file leaves all 32
+    # unmatched and fails) and catches allow-list rot, which are the same check.
+    stale_allowed = sorted(set(ALLOWED) - seen_allowed)
+
     conflated = sum(seen_conflated.values())
-    if not unaccounted and not stale:
+    if not unaccounted and not stale and not stale_allowed:
         print(
             f"[usage-status] kshell.rs: every usage diagnostic sets a failure status "
-            f"({len(ALLOWED)} allowed, {conflated} known help/error conflations)"
+            f"({len(ALLOWED)} allowed, all matched; "
+            f"{conflated} known help/error conflations)"
         )
         return 0
 
@@ -464,6 +500,35 @@ def main(argv):
         )
         for fn, missing in stale:
             print(f"  {fn}: {missing} fewer than expected", file=sys.stderr)
+    if stale_allowed:
+        print("", file=sys.stderr)
+        if len(stale_allowed) == len(ALLOWED):
+            # Every single one missing is not 32 stale entries; it is the
+            # checker looking at the wrong thing. Say so, because the fix is
+            # somewhere else entirely and a list of 32 "remove this" lines
+            # would send the reader to exactly the wrong place.
+            print(
+                f"NOTHING WAS EXAMINED -- all {len(ALLOWED)} ALLOWED entries went "
+                f"unmatched.\n"
+                f"  This is a discovery failure, not an allow-list problem. The "
+                f"subject\n"
+                f"  {path}\n"
+                f"  parsed to {len(lines)} line(s). Check that the path exists, is "
+                f"kshell.rs,\n"
+                f"  and that _rl.strip_noise / _rl.statements still return "
+                f"statements for it.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"{len(stale_allowed)} ALLOWED entr(y/ies) matched no site "
+                "(fixed? renamed?) -- remove them.\n"
+                "  A stale exemption is not inert: it will silently exempt "
+                "whatever new\n"
+                "  usage message that function grows next.", file=sys.stderr
+            )
+            for fn, frag in stale_allowed:
+                print(f"  {fn}: {frag!r}", file=sys.stderr)
     return 1
 
 

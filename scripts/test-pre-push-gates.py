@@ -228,6 +228,7 @@ HEAD_GATES = {
     "multicall-aliases.py": "gate 2, unreachable command names",
     "raced-globals.py": "gate 3, raced process-globals",
     "argv-utf8.py": "gate 4, argv read as String",
+    "host-errmsg.py": "gate 6, host error text",
     "check-requests-not-deleted.py": "gate 9, request deletion",
 }
 

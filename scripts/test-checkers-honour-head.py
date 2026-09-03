@@ -925,6 +925,351 @@ def case_gate4_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# Gate 6 -- host-errmsg.py
+#
+# The defect it looks for: a diagnostic that interpolates an `io::Error` with
+# `{e}`, so the utility prints the *host's* wording -- "The system cannot find
+# the file specified. (os error 2)" -- where every reader expects strerror(3)'s
+# "No such file or directory". Binding `let why = strerror(&e);` and printing
+# `{why}` unmakes it, so one line decides whether a file is a finding.
+#
+# What it reads from a tree, and therefore what has to be made to differ: the
+# `.rs` sources under `userspace/coreutils`, *which* `.rs` files are there at
+# all, and `scripts/host-errmsg-baseline.txt`. The baseline is the input a
+# sources-only conversion leaves behind, and it is a *suppression* list -- so
+# leaving it on the disk is a false pass whose every visible symptom is
+# identical to a clean tree. `--list` gets its own case for gate 4's reason:
+# nothing exits non-zero on it, so a wrong tree there is invisible to every
+# assertion about a verdict, and `--list` is the mode a person actually reads
+# when they are burning the backlog down.
+# --------------------------------------------------------------------------
+
+_HE_HOST = '''\
+fn main() {
+    if let Err(e) = std::fs::metadata("x") {
+        eprintln!("tool: cannot stat 'x': {e}");
+    }
+}
+'''
+
+_HE_OK = '''\
+fn main() {
+    if let Err(e) = std::fs::metadata("x") {
+        let why = strerror(&e);
+        eprintln!("tool: cannot stat 'x': {why}");
+    }
+}
+'''
+
+# Two offending sites in one file, for the `--list` case: `--check` keys on the
+# file and would count this the same as `_HE_HOST`, so only a mode that counts
+# *sites* can tell the two apart.
+_HE_HOST_TWICE = '''\
+fn main() {
+    if let Err(e) = std::fs::metadata("x") {
+        eprintln!("tool: cannot stat 'x': {e}");
+        eprintln!("tool: giving up on 'x': {e}");
+    }
+}
+'''
+
+_HE_BASELINE = "# nothing known-wrong yet\n"
+
+# The finding the fixtures argue about, spelled the way the baseline spells it.
+_HE_KEY = "userspace/coreutils/src/bin/tool.rs:host-error-text"
+
+
+def _errmsg_repo(tmp: str, name: str) -> str:
+    """A repository with the gated tree present and nothing printing host text.
+
+    `clean.rs` is committed in both trees for the reason `_argv_repo` explains:
+    "the checker found nothing" must never be reachable by the checker finding
+    no *files*, which is how this gate fails silently if the enumeration is
+    pointed at the wrong tree or the wrong prefix.
+    """
+    root = new_repo(tmp, name, ("host-errmsg.py",))
+    write(root, "scripts/host-errmsg-baseline.txt", _HE_BASELINE)
+    write(root, "userspace/coreutils/src/bin/clean.rs", _HE_OK)
+    return root
+
+
+def case_gate6_a_tidied_worktree_cannot_hide_a_committed_host_message(tmp: str) -> None:
+    """The silent half: the commit prints Windows' wording, the disk does not."""
+    root = _errmsg_repo(tmp, "g6a")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _HE_HOST)
+    sha = commit(root)
+    write(root, "userspace/coreutils/src/bin/tool.rs", _HE_OK)
+
+    disk = run_checker(root, "host-errmsg.py", "--check")
+    rev = run_checker(root, "host-errmsg.py", "--check", "--head", sha)
+    check("gate 6: the disk prints POSIX's wording throughout", disk.returncode, 0)
+    check("gate 6: ...and the commit is refused anyway", rev.returncode, 1)
+    check("gate 6: ...naming the bin the commit breaks",
+          "tool.rs" in rev.stdout + rev.stderr, True)
+
+
+def case_gate6_an_uncommitted_host_message_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: a half-converted bin on the disk, nothing wrong in the commit."""
+    root = _errmsg_repo(tmp, "g6b")
+    sha = commit(root)
+    write(root, "userspace/coreutils/src/bin/tool.rs", _HE_HOST)
+
+    disk = run_checker(root, "host-errmsg.py", "--check")
+    rev = run_checker(root, "host-errmsg.py", "--check", "--head", sha)
+    check("gate 6: the disk refuses the uncommitted host message", disk.returncode, 1)
+    check("gate 6: ...but the commit being pushed is clean", rev.returncode, 0)
+
+
+def case_gate6_the_baseline_is_read_from_the_same_tree(tmp: str) -> None:
+    """The input a sources-only conversion leaves on the disk.
+
+    Converting the `.rs` walk and leaving `load_baseline` reading the disk
+    passes both cases above, because neither of them edits the baseline. It is
+    the sharpest of the three inputs here for the reason gate 4's is: this
+    baseline is a live backlog that authors edit while they burn it down, so an
+    *uncommitted* waiver excusing a *committed* regression is not a
+    contrived state -- it is Tuesday. And it self-conceals on the next push,
+    when the waiver is committed too.
+    """
+    root = _errmsg_repo(tmp, "g6c")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _HE_HOST)
+    sha = commit(root)
+    check("gate 6: the fixture starts refused",
+          run_checker(root, "host-errmsg.py", "--check",
+                      "--head", sha).returncode, 1)
+
+    # Forgive it in a *commit*, and un-forgive it on the *disk*.
+    write(root, "scripts/host-errmsg-baseline.txt", _HE_BASELINE + _HE_KEY + "\n")
+    sha = commit(root, "baseline it")
+    write(root, "scripts/host-errmsg-baseline.txt", _HE_BASELINE)
+
+    disk = run_checker(root, "host-errmsg.py", "--check")
+    rev = run_checker(root, "host-errmsg.py", "--check", "--head", sha)
+    check("gate 6: the disk's baseline forgives nothing", disk.returncode, 1)
+    check("gate 6: the commit's baseline forgives it, and passes",
+          rev.returncode, 0)
+
+
+def case_gate6_a_file_absent_from_the_disk_is_still_judged(tmp: str) -> None:
+    """The enumeration, not only the contents.
+
+    Every case above edits a file present in both trees, so a checker listing
+    `.rs` files from the disk and reading their text from the revision passes
+    all of them. Here the offending bin is not on the disk at all.
+    """
+    root = _errmsg_repo(tmp, "g6d")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _HE_HOST)
+    sha = commit(root)
+    remove(root, "userspace/coreutils/src/bin/tool.rs")
+
+    disk = run_checker(root, "host-errmsg.py", "--check")
+    rev = run_checker(root, "host-errmsg.py", "--check", "--head", sha)
+    check("gate 6: the disk has no such file to judge", disk.returncode, 0)
+    check("gate 6: the commit still has it, and is refused", rev.returncode, 1)
+    check("gate 6: ...naming the file the disk lacks",
+          "tool.rs" in rev.stdout + rev.stderr, True)
+
+
+def case_gate6_the_stale_half_of_the_ratchet_describes_the_commit(tmp: str) -> None:
+    """The other direction through the same two inputs.
+
+    `--check` also fails on a baseline line naming a bin that no longer has the
+    defect -- 17 of this ratchet's 24 lines were dead when that guard was
+    added, and every one of them was a bin that could have regressed all the
+    way back under a green gate. Nothing above touches `stale`, so a conversion
+    that got `new` right and left `stale` reading the disk passes every other
+    gate-6 case in this file.
+
+    Here the repair is committed and the disk still has the defect: the
+    commit's baseline line is dead and must be reported, the disk's is live and
+    must not be.
+    """
+    root = _errmsg_repo(tmp, "g6i")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _HE_HOST)
+    write(root, "scripts/host-errmsg-baseline.txt", _HE_BASELINE + _HE_KEY + "\n")
+    commit(root, "baselined backlog")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _HE_OK)
+    sha = commit(root, "fix the bin, leave the baseline")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _HE_HOST)
+
+    disk = run_checker(root, "host-errmsg.py", "--check")
+    rev = run_checker(root, "host-errmsg.py", "--check", "--head", sha)
+    check("gate 6: the disk's baseline line is still earning its keep",
+          disk.returncode, 0)
+    check("gate 6: the commit's is dead, and the push is refused",
+          rev.returncode, 1)
+    # For the stated reason, and not because something else went wrong: a bare
+    # exit 1 is also what a crash or an unreadable revision would produce.
+    check("gate 6: ...reported as fixed rather than as new",
+          "FIXED " + _HE_KEY in rev.stdout, True)
+    check("gate 6: ...and the disk reports nothing fixed",
+          "FIXED" in disk.stdout, False)
+
+
+def case_gate6_the_listing_reads_the_same_tree(tmp: str) -> None:
+    """The mode no exit code depends on, and the one the backlog is read from.
+
+    `--list` walks the tree itself rather than going through `findings`, and
+    prints every *site* where `--check` keys on the file. Both runs exit 0
+    whatever tree they read, so no assertion elsewhere in this file can see it
+    pointed at the wrong one -- and it is what a person runs to decide which
+    bin to convert next, so a wrong count here is wrong in the only place it is
+    read.
+
+    Two sites in one file, deliberately: a one-site fixture would make the
+    site count and the file count agree, and this case would then pass against
+    a `--list` that had quietly started counting files.
+    """
+    root = _errmsg_repo(tmp, "g6f")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _HE_HOST_TWICE)
+    sha = commit(root)
+    remove(root, "userspace/coreutils/src/bin/tool.rs")
+
+    disk = run_checker(root, "host-errmsg.py", "--list")
+    rev = run_checker(root, "host-errmsg.py", "--list", "--head", sha)
+    check("gate 6: neither tree is refused by a listing",
+          (disk.returncode, rev.returncode), (0, 0))
+    check("gate 6: the disk has nothing left to list",
+          "0 site(s) in 0 file(s)." in disk.stdout, True)
+    check("gate 6: the commit's two sites are both counted",
+          "2 site(s) in 1 file(s)." in rev.stdout, True)
+
+
+def case_gate6_build_output_is_skipped_on_the_side_that_can_see_it(tmp: str) -> None:
+    """The rule only the disk arm can break, so only it can pin.
+
+    A revision never lists `target/`, so this is about the working-tree arm
+    alone. That arm hand-rolled its own walk with its own copy of the skip
+    rule; the conversion deleted it and delegates to `gittree`. If the
+    delegation is ever dropped for a plain `os.walk`, the gate starts reporting
+    generated sources nobody wrote, inside tens of gigabytes, and becomes
+    something people switch off rather than fix.
+
+    The control carries as much weight as the case: the same bytes one
+    directory across must still be found, or "nothing reported" would be
+    satisfied by a checker that had stopped reading the disk at all.
+    """
+    root = _errmsg_repo(tmp, "g6k")
+    sha = commit(root)
+    # After the commit, so it is on the disk and in no revision -- which is
+    # what build output is.
+    write(root, "userspace/coreutils/target/debug/build/gen.rs", _HE_HOST)
+
+    disk = run_checker(root, "host-errmsg.py", "--check")
+    rev = run_checker(root, "host-errmsg.py", "--check", "--head", sha)
+    check("gate 6: generated sources under target/ are not judged",
+          (disk.returncode, rev.returncode), (0, 0))
+
+    write(root, "userspace/coreutils/notes/gen.rs", _HE_HOST)
+    disk2 = run_checker(root, "host-errmsg.py", "--check")
+    check("gate 6: ...while the same bytes elsewhere on the disk are",
+          disk2.returncode, 1)
+
+
+def case_gate6_a_baseline_cannot_be_written_from_a_revision(tmp: str) -> None:
+    """`--write-baseline` writes the disk; `--head` judges something else.
+
+    Allowing both would write a suppression list describing a tree that is not
+    the tree it lands in -- so the next `--check` reports findings the file
+    does not mention and forgives lines nothing produces, and the author's only
+    evidence is a file they just regenerated. Refused as a usage error rather
+    than resolved to either tree, because either choice is a file whose name
+    does not say which tree it describes.
+    """
+    root = _errmsg_repo(tmp, "g6g")
+    sha = commit(root)
+    proc = run_checker(root, "host-errmsg.py", "--write-baseline", "--head", sha)
+    check("gate 6: --write-baseline with --head is refused", proc.returncode, 2)
+    check("gate 6: ...saying which two flags disagree",
+          "--write-baseline" in proc.stderr and "--head" in proc.stderr, True)
+
+
+def case_gate6_a_tree_with_no_gated_sources_is_not_a_clean_tree(tmp: str) -> None:
+    """The failure this whole tool exists to prevent: a clean report by accident.
+
+    Every rule in `--selftest` proves the detector classifies a given file
+    correctly; none notices the gate being pointed at nothing. Rename
+    `userspace/coreutils` away and the listing comes back empty, no finding is
+    new, and the gate passes forever.
+
+    It is a per-tree question, which is what puts it in this file rather than
+    in the checker's own suite: the *commit* is what disarms the gate, and the
+    working tree -- where the author is mid-rename, or has simply not deleted
+    the old directory -- still holds the corpus and would answer that all is
+    well. This gate asked exactly that wrong question until 2026-09-03, from
+    inside `--selftest`, against the disk. Exit 2, not 1: the gate has lost its
+    subject rather than found a defect.
+    """
+    root = _errmsg_repo(tmp, "g6l")
+    commit(root)
+    remove(root, "userspace/coreutils/src/bin/clean.rs")
+    sha = commit(root, "the gated tree goes somewhere else")
+    write(root, "userspace/coreutils/src/bin/clean.rs", _HE_OK)
+
+    disk = run_checker(root, "host-errmsg.py", "--check")
+    rev = run_checker(root, "host-errmsg.py", "--check", "--head", sha)
+    check("gate 6: the disk still has a corpus and is judged normally",
+          disk.returncode, 0)
+    check("gate 6: the commit has none, which is no verdict rather than a pass",
+          rev.returncode, 2)
+    check("gate 6: ...saying so, rather than exiting quietly",
+          "nothing to judge" in rev.stderr, True)
+
+
+def case_gate6_a_baseline_absent_from_the_tree_is_not_a_pile_of_new_findings(tmp: str) -> None:
+    """The second input's version of the same guard, with a louder failure.
+
+    A missing corpus goes silent; a missing *baseline* goes loud and wrong. It
+    reads as an empty backlog, so every bin the real file forgives becomes a
+    NEW finding and the push is refused with gate 6's whole refusal printed
+    over a list of bins nobody touched -- the false accusation
+    `scripts/run-checker.sh` was written to argue is the worst thing a gate can
+    do. Per-tree for the corpus guard's reason: it is a commit that moves the
+    path, and the disk still has it.
+
+    `--write-baseline` is excluded from the guard because it *creates* the
+    file, and is checked here so that exclusion cannot be dropped: a bootstrap
+    that refuses to bootstrap would be found only by whoever next moved the
+    baseline, which is the same person this guard is protecting.
+    """
+    root = _errmsg_repo(tmp, "g6m")
+    commit(root)
+    remove(root, "scripts/host-errmsg-baseline.txt")
+    sha = commit(root, "the baseline goes somewhere else")
+    write(root, "scripts/host-errmsg-baseline.txt", _HE_BASELINE)
+
+    disk = run_checker(root, "host-errmsg.py", "--check")
+    rev = run_checker(root, "host-errmsg.py", "--check", "--head", sha)
+    check("gate 6: the disk's baseline is where it always was", disk.returncode, 0)
+    check("gate 6: the commit's is gone, which is no verdict", rev.returncode, 2)
+    check("gate 6: ...naming the file rather than blaming a bin",
+          "host-errmsg-baseline.txt" in rev.stderr, True)
+    # `--list` never consults the baseline, so it must not be stopped by one.
+    check("gate 6: a listing does not need the baseline it never reads",
+          run_checker(root, "host-errmsg.py", "--list",
+                      "--head", sha).returncode, 0)
+
+
+def case_gate6_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
+    """Exit 2, not 1 -- the same contract the other converted gates have.
+
+    Exit 1 gets this gate's refusal printed over it: eight paragraphs telling
+    the author a utility of theirs prints Windows' wording, showing the
+    want/got pair, and offering the bypass. A revision that could not be read
+    says nothing about anybody's diagnostics. The message is asserted as well
+    as the status, because run-checker.sh's no-verdict text sends the author to
+    the checker's own output -- and if that output does not name the revision,
+    the author has "gate 6 did not run" and nowhere to start.
+    """
+    root = _errmsg_repo(tmp, "g6e")
+    commit(root)
+    proc = run_checker(root, "host-errmsg.py", "--check", "--head", "nosuchrev")
+    check("gate 6: an unreadable --head exits 2, not 1", proc.returncode, 2)
+    check("gate 6: ...naming the revision it could not read",
+          "nosuchrev" in proc.stderr, True)
+
+
+# --------------------------------------------------------------------------
 # The hook, not the checker.
 #
 # Everything above runs the checker directly, which leaves the seam between the
@@ -996,6 +1341,11 @@ def _push_fixture(tmp: str, name: str,
 _G2_REFUSAL = "command name exists that nothing can run"
 _G3_REFUSAL = "is raced by its own tests"
 _G4_REFUSAL = "dies on a legal filename"
+# Gate 6's own refusal sentence, not its summary line: "prints the host's error
+# text" also occurs in the *checker's* FIX advice, which is printed by a
+# `--check` run that the hook then goes on to allow. Matching it would call a
+# fixture refused on the strength of text from a gate that did not refuse it.
+_G6_REFUSAL = "The message is an interface. Anything that greps"
 
 
 def _push(work: str, ref: str = "main",
@@ -1333,6 +1683,85 @@ def case_gate4_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
           "tool.rs" in blob, True)
 
 
+def _g6_push_fixture(tmp: str, name: str) -> str:
+    """A push fixture for gate 6, with the gated tree already published.
+
+    Only `host-errmsg.py` is installed, so every other gate stands down and a
+    refusal here can only have come from gate 6.
+    """
+    return _push_fixture(
+        tmp, name, checkers=("host-errmsg.py",),
+        seed={"scripts/host-errmsg-baseline.txt": _HE_BASELINE,
+              "userspace/coreutils/src/bin/clean.rs": _HE_OK},
+    )
+
+
+def case_gate6_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) -> None:
+    """End to end: gate 6's own wiring, not gate 2's, 3's or 4's.
+
+    Each gate is a separate block with its own guard, its own loop and its own
+    `--head "$sha"`. Dropping the flag from *this* invocation leaves every
+    other case in this file green, which is why the end-to-end proof is per
+    gate rather than one shared demonstration that the hook works at all.
+    """
+    work = _g6_push_fixture(tmp, "g6push-hide")
+    write(work, "userspace/coreutils/src/bin/tool.rs", _HE_HOST)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a bin that prints the host's wording")
+    # The tidy-up that makes the disk lie.
+    write(work, "userspace/coreutils/src/bin/tool.rs", _HE_OK)
+
+    verdict, blob = _push(work, marker=_G6_REFUSAL)
+    check("gate 6 end to end: the push is refused", verdict, "refused")
+    check("gate 6 end to end: ...naming the bin only the commit breaks",
+          "tool.rs" in blob, True)
+
+
+def case_gate6_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -> None:
+    """End to end, the other direction -- and the one that checks it ran.
+
+    A gate that had skipped itself would allow this, and would have allowed the
+    case above too if that refusal came from elsewhere. The hook's own tally is
+    the only thing that separates "gate 6 passed" from "gate 6 was never
+    asked", and this gate has two ways to be skipped that the others do not
+    share: `touches userspace/` and an empty pushed-sha list.
+    """
+    work = _g6_push_fixture(tmp, "g6push-wip")
+    write(work, "userspace/coreutils/src/bin/other.rs", _HE_OK)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a bin that binds strerror")
+    write(work, "userspace/coreutils/src/bin/tool.rs", _HE_HOST)
+
+    verdict, blob = _push(work, marker=_G6_REFUSAL)
+    check("gate 6 end to end: an uncommitted host message does not block",
+          verdict, "allowed")
+    check("gate 6 end to end: ...and the gate actually ran",
+          "host-errmsg" in _tally(blob)[0], True)
+
+
+def case_gate6_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` from `main`, for gate 6's loop.
+
+    Every case that pushes the branch it is standing on has `HEAD` and the sha
+    being pushed as the same commit, so `--head "$sha"` there is
+    indistinguishable from `git rev-parse HEAD` -- the blind spot that hid the
+    `touches` defect until 2026-09-02. It is per gate: gate 4's off-branch case
+    says nothing about gate 6's loop.
+    """
+    work = _g6_push_fixture(tmp, "g6push-elsewhere")
+    git(work, "checkout", "--quiet", "-b", "feature")
+    write(work, "userspace/coreutils/src/bin/tool.rs", _HE_HOST)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "host wording on a branch we will leave")
+    git(work, "checkout", "--quiet", "main")
+
+    verdict, blob = _push(work, "feature", marker=_G6_REFUSAL)
+    check("gate 6 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    check("gate 6 end to end: ...naming the bin on that other branch",
+          "tool.rs" in blob, True)
+
+
 def case_gate2_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
     """Exit 2, not 1.
 
@@ -1383,15 +1812,29 @@ CASES = (
     case_gate4_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate4_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate4_the_hook_judges_a_branch_it_is_not_standing_on,
+    case_gate6_a_tidied_worktree_cannot_hide_a_committed_host_message,
+    case_gate6_an_uncommitted_host_message_does_not_block_a_clean_push,
+    case_gate6_the_baseline_is_read_from_the_same_tree,
+    case_gate6_a_file_absent_from_the_disk_is_still_judged,
+    case_gate6_the_stale_half_of_the_ratchet_describes_the_commit,
+    case_gate6_the_listing_reads_the_same_tree,
+    case_gate6_build_output_is_skipped_on_the_side_that_can_see_it,
+    case_gate6_a_baseline_cannot_be_written_from_a_revision,
+    case_gate6_a_tree_with_no_gated_sources_is_not_a_clean_tree,
+    case_gate6_a_baseline_absent_from_the_tree_is_not_a_pile_of_new_findings,
+    case_gate6_an_unopenable_revision_is_not_a_finding,
+    case_gate6_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate6_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate6_the_hook_judges_a_branch_it_is_not_standing_on,
 )
 
 
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 35:
+    if len(CASES) < 49:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 35. The list is broken, not the code.")
+              f"least 49. The list is broken, not the code.")
         return 1
     # ...and each converted gate must be represented, through the real hook as
     # well as directly. A floor on the count alone would be met by any number of
@@ -1400,7 +1843,7 @@ def main() -> int:
     # as each remaining checker is converted; they are the thing that notices a
     # gate's cases being deleted along with the gate's own wiring.
     for gate, floor, e2e_floor in (("gate2", 10, 3), ("gate3", 13, 4),
-                                   ("gate4", 12, 3)):
+                                   ("gate4", 12, 3), ("gate6", 14, 3)):
         named = [c for c in CASES if c.__name__.startswith(f"case_{gate}_")]
         hooked = [c for c in named if "the_hook" in c.__name__]
         if len(named) < floor or len(hooked) < e2e_floor:

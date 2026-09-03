@@ -72,10 +72,34 @@ than in the baseline, which records only *that*.
 Scope is `userspace/coreutils/` -- the shipped, on-`PATH` utilities whose
 messages are what scripts and people actually read. See `known-issues.md` ->
 `TD-B-COREUTILS-PRINT-THE-HOSTS-ERROR-TEXT`.
+
+WHICH TREE IS JUDGED
+
+    python scripts/host-errmsg.py --check              # judge the working tree
+    python scripts/host-errmsg.py --check --head <rev> # judge that revision
+
+Without `--head` this reads the working tree, which is what a run by hand and a
+run from the boot test both mean. The push hook passes `--head <sha>` for each
+commit being pushed, because the question at that boundary is about the code
+being published and not about whatever is on the disk at the time -- see
+`known-issues.md` ->
+`TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH`, and gate 7,
+which had exactly this defect and published two unformatted commits under a
+green gate.
+
+**Both** inputs go through the `Tree` seam, not just the sources: the `.rs`
+files *and* `scripts/host-errmsg-baseline.txt`. The baseline is a suppression
+list, so reading it off the disk while judging a revision would let an
+uncommitted baseline edit silence a finding in a commit that does not contain
+the silencing line -- a false pass of exactly the shape this conversion exists
+to remove, and one that no test of the sources alone can see.
+`scripts/test-checkers-honour-head.py` makes each input disagree between commit
+and worktree in turn.
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -83,7 +107,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = Path(__file__).resolve().parent / "host-errmsg-baseline.txt"
 
-GATED = ROOT / "userspace" / "coreutils"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gittree  # noqa: E402
+
+# The two inputs again, relative and `/`-separated, which is the only spelling
+# the `Tree` seam accepts. `BASELINE` above survives alongside `BASELINE_REL`
+# because `--write-baseline` writes to the disk by definition -- it is a repair
+# action, not a verdict -- while everything that *reads* goes through the seam.
+BASELINE_REL = "scripts/host-errmsg-baseline.txt"
+GATED_REL = "userspace/coreutils"
 
 RULE = "host-error-text"
 FIX = (
@@ -287,14 +319,19 @@ def enclosing_call(src: str, pos: int) -> tuple[str, str]:
     return (m.group(1), arg.group(0) if arg else "")
 
 
-def sites(path: Path) -> list[tuple[int, str]]:
+def sites(tree: gittree.Tree, rel: str) -> list[tuple[int, str]]:
     """Every offending literal in one file, as `(line number, the line)`.
 
     Used by `--list` and by the selftest; `analyse` keeps only the first.
+
+    A file the seam cannot read is no findings rather than an error, which is
+    what the previous `except OSError` meant and is kept deliberately: the file
+    list comes from the same tree an instant earlier, so the only ways to get
+    here are a race with a concurrent edit and a submodule gitlink, and neither
+    is a statement about the code being judged.
     """
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    raw = tree.read_text(rel)
+    if raw is None:
         return []
     src = strip_comments(raw)
     scan = blank_literal_bodies(src)
@@ -317,13 +354,13 @@ def sites(path: Path) -> list[tuple[int, str]]:
     return out
 
 
-def analyse(path: Path) -> list[tuple[str, int, str]]:
+def analyse(tree: gittree.Tree, rel: str) -> list[tuple[str, int, str]]:
     """`(rule, line, text)` for the first offending literal in one file.
 
     One entry per file, because the unit of repair is a whole bin -- see the
     module docstring.
     """
-    found = sites(path)
+    found = sites(tree, rel)
     return [(RULE, found[0][0], found[0][1])] if found else []
 
 
@@ -334,32 +371,31 @@ def _relpath(p: Path) -> str:
         return p.as_posix()
 
 
-def rust_files(under: Path) -> list[Path]:
-    """Every `.rs` file below `under`, pruning build output rather than
-    filtering it, so a multi-gigabyte `target/` is never walked."""
-    out: list[Path] = []
-    stack = [under]
-    while stack:
-        d = stack.pop()
-        try:
-            entries = list(d.iterdir())
-        except OSError:
-            continue
-        for e in entries:
-            if e.is_dir():
-                if e.name in {"target", ".git"} or e.name.startswith("target-"):
-                    continue
-                stack.append(e)
-            elif e.suffix == ".rs":
-                out.append(e)
-    return out
+def rust_files(tree: gittree.Tree, prefix: str) -> list[str]:
+    """Every `.rs` file below `prefix`, skipping build output.
+
+    The pruning is the seam's: it skips `target/`, `.git` and the `target-*`
+    family *while walking* rather than filtering the results, which is the
+    difference between a gate that runs in a second and one that descends tens
+    of gigabytes of generated sources inside a push.
+
+    This was a hand-rolled walk carrying its own copy of that rule. The copy is
+    deleted rather than kept, because two spellings of one rule is one rule that
+    drifts -- and the two had already drifted apart in a way that happened not
+    to matter yet: the local copy pruned any *directory* whose name starts with
+    `target-`, while the seam judges a prefix naming a file by file rules first,
+    so `posix/src/target-arch.rs` -- a tracked source file -- survives in the
+    seam and is pinned there by a case. Out of this checker's scope today; one
+    `userspace/coreutils/…/target-*.rs` away from mattering.
+    """
+    return [rel for rel in tree.files_under(prefix)
+            if rel.rsplit("/", 1)[-1].endswith(".rs")]
 
 
-def findings(under: Path) -> dict[str, tuple[int, str]]:
+def findings(tree: gittree.Tree, prefix: str) -> dict[str, tuple[int, str]]:
     out: dict[str, tuple[int, str]] = {}
-    for path in sorted(rust_files(under)):
-        rel = _relpath(path)
-        for rule, line, text in analyse(path):
+    for rel in rust_files(tree, prefix):
+        for rule, line, text in analyse(tree, rel):
             key = f"{rel}:{rule}"
             if key in IGNORE:
                 continue
@@ -367,11 +403,20 @@ def findings(under: Path) -> dict[str, tuple[int, str]]:
     return out
 
 
-def load_baseline() -> set[str]:
-    if not BASELINE.is_file():
+def load_baseline(tree: gittree.Tree) -> set[str]:
+    """The baselined backlog, read from the tree being judged.
+
+    From the tree and not the disk, for the same reason as the sources: this
+    file is a *suppression* list, so a baseline edited but not committed would
+    otherwise silence a finding in a commit that does not contain the silencing
+    line. That is a false pass whose every visible symptom -- a green gate, a
+    clean summary -- is identical to being genuinely clean.
+    """
+    text = tree.read_text(BASELINE_REL)
+    if text is None:
         return set()
     out = set()
-    for line in BASELINE.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
             out.add(line)
@@ -390,6 +435,45 @@ def stale_entries(known: set[str], gated: set[str]) -> list[str]:
     return sorted(known - gated)
 
 
+def _inputs_missing(tree: gittree.Tree, needs_baseline: bool) -> str | None:
+    """Why this tree cannot be judged at all, or `None` if it can.
+
+    Every rule in `--selftest` proves the detector classifies a *given* file
+    correctly. None of them would notice `GATED_REL` naming a directory that
+    had been renamed away, or `rust_files` pruning too eagerly: the listing
+    would come back empty, nothing would be new, and the gate would pass
+    forever while looking at nothing. A clean report produced by accident is
+    the exact failure this tool exists to prevent, so it is worth asking.
+
+    The baseline is the second input and fails the same way for a different
+    reason. Unreadable through the seam it reads as an *empty backlog*, so
+    `--check` calls every baselined bin NEW and refuses the push with one
+    paragraph each, blaming bins nobody touched -- or, on a clean tree, calls
+    every baseline line stale. How loud that is depends on how long the ratchet
+    still is (two lines today, and it only ever shrinks), but not whether it
+    happens. Neither outcome is silent, and both are a false accusation,
+    which `scripts/run-checker.sh` exists to argue is the worst thing a gate
+    can do. `needs_baseline` is false for `--write-baseline`, which creates the
+    file and so must be allowed to run without it, and for `--list`, which
+    reports sites and never consults it.
+
+    Asked of the tree under judgement rather than of the disk, because that is
+    where the risk lives: a commit that moves either path disarms the gate *for
+    that commit*, and a disk-side question answers for a working tree that
+    still has both. Non-emptiness rather than a count -- a threshold would be a
+    claim about this repository, and this checker is run against fixtures too.
+    """
+    if not rust_files(tree, GATED_REL):
+        return (f"no .rs files under {GATED_REL} -- the gate has nothing to "
+                f"judge, which is not the same as a clean tree. Has the "
+                f"directory moved?")
+    if needs_baseline and tree.read_text(BASELINE_REL) is None:
+        return (f"cannot read {BASELINE_REL} -- without the backlog every "
+                f"baselined bin reads as a new finding, so this would refuse "
+                f"the push over a file that moved rather than over any code.")
+    return None
+
+
 def selftest() -> int:
     """Check the rule that decides what this tool reports.
 
@@ -405,9 +489,12 @@ def selftest() -> int:
 
     def classify(src: str) -> int:
         with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "x.rs"
-            p.write_text(src, encoding="utf-8")
-            return len(sites(p))
+            (Path(d) / "x.rs").write_text(src, encoding="utf-8")
+            # Through a real `WorkTree`, not a bare read, so the selftest
+            # exercises the same seam the gate does. A selftest that bypasses
+            # the seam cannot see a seam-shaped defect.
+            with gittree.WorkTree(d) as tree:
+                return len(sites(tree, "x.rs"))
 
     def rule(name: str) -> None:
         nonlocal current
@@ -539,8 +626,9 @@ def selftest() -> int:
             'fn f() { eprintln!("a: {}: {e}", x); eprintln!("b: {}: {e}", y); }',
             encoding="utf-8",
         )
-        expect("sites", len(sites(p)), 2)
-        expect("findings", len(analyse(p)), 1)
+        with gittree.WorkTree(d) as tree:
+            expect("sites", len(sites(tree, "x.rs")), 2)
+            expect("findings", len(analyse(tree, "x.rs")), 1)
 
     # 7. The staleness guard. It fails toward silence exactly as the detector
     #    does -- a version of it that never fires is indistinguishable from a
@@ -565,14 +653,26 @@ def selftest() -> int:
            stale_entries({f"z.rs:{RULE}", f"a.rs:{RULE}", f"m.rs:{RULE}"}, set()),
            [f"a.rs:{RULE}", f"m.rs:{RULE}", f"z.rs:{RULE}"])
 
-    # 8. The gated tree must really be there. Every case above proves the rule
-    #    classifies a *given* file; none would notice `GATED` pointing at a
-    #    directory that had been renamed away, which would make `--check` pass
-    #    forever while looking at nothing.
-    rule("gated-tree-is-not-empty")
-    expect("dir-exists", GATED.is_dir(), True)
-    expect("has-files", len(rust_files(GATED)) > 50, True)
-
+    # Nothing above touches a tree, deliberately. "The inputs are really there"
+    # is the other thing that has to be true before a clean report means
+    # anything, and it used to be an eighth rule here, asking the working tree
+    # whether `userspace/coreutils` held more than fifty `.rs` files and whether
+    # the baseline could be read. That was wrong twice over, in the way gate 4's
+    # identical rule was wrong before it (`scripts/argv-utf8.py`, `_no_corpus`):
+    #
+    #   * It asked the *disk* about a run that may be judging a revision. A
+    #     commit that renames the gated directory away disarms the gate for that
+    #     commit, while a disk-side self-test standing in a working tree that
+    #     still has the directory reports all is well -- which is precisely the
+    #     working-tree-versus-push defect the `--head` conversion exists to
+    #     remove, hiding inside the thing that certifies the conversion.
+    #   * A threshold of fifty is a claim about *this checkout*, so the checker
+    #     could not be self-tested anywhere else -- including in the fixtures of
+    #     `scripts/test-checkers-honour-head.py`, which is where the hook's own
+    #     `--head` wiring is proved. Those cases are what caught this.
+    #
+    # Both questions now live in `main`, asked of whichever tree is under
+    # judgement. See `_inputs_missing`.
     for f in failures:
         print(f"selftest FAIL {f}")
     print(
@@ -583,29 +683,67 @@ def selftest() -> int:
 
 
 def main() -> int:
-    args = sys.argv[1:]
-    if "--selftest" in args:
+    argv = sys.argv[1:]
+    if "--selftest" in argv:
         return selftest()
-    check = "--check" in args
-    write = "--write-baseline" in args
-    listing = "--list" in args
 
-    gated = findings(GATED)
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--list", dest="listing", action="store_true")
+    ap.add_argument("--write-baseline", dest="write", action="store_true")
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--head", metavar="REV",
+                    help="judge this revision instead of the working tree")
+    args = ap.parse_args(argv)
+    check, write, listing = args.check, args.write, args.listing
+
+    # `--write-baseline` regenerates the file on disk from what is found. Doing
+    # that from a revision would write a baseline describing a tree that is not
+    # the one being written into -- so the two are refused together rather than
+    # silently producing a file that matches nothing.
+    if write and args.head:
+        print("host-errmsg: --write-baseline writes the working tree, so it "
+              "cannot be combined with --head", file=sys.stderr)
+        return 2
+
+    try:
+        tree = gittree.open_tree(str(ROOT), args.head)
+    except gittree.GitTreeError as exc:
+        print(f"host-errmsg: cannot read {args.head!r}: {exc}", file=sys.stderr)
+        return 2
+
+    with tree:
+        # Before anything is reported, ask whether there is anything to report
+        # *on*. Exit 2 rather than 1 for run-checker.sh's reason: the gate has
+        # lost an input, which is not a finding about anybody's code, and
+        # printing gate 6's refusal over it would tell the author a utility of
+        # theirs prints Windows' wording when what actually happened is that a
+        # path moved.
+        why = _inputs_missing(tree, needs_baseline=not (write or listing))
+        if why is not None:
+            where = f"in {args.head}" if args.head else "in the working tree"
+            print(f"host-errmsg: {where}, {why}", file=sys.stderr)
+            return 2
+        return _run(tree, check, write, listing)
+
+
+def _run(tree: gittree.Tree, check: bool, write: bool, listing: bool) -> int:
+    gated = findings(tree, GATED_REL)
 
     if listing:
         total = 0
-        for path in sorted(rust_files(GATED)):
+        for rel in rust_files(tree, GATED_REL):
             # Honour IGNORE here too. A listing that counted a file the gate
             # has ruled out would report a total the gate disagrees with, and
             # the listing is what the burn-down is measured against.
-            if f"{_relpath(path)}:{RULE}" in IGNORE:
+            if f"{rel}:{RULE}" in IGNORE:
                 continue
-            found = sites(path)
+            found = sites(tree, rel)
             if not found:
                 continue
             total += len(found)
             for line, text in found:
-                print(f"{_relpath(path)}:{line}  {text}")
+                print(f"{rel}:{line}  {text}")
         print(f"\n{total} site(s) in {len(gated)} file(s).")
         return 0
 
@@ -632,7 +770,7 @@ def main() -> int:
         print(f"wrote {_relpath(BASELINE)} with {len(gated)} entries")
         return 0
 
-    known = load_baseline()
+    known = load_baseline(tree)
     new = sorted(k for k in gated if k not in known)
     stale = stale_entries(known, set(gated))
 

@@ -108781,8 +108781,8 @@ read the disk:
 | 2 unreachable-command | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 3 raced-global | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 4 argv-utf8 | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
+| 6 host-errmsg | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-03** |
 | 5 getopt-table | working tree | `--check`, checker walks the filesystem |
-| 6 host-errmsg | working tree | same |
 | 8 quote-names | working tree | same |
 | 11 doc-links | working tree | same, over whole directories |
 
@@ -108877,7 +108877,10 @@ the regression test all exist. The work is:
    Gate 4's `argv-utf8.py` converted 2026-09-02 (step 8): `--check` and
    `--check --head HEAD` agree byte-for-byte on the real tree, `--selftest`
    still passes every rule it kept, and an unreadable revision exits 2.
-   Four to go: gates 5, 6, 8, 11.
+   Gate 6's `host-errmsg.py` converted 2026-09-03 (step 9): both of its inputs
+   — the `.rs` corpus and the ratchet baseline — go through the seam, `--check`
+   on the real tree still exits 0, and `--selftest` reports 9/9.
+   Three to go: gates 5, 8, 11.
 3. Pass `--head` from the hook, and extend `test-pre-push-gates.py`'s existing
    assertion to all eight gates instead of just gate 9. **In progress.** The
    assertion is now a table (`HEAD_GATES`) rather than a gate-9 special case,
@@ -108886,7 +108889,8 @@ the regression test all exist. The work is:
    A second assertion pairs with it: a gate looping over `$pushed_shas` must
    also guard on that list being non-empty, because a loop over nothing runs
    the checker zero times while `note_gate` has already reported the gate as
-   having run. Gates 3 and 4 joined both assertions 2026-09-02.
+   having run. Gates 3 and 4 joined both assertions 2026-09-02, gate 6
+   2026-09-03.
 4. Behavioural coverage, per `test-pre-push-fmt-gate.py`: for each gate, the
    false-pass and false-fail cases specifically. **Baseline cases are worthless
    here** — committed-clean-passes and committed-dirty-is-refused are green
@@ -109120,6 +109124,77 @@ the regression test all exist. The work is:
    "every converted gate needs its own off-branch push case", step 4's "every
    input it reads must be made to differ"), and gate 4's cases were written to
    those rules before the harness ran rather than after it complained.
+
+9. **Gate 6 converted, 2026-09-03.** `host-errmsg.py` now takes `--head` and
+   reads both of its inputs through the seam: the `.rs` corpus under
+   `userspace/coreutils` (enumeration *and* source text) and the ratchet
+   baseline `scripts/host-errmsg-baseline.txt`. Fewer inputs than gate 4, and
+   the conversion is correspondingly smaller — but its **guard covers one more
+   of them**, and that is the part worth reading before converting gate 5 or 8.
+
+   A baseline the seam cannot read comes back as an *empty backlog*, not as an
+   error. So an unreadable one makes `--check` call every baselined bin NEW and
+   refuse the push with a paragraph each, all of them naming bins the author
+   did not touch — and on a clean tree the same read calls every baseline line
+   stale instead. The refusal is not merely wrong, it is wrong in a way that
+   hides its own cause: the sentence it prints is about someone's error
+   message, and the actual fault is that a file moved. How *loud* it is scales
+   with the ratchet's current length (two lines today, and it only ever
+   shrinks); *whether* it happens does not. So `_inputs_missing` asks about both
+   inputs, of whichever tree is under judgement, before anything is reported,
+   and exits **2** — `run-checker.sh`'s no-verdict arm — rather than 1.
+
+   **Gate 4 has the corpus half of that guard and not the baseline half**
+   (`argv-utf8.py`, `_no_corpus`; its `load_baseline` still returns an empty
+   set for an unreadable baseline with nothing said). Same defect, four
+   baseline lines rather than two. Filed as
+   `TD-B-GATE-4-CANNOT-TELL-AN-EMPTY-BACKLOG-FROM-A-MISSING-ONE` rather than
+   fixed here: it needs its own honour-head case and its own mutant to be worth
+   anything, and neither belongs in a commit about gate 6. Gates 5, 8 and 11
+   should get **both** halves when they are converted.
+
+   `needs_baseline` is false for two modes and both exclusions are load-bearing
+   in opposite directions: `--write-baseline` *creates* the file and must run
+   without it, and `--list` never consults it. Both are pinned by assertions in
+   the same case, so neither can be quietly widened to "always" or dropped to
+   "never".
+
+   **The `--selftest` rule that was in the wrong place in gate 4 was in the
+   wrong place here too, and again the end-to-end fixtures are what proved it**
+   — this time by failing four cases outright. Rule 8,
+   `gated-tree-is-not-empty`, asserted `len(rust_files(tree, GATED_REL)) > 50`
+   against a `WorkTree` of `ROOT`: the disk, on a run that may be judging a
+   revision, and a threshold that is a claim about *this* checkout, so the
+   checker could not be self-tested in a fixture at all. That is step 8's
+   defect verbatim, in a file written before step 8 existed. It is deleted, and
+   a comment in its place records both halves and cites `argv-utf8.py`'s
+   `_no_corpus` as the precedent, so the next conversion does not rediscover it
+   a third time.
+
+   Fourteen gate-6 cases — eleven direct, three end-to-end including its own
+   off-branch push per step 6 — bringing `test-checkers-honour-head.py` to 49.
+   Two are new shapes rather than translations of gate 4's:
+
+   * **The `--list` case counts *sites*, not files, and its fixture has two
+     sites in one file on purpose.** `--list` is the mode no exit code depends
+     on and the one the backlog is read from, so nothing else in the suite
+     covers it. A one-site fixture would make the site count and the file count
+     agree, and the case would then still pass against a `--list` that had
+     quietly started counting the disk's files. Mutation confirmed this is the
+     assertion that catches exactly that.
+   * **The refusal marker is deliberately not the obvious phrase.** "prints the
+     host's error text" also appears in the *checker's own FIX advice*, which a
+     `--check` run prints on a finding the hook then goes on to allow. Matching
+     it would score a fixture as refused on the strength of text from a gate
+     that did not refuse it — step 8's "a refusal is evidence that *a* gate
+     refused, never evidence of *why*", one level finer. The marker is the
+     refusal sentence proper.
+
+   **Mutation-verified with five mutants, all caught:** the baseline read off
+   the disk (1 assertion fired), the corpus guard removed (2), the baseline
+   guard removed (2), `--list` walking the disk (1), and `--head` accepted and
+   ignored (21). The source was restored and re-checked afterwards rather than
+   assumed — `--selftest` back to 9/9.
 
 ### Why it is not done yet
 
@@ -109870,5 +109945,62 @@ a live build produces errors that look like new problems.
 not a last resort — it took one command to convert "the build is mysteriously
 slow" into "rustc is blocked in `SearchPath::new`", which named both the cause
 and the fix.
+
+---
+
+## TD-B-GATE-4-CANNOT-TELL-AN-EMPTY-BACKLOG-FROM-A-MISSING-ONE (lane B)
+
+**Filed:** 2026-09-03 by lane B, out of gate 6's `--head` conversion.
+**Status:** open. Latent — it needs a commit that moves the baseline file, and
+nothing has moved it yet.
+
+**In short:** pre-push gate 4 forgives four known-bad utilities by listing them
+in a file. If a commit ever moves or deletes that file, gate 4 does not say so —
+it reads the missing file as "nothing is forgiven" and refuses the push, once
+per forgiven utility, blaming four utilities the author never touched. The
+message it prints talks about command-line argument handling; the actual fault
+is that a file moved. Gate 6 had exactly this and now checks for it; gate 4 does
+not.
+
+**Where:** `scripts/argv-utf8.py` — `load_baseline` returns `set()` when
+`tree.read_text(BASELINE_REL)` is `None`, and `main` guards only the *corpus*
+(`_no_corpus`), never the baseline. `scripts/host-errmsg-baseline.txt`'s gate
+does both, in `_inputs_missing`.
+
+**Why it is not merely noisy.** A finding is a claim about the author's code,
+and this one is false in both directions:
+
+- **On a dirty tree:** every baselined bin reads as NEW, so the push is refused
+  with gate 4's full refusal text over bins nobody edited.
+- **On a clean tree:** the same read makes every baseline line *stale*, so the
+  ratchet's shrink-only report claims the backlog was fixed by a commit that
+  fixed nothing.
+
+Neither is silent, which is the one mercy — but `scripts/run-checker.sh`'s whole
+argument is that a gate spending its credibility on a verdict it did not reach
+is the worst thing a gate can do, and this is that.
+
+**The fix**, mirroring gate 6 rather than inventing one:
+
+1. Give `argv-utf8.py` the second half of the guard — refuse when the baseline
+   is unreadable *and* the mode actually reads it — and exit **2**, not 1, so
+   `run_checker` classifies it as no-verdict rather than as a finding.
+2. Exclude `--write-baseline` (it creates the file) from that guard, and pin the
+   exclusion with an assertion, or the next person to widen the guard silently
+   breaks bootstrapping.
+3. Add the honour-head case: commit a tree with the baseline moved away, restore
+   it on disk, and require exit 2 from the `--head` arm and a normal verdict
+   from the disk arm — the gate-6 case
+   `case_gate6_a_baseline_absent_from_the_tree_is_not_a_pile_of_new_findings`
+   transposed.
+4. Mutation-verify by deleting the new guard and confirming the case fails. A
+   guard added without a surviving mutant to kill is a guard nobody has tested.
+
+**If it is never fixed:** nothing breaks until someone moves
+`scripts/argv-utf8-baseline.txt`, at which point every lane's pushes are refused
+with a false accusation until somebody reads the checker. The exposure does not
+grow with time. Gates 5, 8 and 11 are unconverted and should be given both
+halves of the guard when they are converted, rather than inheriting gate 4's
+half.
 
 ---

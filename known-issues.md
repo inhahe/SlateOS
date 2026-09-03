@@ -109705,9 +109705,9 @@ read the disk:
 | 3 raced-global | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 4 argv-utf8 | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 6 host-errmsg | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-03** |
+| 11 doc-links | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-03** |
 | 5 getopt-table | working tree | `--check`, checker walks the filesystem |
 | 8 quote-names | working tree | same |
-| 11 doc-links | working tree | same, over whole directories |
 
 Gate 7 is not on that list any more, and it is the proof the rest matter: it had
 exactly this defect and it published two unformatted commits (`861f4d80e`,
@@ -109803,7 +109803,14 @@ the regression test all exist. The work is:
    Gate 6's `host-errmsg.py` converted 2026-09-03 (step 9): both of its inputs
    — the `.rs` corpus and the ratchet baseline — go through the seam, `--check`
    on the real tree still exits 0, and `--selftest` reports 9/9.
-   Three to go: gates 5, 8, 11.
+   Gate 11's `check-doc-links.py` converted 2026-09-03 (step 10): all four of
+   its tree-derived inputs — the crate list, each crate's unit list, the
+   library's definition set, and the `Cargo.toml` dependency list — go through
+   the seam; `rust_files()` is gone rather than left as a second, unseamed way
+   to reach the disk. `--selftest` reports 57/57, `--check` on the working tree
+   and `--check --head HEAD` both exit 0 on the real tree, and an unopenable
+   revision exits 2.
+   Two to go: gates 5 and 8.
 3. Pass `--head` from the hook, and extend `test-pre-push-gates.py`'s existing
    assertion to all eight gates instead of just gate 9. **In progress.** The
    assertion is now a table (`HEAD_GATES`) rather than a gate-9 special case,
@@ -110076,7 +110083,11 @@ the regression test all exist. The work is:
    worth anything, and neither belongs in a commit about gate 6 — and **fixed
    the same day** in the commit after next, which also renamed gate 4's
    `_no_corpus` to `_inputs_missing` so the two gates spell one rule one way.
-   Gates 5, 8 and 11 get **both** halves when they are converted.
+   Gate 11 (step 10) gets the **corpus** half and not the baseline half,
+   because it has no baseline — it is a pure cross-reference checker with
+   nothing to ratchet. See step 10 for why "zero crates in scope" must stay a
+   *pass* there while "zero crates in the tree at all" is a no-verdict.
+   Gates 5 and 8 get **both** halves when they are converted.
 
    `needs_baseline` is false for two modes and both exclusions are load-bearing
    in opposite directions: `--write-baseline` *creates* the file and must run
@@ -110120,6 +110131,59 @@ the regression test all exist. The work is:
    guard removed (2), `--list` walking the disk (1), and `--head` accepted and
    ignored (21). The source was restored and re-checked afterwards rather than
    assumed — `--selftest` back to 9/9.
+
+10. **Gate 11 converted, 2026-09-03.** `check-doc-links.py` now takes `--head`
+    and reads **four** tree-derived inputs through the seam, more than any
+    previous conversion: the crate list (`crate_roots`), each crate's unit list
+    (`units`, the `src/bin/*.rs` set plus `src/lib.rs`), the definition set
+    parsed out of the library's own text (`definitions`), and the dependency
+    names in `Cargo.toml` (`dependencies`). Miss any one and the checker still
+    runs and still prints a verdict — it just judges a *blend* of two trees,
+    which is the failure mode with no symptom. `rust_files()` was deleted
+    rather than left converted-but-unused: an unseamed helper that still
+    reaches the disk is a loaded gun for the next edit.
+
+    **The hook side is where the real bug was, and a test caught it.** The
+    scope list is derived from `$pushed_shas`, and my first draft put that
+    expansion inside the pre-existing `IFS='\n'` block that the old
+    `[ -d ]`-filtering loop needed. A space-separated list of shas then arrived
+    at git as one unsplit word, git matched nothing, the list came out empty,
+    and **the gate skipped itself on every push** — the exact class of silent
+    self-disablement this whole entry is about, reintroduced by the fix for it.
+    `test-pre-push-doclinks-gate.py` failed 2 of 13 within a minute of the
+    edit. The loop is gone entirely now (it existed only for the `[ -d ]`
+    filter, which is itself a working-tree read and had to go), git's output is
+    piped straight into the scope file, and a comment records the trap.
+
+    **The `[ -d ]` filter was a working-tree read hiding inside the hook.** It
+    dropped any directory absent from the disk, so a directory added by the
+    push and then deleted from the worktree would silently leave the scope and
+    its crate would go unscanned. Removing it is safe because the *checker*
+    answers that question now: `crates_touching` maps a path to a crate using
+    the revision's own crate roots, so a path matching none of them simply
+    contributes nothing.
+
+    **Scope is the union across the whole push, not per-sha.** A crate named by
+    a later commit is worth scanning at an earlier one too, and a directory
+    that does not exist at the sha being scanned matches no crate root there
+    and costs nothing. The gate name is per-sha (`doc-links-$sha`) for gate 9's
+    reason: a shared name lets a later clean sha delete the kept log of an
+    earlier failing one.
+
+    **The `_inputs_missing` rule applies by half here.** Gate 11 has no
+    baseline — it is a pure cross-reference checker with nothing to ratchet —
+    so only the corpus half is meaningful, and it has to be spelled carefully:
+    `crate_roots(tree) == []` (no lane-B crates in the tree *at all*) is a
+    no-verdict and exits 2, but "zero crates **in scope**" must stay a **pass**,
+    because a push touching only `kernel/` legitimately maps to no lane-B crate
+    and refusing it would be a false fail on every lane-A and lane-C push.
+
+    Eleven behavioural cases in `test-checkers-honour-head.py` (three of them
+    end-to-end through the hook, including an off-branch push per step 6's
+    rule), plus the pre-existing 13-case `test-pre-push-doclinks-gate.py`,
+    which now copies `gittree.py` into its fixture repos alongside the checker.
+    The suite's floors moved with them — 61 cases overall, 11 for gate 11 — so
+    deleting a case is as loud as deleting the wiring it covers.
 
 ### Why it is not done yet
 

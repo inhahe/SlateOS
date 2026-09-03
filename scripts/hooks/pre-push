@@ -1731,6 +1731,21 @@ doclinks="${repo_root:-.}/scripts/check-doc-links.py"
 # to its crate by the same walk it uses for a file. An empty list is the skip —
 # a push with no Rust in it has nothing here to judge.
 #
+# Derived from `$pushed_shas`, not from `HEAD`. They are the same thing only
+# when the branch being pushed is the one checked out; `git push origin
+# lane-b:lane-b` from a detached HEAD, or a push of two refs at once, is judged
+# against the wrong commits by the `HEAD` spelling. The word-splitting is
+# deliberate for the reason `touches()` records above.
+#
+# NO `[ -d ]` FILTER. It used to drop any directory absent from the working
+# tree, which is a working-tree read inside a gate whose whole subject is a
+# commit — a directory added by the push and then deleted from the worktree
+# would silently drop out of the scope, and its crate would go unscanned. The
+# checker answers that question itself now: `crates_touching` maps a path to a
+# crate using the *revision's* crate roots, and a path matching none of them is
+# simply not in scope. A directory that never existed anywhere is likewise
+# harmless — it matches no crate root and contributes nothing.
+#
 # WRITTEN TO A FILE, NOT PASSED AS ARGUMENTS. It used to be arguments, and that
 # has a ceiling this repository has already hit: a push carrying 2,568 changed
 # `.rs` files names 2,568 directories, which is 64,862 bytes of command line
@@ -1739,19 +1754,23 @@ doclinks="${repo_root:-.}/scripts/check-doc-links.py"
 # push rather than calling an unreached verdict a pass. So the list goes in a
 # file, which has no such limit, and the checker reads it with --paths-from.
 doclink_list="${TMPDIR:-/tmp}/pre-push-doclink-dirs.$$"
+# Nothing being published is nothing to judge, and it is also what stops the
+# `--head` loop below from silently degrading to zero runs while `note_gate`
+# reported the gate as having run.
+[ -n "${pushed_shas# }" ] || skip_doclinks=1
 if [ "$skip_doclinks" != "1" ]; then
-    doclink_old_ifs=$IFS
-    IFS='
-'
-    : > "$doclink_list"
-    for dl_file in $(git -c core.quotePath=false log --name-only --pretty=format: \
-                         --diff-filter=ACMR HEAD --not --remotes="$remote_name" \
-                         -- '*.rs' 2>/dev/null \
-                     | sed 's|/[^/]*$||' | sort -u); do
-        [ -d "$repo_root/$dl_file" ] || continue
-        printf '%s\n' "$dl_file" >> "$doclink_list"
-    done
-    IFS=$doclink_old_ifs
+    # Written straight through, with no `read`/`for` loop and no IFS to save and
+    # restore. The loop that used to be here existed only to apply the `[ -d ]`
+    # filter above, and it was actively harmful once the range became a list:
+    # the loop set IFS to a newline *before* `$pushed_shas` expanded, so a
+    # space-separated list of shas arrived at git as one unsplit word, git
+    # printed nothing, and the gate skipped itself on every push. That is the
+    # failure mode this whole file is about, reintroduced by the fix for it.
+    # shellcheck disable=SC2086
+    git -c core.quotePath=false log --name-only --pretty=format: \
+        --diff-filter=ACMR $pushed_shas --not --remotes="$remote_name" \
+        -- '*.rs' 2>/dev/null \
+        | sed 's|/[^/]*$||' | sort -u > "$doclink_list"
     [ -s "$doclink_list" ] || skip_doclinks=1
 fi
 note_gate doc-links "$skip_doclinks"
@@ -1764,12 +1783,28 @@ if [ "$skip_doclinks" != "1" ]; then
     # reports nothing at all. Neither is distinguishable from a correct run by
     # looking at the exit code, so the self-test runs first and its failure
     # disqualifies the verdict rather than being reported alongside it.
+    #
+    # The self-test gets no `--head`, deliberately, for gates 3 and 4's reason:
+    # it judges the checker sitting on disk — the one about to be run — and
+    # pointing it at a revision would test a copy that is not the one giving
+    # the verdict.
     if ! run_checker doc-links-selftest "$py" "$doclinks" --selftest; then
         echo "pre-push: check-doc-links.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         doclinks_failed=1
     else
-        run_checker doc-links "$py" "$doclinks" --check \
-            --paths-from "$doclink_list" || doclinks_failed=1
+        # One run per ref being pushed, against that ref's own tree. The scope
+        # list is the union across the whole push rather than per-sha: a crate
+        # named by a later commit is worth scanning at an earlier one too, and
+        # a directory that does not exist at this sha matches no crate root
+        # there and costs nothing.
+        for sha in $pushed_shas; do
+            # Per-sha gate name, for gate 9's reason: a shared name lets a
+            # later clean sha delete the kept log of an earlier failing one.
+            if ! run_checker "doc-links-$sha" "$py" "$doclinks" --check \
+                             --head "$sha" --paths-from "$doclink_list"; then
+                doclinks_failed=1
+            fi
+        done
     fi
 fi
 

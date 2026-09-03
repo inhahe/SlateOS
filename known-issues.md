@@ -108338,8 +108338,9 @@ good one — and its own error text will confidently tell you it did neither.
 ### What is actually wrong
 
 Every gate names the files it cares about from the pushed commit range
-(`git log … HEAD --not --remotes=origin`). Only two of them then *read* from
-that range:
+(`git log … HEAD --not --remotes=origin`). Only two of them originally then
+*read* from that range; four more have been converted since, and the rest still
+read the disk:
 
 | Gate | Reads | How |
 |---|---|---|
@@ -108348,8 +108349,8 @@ that range:
 | 7 rustfmt | pushed tip | mirror of pushed blobs — **fixed 2026-09-02** |
 | 2 unreachable-command | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 3 raced-global | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
-| 4 argv-utf8 | working tree | `--check`, checker walks the filesystem |
-| 5 getopt-table | working tree | same |
+| 4 argv-utf8 | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
+| 5 getopt-table | working tree | `--check`, checker walks the filesystem |
 | 6 host-errmsg | working tree | same |
 | 8 quote-names | working tree | same |
 | 11 doc-links | working tree | same, over whole directories |
@@ -108442,7 +108443,10 @@ the regression test all exist. The work is:
    then `--check --head HEAD` was diffed against the clean working-tree run:
    two independent code paths agreeing over ~14k files. It is also **faster**,
    not a tax: 6m18s before, 4m55s on the disk after, 3m49s against a revision.
-   Five to go: gates 4, 5, 6, 8, 11.
+   Gate 4's `argv-utf8.py` converted 2026-09-02 (step 8): `--check` and
+   `--check --head HEAD` agree byte-for-byte on the real tree, `--selftest`
+   still passes every rule it kept, and an unreadable revision exits 2.
+   Four to go: gates 5, 6, 8, 11.
 3. Pass `--head` from the hook, and extend `test-pre-push-gates.py`'s existing
    assertion to all eight gates instead of just gate 9. **In progress.** The
    assertion is now a table (`HEAD_GATES`) rather than a gate-9 special case,
@@ -108451,7 +108455,7 @@ the regression test all exist. The work is:
    A second assertion pairs with it: a gate looping over `$pushed_shas` must
    also guard on that list being non-empty, because a loop over nothing runs
    the checker zero times while `note_gate` has already reported the gate as
-   having run. Gate 3 joined both assertions 2026-09-02.
+   having run. Gates 3 and 4 joined both assertions 2026-09-02.
 4. Behavioural coverage, per `test-pre-push-fmt-gate.py`: for each gate, the
    false-pass and false-fail cases specifically. **Baseline cases are worthless
    here** — committed-clean-passes and committed-dirty-is-refused are green
@@ -108606,6 +108610,85 @@ the regression test all exist. The work is:
    `limine` and `toolchain/sysroot`, and no tracked path has a `target-`
    component — so the change is a no-op today and matters only while a lane is
    mid-build, which is exactly when it was unobservable before.
+
+8. **Gate 4 converted, 2026-09-02.** `argv-utf8.py` now takes `--head` and reads
+   four inputs through the seam, each of which can decide the verdict alone: the
+   `.rs` enumeration under `userspace/coreutils`, each file's source text, the
+   baseline that forgives, and the ungated survey of everything else under
+   `userspace/`. The baseline is the sharp one here — read off the disk it
+   silences a finding in a commit that does not contain the silencing line, so
+   an uncommitted baseline edit publishes a panicking utility *and* the gate
+   stays green on every later push, because by then the edit is committed.
+
+   There is a fifth thing to get right that is not an input: `stale_entries`,
+   the direction the ratchet **shrinks** in. Every case that pins `new` is
+   satisfied by a checker that gets the new half right and answers the stale
+   half from the disk, so this is the half a conversion is likeliest to leave
+   behind. It has its own case, asserting `FIXED <key>` on the revision arm and
+   no `FIXED` at all on the disk arm.
+
+   The hand-rolled directory walk was **deleted rather than ported**. It carried
+   its own copy of the "skip build output" rule, and the copy had already
+   drifted — the drift is step 7 above, found because moving gate 4 onto the
+   seam would otherwise have *lost* a rule the checker already had.
+
+   **A `--selftest` rule turned out to be in the wrong place, and the fixtures
+   are what proved it.** The eighth rule asserted `len(rust_files(disk,
+   GATED_REL)) > 50` — a guard against the gate quietly losing its subject, which
+   is the exact failure this tool exists to prevent: a clean report produced by
+   accident. It had two defects. It asked the **disk** even on a run judging a
+   revision; and a threshold of fifty is a claim about *this* checkout, so the
+   checker could not be self-tested anywhere else — which is precisely what its
+   own new end-to-end fixtures do, and they failed. It now lives in `main()` as
+   `_no_corpus(tree)`, asked of whichever tree is under judgement, testing
+   non-emptiness rather than a count, and exiting **2**: the gate has lost its
+   subject, which is not a finding about anybody's code, and printing gate 4's
+   refusal over it would tell an author their utility panics on a legal
+   filename when nothing of the sort was observed. The relocation is a real fix
+   and not fixture accommodation — a commit that renames `userspace/coreutils`
+   away disarms gate 4 *for that commit*, and the old rule would have answered
+   from a working tree that still had the directory.
+
+   **One of the new end-to-end cases passed for the wrong reason first, and a
+   sub-assertion is the only thing that caught it.** `_push` discriminates
+   markers per *gate*, not per *reason*, so the self-test failure above printed
+   gate 4's refusal text and the verdict assertion went green while the gate had
+   never judged anything. `"tool.rs" in blob` is what failed. That is the
+   standing argument for pairing every verdict assertion with a content one: a
+   refusal is evidence that *a* gate refused, never evidence of *why*.
+
+   Twelve gate-4 cases — nine direct, three end-to-end, including its own
+   off-branch push per step 6 — bringing `test-checkers-honour-head.py` to 35.
+
+   **Mutation-verified with fourteen mutants: thirteen caught behaviourally,
+   and the fourteenth is gate 3's documented equivalent.** Each mutant is a way
+   of converting the checker to `--head` while still answering some part of the
+   question from the disk, which is precisely the defect the conversion removes.
+   Every input got one (source text, baseline, file enumeration, ungated
+   survey); so did the walk being hand-rolled again and forgetting build output,
+   `--head` accepted-and-ignored, both no-verdict exits demoted from 2 to 1, all
+   three ways to break the relocated corpus guard (ask the disk, exit 1, drop
+   it), the stale half of the ratchet, and three wiring mutants in the hook.
+
+   The harness reports a mutant caught only by `test-pre-push-gates.py` as
+   `STATIC-ONLY` rather than as caught, because the static suite matches on the
+   hook's *text* and would not notice the same mistake made anywhere else. One
+   mutant landed there: **dropping gate 4's `[ -n "${pushed_shas# }" ]` guard**
+   — the same result gate 3 got, for the same reason, and it is worth being
+   explicit that this is a *derived* equivalence rather than a second
+   observation. Since step 5 rescoped `touches` by `$pushed_shas`, an empty list
+   already makes `touches` false and skips the gate, so the guard cannot change
+   an outcome and no behavioural case can kill it. It is kept, not deleted as
+   dead code: the redundancy is exactly one edit deep, and under the spelling
+   `touches` had until the morning of the same day, a branch-deletion push
+   reached the loop with nothing in it. It stays pinned statically.
+
+   Nothing survived outright, which is a first for these conversions — gate 2's
+   first draft lost four mutants and gate 3's found two blind spots. The reason
+   is that both of those runs produced rules that were written down (step 6's
+   "every converted gate needs its own off-branch push case", step 4's "every
+   input it reads must be made to differ"), and gate 4's cases were written to
+   those rules before the harness ran rather than after it complained.
 
 ### Why it is not done yet
 

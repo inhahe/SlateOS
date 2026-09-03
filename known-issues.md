@@ -108754,3 +108754,155 @@ structures" (§802) finally becomes untenable — a surface-creation command tak
 a structure the loader has to read to know which platform it is for.
 
 ---
+
+## C-THE-WIFI-SUPPLICANT-REJECTED-EVERY-MIC-FROM-AN-AP-THAT-DID-NOT-SEND-EAPOL-VERSION-2 — FIXED 2026-09-02 (lane C)
+
+**Status:** FIXED 2026-09-02 — awaiting a boot test on `main` before archiving.
+
+**Reported by lane A**, from the authenticator side, in
+`requests/a-c-the-ap-had-a-mic-bug-and-verify-frame-mic-is-the-api-that-would-have-prevented-it.md`.
+
+### What was wrong
+
+`net80211::supplicant`'s private `verify_frame_mic` verified a received
+EAPOL-Key frame's message integrity code by *rebuilding* the frame from the
+parsed `KeyFrame` and hashing the reconstruction, rather than hashing the frame
+that arrived. The MIC covers the frame from offset 0, and `KeyFrame` carries no
+field for two runs of octets inside that range:
+
+- the **EAPOL version octet** at frame offset 0, and
+- the **eight reserved octets** at body offsets 69–76 (frame 73–80).
+
+The rebuild substituted `eapol::version::V2` and eight zeroes for them
+unconditionally. Against any access point that sent EAPOL version 1 or 3 —
+which `eapol::version`'s own doc comment describes as commonplace, and which is
+what makes this a field bug rather than a theoretical one — every MIC failed.
+
+### Why it was invisible
+
+Three things hid it at once:
+
+1. **The symptom is the wrong one.** The handshake fails at message 3 with
+   `Error::BadMic`, which is character-for-character what a wrong passphrase
+   produces. A user would have retyped their password.
+2. **The tests could not catch it.** `run_handshake` builds its fixtures with
+   `eapol::write(..., version::V2, ...)` and all-zero reserved octets, so the
+   rebuild and the original agreed by construction. All 175 tests passed before
+   and after the fix; three new ones had to be written to see it.
+3. **The refutation was already in the file, several hundred lines away.**
+   `eapol::version`'s doc comment states that APs send 1, 2 and 3
+   interchangeably. Nothing checks that a constant's documentation and its
+   users agree.
+
+### The fix
+
+`verify_frame_mic` is deleted, not repaired. The rebuild strategy cannot be
+made correct — a MIC is defined over the octets the sender transmitted, so
+every octet in range must be hashed as received whether this crate models it or
+not. Both call sites (`on_m3`, `on_group_m1`) now use `kdf::verify_mic`, which
+already existed, was already public, and hashes the received frame in three
+pieces. `on_eapol` trims the incoming buffer once to
+`HEADER_LEN + <declared body length>`, because a frame padded to its carrier's
+minimum length would otherwise have the padding hashed.
+
+Reasoning in full, including why lane A's "make it public" suggestion was
+answered with a deletion instead, in `design-decisions.md` §804.
+
+### Regression tests
+
+In `net80211/src/supplicant.rs`:
+
+- `an_access_point_that_speaks_eapol_version_one_or_three_still_verifies`
+- `nonzero_reserved_octets_are_hashed_as_they_arrived`
+- `padding_past_the_declared_body_is_not_hashed`
+
+The first two were run against the pre-fix code and observed to fail there.
+They were spliced into the `HEAD` copy of `supplicant.rs`, so the old
+rebuilding verifier was the only thing that differed, and both failed with
+
+    version 1 should verify, got Err(BadMic)
+    nonzero reserved octets should verify, got Err(BadMic)
+
+— which is the bug reproducing exactly as reported, and is worth reading twice:
+`BadMic` is also what a wrong passphrase produces, so in the field this defect
+had no symptom of its own to distinguish it.
+
+The third passes against the old code, and that is not a weakness in it. The
+rebuild excluded trailing padding by construction — a frame reassembled from
+parsed fields has no room for octets nobody parsed — so the padding hazard is
+one this fix *introduced* by hashing the buffer as received, and the test
+guards the trimming that answers it.
+
+Each works by taking a canonical message 3, editing the octet under test, and
+re-MICing the result — so what is asserted is the property that matters (the
+*sender* hashed this octet, therefore we must too) rather than the one that is
+easy to assert.
+
+### Still worth knowing
+
+`eapol::KeyFrame::parse` takes a **body** while everything MIC-related indexes
+from the start of the **frame**. That asymmetry is what lane A transposed, and
+it survives this fix: both are `&[u8]`, so the compiler cannot tell them apart.
+Changing `parse` to take the frame would remove the trap at the type level, but
+it is a breaking change to an API `kernel/src/net/hwsim_ap.rs` (lane A's tree)
+calls, so it needs a coordinated change rather than a unilateral one. Filed as
+a request rather than done here.
+
+---
+
+## C-A-BUILD-THAT-NEVER-COMPILES-BECAUSE-THE-TARGET-DIRECTORY-CANNOT-BE-LISTED — ENVIRONMENT, WORKED AROUND 2026-09-02 (lane C)
+
+**Status:** worked around 2026-09-02 by deleting the affected tree. Not a code
+defect; recorded because the symptom is badly misleading and lanes A and B keep
+their own `target/` trees on the same volume.
+
+**In short:** a `cargo test` stopped finishing. It printed `Compiling net80211`
+and then sat there — twenty minutes, no error, no progress. It looks exactly
+like a slow machine or a compiler stuck in a loop, and it is neither: the
+compiler was blocked trying to *read the list of files* in its own build-output
+directory, which had reached a state where that listing never returns.
+
+### How to recognise it
+
+- `cargo` prints `Compiling <crate>` and stalls indefinitely. No error is ever
+  printed, and the timeout is the only thing that ends it.
+- The giveaway is **CPU time, not wall time**: `wmic process where
+  "name='rustc.exe'" get processid,kernelmodetime,usermodetime` showed ~1.2
+  seconds of CPU consumed across 15 minutes of wall clock. A compiler that is
+  merely slow burns CPU; one that is blocked does not. This one check separates
+  "the machine is busy" from "something is stuck", and is worth reaching for
+  before waiting any longer.
+- `ls target/<triple>/debug/deps` and `cmd /c dir` on the same directory both
+  hang forever, while every other operation on the same volume — `git status`,
+  reading files, listing sibling directories — returns instantly. A volume that
+  is slow is slow everywhere; this was one directory.
+
+### What it actually was
+
+A stack from `cdb -p <pid> -c "~*k12;qd"` put rustc's main thread in
+`rustc_session::search_paths::SearchPath::new` → `std::fs::DirEntry::path`.
+`SearchPath::new` enumerates each `-L dependency=…` directory at startup, so
+every rustc invocation lists `deps/` before it compiles anything. With that
+directory unreadable, no compile in the workspace could start.
+
+Root cause of the directory's state is not established — a damaged NTFS index
+or simply an enormous entry count both fit. What is established is that the
+volume was **not** at fault (88 GB free, no Defender scan running, 30 GB of
+physical memory free, and unrelated I/O on the same drive was instant).
+
+### The remedy
+
+Delete the affected tree; it is build output, so it is regenerable by
+definition and gitignored. `rd /s /q` from a real `cmd` (not `rm -rf` through
+MSYS), which is itself slow here — it reclaimed the large artifacts in the
+first minutes and then spent much longer on the small ones, at ~14 seconds of
+kernel CPU over 11 minutes, so let it finish rather than concluding it is stuck
+too. Stop every `cargo`/`rustc` process first: deleting a cache out from under
+a live build produces errors that look like new problems.
+
+**Worth knowing:** a `cdb` stack is a cheap first move on any silent hang here,
+not a last resort — it took one command to convert "the build is mysteriously
+slow" into "rustc is blocked in `SearchPath::new`", which named both the cause
+and the fix.
+
+---

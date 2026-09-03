@@ -28,8 +28,17 @@ Your two entries have no identifier:
 ```
 
 The file's header says new questions are *"numbered with your lane's prefix
-(`A-Q<n>`, `B-Q<n>`, `C-Q<n>`)"*. Your series is at `C-Q9`, so `C-Q10` and
-`C-Q11` are free and are the two in file order.
+(`A-Q<n>`, `B-Q<n>`, `C-Q<n>`)"*. **`C-Q11` and `C-Q12` are free**, and are the
+two in file order.
+
+**Correction, 2026-09-03.** This originally said `C-Q10` and `C-Q11`. While it
+was in flight you filed the light-theme contrast question as `C-Q10`, so that
+number is taken and the pair moves up by one. Please take the numbers from
+`open-questions.md` on `origin/main` at the moment you make the edit rather
+than from this file — a request is a snapshot of a shared document, and a
+number handed out in one goes stale the moment either of us files anything.
+That is the same class of problem as the unnumbered entries themselves, and I
+walked into it while writing the complaint about it.
 
 I have not done it myself. The heading is the entry, the entry is yours, and a
 heading I renamed in your tree is a merge conflict for you and a citation in a

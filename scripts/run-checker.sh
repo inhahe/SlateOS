@@ -211,7 +211,20 @@ run_checker() {
     _rc_cmd="$*"
     IFS=$_rc_oldifs
 
-    "$@" >"$_rc_log" 2>&1
+    # `PYTHONUNBUFFERED=1` because stdout and stderr are merged into one file
+    # here, and a merged file is only worth reading if it is in the order the
+    # checker printed it. Redirected stdout is block-buffered while stderr is
+    # not, so a checker's progress lines sit in a buffer until exit and then
+    # land *after* the error they chronologically preceded. The log then reads
+    # as though the gate recovered from its own failure.
+    #
+    # Found via the skip announcement, which quotes the checker's last line as
+    # the reason it gave up: a fixture printing progress on stdout and its
+    # reason on stderr was recorded as having skipped because "cases loaded:
+    # 214". Individual call sites passing `python -u` masked it, which is
+    # precisely why the fix belongs here -- correctness of the evidence must
+    # not depend on every future call site remembering a flag.
+    PYTHONUNBUFFERED=1 "$@" >"$_rc_log" 2>&1
     _rc=$?
     cat "$_rc_log" >&2
 
@@ -236,19 +249,27 @@ run_checker() {
     # quiet, since they are the ones expected to skip sometimes.
     if [ -n "$_rc_skip" ] && [ "$_rc" = "$_rc_skip" ] &&
         ! grep -q '^Traceback (most recent call last):' "$_rc_log"; then
-        _rc_first=$(head -n 1 "$_rc_log" 2>/dev/null)
-        [ -n "$_rc_first" ] || _rc_first="(it printed nothing)"
+        # The LAST non-empty line, not the first.  A gate that skips rarely
+        # discovers it cannot look before printing anything: it does some
+        # setup, says so, and only then finds the instrument missing.  Quoting
+        # `head -n 1` therefore reported the last thing that WORKED as the
+        # reason nothing was checked -- `check-shellquote-vs-bash` skipping for
+        # want of WSL was announced as "port verified against shellquote.rs",
+        # which reads as a success and names the wrong subsystem entirely.
+        # The reason a gate gives up is the last thing it says before it does.
+        _rc_why=$(grep -v '^[[:space:]]*$' "$_rc_log" 2>/dev/null | tail -n 1)
+        [ -n "$_rc_why" ] || _rc_why="(it printed nothing)"
         cat >&2 <<EOF
 $_rc_prog: $_rc_label: SKIPPED — it exited $_rc, which this call site declares
-means "I could not look". Its first line was
+means "I could not look". Its last line was
 
-    $_rc_first
+    $_rc_why
 
 This is NOT a pass: nothing about the tree was checked, and a defect of the
 kind this gate exists to find would look exactly like what you just saw.
 EOF
         if [ -n "${CHECKER_SKIPLOG:-}" ]; then
-            printf '%s\t%s\t%s\n' "$_rc_label" "$_rc" "$_rc_first" \
+            printf '%s\t%s\t%s\n' "$_rc_label" "$_rc" "$_rc_why" \
                 >>"$CHECKER_SKIPLOG" 2>/dev/null || :
         fi
         rm -f "$_rc_log"

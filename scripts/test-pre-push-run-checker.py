@@ -230,8 +230,17 @@ def code_lines(text: str) -> list[str]:
 # "runs every checker through it" count assertion below drops and says so --
 # which is the intended failure, and better than a regex that quietly accepts
 # anything and goes back to matching prose.
+# The `(?:--[a-z-]+=\S+[ \t]+)*` is what steps over option words such as
+# `--may-skip=2`. Without it the flag itself was captured as the label, so two
+# call sites carrying `--may-skip` collided and "boot-test's labels are
+# distinct" failed on a correct tree -- the same phantom-gate shape the
+# docstring below describes, arriving this time from a real call rather than
+# from prose. A label matcher has to know the call's grammar, not just its
+# first word.
 LABEL_RE = re.compile(
-    r"^[ \t]*(?:if[ \t]+)?(?:![ \t]*)?run_checker[ \t]+\"?([a-z0-9$-]+)",
+    r"^[ \t]*(?:if[ \t]+)?(?:![ \t]*)?run_checker[ \t]+"
+    r"(?:--[a-z-]+=\S+[ \t]+)*"
+    r"\"?([a-z0-9$-]+)",
     re.MULTILINE,
 )
 
@@ -529,6 +538,58 @@ def main() -> int:
               else "no skiplog written")
         skiplog.unlink(missing_ok=True)
 
+        # A gate that gets partway before finding it cannot look. This is the
+        # ordinary shape, not an exotic one -- a checker validates its inputs,
+        # says so, and only then reaches for the instrument that is missing --
+        # and the fixture above could not detect it going wrong, because a
+        # checker printing a single line has the same first and last line.
+        #
+        # It caught a real defect: the announcement used `head -n 1`, so
+        # `check-shellquote-vs-bash` skipping for want of WSL was reported as
+        # "port verified against shellquote.rs". That is a *success* message,
+        # naming a subsystem that was never the problem, offered as the reason
+        # nothing was checked. The reason a gate gives up is the last thing it
+        # says before it does.
+        progressed = fake_checker(
+            tmp_root,
+            "progressed",
+            "import sys\n"
+            "print('port verified against shellquote.rs')\n"
+            "print('cases loaded: 214')\n"
+            "print('NO BASH TO ASK -- could not launch wsl', file=sys.stderr)\n"
+            "sys.exit(2)\n",
+        )
+        r = run(tmp_root, func, progressed, flag="--may-skip=2",
+                skiplog=skiplog)
+        out = r.stdout + r.stderr
+        check("quotes the reason, not the last thing that worked",
+              "NO BASH TO ASK" in out, out.strip()[-300:])
+        check("does not quote an earlier success as the reason",
+              "port verified" not in flatten(out).split("NOT a pass")[0]
+              .split("SKIPPED")[-1],
+              out.strip()[-300:])
+        check("records the reason, not the progress, in the skiplog",
+              skiplog.is_file()
+              and "NO BASH TO ASK" in skiplog.read_text(encoding="utf-8"),
+              skiplog.read_text(encoding="utf-8") if skiplog.is_file()
+              else "no skiplog written")
+        skiplog.unlink(missing_ok=True)
+
+        # A blank last line must not be quoted as the reason either: a checker
+        # that ends with a trailing newline would otherwise announce its skip
+        # with an empty quote, which reads as "it said nothing" about a gate
+        # that said plenty.
+        trailing = fake_checker(
+            tmp_root,
+            "trailing",
+            "import sys\nprint('the sysroot is stale')\nprint()\nprint('   ')\n"
+            "sys.exit(2)\n",
+        )
+        r = run(tmp_root, func, trailing, flag="--may-skip=2")
+        out = r.stdout + r.stderr
+        check("skips blank trailing lines when quoting the reason",
+              "the sysroot is stale" in out, out.strip()[-300:])
+
         # The same exit code, from a crash. This is the case that decides
         # whether the option is safe: a checker that dies of `SystemExit(2)`
         # in a bug exits 2 exactly as one that looked and found nothing to
@@ -715,6 +776,21 @@ def main() -> int:
         # would have the second delete the first's evidence.
         dupes = sorted({g for g in boot_gates if boot_gates.count(g) > 1})
         check("boot-test's labels are distinct", not dupes, ", ".join(dupes))
+
+        # The extractor must step over option words to find the label. When
+        # `--may-skip=2` was first used at two call sites, this matcher read
+        # the flag itself as the label, so both "gates" were called
+        # `--may-skip` and the distinctness check above failed on a correct
+        # tree. Pinned directly rather than left to the real file, so it stays
+        # covered if boot-test.sh ever drops back to a single skipping gate --
+        # a duplicate check cannot notice a bug that needs two call sites.
+        flagged = run_checker_labels(
+            'run_checker --may-skip=2 alpha "$py" a.py\n'
+            'if ! run_checker --may-skip=2 beta "$py" b.py; then\n'
+            "run_checker gamma \"$py\" c.py\n"
+        )
+        check("the label extractor steps over option words",
+              flagged == ["alpha", "beta", "gamma"], repr(flagged))
 
         # The same invariant for the hook, which until 2026-09-02 was not
         # checked at all -- the assertion above was written for boot-test and

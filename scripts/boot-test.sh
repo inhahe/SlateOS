@@ -5209,6 +5209,81 @@ check_selftest_reinit() {
 
 check_selftest_reinit
 
+# Ask real bash whether kshell's quoting rules are still bash's rules.
+#
+# kshell's quoting is not ours to invent -- it is bash's -- so the only way to
+# know a rule in `kernel/src/shellquote.rs` is right is to ask bash. Until now
+# that asking happened only when someone remembered to run these by hand, which
+# is close to not having them: a rule that drifts between two manual runs is a
+# rule nobody is checking.
+#
+# Only TWO of the four `*-vs-bash.py` oracles are wired here, and the split is
+# not arbitrary -- it is whether the gate reads the kernel:
+#
+#   * `check-shellquote-vs-bash.py` ports `DQ_ESCAPABLE` out of shellquote.rs
+#     and reds if the Rust alphabet stops matching the ported one.
+#   * `check-kshell-rungs-vs-bash.py` requires 13 literals to occur verbatim in
+#     kshell.rs, so editing a rung without editing the oracle is a finding.
+#
+# The other two (`check-kshell-pipeline-vs-bash.py`,
+# `check-ansic-quoting-vs-bash.py`) compare a *Python table of expectations*
+# against bash and never open a `.rs` file. `check-kshell-pipeline-vs-bash.py`
+# says so itself: "a disagreement means my model is wrong, not bash." No kernel
+# change can make either fail, so wiring them would spend ~23 s per boot to
+# guard nothing -- and, worse, would read as coverage while providing none.
+# They stay pinned in `check-gates-are-wired.py` with that as the reason.
+#
+# `--may-skip=2` is what makes this wireable at all. Both shell out through
+# `bashprobe.py`, which needs WSL, and the boot test must run on a host
+# carrying only the Rust toolchain and QEMU. bashprobe exits 2 -- "I could not
+# look" -- when there is no bash to ask, and run_checker turns that into a loud
+# SKIP rather than a pass or an abort. A *broken* harness still raises, and
+# run_checker refuses to skip anything whose output carries a traceback, so the
+# channel that waves through a missing bash cannot wave through a broken one.
+#
+# Cheap (~19 s for the pair on a host with WSL), so it sits with the document
+# gates, ahead of clippy.
+check_kshell_vs_bash() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== kshell-vs-bash checks: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Cross-checking shellquote.rs's rules against real bash ==="
+    if ! run_checker --may-skip=2 check-shellquote-vs-bash "$py" -u \
+        "$PROJECT_ROOT/scripts/check-shellquote-vs-bash.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  kernel/src/shellquote.rs disagrees" >&2
+        echo "with bash, or its escape alphabet has drifted from the port this" >&2
+        echo "checker validates.  kshell's quoting rules are bash's; a rule we" >&2
+        echo "invent is a rule that breaks a script someone pasted in." >&2
+        exit 1
+    fi
+
+    echo "=== Cross-checking kshell's quoting rungs against real bash ==="
+    if run_checker --may-skip=2 check-kshell-rungs-vs-bash "$py" -u \
+        "$PROJECT_ROOT/scripts/check-kshell-rungs-vs-bash.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A self-test rung in kernel/src/kshell.rs" >&2
+    echo "asserts something bash does not do, or a rung was edited without" >&2
+    echo "editing the oracle that pins its literals." >&2
+    echo "" >&2
+    echo "The rungs are how bash's answers survive onto a host with no bash," >&2
+    echo "so a rung that has drifted is worse than no rung: it is a wrong" >&2
+    echo "answer carrying a passing test's authority." >&2
+    exit 1
+}
+
+check_kshell_vs_bash
+
 check_kernel_clippy
 
 # Compile every `#[cfg(unix)]` arm in the workspace, which nothing else does.

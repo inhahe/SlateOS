@@ -138,30 +138,36 @@ PINNED: dict[str, str] = {
     "check-window-wiring.py":
         "lane C (GUI programs' main); filed to lane C 2026-09-02; "
         "self-test wired 2026-09-03",
-    # The four bash oracles.  These are not gates that happen to be unwired --
-    # they are unwireable on the boot test's own terms, and their docstrings
-    # said so before this list existed.  Each shells out to real bash through
-    # `bashprobe.py`, which requires WSL (`wsl -d Ubuntu`), while the boot test
-    # must run on a host carrying only the Rust toolchain and QEMU.  Wiring one
-    # would red the build on every host without a Linux distro installed.
+    # Two of the four bash oracles.  The "requires WSL" reason all four carried
+    # until 2026-09-03 is GONE, and deliberately not replaced by a softer
+    # version of itself: `run_checker --may-skip=2` plus bashprobe's exit-2
+    # path made WSL-dependence wireable, and the other two oracles
+    # (check-shellquote-vs-bash.py, check-kshell-rungs-vs-bash.py) were wired
+    # into boot-test.sh on that basis, in the same commit as this edit.
     #
-    # They are run by hand when a quoting rule is written or changed, and their
-    # verdicts are carried forward into kshell's own self-test rungs -- which
-    # is the mechanism that makes bash's answers survive onto a host with no
-    # bash at all.  The rungs are wired; these are how the rungs are known to
-    # be right.
-    "check-shellquote-vs-bash.py":
-        "requires WSL (bashprobe.py); verdicts carried into kshell's rungs, "
-        "which are wired. Run by hand when a quoting rule changes.",
+    # These two stay out for a different and more durable reason: **they do not
+    # read the kernel.**  Each compares a *Python table of expectations*
+    # against real bash and never opens a `.rs` file, so no change under
+    # kernel/src/ can make either fail.  Wiring them would cost ~23 s per boot
+    # and report OK forever -- an instrument presented as a gate, which is the
+    # confusion this whole list exists to prevent.
+    #
+    # They remain worth running by hand: they are how bash's answers are
+    # learned in the first place, before those answers are written into
+    # kshell's rungs -- and the rungs ARE gated, by check-kshell-rungs-vs-bash.
     "check-kshell-pipeline-vs-bash.py":
-        "requires WSL (bashprobe.py); verdicts carried into kshell's rungs, "
-        "which are wired. Run by hand when a quoting rule changes.",
-    "check-kshell-rungs-vs-bash.py":
-        "requires WSL (bashprobe.py); pins the literals typed into rung 115 "
-        "against bash. Run by hand when a rung's cases change.",
+        "measures bash, not us: compares a Python table of expectations "
+        "against real bash and opens no .rs file, so no kernel change can red "
+        "it. Its own docstring says 'a disagreement means my model is wrong, "
+        "not bash.' Wire it if it ever grows an assertion against "
+        "kernel/src/kshell.rs.",
     "check-ansic-quoting-vs-bash.py":
-        "requires WSL (bashprobe.py); measures bash's $'...' rules for "
-        "TD-SHELLQUOTE-NO-ANSI-C-QUOTING, which is not implemented yet.",
+        "measures bash, not us: pins bash's $'...' rules for "
+        "TD-SHELLQUOTE-NO-ANSI-C-QUOTING, a fourth quoting context that "
+        "shellquote.rs does not model at all, so there is nothing in the tree "
+        "for it to disagree with yet. UNPIN WHEN "
+        "TD-SHELLQUOTE-NO-ANSI-C-QUOTING is implemented -- it then starts "
+        "grading real code and belongs in boot-test.sh with --may-skip=2.",
     "check-libc-shape.py":
         "MUST NOT be wired as things stand: it grades a build artifact and "
         "returns 2 when libc.a is stale, and run_checker aborts the build on "

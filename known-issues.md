@@ -108554,11 +108554,12 @@ only here — but the numbers above are the debt, not the wording.
 **Status:** OPEN — measured, partly another lane's to act on.
 
 **In short:** the repo has 31 automated checkers under `scripts/check-*.py`.
-Ten of them are not run by the boot test, which is the gate that actually
-blocks a merge, and nine of those ten are not run by the pre-push hook either.
-Those nine execute only inside `scripts/pre-boot.py`, a local pre-flight script
-that nobody is required to run and that takes about forty minutes. So a rule
-they enforce can be broken, merged, and pushed without anything objecting.
+Nine of them are not run by the boot test, which is the gate that actually
+blocks a merge, and eight of those nine are not run by the pre-push hook
+either. Those eight execute only inside `scripts/pre-boot.py`, a local
+pre-flight script that nobody is required to run and that takes about forty
+minutes. So a rule they enforce can be broken, merged, and pushed without
+anything objecting.
 
 This is the same defect as `B-CHECK-DOC-LINKS-BARE-RUN-PRINTED-HELP-AND-PASSED`
 one level up. That gate ran and could not refuse; these gates are never asked.
@@ -108569,12 +108570,13 @@ is not — and neither is visible in a green log, because the evidence is an
 ### The measurement
 
 `scripts/boot-test.sh` names every checker it runs in an explicit `run_checker`
-line; it does **not** glob. Set difference against `scripts/check-*.py`, taken
-2026-09-02:
+call; it does **not** glob. Set difference against `scripts/check-*.py`, taken
+2026-09-02 (and see the methodology caveat below — the first three attempts at
+this number were all wrong):
 
 | Gate | in pre-push? | scans | whose |
 |---|---|---|---|
-| `check-doc-links.py` | **yes** | docs tree-wide | shared |
+| `check-doc-links.py` | **yes** (`doclinks`, hook line 1692) | docs tree-wide | shared |
 | `check-diskcleanup-test-roots.py` | no | `apps/diskcleanup` | C |
 | `check-evdev-elf-asm.py` | no | ring-3 evdev test payload | C |
 | `check-frame-needles.py` | no | windowed app test suites | C |
@@ -108583,11 +108585,42 @@ line; it does **not** glob. Set difference against `scripts/check-*.py`, taken
 | `check-window-wiring.py` | no | GUI programs' `main` | C |
 | `check-selftest-reinit.py` | no | `kernel/src/**` | A |
 | `check-libc-shape.py` | no | `libc.a` object granularity | B |
-| `check-gates-can-refuse.py` | no | `scripts/check-*.py` | B |
 
 Only `check-doc-links.py` is covered elsewhere, by the hook.
+`check-gates-can-refuse.py` was a tenth row when this entry was drafted; it
+was wired in `b5246478b` and is why the count moved from ten to nine.
 
-### One of the ten must NOT be wired, and that is not an oversight
+### Measuring this is harder than it looks, and three obvious methods are wrong
+
+Worth writing down, because the check this entry asks for has to get it right,
+and each of these produced a confidently wrong number first:
+
+1. **"Is the basename mentioned in `boot-test.sh`?"** — over-counts. The file
+   discusses gates in prose: a worked example named `check-thing.py` that has
+   never existed, and post-mortems naming gates it does not run.
+2. **"Mentioned in non-comment text?"** — still over-counts, and the example is
+   this session's own commit. `b5246478b` added the refusal line
+   `echo "as scripts/check-doc-links.py now does." >&2`. That is executable
+   shell naming a gate it does not run, so stripping comments does not remove
+   it. A wiring check written the obvious way would have been broken by the
+   commit that motivated it.
+3. **"A literal `scripts/X.py` on a `run_checker` line?"** — under-counts, in
+   two ways. `boot-test.sh` wraps long calls with `\` continuations, so a
+   line-at-a-time scan misses them (it missed the gate wired minutes earlier).
+   And `scripts/hooks/pre-push` never writes the path on the call at all: it
+   binds `doclinks="${repo_root:-.}/scripts/check-doc-links.py"` 200 lines
+   earlier and calls `run_checker … "$doclinks"`. Judged literally, the hook
+   runs zero checkers.
+
+What works: join `\` continuations, drop comment lines, resolve simple
+`var=…/scripts/X.py` assignments, and take the script argument of `run_checker`
+calls. The load-bearing requirement is the **conservative direction** — a
+`run_checker` call whose script argument cannot be resolved must be *reported*,
+not skipped. A silently-dropped invocation makes a wired gate look unwired,
+which is a false alarm; but the same weakness in the other direction is what
+produced every wrong number above.
+
+### One of the nine must NOT be wired, and that is not an oversight
 
 `check-libc-shape.py` grades a **build artifact** (`libc.a`), and since
 `533e34e00` it returns **2 — "could not look"** when the archive predates its
@@ -108612,8 +108645,8 @@ else (see the header comment at `boot-test.sh:1168-1183`).
 
 ### What to do
 
-1. **Wire `check-gates-can-refuse.py`** — lane B's, no artifact dependency,
-   sub-second, exits only 0/1 in any real checkout. *(Done — see below.)*
+1. ~~**Wire `check-gates-can-refuse.py`**~~ — **done, `b5246478b`.** Lane B's,
+   no artifact dependency, sub-second, exits only 0/1 in any real checkout.
 2. **Lane C: wire the six GUI/apps gates,** or record why each should not be.
    Filed as a request; not lane B's to change, because a gate that fails on
    lane C's tree blocks all three lanes.
@@ -108628,6 +108661,14 @@ answer "does anything run this gate?" — a different question about a different
 file (`boot-test.sh`). The set difference above is currently a one-off
 measurement, not a check. Making it a check is cheap and probably right; it is
 not done yet, and *that* is the honest status of this entry.
+
+When it is written it must be a **ratchet, not a gate**: eight gates are
+unwired today and six of them are lane C's, so a hard failure would block all
+three lanes on work that is not theirs to schedule. The shape is an explicit
+pinned list of known-unwired gates with a reason each, failing only when a
+*new* one appears — and equally when a pinned entry becomes wired or names a
+file that no longer exists, because an exemption list nobody prunes stops
+describing the tree it exempts.
 
 ---
 ## TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH

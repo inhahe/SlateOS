@@ -364,8 +364,13 @@ fi
 
 checker="${repo_root:-.}/scripts/multicall-aliases.py"
 [ -f "$checker" ] || skip_alias=1
-# Only lane B's tree can introduce one of these, so only pay for it there.
-touches userspace/ || skip_alias=1
+# Only lane B's tree can introduce one of these, so only pay for it there --
+# plus the checker and its baseline, for the reason gates 8 and 9 include
+# theirs: hand-editing the waiver list is the one way to defeat this gate
+# without the bypass, so it must be the push that re-verifies it.
+touches userspace/ \
+        scripts/multicall-aliases.py scripts/multicall-aliases-baseline.txt \
+        || skip_alias=1
 # Nothing being published is nothing to judge. This is also what stops the
 # `--head` loop below from silently degrading to zero runs while `note_gate`
 # reported the gate as having run.
@@ -465,7 +470,12 @@ fi
 
 raced="${repo_root:-.}/scripts/raced-globals.py"
 [ -f "$raced" ] || skip_raced=1
-touches posix/ userspace/ || skip_raced=1
+# The checker and its baseline are in scope for gate 8's reason: a hand-edited
+# waiver must be re-verified by the push that carries it, not by whoever next
+# happens to touch a source file.
+touches posix/ userspace/ \
+        scripts/raced-globals.py scripts/raced-globals-baseline.txt \
+        || skip_raced=1
 # Nothing being published is nothing to judge — and this is also what stops the
 # `--head` loop below from silently degrading to zero runs while `note_gate` had
 # already reported the gate as having run.
@@ -580,7 +590,10 @@ fi
 
 argv="${repo_root:-.}/scripts/argv-utf8.py"
 [ -f "$argv" ] || skip_argv=1
-touches userspace/ || skip_argv=1
+# Checker and baseline in scope, per gate 8: a waiver added by hand is judged
+# by the push that adds it.
+touches userspace/ scripts/argv-utf8.py scripts/argv-utf8-baseline.txt \
+        || skip_argv=1
 # Nothing being published is nothing to judge — and this is also what stops the
 # `--head` loop below from silently degrading to zero runs while `note_gate` had
 # already reported the gate as having run.
@@ -853,7 +866,12 @@ fi
 
 errmsg="${repo_root:-.}/scripts/host-errmsg.py"
 [ -f "$errmsg" ] || skip_errmsg=1
-touches userspace/ || skip_errmsg=1
+# Checker and baseline in scope, per gate 8: a waiver added by hand is judged
+# by the push that adds it. Noticed because the push converting this very gate
+# reported it `skipped` -- the commit rewrote the checker and touched no
+# `userspace/` file, so nothing re-ran it.
+touches userspace/ scripts/host-errmsg.py scripts/host-errmsg-baseline.txt \
+        || skip_errmsg=1
 # Nothing being published is nothing to judge — and this is also what stops the
 # `--head` loop below from silently degrading to zero runs while `note_gate` had
 # already reported the gate as having run.

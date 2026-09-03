@@ -320,6 +320,55 @@ def test_the_path_scope_is_taken_from_the_push_not_from_head(text):
           re.search(r"\bHEAD\b", inner) is not None, False)
 
 
+# Every ratchet the hook enforces, as (checker, baseline, label). A ratchet is
+# only a ratchet while the file that records it is judged by the push that
+# edits it, so both paths belong in that gate's `touches` scope.
+RATCHET_GATES = [
+    ("scripts/multicall-aliases.py", "scripts/multicall-aliases-baseline.txt",
+     "gate 2, unreachable command names"),
+    ("scripts/raced-globals.py", "scripts/raced-globals-baseline.txt",
+     "gate 3, raced process-globals"),
+    ("scripts/argv-utf8.py", "scripts/argv-utf8-baseline.txt",
+     "gate 4, argv read as String"),
+    ("scripts/host-errmsg.py", "scripts/host-errmsg-baseline.txt",
+     "gate 6, host error text"),
+    ("scripts/quote-names.py", "scripts/quote-names-baseline.txt",
+     "gate 8, unquoted names in diagnostics"),
+]
+
+
+def test_a_ratchet_is_judged_by_the_push_that_edits_it(text):
+    """A baseline outside its own gate's scope is a ratchet with a free release.
+
+    Each of these gates forgives a known-bad list and refuses anything new. The
+    list is a plain text file in `scripts/`, so the one way to defeat the gate
+    without the documented bypass is to add a line to it by hand — and if the
+    gate is scoped only by its *subject* (`touches userspace/`), a commit that
+    edits nothing but the baseline skips the gate entirely and publishes the
+    waiver unjudged. Worse, it stays hidden: every later push compares against
+    the edited baseline and correctly finds nothing new.
+
+    Gates 8 and 9 had this right from the start and say so in the hook. Gates
+    2, 3, 4 and 6 did not, and it was found the ordinary way — the push that
+    converted gate 6 to `--head` rewrote the checker, touched no `userspace/`
+    file, and reported gate 6 `skipped` in its own tally.
+
+    The checker is included alongside the baseline for the same reason one step
+    removed: a commit that breaks a checker is published green, and the
+    breakage then lands on whoever next touches the subject tree, which with
+    three lanes pushing is routinely not the author.
+    """
+    code = _joined(code_only(text))
+    scopes = [ln for ln in code.splitlines() if re.match(r"\s*touches ", ln)]
+    for checker, baseline, label in RATCHET_GATES:
+        owning = [s for s in scopes if checker in s]
+        if not check(f"{label}: its `touches` scope names its own checker",
+                     len(owning) == 1, True):
+            continue
+        check(f"{label}: ...and the baseline that can silence it",
+              baseline in owning[0], True)
+
+
 def test_no_gate_hands_a_push_sized_list_to_argv(text):
     """A scope derived from the pushed files must not travel as arguments.
 

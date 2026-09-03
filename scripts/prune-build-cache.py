@@ -502,13 +502,18 @@ def self_test():
       * after a prune, no artifact is ever left behind a *surviving*
         fingerprint -- the one state cargo cannot recover from.
 
-    Returns the number of failures.
+    Returns `(checks_run, failures)`.  The count is returned rather than just a
+    pass/fail because a suite that silently stops asserting looks identical,
+    from the outside, to one that passes -- so the caller can put a floor under
+    it.
     """
     import tempfile
 
     fails = []
+    checks = []
 
     def check(cond, what):
+        checks.append(what)
         if not cond:
             fails.append(what)
         print(f"  {'ok  ' if cond else 'FAIL'}  {what}")
@@ -643,8 +648,8 @@ def self_test():
             f"no surviving fingerprint lost its artifacts (orphaned: {broken})",
         )
 
-    print(f"self-test: {len(fails)} failure(s)")
-    return len(fails)
+    print(f"self-test: {len(checks)} check(s), {len(fails)} failure(s)")
+    return len(checks), len(fails)
 
 
 def main(argv=None):
@@ -702,7 +707,8 @@ def main(argv=None):
         pass
 
     if args.self_test:
-        return 1 if self_test() else 0
+        _checks, failures = self_test()
+        return 1 if failures else 0
 
     if args.target_dir:
         targets = [os.path.abspath(t) for t in args.target_dir]

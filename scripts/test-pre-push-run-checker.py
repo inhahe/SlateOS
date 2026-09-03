@@ -149,18 +149,28 @@ def run(
     script: Path,
     *args: str,
     configured: bool = True,
+    flag: str = "",
+    skiplog: Path | None = None,
 ) -> subprocess.CompletedProcess:
     """Drive `run_checker` once, in a shell, exactly as a caller would.
 
     `MARKER-RETURNED` is echoed only if the helper *returns*; the no-verdict
     path exits the caller, so its absence is the assertion that it did.
+
+    `flag` goes *before* the label, which is where the real call sites put
+    `--may-skip=N`. Passing it as a string rather than a bool is deliberate:
+    the tests that matter most for that option are the ones that hand it a
+    value it must refuse, and a bool cannot express `--may-skip=yes`.
     """
     driver = tmp / "driver.sh"
+    skip_env = f'CHECKER_SKIPLOG="{skiplog.as_posix()}"\n' if skiplog else ""
     driver.write_text(
         "set -u\n"
         + preamble(tmp, configured)
+        + skip_env
         + f"{func}\n"
-        + f'run_checker testgate "{sys.executable}" "{script.as_posix()}" '
+        + f"run_checker {flag + ' ' if flag else ''}testgate "
+        + f'"{sys.executable}" "{script.as_posix()}" '
         + " ".join(args)
         + "\n"
         + 'echo "MARKER-RETURNED rc=$?"\n',
@@ -483,6 +493,95 @@ def main() -> int:
         check("quotes the checker's own first line", "not found" in flat)
         check("keeps the commit-limit reading too", "commit limit" in flat)
         check("says which output tells them apart", "tells them apart" in flat)
+        log.unlink(missing_ok=True)
+
+        # ------------------------------------------------------------------
+        # `--may-skip=N` lets one call site declare that N means "I could not
+        # look" for its gate only. The tests below are weighted towards the
+        # ways it must *refuse*, because the failure that matters is not the
+        # option failing to work -- that is obvious on the first run -- but the
+        # option working too well and swallowing a finding or a crash.
+        print("group 4c: a gate whose call site allows it to skip")
+        skiplog = tmp_root / "skips.tsv"
+        cannot_look = fake_checker(
+            tmp_root,
+            "cannot-look",
+            "import sys\nprint('libc.a is stale; nothing to grade')\n"
+            "sys.exit(2)\n",
+        )
+        r = run(tmp_root, func, cannot_look, flag="--may-skip=2",
+                skiplog=skiplog)
+        out = r.stdout + r.stderr
+        flat = flatten(out)
+        check("returns 0 so the build continues",
+              "MARKER-RETURNED rc=0" in out, out.strip()[-300:])
+        check("says SKIPPED in as many words", "SKIPPED" in out)
+        check("says it is not a pass", "NOT a pass" in flat)
+        check("quotes the reason the checker gave",
+              "libc.a is stale" in out)
+        check("does not claim a crash",
+              "never reached a verdict" not in flat)
+        check("deletes the log, as for any non-finding", not log.exists())
+        check("records the skip where a caller can count it",
+              skiplog.is_file()
+              and "testgate\t2\t" in skiplog.read_text(encoding="utf-8"),
+              skiplog.read_text(encoding="utf-8") if skiplog.is_file()
+              else "no skiplog written")
+        skiplog.unlink(missing_ok=True)
+
+        # The same exit code, from a crash. This is the case that decides
+        # whether the option is safe: a checker that dies of `SystemExit(2)`
+        # in a bug exits 2 exactly as one that looked and found nothing to
+        # look at, and only the traceback tells them apart.
+        crash_with_skip_code = fake_checker(
+            tmp_root,
+            "crash-two",
+            "print('starting')\nraise ValueError('boom')\n",
+        )
+        r = run(tmp_root, func, crash_with_skip_code, flag="--may-skip=2",
+                skiplog=skiplog)
+        out = r.stdout + r.stderr
+        flat = flatten(out)
+        check("a traceback is a crash even with the skip code allowed",
+              "MARKER-RETURNED" not in out, out.strip()[-300:])
+        check("and it still aborts", r.returncode == 1, f"rc={r.returncode}")
+        check("a crash is never recorded as a skip", not skiplog.exists())
+        log.unlink(missing_ok=True)
+
+        # Without the flag, exit 2 must still abort -- the whole point of the
+        # option being per call site is that it changes nothing anywhere else.
+        r = run(tmp_root, func, cannot_look)
+        out = r.stdout + r.stderr
+        check("exit 2 without the flag still reaches no verdict",
+              "MARKER-RETURNED" not in out
+              and "never reached a verdict" in flatten(out),
+              out.strip()[-300:])
+        log.unlink(missing_ok=True)
+
+        # A code the call site did not name is still a crash.
+        other_code = fake_checker(
+            tmp_root, "other-code", "import sys\nprint('hm')\nsys.exit(3)\n")
+        r = run(tmp_root, func, other_code, flag="--may-skip=2")
+        check("only the declared code skips; 3 is still no verdict",
+              "MARKER-RETURNED" not in (r.stdout + r.stderr),
+              (r.stdout + r.stderr).strip()[-300:])
+        log.unlink(missing_ok=True)
+
+        # The refusals. Each of these would, if accepted, turn the option into
+        # a way to silence a gate rather than to run one.
+        for bad, why in (
+            ("--may-skip=0", "0 is already a pass"),
+            ("--may-skip=1", "1 is already a finding"),
+            ("--may-skip=126", "126 is a failed invocation"),
+            ("--may-skip=127", "127 is a failed invocation"),
+            ("--may-skip=yes", "not a number"),
+            ("--may-skip=", "empty"),
+        ):
+            r = run(tmp_root, func, clean, flag=bad)
+            out = r.stdout + r.stderr
+            check(f"refuses {bad} ({why})",
+                  "MARKER-RETURNED" not in out and r.returncode == 1,
+                  out.strip()[-200:])
         log.unlink(missing_ok=True)
 
         # ------------------------------------------------------------------

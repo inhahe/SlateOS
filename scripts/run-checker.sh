@@ -40,6 +40,45 @@
 # verdict**, and does not return to the call site at all: it exits, because
 # there is no gate for which "the checker fell over" is a reason to proceed.
 #
+# ## The fourth outcome, which exists only where a call site asks for it
+#
+# "No verdict" collapses two different things: *the checker fell over*, and
+# *the checker ran fine and found it had nothing to look at*. The second is a
+# legitimate answer for a gate that grades something which may not be there —
+# `check-libc-shape.py` reads a build artifact and exits 2 when `libc.a` is
+# stale; the four `check-*-vs-bash.py` oracles shell out to real bash and
+# cannot answer on a host with no WSL. Under the rules above, wiring any of
+# them stops the build on every worktree that has not built a sysroot, or on
+# every machine without a Linux distro. So they were not wired at all, which
+# is the worse end of the trade: a gate nobody runs finds nothing, forever.
+#
+# `run_checker --may-skip=<rc> <label> …` is the opt-in. It is **per call
+# site** and deliberately not a mode: there is no environment variable for it
+# and no way to set it once for a run, because the judgement "this particular
+# gate has a legitimate can't-look answer, and it is this exit code" belongs
+# next to the gate, in the file a reader is already looking at. A global
+# loosening would apply to the twenty-odd gates for which no such answer
+# exists, and abort-on-no-verdict is load-bearing for all of them.
+#
+# Three constraints keep the channel from becoming the hole it is replacing:
+#
+# * **0 and 1 are refused.** Allowing `--may-skip=1` would let a call site
+#   reclassify a *finding* as a skip, which is the one thing no amount of
+#   convenience justifies. 126 and 127 are refused for the same reason in the
+#   other direction: this file already reads them as the shell's codes for a
+#   failed invocation, and no checker returns them as a verdict.
+# * **A traceback still wins.** A checker that crashes with the skip code is
+#   crashing, not skipping, so the skip arm requires the absence of the
+#   traceback banner exactly as the finding arm does. Otherwise `--may-skip=2`
+#   would silently absorb every `SystemExit(2)` raised from a bug.
+# * **A skip is announced, and it is not a pass.** It prints the checker's own
+#   first line — the reason it could not look — and says in as many words that
+#   nothing was checked. If `CHECKER_SKIPLOG` names a file, the skip is also
+#   appended to it, so a caller can say "27 gates ran, 2 could not look" in its
+#   summary instead of the flat "ok" that a silent `return 0` would earn. A
+#   gate that skips on every run must read differently from one that passes,
+#   or this channel has merely moved the silence somewhere less visible.
+#
 # Should a checker ever print the traceback banner as part of a legitimate
 # finding, it lands in the no-verdict arm too, and the run is still refused —
 # the misclassification costs a confusing message, never a missed defect.
@@ -103,14 +142,67 @@
 #   CHECKER_NOTE      one extra paragraph for the no-verdict message, or empty.
 #                     The hook uses it to say why the gate's bypass is the wrong
 #                     reaction; boot-test has no bypass and leaves it unset.
+#   CHECKER_SKIPLOG   a file to append one line per skipped gate to, or empty.
+#                     Only `--may-skip` call sites can write to it. A caller
+#                     that sets it can report how many gates could not look;
+#                     one that does not still gets the message on stderr.
+#
+# Note that there is deliberately no `CHECKER_MAY_SKIP`: see "The fourth
+# outcome" above for why the permission is an argument and not a setting.
 
-# run_checker <label> <command> [args...]
+# run_checker [--may-skip=<rc>] <label> <command> [args...]
 run_checker() {
+    # Parsed before the label so the flag reads left-to-right at the call site.
+    # `--may-skip=N`, not `--may-skip N`, because the joined form cannot be
+    # separated from its value by a line continuation and then lose it.
+    #
+    # `_rc_skip_given` is tracked separately from `_rc_skip` because
+    # `--may-skip=` -- the flag with its value left off -- strips to the empty
+    # string, which is indistinguishable from "no flag passed" if emptiness is
+    # the only test. That spelling then read as an ordinary call and was
+    # obeyed silently, so a call site that had asked for something got no
+    # complaint and no skip. Caught by this file's own suite, which is the
+    # argument for having written the refusal cases first.
+    _rc_skip=''
+    _rc_skip_given=no
+    case $1 in
+    --may-skip=*)
+        _rc_skip=${1#--may-skip=}
+        _rc_skip_given=yes
+        shift
+        ;;
+    esac
+
     _rc_label=$1
     shift
     _rc_prog=${CHECKER_PROG:-checker}
     _rc_dir=${CHECKER_LOGDIR:-${TMPDIR:-/tmp}}
     _rc_log="$_rc_dir/$_rc_prog-$_rc_label.log"
+
+    # Validated before the checker runs, not after it exits, so a typo is a
+    # loud failure on every run rather than a dormant one that surfaces only on
+    # the day the gate first tries to skip -- which is the day nobody is
+    # looking, because until then the call site behaved exactly as intended.
+    if [ "$_rc_skip_given" = yes ]; then
+        case $_rc_skip in
+        *[!0-9]* | '')
+            echo "$_rc_prog: $_rc_label: --may-skip needs an exit code, got '$_rc_skip'." >&2
+            exit 1
+            ;;
+        0 | 1)
+            echo "$_rc_prog: $_rc_label: --may-skip=$_rc_skip is refused. 0 already means" >&2
+            echo "clean and 1 means a finding; letting a call site rename either one would" >&2
+            echo "turn this library into a way to silence gates rather than to run them." >&2
+            exit 1
+            ;;
+        126 | 127)
+            echo "$_rc_prog: $_rc_label: --may-skip=$_rc_skip is refused. Those are the" >&2
+            echo "shell's codes for 'could not execute it', which no checker returns as a" >&2
+            echo "verdict of its own -- so a gate cannot use one to mean 'I could not look'." >&2
+            exit 1
+            ;;
+        esac
+    fi
     # `$*` joins on IFS's first character, and one caller (the hook's doc-links
     # gate) sets IFS to a newline to split a path list — which would render the
     # "re-run it" line one argument per line. Build the string under a known IFS.
@@ -130,6 +222,37 @@ run_checker() {
     if [ "$_rc" = "1" ] && ! grep -q '^Traceback (most recent call last):' "$_rc_log"; then
         echo "$_rc_prog: $_rc_label: full output kept at $_rc_log" >&2
         return 1
+    fi
+
+    # The skip arm. Ordered after the finding arm so that no reachable value of
+    # `_rc_skip` can shadow it -- 0 and 1 are refused above, but the ordering is
+    # what makes that a second line of defence rather than the only one.
+    #
+    # The traceback test is the same one the finding arm uses, and for the same
+    # reason: a checker that dies with `SystemExit(2)` from a bug exits 2 just
+    # as loudly as one that looked and found nothing to look at. Without this,
+    # `--may-skip=2` would convert that entire class of crash into a pass, and
+    # it would do it on exactly the gates that are hardest to notice going
+    # quiet, since they are the ones expected to skip sometimes.
+    if [ -n "$_rc_skip" ] && [ "$_rc" = "$_rc_skip" ] &&
+        ! grep -q '^Traceback (most recent call last):' "$_rc_log"; then
+        _rc_first=$(head -n 1 "$_rc_log" 2>/dev/null)
+        [ -n "$_rc_first" ] || _rc_first="(it printed nothing)"
+        cat >&2 <<EOF
+$_rc_prog: $_rc_label: SKIPPED — it exited $_rc, which this call site declares
+means "I could not look". Its first line was
+
+    $_rc_first
+
+This is NOT a pass: nothing about the tree was checked, and a defect of the
+kind this gate exists to find would look exactly like what you just saw.
+EOF
+        if [ -n "${CHECKER_SKIPLOG:-}" ]; then
+            printf '%s\t%s\t%s\n' "$_rc_label" "$_rc" "$_rc_first" \
+                >>"$CHECKER_SKIPLOG" 2>/dev/null || :
+        fi
+        rm -f "$_rc_log"
+        return 0
     fi
 
     # The first line of the checker's own output is the discriminator between

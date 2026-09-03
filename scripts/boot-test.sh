@@ -208,6 +208,59 @@
 
 set -euo pipefail
 
+# --- Run from a snapshot of ourselves, not from the file in the tree ---------
+#
+# bash does not read a script into memory. It reads it in chunks, and it seeks
+# back to the byte offset it had reached each time it wants more -- so editing
+# a running script edits the part it has not executed yet. For a script that
+# runs for well over an hour, that is not a theoretical window: this file is
+# edited *during* its own runs, because the whole point of backgrounding a boot
+# test is to keep working while it goes, and the tree it tests is the tree the
+# agent is developing in.
+#
+# The failure is silent and it does not look like an edit. Bash resumes at the
+# old offset in the new file, which now lands in the middle of a different
+# line, and executes whatever text follows it: half a word as a command, an
+# unbalanced quote that swallows the rest of the file, a `fi` with no `if`.
+# What the operator sees is a syntax error on a line that is syntactically
+# fine, or -- much worse -- a run that quietly skips a gate and still says
+# PASSED.
+#
+# So the first thing this script does is copy itself somewhere private and hand
+# over to that copy. The copy is complete before the first gate runs and no
+# editor will ever touch it, which makes the run atomic with respect to the
+# tree. `BOOT_TEST_REEXEC` is the guard that stops the copy copying itself, and
+# `BOOT_TEST_ORIG_DIR` carries the one thing the copy cannot work out for
+# itself: `SCRIPT_DIR` is derived from `$0`, and `$0` in the copy points at the
+# temp directory, so every sibling script (`run-checker.sh`, the checkers, the
+# QEMU helpers) would be looked up in the wrong place.
+#
+# The copy is deleted by the trap below rather than by the copy itself, since
+# a script cannot reliably remove the file it is still being read from.
+if [ -z "${BOOT_TEST_REEXEC:-}" ]; then
+    _bt_self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    _bt_snapshot="$(mktemp -t boot-test-snapshot.XXXXXX)" || {
+        echo "boot-test.sh: could not create a snapshot of myself; refusing to"
+        echo "  run directly from the tree, because an edit during the run"
+        echo "  would be executed as if it had always been there."
+        exit 125
+    }
+    # `cat` rather than `cp` so the snapshot is a fresh inode with our own
+    # permissions: `cp` would preserve the source's, and on a checkout where
+    # the script is not executable that would produce a copy we cannot exec.
+    cat "$_bt_self" > "$_bt_snapshot"
+    chmod +x "$_bt_snapshot"
+    # The trap is installed in *this* shell, which stays alive as the parent
+    # only if we do not `exec`. That is the trade: one extra process for the
+    # lifetime of the run, in exchange for the snapshot being removed on every
+    # exit path including a signal.
+    trap 'rm -f "$_bt_snapshot"' EXIT INT TERM
+    BOOT_TEST_REEXEC=1 \
+    BOOT_TEST_ORIG_DIR="$(cd "$(dirname "$0")" && pwd)" \
+        bash "$_bt_snapshot" "$@"
+    exit $?
+fi
+
 # Scan the serial log for self-test failures that do NOT halt the boot.
 #
 # Many fs/subsystem self-tests are NON-FATAL: on failure main.rs logs a
@@ -1163,7 +1216,11 @@ EOF
     return 0
 }
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# `$0` is the snapshot in the temp directory, not this file's home in the tree
+# (see the re-exec at the top), so the real directory is passed in rather than
+# derived. The fallback keeps the script runnable if it is ever sourced or
+# invoked in a way that skips the re-exec.
+SCRIPT_DIR="${BOOT_TEST_ORIG_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Every gate below asks a Python checker whether the tree is clean, and until

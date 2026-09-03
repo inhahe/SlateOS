@@ -318,6 +318,8 @@ def scan_profile(profile_dir, age_days, incr_age_days, now, note=lambda _s: None
         entries = list(os.scandir(fp_root))
     except OSError:
         return [], 0, 0
+    n_undated = 0
+    empty_dirs = []
     for entry in entries:
         if not entry.is_dir(follow_symlinks=False):
             continue
@@ -332,9 +334,27 @@ def scan_profile(profile_dir, age_days, incr_age_days, now, note=lambda _s: None
         except OSError:
             # No `invoked.timestamp` means cargo never recorded a use for this
             # unit in a form we can read.  Absence of evidence is not evidence
-            # of staleness, so treat it as live and leave it alone.
+            # of staleness, so treat it as live and leave it alone -- but count
+            # it, because a unit the discriminator could not read is a unit this
+            # scan did not actually examine, and folding it into "live" without
+            # saying so is how "0 stale" comes to mean two different things.
+            #
+            # There are two real populations here, and only one is interesting.
+            # Build-script *run* units (`run-build-script-*`) legitimately have
+            # no `invoked.timestamp` and are a handful per profile.  The other
+            # is an entirely *empty* unit directory, of which the bare-metal
+            # profile in this worktree had 3016 out of 3104 -- cargo creates
+            # the directory for every unit in the resolve graph and only fills
+            # it in for the ones it actually builds for that target.
+            try:
+                is_empty = not any(os.scandir(entry.path))
+            except OSError:
+                is_empty = False
+            if is_empty:
+                empty_dirs.append(entry.path)
             live_keys.add(key)
             n_live += 1
+            n_undated += 1
             continue
         age = (now - mtime) / 86400.0
         units[key] = (entry.path, age)
@@ -344,9 +364,18 @@ def scan_profile(profile_dir, age_days, incr_age_days, now, note=lambda _s: None
             live_keys.add(key)
             n_live += 1
 
+    # `dated` rather than the unit total, because the histogram only describes
+    # the units the discriminator could actually read.  Saying "0 of 3104 stale"
+    # beside a distribution covering 85 of them invites exactly the reading the
+    # histogram exists to prevent: that all 3104 were examined and found fresh.
+    dated = len(units)
+    undated_note = f"; {n_undated} undated (kept)" if n_undated else ""
+    if empty_dirs:
+        undated_note += f", {len(empty_dirs)} of them empty"
     note(
         f"{len(stale_units)} of {len(stale_units) + n_live} units stale "
-        f"by invoked.timestamp; ages {histogram(u[1] for u in units.values())}"
+        f"by invoked.timestamp{undated_note}; ages of the {dated} dated: "
+        f"{histogram(u[1] for u in units.values())}"
     )
 
     # --- pass 2: index the artifacts by the same key ----------------------
@@ -576,10 +605,37 @@ def self_test():
         hot_incr = incr_unit("alpha-1abcdefghij", now)
         cold_incr = incr_unit("beta_cli-2abcdefghij", old)
 
-        cands, n_live, _ = scan_profile(prof, 14.0, 7.0, now)
-        labels = {c.label for c in cands}
+        # Two units the discriminator cannot read.  Both must be kept -- absence
+        # of evidence is not evidence of staleness -- and both must be *said*,
+        # because a unit folded silently into "live" is one the scan did not
+        # examine while reporting as though it had.  This worktree's bare-metal
+        # profile is 3016 empty directories out of 3104, so a report that
+        # elided them would describe 3% of the profile as though it were all
+        # of it.
+        empty_fp = os.path.join(fp, "delta-9999999999999999")
+        os.makedirs(empty_fp)
+        script_fp = os.path.join(fp, "epsilon-8888888888888888")
+        os.makedirs(script_fp)
+        with open(os.path.join(script_fp, "run-build-script-build-script-build"),
+                  "w") as fh:
+            fh.write("x")
 
-        check(n_live == 2, f"two units are live (got {n_live})")
+        notes = []
+        cands, n_live, _ = scan_profile(prof, 14.0, 7.0, now, note=notes.append)
+        labels = {c.label for c in cands}
+        first = notes[0] if notes else ""
+
+        check(os.path.isdir(empty_fp), "an undated unit is kept, not pruned")
+        check(os.path.isdir(script_fp),
+              "and so is a build-script unit that never gets a timestamp")
+        check("2 undated (kept)" in first,
+              f"both undated units are reported, not folded into live ({first})")
+        check("1 of them empty" in first,
+              f"and the empty one is called out separately ({first})")
+        check("ages of the 3 dated" in first,
+              f"the histogram says how many units it actually covers ({first})")
+
+        check(n_live == 4, f"two units are live, plus the two undated (got {n_live})")
         check(
             "beta_cli-fedcba9876543210" in labels,
             "the stale unit is a candidate despite the hyphen/underscore split",
@@ -610,6 +666,23 @@ def self_test():
             f"(got {len(stale_cand.artifacts) if stale_cand else 'no candidate'})",
         )
 
+        # Snapshot which units actually *had* an artifact before the prune, so
+        # the invariant below can distinguish "lost its artifacts" from "never
+        # had any".  Some units legitimately have none -- a build-script run
+        # unit, and an empty directory cargo created for a unit it did not
+        # build for this target -- and an invariant that cannot tell those from
+        # a real orphan fires on a healthy cache, which is how a check gets
+        # weakened instead of the code being fixed.
+        def artifact_keys():
+            keys = set()
+            for art in os.listdir(deps):
+                dm = _DEP_RE.match(art)
+                if dm:
+                    keys.add((norm(dm.group("name")), dm.group("hash")))
+            return keys
+
+        had_artifacts = artifact_keys()
+
         prune(cands, os.path.join(tmp, "target", ".prune-staging"), False)
         rmtree_fast(os.path.join(tmp, "target", ".prune-staging"))
 
@@ -626,22 +699,22 @@ def self_test():
         check(os.path.exists(hot_incr), "the hot incremental cache survives")
         check(not os.path.exists(cold_incr), "the cold one does not")
 
-        # The invariant that matters most: every fingerprint still present must
-        # still have every artifact it claims.  Violating this is the only way
-        # to leave a cache cargo cannot recover from, so it is checked directly
-        # rather than inferred from the individual assertions above.
-        survivors = set(os.listdir(fp))
+        # The invariant that matters most: no fingerprint that survived may have
+        # lost the artifacts it had.  That is the one state cargo cannot recover
+        # from -- it reads the fingerprint, concludes the unit is fresh, and
+        # fails at link time -- so it is checked directly rather than inferred
+        # from the individual assertions above.
+        #
+        # Scoped to units that had an artifact to begin with: see
+        # `had_artifacts`.
+        still = artifact_keys()
         broken = []
-        for name in survivors:
+        for name in set(os.listdir(fp)):
             m = _FP_RE.match(name)
             if not m:
                 continue
             key = (norm(m.group("name")), m.group("hash"))
-            for art in os.listdir(deps):
-                dm = _DEP_RE.match(art)
-                if dm and (norm(dm.group("name")), dm.group("hash")) == key:
-                    break
-            else:
+            if key in had_artifacts and key not in still:
                 broken.append(name)
         check(
             not broken,

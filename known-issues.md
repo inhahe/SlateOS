@@ -108548,6 +108548,88 @@ section, and the `--quick` argparse help) rather than leaving the measurement
 only here — but the numbers above are the debt, not the wording.
 
 ---
+## TD-B-TEN-GATES-ARE-NEVER-ASKED
+
+**Filed:** 2026-09-02 by Lane B, while wiring `check-gates-can-refuse.py`.
+**Status:** OPEN — measured, partly another lane's to act on.
+
+**In short:** the repo has 31 automated checkers under `scripts/check-*.py`.
+Ten of them are not run by the boot test, which is the gate that actually
+blocks a merge, and nine of those ten are not run by the pre-push hook either.
+Those nine execute only inside `scripts/pre-boot.py`, a local pre-flight script
+that nobody is required to run and that takes about forty minutes. So a rule
+they enforce can be broken, merged, and pushed without anything objecting.
+
+This is the same defect as `B-CHECK-DOC-LINKS-BARE-RUN-PRINTED-HELP-AND-PASSED`
+one level up. That gate ran and could not refuse; these gates are never asked.
+Both present identically from the outside — a rule that appears guarded and
+is not — and neither is visible in a green log, because the evidence is an
+*absence*.
+
+### The measurement
+
+`scripts/boot-test.sh` names every checker it runs in an explicit `run_checker`
+line; it does **not** glob. Set difference against `scripts/check-*.py`, taken
+2026-09-02:
+
+| Gate | in pre-push? | scans | whose |
+|---|---|---|---|
+| `check-doc-links.py` | **yes** | docs tree-wide | shared |
+| `check-diskcleanup-test-roots.py` | no | `apps/diskcleanup` | C |
+| `check-evdev-elf-asm.py` | no | ring-3 evdev test payload | C |
+| `check-frame-needles.py` | no | windowed app test suites | C |
+| `check-generated-tables.py` | no | `gui/font/**` generated tables | C |
+| `check-key-release-wiring.py` | no | windowed programs | C |
+| `check-window-wiring.py` | no | GUI programs' `main` | C |
+| `check-selftest-reinit.py` | no | `kernel/src/**` | A |
+| `check-libc-shape.py` | no | `libc.a` object granularity | B |
+| `check-gates-can-refuse.py` | no | `scripts/check-*.py` | B |
+
+Only `check-doc-links.py` is covered elsewhere, by the hook.
+
+### One of the ten must NOT be wired, and that is not an oversight
+
+`check-libc-shape.py` grades a **build artifact** (`libc.a`), and since
+`533e34e00` it returns **2 — "could not look"** when the archive predates its
+own sources. `run_checker` (`scripts/run-checker.sh:105-128`) treats any exit
+that is neither 0 nor 1 as *no verdict reached* and **aborts the whole build**.
+Wiring this gate into `boot-test.sh` would therefore stop the boot test dead on
+every worktree without a freshly built sysroot — which is nearly all of them,
+nearly all the time, since the archive is not rebuilt per commit.
+
+That interaction is worth stating plainly because it generalises:
+
+> **A gate that can legitimately answer "I could not look" cannot be wired into
+> `boot-test.sh` as it stands.** The exit-2 convention and the `run_checker`
+> abort are individually right and jointly exclusive.
+
+`check-libc-shape.py` stays where it is (invoked with an explicit path by
+`toolchain/build-sysroot.ps1:148`, at the one moment the archive is current)
+until that is resolved. Resolving it means giving `run_checker` a way to say
+"this gate is allowed to skip" — an opt-in per call site, not a global
+loosening, since the abort-on-no-verdict behaviour is load-bearing everywhere
+else (see the header comment at `boot-test.sh:1168-1183`).
+
+### What to do
+
+1. **Wire `check-gates-can-refuse.py`** — lane B's, no artifact dependency,
+   sub-second, exits only 0/1 in any real checkout. *(Done — see below.)*
+2. **Lane C: wire the six GUI/apps gates,** or record why each should not be.
+   Filed as a request; not lane B's to change, because a gate that fails on
+   lane C's tree blocks all three lanes.
+3. **Lane A: wire `check-selftest-reinit.py`** (`kernel/src/**`), same caveat.
+4. **Give `run_checker` an opt-in skip channel,** then wire
+   `check-libc-shape.py`. Until then it is correctly excluded, not forgotten.
+
+### Why this was not caught by the meta-gate that found it
+
+`check-gates-can-refuse.py` answers "can this gate return non-zero?" It cannot
+answer "does anything run this gate?" — a different question about a different
+file (`boot-test.sh`). The set difference above is currently a one-off
+measurement, not a check. Making it a check is cheap and probably right; it is
+not done yet, and *that* is the honest status of this entry.
+
+---
 ## TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH
 
 **Filed:** 2026-09-02 by Lane B, out of the gate-7 fix (`dcdd711fe`).

@@ -42,6 +42,7 @@
 
 use crate::bytestr::ByteStrExt;
 use crate::fs::path::{Path, PathBuf};
+use crate::shellquote;
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
@@ -1180,36 +1181,12 @@ fn expand_vars(input: &str) -> String {
 
 /// Byte offsets of the first and last *unquoted* occurrences of `needle`.
 ///
-/// Quoting is tracked the way the rest of the shell's parsers track it: a
-/// `'` opens a region that only another `'` closes, likewise `"`, and the
-/// other quote character is ordinary inside such a region.
+/// Quoting comes from [`crate::shellquote`], the shell's one scanner, so this
+/// agrees with every other parser here by construction. It previously kept its
+/// own copy of the rules, which — like the other ten copies — knew nothing of
+/// the backslash, so `a\'b` looked like the start of a quoted region.
 fn unquoted_positions(s: &str, needle: u8) -> (Option<usize>, Option<usize>) {
-    let bytes = s.as_bytes();
-    let mut first = None;
-    let mut last = None;
-    let mut quote: Option<u8> = None;
-    let mut i = 0usize;
-    while let Some(&b) = bytes.get(i) {
-        match quote {
-            Some(q) => {
-                if b == q {
-                    quote = None;
-                }
-            }
-            None => {
-                if b == b'\'' || b == b'"' {
-                    quote = Some(b);
-                } else if b == needle {
-                    if first.is_none() {
-                        first = Some(i);
-                    }
-                    last = Some(i);
-                }
-            }
-        }
-        i = i.saturating_add(1);
-    }
-    (first, last)
+    shellquote::bare_positions(s.as_bytes(), needle)
 }
 
 /// Byte offset of the first *unquoted* space or tab in `s`, or `None` if the
@@ -1225,27 +1202,7 @@ fn unquoted_positions(s: &str, needle: u8) -> (Option<usize>, Option<usize>) {
 /// word can carry a quoted value: see [`parse_inline_assignment`], where the
 /// raw search made `FOO='a b' cmd` run the command `b'`.
 fn first_unquoted_space(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut quote: Option<u8> = None;
-    let mut i = 0usize;
-    while let Some(&b) = bytes.get(i) {
-        match quote {
-            Some(q) => {
-                if b == q {
-                    quote = None;
-                }
-            }
-            None => {
-                if b == b'\'' || b == b'"' {
-                    quote = Some(b);
-                } else if b == b' ' || b == b'\t' {
-                    return Some(i);
-                }
-            }
-        }
-        i = i.saturating_add(1);
-    }
-    None
+    shellquote::find_bare_space(s.as_bytes())
 }
 
 /// Split `s` on *unquoted* occurrences of `sep`, keeping the pieces verbatim.
@@ -1253,31 +1210,14 @@ fn first_unquoted_space(s: &str) -> Option<usize> {
 /// Always returns at least one piece, so `parts.len() > 1` is the test for
 /// "the separator actually occurred outside quotes".
 fn split_unquoted(s: &str, sep: u8) -> Vec<&str> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let mut quote: Option<u8> = None;
-    let mut i = 0usize;
-    while let Some(&b) = bytes.get(i) {
-        match quote {
-            Some(q) => {
-                if b == q {
-                    quote = None;
-                }
-            }
-            None => {
-                if b == b'\'' || b == b'"' {
-                    quote = Some(b);
-                } else if b == sep {
-                    out.push(s.get(start..i).unwrap_or(""));
-                    start = i.saturating_add(1);
-                }
-            }
-        }
-        i = i.saturating_add(1);
-    }
-    out.push(s.get(start..).unwrap_or(""));
-    out
+    // Every shell metacharacter is ASCII, so an offset the scanner reports can
+    // never fall inside a multi-byte UTF-8 sequence and these slices are always
+    // on char boundaries. `unwrap_or("")` is therefore unreachable, and is kept
+    // only because `get` is the non-panicking form the lints require.
+    shellquote::split_bare_ranges(s.as_bytes(), sep)
+        .into_iter()
+        .map(|(start, end)| s.get(start..end).unwrap_or(""))
+        .collect()
 }
 
 /// Expand shell brace patterns: `{a,b,c}` and `{N..M}` ranges.
@@ -6613,30 +6553,28 @@ struct Redirect<'a> {
 ///
 /// Returns `None` if there is no redirection operator (or it's inside quotes).
 fn parse_redirect(line: &str) -> Option<Redirect<'_>> {
-    // Scan for `>>` first (longer match), then `>`.
-    // Ignore `>` inside quoted strings.
+    // The `>` must be *bare*: outside quotes and not backslash-escaped.
+    //
+    // This used to keep a private `in_quote: bool` toggled by either quote
+    // character, which cannot represent which quote opened the region. An
+    // apostrophe inside double quotes therefore looked like an opening quote
+    // and swallowed the rest of the line: `echo "it's fine" > out` printed
+    // `it's fine > out` and created no file at all. See known-issues.md
+    // A-KSHELL-REDIRECT-MISSED-WHEN-AN-APOSTROPHE-PRECEDES-IT.
     let bytes = line.as_bytes();
-    let mut in_quote = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'"' || b == b'\'' {
-            in_quote = !in_quote;
-        } else if !in_quote && b == b'>' {
-            let append = bytes.get(i.saturating_add(1)) == Some(&b'>');
-            let skip = if append { 2 } else { 1 };
-            let command = line.get(..i).unwrap_or("").trim();
-            let path = line.get(i.saturating_add(skip)..).unwrap_or("").trim();
-            if command.is_empty() || path.is_empty() {
-                return None;
-            }
-            return Some(Redirect {
-                command,
-                path,
-                append,
-            });
+    if let Some(i) = shellquote::find_bare(bytes, b'>') {
+        let append = bytes.get(i.saturating_add(1)) == Some(&b'>');
+        let skip = if append { 2 } else { 1 };
+        let command = line.get(..i).unwrap_or("").trim();
+        let path = line.get(i.saturating_add(skip)..).unwrap_or("").trim();
+        if command.is_empty() || path.is_empty() {
+            return None;
         }
-        i = i.saturating_add(1);
+        return Some(Redirect {
+            command,
+            path,
+            append,
+        });
     }
     None
 }
@@ -6650,34 +6588,25 @@ fn parse_redirect(line: &str) -> Option<Redirect<'_>> {
 /// Returns `(command, word)` if the pattern is found.
 /// The word is stripped of surrounding quotes if present.
 fn parse_here_string(line: &str) -> Option<(&str, String)> {
+    // The twelfth quote scanner. This one at least tracked `'` and `"`
+    // separately, so it never had the redirect parsers' apostrophe bug — but
+    // it was still blind to the backslash, and being a twelfth copy it could
+    // drift from the other eleven at any time. Now it cannot.
     let bytes = line.as_bytes();
-    let mut in_sq = false;
-    let mut in_dq = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\'' && !in_dq {
-            in_sq = !in_sq;
-            i = i.saturating_add(1);
+    // Preserves the original's jump over a fourth `<`, so `<<<<` is not read as
+    // a here-string starting at its second character.
+    let mut skip_past = 0usize;
+    for t in shellquote::scan(bytes).filter(shellquote::Tok::is_bare) {
+        let i = t.off;
+        if i < skip_past || t.byte != b'<' {
             continue;
         }
-        if b == b'"' && !in_sq {
-            in_dq = !in_dq;
-            i = i.saturating_add(1);
-            continue;
-        }
-        if in_sq || in_dq {
-            i = i.saturating_add(1);
-            continue;
-        }
-
-        if b == b'<'
-            && bytes.get(i.saturating_add(1)) == Some(&b'<')
+        if bytes.get(i.saturating_add(1)) == Some(&b'<')
             && bytes.get(i.saturating_add(2)) == Some(&b'<')
         {
             // Ensure it's not `<<<<`.
             if bytes.get(i.saturating_add(3)) == Some(&b'<') {
-                i = i.saturating_add(4);
+                skip_past = i.saturating_add(4);
                 continue;
             }
             let command = line.get(..i)?.trim();
@@ -6687,7 +6616,6 @@ fn parse_here_string(line: &str) -> Option<(&str, String)> {
             }
             return Some((command, String::from(strip_quotes(word))));
         }
-        i = i.saturating_add(1);
     }
     None
 }
@@ -6782,36 +6710,39 @@ fn parse_bare_assignment(line: &str) -> Option<(String, String)> {
 }
 
 fn parse_input_redirect(line: &str) -> Option<(&str, &str)> {
+    // Same fix as `parse_redirect`: the `<` must be bare, and "bare" comes from
+    // the one scanner. With a single `in_quote` bool, `cat < "don't.txt"` saw
+    // the apostrophe as an opening quote and found no redirect at all.
     let bytes = line.as_bytes();
-    let mut in_quote = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'"' || b == b'\'' {
-            in_quote = !in_quote;
-        } else if !in_quote && b == b'<' {
-            // Make sure this isn't `<<` / `<<<` (heredoc/here-string) or `<(`.
-            let next = bytes.get(i.saturating_add(1));
-            if next == Some(&b'<') {
-                // Skip all consecutive `<` chars (<<, <<<).
-                i = i.saturating_add(2);
-                while i < bytes.len() && bytes[i] == b'<' {
-                    i = i.saturating_add(1);
-                }
-                continue;
-            }
-            if next == Some(&b'(') {
-                i = i.saturating_add(2);
-                continue;
-            }
-            let command = line.get(..i).unwrap_or("").trim();
-            let path = line.get(i.saturating_add(1)..).unwrap_or("").trim();
-            if command.is_empty() || path.is_empty() {
-                return None;
-            }
-            return Some((command, path));
+    // `skip_past` reproduces the original's jump over a run of `<`, so `<<` and
+    // `<<<` are not mistaken for input redirection by matching at their second
+    // character.
+    let mut skip_past = 0usize;
+    for t in shellquote::scan(bytes).filter(shellquote::Tok::is_bare) {
+        let i = t.off;
+        if i < skip_past || t.byte != b'<' {
+            continue;
         }
-        i = i.saturating_add(1);
+        let next = bytes.get(i.saturating_add(1));
+        if next == Some(&b'<') {
+            // Skip all consecutive `<` chars (`<<`, `<<<`).
+            let mut j = i.saturating_add(2);
+            while bytes.get(j) == Some(&b'<') {
+                j = j.saturating_add(1);
+            }
+            skip_past = j;
+            continue;
+        }
+        if next == Some(&b'(') {
+            skip_past = i.saturating_add(2);
+            continue;
+        }
+        let command = line.get(..i).unwrap_or("").trim();
+        let path = line.get(i.saturating_add(1)..).unwrap_or("").trim();
+        if command.is_empty() || path.is_empty() {
+            return None;
+        }
+        return Some((command, path));
     }
     None
 }
@@ -21984,6 +21915,63 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             !out.contains(&b'#'),
             "and an unquoted `$#` really does expand, got {:?}",
             out
+        );
+    }
+
+    serial_println!(
+        "  kshell::self_test 114: an apostrophe inside double quotes no longer \
+         hides the redirect after it -- `echo \"it's fine\" > out` writes the \
+         file, and `cat < \"don't.txt\"` reads one"
+    );
+    {
+        // Rung 114 -- the redirect half of
+        // A-KSHELL-REDIRECT-MISSED-WHEN-AN-APOSTROPHE-PRECEDES-IT. Both parsers
+        // kept a private `in_quote: bool` toggled by *either* quote character,
+        // which cannot represent which quote opened the region: the apostrophe
+        // in `it's` read as an opening quote and swallowed the operator.
+        let r = parse_redirect("echo \"it's fine\" > out")
+            .ok_or(crate::error::KernelError::InternalError)?;
+        assert_eq!(r.command, "echo \"it's fine\"", "command half of the split");
+        assert_eq!(r.path, "out", "path half of the split");
+        assert!(!r.append, "`>` is not append");
+
+        let (cmd, path) = parse_input_redirect("cat < \"don't.txt\"")
+            .ok_or(crate::error::KernelError::InternalError)?;
+        assert_eq!(cmd, "cat");
+        assert_eq!(path, "\"don't.txt\"");
+
+        // The other half of the same bug: an operator that really *is* quoted
+        // must still be invisible. These passed before the fix too -- they are
+        // the control that stops the fix from over-correcting into "every `>`
+        // is a redirect".
+        assert!(
+            parse_redirect("echo 'a > b'").is_none(),
+            "a `>` inside single quotes is not a redirect"
+        );
+        assert!(
+            parse_redirect("echo \"a > b\"").is_none(),
+            "a `>` inside double quotes is not a redirect"
+        );
+        assert!(
+            parse_input_redirect("echo 'a < b'").is_none(),
+            "a `<` inside single quotes is not a redirect"
+        );
+
+        // A backslash-escaped operator is data. No scanner here could see this
+        // before, because none of the twelve knew the backslash existed.
+        assert!(
+            parse_redirect("echo a\\>b").is_none(),
+            "an escaped `>` is not a redirect"
+        );
+
+        // `>>` still parses as append, and `<<`/`<<<` are still not input
+        // redirection -- the run-skipping logic survived the rewrite.
+        let r = parse_redirect("echo hi >> out").ok_or(crate::error::KernelError::InternalError)?;
+        assert!(r.append, "`>>` is append");
+        assert_eq!(r.path, "out");
+        assert!(
+            parse_input_redirect("cat <<< word").is_none(),
+            "a here-string is not input redirection"
         );
     }
 

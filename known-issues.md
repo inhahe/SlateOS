@@ -91051,7 +91051,7 @@ still in it, no profile was added, and the string
 `"Server address is required"` is among the `RenderCommand::Text` the frame
 actually draws. Confirmed to fail when the early-close is mutated back in.
 
-## C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER (lane C, 2026-08-26)
+## C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER (lane C, 2026-08-26) -- **fixed 2026-09-03**
 
 **In short:** the VPN Manager's Import and Export buttons work, but they always
 read and write **one fixed file** — `$HOME/.config/slateos/vpn/profiles.txt` —
@@ -91089,6 +91089,60 @@ which the same rework has to fix; this entry is the caller waiting on both.
 **Until then:** Export says where it wrote, Import says how many profiles it
 read and names the first failure if a block was malformed, and both refuse
 clearly (`"Cannot export: $HOME is not set"`) rather than failing silently.
+
+**Fixed 2026-09-03.** The blocker named in the table above —
+`C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS` — was
+fixed the day before, and the third row of that table (`list_directory`) had
+already been answered. Both buttons now open a real chooser: Import a
+`FileDialog::open()` filtered to `*.txt`, Export a `FileDialog::save()`
+pre-filled with the filename the fixed path used to end in.
+
+Four things were worth deciding rather than merely typing:
+
+- **The chooser opens where the old fixed path was**, and offers that path's
+  own filename. `picker_start()` derives both from the same `profile_file()`
+  the old code wrote to, rather than re-deriving `$HOME/.config/...`
+  independently. Had it opened at `$HOME` or at `/`, this "upgrade" would have
+  lost every existing user's exported file behind a chooser that no longer
+  pointed at it. Pinned by
+  `the_default_start_agrees_with_the_path_export_used_to_write`.
+- **Export creates the directory it was given, on the way out, not on the way
+  in.** `$HOME/.config/slateos/vpn/` usually does not exist on a fresh account,
+  so `create_dir_all` runs in `export_to` just before the write. Doing it when
+  the chooser *opens* would leave a directory behind for a user who then
+  cancelled.
+- **`NavigatedTo` is answered with a real listing every time.** The widget reads
+  nothing itself, so an unanswered navigation shows the *previous* directory's
+  files under the *new* directory's name — the same trap that made the widget's
+  own Alt+Backspace bug invisible.
+- **There are two public doors onto the pointer, and the second one is the
+  interesting one.** `handle_event` is the normal door; `handle_click` is the
+  other, and it is the one `Probe` uses. Both forward to the chooser.
+  `the_chooser_keeps_clicks_and_keys_off_the_window_behind_it` sweeps a 12x8
+  grid over the whole window through *both* and asserts nothing behind moved —
+  but that half of the test turned out to pass with the forwarding deleted
+  entirely, because `render_frame` calls `frame.discard_hits()` while the
+  chooser is up, so the window's own targets are gone before any hit-test
+  happens. Blocking is therefore free here; what is *not* free is that
+  `handle_click` still **reaches** the chooser, since a press that finds
+  nothing in an emptied frame is silently discarded. So the test also clicks
+  Cancel through `handle_click` and asserts the chooser closes, which does fail
+  when the forwarding is removed. Worth recording because the obvious
+  assertion — "nothing behind the modal moved" — is exactly the one that
+  cannot fail in a window that empties its own frame, and it would have been
+  believed.
+
+Seven tests cover it, including a real round trip: export to a scratch
+directory through the chooser, wipe the profile list, import the file back
+through the chooser, and compare. The scratch directory is a
+`scratchdir::ScratchDir` (new dev-dependency) rather than a fixed temp path,
+because a test that writes a real file and then fails would otherwise leave it
+behind for the next run to read.
+
+**Still open:**
+`TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE`
+now bites here too: the chooser hands back a `String`, so a profile file whose
+name is not UTF-8 cannot be picked. That is the toolkit's bug, tracked there.
 
 ## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26) -- **fixed 2026-08-29**
 

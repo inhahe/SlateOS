@@ -109142,3 +109142,43 @@ property over the eleven sites — for a corpus of lines mixing `'`, `"`, `\`
 and an operator, every scanner must report the same quoted/unquoted
 classification for every byte. Disagreement *is* the bug, so agreement is the
 assertion.
+
+### Second symptom, same trigger: `echo "it's $HOME"` does not expand `$HOME`
+
+Verified 2026-09-02: the string `in_double_quote` occurs **zero** times in all
+140k lines of `kshell.rs`, and `expand_vars_bytes` never tests for a `"` byte
+at all. The double-quoted context is not modelled anywhere in the expansion
+stage. Scanner #7 keeps one flag, `in_single_quote`, and flips it on *any*
+apostrophe:
+
+```rust
+if b == b'\'' && !in_single_quote { in_single_quote = true;  … }
+if b == b'\'' &&  in_single_quote { in_single_quote = false; … }
+if in_single_quote { /* copy verbatim, expand nothing */ }
+```
+
+So an apostrophe inside a double-quoted string opens a region the expander
+treats as single-quoted, and expansion stays off until the next apostrophe or
+the end of the line:
+
+| Line | Prints | Should print |
+|---|---|---|
+| `echo "it's $HOME"` | `it's $HOME` | `it's /root` |
+| `echo "don't $USER"` | `don't $USER` | `don't root` |
+| `echo "it's $HOME" > out` | *both* bugs at once: nothing expanded **and** no redirect | `it's /root` written to `out` |
+
+This matters for the fix beyond being one more bug. It is the **same trigger**
+as the redirect failure — an apostrophe inside double quotes — reached through
+a completely different scanner, which is the clearest possible evidence that
+the defect is the duplication rather than any one copy. It also means the
+shared scanner cannot merely be "quote-aware"; it must carry a three-state
+context (unquoted / single / double), because two of the eleven sites are
+wrong specifically for collapsing that into a boolean.
+
+Bash's actual rule, which the scanner must encode: inside `"…"` an apostrophe
+is an ordinary character and `$` still expands; inside `'…'` nothing expands
+and a `"` is ordinary. A one-bit model cannot express either half.
+
+The third row is worth a rung of its own — it is the line where both defects
+fire together, and a fix that repaired only one of them would still get it
+wrong while looking greener.

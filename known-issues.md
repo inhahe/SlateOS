@@ -34112,6 +34112,42 @@ Three other things the conversion turned up, all pre-existing:
 what a ratchet is for: ground gained and not held is ground that can be lost
 again without anything objecting.
 
+**`apps/procexplorer` is number 89**, and its defect was the other one the
+recipe singles out. It already handled mouse, resize *and* `Event::Tick` — so
+the conversion was mechanical except for `tick_interval`, which defaults to
+`None`, which means no tick is ever delivered. Shipping that default would have
+given a **process explorer whose numbers never change**: a system monitor that
+monitors nothing, with all 67 of its existing tests still green, because a model
+test can assert the refresh works without asserting anything ever asks for it.
+That is lesson 47 again, and the recipe calls `tick_interval` "the one to get
+right" for exactly this reason.
+
+It returns the *user's* refresh interval rather than a constant or a frame rate,
+so changing the setting changes the clock, and an idle desktop parks between
+refreshes instead of being woken sixty times a second to redraw the same
+numbers. Three tests: the clock follows the setting; the refresh is driven by
+*elapsed time* rather than tick count (the interval is a floor, not a promise —
+`Event::Tick` carries what actually elapsed); and one long tick after a busy
+loop still refreshes. Mutation-checked: returning `None` fails exactly the first.
+
+Pre-existing debt this one exposed was larger than fontmanager's, and in a file
+the conversion did not otherwise touch: **31 clippy findings under
+`-D warnings`**, across `main.rs` and `features.rs`. Seven were latent
+production sites — `(1u64 << count) - 1` in two places, `cpu % cols` and
+`cpu / cols`, `scroll_offset + i`, `current + delta` before a clamp that cannot
+rescue an addition that already overflowed, and `handles.len() - max_handles`
+guarded by a `>` three lines above it. Each is safe today because of a check
+somewhere nearby, which is the guarantee that stops holding when someone moves
+the check. The rest were the two test modules, which now carry the standard
+allow block.
+
+Baseline 48 → 47.
+
+**A note for the next conversion:** budget for the lint tail. Both apps so far
+were clippy-dirty under `-D warnings` *before* being touched, and the debt is
+not visible until the crate is looked at. It is worth fixing — these are real
+overflow and panic sites — but it is most of the work, not a footnote to it.
+
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY

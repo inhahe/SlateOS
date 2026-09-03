@@ -62,34 +62,93 @@ def assert_transport_is_faithful():
             f"  back: {r.stdout!r}\n"
             f"  err : {r.stderr!r}"
         )
+    _assert_word_probe_is_exact()
+
+
+# (line, expected words) -- the three properties `words()` must have.  These
+# are deliberately cases whose answer is not in doubt, so a failure here is
+# unambiguously a harness bug and never a fact about bash.
+_WORD_PROBE_SELF_TEST = [
+    # Byte-exactness through the separator.  This is the one that was broken:
+    # a newline *inside* a word used to be indistinguishable from the
+    # separator, so a word bash built correctly came back as None and every
+    # caller printed it as `<bash error>`.
+    (r"$'a\nb'", [b"a\nb"]),
+    (r"$'a\nb' c", [b"a\nb", b"c"]),
+    # Arity at zero, which `printf` alone cannot express.
+    ("$EMPTY", []),
+    ('"$EMPTY"', [b""]),
+]
+
+
+def _assert_word_probe_is_exact():
+    """Prove `words()` itself before trusting a single one of its answers.
+
+    `assert_transport_is_faithful` used to stop at the here-doc, which proved
+    only that bytes reach bash -- not that the *answers* come back intact.
+    The subtle half of this harness is the return path, and that is exactly
+    where it was wrong for as long as no case happened to contain a newline.
+    """
+    for line, want in _WORD_PROBE_SELF_TEST:
+        got = words(line)
+        if got != want:
+            raise SystemExit(
+                "THE WORD PROBE IS BROKEN -- every result below would be a lie.\n"
+                f"  line: {line!r}\n"
+                f"  want: {want!r}\n"
+                f"  got : {got!r}"
+                + ("\n  (None means the probe gave up, not that bash errored.)"
+                   if got is None else "")
+            )
 
 
 def words(line: str, setup: str = "HOME=/root; USER=root; EMPTY=''"):
     """The exact word list bash produces for `line`, or None if bash errored.
 
-    Uses `set --` so the count is bash's own, then prints each word wrapped
-    in a byte that cannot be confused with a separator.  Returns a list of
-    `bytes` whose *length* is authoritative, including the empty list.
+    Uses `set --` so the count is bash's own, then emits the words separated
+    by NUL.  Returns a list of `bytes` whose *length* is authoritative,
+    including the empty list.
+
+    **The separator must be NUL, not a newline.**  This function used to print
+    each word as `[%s]` on its own line and reject any line not wrapped in
+    brackets.  A word *containing* a newline -- `$'a\\nb'`, which is perfectly
+    legal and is precisely what ANSI-C quoting is for -- spans two lines, so
+    the wrapper check failed and the function returned None.  Every caller
+    prints None as `<bash error>`, so a case bash handled correctly was
+    reported as a case bash *rejected*.  That is the worst direction for a
+    probe to fail in: it does not look like a broken harness, it looks like a
+    fact about bash, and it was one step from being written into a kernel
+    self-test rung as "bash rejects `$'a\\nb'`".
+
+    NUL is safe as the delimiter precisely because bash cannot put one in a
+    word -- a bash string is NUL-terminated, so `$'a\\0b'` yields `a`.  A byte
+    that cannot occur in the data is the only kind of separator that needs no
+    escaping, which is the same reason `find -print0` exists.
+
+    The count still comes from `$#` and the loop still runs once per word, so
+    the zero-word/one-empty-word distinction that `printf` cannot express is
+    preserved: a `for` over zero arguments produces no output at all.
     """
     script = (
         f"{setup}\n"
         f"set -- {line}\n"
         'printf "%s\\n" "$#"\n'
-        'for w in "$@"; do printf "[%s]\\n" "$w"; done\n'
+        'for w in "$@"; do printf "%s\\0" "$w"; done\n'
     ).encode()
     r = run(script)
     if r.returncode != 0:
         return None
-    lines = r.stdout.split(b"\n")
+    count, sep, rest = r.stdout.partition(b"\n")
+    if not sep:
+        return None
     try:
-        n = int(lines[0])
-    except (ValueError, IndexError):
+        n = int(count)
+    except ValueError:
         return None
-    out = []
-    for raw in lines[1 : 1 + n]:
-        if not (raw.startswith(b"[") and raw.endswith(b"]")):
-            return None
-        out.append(raw[1:-1])
-    if len(out) != n:
+    # Every word is NUL-*terminated*, so n words leave a trailing empty field.
+    # Checking for it is what catches a truncated or over-long read rather
+    # than silently returning a short list.
+    fields = rest.split(b"\0")
+    if len(fields) != n + 1 or fields[-1] != b"":
         return None
-    return out
+    return fields[:n]

@@ -92623,6 +92623,47 @@ whoever picks this up:
   same request, since designing the read side alone would leave this needing a
   third API revision. Still not filed, for the reason above.
 
+**Update, 2026-09-03 — the cap now bounds the rewrite, and the request is filed.**
+
+Two things changed, and only the second needs lane A.
+
+*The bound.* `MAX_SAVE_BYTES` (3 × `MAX_ARCHIVE_BYTES`) and
+`projected_save_bytes` are new. The projection is arithmetic over the central
+directory — which carries both the compressed and the uncompressed size of
+every member — so a rewrite is costed *before* anything is allocated and
+before the old archive is touched, and refused with a message naming both
+numbers rather than being discovered by the allocator. The three-times factor is
+not a guess: a save holds the old archive, every reproduced member's plaintext,
+and the new archive at once, so it is three of the order an open costs.
+
+This does **not** make the program stream. It converts "exhausts memory during a
+save, having possibly already started writing" into "says it cannot, and the
+file on disk is untouched" — which is the same conversion
+`MAX_ARCHIVE_BYTES` already performed for opening, applied to the operation it
+did not cover. The bullet above is therefore resolved; the entry as a whole is
+not.
+
+Guarded by `a_rewrite_too_big_to_hold_is_refused_and_the_file_is_untouched`,
+which reaches the refusal through `save_within` — the body `save` runs, with
+the budget as a parameter. Tripping `MAX_SAVE_BYTES` honestly would need an
+archive claiming 1.5 GiB of plaintext, which costs 1.5 GiB to write; testing the
+projection alone would have left nothing covering "and `save` acts on it", which
+is precisely the shape of bug this crate keeps finding elsewhere. Mutation-
+checked: replacing the comparison with `if false` fails that test and only that
+test. Two more tests cover the other direction — that an ordinary archive is
+nowhere near the budget (a false refusal would hit everybody, unlike the bug it
+fixes) and that a directory member is charged nothing.
+
+*The request.* Now filed, as
+`requests/c-a-ziparchive-wants-a-ranged-reader-and-a-streaming-writer.md`. The
+reason given above for holding it back — "the crate is a week old; asking for
+a second API before the first has been used in anger is how APIs get designed
+twice" — has expired in the best way: it *has* been used in anger. Both a
+reader and a writer are implemented against the slice API, and the writer is
+what trebled the peak. That is the evidence a second API design wants, and
+withholding it now would just mean lane A designing the read side alone and
+needing a third revision for the write side.
+
 ### TD-C-NOTHING-CAN-ACTUALLY-COPY-AND-PASTE-BETWEEN-PROGRAMS — 2026-08-26 — LANE C, OPEN
 
 **In short:** Copy and Paste do not cross between programs. Every window that

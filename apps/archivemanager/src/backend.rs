@@ -44,6 +44,24 @@ use crate::{ArchiveEntry, ArchiveFormat, ArchiveModel, ArchiveTestResults, TestR
 /// `known-issues.md`; the proper fix is a seeking reader on the crate side.
 pub const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
+/// The most this program will allocate to *rewrite* an archive.
+///
+/// [`MAX_ARCHIVE_BYTES`] bounds what an open costs, and for a long time it was
+/// the only bound there was -- which left the rewrite unbounded, because the
+/// two cost different things. A save holds three of that order at once: the old
+/// archive it is reading members out of, every reproduced member's *plaintext*,
+/// and the new archive being built. So the budget is three times the open
+/// budget. It is a ceiling on this program, not a property of ZIP.
+///
+/// The gap this closes is compression ratio, and it is not a small one.
+/// `MAX_ARCHIVE_BYTES` is checked against the file on disk, and a 500 MB
+/// archive of highly compressible data holds *far* more than 500 MB of
+/// plaintext -- a ZIP of zeroes expands about a thousandfold. Such an archive
+/// passed the open check, then exhausted memory during a save, which is the
+/// failure the open check exists to turn into a message. See known-issues.md
+/// -> `TD-C-ARCHIVEMANAGER-HOLDS-THE-WHOLE-ARCHIVE-IN-MEMORY`.
+pub const MAX_SAVE_BYTES: u64 = 3 * MAX_ARCHIVE_BYTES;
+
 /// Why an archive operation could not be carried out.
 #[derive(Debug)]
 pub enum ArchiveError {
@@ -604,6 +622,13 @@ pub enum SaveError {
     /// encrypted member cannot be rewritten by a build with no decryption
     /// without losing that member, so it is not rewritten at all.
     CannotReproduce { name: String, why: SkipReason },
+    /// The rewrite would allocate more than [`MAX_SAVE_BYTES`].
+    ///
+    /// Refused up front, from the sizes in the central directory, rather than
+    /// discovered by being killed part way through: an archive rewrite that
+    /// dies mid-flight is the one case where this program could lose a file the
+    /// user already had.
+    WouldExhaustMemory { projected: u64, limit: u64 },
     /// A row in the list names a member the source archive does not contain.
     ///
     /// Separate from [`Self::CannotReproduce`] because it is not a fact about
@@ -621,6 +646,12 @@ impl fmt::Display for SaveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoSource => f.write_str("this archive was not read from a file"),
+            Self::WouldExhaustMemory { projected, limit } => write!(
+                f,
+                "rewriting this archive needs about {} of memory and this                  program will use up to {}; nothing was changed",
+                guitk::bytes::iec(*projected),
+                guitk::bytes::iec(*limit)
+            ),
             Self::CannotReproduce { name, why } => write!(
                 f,
                 "{name} cannot be rewritten — {why}; nothing was changed, \
@@ -756,8 +787,78 @@ fn dos_datetime_of(meta: &fs::Metadata) -> u32 {
 /// # Errors
 ///
 /// [`SaveError`], and in every case the archive on disk is exactly as it was.
+/// What a rewrite of `model` with `adding` will hold in memory at its peak.
+///
+/// Computed from the central directory, which carries both the compressed and
+/// the uncompressed size of every member, so this is an arithmetic projection
+/// rather than a guess. The four terms are the four things alive at once:
+///
+/// | term | why it is held |
+/// |---|---|
+/// | the archive | `ArchiveSource::bytes`, read whole at open and kept |
+/// | plaintext of every reproduced member | `ZipWriteEntry::data`, all built before any is written |
+/// | the bytes of every added file | already in `PendingAdd::data` by the time we are called |
+/// | the archive being built | the writer's output buffer |
+///
+/// The last is estimated as the *compressed* size of what is reproduced plus
+/// the full size of what is added, which is what a deflate writer will produce
+/// give or take per-member headers. Added files are counted twice on purpose:
+/// once as the input we are holding and once as the output they become.
+///
+/// Directory members contribute nothing: they have no data, which is why they
+/// are skipped in the rewrite loop too.
+fn projected_save_bytes(
+    source: &ArchiveSource,
+    model: &ArchiveModel,
+    adding: &[PendingAdd],
+) -> u64 {
+    let mut total = source.bytes().len() as u64;
+    for entry in &model.entries {
+        let Some(member) = source.member(entry.id) else {
+            continue;
+        };
+        if member.is_dir || adding.iter().any(|add| add.name == member.name) {
+            continue;
+        }
+        total = total
+            .saturating_add(member.uncompressed_size)
+            .saturating_add(member.compressed_size);
+    }
+    for add in adding {
+        // Twice: held as input, and written as output.
+        let len = add.data.len() as u64;
+        total = total.saturating_add(len).saturating_add(len);
+    }
+    total
+}
+
 pub fn save(model: &ArchiveModel, adding: Vec<PendingAdd>) -> Result<SaveReport, SaveError> {
+    save_within(model, adding, MAX_SAVE_BYTES)
+}
+
+/// [`save`], with the memory budget as a parameter.
+///
+/// The budget is a parameter for one reason: so a test can reach the refusal on
+/// the *real* path. Tripping [`MAX_SAVE_BYTES`] honestly would mean building an
+/// archive claiming more than 1.5 GiB of plaintext, which costs 1.5 GiB to
+/// write -- so the alternative was to test the projection arithmetic on its own
+/// and leave nothing at all covering "and `save` acts on it", which is the
+/// shape of bug this crate keeps finding in others (an argument the program
+/// cannot produce is an argument no test result means anything about).
+///
+/// `save` is the only non-test caller and passes the constant.
+fn save_within(
+    model: &ArchiveModel,
+    adding: Vec<PendingAdd>,
+    limit: u64,
+) -> Result<SaveReport, SaveError> {
     let source = model.source.as_ref().ok_or(SaveError::NoSource)?;
+
+    // Before anything is allocated, and before the old archive is touched.
+    let projected = projected_save_bytes(source, model, &adding);
+    if projected > limit {
+        return Err(SaveError::WouldExhaustMemory { projected, limit });
+    }
 
     // The names being added, so an existing member with the same name can be
     // dropped rather than written twice. A ZIP with two members of one name is
@@ -1571,6 +1672,139 @@ mod tests {
             .into_iter()
             .map(|m| m.name)
             .collect()
+    }
+
+    /// A rewrite that would not fit in memory is refused before it starts.
+    ///
+    /// `MAX_ARCHIVE_BYTES` is checked against the file *on disk*, which does
+    /// not bound the rewrite at all: a save additionally holds every member's
+    /// plaintext, and compression ratio is exactly the gap between those two
+    /// numbers. A 500 MB archive of zeroes holds hundreds of gigabytes of
+    /// plaintext, passed the open check, and then exhausted memory during a
+    /// save -- which is the failure the open check exists to turn into a
+    /// message. See known-issues.md ->
+    /// `TD-C-ARCHIVEMANAGER-HOLDS-THE-WHOLE-ARCHIVE-IN-MEMORY`.
+    ///
+    /// The budget is passed in rather than tripped honestly: reaching
+    /// `MAX_SAVE_BYTES` for real needs an archive claiming 1.5 GiB of
+    /// plaintext, which costs 1.5 GiB to write. `save_within` is the body
+    /// `save` runs, so this exercises the real path.
+    #[test]
+    fn a_rewrite_too_big_to_hold_is_refused_and_the_file_is_untouched() {
+        let dir = scratch("save-budget");
+        // Compressible on purpose: the point is that the archive on disk is
+        // small while its plaintext is not, which is the case the on-disk
+        // check cannot see.
+        let model = on_disk(
+            &dir,
+            "big.zip",
+            &[member("zeroes.bin", &b"\0".repeat(64 * 1024))],
+        );
+        let on_disk_len = fs::metadata(&model.path).expect("the archive exists").len();
+        let before = fs::read(&model.path).expect("readable");
+
+        let projected = {
+            let source = model.source.as_ref().expect("a source");
+            projected_save_bytes(source, &model, &[])
+        };
+        assert!(
+            projected > on_disk_len,
+            "the projection ({projected}) must exceed the file on disk \
+             ({on_disk_len}) or it is measuring the wrong thing"
+        );
+
+        // A budget under the projection: the case the constant is meant to
+        // catch, reached without allocating a gigabyte to do it.
+        let err = save_within(&model, Vec::new(), projected - 1)
+            .expect_err("a rewrite over budget must be refused");
+        match err {
+            SaveError::WouldExhaustMemory {
+                projected: p,
+                limit,
+            } => {
+                assert_eq!(p, projected, "the refusal must report what it measured");
+                assert_eq!(limit, projected - 1);
+                // The message names both numbers, because "not enough memory"
+                // without them tells the user nothing they can act on.
+                let text = SaveError::WouldExhaustMemory {
+                    projected: p,
+                    limit,
+                }
+                .to_string();
+                assert!(text.contains("memory"), "unhelpful message: {text}");
+            }
+            other => panic!("wrong refusal: {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read(&model.path).expect("still readable"),
+            before,
+            "a refused rewrite must not have touched the file"
+        );
+
+        // And exactly at the budget it goes through, so the comparison is not
+        // off by one in the direction that refuses work it could do.
+        save_within(&model, Vec::new(), projected).expect("a rewrite within budget proceeds");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The projection counts the four things that are alive at once, and an
+    /// ordinary archive is nowhere near the budget.
+    ///
+    /// The risk on this side is a false refusal: a projection that over-counts
+    /// would refuse rewrites the program can perfectly well do, which is worse
+    /// than the bug it fixes because it happens to everybody rather than to
+    /// someone opening a zip bomb.
+    #[test]
+    fn an_ordinary_archive_is_nowhere_near_the_save_budget() {
+        let dir = scratch("save-budget-ok");
+        let model = on_disk(
+            &dir,
+            "ordinary.zip",
+            &[
+                member("src/main.rs", b"fn main() {}\n"),
+                member("README.md", &b"read me\n".repeat(40)),
+            ],
+        );
+        let source = model.source.as_ref().expect("a source");
+        let projected = projected_save_bytes(source, &model, &[]);
+        assert!(
+            projected < MAX_SAVE_BYTES,
+            "a two-file archive projected {projected}, over the budget"
+        );
+        // It must still be a real measurement rather than zero.
+        assert!(projected > 0, "the projection is not measuring anything");
+
+        save(&model, Vec::new()).expect("an ordinary rewrite is not refused");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A directory member contributes nothing to the projection, because it
+    /// carries no data -- the same reason the rewrite loop skips it.
+    #[test]
+    fn a_directory_member_costs_nothing_in_the_projection() {
+        let dir = scratch("save-budget-dir");
+        let with_dir = on_disk(
+            &dir,
+            "d.zip",
+            &[member("keep/", b""), member("keep/f.txt", b"hello")],
+        );
+        let source = with_dir.source.as_ref().expect("a source");
+        let projected = projected_save_bytes(source, &with_dir, &[]);
+
+        // The only data in the archive is "hello", counted twice (plaintext and
+        // output) on top of the archive itself. A directory adding its name's
+        // worth would show up as a larger number.
+        let archive_len = source.bytes().len() as u64;
+        assert_eq!(
+            projected,
+            archive_len + 5 + 5,
+            "a directory member was charged for data it does not have"
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -5266,6 +5266,59 @@ check_kernel_clippy
 # it maintains a parallel set.  That is why the cold column is not a
 # first-run artifact that goes away, and why the numbers above were taken
 # with clippy running twice *before* check: check still had nothing to reuse.
+#
+# WHY `--all-targets`, AND WHY `--exclude kernel` COMES WITH IT.  Without
+# `--all-targets` cargo builds each crate's lib and bin and nothing else, so
+# this gate never compiled a single `#[cfg(test)]` module -- and `#[cfg(unix)]`
+# is *concentrated* in test code, because production code here is mostly
+# written against `std` while the tests are full of `set_permissions(0o4741)`,
+# `symlink`, `nlink`, `chown` and xattr fixtures that exist on unix and nowhere
+# else.  In `userspace/coreutils` most `#[cfg(unix)]` items in `src/bin/*.rs`
+# are inside `mod tests`.  So the gate compiled the smaller half of the thing it
+# was built for and printed OK.
+#
+# Lane B demonstrated the gap rather than arguing it: the same command with
+# `--all-targets` against `-p coreutils` found four hard compile errors in
+# `userspace/coreutils/src/bin/cp.rs` that had been in the tree for weeks, all
+# four inside `#[cfg(unix)] #[test]` helpers, all four missing imports.  Three
+# were found by eye first and believed to be all of them; the fourth was eighty
+# lines further down under a different name and only the compiler found it.
+#
+# `--exclude kernel` is not a scope reduction, it is what makes `--all-targets`
+# build at all.  `--all-targets` adds each crate's `test` target; a `test`
+# target links the harness, which pulls `std`, which already defines
+# `panic_impl` -- so a `#![no_std]` binary supplying its own `#[panic_handler]`
+# cannot have a `test` target on a hosted triple:
+#
+#     error[E0152]: found duplicate lang item `panic_impl`
+#         --> kernel/src/main.rs:7963:1
+#
+# That is structural, not a lint.  `kernel` is the only crate in the workspace
+# it hits: seven crates define a `#[panic_handler]`, but the other six are the
+# `services/*` binaries, which the workspace's own `exclude` list (root
+# Cargo.toml ~183) already keeps out.  And nothing is lost by excluding it --
+# the kernel is `no_std`, so it has no `cfg(unix)` arms for this gate to check.
+#
+# The failure mode of `--exclude` is the good one: if a second bare-metal
+# binary is ever added *inside* the workspace, this breaks loudly on the next
+# run instead of quietly skipping it.  Naming the hosted crates positively with
+# `-p` would under-cover in silence instead.
+#
+# COST, measured by lane B on 2026-09-03 on this workspace, not extrapolated:
+# 508 s of one-time compilation on a cache that already held every crate's lib
+# and bin, and **zero** new deny-level findings across all three lanes
+# (0 errors, 1,857 warnings, which stay warnings).  Steady state after a
+# one-line fix in the crate with the most test code in the tree is 46 s.  The
+# full `clippy --workspace --exclude kernel --all-targets` pass measured 1,513 s
+# cold, but `check` and `clippy` invalidate each other's fingerprints in a
+# shared target/, so every run of this gate already pays a rebuild; what
+# `--all-targets` adds on top is the test targets, i.e. the 508 s.
+#
+# Taken in both places at once rather than staged through pre-boot.py first,
+# because the risk a staged rollout would have been protecting against -- new
+# denials from three lanes' unseen test code -- was measured at zero, and lane B
+# left the workspace green under this exact command.  See design-decisions.md
+# §904.
 check_cfg_unix() {
     if ! rustup target list --installed 2>/dev/null \
         | grep -qx "x86_64-unknown-linux-gnu"; then
@@ -5281,7 +5334,11 @@ check_cfg_unix() {
     # Same `&& rc=0 || rc=$?` reasoning as check_shellcheck: this file runs
     # under `set -e`, so a bare `if ! cargo ...` is fine but a plain command
     # whose status we want to read is not.
-    "$CARGO" clippy --workspace --target x86_64-unknown-linux-gnu \
+    # `--all-targets --exclude kernel`, requested with measurements in
+    # requests/b-a-the-cfg-unix-gate-skips-every-test-module.md.  See the
+    # WHY --all-targets block above the function.
+    "$CARGO" clippy --workspace --exclude kernel --all-targets \
+        --target x86_64-unknown-linux-gnu \
         --message-format=short > "$log" 2>&1 && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "cfg(unix) OK ($(( $(date +%s) - start ))s, every cfg(unix) arm compiles and lints)."

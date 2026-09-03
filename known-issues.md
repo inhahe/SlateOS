@@ -108692,6 +108692,41 @@ The general point, for the next checker of checkers: **running a gate's own
 cases is not running the gate**, and a wiring audit that cannot tell the two
 apart will certify a deleted check as present.
 
+### Third arm: self-tests nobody runs — one found and fixed, fifteen absent
+
+Measured 2026-09-02, same session. **17 of 32 gates ship a `--self-test`; 13
+were run as one.** Three of the four gaps were lane C gates that nothing runs
+at all, so the ratchet suppresses the finding for unwired gates — restating a
+finding trains the reader to skim it.
+
+The fourth was live: **`check-option-refusal.py` was wired and running while
+its own fixtures had never executed in the blocking path.** It scans
+`kernel/src/kshell.rs`, so it fails the usual silent way — lose the Rust parse
+and it reports no findings, which is spelled exactly like a clean tree. Its
+self-test passed when finally run, so wiring it (`db691d1b0`) was safe; it now
+catches the regression rather than the absence.
+
+**The remaining debt is the fifteen gates with no self-test at all**, i.e. the
+*detector* half untested:
+
+`check-boot-skips` · `check-design-decisions-bands` · `check-evdev-elf-asm` ·
+`check-frame-needles` · `check-gated-selftests` · `check-generated-tables` ·
+`check-libc-shape` · `check-live-counter-reads` · `check-query-status` ·
+`check-self-tests-wired` · `check-selftest-reinit` · `check-usage-status` ·
+`check-user-access-sites` · `check-vfs-permission-gate` · `check-vfs-under-lock`
+
+For each of these the question "does a planted defect actually make it exit
+non-zero?" is **unanswered**. `check-gates-can-refuse.py` proves only that
+*some* non-zero exit is reachable; it says nothing about whether the detector
+fires on a real defect.
+
+Not turned into a ratchet, deliberately. Pinning fifteen entries that all say
+"nobody has written one yet" is a list nobody reads. The version worth having
+is a ratchet on *new* gates — no newly added `check-*.py` may ship without a
+self-test — which stops the debt growing without demanding fifteen retrofits
+first. That is a policy affecting all three lanes' files, so it belongs in a
+request to A and C rather than a unilateral lane-B gate; **not yet filed.**
+
 ---
 ## TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH
 

@@ -63689,6 +63689,122 @@ veto is not.
 
 ---
 
+## §905 — "I could not look" is a third verdict, and a checker that grades a third party is an instrument rather than a gate
+
+**Date:** 2026-09-03. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** The boot test runs about thirty small checking programs before it
+builds anything. Each one answers yes or no, and `run_checker` — the wrapper
+they all go through — treats any other answer as a bug and stops the build, on
+the principle that a checker which did not reach a verdict must not be mistaken
+for one that reached "fine". That was right, but it left several perfectly good
+checkers permanently switched off, because they legitimately cannot answer on
+some machines: one needs a Linux shell that not every developer has installed,
+another grades a file produced by a build step that a fresh checkout has not
+run. Three decisions here. Checkers may now declare, per call site, one exit
+code that means *"I could not look"*, and the build says so loudly and
+continues. A checker that could not reach its instrument must use that code and
+never exit 0 or 1. And two of the four checkers waiting on this turned out not
+to belong in the boot test at all, for a reason that has nothing to do with
+availability: they do not read our code.
+
+The three parts landed as `e7d9573b9` (the channel), `0662772f8` (the exit
+split), `cb29ea5dc` and `5c3a57267` (the classification and the wiring).
+Requested by lane B in
+`requests/c-b-four-of-your-new-shell-gates-are-unwired-and-main-is-red.md`,
+which lists it as the one change five pinned gates were all waiting on.
+
+### The channel is opt-in per call site, not a property of the checker
+
+`run_checker --may-skip=2 <label> <command>` says: *at this call site*, exit 2
+from this checker means it could not look. Any other unexpected code still
+aborts the build.
+
+The alternative was to let the checker declare it — a convention that exit 2
+always means "could not look", enforced nowhere. That is the cheaper design and
+it is wrong here, for a reason this repo has already been bitten by: the
+declaration would live in the file being graded rather than in the file doing
+the grading. A checker that acquires a new exit-2 path — a bare `return 2` from
+some later error branch, added by someone who never read this rule — would
+silently convert an abort into a skip, and a skip reads as *nothing was wrong*.
+Putting the permission at the call site means widening what may be skipped is
+an edit to `boot-test.sh`, where the ratchet and the label-distinctness suite
+can both see it.
+
+The cost is real: five call sites now repeat `--may-skip=2`, and a sixth that
+forgets it will abort the build on a host that should have skipped. That is the
+right failure direction — it stops the build and names the gate, rather than
+passing.
+
+Against the whole idea: a skip is a hole, and holes accumulate. The mitigation
+is that the skip is *loud* — it prints the checker's own last line as the
+reason and appends a row to `CHECKER_SKIPLOG`, so a machine that never builds a
+sysroot is told every single boot which checks are not being made. A silent
+skip would have been strictly worse than the pin it replaced.
+
+### Why the exit code has to be split at the checker too
+
+`bashprobe.py` left via `raise SystemExit("no WSL")` when the Linux shell was
+absent, which Python maps to **exit 1** — the code that means *"I looked and
+found a problem."* On a machine without WSL, four checkers therefore reported
+that our shell quoting disagreed with bash, about a bash they never reached.
+Lane B found this while writing the pin and flagged it as the first thing to
+fix, correctly.
+
+It now has three endings that cannot be confused: 0 or 1 after actually
+comparing, **2** for "I could not look", and an uncaught exception — a
+traceback, not a tidy exit — for the case where the comparison machinery itself
+is broken. The third deserves the ugliest ending on purpose: if the harness is
+wrong then no result it produces means anything, including a clean one, and
+that must not be expressible as a number the caller might handle.
+
+### The classification, which is the part that generalises
+
+Four checkers were pinned as "needs WSL". Once WSL-dependence became wireable,
+the obvious move was to wire all four. Reading their inputs says otherwise, and
+the distinction is not about availability at all:
+
+| | reads | can a change to our tree red it? |
+|---|---|---|
+| `check-shellquote-vs-bash.py` | `kernel/src/shellquote.rs` + bash | yes — **wired** |
+| `check-kshell-rungs-vs-bash.py` | `kernel/src/kshell.rs` + bash | yes — **wired** |
+| `check-kshell-pipeline-vs-bash.py` | a Python table + bash | no — **pinned** |
+| `check-ansic-quoting-vs-bash.py` | a Python table + bash | no — **pinned** |
+
+The bottom two open no `.rs` file. They compare a written-down model of bash
+against real bash, and their own docstring says a disagreement means the model
+is wrong, not bash. Wiring them would add about 23 seconds to every boot to
+guard nothing, and — worse — would be *read* as coverage of our quoting code by
+anyone scanning the gate list.
+
+That is the general rule this entry exists to record: **a program that measures
+a third party is an instrument, and only a program that grades this repository
+is a gate.** They look identical from outside — both live in `scripts/`, both
+exit 0, both print little — which is exactly why the difference has to be
+written down where the list of gates is kept, rather than left to be
+rediscovered. The two instruments stay valuable and stay run by hand: they are
+how bash's answers are learned before those answers are written into kshell's
+own self-test rungs, and the rungs *are* gated.
+
+Against this split: it is a judgement call per checker, and a wrong call is
+invisible — a misfiled instrument is a gate nobody runs. The pins therefore
+carry the unpinning condition explicitly ("wire it if it ever grows an
+assertion against `kernel/src/kshell.rs`"), so the question is re-asked by the
+file itself rather than by memory.
+
+### What is still missing, and is not fixed by any of this
+
+None of the four has a `--self-test`, so nothing proves either of the two now
+wired can still *find* anything. They scan Rust source by regex for literals,
+which means a rename makes them match nothing and report a clean tree — the
+failure this whole family of gates exists to prevent, in the two gates just
+added to the family. Lane B predicted this in the reply cited above and listed
+it as step 3 of four; it is tracked in `known-issues.md` →
+`TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED` and is the immediate next
+piece of work, not a deferral.
+
+---
+
 ## 806. The file chooser stores no size of its own, and lets an explicit scroll leave the selection off screen
 
 **Date:** 2026-09-03

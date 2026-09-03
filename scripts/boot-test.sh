@@ -5076,6 +5076,67 @@ check_kernel_clippy() {
     done
 }
 
+# Pin the teardown shape of the `/proc` self-test tables.
+#
+# Requested by lane B in
+# `requests/b-a-check-selftest-reinit-is-never-run-by-anything.md`, and answered
+# in `requests/a-b-wiring-check-selftest-reinit-and-a-correction-it-runs-nowhere.md`.
+#
+# Lane B's request said this gate ran "only inside scripts/pre-boot.py". It ran
+# nowhere at all -- nothing in `scripts/` on either branch named it. That is
+# worse than an unrun gate, because something was relying on it:
+# `design-decisions.md` §612 states the liability in plain terms ("a future
+# reader may reasonably think diagnostics should not run during boot and remove
+# the `fs::*::self_test()` calls, silently switching 146 /proc tables back off
+# -- with no error and no failing test, because a table that refuses writes and
+# a table with no writers print the same zeros") and names two mitigations
+# against it. The sibling, `check-self-tests-wired.py`, is wired. This one had
+# never executed, so the record claimed two mitigations and the tree had one.
+#
+# Placed here, after every cheap document gate, because it is slow -- ~60-100 s,
+# and essentially all of it is I/O: it opens 805 `.rs` files on a host that
+# costs ~77 ms per file open regardless of cache state (profiled 2026-09-03:
+# 59.2 s of 60.6 s in `read()`, 0.46 s in all the regex work combined). A typo
+# in `design-decisions.md` still fails in under a second, ahead of this.
+check_selftest_reinit() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== self-test reinit check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the selftest-reinit gate against its fixtures ==="
+    if ! run_checker check-selftest-reinit-selftest "$py" -u \
+        "$PROJECT_ROOT/scripts/check-selftest-reinit.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The selftest-reinit gate no longer" >&2
+        echo "agrees with its own fixtures, so its verdict means nothing." >&2
+        exit 1
+    fi
+
+    echo "=== Checking /proc self-test tables are re-opened after clearing ==="
+    if run_checker check-selftest-reinit "$py" -u \
+        "$PROJECT_ROOT/scripts/check-selftest-reinit.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A self_test clears a \`Mutex<Option<_>>\`" >&2
+    echo "table and does not call \`init_defaults()\` afterwards, so the table" >&2
+    echo "stays switched off for the rest of the boot." >&2
+    echo "" >&2
+    echo "This does not fail a test and does not print an error: a /proc table" >&2
+    echo "that refuses writes and one with no writers both print zeros.  That" >&2
+    echo "is why it is a gate and not a test.  See design-decisions.md §612." >&2
+    exit 1
+}
+
+check_selftest_reinit
+
 check_kernel_clippy
 
 # Compile every `#[cfg(unix)]` arm in the workspace, which nothing else does.

@@ -115,8 +115,6 @@ PINNED: dict[str, str] = {
         "lane C (windowed programs); filed to lane C 2026-09-02",
     "check-window-wiring.py":
         "lane C (GUI programs' main); filed to lane C 2026-09-02",
-    "check-selftest-reinit.py":
-        "lane A (kernel/src); filed to lane A 2026-09-02",
     # The four bash oracles.  These are not gates that happen to be unwired --
     # they are unwireable on the boot test's own terms, and their docstrings
     # said so before this list existed.  Each shells out to real bash through

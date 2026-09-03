@@ -22071,7 +22071,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "an escaped `$` inside double quotes does not expand, and keeps its backslash"
         );
         let out = expand_vars_bytes(b"\\$#");
-        assert_eq!(out, b"\\$#".to_vec(), "an escaped `$` unquoted does not expand");
+        assert_eq!(
+            out,
+            b"\\$#".to_vec(),
+            "an escaped `$` unquoted does not expand"
+        );
 
         // Tilde is the one construct double quotes suppress but `$` survives,
         // so it is tested against the same three contexts to prove the two
@@ -22085,7 +22089,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // at `/root` would change the behaviour of everything after it.
         let saved_home = env_get("HOME");
         assert!(env_set("HOME", "/root"), "HOME is not readonly");
-        assert_eq!(expand_vars_bytes(b"~"), b"/root".to_vec(), "bare tilde expands");
+        assert_eq!(
+            expand_vars_bytes(b"~"),
+            b"/root".to_vec(),
+            "bare tilde expands"
+        );
         assert_eq!(
             expand_vars_bytes(b"\"~\""),
             b"\"~\"".to_vec(),
@@ -22137,18 +22145,34 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "a\\\\b",
             "but single quotes have no escapes at all, so both survive"
         );
-        assert_eq!(remove_quotes("'a'\\''b'"), "a'b", "the idiom quote_word emits");
+        assert_eq!(
+            remove_quotes("'a'\\''b'"),
+            "a'b",
+            "the idiom quote_word emits"
+        );
         assert_eq!(remove_quotes("a'b'c"), "abc", "quotes vanish mid-word");
 
         // --- split_words: what is one word. ---------------------------------
-        assert_eq!(split_words("a\\ b"), alloc::vec!["a b"], "an escaped blank does not split");
+        assert_eq!(
+            split_words("a\\ b"),
+            alloc::vec!["a b"],
+            "an escaped blank does not split"
+        );
         assert_eq!(
             split_words("\"a b\" c"),
             alloc::vec!["a b", "c"],
             "a quoted blank does not split"
         );
-        assert_eq!(split_words("a b  c"), alloc::vec!["a", "b", "c"], "runs collapse");
-        assert_eq!(split_words("x'y z'w"), alloc::vec!["xy zw"], "quotes vanish mid-word");
+        assert_eq!(
+            split_words("a b  c"),
+            alloc::vec!["a", "b", "c"],
+            "runs collapse"
+        );
+        assert_eq!(
+            split_words("x'y z'w"),
+            alloc::vec!["xy zw"],
+            "quotes vanish mid-word"
+        );
         assert_eq!(
             split_words("\"a'b\" c"),
             alloc::vec!["a'b", "c"],
@@ -22156,7 +22180,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
 
         // --- expand_braces: quoting suppresses it. --------------------------
-        assert_eq!(expand_braces("x{1,2}y"), "x1y x2y", "prefix and suffix distribute");
+        assert_eq!(
+            expand_braces("x{1,2}y"),
+            "x1y x2y",
+            "prefix and suffix distribute"
+        );
         assert_eq!(
             expand_braces("\"{a,b}\""),
             "\"{a,b}\"",
@@ -22173,7 +22201,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "echo 'a   b'",
             "interior spacing survives, which is why this stage does not rejoin words"
         );
-        assert_eq!(expand_braces("{a}"), "{a}", "no comma is not a brace expansion");
+        assert_eq!(
+            expand_braces("{a}"),
+            "{a}",
+            "no comma is not a brace expansion"
+        );
     }
 
     // --- 116: tab completion reads the same words as the rest of the shell.
@@ -22192,7 +22224,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         const SPACED: &str = "/tmp/zz_tc two.txt";
         let made_uniq = crate::fs::Vfs::write_file(UNIQ, b"x").is_ok();
         let made_spaced = crate::fs::Vfs::write_file(SPACED, b"x").is_ok();
-        assert!(made_uniq && made_spaced, "could not build the rung-116 fixture");
+        assert!(
+            made_uniq && made_spaced,
+            "could not build the rung-116 fixture"
+        );
 
         // Baseline: an unquoted path completes as it always did.
         let (suffix, _) = tab_complete("cat /tmp/zz_tc_uni", 18);
@@ -22207,7 +22242,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "a quoted path completes, and the quote is closed before the space"
         );
         let (suffix, _) = tab_complete("cat '/tmp/zz_tc_uni", 19);
-        assert_eq!(suffix, "q.txt' ", "the closing quote matches the one opened");
+        assert_eq!(
+            suffix, "q.txt' ",
+            "the closing quote matches the one opened"
+        );
 
         // The decisive case: a space *inside* the quotes. The old scan took
         // the word to start after the last space of any kind, so it searched
@@ -22221,7 +22259,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // An escaped space is the same word by the same rule, and the suffix
         // is unquoted because the user's quoting style is theirs, not ours.
         let (suffix, _) = tab_complete("cat /tmp/zz_tc\\ t", 17);
-        assert_eq!(suffix, "wo.txt ", "an escaped space does not start a new word");
+        assert_eq!(
+            suffix, "wo.txt ",
+            "an escaped space does not start a new word"
+        );
 
         // A quoted blank does not end the *first* word either, so this is
         // still command completion and finds no command by that name.

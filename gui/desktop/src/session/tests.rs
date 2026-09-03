@@ -805,7 +805,7 @@ fn a_start_menu_row_comes_out_as_a_program_to_start() {
     let launched = session.take_launches();
     assert_eq!(launched.len(), 1, "expected one program, got {launched:?}");
     assert!(
-        launched[0].starts_with('/'),
+        launched[0].starts_with("/"),
         "a launch should be a path, not {:?}",
         launched[0]
     );
@@ -2245,7 +2245,10 @@ fn a_command_confirmed_with_enter_reaches_the_launcher() {
         .send_input(&[InputEvent::new(panel, key(Key::Enter))]);
     session.pump().expect("pump");
 
-    assert_eq!(session.take_launches(), ["terminal"]);
+    assert_eq!(
+        session.take_launches(),
+        [std::path::PathBuf::from("terminal")]
+    );
     assert!(
         !session.shell().run_dialog.is_visible(),
         "the box stayed up after starting the command"

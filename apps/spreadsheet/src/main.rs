@@ -18,8 +18,9 @@ use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::frame::Rect;
 #[allow(unused_imports)]
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textfind;
@@ -71,7 +72,21 @@ const RESIZE_HANDLE_SIZE: f32 = 5.0;
 const AUTOFILL_HANDLE_SIZE: f32 = 7.0;
 const UNDO_STACK_LIMIT: usize = 200;
 const SCROLLBAR_WIDTH: f32 = 14.0;
+/// The shortest a thumb may be drawn, so a very long sheet still leaves
+/// something big enough to aim at.
+const SCROLLBAR_MIN_THUMB: f32 = 20.0;
+/// The gap between the thumb and the walls of its gutter, across the bar.
+const SCROLLBAR_THUMB_INSET: f32 = 2.0;
 const SHEET_TAB_WIDTH: f32 = 90.0;
+/// The blank strip left of the first tab.
+const SHEET_TAB_MARGIN: f32 = 4.0;
+/// The blank strip between one tab and the next.
+const SHEET_TAB_GAP: f32 = 2.0;
+/// The tabs are drawn a little below the top of their strip, so the strip's
+/// own colour shows above them as a lip.
+const SHEET_TAB_TOP_INSET: f32 = 2.0;
+/// The "+" button that follows the last tab is narrower than a tab.
+const SHEET_ADD_BUTTON_WIDTH: f32 = 28.0;
 
 /// Move a zero-based index by a signed delta, staying inside `0..limit`.
 ///
@@ -2249,6 +2264,13 @@ pub enum InteractionMode {
         anchor_range: CellRange,
         current_end: CellAddr,
     },
+    /// User is dragging a scrollbar thumb.
+    ///
+    /// `grab` is how far into the thumb the pointer took hold, kept so the
+    /// thumb tracks the pointer instead of jumping to centre itself on the
+    /// first move — the difference is a visible lurch of up to the thumb's own
+    /// length on every drag.
+    ScrollDrag { vertical: bool, grab: f32 },
     /// Find/replace dialog is active.
     FindReplace,
 }
@@ -2262,6 +2284,118 @@ pub enum InteractionMode {
 pub enum SortDirection {
     Ascending,
     Descending,
+}
+
+// ============================================================================
+// Scrollbar geometry
+// ============================================================================
+
+/// Where one scrollbar's track and thumb are drawn, and the map between the
+/// thumb's position and the scroll offset it stands for.
+///
+/// One law, two callers, for the same reason `col_screen_x` exists: the
+/// renderer draws these rectangles and the pointer code hit-tests and drags
+/// *these* rectangles. A drag that re-derived the ratio would be a second
+/// derivation of one number, and the thumb would come to rest somewhere other
+/// than where the pointer left it — the divergence being small at the top of a
+/// sheet and growing with the offset, which is that bug's signature.
+///
+/// [`Self::offset_at`] is the exact inverse of the thumb placement in
+/// [`Self::new`], so dragging the thumb to a position and reading the offset
+/// back gives the position again.
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollbarGeometry {
+    /// The gutter. Always drawn, even when nothing can scroll, so the grid's
+    /// edge does not move as content grows.
+    pub track: Rect,
+    /// The thumb, or `None` when the content fits and there is nothing to
+    /// scroll — which is also what makes a press in the gutter a no-op then.
+    pub thumb: Option<Rect>,
+    /// Along-axis coordinate of the track's leading edge.
+    start: f32,
+    /// How far the thumb's leading edge may travel: the track's length less
+    /// the thumb's own. Zero when the thumb fills the track.
+    travel: f32,
+    /// The offset reached with the thumb at the far end of `travel`.
+    max_scroll: f32,
+}
+
+impl ScrollbarGeometry {
+    /// Lay out one axis.
+    ///
+    /// `vertical` picks which of the rectangle's dimensions is the bar's
+    /// length and which its thickness; the arithmetic is otherwise identical
+    /// for the two axes, so it is written once.
+    ///
+    /// `max_scroll` is passed in rather than recomputed from a content extent:
+    /// it is the same number `clamp_scroll` bounds the offset with, so a thumb
+    /// at the end of its travel and an offset that cannot go further are the
+    /// same fact by construction.
+    fn new(track: Rect, vertical: bool, max_scroll: f32, offset: f32) -> Self {
+        let (start, length) = if vertical {
+            (track.y, track.h)
+        } else {
+            (track.x, track.w)
+        };
+        // Nothing to scroll, or no room to draw: no thumb, and `offset_at`
+        // answers 0 for every position rather than dividing by zero.
+        //
+        // Finiteness is tested separately because a NaN compares false to
+        // everything: `max_scroll <= 0.0` alone would wave one through, and
+        // it would then reach the division below and poison the thumb's
+        // position into a rect that is drawn nowhere and hit nowhere.
+        if !max_scroll.is_finite() || max_scroll <= 0.0 || length <= 0.0 {
+            return Self {
+                track,
+                thumb: None,
+                start,
+                travel: 0.0,
+                max_scroll: 0.0,
+            };
+        }
+        let content = length + max_scroll;
+        // Clamped at both ends: `max` keeps a huge sheet's thumb grabbable,
+        // and `min` stops that floor from drawing a thumb longer than the
+        // track it sits in when the window is very short.
+        let thumb_len = (length / content * length)
+            .max(SCROLLBAR_MIN_THUMB)
+            .min(length);
+        let travel = (length - thumb_len).max(0.0);
+        let lead = start + (offset / max_scroll).clamp(0.0, 1.0) * travel;
+        let thumb = if vertical {
+            Rect {
+                x: track.x + SCROLLBAR_THUMB_INSET,
+                y: lead,
+                w: (track.w - SCROLLBAR_THUMB_INSET * 2.0).max(0.0),
+                h: thumb_len,
+            }
+        } else {
+            Rect {
+                x: lead,
+                y: track.y + SCROLLBAR_THUMB_INSET,
+                w: thumb_len,
+                h: (track.h - SCROLLBAR_THUMB_INSET * 2.0).max(0.0),
+            }
+        };
+        Self {
+            track,
+            thumb: Some(thumb),
+            start,
+            travel,
+            max_scroll,
+        }
+    }
+
+    /// The scroll offset meant by a thumb whose leading edge is at `lead`.
+    ///
+    /// Clamped to the track, so dragging the pointer far past either end of
+    /// the bar parks the sheet at that end instead of running away.
+    fn offset_at(&self, lead: f32) -> f32 {
+        if self.travel <= 0.0 {
+            return 0.0;
+        }
+        ((lead - self.start) / self.travel).clamp(0.0, 1.0) * self.max_scroll
+    }
 }
 
 // ============================================================================
@@ -3073,13 +3207,59 @@ impl SpreadsheetApp {
         y
     }
 
-    /// Calculate the grid viewport height.
-    pub fn grid_height(&self) -> f32 {
+    /// The top of the sheet-tab strip, in window coordinates.
+    ///
+    /// One law, two callers — the renderer and the click test. They each
+    /// derived it, and they disagreed: the click test subtracted
+    /// [`STATUS_BAR_HEIGHT`] unconditionally while the renderer subtracted it
+    /// only when the status bar was shown, so with the bar hidden every tab's
+    /// hit box sat a status bar's height above the tab drawn for it.
+    pub fn tab_top(&self) -> f32 {
         let mut bottom = self.window_height;
         if self.show_status_bar {
             bottom -= STATUS_BAR_HEIGHT;
         }
-        bottom -= SHEET_TAB_HEIGHT;
+        bottom - SHEET_TAB_HEIGHT
+    }
+
+    /// The rect each sheet tab is drawn in, left to right, followed by the
+    /// "+" button's — which is why this yields one more rect than there are
+    /// sheets.
+    ///
+    /// One walk, two callers. The renderer laid the tabs out from
+    /// [`SHEET_TAB_MARGIN`] in strides of `SHEET_TAB_WIDTH + SHEET_TAB_GAP`,
+    /// while the click test sliced the strip from `x = 0` in strides of
+    /// `SHEET_TAB_WIDTH` alone. That is two derivations of one number, so
+    /// they drifted: the boxes were 4px out at the first tab and a further
+    /// 2px out at each tab after it. The rightmost 4px of the first tab
+    /// already selected the second, and the further right you clicked the
+    /// wider that wrong strip got — until, on the "+" button, it swallowed
+    /// the button whole.
+    pub fn sheet_tab_rects(&self) -> impl Iterator<Item = Rect> + '_ {
+        let y = self.tab_top() + SHEET_TAB_TOP_INSET;
+        let h = SHEET_TAB_HEIGHT - SHEET_TAB_TOP_INSET;
+        let sheets = self.sheets.len();
+        (0..=sheets).scan(SHEET_TAB_MARGIN, move |x, index| {
+            let w = if index < sheets {
+                SHEET_TAB_WIDTH
+            } else {
+                SHEET_ADD_BUTTON_WIDTH
+            };
+            let rect = Rect { x: *x, y, w, h };
+            *x += w + SHEET_TAB_GAP;
+            Some(rect)
+        })
+    }
+
+    /// Calculate the grid viewport height.
+    ///
+    /// The horizontal scrollbar gets its own band here, exactly as the
+    /// vertical one does in [`grid_width`](Self::grid_width). Without it the
+    /// grid ran down to the tab strip and the bar was drawn over the top half
+    /// of the tabs — and since the tabs are hit-tested first, a press on the
+    /// bar picked a sheet instead.
+    pub fn grid_height(&self) -> f32 {
+        let bottom = self.tab_top() - SCROLLBAR_WIDTH;
         let top = self.grid_top();
         (bottom - top).max(0.0)
     }
@@ -3168,6 +3348,34 @@ impl SpreadsheetApp {
     /// The largest vertical offset that still shows content.
     pub fn max_scroll_y(&self) -> f32 {
         (self.active_sheet().row_y_offset(MAX_ROWS) - self.grid_height()).max(0.0)
+    }
+
+    // ── The scrollbars ───────────────────────────────────────────────────
+    //
+    // Built from the two `max_scroll_*` laws above rather than from a content
+    // extent of their own, so the thumb reaches the end of its travel at
+    // exactly the offset `clamp_scroll` stops at.
+
+    /// The vertical scrollbar, down the right-hand edge of the grid.
+    pub fn vertical_scrollbar(&self) -> ScrollbarGeometry {
+        let track = Rect {
+            x: self.window_width - SCROLLBAR_WIDTH,
+            y: self.grid_top(),
+            w: SCROLLBAR_WIDTH,
+            h: self.grid_height(),
+        };
+        ScrollbarGeometry::new(track, true, self.max_scroll_y(), self.scroll().y)
+    }
+
+    /// The horizontal scrollbar, along the bottom of the grid.
+    pub fn horizontal_scrollbar(&self) -> ScrollbarGeometry {
+        let track = Rect {
+            x: ROW_HEADER_WIDTH,
+            y: self.grid_bottom(),
+            w: self.grid_width(),
+            h: SCROLLBAR_WIDTH,
+        };
+        ScrollbarGeometry::new(track, false, self.max_scroll_x(), self.scroll().x)
     }
 
     /// Move the grid by a pixel delta, bounded at both ends of both axes.
@@ -3452,23 +3660,37 @@ impl SpreadsheetApp {
 
     /// Handle left mouse click at a position.
     fn handle_left_click(&mut self, x: f32, y: f32, _ctrl_held: bool) -> EventResult {
-        // Check for sheet tab clicks
-        let tab_y = self.window_height - SHEET_TAB_HEIGHT - STATUS_BAR_HEIGHT;
+        // Check for sheet tab clicks. The whole strip is claimed, so a click
+        // in the blank between two tabs stops here rather than falling
+        // through to whatever the grid would have made of it; only a click
+        // that lands inside a drawn tab actually selects one.
+        let tab_y = self.tab_top();
         if y >= tab_y && y < tab_y + SHEET_TAB_HEIGHT {
-            let tab_x = x;
-            let tab_idx = (tab_x / SHEET_TAB_WIDTH) as usize;
-            if tab_idx < self.sheets.len() {
-                // Nothing to reset afterwards: the selection and the offset
-                // both live on the sheet, so this returns it exactly as it was
-                // left. This used to clear both — carrying the *old* sheet's
-                // offset in and then snapping the selection to A1 to
-                // compensate, which lost your place on both sheets at once.
-                self.sheets.set_active(tab_idx);
-            } else if tab_idx == self.sheets.len() {
-                // "+" button to add sheet
-                self.add_sheet();
+            let sheets = self.sheets.len();
+            // Bound to a `let` so the iterator — which borrows `self` — is
+            // dropped before the body needs `self` mutably.
+            let hit = self.sheet_tab_rects().position(|rect| rect.contains(x, y));
+            if let Some(index) = hit {
+                if index < sheets {
+                    // Nothing to reset afterwards: the selection and the offset
+                    // both live on the sheet, so this returns it exactly as it was
+                    // left. This used to clear both — carrying the *old* sheet's
+                    // offset in and then snapping the selection to A1 to
+                    // compensate, which lost your place on both sheets at once.
+                    self.sheets.set_active(index);
+                } else {
+                    // The one past the last sheet is the "+" button.
+                    self.add_sheet();
+                }
             }
             return EventResult::Consumed;
+        }
+
+        // The scrollbars, before anything that could claim their gutters. They
+        // sit outside the grid on two edges the tests below reason about only
+        // by exclusion, so testing them first keeps that reasoning local.
+        if let Some(result) = self.press_scrollbar(x, y) {
+            return result;
         }
 
         // Check column header resize.
@@ -3564,6 +3786,74 @@ impl SpreadsheetApp {
         EventResult::Consumed
     }
 
+    /// A press on either scrollbar; `None` if the point is on neither.
+    ///
+    /// On the thumb it starts a drag. Anywhere else in the gutter it pages
+    /// towards the click, which is what every scrollbar does and what makes a
+    /// press below the thumb mean "further down" rather than "jump here".
+    fn press_scrollbar(&mut self, x: f32, y: f32) -> Option<EventResult> {
+        for vertical in [true, false] {
+            let bar = if vertical {
+                self.vertical_scrollbar()
+            } else {
+                self.horizontal_scrollbar()
+            };
+            if !bar.track.contains(x, y) {
+                continue;
+            }
+            let along = if vertical { y } else { x };
+            match bar.thumb {
+                Some(thumb) if thumb.contains(x, y) => {
+                    let lead = if vertical { thumb.y } else { thumb.x };
+                    self.mode = InteractionMode::ScrollDrag {
+                        vertical,
+                        grab: along - lead,
+                    };
+                }
+                // No thumb means nothing can scroll, so the page below is a
+                // no-op after clamping -- correct without a special case.
+                thumb => {
+                    let ahead = thumb.is_none_or(|t| along >= if vertical { t.y } else { t.x });
+                    let page = if vertical {
+                        self.grid_height()
+                    } else {
+                        self.grid_width()
+                    };
+                    let step = if ahead { page } else { -page };
+                    if vertical {
+                        self.scroll_by(0.0, step);
+                    } else {
+                        self.scroll_by(step, 0.0);
+                    }
+                }
+            }
+            return Some(EventResult::Consumed);
+        }
+        None
+    }
+
+    /// Follow the pointer during a scrollbar drag.
+    ///
+    /// The offset is computed from the bar's own map and then applied through
+    /// [`Self::scroll_by`], so the drag inherits its non-finite screen and its
+    /// clamp rather than restating either.
+    fn drag_scrollbar(&mut self, vertical: bool, grab: f32, x: f32, y: f32) -> EventResult {
+        let bar = if vertical {
+            self.vertical_scrollbar()
+        } else {
+            self.horizontal_scrollbar()
+        };
+        let along = if vertical { y } else { x };
+        let target = bar.offset_at(along - grab);
+        let scroll = self.scroll();
+        if vertical {
+            self.scroll_by(0.0, target - scroll.y);
+        } else {
+            self.scroll_by(target - scroll.x, 0.0);
+        }
+        EventResult::Consumed
+    }
+
     /// Handle left mouse button release.
     fn handle_left_release(&mut self, _x: f32, _y: f32) -> EventResult {
         match &self.mode {
@@ -3631,6 +3921,9 @@ impl SpreadsheetApp {
     /// Handle mouse move.
     fn handle_mouse_move(&mut self, x: f32, y: f32) -> EventResult {
         match self.mode.clone() {
+            InteractionMode::ScrollDrag { vertical, grab } => {
+                self.drag_scrollbar(vertical, grab, x, y)
+            }
             InteractionMode::RangeSelect { anchor } => {
                 let Some((col, row)) = self.cell_nearest_position(x, y) else {
                     return EventResult::Consumed;
@@ -3831,14 +4124,7 @@ impl SpreadsheetApp {
         self.render_grid(&mut cmds, y_offset);
 
         // Sheet tabs
-        let tab_y = self.window_height
-            - SHEET_TAB_HEIGHT
-            - if self.show_status_bar {
-                STATUS_BAR_HEIGHT
-            } else {
-                0.0
-            };
-        self.render_sheet_tabs(&mut cmds, tab_y);
+        self.render_sheet_tabs(&mut cmds);
 
         // Status bar
         if self.show_status_bar {
@@ -4727,19 +5013,24 @@ impl SpreadsheetApp {
     }
 
     /// Render sheet tabs at the bottom.
-    fn render_sheet_tabs(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+    ///
+    /// Every rect here comes from [`sheet_tab_rects`](Self::sheet_tab_rects),
+    /// which is the same walk the click test makes — so a tab cannot be drawn
+    /// anywhere the click test would not find it.
+    fn render_sheet_tabs(&self, cmds: &mut Vec<RenderCommand>) {
         // Tab bar background
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
-            y,
+            y: self.tab_top(),
             width: self.window_width,
             height: SHEET_TAB_HEIGHT,
             color: COLOR_CRUST,
             corner_radii: CornerRadii::ZERO,
         });
 
-        let mut tx = 4.0;
+        let mut rects = self.sheet_tab_rects();
         for (idx, sheet) in self.sheets.iter().enumerate() {
+            let Some(rect) = rects.next() else { break };
             let is_active = idx == self.sheets.active_index();
             let bg = if is_active { COLOR_BASE } else { COLOR_MANTLE };
             let fg = if is_active {
@@ -4755,17 +5046,17 @@ impl SpreadsheetApp {
             };
 
             cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: y + 2.0,
-                width: SHEET_TAB_WIDTH,
-                height: SHEET_TAB_HEIGHT - 2.0,
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
                 color: bg,
                 corner_radii: radii,
             });
 
             cmds.push(RenderCommand::Text {
-                x: tx + 8.0,
-                y: y + 8.0,
+                x: rect.x + 8.0,
+                y: rect.y + 6.0,
                 text: sheet.name.clone(),
                 font_size: SMALL_FONT,
                 color: fg,
@@ -4777,22 +5068,21 @@ impl SpreadsheetApp {
                 max_width: Some(SHEET_TAB_WIDTH - 16.0),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            tx += SHEET_TAB_WIDTH + 2.0;
         }
 
-        // "+" button for new sheet
+        // "+" button for new sheet — the one rect past the last sheet.
+        let Some(plus) = rects.next() else { return };
         cmds.push(RenderCommand::FillRect {
-            x: tx,
-            y: y + 2.0,
-            width: 28.0,
-            height: SHEET_TAB_HEIGHT - 2.0,
+            x: plus.x,
+            y: plus.y,
+            width: plus.w,
+            height: plus.h,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: tx + 8.0,
-            y: y + 7.0,
+            x: plus.x + 8.0,
+            y: plus.y + 5.0,
             text: "+".to_string(),
             font_size: FONT_SIZE,
             color: COLOR_SUBTEXT1,
@@ -4847,6 +5137,10 @@ impl SpreadsheetApp {
             InteractionMode::ColResize { .. } | InteractionMode::RowResize { .. } => "Resize",
             InteractionMode::AutoFill { .. } => "Fill",
             InteractionMode::FindReplace => "Find",
+            // Not "Ready": the sheet is mid-gesture, and a mode line that read
+            // Ready while the thumb was being dragged would be the one place
+            // the status bar lied about what the pointer was doing.
+            InteractionMode::ScrollDrag { .. } => "Scroll",
         };
         cmds.push(RenderCommand::Text {
             x: 8.0,
@@ -4874,68 +5168,30 @@ impl SpreadsheetApp {
     }
 
     /// Render scrollbars.
+    /// Draw both scrollbars from the geometry the pointer code also uses.
+    ///
+    /// Nothing here computes a position: every rectangle comes out of
+    /// [`ScrollbarGeometry`], which is the whole point — see its doc comment.
     fn render_scrollbars(&self, cmds: &mut Vec<RenderCommand>) {
-        let sheet = self.active_sheet();
-        let grid_top = self.grid_top();
-        let grid_h = self.grid_height();
-        let total_content_h = sheet.row_y_offset(MAX_ROWS);
-        let total_content_w = sheet.col_x_offset(MAX_COLS);
-
-        // Vertical scrollbar track
-        let vbar_x = self.window_width - SCROLLBAR_WIDTH;
-        cmds.push(RenderCommand::FillRect {
-            x: vbar_x,
-            y: grid_top,
-            width: SCROLLBAR_WIDTH,
-            height: grid_h,
-            color: COLOR_MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Vertical scrollbar thumb
-        if total_content_h > grid_h {
-            let thumb_ratio = grid_h / total_content_h;
-            let thumb_h = (thumb_ratio * grid_h).max(20.0);
-            let scroll_ratio = self.scroll().y / (total_content_h - grid_h);
-            let thumb_y = grid_top + scroll_ratio * (grid_h - thumb_h);
-
+        for bar in [self.vertical_scrollbar(), self.horizontal_scrollbar()] {
             cmds.push(RenderCommand::FillRect {
-                x: vbar_x + 2.0,
-                y: thumb_y,
-                width: SCROLLBAR_WIDTH - 4.0,
-                height: thumb_h,
-                color: COLOR_SURFACE1,
-                corner_radii: CornerRadii::all(4.0),
+                x: bar.track.x,
+                y: bar.track.y,
+                width: bar.track.w,
+                height: bar.track.h,
+                color: COLOR_MANTLE,
+                corner_radii: CornerRadii::ZERO,
             });
-        }
-
-        // Horizontal scrollbar track
-        let hbar_y = grid_top + grid_h;
-        let hbar_w = self.window_width - SCROLLBAR_WIDTH - ROW_HEADER_WIDTH;
-        cmds.push(RenderCommand::FillRect {
-            x: ROW_HEADER_WIDTH,
-            y: hbar_y,
-            width: hbar_w,
-            height: SCROLLBAR_WIDTH,
-            color: COLOR_MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Horizontal scrollbar thumb
-        if total_content_w > hbar_w {
-            let thumb_ratio = hbar_w / total_content_w;
-            let thumb_w = (thumb_ratio * hbar_w).max(20.0);
-            let scroll_ratio = self.scroll().x / (total_content_w - hbar_w);
-            let thumb_x = ROW_HEADER_WIDTH + scroll_ratio * (hbar_w - thumb_w);
-
-            cmds.push(RenderCommand::FillRect {
-                x: thumb_x,
-                y: hbar_y + 2.0,
-                width: thumb_w,
-                height: SCROLLBAR_WIDTH - 4.0,
-                color: COLOR_SURFACE1,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            if let Some(thumb) = bar.thumb {
+                cmds.push(RenderCommand::FillRect {
+                    x: thumb.x,
+                    y: thumb.y,
+                    width: thumb.w,
+                    height: thumb.h,
+                    color: COLOR_SURFACE1,
+                    corner_radii: CornerRadii::all(4.0),
+                });
+            }
         }
     }
 
@@ -7482,6 +7738,409 @@ mod tests {
         }
         assert_eq!(app.scroll().x, 0.0);
         assert_eq!(app.scroll().y, 0.0);
+    }
+
+    // ── The scrollbars ───────────────────────────────────────────────────
+
+    fn press_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn move_to(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        })
+    }
+
+    fn release_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        })
+    }
+
+    /// The thumb is where the renderer says it is, and grabbing it moves the
+    /// sheet. This is the whole of the bug: both bars tracked the offset
+    /// correctly and neither answered the mouse.
+    #[test]
+    fn dragging_the_vertical_thumb_scrolls_the_sheet() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let thumb = app
+            .vertical_scrollbar()
+            .thumb
+            .expect("a full sheet overflows the window, so there is a thumb");
+        let (x, y) = thumb.centre();
+        assert_eq!(app.handle_event(&press_at(x, y)), EventResult::Consumed);
+        app.handle_event(&move_to(x, y + 100.0));
+        assert!(
+            app.scroll().y > 0.0,
+            "the thumb was dragged down and the sheet did not move"
+        );
+        app.handle_event(&release_at(x, y + 100.0));
+        assert!(matches!(app.mode, InteractionMode::Normal));
+    }
+
+    #[test]
+    fn dragging_the_horizontal_thumb_scrolls_the_sheet() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let thumb = app
+            .horizontal_scrollbar()
+            .thumb
+            .expect("a full sheet overflows the window, so there is a thumb");
+        let (x, y) = thumb.centre();
+        app.handle_event(&press_at(x, y));
+        app.handle_event(&move_to(x + 120.0, y));
+        assert!(app.scroll().x > 0.0);
+        assert_eq!(app.scroll().y, 0.0, "the drag moved the other axis too");
+    }
+
+    /// The thumb must not jump so that its centre lands under the pointer:
+    /// grabbing it near one end and moving by zero should move nothing.
+    #[test]
+    fn grabbing_a_thumb_off_centre_does_not_make_it_jump() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.scroll_by(0.0, 300.0);
+        let before = app.scroll().y;
+        let thumb = app.vertical_scrollbar().thumb.expect("thumb");
+        // Two pixels in from the thumb's top edge: as off-centre as a real
+        // grab gets.
+        let (x, _) = thumb.centre();
+        app.handle_event(&press_at(x, thumb.y + 2.0));
+        app.handle_event(&move_to(x, thumb.y + 2.0));
+        assert!(
+            (app.scroll().y - before).abs() < 0.5,
+            "a grab that did not move still scrolled from {before} to {}",
+            app.scroll().y
+        );
+    }
+
+    /// Dragging is the renderer's own map run backwards, so the thumb must
+    /// come to rest under the pointer rather than drifting away from it.
+    #[test]
+    fn the_thumb_follows_the_pointer_it_was_dragged_with() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let thumb = app.vertical_scrollbar().thumb.expect("thumb");
+        let (x, y) = thumb.centre();
+        let grab = y - thumb.y;
+        app.handle_event(&press_at(x, y));
+        for target in [200.0_f32, 350.0, 500.0, 260.0] {
+            app.handle_event(&move_to(x, target));
+            let drawn = app.vertical_scrollbar().thumb.expect("thumb").y;
+            assert!(
+                (drawn - (target - grab)).abs() < 1.0,
+                "pointer at {target} left the thumb drawn at {drawn}, wanted {}",
+                target - grab
+            );
+        }
+    }
+
+    /// Past the end of the track the sheet parks at the end rather than
+    /// running away: `offset_at` clamps, and `scroll_by` clamps again.
+    #[test]
+    fn dragging_far_past_the_track_stops_at_the_end() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let thumb = app.vertical_scrollbar().thumb.expect("thumb");
+        let (x, y) = thumb.centre();
+        app.handle_event(&press_at(x, y));
+        app.handle_event(&move_to(x, 1e6));
+        assert_eq!(app.scroll().y, app.max_scroll_y());
+        app.handle_event(&move_to(x, -1e6));
+        assert_eq!(app.scroll().y, 0.0);
+    }
+
+    /// A press in the gutter pages towards the click -- the behaviour every
+    /// scrollbar has -- rather than jumping the thumb to the pointer.
+    #[test]
+    fn pressing_the_track_pages_towards_the_press() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let bar = app.vertical_scrollbar();
+        let thumb = bar.thumb.expect("thumb");
+        // Below the thumb, still inside the track.
+        let below = f32::midpoint(thumb.bottom(), bar.track.bottom());
+        app.handle_event(&press_at(bar.track.centre().0, below));
+        let after_down = app.scroll().y;
+        assert!(
+            after_down > 0.0,
+            "a press below the thumb did not page down"
+        );
+        assert!(
+            matches!(app.mode, InteractionMode::Normal),
+            "paging started a drag"
+        );
+
+        // And back up: the thumb has moved, so re-read it.
+        let bar = app.vertical_scrollbar();
+        let thumb = bar.thumb.expect("thumb");
+        let above = f32::midpoint(bar.track.y, thumb.y);
+        app.handle_event(&press_at(bar.track.centre().0, above));
+        assert!(
+            app.scroll().y < after_down,
+            "a press above the thumb did not page up"
+        );
+    }
+
+    /// The bars sit outside the grid, so a press on one must not also be read
+    /// as a cell -- which is what would happen if the gutter test came after
+    /// the cell test rather than before it.
+    #[test]
+    fn pressing_a_scrollbar_does_not_move_the_selection() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.handle_event(&press_at(600.0, 300.0));
+        let selected = app.selection().active;
+
+        let bar = app.vertical_scrollbar();
+        let thumb = bar.thumb.expect("thumb");
+        app.handle_event(&press_at(thumb.centre().0, thumb.centre().1));
+        assert_eq!(
+            app.selection().active,
+            selected,
+            "the vertical bar selected"
+        );
+
+        let hbar = app.horizontal_scrollbar();
+        let hthumb = hbar.thumb.expect("thumb");
+        app.handle_event(&press_at(hthumb.centre().0, hthumb.centre().1));
+        assert_eq!(
+            app.selection().active,
+            selected,
+            "the horizontal bar selected"
+        );
+    }
+
+    /// A sheet that fits has nothing to scroll, so there is no thumb to grab
+    /// and a press in the gutter must not move anything.
+    #[test]
+    fn a_bar_with_nothing_to_scroll_has_no_thumb_and_does_nothing() {
+        // Wide and tall enough that MAX_COLS/MAX_ROWS still overflow it is
+        // impossible, so shrink the sheet's own extent instead by asking the
+        // bar directly with a zero range.
+        let track = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 14.0,
+            h: 400.0,
+        };
+        let bar = ScrollbarGeometry::new(track, true, 0.0, 0.0);
+        assert!(bar.thumb.is_none(), "a bar that cannot scroll drew a thumb");
+        assert_eq!(
+            bar.offset_at(200.0),
+            0.0,
+            "it mapped a position to an offset"
+        );
+    }
+
+    /// A NaN compares false to everything, so a `max_scroll <= 0.0` guard on
+    /// its own lets one straight through to the division that places the
+    /// thumb — and a NaN rect is drawn nowhere and hit nowhere, which reads
+    /// to the user as a scrollbar that simply vanished.
+    #[test]
+    fn a_nonfinite_range_leaves_the_bar_with_no_thumb() {
+        let track = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 14.0,
+            h: 400.0,
+        };
+        for max_scroll in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0] {
+            let bar = ScrollbarGeometry::new(track, true, max_scroll, 0.0);
+            assert!(
+                bar.thumb.is_none(),
+                "max_scroll={max_scroll} produced a thumb"
+            );
+            assert_eq!(bar.offset_at(200.0), 0.0);
+        }
+    }
+
+    /// The floor that keeps a thumb grabbable must not push it out of its own
+    /// track when the window is very short.
+    #[test]
+    fn the_thumb_never_outgrows_its_track() {
+        let track = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 14.0,
+            h: 8.0,
+        };
+        let bar = ScrollbarGeometry::new(track, true, 5000.0, 0.0);
+        let thumb = bar.thumb.expect("thumb");
+        assert!(
+            thumb.h <= track.h,
+            "a {}px thumb was drawn in an {}px track",
+            thumb.h,
+            track.h
+        );
+    }
+
+    /// `offset_at` is the inverse of the placement in `new`, which is what
+    /// lets the renderer and the drag share one map. Checked across the range
+    /// rather than at one point, since a wrong scale agrees at zero.
+    #[test]
+    fn the_thumb_placement_and_the_offset_map_are_inverses() {
+        let track = Rect {
+            x: 0.0,
+            y: 100.0,
+            w: 14.0,
+            h: 400.0,
+        };
+        let max_scroll = 3000.0_f32;
+        for step in 0..=10u8 {
+            let offset = max_scroll * f32::from(step) / 10.0;
+            let bar = ScrollbarGeometry::new(track, true, max_scroll, offset);
+            let lead = bar.thumb.expect("thumb").y;
+            let round_trip = bar.offset_at(lead);
+            assert!(
+                (round_trip - offset).abs() < 1.0,
+                "offset {offset} placed the thumb at {lead}, which read back as {round_trip}"
+            );
+        }
+    }
+
+    /// The horizontal bar used to be drawn straight over the top half of the
+    /// sheet-tab strip, because `grid_height` reserved no band for it. It was
+    /// unreachable twice over: the tabs are drawn after it, so they painted on
+    /// top, and the tabs are hit-tested first, so a press on the bar picked a
+    /// sheet.
+    #[test]
+    fn the_horizontal_scrollbar_does_not_overlap_the_sheet_tabs() {
+        for (w, h) in [(1280.0, 800.0), (640.0, 480.0), (400.0, 300.0)] {
+            let app = SpreadsheetApp::new(w, h);
+            let bar = app.horizontal_scrollbar();
+            assert!(
+                bar.track.bottom() <= app.tab_top() + 0.01,
+                "at {w}x{h} the bar ends at {} but the tabs start at {}",
+                bar.track.bottom(),
+                app.tab_top()
+            );
+        }
+    }
+
+    /// Where the renderer actually put the sheet tabs, read back out of its
+    /// own command list.
+    ///
+    /// The two tests below mean "click the tab where the user can see it", and
+    /// the only honest source for that is the renderer. Asking
+    /// [`SpreadsheetApp::sheet_tab_rects`] instead would make the click and
+    /// the drawing agree by construction, and the tests could not fail even
+    /// with the click test wired back to a second, disagreeing layout — which
+    /// is exactly the bug they exist to pin.
+    fn drawn_tab_rects(app: &SpreadsheetApp) -> Vec<Rect> {
+        app.render()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*width - SHEET_TAB_WIDTH).abs() < 0.01
+                    && (*height - (SHEET_TAB_HEIGHT - SHEET_TAB_TOP_INSET)).abs() < 0.01 =>
+                {
+                    Some(Rect {
+                        x: *x,
+                        y: *y,
+                        w: *width,
+                        h: *height,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// With the status bar hidden the tabs were drawn at the very bottom of
+    /// the window but hit-tested a status bar's height above that, so the
+    /// tabs on screen were dead and a band of the grid selected them.
+    #[test]
+    fn a_tab_can_be_clicked_with_the_status_bar_hidden() {
+        for show_status_bar in [true, false] {
+            let mut app = SpreadsheetApp::new(1280.0, 800.0);
+            app.show_status_bar = show_status_bar;
+            app.add_sheet();
+            app.sheets.set_active(0);
+            let drawn = drawn_tab_rects(&app);
+            assert_eq!(drawn.len(), 2, "two sheets should draw two tabs");
+            let (x, y) = drawn[1].centre();
+            assert!(
+                y < app.window_height,
+                "the tabs were drawn off the bottom of the window"
+            );
+            app.handle_event(&press_at(x, y));
+            assert_eq!(
+                app.sheets.active_index(),
+                1,
+                "with show_status_bar={show_status_bar}, clicking the second \
+                 tab where it is drawn selected sheet {}",
+                app.sheets.active_index()
+            );
+        }
+    }
+
+    /// The tabs were laid out from x=4 in strides of 92 and hit-tested from
+    /// x=0 in strides of 90 — two derivations of one number, 4px apart at the
+    /// first tab and a further 2px apart at every tab after it. Clicking each
+    /// tab's own right edge is what catches that: the drift is largest there,
+    /// and it grows with the index, so a single tab would not have shown it.
+    #[test]
+    fn every_tab_selects_itself_along_its_whole_width() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        for _ in 0..4 {
+            app.add_sheet();
+        }
+        let drawn = drawn_tab_rects(&app);
+        assert_eq!(drawn.len(), app.sheets.len(), "a sheet went undrawn");
+
+        for (index, rect) in drawn.iter().enumerate() {
+            for x in [rect.x + 1.0, rect.centre().0, rect.right() - 1.0] {
+                app.sheets.set_active(0);
+                app.handle_event(&press_at(x, rect.centre().1));
+                assert_eq!(
+                    app.sheets.active_index(),
+                    index,
+                    "x={x} is drawn inside tab {index} but selected sheet {}",
+                    app.sheets.active_index()
+                );
+            }
+        }
+
+        // And the "+" button, which the old slicing missed entirely: by then
+        // the two layouts were 4 + 2*5 = 14px apart, wider than half the
+        // button. It is the only rect of its own width in the strip.
+        let last = drawn.last().copied().expect("at least one tab");
+        let plus = app
+            .render()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*width - SHEET_ADD_BUTTON_WIDTH).abs() < 0.01
+                    && (*y - last.y).abs() < 0.01 =>
+                {
+                    Some(Rect {
+                        x: *x,
+                        y: *y,
+                        w: *width,
+                        h: *height,
+                    })
+                }
+                _ => None,
+            })
+            .expect("the + button is drawn");
+        assert!(plus.x > last.right(), "the + is drawn before the last tab");
+        let before = app.sheets.len();
+        app.handle_event(&press_at(plus.centre().0, plus.centre().1));
+        assert_eq!(app.sheets.len(), before + 1, "the + button did not add");
     }
 
     /// Growing the window can leave the offset past the end of the sheet, which

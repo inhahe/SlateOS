@@ -68,6 +68,7 @@
 //! things a point belongs to, and that comparison is only meaningful while they
 //! are all in one space.
 
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use appearance::Palette;
@@ -207,7 +208,7 @@ pub struct ShellSession<T: Transport> {
     /// Whether the chrome needs repainting before the next block.
     dirty: bool,
     running: bool,
-    launches: Vec<String>,
+    launches: Vec<PathBuf>,
     /// Everything currently moving. Empty means no wake-up is registered and
     /// the loop parks with no bound at all, which is what keeps an idle desktop
     /// idle.
@@ -424,7 +425,12 @@ impl<T: Transport> ShellSession<T> {
     /// the window manager. So the path comes out here for whoever does own
     /// process creation. See `known-issues.md`
     /// `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`.
-    pub fn take_launches(&mut self) -> Vec<String> {
+    ///
+    /// A [`PathBuf`] and not a `String`, because the name of a program is a
+    /// filesystem path and our paths are byte strings — a browsed executable
+    /// whose name has no UTF-8 spelling must reach the process server as the
+    /// bytes that name it, not as a lossy rendering that names nothing.
+    pub fn take_launches(&mut self) -> Vec<PathBuf> {
         core::mem::take(&mut self.launches)
     }
 
@@ -648,12 +654,53 @@ impl<T: Transport> ShellSession<T> {
         Ok(())
     }
 
+    /// Give the Run box's file chooser a listing of whatever directory it is
+    /// showing, if it is showing one it has not been given.
+    ///
+    /// This is the filesystem half of the split described on
+    /// `DesktopShell::run_browser_listed`: the shell holds the chooser and
+    /// knows what directory it is in, and the session does the reading. Keeping
+    /// the read out here is what lets the shell's several thousand tests run
+    /// with no filesystem at all, and is the same arrangement the wallpaper
+    /// uses — the manager names a picture, `refresh_wallpaper_image` reads it.
+    ///
+    /// One listing per paint is enough, and is not a limit in practice: a
+    /// navigation marks the shell dirty, a dirty shell paints, and the paint
+    /// comes through here. Answering repeatedly in a loop would be answering a
+    /// question the user has not asked yet.
+    ///
+    /// An unreadable directory yields an empty listing rather than an error —
+    /// see `guitk::dialog::list_directory`. A user who wandered into a folder
+    /// they cannot read has not broken anything, and a modal error over a modal
+    /// chooser would be two dialogs deep for a normal thing to find.
+    fn refresh_run_browser(&mut self) {
+        let Some(path) = self
+            .shell
+            .run_browser_wants()
+            .map(std::path::Path::to_path_buf)
+        else {
+            return;
+        };
+        let entries = guitk::dialog::list_directory(&path);
+        self.shell.set_run_browser_entries(entries);
+        // The listing changed what the chooser draws, and nothing else in this
+        // paint knows that: the event that caused the navigation was handled
+        // before the read happened.
+        self.dirty = true;
+    }
+
     /// Paint the taskbar, and the menus if any are open.
     ///
     /// # Errors
     ///
     /// As [`EventLoop::submit`] and [`oswindow::WindowHandle::set_visible`].
     pub fn paint_chrome(&mut self) -> Result<(), Error<T>> {
+        // Before the picture, the contents the picture is of — the same
+        // ordering, and for the same reason, as `paint_background`'s upload of
+        // the wallpaper's pixels. The shell reads no files, so a chooser it has
+        // put up is showing an empty directory until somebody lists it, and
+        // that somebody is here.
+        self.refresh_run_browser();
         let bar = self.shell.render_taskbar();
         self.events
             .submit(self.panel.window, &self.panel.localize(&bar))?;
@@ -709,6 +756,14 @@ impl<T: Transport> ShellSession<T> {
                 // opening it dismisses the popups — so this states the invariant
                 // rather than resolving a case that arises.
                 self.shell.render_run_dialog(),
+                // Over even the Run box, and this one *is* a case that arises
+                // rather than an invariant: the chooser is raised from the box
+                // and the box stays up underneath it, so that cancelling
+                // returns the user to the command line they had typed. The
+                // input routing agrees — `handle_mouse_inner` and
+                // `handle_hotkey_inner` both offer the chooser every event
+                // before the box sees one.
+                self.shell.render_run_browser(),
             ]
             .into_iter()
             .flatten()

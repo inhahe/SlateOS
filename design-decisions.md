@@ -51666,6 +51666,90 @@ tests `an_access_point_that_speaks_eapol_version_one_or_three_still_verifies`,
 `padding_past_the_declared_body_is_not_hashed`, with the `remic` and
 `m3_after_editing` helpers, in the same file.
 
+## 805. The archive manager refuses a save whole rather than writing what it can, and undoes a refused edit from memory rather than from the file
+
+**Date:** 2026-09-02
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** the Archive Manager can now change a ZIP file — Add puts a file in,
+Delete takes members out. Both work by writing a *new* archive containing
+everything that should still be there, and putting it in the old one's place.
+That raises a question the reading half never had to answer: what should happen
+when one of the members that should still be there cannot be reproduced? The
+decision is that the whole operation is refused and the file is left exactly as
+it was, even though this means one unreadable member makes the archive
+un-editable. And when a refusal has to put back rows the user already saw
+disappear, the rows come from a copy kept in memory, not from re-reading the
+file.
+
+### The first decision: refuse whole, don't write what you can
+
+There is no in-place edit of a ZIP. Removing a member means writing a new
+archive without it, so every member that stays has to be decompressed out of the
+old file and compressed back into the new one. A member that will not come back
+out — it is encrypted and this build has no decryption, or it fails its own CRC
+check — cannot be put into the new archive.
+
+| | Write what can be written | Refuse the whole save |
+|---|---|---|
+| *What changes:* | Delete succeeds; the encrypted member is silently gone from the file afterwards | Delete reports "cannot be rewritten — it is encrypted…; nothing was changed", and the file is untouched |
+| Cost when it fires | the user loses a file they never asked to delete, inside an archive they still believe is intact | the user cannot edit this archive at all until they extract it and rebuild it elsewhere |
+| When they notice | possibly never | immediately |
+
+The second column's cost is real and it is not small: an archive with one
+encrypted member becomes read-only in this program. It was chosen anyway,
+because the first column's cost is *unbounded and silent*. A partial success in
+a rewrite is not a partial success; it is data loss reported as completion. The
+one thing a user cannot recover from is not knowing it happened.
+
+A "skip it and warn" middle option was rejected for the same reason. A warning
+on the status line is a line of text that scrolls away, attached to an operation
+that already succeeded — and the file is already rewritten by the time it is
+read.
+
+### The second decision: undo from memory, not from the file
+
+Delete removes the rows from the list first and then saves. When the save is
+refused, the rows have to come back, or the window describes an archive that
+still contains them and the user closes the program believing a deletion
+happened.
+
+The obvious way to put them back is to re-read the archive from disk — it is
+guaranteed unchanged, and re-reading is what the *success* path does anyway.
+That was the first implementation and it is wrong, for a reason that only shows
+up in exactly the case it is needed: **the reasons a write fails are largely the
+reasons a read fails.** A removed drive, a file deleted underneath the program, a
+permissions change — each fails the rewrite and then fails the recovery read too,
+and `open_path` keeps the previous archive on a failed read, which is the
+*edited* list. The recovery would silently do nothing, in the one situation it
+exists for.
+
+So `AppState::save` takes the pre-edit entry list as an argument and restores it
+on refusal. A restore from memory has no failure mode. On success the file *is*
+re-read, because there the re-read is not recovery — it is the only way to learn
+the new sizes, ratios and member ids, all of which the rewrite changed.
+
+The same reasoning gives the success path its own honest failure message: if the
+write succeeded and the re-read then failed, the status line says both ("Saved …
+— but it could not be read back, so this list is out of date. Re-open it"),
+because "Saved" alone describes the file correctly and the window wrongly.
+
+### What was not decided here
+
+**Immediate save vs. a Save button.** Add and Delete write the file at once,
+matching 7-Zip and WinZip. This is not really a tradeoff — a deferred model
+would need a dirty-state indicator, a close-confirmation prompt and a way to
+discard, none of which exist — but it is recorded because it is the thing a
+reader would otherwise assume was overlooked rather than chosen.
+
+**Where it is:** `apps/archivemanager/src/backend.rs` — `save`, `SaveError`
+(every variant of which leaves the file untouched), `replace_file` (write beside,
+rename over); `apps/archivemanager/src/main.rs` — `AppState::save`'s `undo`
+parameter, `ArchiveModel::set_entries`, `open_path`'s new `bool` return, and the
+`can_write` arm of `toolbar_enabled` that disables both write buttons when the
+open model has no bytes behind it.
+
 ## 630. The shellcheck gate stops the build on a finding but waves it through when the tool is missing
 
 **Date:** 2026-08-29
@@ -62909,3 +62993,349 @@ means an AP built from an independent implementation, which is a much larger
 piece of work and should be weighed against simply testing against real
 hardware or against `hostapd` under QEMU, either of which removes the
 circularity outright rather than trading it for a second unverified encoder.
+
+## 806. The file chooser stores no size of its own, and lets an explicit scroll leave the selection off screen
+
+**Date:** 2026-09-03
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** making `guitk::dialog::FileDialog` clickable also forced it to
+scroll, since a list you can click but cannot scroll still cannot reach most of
+a directory. Two choices inside that work had a real case on both sides. The
+first: the widget does *not* remember how big it is, so every method that needs
+to know is handed the width and height — which is why three applications had to
+change a function signature they were otherwise not touching. The second: the
+list follows the selection when a *key* moves it, but the mouse wheel and the
+scrollbar are allowed to scroll the selection right off the screen and leave it
+there.
+
+### The first decision: the widget is told its size, it does not remember it
+
+`render(&self, width, height)` takes the size and `&self`, so it cannot write
+anything back. If the widget also kept a `size` field, there would be two
+answers on file to "how big is this dialog" — the one the renderer was just
+handed, and the one the widget remembers from some earlier frame — and nothing
+would keep them equal. A window resized between two frames would leave the
+stale one behind, and the scrolling arithmetic reads that size to decide how
+many rows fit.
+
+| | Store the size at render time | Pass the size to every method that needs it |
+|---|---|---|
+| *What changes:* | `handle_event(key)` keeps its old one-argument shape; after a resize the first click or keystroke can scroll to the wrong row | `handle_event(key, height)` — every caller has to say how tall it drew the dialog |
+| Cost | a divergence that only appears after a resize, i.e. the case nobody tests | three call sites in two applications had to be edited, and every future host must pass a size it already knows |
+| Failure mode | silent and wrong | a compile error |
+
+This is the same class of bug as recomputing a hit box in the caller, which
+`C-NETMANAGER-CLICKED-ROWS-THAT-WERE-NOT-ON-SCREEN` records: two copies of one
+fact, and the bug lives in whichever copy you are not reading. The toolkit
+already settled that argument once for geometry; a stored size is the same
+argument about a smaller number. The cost — an extra parameter — is paid at
+compile time by a caller that has the number in hand anyway.
+
+Against it: a widget that cannot answer "how tall am I" is slightly awkward to
+build tooling around, and the parameter is a wart on an otherwise tidy
+signature. Both are real; neither is a wrong answer at runtime.
+
+### The second decision: the scroll follows the keyboard, not the selection
+
+The obvious implementation of "keep the selected row visible" is to enforce it
+in `render`: before drawing, scroll so the selection is on screen. That is
+wrong, and not subtly — it makes the wheel useless. Every notch the user
+scrolls is undone by the very next frame, because the selection has not moved
+and render puts the window back on top of it. A scrollbar drawn under that rule
+would be draggable and immovable at once.
+
+So reveal is *stateful*: `move_selection` scrolls to bring the new selection
+into view, and nothing else does. The wheel, a track click and a thumb drag
+change the offset and leave the selection wherever it was.
+
+| | Reveal at render time | Reveal only when a key moves the selection |
+|---|---|---|
+| *What changes:* | the wheel appears to do nothing on a list with a selection | the user can scroll away from the highlighted row and see no highlight at all |
+| Cost | the mouse cannot scroll, which is the whole point of the change | Enter/Open acts on a row that may be off screen |
+
+The second cost is the one to weigh, and it is what every file manager and text
+editor already does — scroll away from the cursor and the cursor stays put.
+Confirming still opens the selected file, which is the row the user last
+*chose*, not the row that happens to be under the scroll. The alternative
+reading — that Open should act on nothing when the selection is off screen — is
+worse: it makes a working command fail for a reason the user cannot see.
+
+`the_wheel_may_scroll_away_from_the_selection` and
+`keyboard_selection_scrolls_the_list_to_follow_it` pin the two halves against
+each other, so neither can be "fixed" into the other without a failure.
+
+### Reversing either
+
+The first is mechanical to reverse — add the field, drop the parameters — and
+should only be done if some caller genuinely cannot know the size it drew at,
+which none does today. The second is a behaviour change a user would notice; if
+it is ever reversed, the reversal must not be "reveal in `render`", but a
+scrollbar-aware reveal that distinguishes a scroll the user asked for from one
+the widget imposed.
+
+## 807. A scrollbar is one geometry object shared by the renderer and the drag, and paging beats jump-to-click
+
+**Date:** 2026-09-03
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** The spreadsheet drew scrollbars that could not be dragged. Making
+them work needs the program to answer two questions -- "where do I draw the
+thumb?" and "where did the user just drag it to?" -- which are the same
+question run in opposite directions. I made one object answer both, rather
+than writing the answer out twice. Separately, I chose what a click on the
+empty part of the bar does: it moves the view one screenful towards the click,
+which is what Windows, macOS and every browser do, rather than teleporting the
+view to that spot.
+
+### Decision 1: one geometry object, not two derivations
+
+`ScrollbarGeometry::new(track, vertical, max_scroll, offset)` computes the
+thumb's rect, and `ScrollbarGeometry::offset_at(lead)` maps a thumb position
+back to a scroll offset. `render_scrollbars` uses the first; `drag_scrollbar`
+uses the second. Neither computes a ratio of its own.
+
+| | One object (chosen) | A ratio in each place |
+|---|---|---|
+| Renderer and drag agree | By construction | Only while both are edited together |
+| Cost of a layout change | One function | Two, and the second is easy to miss |
+| How a divergence shows up | It cannot | Thumb drifts from the pointer, error zero at the top and growing downward |
+| Testable as a law | Yes -- round-trip `offset -> lead -> offset` | Only end-to-end, at whatever points a test happens to sample |
+
+The alternative is not a straw man: it is what the file already did in three
+other places, and all three were wrong. This same task uncovered a horizontal
+scrollbar drawn over the sheet tabs, a tab strip whose hit boxes sat a status
+bar's height above the tabs, and a tab layout hit-tested at a different stride
+than it was drawn at. Every one was two derivations of a number that should
+have had one, and every one was invisible at zero and grew with the offset.
+That is the signature, and it is why the round-trip test checks eleven points
+across the range rather than one: a wrong scale still agrees at zero.
+
+### Decision 2: a press in the gutter pages, it does not jump
+
+A press on the track outside the thumb scrolls one viewport towards the press
+and starts no drag.
+
+| | Page towards the press (chosen) | Jump the thumb to the pointer |
+|---|---|---|
+| *What changes:* | The view moves one screenful per click, so you can read what you pass | The view lands wherever you clicked, skipping everything between |
+| Matches | Windows, macOS, GTK, every browser | macOS with a non-default setting; some touch UIs |
+| Misclick cost | One screenful, one click to undo | Anywhere in the document, and the place you were is gone |
+| Fine positioning | Repeat clicks, or drag the thumb | Immediate |
+
+Paging wins on familiarity and on the cost of being wrong. A user who wants
+the jump can drag the thumb there, which is one gesture; a user who wanted a
+page and got a jump has lost their place. The one real argument for jumping --
+reaching a distant part of a long sheet quickly -- is already served better by
+Ctrl+End and by the name box.
+
+### Reversing either
+
+Decision 1 should not be reversed; if a future scrollbar needs geometry this
+object cannot express, widen the object rather than letting a caller compute
+its own. Decision 2 is a user-visible behaviour and a plausible thing to make
+configurable later; it lives entirely in the non-thumb arm of
+`press_scrollbar`, which is the only place that would have to change.
+
+## 808. A path the chooser hands back is bytes, split only at `/`, and a save name it filled in keeps a copy of the bytes beside the text
+
+**Date:** 2026-09-03
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** a filename on SlateOS is a string of bytes, not text — every byte
+but `/` and NUL is allowed, so plenty of legal filenames cannot be written down
+in a `String` at all. The file chooser used to store them as `String`s anyway,
+which meant a name it could not read was quietly replaced with question-mark
+characters and the file the user picked was no longer the file that got opened.
+Fixing that raised two questions with real arguments on both sides: what to use
+to cut a path into a directory and a filename, and what to do about the Save
+box, where the name genuinely *is* text because the user types into it.
+
+### Decision 1 — cut paths with our own byte code, not with `std::path`
+
+Rust's `Path::parent` and `Path::join` are the obvious tools and they were
+rejected. The whole test suite runs on a Windows *host*, and on Windows those
+functions also treat `\` as a separator. `\` is a perfectly legal character in
+a SlateOS filename, so `Path::parent("/docs/a\b.txt")` answers `/docs/a` on the
+host and `/docs` on the target — the tests would pin the wrong behaviour and
+pass.
+
+| | `std::path` | hand-written byte split |
+|---|---|---|
+| *What changes:* a file named `a\b.txt` | its directory is reported as `a` | its directory is reported correctly |
+| Amount of code | none | ~30 lines, three functions |
+| `unsafe` | none | three `from_encoded_bytes_unchecked` calls |
+| Agreement between host tests and target | none — they differ | exact |
+
+The `unsafe` is the price and it is a narrow one: every cut is made at an ASCII
+`/`, which cannot occur inside a multi-byte sequence in any encoding `OsStr`
+uses, so both halves of the cut are always valid. Each call carries a `SAFETY:`
+comment saying exactly that. `PathBuf` is still the public type — only the
+*splitting* is ours.
+
+`apps/diskimager` keeps its own `parent_directory`, which deliberately splits on
+both separators, because it is fed paths a *host* handed the program; that is a
+different job and its own comment says so.
+
+### Decision 2 — the Save box remembers the bytes it was filled with
+
+The Save box's text field has to be a `String`: the user edits it a character at
+a time. But clicking a listed file to overwrite it fills that field from the
+listing, and a name with no UTF-8 spelling would come back out as a *different*
+name — creating a new file beside the one the user pointed at rather than
+replacing it.
+
+| Option | *What changes* |
+|---|---|
+| Leave it lossy | overwriting a file with an unusual name silently creates a second file next to it |
+| Make the field an `OsString` | the text editing code (insert, backspace, cursor) has to work on bytes it cannot index safely |
+| **Keep a second copy of the exact bytes** (chosen) | overwrite hits the clicked file; typing anything at all falls back to the typed text |
+
+The chosen shape is `filename_exact: Option<OsString>`, set when the field is
+filled from a listing and cleared by `edited_filename()` on the first keystroke
+that actually changes the text. Clearing it on edit is not a detail: kept past
+an edit, it would overwrite the clicked file regardless of what the user then
+typed — a worse failure than the one being fixed, because it ignores an explicit
+instruction rather than mangling an implicit one.
+
+The cost is a second field that has to be invalidated in every place the text
+can change. There are two such places — the backspace arm and the
+typed-character arm of the key handler — both go through the one
+`edited_filename()` helper, and
+`typing_in_the_name_field_drops_the_remembered_bytes` drives a real keystroke
+through each of them and fails if either forgets. (The typed-character arm
+invalidates only when the text actually changed: most keys that reach it — a
+bare Shift, an unhandled function key — type nothing, and dropping the exact
+name on one of those would turn a harmless keypress into a silently different
+save target.)
+
+### Reversing either
+
+Decision 1 should not be reversed while the tests run on a Windows host; if they
+ever move to the target, `std::path` becomes correct there and the byte helpers
+could go. Decision 2 is contained: deleting `filename_exact` and its two setters
+restores the old behaviour, and the named test above says what is lost.
+
+---
+
+## 809. The Run box's file chooser is handed its directory listing from outside the shell, does not close when clicked past, and checks its remembered path instead of forgetting it
+
+**Date:** 2026-09-03
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** the Run box (press Super+R, type a program's name, press Enter) has
+a **Browse...** button that until now did nothing. Making it work means putting a
+file chooser on the screen, and a file chooser needs to know what files are in a
+directory — which means *reading a disk*. The desktop shell has never read a disk
+in its life, and that turns out to be worth protecting. Three choices came out of
+wiring it up: who reads the directory, what a click outside the chooser should
+do, and how the chooser's answer survives the trip back into a text box that can
+only hold text.
+
+### Decision 1 — the session reads the directory; the shell only says which one
+
+`DesktopShell` performs no filesystem I/O at all. The only `std::fs` call in the
+whole of `gui/desktop/src` outside tests is the wallpaper decode, and it lives in
+`ShellSession`, not the shell. That is why all ~3034 of the shell's tests run
+offline with no fixture directory, no temp files and no cleanup — a property
+`gui/desktop/Cargo.toml` calls out in a comment.
+
+| Option | *What changes* |
+|---|---|
+| `DesktopShell` calls `list_directory` itself | one fewer method pair; shell tests now touch the developer's real disk |
+| **Shell reports the directory, session reads it** (chosen) | the shell stays pure; two methods and one field of plumbing |
+
+The second option was not chosen only for tidiness. On a Windows host,
+`read_dir("/")` **succeeds** — `/` resolves to the current drive's root — so a
+shell unit test that opened the chooser would have quietly listed whatever is on
+`D:`, and passed or failed depending on the machine. A test that reads the
+developer's disk by accident is worse than one that cannot read a disk at all,
+because it looks like it is testing the chooser.
+
+The shape copies the wallpaper, which had already solved the same problem:
+
+| | wallpaper | Run box chooser |
+|---|---|---|
+| shell states a need | `WallpaperManager` names an image id + path | `run_browser_wants() -> Option<&Path>` |
+| session satisfies it | `refresh_wallpaper_image`, first thing in `paint_background` | `refresh_run_browser`, first thing in `paint_chrome` |
+| answer returns | image upload | `set_run_browser_entries(Vec<DirEntry>)` |
+
+A sub-choice inside it: `run_browser_listed: Option<PathBuf>` records **what was
+last delivered**, and `run_browser_wants` compares it against the chooser's
+current directory. The alternative — a `needs_listing: bool` set whenever the
+directory changes — is one byte instead of a path, but it has to be *set* by
+every code path that can navigate: double-clicking a folder, the `^` button,
+typing a path, and whatever the chooser grows next. Derived state cannot be
+forgotten by a path that does not know it exists. The cost is a `PathBuf` per
+open chooser and a comparison per frame, which is nothing next to the listing it
+guards.
+
+The same split leaves room for a directory that is not local — a network or
+package-store listing would be a change in `ShellSession` alone.
+
+### Decision 2 — a press outside the chooser does nothing
+
+The Run box itself is dismissed by a press outside it. The chooser on top of it
+is not, and the asymmetry is deliberate.
+
+| Option | *What changes* |
+|---|---|
+| Outside press dismisses (matching the Run box) | a stray click while reading a long listing throws away however deep you had navigated |
+| **Outside press is swallowed and ignored** (chosen) | the chooser stays put; Escape and its Cancel button are the ways out |
+
+What is being protected is different in the two cases. Dismissing the Run box
+costs the user a line of typing they can retype. Dismissing the chooser costs
+them a *navigation* — several directories deep, reached by reading listings —
+and there is no way to get it back but to do it again. The press is still
+consumed rather than passed through, so nothing underneath acts on a click the
+user aimed at a window that was in the way.
+
+Modality is otherwise total: `handle_hotkey_inner` and `handle_mouse_inner` both
+test the chooser before the Run box, so while it is up every key and every click
+belongs to it. `dismiss_popups` closes it *after* draining the Run box's pending
+events, which is the ordering that stops a Browse pending at dismissal from
+leaving a chooser standing over a box that is already gone.
+
+### Decision 3 — the remembered path is validated when used, not cleared when the text changes
+
+The command field is a `String` because the user types into it. A chosen path
+may have no UTF-8 spelling, so `RunDialog` keeps `command_exact: Option<PathBuf>`
+beside the text. §808 Decision 2 solved the identical problem in the chooser's
+Save field by **clearing** the remembered bytes on the first keystroke that
+changed the text. This one does the opposite, and the reason is arithmetic:
+
+| | chooser's Save field | Run box's command field |
+|---|---|---|
+| places the text can change | 2 (backspace, typed character), both via one helper | 10 — cut, paste, backspace, delete, typed character, clear, three history-recall sites, autocomplete accept |
+| *What changes* if one is missed | — | the box starts a file the user is no longer pointing at |
+
+With two sites funnelled through one helper, clearing is safe and a test can
+drive both. With ten spread across three subsystems — and history and
+autocomplete each free to grow more — "every writer must remember" is a rule
+that will eventually be broken by a writer added later, and the failure is
+silent and points at the wrong file.
+
+So `execute_current` and `browse_start` both use `command_exact` only while
+`path.as_os_str().to_string_lossy().trim()` still equals the field. Nothing has
+to be remembered; the check is at the one place the value is believed. The cost
+is a lossy re-render per use (a short string, twice per Run-box interaction) and
+one genuine false positive: if the user types, by hand, the exact `�`-containing
+rendering of a path they had browsed to, they get the browsed path rather than
+the literal one. That is a name they cannot type, spelled to match one they did
+not choose, resolving in favour of the file they actually pointed at.
+
+### Reversing any of these
+
+Decision 1 is the structural one and should not be reversed — the offline test
+suite depends on it and the Windows `read_dir("/")` trap is still there.
+Decision 2 is two lines in `handle_mouse_inner`, and
+`a_press_outside_the_chooser_neither_closes_it_nor_reaches_the_desktop` is the
+test that would have to be rewritten to say the opposite. Decision 3 can become §808's shape at any
+time by clearing `command_exact` in all ten writers;
+`choosing_a_name_that_is_not_utf8_starts_that_exact_file` fails if a writer is
+missed only when it is the one the test drives, which is the argument against
+doing it.

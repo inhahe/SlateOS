@@ -20,12 +20,49 @@
 //!     .with_filter("Text files", &["*.txt"])
 //!     .with_filename("untitled.txt");
 //! ```
+//!
+//! # Driving it
+//!
+//! Forward keys to [`FileDialog::handle_event`] and pointer events to
+//! [`FileDialog::handle_mouse`]; both answer with a [`DialogAction`]. Forward
+//! *every* pointer event while the dialog is up, including ones landing outside
+//! its edges — it swallows those deliberately, and that is what makes it modal.
+//!
+//! The dialog does no I/O of its own: it shows whatever listing it was handed,
+//! so a [`DialogAction::NavigatedTo`] is a *request* for a fresh one, answered
+//! with [`FileDialog::set_entries`]. Leaving one unanswered puts the previous
+//! directory's files on screen under the new directory's name.
+//!
+//! ## The dialog stores no size
+//!
+//! [`render`](FileDialog::render) is *given* a width and height and cannot
+//! write anything back, so a size kept on the widget would be a second answer
+//! to how big the dialog is, free to disagree with the one it was last drawn
+//! at. It keeps none — which is why the two handlers take the size too. Pass
+//! them the size of the most recent `render`, or clicks will be tested against
+//! a layout the user is not looking at.
+//!
+//! ## Hit-testing
+//!
+//! [`FileDialog::frame`] is the single walk that both draws the dialog and
+//! records where each control landed, as a [`Frame<DialogTarget>`](crate::frame::Frame);
+//! `render` is a thin wrapper over it. Hosts that only draw need nothing new,
+//! and hosts that want to name a control themselves — a test, usually — can ask
+//! the frame where it is rather than recomputing it. Recomputing row geometry
+//! outside this module is the one thing not to do: it is a second copy of the
+//! layout, and the bug then lives in whichever copy you are not reading.
 
 use crate::color::Color;
 use crate::date::Date;
-use crate::event::{Key, KeyEvent};
+use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crate::frame::{Frame, Rect};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
+use crate::scroll_window;
 use crate::style::CornerRadii;
+use crate::wheel;
+use core::ops::Range;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 pub use tzrules::Tz;
 
 // --- Catppuccin Mocha palette ---
@@ -63,6 +100,16 @@ const FONT_SIZE_SMALL: f32 = 11.0;
 const BUTTON_WIDTH: f32 = 80.0;
 const BUTTON_HEIGHT: f32 = 30.0;
 const CORNER_RADIUS: f32 = 4.0;
+/// Width of the file list's scrollbar, when the list is long enough to have one.
+const SCROLLBAR_WIDTH: f32 = 10.0;
+/// Shortest the scrollbar thumb may get.
+///
+/// A thumb sized strictly in proportion to the visible fraction of a very long
+/// listing shrinks to a couple of pixels, which is both invisible and too small
+/// to grab. Every real scrollbar imposes a floor for the same reason; the cost
+/// is that the thumb's *size* stops being a faithful proportion once the list is
+/// long, which nobody reads it for, while its *position* stays exact.
+const MIN_THUMB_HEIGHT: f32 = 20.0;
 
 // --- Public types ---
 
@@ -78,10 +125,17 @@ pub enum DialogMode {
 }
 
 /// One entry in the current directory listing.
+///
+/// The name is an [`OsString`] rather than a `String` because SlateOS
+/// filesystems accept every byte but `/` and NUL, so a name is not text — it is
+/// the key that identifies the file. Decoding it to UTF-8 is lossy, and a lossy
+/// name is a *different* name: `fs::read` on it either fails or, worse, finds
+/// some other file. The one place the name becomes text is the draw call, which
+/// is producing glyphs rather than a lookup key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirEntry {
     /// Display name (file or directory name, not full path).
-    pub name: String,
+    pub name: OsString,
     /// Whether this entry is a directory.
     pub is_dir: bool,
     /// File size in bytes (0 for directories).
@@ -89,7 +143,11 @@ pub struct DirEntry {
     /// Last-modified timestamp (Unix epoch seconds).
     pub modified_timestamp: u64,
     /// File extension (without the dot), empty for dirs/extensionless.
-    pub extension: String,
+    ///
+    /// Also an [`OsString`]: an extension that is not UTF-8 must fail to match
+    /// every UTF-8 pattern, and decoding it lossily could make it match one it
+    /// is not.
+    pub extension: OsString,
 }
 
 /// A file type filter (e.g. "Rust files" matching `*.rs`).
@@ -115,7 +173,7 @@ pub struct QuickAccess {
     /// Display label (e.g. "Home").
     pub label: String,
     /// Absolute path this entry navigates to.
-    pub path: String,
+    pub path: PathBuf,
 }
 
 /// Result of an action on the dialog.
@@ -124,11 +182,68 @@ pub enum DialogAction {
     /// Nothing happened (event was consumed but state unchanged meaningfully).
     None,
     /// Dialog navigated to a new directory.
-    NavigatedTo(String),
+    NavigatedTo(PathBuf),
     /// User confirmed a selection (path to the selected file/folder).
-    Selected(String),
+    Selected(PathBuf),
     /// User cancelled the dialog.
     Cancelled,
+}
+
+/// A part of a [`FileDialog`] that a click can land on.
+///
+/// Recorded by [`FileDialog::frame`] as it draws, so that what a click reaches
+/// and what the user sees come out of the same walk. See [`crate::frame`] for
+/// why that matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogTarget {
+    /// The `<` button: back through the navigation history.
+    Back,
+    /// The `>` button: forward again.
+    Forward,
+    /// The `^` button: to the parent directory.
+    Up,
+    /// The path display in the toolbar.
+    ///
+    /// Recorded, but clicking it does nothing yet: editing a path by hand needs
+    /// a text field with a caret, and the dialog has none. Recording it anyway
+    /// means a click there is *swallowed* rather than falling through to the
+    /// list behind, which is what the user expects of a control they can see.
+    AddressBar,
+    /// A quick-access shortcut in the sidebar, by position in the sidebar list.
+    Shortcut(usize),
+    /// A column header in the file list, which sorts by that column.
+    Header(SortColumn),
+    /// A row of the file list, by index into [`FileDialog::entries`].
+    ///
+    /// An index rather than a stable id — which is what [`crate::frame`]
+    /// recommends for rows — because the frame a click is tested against is
+    /// built from the listing as it stands at that moment, so there is no
+    /// interval in which the two could disagree. A `DirEntry` has no id to use
+    /// instead; its name would be one, at the cost of a `String` per row per
+    /// frame.
+    Entry(usize),
+    /// The empty part of the file list, below the last row.
+    List,
+    /// The scrollbar's track.
+    ScrollTrack,
+    /// The scrollbar's thumb.
+    ScrollThumb,
+    /// The filename box in the bottom bar (Save mode only).
+    ///
+    /// Like [`AddressBar`](Self::AddressBar): recorded so the click stops here,
+    /// not acted on. Typing goes to the box already, since Save mode has nowhere
+    /// else for a keystroke to go.
+    FilenameInput,
+    /// The Open/Save/Select button.
+    Confirm,
+    /// The Cancel button.
+    Cancel,
+    /// Dialog background: no control, but inside the dialog.
+    ///
+    /// The distinction from "no target at all" is what tells a host whether the
+    /// click was *outside* the dialog, which is the click a modal has to refuse
+    /// to pass through.
+    Chrome,
 }
 
 /// File open/save/folder-select dialog.
@@ -139,19 +254,56 @@ pub enum DialogAction {
 #[derive(Clone, Debug)]
 pub struct FileDialog {
     mode: DialogMode,
-    current_path: String,
+    current_path: PathBuf,
     entries: Vec<DirEntry>,
     selected_index: Option<usize>,
+    /// What the Save-mode name field shows, and what the user edits.
+    ///
+    /// Stays a `String` because it is genuinely text: it is typed a character
+    /// at a time and backspaced a character at a time, and a keyboard cannot
+    /// produce a byte sequence that is not UTF-8. See `filename_exact` for the
+    /// case this cannot represent.
     filename_input: String,
+    /// The exact bytes of the name when the field was filled from a listed
+    /// file, or `None` once the user has edited it.
+    ///
+    /// Clicking a file in Save mode means "overwrite this one", and the file
+    /// clicked may have a name that is not UTF-8. Round-tripping that through
+    /// `filename_input` would replace the undecodable bytes with U+FFFD and
+    /// quietly save to a *different*, newly created file instead of the one the
+    /// user pointed at. So the bytes are kept beside the text, and dropped the
+    /// moment a keystroke makes the text no longer describe them.
+    filename_exact: Option<OsString>,
     filters: Vec<FileFilter>,
     active_filter_index: usize,
     show_hidden: bool,
     sort_by: SortColumn,
     sort_ascending: bool,
-    history_back: Vec<String>,
-    history_forward: Vec<String>,
+    history_back: Vec<PathBuf>,
+    history_forward: Vec<PathBuf>,
     quick_access: Vec<QuickAccess>,
     cancelled: bool,
+    /// Index of the first entry row drawn.
+    ///
+    /// A request rather than a fact: it is clamped against the height the
+    /// dialog turns out to be drawn at, so a listing that shrank under a stale
+    /// offset shows its last page rather than blank space. See
+    /// [`scroll_window`], whose policy this is.
+    ///
+    /// The dialog stores no size of its own — [`render`](Self::render) is given
+    /// one and cannot write anything back — which is why every method that has
+    /// to move this takes the height as an argument.
+    scroll_top: usize,
+    /// Wheel fractions earned but not yet spent, so a high-resolution wheel or
+    /// a trackpad scrolls smoothly instead of discarding everything under one
+    /// notch.
+    wheel: wheel::Accumulator,
+    /// While the scrollbar thumb is being dragged, how far below the thumb's
+    /// top edge the pointer grabbed it.
+    ///
+    /// Kept so the thumb does not jump under the pointer on the first drag
+    /// event: the thumb follows the grab point, not the pointer.
+    thumb_grab: Option<f32>,
     /// The zone the Modified column is rendered in.
     ///
     /// Defaults to UTC because a toolkit has no business reading `TZ` behind
@@ -193,15 +345,19 @@ impl FileDialog {
 
     /// Set the initial directory the dialog opens to.
     #[must_use]
-    pub fn with_initial_path(mut self, path: &str) -> Self {
-        self.current_path = path.to_string();
+    pub fn with_initial_path(mut self, path: impl AsRef<Path>) -> Self {
+        self.current_path = path.as_ref().to_path_buf();
         self
     }
 
     /// Pre-fill the filename input (useful for Save mode).
+    ///
+    /// Takes an [`OsStr`] so a caller reopening a file it already holds a real
+    /// path to can pre-fill the exact name, undecodable bytes and all. The text
+    /// shown is a lossy rendering of it; the name saved to is not.
     #[must_use]
-    pub fn with_filename(mut self, name: &str) -> Self {
-        self.filename_input = name.to_string();
+    pub fn with_filename(mut self, name: impl AsRef<OsStr>) -> Self {
+        self.set_filename(name);
         self
     }
 
@@ -238,21 +394,22 @@ impl FileDialog {
 
     /// Navigate into the given directory path. Pushes the current path onto the
     /// back-history stack.
-    pub fn navigate_to(&mut self, path: &str) {
+    pub fn navigate_to(&mut self, path: impl AsRef<Path>) {
+        let path = path.as_ref();
         if path == self.current_path {
             return;
         }
         self.history_back.push(self.current_path.clone());
         self.history_forward.clear();
-        self.current_path = path.to_string();
-        self.selected_index = None;
+        self.current_path = path.to_path_buf();
+        self.rewind();
     }
 
     /// Navigate to the parent directory.
     pub fn navigate_up(&mut self) {
-        let parent = parent_path(&self.current_path);
-        if parent != self.current_path {
-            self.navigate_to(&parent);
+        let parent = parent_path(self.current_path.as_os_str());
+        if parent != self.current_path.as_os_str() {
+            self.navigate_to(PathBuf::from(parent));
         }
     }
 
@@ -261,7 +418,7 @@ impl FileDialog {
         if let Some(prev) = self.history_back.pop() {
             self.history_forward.push(self.current_path.clone());
             self.current_path = prev;
-            self.selected_index = None;
+            self.rewind();
         }
     }
 
@@ -270,8 +427,23 @@ impl FileDialog {
         if let Some(next) = self.history_forward.pop() {
             self.history_back.push(self.current_path.clone());
             self.current_path = next;
-            self.selected_index = None;
+            self.rewind();
         }
+    }
+
+    /// Forget where the *previous* listing was looking.
+    ///
+    /// Called by every navigation. A scroll position and a selected row are
+    /// both indices into the listing that is about to be replaced, so carrying
+    /// either into the new directory would pick an unrelated file, or open at
+    /// row 40 of a directory with three files in it. The wheel's banked
+    /// fraction goes too, so a fraction earned in one directory cannot deliver
+    /// a row in the next.
+    fn rewind(&mut self) {
+        self.selected_index = None;
+        self.scroll_top = 0;
+        self.wheel.reset();
+        self.thumb_grab = None;
     }
 
     // --- Selection / Interaction ---
@@ -285,7 +457,8 @@ impl FileDialog {
                 && let Some(entry) = self.entries.get(index)
                 && !entry.is_dir
             {
-                self.filename_input = entry.name.clone();
+                let name = entry.name.clone();
+                self.fill_filename(name);
             }
         }
     }
@@ -302,22 +475,18 @@ impl FileDialog {
         };
 
         if entry.is_dir {
+            let full = self.child_path(&entry.name);
             if self.mode == DialogMode::SelectFolder {
-                let full = join_path(&self.current_path, &entry.name);
                 return DialogAction::Selected(full);
             }
-            let target = join_path(&self.current_path, &entry.name);
-            self.navigate_to(&target);
+            self.navigate_to(full);
             DialogAction::NavigatedTo(self.current_path.clone())
         } else {
             match self.mode {
-                DialogMode::Open => {
-                    let full = join_path(&self.current_path, &entry.name);
-                    DialogAction::Selected(full)
-                }
+                DialogMode::Open => DialogAction::Selected(self.child_path(&entry.name)),
                 DialogMode::Save => {
                     // Double-clicking a file in save mode fills the name input.
-                    self.filename_input = entry.name.clone();
+                    self.fill_filename(entry.name);
                     DialogAction::None
                 }
                 DialogMode::SelectFolder => {
@@ -328,9 +497,33 @@ impl FileDialog {
         }
     }
 
-    /// Set the filename input text (Save mode).
-    pub fn set_filename(&mut self, name: &str) {
-        self.filename_input = name.to_string();
+    /// Set the filename input (Save mode).
+    ///
+    /// The exact bytes are kept, so a name that is not valid UTF-8 survives to
+    /// [`confirm`](Self::confirm) even though the field can only *show* a lossy
+    /// rendering of it.
+    pub fn set_filename(&mut self, name: impl AsRef<OsStr>) {
+        self.fill_filename(name.as_ref().to_os_string());
+    }
+
+    /// Put `name` in the field and remember its exact bytes.
+    fn fill_filename(&mut self, name: OsString) {
+        self.filename_input = name.to_string_lossy().into_owned();
+        self.filename_exact = Some(name);
+    }
+
+    /// Drop the remembered bytes, because the text no longer describes them.
+    ///
+    /// Called from every edit. Once the user has typed, what they want is what
+    /// the field says — the previous file's exact name would be a stale answer
+    /// silently preferred over the one on screen.
+    fn edited_filename(&mut self) {
+        self.filename_exact = None;
+    }
+
+    /// `current_path` joined with a name from the listing.
+    fn child_path(&self, name: &OsStr) -> PathBuf {
+        PathBuf::from(join_path(self.current_path.as_os_str(), name))
     }
 
     /// Change the active file type filter by index.
@@ -343,7 +536,7 @@ impl FileDialog {
 
     /// Attempt to confirm the current selection. Returns `Some(path)` if a
     /// valid selection exists, or `None` if confirmation is not possible.
-    pub fn confirm(&self) -> Option<String> {
+    pub fn confirm(&self) -> Option<PathBuf> {
         match self.mode {
             DialogMode::Open => {
                 let idx = self.selected_index?;
@@ -351,14 +544,13 @@ impl FileDialog {
                 if entry.is_dir {
                     return None;
                 }
-                Some(join_path(&self.current_path, &entry.name))
+                Some(self.child_path(&entry.name))
             }
             DialogMode::Save => {
                 if self.filename_input.is_empty() {
                     return None;
                 }
-                let name = self.filename_with_extension();
-                Some(join_path(&self.current_path, &name))
+                Some(self.child_path(&self.filename_with_extension()))
             }
             DialogMode::SelectFolder => {
                 // In folder mode, confirming selects the current directory
@@ -367,7 +559,7 @@ impl FileDialog {
                     && let Some(entry) = self.entries.get(idx)
                     && entry.is_dir
                 {
-                    return Some(join_path(&self.current_path, &entry.name));
+                    return Some(self.child_path(&entry.name));
                 }
                 // Fall back to current directory itself.
                 Some(self.current_path.clone())
@@ -381,7 +573,14 @@ impl FileDialog {
     }
 
     /// Handle a keyboard event. Returns the resulting action.
-    pub fn handle_event(&mut self, event: &KeyEvent) -> DialogAction {
+    ///
+    /// `height` is the height the dialog is being drawn at — the same number
+    /// [`render`](Self::render) is given. Moving the selection has to scroll the
+    /// list to keep the selection on screen, and how many rows are on screen
+    /// depends on the height; the dialog deliberately stores no size of its own,
+    /// because a stored size is a second answer to "how big is this dialog"
+    /// that can disagree with the one the renderer is using.
+    pub fn handle_event(&mut self, event: &KeyEvent, height: f32) -> DialogAction {
         if !event.pressed {
             return DialogAction::None;
         }
@@ -406,48 +605,64 @@ impl FileDialog {
                 }
             }
             Key::Up => {
-                self.move_selection(-1);
+                self.move_selection(-1, height);
                 DialogAction::None
             }
             Key::Down => {
-                self.move_selection(1);
+                self.move_selection(1, height);
                 DialogAction::None
             }
-            Key::Backspace if event.modifiers.alt => {
-                self.navigate_back();
-                if self.history_back.is_empty() {
-                    DialogAction::None
-                } else {
-                    DialogAction::NavigatedTo(self.current_path.clone())
-                }
+            Key::PageUp => {
+                // Saturating rather than plain `-`: negating `isize::MIN` is
+                // an overflow, and `page_step` is free to return whatever a
+                // window height implies. Saturation is exact for every value
+                // it can actually produce, so this is a guard, not a rounding.
+                self.move_selection(page_step(height).saturating_neg(), height);
+                DialogAction::None
             }
+            Key::PageDown => {
+                self.move_selection(page_step(height), height);
+                DialogAction::None
+            }
+            Key::Backspace if event.modifiers.alt => self.navigated(Self::navigate_back),
             Key::Backspace => {
                 // Without modifiers in non-save mode: go to parent.
                 if self.mode != DialogMode::Save || self.filename_input.is_empty() {
-                    self.navigate_up();
-                    DialogAction::NavigatedTo(self.current_path.clone())
+                    self.navigated(Self::navigate_up)
                 } else {
                     // In save mode with text: delete last char of filename input.
                     self.filename_input.pop();
+                    self.edited_filename();
                     DialogAction::None
                 }
             }
             Key::Home => {
                 if !self.entries.is_empty() {
                     self.selected_index = Some(0);
+                    self.reveal(height);
                 }
                 DialogAction::None
             }
             Key::End => {
                 if !self.entries.is_empty() {
                     self.selected_index = Some(self.entries.len().saturating_sub(1));
+                    self.reveal(height);
                 }
                 DialogAction::None
             }
             _ => {
                 // Text input for save-mode filename.
                 if self.mode == DialogMode::Save {
+                    let before = self.filename_input.len();
                     self.filename_input.extend(event.typed());
+                    // Only an edit that actually changed the text invalidates
+                    // the remembered bytes: most keys reaching this arm — a
+                    // bare Shift, an unhandled function key — type nothing,
+                    // and dropping the exact name on one of those would turn a
+                    // harmless keypress into a silently different save target.
+                    if self.filename_input.len() != before {
+                        self.edited_filename();
+                    }
                 }
                 DialogAction::None
             }
@@ -457,11 +672,28 @@ impl FileDialog {
     // --- Rendering ---
 
     /// Produce render commands for the entire dialog at the given dimensions.
+    ///
+    /// A thin wrapper over [`frame`](Self::frame), which is the same walk with
+    /// the click targets kept. Callers that only paint can keep using this.
     pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+        self.frame(width, height).into_tree().commands
+    }
 
-        // Dialog background
-        cmds.push(RenderCommand::FillRect {
+    /// Draw the dialog at the given dimensions, recording what each part of it
+    /// can be clicked to reach.
+    ///
+    /// One walk produces both the ink and the hit boxes, so a control cannot be
+    /// drawn in one place and clicked in another — see [`crate::frame`]. This is
+    /// also what [`handle_mouse`](Self::handle_mouse) tests a click against, so
+    /// there is no second copy of the layout to keep in step with this one.
+    #[must_use]
+    pub fn frame(&self, width: f32, height: f32) -> Frame<DialogTarget> {
+        let mut frame = Frame::new(width, height);
+
+        // Dialog background. Recorded as a target so that a host drawing the
+        // dialog inset can tell a click on the dialog from a click past its
+        // edge — the click a modal must not let through.
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -469,31 +701,188 @@ impl FileDialog {
             color: COLOR_BASE,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
+        frame.hit(DialogTarget::Chrome, Rect::new(0.0, 0.0, width, height));
 
         // Toolbar
-        self.render_toolbar(&mut cmds, width);
+        self.draw_toolbar(&mut frame, width);
 
-        // Sidebar
+        // Sidebar. Clamped at zero because a dialog shorter than its own
+        // furniture would otherwise hand a negative height to the clip stack,
+        // and a negative-height clip is not a small one — it is one whose
+        // bottom edge is above its top.
         let content_top = TOOLBAR_HEIGHT;
-        let content_height = height - TOOLBAR_HEIGHT - BOTTOM_BAR_HEIGHT;
-        self.render_sidebar(&mut cmds, content_top, content_height);
+        let content_height = (height - TOOLBAR_HEIGHT - BOTTOM_BAR_HEIGHT).max(0.0);
+        self.draw_sidebar(&mut frame, content_top, content_height);
 
         // File list
         let list_x = SIDEBAR_WIDTH;
-        let list_width = width - SIDEBAR_WIDTH;
-        self.render_file_list(&mut cmds, list_x, content_top, list_width, content_height);
+        let list_width = (width - SIDEBAR_WIDTH).max(0.0);
+        self.draw_file_list(
+            &mut frame,
+            list_x,
+            content_top,
+            list_width,
+            content_height,
+            height,
+        );
 
         // Bottom bar (filename input for save, buttons)
         let bottom_y = height - BOTTOM_BAR_HEIGHT;
-        self.render_bottom_bar(&mut cmds, bottom_y, width);
+        self.draw_bottom_bar(&mut frame, bottom_y, width);
 
-        cmds
+        frame
+    }
+
+    /// Handle a mouse event. Returns the resulting action.
+    ///
+    /// `width` and `height` are the dimensions the dialog is drawn at — the
+    /// same numbers [`render`](Self::render) is given — because the click is
+    /// tested against a frame laid out at that size. A host that passes a
+    /// different size here than it draws at will find its clicks landing
+    /// somewhere else, which is the one way this can go wrong and is why the
+    /// dialog will not keep a second copy of the size for itself.
+    ///
+    /// Every mouse event should be forwarded while the dialog is up, not only
+    /// presses: a drag of the scrollbar is a press, a run of moves and a
+    /// release, and a dialog that only sees the press cannot follow the thumb.
+    pub fn handle_mouse(&mut self, event: &MouseEvent, width: f32, height: f32) -> DialogAction {
+        let frame = self.frame(width, height);
+        let target = frame.hit_test(event.x, event.y);
+
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => self.press(&frame, target, event.y, height),
+            MouseEventKind::Release(MouseButton::Left) => {
+                self.thumb_grab = None;
+                DialogAction::None
+            }
+            MouseEventKind::Move => {
+                self.drag_thumb(&frame, event.y, height);
+                DialogAction::None
+            }
+            MouseEventKind::DoubleClick(MouseButton::Left) => match target {
+                // Only rows act on the second click. Every other control has
+                // already acted on the press that came before it, and a Cancel
+                // button that cancelled twice would be no worse but a Back
+                // button that went back twice would be wrong.
+                Some(DialogTarget::Entry(index)) => {
+                    self.select_entry(index);
+                    self.activate_entry(index)
+                }
+                _ => DialogAction::None,
+            },
+            MouseEventKind::Scroll { dy, .. } => {
+                let rows = self.wheel.rows(dy);
+                // Start from where the list is actually looking, not from the
+                // stored request: after the keyboard has scrolled by revealing a
+                // selection, or after the list shrank, the two differ, and
+                // scrolling from the stale one makes the first notch jump.
+                self.scroll_top = self.visible_rows(height).start;
+                self.scroll_top = scroll_window::shift(self.scroll_top, rows);
+                DialogAction::None
+            }
+            _ => DialogAction::None,
+        }
+    }
+
+    /// Act on a left-button press on `target`.
+    fn press(
+        &mut self,
+        frame: &Frame<DialogTarget>,
+        target: Option<DialogTarget>,
+        y: f32,
+        height: f32,
+    ) -> DialogAction {
+        match target {
+            Some(DialogTarget::Back) => self.navigated(Self::navigate_back),
+            Some(DialogTarget::Forward) => self.navigated(Self::navigate_forward),
+            Some(DialogTarget::Up) => self.navigated(Self::navigate_up),
+            Some(DialogTarget::Shortcut(index)) => {
+                let Some(path) = self.quick_access.get(index).map(|qa| qa.path.clone()) else {
+                    return DialogAction::None;
+                };
+                self.navigated(|dialog| dialog.navigate_to(&path))
+            }
+            Some(DialogTarget::Header(column)) => {
+                self.toggle_sort(column);
+                DialogAction::None
+            }
+            Some(DialogTarget::Entry(index)) => {
+                self.select_entry(index);
+                DialogAction::None
+            }
+            Some(DialogTarget::ScrollThumb) => {
+                if let Some(thumb) = frame.rect_of(|t| *t == DialogTarget::ScrollThumb) {
+                    self.thumb_grab = Some(y - thumb.y);
+                }
+                DialogAction::None
+            }
+            Some(DialogTarget::ScrollTrack) => {
+                // A click on the track moves one windowful towards the click,
+                // which is what every scrollbar does and is more predictable
+                // than jumping to the exact spot: the thumb ends up under the
+                // pointer either way if you keep clicking.
+                let page = usize::try_from(page_step(height)).unwrap_or(1);
+                let above = frame
+                    .rect_of(|t| *t == DialogTarget::ScrollThumb)
+                    .is_some_and(|thumb| y < thumb.y);
+                self.scroll_top = self.visible_rows(height).start;
+                self.scroll_top = if above {
+                    self.scroll_top.saturating_sub(page)
+                } else {
+                    self.scroll_top.saturating_add(page)
+                };
+                DialogAction::None
+            }
+            Some(DialogTarget::Confirm) => match self.confirm() {
+                Some(path) => DialogAction::Selected(path),
+                None => DialogAction::None,
+            },
+            Some(DialogTarget::Cancel) => {
+                self.cancel();
+                DialogAction::Cancelled
+            }
+            // Inside the dialog but on nothing that acts: swallowed, because a
+            // click the user aimed at the dialog must not reach whatever is
+            // behind it. `None` — outside the dialog entirely — is swallowed
+            // the same way, and for the same reason: a modal that let the
+            // window behind it be clicked would only look modal.
+            _ => DialogAction::None,
+        }
+    }
+
+    /// Follow the scrollbar thumb while it is being dragged.
+    ///
+    /// Reads the track and thumb out of the frame that was just drawn rather
+    /// than recomputing where they are. Two answers to "where is the
+    /// scrollbar" is exactly the divergence [`crate::frame`] exists to prevent,
+    /// and a drag handler is where it would show: the thumb would follow the
+    /// pointer at an offset that grew with the window size.
+    fn drag_thumb(&mut self, frame: &Frame<DialogTarget>, y: f32, height: f32) {
+        let Some(grab) = self.thumb_grab else { return };
+        let (Some(track), Some(thumb)) = (
+            frame.rect_of(|t| *t == DialogTarget::ScrollTrack),
+            frame.rect_of(|t| *t == DialogTarget::ScrollThumb),
+        ) else {
+            // The list got short enough to lose its scrollbar mid-drag.
+            self.thumb_grab = None;
+            return;
+        };
+        let span = track.h - thumb.h;
+        let hidden = self
+            .entries
+            .len()
+            .saturating_sub(Self::row_capacity(height));
+        if span <= 0.0 || hidden == 0 {
+            return;
+        }
+        let fraction = ((y - grab - track.y) / span).clamp(0.0, 1.0);
+        self.scroll_top = (fraction * hidden as f32).round() as usize;
     }
 
     // --- Queries ---
 
     /// The current directory being displayed.
-    pub fn current_path(&self) -> &str {
+    pub fn current_path(&self) -> &Path {
         &self.current_path
     }
 
@@ -522,7 +911,9 @@ impl FileDialog {
     pub fn set_entries(&mut self, mut entries: Vec<DirEntry>) {
         // Filter hidden files unless show_hidden is set.
         if !self.show_hidden {
-            entries.retain(|e| !e.name.starts_with('.'));
+            // Tested on the bytes: `.` is ASCII, so a leading one is a leading
+            // one whatever the rest of the name does or does not decode to.
+            entries.retain(|e| e.name.as_encoded_bytes().first() != Some(&b'.'));
         }
 
         // Filter by extension in Open/Save modes (not folder mode).
@@ -537,16 +928,58 @@ impl FileDialog {
             }
         }
 
-        // Sort: directories first, then by selected column.
+        self.sort_entries(&mut entries);
+
+        self.entries = entries;
+        // A new listing is a new set of rows, so a scroll position or a
+        // selection into the old one means nothing.
+        self.rewind();
+    }
+
+    /// Toggle sort column. If already sorting by this column, flip direction.
+    ///
+    /// Re-orders the listing already on screen, rather than only changing the
+    /// order the *next* listing would arrive in. This used to set the field and
+    /// stop, which was invisible while nothing could reach it — and became a
+    /// column header that moved its own little sort arrow and nothing else the
+    /// moment the headers became clickable.
+    pub fn toggle_sort(&mut self, column: SortColumn) {
+        if self.sort_by == column {
+            self.sort_ascending = !self.sort_ascending;
+        } else {
+            self.sort_by = column;
+            self.sort_ascending = true;
+        }
+
+        // Follow the picked *entry* through the reordering, not its row number.
+        // The row number after a re-sort belongs to some other file, and the
+        // confirm button reads the selection — so keeping the number would let
+        // a click on "Size" change which file Open would open.
+        let picked = self
+            .selected_index
+            .and_then(|index| self.entries.get(index))
+            .map(|entry| entry.name.clone());
+        let mut entries = core::mem::take(&mut self.entries);
+        self.sort_entries(&mut entries);
+        self.entries = entries;
+        self.selected_index =
+            picked.and_then(|name| self.entries.iter().position(|entry| entry.name == name));
+    }
+
+    /// Order a listing by the current sort column and direction.
+    ///
+    /// Directories always come first, whatever the column: a listing that
+    /// interleaves them by size or date buries the way *out* of the directory
+    /// among the files in it.
+    fn sort_entries(&self, entries: &mut [DirEntry]) {
         entries.sort_by(|a, b| {
-            // Directories always come first.
             match (a.is_dir, b.is_dir) {
                 (true, false) => return core::cmp::Ordering::Less,
                 (false, true) => return core::cmp::Ordering::Greater,
                 _ => {}
             }
             let ordering = match self.sort_by {
-                SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                SortColumn::Name => sort_key(&a.name).cmp(&sort_key(&b.name)),
                 SortColumn::Size => a.size.cmp(&b.size),
                 SortColumn::Modified => a.modified_timestamp.cmp(&b.modified_timestamp),
             };
@@ -556,19 +989,6 @@ impl FileDialog {
                 ordering.reverse()
             }
         });
-
-        self.entries = entries;
-        self.selected_index = None;
-    }
-
-    /// Toggle sort column. If already sorting by this column, flip direction.
-    pub fn toggle_sort(&mut self, column: SortColumn) {
-        if self.sort_by == column {
-            self.sort_ascending = !self.sort_ascending;
-        } else {
-            self.sort_by = column;
-            self.sort_ascending = true;
-        }
     }
 
     // --- Private helpers ---
@@ -576,10 +996,11 @@ impl FileDialog {
     fn new(mode: DialogMode) -> Self {
         Self {
             mode,
-            current_path: String::from("/"),
+            current_path: PathBuf::from("/"),
             entries: Vec::new(),
             selected_index: None,
             filename_input: String::new(),
+            filename_exact: None,
             filters: Vec::new(),
             active_filter_index: 0,
             show_hidden: false,
@@ -589,6 +1010,9 @@ impl FileDialog {
             history_forward: Vec::new(),
             quick_access: default_quick_access(),
             cancelled: false,
+            scroll_top: 0,
+            wheel: wheel::Accumulator::default(),
+            thumb_grab: None,
             timezone: Tz::UTC,
         }
     }
@@ -608,23 +1032,38 @@ impl FileDialog {
         filters
     }
 
-    /// In save mode, if the user's filename input lacks an extension matching the
-    /// active filter, append the first extension from the filter.
-    fn filename_with_extension(&self) -> String {
-        let name = &self.filename_input;
+    /// In save mode, the name to save under: the field's contents plus the
+    /// active filter's extension if it lacks one.
+    ///
+    /// Built on the exact bytes when the field was filled from a listed file,
+    /// so an existing name that is not valid UTF-8 is saved to *as it is on
+    /// disk* rather than as the U+FFFD-substituted text the field can show.
+    /// Which suffix to append is still decided from the text, because the
+    /// patterns it is compared against are themselves UTF-8 and a byte that
+    /// cannot be decoded cannot match one of them.
+    fn filename_with_extension(&self) -> OsString {
+        let mut name = self
+            .filename_exact
+            .clone()
+            .unwrap_or_else(|| OsString::from(&self.filename_input));
         if name.is_empty() {
-            return String::new();
+            return OsString::new();
         }
+        if let Some(suffix) = self.extension_suffix() {
+            name.push(suffix);
+        }
+        name
+    }
 
+    /// The extension to append to the typed name, or `None` to leave it alone.
+    fn extension_suffix(&self) -> Option<String> {
+        let name = &self.filename_input;
         let filters = self.effective_filters();
-        let filter = match filters.get(self.active_filter_index) {
-            Some(f) => f,
-            None => return name.clone(),
-        };
+        let filter = filters.get(self.active_filter_index)?;
 
         // If filter is "all files", don't auto-append.
         if filter.patterns.iter().any(|p| p == "*" || p == "*.*") {
-            return name.clone();
+            return None;
         }
 
         // Check if the filename already has a matching extension.
@@ -632,21 +1071,18 @@ impl FileDialog {
             if let Some(ext) = pattern.strip_prefix("*.")
                 && name.ends_with(&format!(".{ext}"))
             {
-                return name.clone();
+                return None;
             }
         }
 
         // Append the first pattern's extension.
-        if let Some(first) = filter.patterns.first()
-            && let Some(ext) = first.strip_prefix("*.")
-        {
-            return format!("{name}.{ext}");
-        }
-
-        name.clone()
+        let first = filter.patterns.first()?;
+        let ext = first.strip_prefix("*.")?;
+        Some(format!(".{ext}"))
     }
 
-    /// Move the selection `delta` rows, stopping at either end of the list.
+    /// Move the selection `delta` rows, stopping at either end of the list, and
+    /// scroll far enough that the row it lands on is on screen.
     ///
     /// Done entirely in `usize` with saturating steps. The old version cast
     /// the index to `isize` to add a signed delta and clamped against
@@ -655,7 +1091,7 @@ impl FileDialog {
     /// list, a delta small enough not to overflow. Saturating in the index's
     /// own type needs none of those proofs, and `checked_sub` on the length
     /// *is* the emptiness check.
-    fn move_selection(&mut self, delta: isize) {
+    fn move_selection(&mut self, delta: isize, height: f32) {
         let Some(last) = self.entries.len().checked_sub(1) else {
             return;
         };
@@ -666,13 +1102,92 @@ impl FileDialog {
             current.saturating_add(delta.unsigned_abs())
         };
         self.selected_index = Some(next.min(last));
+        self.reveal(height);
+    }
+
+    /// Scroll the least distance that puts the selected row on screen.
+    ///
+    /// Called by everything that moves the selection with a keystroke, and by
+    /// nothing else: an explicit scroll — the wheel, a drag of the thumb — is
+    /// allowed to leave the selection behind, which is what every file manager
+    /// does and what makes it possible to look elsewhere without losing the row
+    /// you had picked.
+    fn reveal(&mut self, height: f32) {
+        let Some(selected) = self.selected_index else {
+            return;
+        };
+        let capacity = Self::row_capacity(height);
+        // Above the window: pull the top down to the selection.
+        self.scroll_top = self.scroll_top.min(selected);
+        // Below it: push the top up until the selection is the last row drawn.
+        // A window `capacity` rows tall ending at `selected` starts at
+        // `selected + 1 - capacity`; `checked_sub` returning `None` means the
+        // window already reaches row 0 from there, so there is nothing to push.
+        if let Some(top) = selected
+            .checked_add(1)
+            .and_then(|past_end| past_end.checked_sub(capacity))
+        {
+            self.scroll_top = self.scroll_top.max(top);
+        }
+    }
+
+    /// How many whole entry rows fit below the column headers at `height`.
+    ///
+    /// A partially-visible row does not count, so nothing is ever drawn across
+    /// the bottom edge of the list — [`scroll_window`]'s rule, applied from
+    /// [`scroll_window::capacity`] rather than restated here.
+    fn row_capacity(height: f32) -> usize {
+        scroll_window::capacity(
+            ROW_HEIGHT,
+            height - TOOLBAR_HEIGHT - BOTTOM_BAR_HEIGHT - ROW_HEIGHT,
+        )
+    }
+
+    /// Which rows of the listing are on screen at `height`.
+    ///
+    /// Derived rather than stored, and re-derived on every call: the listing can
+    /// be replaced between the keystroke that last moved [`Self::scroll_top`]
+    /// and the frame that asks what to draw, and this is the last chance to
+    /// notice it got shorter. [`scroll_window::visible_count`] is what turns
+    /// "shrank underneath us" into the last page rather than an empty list.
+    fn visible_rows(&self, height: f32) -> Range<usize> {
+        let rows = scroll_window::visible_count(
+            self.entries.len(),
+            Self::row_capacity(height),
+            self.scroll_top,
+        );
+        rows.start..rows.end()
+    }
+
+    /// Run `nav`, reporting a navigation only if the path actually moved.
+    ///
+    /// A host answers [`DialogAction::NavigatedTo`] by reading that directory
+    /// and handing the listing back through [`set_entries`](Self::set_entries),
+    /// so the answer has to be exact in both directions: claiming a move that
+    /// did not happen costs a pointless directory read, and failing to report
+    /// one that did leaves the previous directory's files on screen under the
+    /// new directory's name.
+    ///
+    /// The Alt+Backspace arm used to decide by asking whether any history
+    /// remained *afterwards*, which is a different question with a different
+    /// answer in exactly one case: going back to the first directory of the
+    /// session empties the history, so the one navigation that always happens
+    /// was the one always reported as not having happened.
+    fn navigated(&mut self, nav: impl FnOnce(&mut Self)) -> DialogAction {
+        let before = self.current_path.clone();
+        nav(self);
+        if self.current_path == before {
+            DialogAction::None
+        } else {
+            DialogAction::NavigatedTo(self.current_path.clone())
+        }
     }
 
     // --- Render sub-methods ---
 
-    fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
+    fn draw_toolbar(&self, frame: &mut Frame<DialogTarget>, width: f32) {
         // Toolbar background
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -689,13 +1204,23 @@ impl FileDialog {
         let btn_y = (TOOLBAR_HEIGHT - 24.0) / 2.0;
         let mut x = PADDING;
 
-        // Back button
+        // Navigation buttons. Each is a bare glyph, so its click target is the
+        // slot the glyph sits in rather than the glyph's own ink — a single
+        // character is a few pixels wide and would be a target nobody could
+        // hit. The whole toolbar's height is used, not the glyph's, for the
+        // same reason.
+        //
+        // Back and Forward are drawn greyed when there is nowhere to go, and
+        // are still recorded: the press is then swallowed by a control that
+        // visibly does nothing, which is what a disabled button is. Dropping
+        // the target instead would let the click fall through to the toolbar,
+        // which is not different here but would be if anything were behind it.
         let back_color = if self.history_back.is_empty() {
             COLOR_OVERLAY
         } else {
             COLOR_TEXT
         };
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x,
             y: btn_y + 4.0,
             text: String::from("<"),
@@ -705,6 +1230,7 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        frame.hit(DialogTarget::Back, Rect::new(x, 0.0, 24.0, TOOLBAR_HEIGHT));
         x += 24.0;
 
         // Forward button
@@ -713,7 +1239,7 @@ impl FileDialog {
         } else {
             COLOR_TEXT
         };
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x,
             y: btn_y + 4.0,
             text: String::from(">"),
@@ -723,10 +1249,14 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        frame.hit(
+            DialogTarget::Forward,
+            Rect::new(x, 0.0, 24.0, TOOLBAR_HEIGHT),
+        );
         x += 24.0;
 
         // Up button
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x,
             y: btn_y + 4.0,
             text: String::from("^"),
@@ -736,11 +1266,12 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        frame.hit(DialogTarget::Up, Rect::new(x, 0.0, 28.0, TOOLBAR_HEIGHT));
         x += 28.0;
 
         // Address bar
         let addr_width = width - x - PADDING;
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x,
             y: btn_y,
             width: addr_width,
@@ -748,21 +1279,28 @@ impl FileDialog {
             color: COLOR_SURFACE1,
             corner_radii: CornerRadii::all(3.0),
         });
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: x + 6.0,
             y: btn_y + 5.0,
-            text: self.current_path.clone(),
+            // One of the two places a path becomes text, and it is producing
+            // glyphs rather than a key to look anything up with, so lossy is
+            // correct here. See `DirEntry::name`.
+            text: self.current_path.to_string_lossy().into_owned(),
             color: COLOR_TEXT,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(addr_width - 12.0),
             overflow: TextOverflow::Ellipsis,
         });
+        frame.hit(
+            DialogTarget::AddressBar,
+            Rect::new(x, btn_y, addr_width, 24.0),
+        );
     }
 
-    fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>, top: f32, height: f32) {
+    fn draw_sidebar(&self, frame: &mut Frame<DialogTarget>, top: f32, height: f32) {
         // Sidebar background
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: top,
             width: SIDEBAR_WIDTH,
@@ -771,9 +1309,14 @@ impl FileDialog {
             corner_radii: CornerRadii::ZERO,
         });
 
+        // The sidebar is clipped to its own background so that a shortcut list
+        // longer than a short dialog cannot draw over the bottom bar, and — the
+        // part that matters here — so that a shortcut scrolled out of sight
+        // cannot still be clicked. `Frame::hit` trims to the clip in force.
+        frame.clip(Rect::new(0.0, top, SIDEBAR_WIDTH, height));
         let mut y = top + PADDING;
-        for qa in &self.quick_access {
-            cmds.push(RenderCommand::Text {
+        for (index, qa) in self.quick_access.iter().enumerate() {
+            frame.push(RenderCommand::Text {
                 x: PADDING + 4.0,
                 y,
                 text: qa.label.clone(),
@@ -783,29 +1326,36 @@ impl FileDialog {
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 4.0),
                 overflow: TextOverflow::Ellipsis,
             });
+            // The row, not the label: the gap between two labels belongs to the
+            // one above it, so there is no dead strip between shortcuts.
+            frame.hit(
+                DialogTarget::Shortcut(index),
+                Rect::new(0.0, y, SIDEBAR_WIDTH, ROW_HEIGHT),
+            );
             y += ROW_HEIGHT;
         }
+        frame.unclip();
     }
 
-    fn render_file_list(
+    fn draw_file_list(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        frame: &mut Frame<DialogTarget>,
         x: f32,
         top: f32,
         width: f32,
         height: f32,
+        dialog_height: f32,
     ) {
         // Clip the file list area
-        cmds.push(RenderCommand::PushClip {
-            x,
-            y: top,
-            width,
-            height,
-        });
+        frame.clip(Rect::new(x, top, width, height));
+        // The list's own background, below the rows, so that a click in the
+        // empty space under a short listing still counts as "in the list" — the
+        // wheel needs to know that much to decide whether to scroll.
+        frame.hit(DialogTarget::List, Rect::new(x, top, width, height));
 
         // Column headers
         let header_y = top;
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x,
             y: header_y,
             width,
@@ -818,8 +1368,24 @@ impl FileDialog {
         let size_col_x = x + width - 200.0;
         let date_col_x = x + width - 100.0;
 
+        // Each header is clickable across its whole column, not just under its
+        // label: the label sits at the column's left edge, and a target the
+        // width of the word "Size" leaves most of the column dead.
+        frame.hit(
+            DialogTarget::Header(SortColumn::Name),
+            Rect::new(x, header_y, size_col_x - x, ROW_HEIGHT),
+        );
+        frame.hit(
+            DialogTarget::Header(SortColumn::Size),
+            Rect::new(size_col_x, header_y, date_col_x - size_col_x, ROW_HEIGHT),
+        );
+        frame.hit(
+            DialogTarget::Header(SortColumn::Modified),
+            Rect::new(date_col_x, header_y, x + width - date_col_x, ROW_HEIGHT),
+        );
+
         // Header labels
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: name_col_x,
             y: header_y + 6.0,
             text: String::from("Name"),
@@ -829,7 +1395,7 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: size_col_x,
             y: header_y + 6.0,
             text: String::from("Size"),
@@ -839,7 +1405,7 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: date_col_x,
             y: header_y + 6.0,
             text: String::from("Modified"),
@@ -857,7 +1423,7 @@ impl FileDialog {
             SortColumn::Modified => date_col_x + 54.0,
         };
         let indicator = if self.sort_ascending { "v" } else { "^" };
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: indicator_x,
             y: header_y + 6.0,
             text: String::from(indicator),
@@ -868,19 +1434,27 @@ impl FileDialog {
             overflow: TextOverflow::Clip,
         });
 
-        // File entries
+        // File entries. Only the rows on screen are built at all: the loop used
+        // to walk the whole listing and break once a row fell past the bottom
+        // edge, which drew the right thing but had no way to reach anything
+        // below it — the tail of a long directory could not be got at by any
+        // means, since the selection did not scroll the list either.
+        let rows = self.visible_rows(dialog_height);
+        let first = rows.start;
         let entries_top = top + ROW_HEIGHT;
-        for (i, entry) in self.entries.iter().enumerate() {
-            let row_y = entries_top + (i as f32) * ROW_HEIGHT;
-
-            // Stop rendering if below visible area (simple culling).
-            if row_y > top + height {
-                break;
-            }
+        for (offset, entry) in self
+            .entries
+            .get(rows)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let index = first.saturating_add(offset);
+            let row_y = entries_top + (offset as f32) * ROW_HEIGHT;
 
             // Selection highlight
-            if self.selected_index == Some(i) {
-                cmds.push(RenderCommand::FillRect {
+            if self.selected_index == Some(index) {
+                frame.push(RenderCommand::FillRect {
                     x,
                     y: row_y,
                     width,
@@ -897,7 +1471,7 @@ impl FileDialog {
             } else {
                 COLOR_SUBTEXT
             };
-            cmds.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + PADDING,
                 y: row_y + 6.0,
                 text: String::from(icon_char),
@@ -915,10 +1489,15 @@ impl FileDialog {
                 COLOR_TEXT
             };
             let max_name_width = size_col_x - name_col_x - PADDING;
-            cmds.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: name_col_x,
                 y: row_y + 6.0,
-                text: entry.name.clone(),
+                // The other place, and the reason `DirEntry::name` can be an
+                // `OsString` everywhere else: a row has to *show* a name that
+                // has no UTF-8 reading, and U+FFFD is the honest way to show
+                // one. What the row opens is rebuilt from the bytes, not from
+                // this.
+                text: entry.name.to_string_lossy().into_owned(),
                 color: name_color,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -928,7 +1507,7 @@ impl FileDialog {
 
             // Size (human-readable, only for files)
             if !entry.is_dir {
-                cmds.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: size_col_x,
                     y: row_y + 6.0,
                     text: format_size(entry.size),
@@ -941,7 +1520,7 @@ impl FileDialog {
             }
 
             // Modified timestamp (simplified display)
-            cmds.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: date_col_x,
                 y: row_y + 6.0,
                 text: format_timestamp(entry.modified_timestamp, &self.timezone),
@@ -951,14 +1530,80 @@ impl FileDialog {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
+
+            // The whole row, so that a click anywhere along it picks the file —
+            // aiming at the filename's ink would leave the size and date
+            // columns dead, and the row is what the highlight covers.
+            frame.hit(
+                DialogTarget::Entry(index),
+                Rect::new(x, row_y, width, ROW_HEIGHT),
+            );
         }
 
-        cmds.push(RenderCommand::PopClip);
+        self.draw_scrollbar(frame, x, entries_top, width, height, dialog_height);
+
+        frame.unclip();
     }
 
-    fn render_bottom_bar(&self, cmds: &mut Vec<RenderCommand>, y: f32, width: f32) {
+    /// Draw the file list's scrollbar, if the listing is longer than the space
+    /// it is drawn into.
+    ///
+    /// Nothing is drawn when everything fits — a track with a full-length thumb
+    /// says "there is more" as loudly as one with a short thumb, and there is
+    /// not.
+    fn draw_scrollbar(
+        &self,
+        frame: &mut Frame<DialogTarget>,
+        x: f32,
+        entries_top: f32,
+        width: f32,
+        height: f32,
+        dialog_height: f32,
+    ) {
+        let capacity = Self::row_capacity(dialog_height);
+        let total = self.entries.len();
+        if capacity == 0 || total <= capacity {
+            return;
+        }
+
+        let track = Rect::new(
+            x + width - SCROLLBAR_WIDTH,
+            entries_top,
+            SCROLLBAR_WIDTH,
+            (height - ROW_HEIGHT).max(0.0),
+        );
+        frame.push(RenderCommand::FillRect {
+            x: track.x,
+            y: track.y,
+            width: track.w,
+            height: track.h,
+            color: COLOR_SURFACE0,
+            corner_radii: CornerRadii::ZERO,
+        });
+        frame.hit(DialogTarget::ScrollTrack, track);
+
+        let thumb = thumb_rect(
+            track,
+            total,
+            capacity,
+            self.visible_rows(dialog_height).start,
+        );
+        frame.push(RenderCommand::FillRect {
+            x: thumb.x,
+            y: thumb.y,
+            width: thumb.w,
+            height: thumb.h,
+            color: COLOR_SURFACE2,
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
+        });
+        // Recorded after the track, so a press on the overlap reaches the thumb
+        // — `hit_test` answers with the last box drawn, which is the one on top.
+        frame.hit(DialogTarget::ScrollThumb, thumb);
+    }
+
+    fn draw_bottom_bar(&self, frame: &mut Frame<DialogTarget>, y: f32, width: f32) {
         // Bottom bar background
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y,
             width,
@@ -977,7 +1622,7 @@ impl FileDialog {
         // Filename input (save mode only)
         if self.mode == DialogMode::Save {
             let input_width = width - BUTTON_WIDTH * 2.0 - PADDING * 5.0;
-            cmds.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: PADDING,
                 y: input_y,
                 width: input_width,
@@ -985,7 +1630,11 @@ impl FileDialog {
                 color: COLOR_SURFACE1,
                 corner_radii: CornerRadii::all(3.0),
             });
-            cmds.push(RenderCommand::StrokeRect {
+            frame.hit(
+                DialogTarget::FilenameInput,
+                Rect::new(PADDING, input_y, input_width, 28.0),
+            );
+            frame.push(RenderCommand::StrokeRect {
                 x: PADDING,
                 y: input_y,
                 width: input_width,
@@ -1005,7 +1654,7 @@ impl FileDialog {
             } else {
                 COLOR_TEXT
             };
-            cmds.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: PADDING + 6.0,
                 y: input_y + 7.0,
                 text: display_text,
@@ -1033,7 +1682,7 @@ impl FileDialog {
             DialogMode::Save => "Save",
             DialogMode::SelectFolder => "Select",
         };
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: confirm_x,
             y: input_y,
             width: BUTTON_WIDTH,
@@ -1041,7 +1690,16 @@ impl FileDialog {
             color: confirm_bg,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-        cmds.push(RenderCommand::Text {
+        // Recorded whether or not it is enabled. A disabled Open button that let
+        // the click through would be a hole in the dialog exactly where the user
+        // aims most confidently; `confirm()` returning `None` is what makes the
+        // press do nothing, and it is asked again at press time rather than
+        // trusted from paint time.
+        frame.hit(
+            DialogTarget::Confirm,
+            Rect::new(confirm_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+        );
+        frame.push(RenderCommand::Text {
             x: confirm_x + (BUTTON_WIDTH - 30.0) / 2.0,
             y: input_y + 8.0,
             text: String::from(confirm_label),
@@ -1057,7 +1715,7 @@ impl FileDialog {
         });
 
         // Cancel button
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: cancel_x,
             y: input_y,
             width: BUTTON_WIDTH,
@@ -1065,7 +1723,11 @@ impl FileDialog {
             color: COLOR_SURFACE1,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-        cmds.push(RenderCommand::Text {
+        frame.hit(
+            DialogTarget::Cancel,
+            Rect::new(cancel_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+        );
+        frame.push(RenderCommand::Text {
             x: cancel_x + (BUTTON_WIDTH - 42.0) / 2.0,
             y: input_y + 8.0,
             text: String::from("Cancel"),
@@ -1080,52 +1742,158 @@ impl FileDialog {
 
 // --- Free functions (utilities) ---
 
+/// How many rows Page Up or Page Down moves at `height`.
+///
+/// One windowful, and never zero: a page key that moved nothing in a dialog too
+/// short to show a whole row would be a key that appears broken, and one row is
+/// the smallest movement that is still movement.
+fn page_step(height: f32) -> isize {
+    isize::try_from(FileDialog::row_capacity(height).max(1)).unwrap_or(isize::MAX)
+}
+
+/// Where the scrollbar thumb sits in `track` for a listing of `total` rows
+/// showing `capacity` of them starting at row `first`.
+///
+/// Size shows how much of the listing is on screen; position shows where in it.
+/// The two are computed separately because [`MIN_THUMB_HEIGHT`] makes the size
+/// stop being proportional for a long listing while the position must stay
+/// exact — a thumb that reached the bottom of its track only when the last row
+/// was reached, but sat at 90% when the listing was at its end, would be worse
+/// than no thumb at all.
+fn thumb_rect(track: Rect, total: usize, capacity: usize, first: usize) -> Rect {
+    let shown = (capacity as f32 / total as f32).clamp(0.0, 1.0);
+    let thumb_h = (track.h * shown).clamp(MIN_THUMB_HEIGHT.min(track.h), track.h);
+    let hidden = total.saturating_sub(capacity);
+    let position = if hidden == 0 {
+        0.0
+    } else {
+        (first as f32 / hidden as f32).clamp(0.0, 1.0)
+    };
+    Rect::new(
+        track.x,
+        track.y + (track.h - thumb_h) * position,
+        track.w,
+        thumb_h,
+    )
+}
+
 /// Default quick-access sidebar entries.
 fn default_quick_access() -> Vec<QuickAccess> {
     vec![
         QuickAccess {
             label: String::from("Home"),
-            path: String::from("/home/user"),
+            path: PathBuf::from("/home/user"),
         },
         QuickAccess {
             label: String::from("Documents"),
-            path: String::from("/home/user/documents"),
+            path: PathBuf::from("/home/user/documents"),
         },
         QuickAccess {
             label: String::from("Downloads"),
-            path: String::from("/home/user/downloads"),
+            path: PathBuf::from("/home/user/downloads"),
         },
         QuickAccess {
             label: String::from("Desktop"),
-            path: String::from("/home/user/desktop"),
+            path: PathBuf::from("/home/user/desktop"),
         },
         QuickAccess {
             label: String::from("Recent"),
-            path: String::from("/recent"),
+            path: PathBuf::from("/recent"),
         },
     ]
 }
 
+/// Reinterpret bytes taken from an [`OsStr`] as an [`OsStr`] again.
+///
+/// # Safety
+///
+/// `bytes` must be a subslice of `OsStr::as_encoded_bytes` output taken on
+/// boundaries of the ASCII bytes it was split at. `OsStr::from_encoded_bytes_unchecked`
+/// documents exactly that contract: the encoding is self-synchronising at
+/// ASCII, so splitting at an ASCII byte cannot land inside a multi-byte
+/// sequence on any platform.
+unsafe fn os_str_from_bytes(bytes: &[u8]) -> &OsStr {
+    // SAFETY: the caller guarantees `bytes` came from `as_encoded_bytes` and
+    // was cut only at ASCII `/`, which is a valid boundary in every encoding
+    // `OsStr` uses.
+    unsafe { OsStr::from_encoded_bytes_unchecked(bytes) }
+}
+
 /// Get the parent of a path (simple slash-based splitting).
-fn parent_path(path: &str) -> String {
-    if path == "/" || path.is_empty() {
-        return String::from("/");
+///
+/// Split on the raw bytes at `/` alone rather than through [`Path::parent`],
+/// because a SlateOS path is separated by `/` and may contain **every** other
+/// byte — including `\`, which `std::path` on a Windows *host* treats as a
+/// separator too. Going through `Path` would therefore give one answer in the
+/// host test suite and a different one on the target, for a filename the
+/// filesystem is specified to accept.
+fn parent_path(path: &OsStr) -> OsString {
+    let bytes = path.as_encoded_bytes();
+    if bytes == b"/" || bytes.is_empty() {
+        return OsString::from("/");
     }
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rfind('/') {
-        Some(0) => String::from("/"),
-        Some(idx) => trimmed[..idx].to_string(),
-        None => String::from("/"),
+    // `saturating_add` rather than `+`: `rposition` cannot in fact return
+    // `usize::MAX` for a slice that fits in memory, but the lint does not know
+    // that and an `allow` here would be a wider exemption than the one line
+    // needs.
+    let end = bytes
+        .iter()
+        .rposition(|b| *b != b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    let trimmed = bytes.get(..end).unwrap_or(bytes);
+    match trimmed.iter().rposition(|b| *b == b'/') {
+        Some(0) | None => OsString::from("/"),
+        // SAFETY: `idx` is the position of an ASCII `/` in bytes that came
+        // from `as_encoded_bytes`, so the prefix ends on a valid boundary.
+        Some(idx) => unsafe { os_str_from_bytes(trimmed.get(..idx).unwrap_or(&[])) }.to_os_string(),
     }
 }
 
-/// Join a directory path and a child name.
-fn join_path(dir: &str, name: &str) -> String {
-    if dir == "/" {
-        format!("/{name}")
-    } else {
-        format!("{dir}/{name}")
+/// Join a directory path and a child name, on `/` alone. See [`parent_path`]
+/// for why this does not use [`Path::join`].
+fn join_path(dir: &OsStr, name: &OsStr) -> OsString {
+    let mut out = OsString::new();
+    if dir.as_encoded_bytes() != b"/" {
+        out.push(dir);
     }
+    out.push("/");
+    out.push(name);
+    out
+}
+
+/// The part of `name` after its last `.`, ASCII-lowercased, or empty if it has
+/// none.
+///
+/// Split on the raw bytes rather than `Path::extension` so that a name which
+/// is not valid UTF-8 still yields the extension it actually has, and so that
+/// the `.` is found by its byte — `.` is ASCII, so it cannot occur inside a
+/// multi-byte sequence.
+fn extension_of(name: &OsStr) -> OsString {
+    let bytes = name.as_encoded_bytes();
+    let Some(dot) = bytes.iter().rposition(|b| *b == b'.') else {
+        return OsString::new();
+    };
+    let Some(ext) = bytes.get(dot.saturating_add(1)..) else {
+        return OsString::new();
+    };
+    let lowered = ext.to_ascii_lowercase();
+    // SAFETY: `ext` is a suffix of `as_encoded_bytes` output cut just after an
+    // ASCII `.`, which is a valid boundary; ASCII-lowercasing maps ASCII bytes
+    // to ASCII bytes and leaves every other byte alone, so the encoding holds.
+    unsafe { os_str_from_bytes(&lowered) }.to_os_string()
+}
+
+/// The key a listing is sorted by when sorting on Name.
+///
+/// Unicode-lowercased when the name is valid UTF-8 — which is what this has
+/// always done, and what makes `README` and `readme` sort together — and the
+/// raw bytes when it is not. A name that cannot be decoded still has to sort
+/// *somewhere* deterministic, and its own bytes are the only key it has.
+fn sort_key(name: &OsStr) -> Vec<u8> {
+    name.to_str().map_or_else(
+        || name.as_encoded_bytes().to_vec(),
+        |s| s.to_lowercase().into_bytes(),
+    )
 }
 
 /// Format a byte size into a human-readable string.
@@ -1160,11 +1928,25 @@ fn format_timestamp(epoch_secs: u64, zone: &Tz) -> String {
 
 /// Check whether a filename matches any of the given glob patterns.
 /// Supports simple `*.ext` patterns only (not full glob).
-fn matches_any_pattern(filename: &str, patterns: &[&str]) -> bool {
+///
+/// A name that is not valid UTF-8 matches only `*` / `*.*`. That is not a
+/// limitation to work around but the right answer: the patterns are UTF-8, so
+/// no undecodable name can equal one, and deciding otherwise would mean
+/// decoding the name lossily and matching on characters that are not in it.
+fn matches_any_pattern(filename: &OsStr, patterns: &[&str]) -> bool {
+    let mut catch_all = false;
     for pattern in patterns {
         if *pattern == "*" || *pattern == "*.*" {
-            return true;
+            catch_all = true;
         }
+    }
+    if catch_all {
+        return true;
+    }
+    let Some(filename) = filename.to_str() else {
+        return false;
+    };
+    for pattern in patterns {
         if let Some(ext) = pattern.strip_prefix("*.")
             && filename.ends_with(&format!(".{ext}"))
         {
@@ -1176,6 +1958,24 @@ fn matches_any_pattern(filename: &str, patterns: &[&str]) -> bool {
         }
     }
     false
+}
+
+/// The directory containing `path`, by SlateOS's path rules.
+///
+/// Public because the code that *opens* a chooser needs this as much as the
+/// chooser's own `^` button does. A Browse button raised on behalf of a path
+/// the user already has — the desktop shell's Run box opens its chooser in the
+/// directory of whatever is currently typed — has to name that path's
+/// directory, and a second hand-rolled "cut at the last slash" is a second
+/// place for the rules in [`parent_path`] to be got wrong.
+///
+/// See [`parent_path`] for why this is a byte split on `/` and not
+/// [`Path::parent`]. Nothing is decoded, so a directory whose name has no UTF-8
+/// spelling comes back as the bytes that name it. A path with no `/` in it at
+/// all, and the root itself, both yield `/`.
+#[must_use]
+pub fn parent_of(path: impl AsRef<Path>) -> PathBuf {
+    PathBuf::from(parent_path(path.as_ref().as_os_str()))
 }
 
 /// List `path` for a [`FileDialog`], in the shape [`FileDialog::set_entries`]
@@ -1194,27 +1994,25 @@ fn matches_any_pattern(filename: &str, patterns: &[&str]) -> bool {
 /// they wandered into is a normal thing to find, not a failure of the program.
 /// Entries whose metadata cannot be read are skipped for the same reason.
 ///
-/// The name is taken from `file_name` as an `OsStr` and converted once. A path
-/// component is a byte string on this OS, and a listing is the one place a
-/// filename with no UTF-8 reading still has to be *shown*, so lossy conversion
-/// is the right answer here and only here — what is opened is rebuilt from
-/// `current_path` plus this name inside the dialog, so a substituted character
-/// would open the wrong file. That is a real limitation, and it belongs to
-/// [`DirEntry`]'s `String`-typed API rather than to this function; recorded in
-/// `known-issues.md`.
+/// The name is carried through as the `OsString` the filesystem gave, never
+/// decoded. It is the key that identifies the file — the dialog rebuilds what
+/// to open from `current_path` plus this name — and a lossy decode would make
+/// it the key to a different file, or to none. The only decode is at the draw
+/// call, which wants glyphs rather than a key.
 #[must_use]
-pub fn list_directory(path: &str) -> Vec<DirEntry> {
-    let Ok(iter) = std::fs::read_dir(path) else {
+pub fn list_directory(path: impl AsRef<Path>) -> Vec<DirEntry> {
+    let Ok(iter) = std::fs::read_dir(path.as_ref()) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for entry in iter.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let extension = name
-            .rsplit_once('.')
-            .map(|(_, ext)| ext.to_ascii_lowercase())
-            .unwrap_or_default();
+        let name = entry.file_name();
+        let extension = if meta.is_dir() {
+            OsString::new()
+        } else {
+            extension_of(&name)
+        };
         out.push(DirEntry {
             is_dir: meta.is_dir(),
             size: if meta.is_dir() { 0 } else { meta.len() },
@@ -1223,11 +2021,7 @@ pub fn list_directory(path: &str) -> Vec<DirEntry> {
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_secs()),
-            extension: if meta.is_dir() {
-                String::new()
-            } else {
-                extension
-            },
+            extension,
             name,
         });
     }
@@ -1251,6 +2045,208 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The size the tests render and dispatch at. The dialog stores no size of
+    /// its own — every handler is *given* one, exactly as a host gives it — so
+    /// the tests have to name one too rather than read it back off the widget.
+    /// 400 tall leaves room for ten rows, so a listing of a dozen has a tail
+    /// below the fold to scroll to.
+    const W: f32 = 600.0;
+    const H: f32 = 400.0;
+
+    fn file(name: &str) -> DirEntry {
+        DirEntry {
+            name: OsString::from(name),
+            is_dir: false,
+            size: 10,
+            modified_timestamp: 1_000,
+            extension: name
+                .rsplit_once('.')
+                .map_or(OsString::new(), |(_, e)| OsString::from(e)),
+        }
+    }
+
+    fn dir(name: &str) -> DirEntry {
+        DirEntry {
+            name: OsString::from(name),
+            is_dir: true,
+            size: 0,
+            modified_timestamp: 1_000,
+            extension: OsString::new(),
+        }
+    }
+
+    /// A filename that no `String` can hold, built through the platform's own
+    /// safe API rather than by asserting bytes into an `OsStr`.
+    ///
+    /// Windows filenames are UTF-16 sequences that need not be well-formed, so
+    /// a lone high surrogate is a legal name there and has no UTF-8 spelling;
+    /// Unix filenames are byte strings, so `0xFF` — which starts no UTF-8
+    /// sequence — does the same job. Either way `to_string_lossy` turns the
+    /// bad unit into U+FFFD, which is what makes the round-trip observable:
+    /// a dialog that carried the name as a `String` hands back a *different*
+    /// name than the one it was given.
+    #[cfg(windows)]
+    fn unmappable_name() -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        // "b\u{D800}.txt"
+        OsString::from_wide(&[0x0062, 0xD800, 0x002E, 0x0074, 0x0078, 0x0074])
+    }
+
+    #[cfg(not(windows))]
+    fn unmappable_name() -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(vec![b'b', 0xFF, b'.', b't', b'x', b't'])
+    }
+
+    fn unmappable_entry() -> DirEntry {
+        DirEntry {
+            name: unmappable_name(),
+            is_dir: false,
+            size: 10,
+            modified_timestamp: 1_000,
+            extension: OsString::from("txt"),
+        }
+    }
+
+    /// Opening a file whose name is not UTF-8 must hand back that file, not a
+    /// neighbour with a similar-looking name.
+    ///
+    /// This is the whole of the defect the `OsString` conversion fixes: with a
+    /// `String` name the U+FFFD substitution happened on the way *in*, so the
+    /// path the caller received named a file that in general does not exist —
+    /// and if it does exist, is the wrong one.
+    #[test]
+    fn opening_a_name_that_is_not_utf8_returns_the_exact_bytes() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![unmappable_entry()]);
+        dialog.select_entry(0);
+
+        let chosen = dialog.confirm().expect("a file is selected");
+        assert_eq!(
+            chosen.file_name(),
+            Some(unmappable_name().as_os_str()),
+            "the name came back as {:?}, not the bytes it went in as",
+            chosen.file_name()
+        );
+        assert_eq!(chosen.parent(), Some(Path::new("/docs")));
+    }
+
+    /// Double-clicking such a file in Open mode goes through a different arm
+    /// of the code, so it gets its own test.
+    #[test]
+    fn activating_a_name_that_is_not_utf8_returns_the_exact_bytes() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![unmappable_entry()]);
+
+        let action = dialog.activate_entry(0);
+        let DialogAction::Selected(chosen) = action else {
+            panic!("activating a file in Open mode should select it: {action:?}");
+        };
+        assert_eq!(chosen.file_name(), Some(unmappable_name().as_os_str()));
+    }
+
+    /// Save mode: clicking an existing file to overwrite it must overwrite
+    /// *that* file.
+    ///
+    /// The name shown in the text field is a `String` — it has to be, because
+    /// the user types into it a character at a time — so filling it from a
+    /// listing is the one place where an unrepresentable name would be
+    /// flattened to U+FFFD and then written back out as a new, different file
+    /// sitting beside the one the user pointed at. The exact bytes are kept
+    /// beside the text for as long as the text is still the listing's.
+    #[test]
+    fn overwriting_a_name_that_is_not_utf8_targets_the_file_that_was_clicked() {
+        let mut dialog = FileDialog::save().with_initial_path("/docs");
+        dialog.set_entries(vec![unmappable_entry()]);
+        dialog.select_entry(0);
+
+        let chosen = dialog.confirm().expect("the name field was filled");
+        assert_eq!(
+            chosen.file_name(),
+            Some(unmappable_name().as_os_str()),
+            "save mode would have created {:?} beside the file that was clicked",
+            chosen.file_name()
+        );
+    }
+
+    /// ...but once the user *types*, the text is the name. Keeping the
+    /// remembered bytes past a keystroke would save over the clicked file no
+    /// matter what the user then typed, which is the worse of the two failures
+    /// — it ignores an explicit instruction rather than mangling an implicit
+    /// one.
+    ///
+    /// The keystroke goes through `handle_event` rather than `set_filename`,
+    /// because `set_filename` fills the remembered bytes as well and so cannot
+    /// tell whether they are being invalidated at all.
+    #[test]
+    fn typing_in_the_name_field_drops_the_remembered_bytes() {
+        let mut dialog = FileDialog::save().with_initial_path("/docs");
+        dialog.set_entries(vec![unmappable_entry()]);
+        dialog.select_entry(0);
+
+        // Backspace once to cut the field down, then type a character. Either
+        // is an edit; both arms are exercised.
+        dialog.handle_event(
+            &KeyEvent {
+                key: Key::Backspace,
+                pressed: true,
+                modifiers: crate::event::Modifiers::NONE,
+                text: String::new(),
+            },
+            H,
+        );
+        dialog.handle_event(
+            &KeyEvent {
+                key: Key::Z,
+                pressed: true,
+                modifiers: crate::event::Modifiers::NONE,
+                text: String::from("z"),
+            },
+            H,
+        );
+
+        let typed = dialog.filename_input.clone();
+        assert!(
+            typed.ends_with('z'),
+            "the keystroke never reached the field: {typed:?}"
+        );
+        let chosen = dialog.confirm().expect("the name field is not empty");
+        assert_eq!(
+            chosen,
+            Path::new(&join_path(OsStr::new("/docs"), OsStr::new(&typed))),
+            "confirm answered with the remembered name, not the typed one"
+        );
+    }
+
+    /// Aim a click at the middle of whatever the frame drew for `target`.
+    /// Deliberately *not* a recomputed coordinate: the point of recording hit
+    /// boxes during the draw is that no second copy of the geometry exists to
+    /// disagree with the first.
+    fn centre_of(dialog: &FileDialog, target: DialogTarget) -> (f32, f32) {
+        let frame = dialog.frame(W, H);
+        let rect = frame
+            .rect_of(|t| *t == target)
+            .unwrap_or_else(|| panic!("{target:?} should have been drawn"));
+        rect.centre()
+    }
+
+    fn click_at(dialog: &mut FileDialog, x: f32, y: f32) -> DialogAction {
+        dialog.handle_mouse(&press_at(x, y), W, H)
+    }
+
+    fn press_at(x: f32, y: f32) -> MouseEvent {
+        MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }
+    }
+
+    fn click(dialog: &mut FileDialog, target: DialogTarget) -> DialogAction {
+        let (x, y) = centre_of(dialog, target);
+        click_at(dialog, x, y)
+    }
 
     #[test]
     fn test_open_dialog_creation() {
@@ -1322,25 +2318,25 @@ mod tests {
         let mut dialog = FileDialog::open();
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from("zebra.txt"),
+                name: OsString::from("zebra.txt"),
                 is_dir: false,
                 size: 100,
                 modified_timestamp: 1000,
-                extension: String::from("txt"),
+                extension: OsString::from("txt"),
             },
             DirEntry {
-                name: String::from("alpha"),
+                name: OsString::from("alpha"),
                 is_dir: true,
                 size: 0,
                 modified_timestamp: 2000,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("beta.rs"),
+                name: OsString::from("beta.rs"),
                 is_dir: false,
                 size: 200,
                 modified_timestamp: 3000,
-                extension: String::from("rs"),
+                extension: OsString::from("rs"),
             },
         ]);
 
@@ -1354,18 +2350,18 @@ mod tests {
         let mut dialog = FileDialog::open();
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from(".hidden"),
+                name: OsString::from(".hidden"),
                 is_dir: false,
                 size: 10,
                 modified_timestamp: 100,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("visible.txt"),
+                name: OsString::from("visible.txt"),
                 is_dir: false,
                 size: 20,
                 modified_timestamp: 200,
-                extension: String::from("txt"),
+                extension: OsString::from("txt"),
             },
         ]);
 
@@ -1378,18 +2374,18 @@ mod tests {
         let mut dialog = FileDialog::open().show_hidden(true);
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from(".hidden"),
+                name: OsString::from(".hidden"),
                 is_dir: false,
                 size: 10,
                 modified_timestamp: 100,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("visible.txt"),
+                name: OsString::from("visible.txt"),
                 is_dir: false,
                 size: 20,
                 modified_timestamp: 200,
-                extension: String::from("txt"),
+                extension: OsString::from("txt"),
             },
         ]);
 
@@ -1403,25 +2399,25 @@ mod tests {
         dialog.set_filter_index(0);
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from("main.rs"),
+                name: OsString::from("main.rs"),
                 is_dir: false,
                 size: 500,
                 modified_timestamp: 100,
-                extension: String::from("rs"),
+                extension: OsString::from("rs"),
             },
             DirEntry {
-                name: String::from("readme.md"),
+                name: OsString::from("readme.md"),
                 is_dir: false,
                 size: 300,
                 modified_timestamp: 200,
-                extension: String::from("md"),
+                extension: OsString::from("md"),
             },
             DirEntry {
-                name: String::from("src"),
+                name: OsString::from("src"),
                 is_dir: true,
                 size: 0,
                 modified_timestamp: 300,
-                extension: String::new(),
+                extension: OsString::new(),
             },
         ]);
 
@@ -1435,11 +2431,11 @@ mod tests {
     fn test_confirm_open_requires_file_selection() {
         let mut dialog = FileDialog::open();
         dialog.set_entries(vec![DirEntry {
-            name: String::from("file.txt"),
+            name: OsString::from("file.txt"),
             is_dir: false,
             size: 100,
             modified_timestamp: 1000,
-            extension: String::from("txt"),
+            extension: OsString::from("txt"),
         }]);
 
         // No selection yet.
@@ -1447,7 +2443,7 @@ mod tests {
 
         // Select the file.
         dialog.select_entry(0);
-        assert_eq!(dialog.confirm(), Some(String::from("/file.txt")));
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/file.txt")));
     }
 
     #[test]
@@ -1456,7 +2452,7 @@ mod tests {
         assert_eq!(dialog.confirm(), None);
 
         dialog.set_filename("report.txt");
-        assert_eq!(dialog.confirm(), Some(String::from("/docs/report.txt")));
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/docs/report.txt")));
     }
 
     #[test]
@@ -1468,7 +2464,7 @@ mod tests {
         dialog.set_filename("main");
 
         // confirm() should append .rs
-        assert_eq!(dialog.confirm(), Some(String::from("/src/main.rs")));
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/src/main.rs")));
     }
 
     #[test]
@@ -1480,24 +2476,24 @@ mod tests {
         dialog.set_filename("main.rs");
 
         // Should not double up the extension.
-        assert_eq!(dialog.confirm(), Some(String::from("/src/main.rs")));
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/src/main.rs")));
     }
 
     #[test]
     fn test_activate_entry_navigates_into_dir() {
         let mut dialog = FileDialog::open().with_initial_path("/home");
         dialog.set_entries(vec![DirEntry {
-            name: String::from("projects"),
+            name: OsString::from("projects"),
             is_dir: true,
             size: 0,
             modified_timestamp: 1000,
-            extension: String::new(),
+            extension: OsString::new(),
         }]);
 
         let action = dialog.activate_entry(0);
         assert_eq!(
             action,
-            DialogAction::NavigatedTo(String::from("/home/projects"))
+            DialogAction::NavigatedTo(PathBuf::from("/home/projects"))
         );
         assert_eq!(dialog.current_path(), "/home/projects");
     }
@@ -1506,17 +2502,17 @@ mod tests {
     fn test_activate_file_in_open_mode_selects() {
         let mut dialog = FileDialog::open().with_initial_path("/docs");
         dialog.set_entries(vec![DirEntry {
-            name: String::from("notes.txt"),
+            name: OsString::from("notes.txt"),
             is_dir: false,
             size: 50,
             modified_timestamp: 2000,
-            extension: String::from("txt"),
+            extension: OsString::from("txt"),
         }]);
 
         let action = dialog.activate_entry(0);
         assert_eq!(
             action,
-            DialogAction::Selected(String::from("/docs/notes.txt"))
+            DialogAction::Selected(PathBuf::from("/docs/notes.txt"))
         );
     }
 
@@ -1537,7 +2533,7 @@ mod tests {
             modifiers: crate::event::Modifiers::NONE,
             text: String::new(),
         };
-        let action = dialog.handle_event(&event);
+        let action = dialog.handle_event(&event, H);
         assert_eq!(action, DialogAction::Cancelled);
         assert!(dialog.is_cancelled());
     }
@@ -1547,25 +2543,25 @@ mod tests {
         let mut dialog = FileDialog::open();
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from("a"),
+                name: OsString::from("a"),
                 is_dir: false,
                 size: 10,
                 modified_timestamp: 100,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("b"),
+                name: OsString::from("b"),
                 is_dir: false,
                 size: 20,
                 modified_timestamp: 200,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("c"),
+                name: OsString::from("c"),
                 is_dir: false,
                 size: 30,
                 modified_timestamp: 300,
-                extension: String::new(),
+                extension: OsString::new(),
             },
         ]);
 
@@ -1575,14 +2571,14 @@ mod tests {
             modifiers: crate::event::Modifiers::NONE,
             text: String::new(),
         };
-        dialog.handle_event(&down);
+        dialog.handle_event(&down, H);
         assert_eq!(dialog.selected_index(), Some(1));
 
-        dialog.handle_event(&down);
+        dialog.handle_event(&down, H);
         assert_eq!(dialog.selected_index(), Some(2));
 
         // Should clamp at the end.
-        dialog.handle_event(&down);
+        dialog.handle_event(&down, H);
         assert_eq!(dialog.selected_index(), Some(2));
 
         let up = KeyEvent {
@@ -1591,7 +2587,7 @@ mod tests {
             modifiers: crate::event::Modifiers::NONE,
             text: String::new(),
         };
-        dialog.handle_event(&up);
+        dialog.handle_event(&up, H);
         assert_eq!(dialog.selected_index(), Some(1));
     }
 
@@ -1680,11 +2676,11 @@ mod tests {
     fn a_dialog_renders_the_modified_column_in_its_own_zone() {
         let est = Tz::parse(b"EST5").expect("a POSIX TZ string");
         let entry = DirEntry {
-            name: String::from("notes.txt"),
+            name: OsString::from("notes.txt"),
             is_dir: false,
             size: 10,
             modified_timestamp: 19_675 * 86_400,
-            extension: String::from("txt"),
+            extension: OsString::from("txt"),
         };
         let dated = |zone: Option<Tz>| {
             let mut dialog = FileDialog::open();
@@ -1711,82 +2707,112 @@ mod tests {
         let mut dialog = FileDialog::open();
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from("a"),
+                name: OsString::from("a"),
                 is_dir: false,
                 size: 0,
                 modified_timestamp: 1,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("b"),
+                name: OsString::from("b"),
                 is_dir: false,
                 size: 0,
                 modified_timestamp: 1,
-                extension: String::new(),
+                extension: OsString::new(),
             },
         ]);
-        dialog.move_selection(1);
+        dialog.move_selection(1, H);
         assert_eq!(dialog.selected_index, Some(1));
         // Far past either end, including a delta that would overflow the
         // signed arithmetic the old implementation used.
-        dialog.move_selection(isize::MAX);
+        dialog.move_selection(isize::MAX, H);
         assert_eq!(dialog.selected_index, Some(1));
-        dialog.move_selection(isize::MIN);
+        dialog.move_selection(isize::MIN, H);
         assert_eq!(dialog.selected_index, Some(0));
-        dialog.move_selection(-1);
+        dialog.move_selection(-1, H);
         assert_eq!(dialog.selected_index, Some(0));
     }
 
     #[test]
     fn moving_the_selection_in_an_empty_list_selects_nothing() {
         let mut dialog = FileDialog::open();
-        dialog.move_selection(1);
+        dialog.move_selection(1, H);
         assert_eq!(dialog.selected_index, None);
-        dialog.move_selection(-1);
+        dialog.move_selection(-1, H);
         assert_eq!(dialog.selected_index, None);
     }
 
     #[test]
     fn test_parent_path() {
-        assert_eq!(parent_path("/"), "/");
-        assert_eq!(parent_path("/home"), "/");
-        assert_eq!(parent_path("/home/user"), "/home");
-        assert_eq!(parent_path("/home/user/docs"), "/home/user");
-        assert_eq!(parent_path("/a/b/c/d"), "/a/b/c");
+        assert_eq!(parent_path(OsStr::new("/")), "/");
+        assert_eq!(parent_path(OsStr::new("/home")), "/");
+        assert_eq!(parent_path(OsStr::new("/home/user")), "/home");
+        assert_eq!(parent_path(OsStr::new("/home/user/docs")), "/home/user");
+        assert_eq!(parent_path(OsStr::new("/a/b/c/d")), "/a/b/c");
+    }
+
+    /// The public wrapper answers the same as the private splitter, and answers
+    /// it for a name that has no UTF-8 spelling. `parent_of` exists so that
+    /// callers who *open* a chooser — the desktop shell's Run box — do not
+    /// hand-roll the split; a wrapper that decoded on the way through would
+    /// defeat the point of sharing it.
+    #[test]
+    fn parent_of_splits_a_name_it_cannot_decode() {
+        assert_eq!(parent_of("/home/user/docs"), PathBuf::from("/home/user"));
+        assert_eq!(parent_of("/"), PathBuf::from("/"));
+        assert_eq!(parent_of("terminal"), PathBuf::from("/"));
+
+        let mut odd = OsString::from("/usr/bin/");
+        odd.push(unmappable_name());
+        assert_eq!(parent_of(&odd), PathBuf::from("/usr/bin"));
+
+        // A `\` is an ordinary character in a SlateOS filename, which is the
+        // case `Path::parent` would get wrong on a Windows host: it would
+        // answer `/usr` where the filesystem says the file is in `/usr/b\ck`.
+        assert_eq!(parent_of("/usr/b\\ck/thing"), PathBuf::from("/usr/b\\ck"));
     }
 
     #[test]
     fn test_join_path() {
-        assert_eq!(join_path("/", "home"), "/home");
-        assert_eq!(join_path("/home", "user"), "/home/user");
-        assert_eq!(join_path("/a/b", "c"), "/a/b/c");
+        assert_eq!(join_path(OsStr::new("/"), OsStr::new("home")), "/home");
+        assert_eq!(
+            join_path(OsStr::new("/home"), OsStr::new("user")),
+            "/home/user"
+        );
+        assert_eq!(join_path(OsStr::new("/a/b"), OsStr::new("c")), "/a/b/c");
     }
 
     #[test]
     fn test_matches_any_pattern() {
-        assert!(matches_any_pattern("main.rs", &["*.rs"]));
-        assert!(!matches_any_pattern("main.rs", &["*.txt"]));
-        assert!(matches_any_pattern("anything", &["*"]));
-        assert!(matches_any_pattern("main.rs", &["*.txt", "*.rs"]));
-        assert!(matches_any_pattern("exact_match", &["exact_match"]));
+        assert!(matches_any_pattern(OsStr::new("main.rs"), &["*.rs"]));
+        assert!(!matches_any_pattern(OsStr::new("main.rs"), &["*.txt"]));
+        assert!(matches_any_pattern(OsStr::new("anything"), &["*"]));
+        assert!(matches_any_pattern(
+            OsStr::new("main.rs"),
+            &["*.txt", "*.rs"]
+        ));
+        assert!(matches_any_pattern(
+            OsStr::new("exact_match"),
+            &["exact_match"]
+        ));
     }
 
     #[test]
     fn test_select_folder_mode() {
         let mut dialog = FileDialog::select_folder().with_initial_path("/home");
         dialog.set_entries(vec![DirEntry {
-            name: String::from("projects"),
+            name: OsString::from("projects"),
             is_dir: true,
             size: 0,
             modified_timestamp: 1000,
-            extension: String::new(),
+            extension: OsString::new(),
         }]);
 
         // Activating a dir in select-folder mode selects it.
         let action = dialog.activate_entry(0);
         assert_eq!(
             action,
-            DialogAction::Selected(String::from("/home/projects"))
+            DialogAction::Selected(PathBuf::from("/home/projects"))
         );
     }
 
@@ -1833,8 +2859,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("sub")).expect("create the fixture");
         std::fs::write(dir.join("notes.TXT"), b"hello").expect("write the fixture");
 
-        let listing = list_directory(&dir.to_string_lossy());
-        let mut names: Vec<&str> = listing.iter().map(|e| e.name.as_str()).collect();
+        let listing = list_directory(&dir);
+        let mut names: Vec<&OsStr> = listing.iter().map(|e| e.name.as_os_str()).collect();
         names.sort_unstable();
         assert_eq!(names, ["notes.TXT", "sub"]);
 
@@ -1861,5 +2887,579 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).expect("remove the fixture");
+    }
+
+    // --- Mouse ---
+
+    #[test]
+    fn clicking_a_row_selects_it_without_opening_it() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+
+        let action = click(&mut dialog, DialogTarget::Entry(1));
+
+        assert_eq!(dialog.selected_index(), Some(1));
+        assert_eq!(
+            action,
+            DialogAction::None,
+            "one click picks; it takes a second one, or Open, to act"
+        );
+        assert_eq!(dialog.current_path(), "/docs");
+    }
+
+    #[test]
+    fn double_clicking_a_directory_navigates_into_it() {
+        let mut dialog = FileDialog::open().with_initial_path("/home");
+        dialog.set_entries(vec![dir("projects"), file("notes.txt")]);
+
+        let (x, y) = centre_of(&dialog, DialogTarget::Entry(0));
+        let action = dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::DoubleClick(MouseButton::Left),
+            },
+            W,
+            H,
+        );
+
+        assert_eq!(
+            action,
+            DialogAction::NavigatedTo(PathBuf::from("/home/projects"))
+        );
+        assert_eq!(dialog.current_path(), "/home/projects");
+    }
+
+    #[test]
+    fn double_clicking_a_file_opens_it() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("notes.txt")]);
+
+        let (x, y) = centre_of(&dialog, DialogTarget::Entry(0));
+        let action = dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::DoubleClick(MouseButton::Left),
+            },
+            W,
+            H,
+        );
+
+        assert_eq!(
+            action,
+            DialogAction::Selected(PathBuf::from("/docs/notes.txt")),
+            "a double-click has to open the row it landed on even if no press \
+             selected it first — the host may send only the double-click"
+        );
+    }
+
+    #[test]
+    fn clicking_cancel_cancels() {
+        let mut dialog = FileDialog::open();
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Cancel),
+            DialogAction::Cancelled
+        );
+        assert!(dialog.is_cancelled());
+    }
+
+    #[test]
+    fn clicking_open_returns_the_selected_file() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("a.txt"), file("b.txt")]);
+        click(&mut dialog, DialogTarget::Entry(1));
+
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Confirm),
+            DialogAction::Selected(PathBuf::from("/docs/b.txt"))
+        );
+    }
+
+    #[test]
+    fn clicking_open_with_nothing_picked_does_nothing() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("a.txt")]);
+
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Confirm),
+            DialogAction::None,
+            "a disabled Open button must still swallow the click, but must not act"
+        );
+        assert!(!dialog.is_cancelled());
+    }
+
+    #[test]
+    fn clicking_up_navigates_and_reports_it() {
+        let mut dialog = FileDialog::open().with_initial_path("/home/user/docs");
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Up),
+            DialogAction::NavigatedTo(PathBuf::from("/home/user"))
+        );
+    }
+
+    #[test]
+    fn clicking_up_at_the_root_reports_no_move() {
+        let mut dialog = FileDialog::open().with_initial_path("/");
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Up),
+            DialogAction::None,
+            "claiming a move that did not happen costs the host a pointless read"
+        );
+    }
+
+    #[test]
+    fn clicking_back_at_the_start_of_the_session_still_reports_the_move() {
+        // The history is emptied by this very step, so an implementation that
+        // asks "is there history left?" afterwards concludes nothing happened
+        // and leaves the previous directory's files under the new name.
+        let mut dialog = FileDialog::open().with_initial_path("/home");
+        click(&mut dialog, DialogTarget::Up);
+        assert_eq!(dialog.current_path(), "/");
+
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Back),
+            DialogAction::NavigatedTo(PathBuf::from("/home"))
+        );
+    }
+
+    #[test]
+    fn clicking_a_sidebar_shortcut_navigates_there() {
+        let mut dialog = FileDialog::open().with_initial_path("/");
+        let expected = dialog.quick_access[1].path.clone();
+
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Shortcut(1)),
+            DialogAction::NavigatedTo(expected.clone())
+        );
+        assert_eq!(dialog.current_path(), expected);
+    }
+
+    #[test]
+    fn clicking_a_header_re_sorts_and_keeps_the_picked_file() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![
+            DirEntry {
+                size: 300,
+                ..file("a.txt")
+            },
+            DirEntry {
+                size: 100,
+                ..file("b.txt")
+            },
+            DirEntry {
+                size: 200,
+                ..file("c.txt")
+            },
+        ]);
+        // Picked by name order: a, b, c -> row 0 is "a.txt".
+        click(&mut dialog, DialogTarget::Entry(0));
+
+        click(&mut dialog, DialogTarget::Header(SortColumn::Size));
+
+        let order: Vec<&OsStr> = dialog.entries.iter().map(|e| e.name.as_os_str()).collect();
+        assert_eq!(
+            order,
+            ["b.txt", "c.txt", "a.txt"],
+            "the header has to reorder the listing, not just move its arrow"
+        );
+        assert_eq!(
+            dialog.selected_index(),
+            Some(2),
+            "the selection follows the file, not the row number"
+        );
+        assert_eq!(
+            dialog.confirm().as_deref(),
+            Some(Path::new("/docs/a.txt")),
+            "so sorting cannot change which file Open opens"
+        );
+    }
+
+    // --- Scrolling ---
+
+    /// A listing long enough to have a tail below the fold at `H`.
+    fn long_listing() -> Vec<DirEntry> {
+        (0..30).map(|i| file(&format!("f{i:02}.txt"))).collect()
+    }
+
+    #[test]
+    fn everything_that_fits_gets_no_scrollbar() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(vec![file("a.txt"), file("b.txt")]);
+        let frame = dialog.frame(W, H);
+
+        assert!(
+            frame.rect_of(|t| *t == DialogTarget::ScrollTrack).is_none(),
+            "a scrollbar with nothing to scroll is a control that does nothing"
+        );
+    }
+
+    #[test]
+    fn the_wheel_reaches_the_rows_below_the_fold() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(long_listing());
+
+        let before = dialog.frame(W, H);
+        assert!(
+            before.rect_of(|t| *t == DialogTarget::Entry(29)).is_none(),
+            "the last row starts out below the fold, or this test proves nothing"
+        );
+
+        for _ in 0..10 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                },
+                W,
+                H,
+            );
+        }
+
+        let after = dialog.frame(W, H);
+        assert!(
+            after.rect_of(|t| *t == DialogTarget::Entry(29)).is_some(),
+            "scrolling to the end has to bring the last row on screen"
+        );
+        assert!(
+            after.rect_of(|t| *t == DialogTarget::Entry(0)).is_none(),
+            "and take the first one off it"
+        );
+    }
+
+    #[test]
+    fn the_wheel_stops_at_the_end_rather_than_scrolling_into_nothing() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        let capacity = FileDialog::row_capacity(H);
+
+        for _ in 0..50 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                },
+                W,
+                H,
+            );
+        }
+
+        let rows = dialog.visible_rows(H);
+        assert_eq!(
+            rows.start,
+            30 - capacity,
+            "the last page is the end of the list, not a screen of blank"
+        );
+        assert_eq!(rows.end, 30);
+    }
+
+    #[test]
+    fn a_row_clicked_after_scrolling_is_the_row_that_was_drawn_there() {
+        // The bug class this whole design exists to prevent: hit-testing
+        // against geometry recomputed without the scroll offset picks the row
+        // that *would* be there if the list had never moved.
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        for _ in 0..2 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                },
+                W,
+                H,
+            );
+        }
+        let first = dialog.visible_rows(H).start;
+        assert!(first > 0, "the list has to have actually scrolled");
+
+        // Aim at the topmost drawn row by its pixels, and check the dialog
+        // agrees about which entry lives there.
+        let rect = dialog
+            .frame(W, H)
+            .rect_of(|t| *t == DialogTarget::Entry(first))
+            .expect("the first visible row is drawn");
+        let (x, y) = rect.centre();
+        click_at(&mut dialog, x, y);
+
+        assert_eq!(dialog.selected_index(), Some(first));
+    }
+
+    #[test]
+    fn dragging_the_thumb_scrolls_the_list() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+
+        let (x, y) = centre_of(&dialog, DialogTarget::ScrollThumb);
+        click_at(&mut dialog, x, y);
+        assert!(
+            dialog.thumb_grab.is_some(),
+            "the press has to take the grab"
+        );
+
+        // Drag far past the bottom of the track; the offset clamps to the end.
+        dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y: y + H,
+                kind: MouseEventKind::Move,
+            },
+            W,
+            H,
+        );
+        assert_eq!(dialog.visible_rows(H).end, 30);
+
+        dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y: y - H,
+                kind: MouseEventKind::Move,
+            },
+            W,
+            H,
+        );
+        assert_eq!(dialog.visible_rows(H).start, 0);
+
+        dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Release(MouseButton::Left),
+            },
+            W,
+            H,
+        );
+        assert!(
+            dialog.thumb_grab.is_none(),
+            "releasing has to drop the grab"
+        );
+    }
+
+    #[test]
+    fn a_move_without_a_grab_does_not_scroll() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+
+        dialog.handle_mouse(
+            &MouseEvent {
+                x: W - 5.0,
+                y: H - 60.0,
+                kind: MouseEventKind::Move,
+            },
+            W,
+            H,
+        );
+
+        assert_eq!(
+            dialog.visible_rows(H).start,
+            0,
+            "the pointer merely passing over the scrollbar must not move it"
+        );
+    }
+
+    #[test]
+    fn clicking_the_track_pages_towards_the_click() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        let capacity = FileDialog::row_capacity(H);
+
+        let track = dialog
+            .frame(W, H)
+            .rect_of(|t| *t == DialogTarget::ScrollTrack)
+            .expect("a long listing has a scrollbar");
+        // Below the thumb, which sits at the top.
+        click_at(&mut dialog, track.centre().0, track.y + track.h - 1.0);
+
+        assert_eq!(dialog.visible_rows(H).start, capacity);
+    }
+
+    #[test]
+    fn the_thumb_sits_at_the_end_when_the_list_is_at_its_end() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        for _ in 0..50 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                },
+                W,
+                H,
+            );
+        }
+
+        let frame = dialog.frame(W, H);
+        let track = frame
+            .rect_of(|t| *t == DialogTarget::ScrollTrack)
+            .expect("track");
+        let thumb = frame
+            .rect_of(|t| *t == DialogTarget::ScrollThumb)
+            .expect("thumb");
+        assert!(
+            (thumb.y + thumb.h - (track.y + track.h)).abs() < 0.5,
+            "a thumb held to a minimum height still has to reach the bottom: \
+             {thumb:?} in {track:?}"
+        );
+    }
+
+    #[test]
+    fn keyboard_selection_scrolls_the_list_to_follow_it() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        let down = KeyEvent {
+            key: Key::Down,
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: String::new(),
+        };
+        for _ in 0..29 {
+            dialog.handle_event(&down, H);
+        }
+
+        assert_eq!(dialog.selected_index(), Some(29));
+        let rows = dialog.visible_rows(H);
+        assert!(
+            rows.contains(&29),
+            "walking off the bottom edge has to bring the list with it: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_wheel_may_scroll_away_from_the_selection() {
+        // Reveal is a consequence of *moving* the selection, not something
+        // render re-imposes: if it were the latter, every wheel notch would be
+        // undone by the next frame and the wheel would do nothing at all.
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        dialog.handle_event(
+            &KeyEvent {
+                key: Key::End,
+                pressed: true,
+                modifiers: crate::event::Modifiers::NONE,
+                text: String::new(),
+            },
+            H,
+        );
+        assert_eq!(dialog.selected_index(), Some(29));
+
+        for _ in 0..50 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: 3.0 },
+                },
+                W,
+                H,
+            );
+        }
+
+        assert_eq!(dialog.visible_rows(H).start, 0);
+        assert_eq!(
+            dialog.selected_index(),
+            Some(29),
+            "scrolling away from the selection must not change it"
+        );
+    }
+
+    #[test]
+    fn navigating_rewinds_the_scroll() {
+        let mut dialog = FileDialog::open().with_initial_path("/a");
+        dialog.set_entries(long_listing());
+        for _ in 0..5 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                },
+                W,
+                H,
+            );
+        }
+        assert!(dialog.visible_rows(H).start > 0);
+
+        click(&mut dialog, DialogTarget::Up);
+        dialog.set_entries(vec![file("only.txt")]);
+
+        assert_eq!(dialog.visible_rows(H).start, 0);
+        assert_eq!(dialog.selected_index(), None);
+    }
+
+    // --- Modality ---
+
+    #[test]
+    fn a_click_outside_the_dialog_is_swallowed() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("a.txt")]);
+
+        assert_eq!(
+            click_at(&mut dialog, W + 40.0, H + 40.0),
+            DialogAction::None,
+            "a modal that let the window behind it be clicked would only look modal"
+        );
+        assert!(!dialog.is_cancelled(), "and must not dismiss itself either");
+    }
+
+    #[test]
+    fn a_click_on_dead_chrome_is_swallowed() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("a.txt")]);
+        // The toolbar strip to the right of the address bar acts on nothing.
+        assert_eq!(click_at(&mut dialog, W - 2.0, 2.0), DialogAction::None);
+        assert_eq!(dialog.selected_index(), None);
+    }
+
+    #[test]
+    fn every_control_the_frame_draws_is_reachable() {
+        // A hit box recorded but clipped away is a control the user can see and
+        // cannot press. `Frame` drops those, so asking the frame is the check.
+        let mut dialog = FileDialog::save().with_initial_path("/docs");
+        dialog.set_entries(long_listing());
+        let frame = dialog.frame(W, H);
+
+        for target in [
+            DialogTarget::Back,
+            DialogTarget::Forward,
+            DialogTarget::Up,
+            DialogTarget::AddressBar,
+            DialogTarget::Shortcut(0),
+            DialogTarget::Header(SortColumn::Name),
+            DialogTarget::Header(SortColumn::Size),
+            DialogTarget::Header(SortColumn::Modified),
+            DialogTarget::Entry(0),
+            DialogTarget::List,
+            DialogTarget::ScrollTrack,
+            DialogTarget::ScrollThumb,
+            DialogTarget::FilenameInput,
+            DialogTarget::Confirm,
+            DialogTarget::Cancel,
+            DialogTarget::Chrome,
+        ] {
+            assert!(
+                frame.rect_of(|t| *t == target).is_some(),
+                "{target:?} should be reachable"
+            );
+        }
+        assert!(frame.is_balanced(), "every clip has to be closed");
+    }
+
+    #[test]
+    fn the_address_bar_swallows_its_click_without_acting() {
+        let mut dialog = FileDialog::open().with_initial_path("/home/user");
+
+        assert_eq!(
+            click(&mut dialog, DialogTarget::AddressBar),
+            DialogAction::None
+        );
+        assert_eq!(
+            dialog.current_path(),
+            "/home/user",
+            "it is not editable yet, but it must not fall through to the list"
+        );
     }
 }

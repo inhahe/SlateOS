@@ -151,7 +151,10 @@ fn clicking_settings_in_the_start_menu_asks_for_the_settings_program() {
 
     let rect = shell.start_menu_row_rect(row);
     let action = click_at(&mut shell, rect);
-    assert_eq!(action, ShellAction::Launch("/usr/bin/settings".to_string()));
+    assert_eq!(
+        action,
+        ShellAction::Launch(std::path::PathBuf::from("/usr/bin/settings"))
+    );
     // Picking something dismisses the menu; a menu still open over the program
     // it just started is nobody's idea of a launcher.
     assert!(!shell.start_menu_open);
@@ -192,7 +195,11 @@ fn every_visible_row_launches_the_program_named_on_it() {
         let expected = shell.start_menu_entries()[row].executable_path.clone();
         let rect = shell.start_menu_row_rect(row);
         let action = click_at(&mut shell, rect);
-        assert_eq!(action, ShellAction::Launch(expected), "row {row}");
+        assert_eq!(
+            action,
+            ShellAction::Launch(std::path::PathBuf::from(&expected)),
+            "row {row}"
+        );
     }
 }
 
@@ -217,7 +224,10 @@ fn a_scrolled_row_launches_the_program_named_on_it() {
     let expected = shell.start_menu_entries()[3].executable_path.clone();
     let rect = shell.start_menu_row_rect(0);
     let action = click_at(&mut shell, rect);
-    assert_eq!(action, ShellAction::Launch(expected));
+    assert_eq!(
+        action,
+        ShellAction::Launch(std::path::PathBuf::from(&expected))
+    );
 }
 
 #[test]
@@ -377,7 +387,11 @@ fn the_power_menu_offers_every_system_action_and_launches_them() {
         let expected = shell.power_menu_entries()[row].executable_path.clone();
         let rect = shell.power_menu_row_rect(row);
         let action = click_at(&mut shell, rect);
-        assert_eq!(action, ShellAction::Launch(expected), "row {row}");
+        assert_eq!(
+            action,
+            ShellAction::Launch(std::path::PathBuf::from(&expected)),
+            "row {row}"
+        );
         // Both menus go: the machine is about to shut down behind them.
         assert!(!shell.power_menu_open);
         assert!(!shell.start_menu_open);

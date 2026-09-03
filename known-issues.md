@@ -46839,9 +46839,9 @@ project, so it is the one that will hit this first. There is no repository-side
 fix; the value here is the five minutes a future session will otherwise spend
 looking for a `#![no_std]` that is not there.
 
-## C-SPREADSHEET-SCROLLBARS-ARE-DRAWN-BUT-NOT-DRAGGABLE (lane C, 2026-08-20)
+## C-SPREADSHEET-SCROLLBARS-ARE-DRAWN-BUT-NOT-DRAGGABLE (lane C, 2026-08-20) -- **fixed 2026-09-03**
 
-**Status:** open — dead control, not a wrong one.
+**Status:** fixed — see "Fixed 2026-09-03" at the end of this entry.
 
 `apps/spreadsheet/src/main.rs` draws a vertical and a horizontal scrollbar
 (`render_scrollbars`, the `scroll_ratio` computations near the end of the
@@ -46864,6 +46864,66 @@ the divergence the layout law (`col_screen_x`/`row_screen_y`) was introduced to
 end, and a scrollbar with its own idea of the offset would reintroduce it in a
 new place. Note `scroll_by` already screens non-finite input, which a drag
 needs because the ratio divides by a content extent that can be zero.
+
+### Fixed 2026-09-03
+
+Done as the entry describes. `ScrollbarGeometry` is the single law: given a
+track, an axis, a `max_scroll` and an offset it produces both the thumb's rect
+and, through `offset_at`, the inverse map from a pointer position back to an
+offset. `render_scrollbars` draws what it returns and `drag_scrollbar` reads
+the pointer through it, so the drawn thumb and the drag cannot disagree —
+`tests::the_thumb_placement_and_the_offset_map_are_inverses` pins the two as
+inverses across the whole range rather than at one point, since a wrong scale
+still agrees at zero. `InteractionMode::ScrollDrag { vertical, grab }` holds
+the grab offset so a thumb caught near one end does not jump its centre under
+the pointer. A press in the gutter pages towards the press and starts no drag.
+
+**Three pre-existing bugs surfaced while testing this, all now fixed.** Each
+was a second derivation of a number that already had one — the same failure
+`col_screen_x`/`row_screen_y` was introduced to end — and in each the error was
+invisible at zero and grew with the offset:
+
+- **The horizontal bar was drawn over the sheet tabs and could never be
+  clicked.** `grid_height` reserved no band for it, so `grid_bottom()` was the
+  tab strip's top edge, while `grid_width` had always reserved
+  `SCROLLBAR_WIDTH` for the vertical bar. The bar was unreachable twice over:
+  the tabs are drawn after it, so they painted over its top half, and the tabs
+  are hit-tested *first*, so a press on what was left picked a sheet. Fixed by
+  making `grid_height` reserve the band symmetrically with `grid_width`.
+  Pinned by `tests::the_horizontal_scrollbar_does_not_overlap_the_sheet_tabs`,
+  which checks it at three window sizes.
+
+- **With the status bar hidden, every sheet tab was dead.** The click test
+  computed the strip's top as `window_height - SHEET_TAB_HEIGHT -
+  STATUS_BAR_HEIGHT` unconditionally; the renderer subtracted
+  `STATUS_BAR_HEIGHT` only when the bar was actually shown. With it hidden,
+  every tab's hit box sat a status bar's height above the tab drawn for it —
+  so the visible tabs did nothing and a blank band of grid selected them.
+  Fixed with one `tab_top()` law, used by both.
+
+- **Clicking a tab's right-hand edge selected the tab next door.** The
+  renderer laid the tabs out from `x = 4` in strides of `SHEET_TAB_WIDTH + 2`;
+  the click test sliced the strip from `x = 0` in strides of
+  `SHEET_TAB_WIDTH` alone. 4px out at the first tab, a further 2px at each one
+  after it — and by the "+" button, 14px, wider than half the button, so the
+  button could not be hit at all. Fixed with `sheet_tab_rects()`, one walk
+  yielding a rect per tab plus one for the "+", which the renderer draws and
+  the click test hit-tests. Pinned by
+  `tests::every_tab_selects_itself_along_its_whole_width`, which clicks each
+  tab's left edge, centre and right edge — the drift is largest at the right
+  edge and grows with the index, so a single tab at its centre would have
+  shown nothing.
+
+The two tab tests take their click coordinates **out of the render command
+list**, not from `sheet_tab_rects()`. Asking the law under test where the tab
+is would make the click and the drawing agree by construction and the tests
+could not fail. All three were mutation-checked: each of the three fixes was
+reverted in turn and the corresponding test observed to fail with the
+predicted numbers (`the bar ends at 762 but the tabs start at 748`; `x=93 is
+drawn inside tab 0 but selected sheet 1`; `clicking the second tab where it is
+drawn selected sheet 0`).
+
+241 tests pass; clippy and rustfmt clean.
 
 ## C-SPREADSHEET-FREEZE-ACCEPTS-A-BAND-BIGGER-THAN-THE-WINDOW (lane C, 2026-08-20)
 
@@ -80967,7 +81027,7 @@ way to build one; the test caught the parser rather than the fixture. A disk
 imager reads the images that exist, not the ones the standard describes, so
 the trim now covers NUL and a named test pins it.
 
-### TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE — 2026-08-25 — OPEN
+### TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE — 2026-08-25 — **FIXED 2026-09-03**
 
 **Where:** `gui/toolkit/src/dialog.rs` — `DirEntry::name`, `DialogAction::Selected(String)`,
 `DialogAction::NavigatedTo(String)`, `FileDialog::with_initial_path(&str)`. First
@@ -81016,6 +81076,101 @@ on the type signatures is the most that can be pinned.
 **Severity while open:** low frequency, silent, and wrong-file rather than
 crash. Nothing in lane C currently *creates* non-UTF-8 filenames, so the way to
 meet it today is an image copied from another system.
+
+### Fixed 2026-09-03
+
+The type surface is now what the "proper fix" above prescribed:
+
+| item | was | is |
+|---|---|---|
+| `DirEntry::name`, `DirEntry::extension` | `String` | `OsString` |
+| `DialogAction::Selected`, `::NavigatedTo` | `String` | `PathBuf` |
+| `FileDialog::current_path`, `history_back/forward` | `String` | `PathBuf` |
+| `current_path()`, `confirm()` | `&str` / `Option<String>` | `&Path` / `Option<PathBuf>` |
+| `with_initial_path`, `navigate_to`, `list_directory` | `&str` | `impl AsRef<Path>` |
+| `with_filename`, `set_filename` | `&str` | `impl AsRef<OsStr>` |
+
+**Three lossy conversions survive and no more, each carrying a comment saying
+why** — two are draw calls (the path bar and the entry-name row) and the third
+fills the Save box's text field, which has to be a `String` because the user
+edits it a character at a time. That third one is the reason `filename_exact`
+exists (case 2 below): the decoded text is what is *shown*, never what is
+opened. Nothing used as a lookup key is ever decoded. `apps/archivemanager`
+dropped its
+`to_string_lossy` entirely; `apps/diskimager` carries `ImageInfo::path`,
+`RecentImage::path`, `WriteOptions::image_path` and `CreateOptions::output_path`
+as `PathBuf` all the way down to `File::open`, and its three remaining lossy
+calls are likewise all text for the screen: a `RenderCommand::Text`, the
+elision inside `truncate_path`, and a sentence in a confirmation dialog. (Its
+status-line messages use `Path::display`, which is the same bargain stated in
+the type system.)
+
+**Three things the original entry did not anticipate.**
+
+1. **`std::path` is the wrong tool for splitting a SlateOS path on a Windows
+   host.** Our paths are `/`-separated and admit every byte but `/` and NUL —
+   including `\`. `Path::parent` / `Path::join` on a Windows host *also* split
+   on `\`, so a filename legally containing one would be cut differently by the
+   host test suite than by the target. The dialog therefore has its own
+   byte-level `parent_path` / `join_path` / `extension_of` built on
+   `OsStr::as_encoded_bytes`, cutting only at ASCII `/` — which is a character
+   boundary in every encoding `OsStr` uses, so `from_encoded_bytes_unchecked`
+   over the halves is sound. `PathBuf` remains the public type; it is only the
+   *splitting* that is hand-written. (See `design-decisions.md` §808.)
+
+2. **Save mode needed a second field.** `filename_input` has to stay a `String`
+   because the user types into it a character at a time. But clicking an
+   existing file to overwrite it *fills* that field from the listing — and a
+   name with no UTF-8 spelling would round-trip through U+FFFD and then create
+   a **different file beside the one the user pointed at**. The fix is
+   `filename_exact: Option<OsString>`, holding the exact bytes for as long as
+   the text is still the listing's, and dropped by `edited_filename()` the
+   moment a keystroke changes the field. Dropping it on edit is the important
+   half: kept past an edit it would overwrite the clicked file no matter what
+   the user then typed, which is the worse of the two failures.
+
+3. **The test the entry said "cannot yet exist" can exist, just not the way it
+   was imagined.** Creating an invalid-UTF-8 *file* does need a target
+   filesystem. But the defect is in the widget, and the widget is handed its
+   listing — so feeding it a `DirEntry` whose name has no UTF-8 spelling and
+   asserting the exact bytes come back out pins the whole of it on the host.
+   `unmappable_name()` builds one through the platform's own safe API (a lone
+   high surrogate via `OsStringExt::from_wide` on Windows, a `0xFF` byte via
+   `from_vec` elsewhere) rather than asserting bytes into an `OsStr`. Four
+   tests: `opening_a_name_that_is_not_utf8_returns_the_exact_bytes`,
+   `activating_…` (the double-click arm is separate code),
+   `overwriting_a_name_that_is_not_utf8_targets_the_file_that_was_clicked`
+   (case 2 above), and `typing_in_the_name_field_drops_the_remembered_bytes`.
+   The last of those drives real `Backspace` and character key events through
+   `handle_event` rather than calling `set_filename`, because `set_filename`
+   *fills* the remembered bytes and so cannot tell whether they are ever
+   invalidated — written the other way round, the test passes with the
+   invalidation deleted.
+
+**Three more instances of the same defect found in callers on the way**, all
+pre-existing and all fixed here:
+
+- `apps/archivemanager` `default_directory()` read `$HOME` with `env::var`,
+  which returns `Err` for a non-UTF-8 value — so a user whose home directory is
+  not UTF-8 silently got `/`. Now `var_os`.
+- `apps/archivemanager` updated `last_directory` at three sites inside
+  `if let Some(dir) = ….to_str() { … }`. When the chosen path was not UTF-8 the
+  update was **skipped entirely** and the next dialog reopened at the previous
+  directory, with nothing said. Now unconditional.
+- `apps/vpnmanager` `picker_start()` returned `(String, String)` built with
+  `to_string_lossy`, so on a non-UTF-8 `$HOME` the Export box opened with a
+  name full of U+FFFD and would have written a *second* file beside the user's
+  existing profiles rather than over it — precisely the failure this entry
+  describes, reached without the chooser being involved at all. Now
+  `(PathBuf, OsString)`. Its fallback name is also now derived from
+  `PROFILE_FILE`'s last component instead of being spelled out again, since
+  `PROFILE_FILE` is a relative *path* (`.config/slateos/vpn/profiles.txt`) and
+  the two spellings could drift.
+
+`apps/diskcleanup` and `apps/undelete` needed no change. The
+two other entries that name this one as a blocker —
+`TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO` and the vpnmanager
+import/export entry — are unblocked by it.
 
 ---
 
@@ -87667,7 +87822,7 @@ the remaining hole look handled. See
 
 ---
 
-### TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO — 2026-08-26 — OPEN
+### TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO — 2026-08-26 — **FIXED 2026-09-03**
 
 **In short:** The Run box (Super+R — type a program's name, press Enter, it
 starts) has three buttons: OK, Cancel and **Browse...**. Browse is supposed to
@@ -87721,6 +87876,263 @@ happen and types the path instead. Nothing is lost or corrupted.
 **Not a regression.** `run_dialog.rs` had no caller of any kind until 2026-08-26
 — the button has never worked, because until this commit the box had no way to
 be opened.
+
+### Fixed 2026-09-03
+
+Browse now puts a real `guitk::dialog::FileDialog` up over the Run box; picking
+a file drops that file's path into the command field and pressing Enter starts
+**that** file, byte for byte. Cancel and Escape return to the box with the typed
+text untouched.
+
+**Step 1 of the plan above was obsolete and was not done.**
+`guitk::dialog::list_directory` already existed — it was added by
+`TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE`
+(`8d2ddc10d`), the entry this one was blocked on — and it already returns
+`Vec<DirEntry>` with names carried as `OsString`. It was reused, not rewritten.
+
+**The listing is pulled in from outside the shell rather than read by it.**
+`DesktopShell` performs no filesystem I/O anywhere, and that is load-bearing
+rather than incidental: it is why all ~3034 of the shell's tests run offline,
+and `gui/desktop/Cargo.toml` says so in a comment. Reading the directory from
+inside the shell would also have been wrong in a way that is easy to miss —
+`read_dir("/")` *succeeds* on a Windows host (it is a drive root), so a shell
+unit test would have silently started listing the developer's `D:` drive
+instead of failing honestly. So the split follows the wallpaper pattern already
+in the crate:
+
+| | wallpaper | Run box chooser |
+|---|---|---|
+| shell says what it needs | `WallpaperManager` names an image id + path | `DesktopShell::run_browser_wants() -> Option<&Path>` |
+| session does the I/O | `ShellSession::refresh_wallpaper_image`, first thing in `paint_background` | `ShellSession::refresh_run_browser`, first thing in `paint_chrome` |
+| answer goes back in | image upload | `DesktopShell::set_run_browser_entries(Vec<DirEntry>)` |
+
+`run_browser_listed: Option<PathBuf>` holds **what was last delivered**, and
+`run_browser_wants` reports the chooser's current directory only when it differs.
+That is deliberately *derived* rather than a "needs listing" flag: navigating
+into a subdirectory re-requests automatically, with no navigation path having to
+remember to set anything. (See `design-decisions.md` §809.)
+
+**Modality.** `handle_hotkey_inner` and `handle_mouse_inner` both check the
+chooser *before* the Run box, so while it is up every key and every click is
+its own. One deliberate asymmetry: a press outside the chooser does **nothing**,
+where a press outside the Run box dismisses the box. Dismissing on an outside
+press would cost the user their navigation for a stray click; Escape and Cancel
+are the ways out. `dismiss_popups` closes the chooser *after* draining the Run
+box's events, so a Browse that was pending at dismissal cannot leave a chooser
+standing over a box that is gone.
+
+**Two type widenings fell out of it**, both mechanical but both real. A path
+Browse chose can have no UTF-8 spelling, so it cannot be carried as a `String`
+from the chooser to whoever starts the program:
+`RunDialogEvent::Execute(PathBuf)`, `ShellAction::Launch(PathBuf)`,
+`HotkeyOutcome::launches: Vec<PathBuf>` and `ShellSession::launches:
+Vec<PathBuf>`. And because the *field* must stay a `String` — the user types
+into it a character at a time — `RunDialog` keeps `command_exact:
+Option<PathBuf>` beside the text, validated at use time by comparing
+`path.as_os_str().to_string_lossy().trim()` against the field. Validating at use
+rather than clearing on edit is what keeps a dozen text-mutating sites from each
+having to remember; it is the same shape as `filename_exact` in the chooser
+itself.
+
+`RunDialog::browse_start()` answers where the chooser should open — the
+directory of what is currently in the field, so a second Browse resumes where
+the first left off, and the root for a bare command name like `terminal` that
+is not a path at all. It uses the new public `guitk::dialog::parent_of`, which
+exposes the dialog's existing byte-level `parent_path`. Public because
+`Path::parent` is the wrong tool here for the reason recorded in the entry above
+— a SlateOS filename may legally contain `\`, which a Windows host would split
+on — and a second hand-rolled "cut at the last slash" would be a second place to
+get it wrong.
+
+**Seven tests** in `run_box_wiring_tests`, replacing
+`the_browse_button_starts_nothing_and_leaves_the_box_up`, which pinned the
+broken behaviour:
+`the_browse_button_puts_a_chooser_up_and_leaves_the_box_under_it`,
+`choosing_a_name_that_is_not_utf8_starts_that_exact_file`,
+`cancelling_the_chooser_leaves_the_typed_command_alone`,
+`keys_reach_the_chooser_and_not_the_box_underneath_it`,
+`the_chooser_opens_in_the_directory_of_what_is_typed`,
+`dismissing_the_box_takes_the_chooser_down_too`,
+`a_press_outside_the_chooser_neither_closes_it_nor_reaches_the_desktop`. Plus
+`parent_of_splits_a_name_it_cannot_decode` in guitk.
+
+Mutation-checked in two rounds rather than trusted: making `set_command_path`
+clear `command_exact` failed exactly one test
+(`choosing_a_name_that_is_not_utf8_starts_that_exact_file`, with the predicted
+`left: ["/z\u{FFFD}"] right: ["/z\u{d800}"]`), and disabling the chooser's key
+interception failed exactly three. Both reverted.
+
+**One consequence found immediately afterwards**, and fixed the same day: the
+command *history* was `Vec<String>`, so a browsed path with no UTF-8 spelling was
+remembered in its lossy display form and could not be re-run. See
+`TD-C-RUN-HISTORY-CANNOT-HOLD-A-PATH-THAT-IS-NOT-UTF-8` below.
+
+---
+
+### TD-C-RUN-HISTORY-CANNOT-HOLD-A-PATH-THAT-IS-NOT-UTF-8 — 2026-09-03 — **FIXED 2026-09-03**
+
+**In short:** the Run box remembers the commands you have run so you can press
+Up to get them back. It remembers them as text. Almost every filename is text,
+but SlateOS filenames are allowed to be byte sequences with no text spelling at
+all — and if you Browse to such a file and run it, what gets *remembered* is a
+mangled version of its name, with the unspellable parts replaced by `�`. Press
+Up to run it again and you are asking for a file that does not exist. Nothing
+starts, and nothing says why.
+
+**Where.** `gui/desktop/src/run_dialog.rs`. `RunDialog::history` is
+`Vec<String>`; `add_to_history` is fed `self.input.text`, which is the *display*
+form. `command_exact: Option<PathBuf>` carries the real bytes to
+`execute_current`, but it is not carried into the history entry, and could not
+be as the type stands.
+
+**Why it fails quietly rather than loudly.** `resolve_command` short-circuits:
+
+```rust
+// Absolute paths pass through directly.
+if command.starts_with('/') {
+    return true;
+}
+```
+
+so the mangled path is accepted without being checked to exist, the box hides,
+`RunDialogEvent::Execute` is posted, and the launcher gets a path to nothing.
+Whether the user sees an error then depends on the launcher, not on the box.
+
+**Severity while open:** very low. It needs a file whose name has no UTF-8
+spelling *and* the user to re-run it from history rather than re-Browsing. The
+failure direction is safe — it starts nothing rather than starting the wrong
+file. But it is silent, which is the part worth fixing.
+
+**The proper fix**, in the order the value falls off:
+
+1. Make `history` a `Vec<OsString>`. Display is still lossy; only what is
+   *stored* becomes exact, and recall then sets `command_exact`, so re-running a
+   browsed file works.
+2. Independently: make `resolve_command` check that an absolute path exists
+   instead of waving it through, so a command that cannot possibly start says so
+   in the box's own error line rather than appearing to work. That is worth
+   doing on its own merits — a typo'd absolute path today gets the same silent
+   nothing.
+
+**Not a regression.** History was `Vec<String>` from the start; before
+2026-09-03 there was simply no way to get a non-UTF-8 name into the box, because
+Browse did nothing.
+
+### Fixed 2026-09-03 — step 1. Step 2 is split out below, still open.
+
+`history` is `Vec<OsString>`; `add_to_history` takes `&OsStr` and
+`execute_current` hands it the same exact bytes it puts in
+`RunDialogEvent::Execute`, rather than the trimmed field text.
+`a_browsed_name_that_is_not_utf8_survives_a_trip_through_the_history` drives the
+whole round trip through the shell — Browse, choose, run, reopen the box, Up,
+Enter — and fails with the `U+FFFD` spelling if the history holds text.
+
+**The autocomplete was the same hole by another route, and is fixed with it.**
+The dropdown offers history entries, and accepting one used to write
+`Suggestion::text` — a `String` — into the field. So a completion would *show*
+one file and *enter* another. `Suggestion` now carries `exact: OsString`
+alongside the text it displays: the fuzzy match still runs over the rendering,
+because a score against bytes the user cannot see would be a score against
+nothing they could have typed, but the entry's own bytes travel with it.
+`accepting_a_history_suggestion_fills_in_its_exact_bytes` pins it.
+
+Every route that fills the field from something the user did not *type* now goes
+through one private `fill_exact(&OsStr)` — Browse, both history-recall
+directions, and the accepted completion. Each was previously a separate
+`input.set_text` and so a separate opportunity to drop the bytes. Stepping
+*past* the newest entry deliberately does not use it: that text is the user's
+own, typed a character at a time, and has no exact bytes behind it.
+
+**A dead field went with it.** `history_path: Option<String>` was set by
+`with_config` and read by nothing — the history has never been written anywhere,
+despite the module doc claiming "history (with persistence)". The field and the
+`with_config` parameter are gone and the doc now says what is true. A parameter
+that only looks like it turns persistence on is worse than no parameter. What
+persisting it would take is `C-RUN-HISTORY-IS-NOT-PERSISTED` below.
+
+Mutation-checked: making `execute_current` remember the rendering failed exactly
+`a_browsed_name_that_is_not_utf8_survives_a_trip_through_the_history`, and making
+`accept_suggestion` enter the rendering failed exactly
+`accepting_a_history_suggestion_fills_in_its_exact_bytes`. Nothing else moved in
+either round.
+
+---
+
+### TD-C-THE-RUN-BOX-ACCEPTS-ANY-ABSOLUTE-PATH-WITHOUT-CHECKING-IT — 2026-09-03 — OPEN
+
+**In short:** type a path into the Run box that starts with `/` and press Enter
+and the box always closes, whether or not anything is there. Mistype
+`/usr/bin/fierfox` and the box behaves exactly as if it had worked: it hides,
+and you are left looking at a desktop where nothing happened. Any other kind of
+mistyped command gets a plain error line — *"…" is not recognized as an
+application or command.* — inside the box, which stays open so you can fix it.
+
+**Where.** `gui/desktop/src/run_dialog.rs`, `RunDialog::resolve_command`:
+
+```rust
+// Absolute paths pass through directly.
+if command.starts_with('/') {
+    return true;
+}
+```
+
+Everything below that line checks *something* (a known-apps list, a plausible
+program name). The absolute-path arm checks nothing, so `execute_current` takes
+the success branch, posts `RunDialogEvent::Execute` and hides the box. Whether
+the user ever learns depends on what the launcher does with a path to nothing —
+which today is nothing visible.
+
+**Why it has not been fixed with the rest.** Answering it means asking the
+filesystem whether the path exists, and `DesktopShell` performs no filesystem
+I/O — the property that keeps ~3037 shell tests offline (see
+`TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO` for why that is worth
+keeping, and for the pattern that answers it).
+
+**The proper fix.** The same pull model the chooser's listing uses: the box asks,
+the session answers, the answer comes back in. Concretely — on Enter with an
+absolute path that is not already known to exist, post the launch as it does now
+*or* hold it pending one `stat`, and have `ShellSession` answer. The cheaper
+alternative, and probably the right first move, is to let the **launcher** report
+failure back to the box: the shell already gets a `ShellAction::Launch(path)`
+answered by whoever starts programs, and a launch that could not start is a fact
+that side already has. That turns a silent close into a message without teaching
+the shell to read a disk at all.
+
+**Severity while open:** low, and it is a usability failure rather than a
+correctness one — nothing wrong is *started*; the box just stops saying that
+nothing was. It is the reason a mangled history entry used to fail invisibly.
+
+**Not a regression.** True since `resolve_command` was written.
+
+---
+
+### C-RUN-HISTORY-IS-NOT-PERSISTED — 2026-09-03 — OPEN
+
+**In short:** the Run box's command history is forgotten when the desktop shell
+restarts. Press Up to find the thing you ran yesterday and it is not there. It
+has never been saved; until 2026-09-03 there was a `history_path` setting that
+looked like it turned saving on, which is why this was easy to miss. That field
+has been removed, so the code no longer claims anything it does not do.
+
+**Where.** `gui/desktop/src/run_dialog.rs`. `RunDialog::history` is a plain
+`Vec<OsString>` in memory; `history()` and `load_history()` exist and are the
+right shape, and nothing calls either.
+
+**What it would take.** The shell reads no files (see
+`TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`), so this is another instance
+of the pull model: `ShellSession` reads the history file at startup and hands it
+to `load_history`, and writes `history()` back out when the box runs something.
+The on-disk form must be **bytes with a NUL delimiter**, not lines of text — an
+entry may be a path with no UTF-8 spelling, and `/` and NUL are the only two
+bytes a SlateOS filename may not contain, so NUL is the only separator that
+cannot occur inside an entry. A newline-delimited text file would reintroduce
+exactly the defect that was just fixed above.
+
+**Severity while open:** low. It is a convenience that is absent rather than
+broken, and its absence is obvious the first time you look for it.
+
+**Not a regression.** It has never worked. What changed on 2026-09-03 is only
+that the code stopped implying otherwise.
 
 ---
 
@@ -90779,9 +91191,24 @@ actually bite:
 
 `scripts/check-window-wiring.py` baseline lowered 124 → 123.
 
-## C-ARCHIVEMANAGER-CANNOT-ACTUALLY-READ-AN-ARCHIVE (lane C, 2026-08-26)
+## C-ARCHIVEMANAGER-CANNOT-ACTUALLY-READ-AN-ARCHIVE (lane C, 2026-08-26) — FIXED 2026-09-02
 
-**In short:** the Archive Manager can now be clicked, but it has nothing to click
+**Status, 2026-09-02: all six toolbar buttons now work against real archive
+bytes.** The entry below is the original 2026-08-26 report and is kept for the
+history; it describes a program that no longer exists. Read the "How it was
+actually fixed" section at the end of this entry, not the numbered plan in the
+middle — three of that plan's five steps landed differently from how it
+guessed.
+
+**In short (the fix):** the Archive Manager reads, verifies, extracts, creates
+and modifies real ZIP files. Open reads a path off the disk through a file
+picker; Test inflates every member and checks it against the CRC-32 the archive
+declares; Extract All and Extract Selected write the members out with a
+traversal defence; New writes a fresh empty archive; Add puts a file into the
+open one; and Delete now removes members **from the file**, not merely from the
+list on screen.
+
+**In short (the original bug):** the Archive Manager can now be clicked, but it has nothing to click
 *on* except a hard-coded sample listing. Pressing Open, Extract All, Extract
 Selected, Add or Test does not read or write a single byte of any file on disk —
 each one just writes "not yet implemented — no archive back end" into the status
@@ -90835,6 +91262,86 @@ fail independently and are tested completely differently — one against rendere
 geometry, the other against archive bytes. This mirrors what was done for
 `apps/diskcleanup`, which was wired first and given a real back end in the
 following commit.
+
+### How it was actually fixed
+
+The blocker cleared first: lane A lifted `kernel/src/fs/zip.rs` out of the
+kernel binary into the **`ziparchive/` crate**, which is what
+`requests/c-a-zip-is-trapped-in-the-kernel-binary.md` asked for. No second ZIP
+parser was written, so the `..`-traversal, backwards-EOCD-scan and ZIP64
+handling all still live in exactly one place.
+
+`apps/archivemanager/src/backend.rs` is that crate plus the app's own policy.
+The reading half landed on 2026-08-26; the writing half on 2026-09-02.
+
+| Button | What it does now |
+|---|---|
+| Open | `backend::open` → `ziparchive::parse`. A failure keeps the archive already open and says why, rather than clearing the window. |
+| Test | Inflates every member, checks size and CRC-32, and reports an encrypted member as needing a password rather than as damage. |
+| Extract All / Selected | `safe_destination` splits on **both** `/` and `\`, requires every component to be `Component::Normal`, and refuses a Windows drive prefix (`PathBuf::push("C:")` *replaces* rather than extends, which is a traversal all by itself). |
+| New | `backend::create_empty` writes an empty archive and then **opens it**, so every later Add and Delete rewrites that file rather than a model built in memory. |
+| Add | `backend::read_for_add` reads the file, then the same rewrite Delete uses. An added file with an existing member's name displaces it: a ZIP with two members of one name is legal to write and ambiguous to read, so writing one is a way of not deciding. |
+| Delete | Rewrites the archive without the removed members. It used to say "Removed N entries **from the list**" — true about the wrong noun. |
+
+**Three deviations from the plan above**, recorded because the plan is what a
+later reader would otherwise trust:
+
+- Step 2's file-picker worry was **half** right, and the half that survived is
+  still open. The directory-listing gap closed — the app hands the dialog a
+  listing through `list_directory`/`set_entries` — so a picker is now four
+  `DialogPurpose` variants over one dialog. But `FileDialog` **still records no
+  hit targets and has no `handle_click`**: every picker in this program, the two
+  new ones included, is keyboard-only. Clicking a filename in the Open, New or
+  Add dialog does nothing. Tracked at
+  `C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS`.
+- Step 5 guessed that `deflate/` might have no compressor and that storing
+  uncompressed would be "a correct first cut". It does have one;
+  `ziparchive::create` deflates, and members come back out smaller than they
+  went in.
+- The plan did not mention the property that turned out to matter most, below.
+
+### The property the writer is built around: never lose a member
+
+A rewrite drops everything it cannot reproduce. That makes a *partial* success
+the worst possible outcome — silent data loss inside a file the user still
+believes is intact — so `backend::save` reproduces every member first and only
+then writes anything. If any member will not come back (encrypted, or it fails
+the same `extract_entry` the Test button uses), the whole save is refused and
+the file is untouched. Four consequences, each with its own regression test:
+
+- **Refused whole, not partly.** `a_member_that_cannot_be_reproduced_stops_the_whole_save_and_the_file_is_untouched`
+  asserts the archive is byte-identical afterwards and that no temporary is
+  left beside it.
+- **Written beside, then renamed over.** `fs::write` straight onto the target
+  would truncate the user's archive as its first action, so a full disk halfway
+  through would destroy the original and leave a fragment wearing its name. The
+  temporary is a sibling, so the rename stays inside one filesystem and is
+  atomic on both Windows and Unix.
+- **The raw member name, never the displayed one.** `ArchiveEntry::path` is a
+  lossy rendering built for a column. Writing it back would rename any member
+  whose name has no UTF-8 reading to one containing U+FFFD, and would collapse
+  two members onto one name if they differed only in those bytes.
+  `a_name_with_no_utf8_reading_survives_a_rewrite_unchanged` covers it, and
+  `read_for_add` takes the added file's name from `OsStr::as_encoded_bytes` for
+  the same reason.
+- **A refused save puts the rows back.** Delete edits the list before saving, so
+  a refusal has to undo that edit or the window ends up describing an archive
+  that still contains the rows. The undo is a snapshot restored from memory, not
+  a re-read: the likeliest reason a write failed (a removed drive, a vanished
+  file) is a reason the read would fail too, which would leave the edit standing
+  with nothing to correct it. `a_delete_the_archive_will_not_accept_puts_the_rows_back`
+  drives that path by replacing the archive with a *directory* of the same name,
+  which no filesystem will rename a file over.
+
+**Add and Delete save immediately** rather than accumulating into a Save button,
+matching 7-Zip and WinZip. The two buttons that can destroy something are
+disabled — not merely failed at the end — when the open model has no bytes
+behind it (`source: None`), since a rewrite from such a model would replace the
+user's archive with an empty one.
+
+**Still open, separately:** `TD-C-ARCHIVEMANAGER-HOLDS-THE-WHOLE-ARCHIVE-IN-MEMORY`.
+The rewrite holds the old archive, every member's plaintext and the new archive
+at once, so `MAX_ARCHIVE_BYTES` bounds it rather than streaming doing so.
 
 ## C-NETMANAGER-CLICKED-ROWS-THAT-WERE-NOT-ON-SCREEN (lane C, 2026-08-26) — FIXED 2026-08-26
 
@@ -90956,7 +91463,7 @@ still in it, no profile was added, and the string
 `"Server address is required"` is among the `RenderCommand::Text` the frame
 actually draws. Confirmed to fail when the early-close is mutated back in.
 
-## C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER (lane C, 2026-08-26)
+## C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER (lane C, 2026-08-26) -- **fixed 2026-09-03**
 
 **In short:** the VPN Manager's Import and Export buttons work, but they always
 read and write **one fixed file** — `$HOME/.config/slateos/vpn/profiles.txt` —
@@ -90994,6 +91501,60 @@ which the same rework has to fix; this entry is the caller waiting on both.
 **Until then:** Export says where it wrote, Import says how many profiles it
 read and names the first failure if a block was malformed, and both refuse
 clearly (`"Cannot export: $HOME is not set"`) rather than failing silently.
+
+**Fixed 2026-09-03.** The blocker named in the table above —
+`C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS` — was
+fixed the day before, and the third row of that table (`list_directory`) had
+already been answered. Both buttons now open a real chooser: Import a
+`FileDialog::open()` filtered to `*.txt`, Export a `FileDialog::save()`
+pre-filled with the filename the fixed path used to end in.
+
+Four things were worth deciding rather than merely typing:
+
+- **The chooser opens where the old fixed path was**, and offers that path's
+  own filename. `picker_start()` derives both from the same `profile_file()`
+  the old code wrote to, rather than re-deriving `$HOME/.config/...`
+  independently. Had it opened at `$HOME` or at `/`, this "upgrade" would have
+  lost every existing user's exported file behind a chooser that no longer
+  pointed at it. Pinned by
+  `the_default_start_agrees_with_the_path_export_used_to_write`.
+- **Export creates the directory it was given, on the way out, not on the way
+  in.** `$HOME/.config/slateos/vpn/` usually does not exist on a fresh account,
+  so `create_dir_all` runs in `export_to` just before the write. Doing it when
+  the chooser *opens* would leave a directory behind for a user who then
+  cancelled.
+- **`NavigatedTo` is answered with a real listing every time.** The widget reads
+  nothing itself, so an unanswered navigation shows the *previous* directory's
+  files under the *new* directory's name — the same trap that made the widget's
+  own Alt+Backspace bug invisible.
+- **There are two public doors onto the pointer, and the second one is the
+  interesting one.** `handle_event` is the normal door; `handle_click` is the
+  other, and it is the one `Probe` uses. Both forward to the chooser.
+  `the_chooser_keeps_clicks_and_keys_off_the_window_behind_it` sweeps a 12x8
+  grid over the whole window through *both* and asserts nothing behind moved —
+  but that half of the test turned out to pass with the forwarding deleted
+  entirely, because `render_frame` calls `frame.discard_hits()` while the
+  chooser is up, so the window's own targets are gone before any hit-test
+  happens. Blocking is therefore free here; what is *not* free is that
+  `handle_click` still **reaches** the chooser, since a press that finds
+  nothing in an emptied frame is silently discarded. So the test also clicks
+  Cancel through `handle_click` and asserts the chooser closes, which does fail
+  when the forwarding is removed. Worth recording because the obvious
+  assertion — "nothing behind the modal moved" — is exactly the one that
+  cannot fail in a window that empties its own frame, and it would have been
+  believed.
+
+Seven tests cover it, including a real round trip: export to a scratch
+directory through the chooser, wipe the profile list, import the file back
+through the chooser, and compare. The scratch directory is a
+`scratchdir::ScratchDir` (new dev-dependency) rather than a fixed temp path,
+because a test that writes a real file and then fails would otherwise leave it
+behind for the next run to read.
+
+**Still open:**
+`TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE`
+now bites here too: the chooser hands back a `String`, so a profile file whose
+name is not UTF-8 cannot be picked. That is the toolkit's bug, tracked there.
 
 ## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26) -- **fixed 2026-08-29**
 
@@ -91682,6 +92243,24 @@ message. That is a lane A change; it is not filed as a request yet because the
 current behaviour is correct for every archive a desktop user is likely to open,
 and the crate is a week old — asking for a second API before the first one has
 been used in anger is how APIs get designed twice.
+
+**Update, 2026-09-02 — the writer trebled the peak.** `backend::save` now exists,
+and a rewrite holds the old archive, every member's decompressed plaintext, and
+the newly built archive all at the same time. So the peak is no longer "the size
+of the archive" but roughly *old + uncompressed contents + new*, which for a
+well-compressed 400 MB archive can be several gigabytes — far above the 512 MB
+`MAX_ARCHIVE_BYTES` that a reader would suggest is the ceiling. Two notes for
+whoever picks this up:
+
+- **The cap does not bound the rewrite.** `MAX_ARCHIVE_BYTES` is checked against
+  the file on disk and against each file being added, not against the total the
+  save allocates. A 500 MB archive of highly compressible data passes the check
+  and can still exhaust memory during a save.
+- **The reader trait in "Proper fix" fixes this half too, but only with a
+  writer counterpart** — the save wants to stream each member from the old
+  archive to the new one without ever materialising both. Worth stating in the
+  same request, since designing the read side alone would leave this needing a
+  third API revision. Still not filed, for the reason above.
 
 ### TD-C-NOTHING-CAN-ACTUALLY-COPY-AND-PASTE-BETWEEN-PROGRAMS — 2026-08-26 — LANE C, OPEN
 
@@ -110274,3 +110853,118 @@ has to bisect a gate they did not break. The exposure is proportional to how
 many crates exist, and that number only goes up.
 
 ---
+
+## C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS (lane C, 2026-09-02)
+
+**In short:** every Open / Save / Choose-folder dialog in SlateOS can only be
+driven with the keyboard. The dialog draws a list of files, a sidebar of
+shortcuts, a toolbar and OK/Cancel buttons — and clicking any of them does
+nothing at all. Arrow keys, Enter, Backspace and Escape work; the mouse does
+not. A user who clicks a filename and then clicks OK has selected nothing, and
+the dialog will act on whatever row the keyboard cursor happened to be on.
+
+**Where it lives:** `gui/toolkit/src/dialog.rs`. `FileDialog::render` returns a
+flat `Vec<RenderCommand>` — pure ink, with no record of *where* anything was
+drawn — and there is no `handle_click` on the type at all. The absence is not
+hidden: `apps/archivemanager/src/main.rs` says so at its own call site, "it is
+drawn straight into the tree rather than through the frame because it records no
+hit boxes".
+
+**What a user sees:** the dialog looks exactly like a normal file picker. Rows
+highlight on the keyboard cursor, so it even looks live. Clicking a row does not
+select it; clicking OK does not press it; clicking a sidebar shortcut does not
+navigate. Nothing reports an error, because from the program's point of view
+nothing was clicked — the host window swallows the click to stay modal and
+throws it away.
+
+**Who is affected right now:** `apps/archivemanager` has four pickers (Open,
+Extract All, Extract Selected, and — since 2026-09-02 — New and Add, so six),
+and every one of them is keyboard-only.
+`C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER` is a caller that declined to
+use the widget *because* of this, and writes to one fixed path instead. The
+start menu's Run box wants the same widget (see the entry at the "What is
+actually missing" section for it). Every future app with an Open button
+inherits the bug.
+
+**Why it is like this:** the widget was written before `guitk::frame` existed and
+was never revisited — it had zero users tree-wide until 2026-08-25. The rest of
+the toolkit has since settled on "rendering and hit-testing are the *same
+walk*": a `Frame<T>` records a target for each rect as it is drawn, intersected
+with the clip and translation in force, so ink and click target cannot end up in
+different places. `FileDialog` is the last widget of any size that still draws
+into a bare command list.
+
+**What the proper fix looks like:** convert `render` into one walk that draws
+into a `guitk::frame::Frame<DialogTarget>`, with `DialogTarget` naming the file
+rows, sidebar shortcuts, toolbar buttons, sort headers, the filter control and
+the OK/Cancel pair. `render(width, height) -> Vec<RenderCommand>` stays as a
+thin wrapper over that walk so existing callers do not change. Add
+`handle_click(&mut self, x, y, width, height) -> DialogAction`, which hit-tests
+that frame and returns the same `DialogAction` the keyboard path already
+returns — so a host only has to forward mouse events the way it already forwards
+keys. Two rules the conversion must not break: a double-click on a directory
+navigates (a single click selects), and a click outside the dialog must not
+reach the window behind it, which is what makes it modal.
+
+**What must not be done instead:** hit-testing by recomputing the row geometry in
+the caller. That is a second copy of the layout, and the bug is then in whichever
+copy you are not reading — exactly the failure
+`C-NETMANAGER-CLICKED-ROWS-THAT-WERE-NOT-ON-SCREEN` documents, where two private
+copies of `Frame` disagreed about clipping.
+
+**Fixed 2026-09-03**, along the prescribed line and with the two rules intact:
+a single click selects, a double-click on a directory navigates, and every
+pointer event — including one landing past the dialog's own edges — is swallowed
+so nothing reaches the window behind. `render` is now a thin wrapper over
+`pub fn frame(width, height) -> Frame<DialogTarget>`, so no caller had to change
+how it draws; `handle_mouse(&mut self, event, width, height) -> DialogAction`
+hit-tests that same frame. `apps/archivemanager` (six pickers) and
+`apps/diskimager` forward the pointer to it now.
+
+Three things the fix turned out to require that the plan above did not name:
+
+- **Scrolling, or the fix would have been half a fix.** The list culled every
+  row past the bottom edge and had no offset at all, so the tail of a long
+  directory was unreachable by *any* means — the keyboard did not scroll to
+  follow its own selection either. Shipping a clickable list whose rows below
+  the fold cannot be reached would have been a picker that still could not open
+  most files. There is now a wheel, a keyboard reveal, a page step, and a
+  scrollbar that can be *dragged* — a drawn-but-inert one would only reproduce
+  `C-SPREADSHEET-SCROLLBARS-ARE-DRAWN-BUT-NOT-DRAGGABLE`. The thumb's track and
+  rect are read back out of the frame that was just drawn (`Frame::rect_of`),
+  not recomputed, for the reason the paragraph above gives.
+- **Reveal has to be stateful, not re-imposed at render time.** The obvious
+  design — "render always scrolls to show the selection" — makes the wheel
+  useless, because every notch is undone by the next frame. So the scroll
+  follows the selection only when a *keystroke moves* it; explicit scrolling is
+  allowed to leave the selection off screen, which is what every file manager
+  does. `the_wheel_may_scroll_away_from_the_selection` pins it.
+- **The dialog stores no size of its own.** `render(&self, width, height)` is
+  given its size and cannot write anything back, so a stored copy would be a
+  second answer to "how big is this dialog" that can disagree with the
+  renderer's — the same class of divergence as a recomputed hit box. Every
+  method that has to move the scroll takes the size as an argument instead,
+  which is why `handle_event` grew a `height` parameter and the three callers
+  had to be touched.
+
+Two pre-existing bugs surfaced while doing it, both invisible only because
+nothing could reach them, both fixed here:
+
+- `toggle_sort` set the sort field and never reordered `self.entries`. The
+  moment the headers became clickable that would have been a column header
+  which moves its own little arrow and nothing else. It now re-sorts, and
+  follows the picked *entry by name* through the reordering — keeping the row
+  *number* would let a click on "Size" change which file Open opens.
+- Alt+Backspace decided whether to report `NavigatedTo` by asking whether any
+  history remained *afterwards*. Going back to the first directory of the
+  session — the one case that empties the history — therefore reported no move,
+  and the host left the previous directory's files on screen under the new
+  directory's name. All three navigations now compare the path before and
+  after.
+
+**Still open after this:**
+`C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER` — the caller that declined to
+use the widget because of this bug — is now unblocked but not yet done. The
+start menu's Run box is likewise still waiting on a caller, not on the widget.
+`TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE`
+is untouched by this change and remains open.

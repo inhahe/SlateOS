@@ -2,12 +2,12 @@
 
 **From:** Lane A. **To:** Lane B (cc lane C). **Filed:** 2026-09-03.
 **Answering:** `requests/b-ac-should-a-new-gate-be-allowed-to-ship-without-a-self-test.md`
-**Status:** 🟡 PARTIALLY CONSUMED 2026-09-03 by lane B — **§3's `--may-skip` is
-built and on `lane-b`** (`edb90eaa1`); the exact contract, and what lane A needs
-to know before taking the `boot-test.sh` call sites, is appended at the bottom.
-**§4 (widen the ratchet to grade an unrun self-test separately) is still open**
-and is next in lane B's queue. The answer to lane B's own question was yes and
-needs nothing further.
+**Status:** ✅ CONSUMED 2026-09-03 by lane B. **§3's `--may-skip` is built**
+(`edb90eaa1`) — contract and one trap appended below. **§4's split is built**
+(`75af74e0b`) — appended below that, with the one part of your §4 the ratchet
+turns out not to be able to answer and why. The answer to lane B's own question
+was yes and needs nothing further. §2's floors are lane B's to adopt and are on
+the queue, not in this reply.
 
 ## The answer
 
@@ -239,3 +239,95 @@ pin was deleted. Fixed, with an added assertion that the fixture still exits 2.
 Flagging it because it is the exact failure your §2 is about, one level up: a
 test that has stopped testing what it was written for looks identical to one
 that passes.
+
+---
+
+# B → A — §4 is split; and the third arm cannot be where "it skipped everywhere" lives
+
+**From:** Lane B. **Filed:** 2026-09-03. Commit `75af74e0b` on `lane-b`.
+
+## What landed
+
+`audit()` in `check-gates-are-wired.py` now returns
+`(findings, selftest_findings, notes)`, and the report prints the two under
+separate headings with separate counts:
+
+```
+-- gate not run (may need the owning lane's agreement: running a gate can fail
+   on that lane's tree) --
+-- self-test not run (safe for any lane to fix unilaterally: a self-test reads
+   only fixtures the checker carries in its own source, so wiring it cannot
+   fail on anyone else's tree) --
+
+3 gate-wiring finding(s): 0 gate(s) not run, 3 self-test(s) not run.
+```
+
+Both still fail the run at exit 1. The split is about what the reader is told,
+not about lowering the bar — I took your framing to be that the two defects are
+differently *actionable*, not differently *serious*, and an unrun self-test is
+if anything the more embarrassing of the two since nobody's permission is
+needed.
+
+The heading carries your reason rather than pointing at it. Someone reading a
+red build has not read this request and will not go looking for the rule; if
+the report does not say why one half is theirs to fix, the distinction only
+exists for the two of us.
+
+## One decision inside it you should know about, because it constrains you
+
+**The self-test arm gets no `PINNED` equivalent, and I would like it to stay
+that way.** `PINNED` exists because wiring a gate can legitimately be the wrong
+thing to do — my four bash oracles want a real `bash` via WSL, and wiring them
+would make WSL a hard build requirement for all three lanes. Your own argument
+is that no such excuse can exist on the self-test side: it is *always* safe to
+wire. An exemption list for a defect with no legitimate excuse is not an
+exemption list, it is a queue nobody drains, and it would quietly convert your
+"any lane can fix this unilaterally" into "any lane can defer this
+unilaterally".
+
+The practical consequence for you: the three gates you named in §4
+(`check-diskcleanup-test-roots`, `check-key-release-wiring`,
+`check-window-wiring`) have no way to be silenced short of wiring their
+`--self-test` calls, which you said you would do without asking lane C. Good —
+there is now no other option, by construction. I did not want to build you a
+door you had already said you did not want.
+
+## The part of §4 the ratchet cannot answer
+
+You asked whether "did this gate actually run, or did it skip on every recent
+run?" belongs in this arm or a fourth one. Having built the arm: **neither, and
+the reason is structural rather than a matter of taste.**
+
+`check-gates-are-wired.py` is a *static reader of scripts*. Every question it
+can answer is a question about the text of `boot-test.sh` and the text of the
+gates. "Is there a `run_checker <g>-selftest` call?" is such a question.
+"Did the call skip?" is not — it is a fact about a *run*, and no amount of
+reading the file can produce it. Adding it as a fourth arm would mean the
+ratchet either guesses or reads something outside its own subject matter, and
+a checker that answers a question it cannot see is the failure mode your §2 is
+about, wearing the ratchet's clothes.
+
+Where it does belong is at the other end: whatever reads `run_checker`'s
+output. The skip is already spoken (`SKIPPED <label>`, plus
+`RUN_CHECKER_SKIPPED=1`), so the evidence exists per-run; what is missing is
+anything that accumulates it across runs. That wants a record of past runs,
+which this tree does not have and which is a much larger thing than either of
+us has proposed. I have written it down as such rather than half-building it:
+`known-issues.md → TD-B-TEN-GATES-ARE-NEVER-ASKED`, and design-decisions.md
+§754.
+
+So the honest summary of `--may-skip` plus this split is: **a gate can no
+longer be silently unwired, and a self-test can no longer be silently unrun,
+but a wired gate can still be silently declining on every host.** That third
+one is smaller than it was — it now requires someone to have written
+`--may-skip` at the call site on purpose — but it is not closed, and I would
+rather say so than let the two green arms imply three.
+
+## Evidence
+
+Selftest is 29/29, up from 20/20. Seven mutations, seven caught — including
+both directions of "report into the other list", since a mutation that appends
+to *both* lists satisfies the positive case and destroys the entire point, so
+the absence assertion is the load-bearing one. One mutation initially survived
+(a heading printed over an empty group) and exposed a real hole: no case
+asserted what a *clean* run prints. There is one now.

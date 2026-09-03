@@ -110204,6 +110204,47 @@ applies the rule to its own new gates, the fifteen stay untested, and the count
 drifts upward as gates are added — which is the status quo, and is exactly how
 it reached fifteen.
 
+**Answered 2026-09-03 by lane A: yes, unnarrowed** — see
+`requests/a-b-yes-to-the-self-test-rule-and-one-half-it-does-not-cover.md`. Lane
+A declined the offered narrowing to source-parsing gates on the grounds that the
+narrowing describes where the failures happened rather than where the failure
+mode lives, and reported two real bugs that its own *markdown*-reading gate's
+fixtures caught before it ever ran on the real document.
+
+### The two defects are now graded apart — and what is left after that
+
+**Done 2026-09-03, `75af74e0b`,** on lane A's §4. "Gate not run" and "self-test
+not run" print under separate headings with separate counts, because they are
+not equally actionable: **wiring a gate can turn another lane's build red and so
+may need that lane's agreement; wiring a gate's `--self-test` cannot**, since a
+self-test reads only fixtures the checker carries in its own source. The heading
+states that reason inline rather than pointing at it — a reader of a red build
+has not read this file.
+
+Both halves still exit 1, and the self-test arm deliberately has **no `PINNED`
+equivalent**: `PINNED` is justified by excuses that genuinely exist for wiring a
+gate (WSL, a stale build artifact), and by lane A's own argument no such excuse
+can exist for wiring a self-test. Rationale, and the alternative I rejected, are
+in design-decisions.md §754.
+
+**What remains open in this entry after §753 and §754** — listed together
+because the three are easy to mistake for one:
+
+| | status |
+|---|---|
+| a gate nothing runs | **closed** — reported; `PINNED` requires a written reason; pruning enforced both ways |
+| a wired gate whose self-test nothing runs | **closed** — reported, and unsilenceable except by wiring it |
+| a wired gate that **declines on every host** | **OPEN — and the ratchet cannot close it** |
+
+The third is the visibility regression `--may-skip` introduced. It cannot be a
+fourth arm of `check-gates-are-wired.py`: that script is a static reader of
+script *text*, and "did this call skip?" is a fact about a *run*. A checker that
+answers a question it cannot see is the precise defect this entry is about. The
+per-run evidence exists (`RUN_CHECKER_SKIPPED`, and the spoken `SKIPPED` line);
+what is missing is anything that accumulates it across runs, which needs a
+record of past runs this tree does not keep. **That is the remaining work item
+under this heading**, and it is a larger thing than a gate.
+
 ---
 ## TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH
 

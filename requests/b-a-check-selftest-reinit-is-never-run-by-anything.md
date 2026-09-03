@@ -1,6 +1,16 @@
 # B → A — `check-selftest-reinit.py` is run by nothing that blocks anything
 
-**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-02. **Status:** open.
+**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-02.
+**Status:** ✅ **DONE 2026-09-03 by lane A** — wired in `13daeedb2`, with the
+`PINNED` entry deleted in the same commit as you asked. Placed after every cheap
+document gate and before clippy, because the measured cost is 98.7 s and not the
+66 s I first quoted; the reply, including why that 98.7 s is the host and not
+the checker, is
+`requests/a-b-wiring-check-selftest-reinit-and-a-correction-it-runs-nowhere.md`
+§5. Your premise needed one correction: it did not run "only inside
+`scripts/pre-boot.py`" — nothing in `scripts/` on either branch named it, so it
+had never executed at all, while `design-decisions.md` §612 named it as one of
+two live mitigations.
 **Action needed from A:** either add a `run_checker` call for
 `scripts/check-selftest-reinit.py` to `scripts/boot-test.sh`, or tell me it
 should stay unwired and why. Either way the reason goes on record.

@@ -3657,17 +3657,31 @@ enum PickerPurpose {
 /// write would make the upgrade from "fixed path" to "picker" lose the user's
 /// existing file. Falls back to the root when `$HOME` is unset, because a
 /// chooser that refuses to open is worse than one that opens somewhere dull.
-fn picker_start() -> (String, String) {
-    let Some(path) = profile_file() else {
-        return (String::from("/"), String::from("profiles.txt"));
+///
+/// Answers in `PathBuf`/`OsString`, not `String`. `$HOME` is OS bytes and a
+/// filename admits every byte but `/` and NUL, so decoding either here would
+/// hand the chooser a name containing U+FFFD — and Export would then write
+/// beside the user's existing file instead of over it.
+fn picker_start() -> (std::path::PathBuf, std::ffi::OsString) {
+    // `PROFILE_FILE` is a *relative path*, not a leaf name, so the fallback
+    // takes its last component rather than the whole thing — spelling the leaf
+    // out a second time would let the two drift apart.
+    let default_name = || {
+        std::path::Path::new(PROFILE_FILE).file_name().map_or_else(
+            || std::ffi::OsString::from("profiles.txt"),
+            |n| n.to_os_string(),
+        )
     };
-    let name = path.file_name().map_or_else(
-        || String::from("profiles.txt"),
-        |n| n.to_string_lossy().into_owned(),
+    let Some(path) = profile_file() else {
+        return (std::path::PathBuf::from("/"), default_name());
+    };
+    let name = path
+        .file_name()
+        .map_or_else(default_name, std::ffi::OsStr::to_os_string);
+    let dir = path.parent().map_or_else(
+        || std::path::PathBuf::from("/"),
+        std::path::Path::to_path_buf,
     );
-    let dir = path
-        .parent()
-        .map_or_else(|| String::from("/"), |d| d.to_string_lossy().into_owned());
     (dir, name)
 }
 
@@ -3912,7 +3926,6 @@ impl VpnManager {
         match action {
             DialogAction::Selected(path) => {
                 self.picker = None;
-                let path = std::path::PathBuf::from(path);
                 match purpose {
                     PickerPurpose::Import => self.import_from(&path),
                     PickerPurpose::Export => self.export_to(&path),
@@ -7362,14 +7375,14 @@ mod tests {
         match profile_file() {
             Some(path) => {
                 assert_eq!(
-                    std::path::Path::new(&dir),
+                    dir,
                     path.parent().expect("the default path has a directory")
                 );
                 assert_eq!(name, "profiles.txt");
             }
             // No `$HOME`: a chooser that refuses to open is worse than a dull
             // one, so it opens at the root rather than not at all.
-            None => assert_eq!(dir, "/"),
+            None => assert_eq!(dir, std::path::Path::new("/")),
         }
     }
 

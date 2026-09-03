@@ -1341,7 +1341,7 @@ pub struct AppState {
     /// Remembered across dialogs because a user who just extracted into
     /// `~/work` is more likely to extract into `~/work` again than into
     /// wherever the program happened to start.
-    pub last_directory: String,
+    pub last_directory: PathBuf,
 }
 
 impl Default for AppState {
@@ -1376,11 +1376,14 @@ impl Default for AppState {
 /// `HOME` rather than the process's working directory: a program launched
 /// from a desktop icon inherits whatever directory the launcher happened to
 /// be in, which is not a place the user has ever seen.
-fn default_directory() -> String {
-    std::env::var("HOME")
-        .ok()
+fn default_directory() -> PathBuf {
+    // `var_os`, not `var`: an environment variable is OS bytes, and a `$HOME`
+    // that does not decode as UTF-8 is a real home directory, not an absent
+    // one. `var` would silently fall back to `/` and drop the user in the
+    // wrong place.
+    std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| String::from("/"))
+        .map_or_else(|| PathBuf::from("/"), PathBuf::from)
 }
 
 impl AppState {
@@ -2990,15 +2993,15 @@ impl AppState {
     }
 
     /// Act on the path the dialog came back with.
-    fn finish_choice(&mut self, purpose: DialogPurpose, path: &str) {
+    fn finish_choice(&mut self, purpose: DialogPurpose, path: &Path) {
         match purpose {
             // The answer is for `save`, which has a stale list to worry about.
             // Opening a file the user just named has nothing to fall back to.
-            DialogPurpose::OpenArchive => drop(self.open_path(Path::new(path))),
-            DialogPurpose::ExtractAll => self.extract(Path::new(path), false),
-            DialogPurpose::ExtractSelected => self.extract(Path::new(path), true),
-            DialogPurpose::NewArchive => self.create_archive(Path::new(path)),
-            DialogPurpose::AddFile => self.add_file(Path::new(path)),
+            DialogPurpose::OpenArchive => drop(self.open_path(path)),
+            DialogPurpose::ExtractAll => self.extract(path, false),
+            DialogPurpose::ExtractSelected => self.extract(path, true),
+            DialogPurpose::NewArchive => self.create_archive(path),
+            DialogPurpose::AddFile => self.add_file(path),
         }
     }
 
@@ -3033,8 +3036,8 @@ impl AppState {
                 return;
             }
         };
-        if let Some(dir) = path.parent().and_then(|p| p.to_str()) {
-            self.last_directory = dir.to_string();
+        if let Some(dir) = path.parent() {
+            self.last_directory = dir.to_path_buf();
         }
         // Add edits nothing before saving, so the list it would restore is the
         // list already on screen — the undo is a no-op here, and passing it
@@ -3127,8 +3130,8 @@ impl AppState {
     pub fn open_path(&mut self, path: &Path) -> bool {
         match backend::open(path) {
             Ok(model) => {
-                if let Some(dir) = path.parent().and_then(|p| p.to_str()) {
-                    self.last_directory = dir.to_string();
+                if let Some(dir) = path.parent() {
+                    self.last_directory = dir.to_path_buf();
                 }
                 self.archive = Some(model);
                 self.current_dir = String::new();
@@ -3174,9 +3177,7 @@ impl AppState {
         };
         let report = backend::extract(source, &members, dest);
         self.status_message = report.summary(dest);
-        if let Some(dir) = dest.to_str() {
-            self.last_directory = dir.to_string();
-        }
+        self.last_directory = dest.to_path_buf();
     }
 
     /// Perform whatever `target` names.
@@ -3707,6 +3708,7 @@ mod tests {
 
     use super::*;
     use guitk::event::Modifiers;
+    use std::ffi::OsString;
 
     // --- ArchiveFormat tests ---
 
@@ -5556,18 +5558,18 @@ mod tests {
         // be in the directory the app opened at.
         dialog.set_entries(vec![
             guitk::dialog::DirEntry {
-                name: String::from("one.zip"),
+                name: OsString::from("one.zip"),
                 is_dir: false,
                 size: 1,
                 modified_timestamp: 1,
-                extension: String::from("zip"),
+                extension: OsString::from("zip"),
             },
             guitk::dialog::DirEntry {
-                name: String::from("two.zip"),
+                name: OsString::from("two.zip"),
                 is_dir: false,
                 size: 2,
                 modified_timestamp: 2,
-                extension: String::from("zip"),
+                extension: OsString::from("zip"),
             },
         ]);
         let (x, y) = dialog
@@ -5773,7 +5775,7 @@ mod tests {
         std::fs::write(&payload, b"hello from a real file").expect("write the file to add");
 
         let mut state = AppState::default();
-        state.finish_choice(DialogPurpose::NewArchive, &archive.to_string_lossy());
+        state.finish_choice(DialogPurpose::NewArchive, &archive);
         assert!(
             archive.is_file(),
             "New wrote nothing: {}",
@@ -5785,7 +5787,7 @@ mod tests {
             "New must leave the archive it created open and empty"
         );
 
-        state.finish_choice(DialogPurpose::AddFile, &payload.to_string_lossy());
+        state.finish_choice(DialogPurpose::AddFile, &payload);
         let after_add = backend::open(&archive).expect("the archive still opens");
         assert_eq!(
             after_add.entries.len(),

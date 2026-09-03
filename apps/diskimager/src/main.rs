@@ -55,9 +55,11 @@ use guitk::{scroll_window, wheel};
 use oswindow::app::Response;
 
 use std::collections::{HashMap, VecDeque};
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -316,13 +318,19 @@ impl ImageFormat {
     }
 
     /// Detect format from file extension.
-    pub fn from_extension(path: &str) -> Self {
-        let lower = path.to_lowercase();
-        if lower.ends_with(".iso") {
+    ///
+    /// Compared as bytes, case-folded with `to_ascii_lowercase`, because a
+    /// path is not text: our filenames admit every byte but `/` and NUL, so
+    /// one that is not UTF-8 has no `str` to call `to_lowercase` on. Every
+    /// suffix here is ASCII, so ASCII folding is the whole of what the
+    /// comparison needs.
+    pub fn from_extension(path: &Path) -> Self {
+        let lower = path.as_os_str().as_encoded_bytes().to_ascii_lowercase();
+        if lower.ends_with(b".iso") {
             Self::Iso9660
-        } else if lower.ends_with(".img.gz") || lower.ends_with(".bin.gz") {
+        } else if lower.ends_with(b".img.gz") || lower.ends_with(b".bin.gz") {
             Self::GzipCompressed
-        } else if lower.ends_with(".img") || lower.ends_with(".bin") || lower.ends_with(".raw") {
+        } else if lower.ends_with(b".img") || lower.ends_with(b".bin") || lower.ends_with(b".raw") {
             Self::Raw
         } else {
             Self::Unknown
@@ -537,7 +545,7 @@ struct HashJob {
 }
 
 impl HashJob {
-    fn open(path: &str, algorithm: HashAlgorithm) -> io::Result<Self> {
+    fn open(path: &Path, algorithm: HashAlgorithm) -> io::Result<Self> {
         Ok(Self {
             file: fs::File::open(path)?,
             state: HashState::new(algorithm),
@@ -572,7 +580,7 @@ struct CopyJob {
 }
 
 impl CopyJob {
-    fn open(src_path: &str, dst_path: &str) -> io::Result<Self> {
+    fn open(src_path: &Path, dst_path: &Path) -> io::Result<Self> {
         let src = fs::File::open(src_path)?;
         // `create` rather than `create_new`: writing an image to a device means
         // opening a node that already exists, and creating an image means
@@ -621,7 +629,7 @@ struct CompareJob {
 }
 
 impl CompareJob {
-    fn open(a_path: &str, b_path: &str) -> io::Result<Self> {
+    fn open(a_path: &Path, b_path: &Path) -> io::Result<Self> {
         Ok(Self {
             a: fs::File::open(a_path)?,
             b: fs::File::open(b_path)?,
@@ -1252,7 +1260,7 @@ pub fn parse_iso_directory(data: &[u8], depth: u32) -> Vec<IsoEntry> {
 /// Metadata about a loaded image file.
 #[derive(Clone, Debug)]
 pub struct ImageInfo {
-    pub path: String,
+    pub path: PathBuf,
     pub file_size: u64,
     pub format: ImageFormat,
     pub volume_label: String,
@@ -1264,9 +1272,9 @@ pub struct ImageInfo {
 }
 
 impl ImageInfo {
-    pub fn new(path: &str) -> Self {
+    pub fn new(path: &Path) -> Self {
         Self {
-            path: path.to_string(),
+            path: path.to_path_buf(),
             file_size: 0,
             format: ImageFormat::Unknown,
             volume_label: String::new(),
@@ -1504,8 +1512,25 @@ fn write_confirmation(image_name: &str, drive_name: &str, drive_size: u64) -> Al
 ///
 /// Shared with the image card on the Write tab so the confirmation names the
 /// file the same way the card the user just read did.
-fn image_display_name(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
+fn image_display_name(path: &Path) -> &Path {
+    // Split on bytes, not characters: a filename is not required to be UTF-8,
+    // and `/` and `\` are single bytes that cannot occur inside a multi-byte
+    // sequence, so cutting at one can never land mid-character.
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let Some(i) = bytes.iter().rposition(|b| *b == b'/' || *b == b'\\') else {
+        return path;
+    };
+    match bytes.get(i.saturating_add(1)..) {
+        // SAFETY: the slice starts one past an ASCII `/` or `\`, which is a
+        // character boundary in every encoding `OsStr` admits, and runs to the
+        // end of the original string.
+        Some(tail) if !tail.is_empty() => {
+            Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(tail) })
+        }
+        // A trailing separator: there is no last component, so name the whole
+        // path rather than nothing at all.
+        _ => path,
+    }
 }
 
 // ============================================================================
@@ -1515,7 +1540,7 @@ fn image_display_name(path: &str) -> &str {
 /// Recently used image file entry.
 #[derive(Clone, Debug)]
 pub struct RecentImage {
-    pub path: String,
+    pub path: PathBuf,
     pub format: ImageFormat,
     pub size_bytes: u64,
     pub last_used_timestamp: u64,
@@ -1529,7 +1554,7 @@ pub struct RecentImage {
 #[derive(Clone, Debug)]
 pub struct CreateOptions {
     pub source_drive_id: String,
-    pub output_path: String,
+    pub output_path: PathBuf,
     pub block_size: u64,
     pub compress: bool,
     pub format: ImageFormat,
@@ -1539,7 +1564,7 @@ impl Default for CreateOptions {
     fn default() -> Self {
         Self {
             source_drive_id: String::new(),
-            output_path: String::new(),
+            output_path: PathBuf::new(),
             block_size: DEFAULT_BLOCK_SIZE,
             compress: false,
             format: ImageFormat::Raw,
@@ -1550,7 +1575,7 @@ impl Default for CreateOptions {
 /// Configuration for image writing.
 #[derive(Clone, Debug)]
 pub struct WriteOptions {
-    pub image_path: String,
+    pub image_path: PathBuf,
     pub target_drive_id: String,
     pub verify_after_write: bool,
     pub block_size: u64,
@@ -1559,7 +1584,7 @@ pub struct WriteOptions {
 impl Default for WriteOptions {
     fn default() -> Self {
         Self {
-            image_path: String::new(),
+            image_path: PathBuf::new(),
             target_drive_id: String::new(),
             verify_after_write: true,
             block_size: DEFAULT_BLOCK_SIZE,
@@ -1904,7 +1929,7 @@ impl DiskImagerApp {
     /// side and means the two must be kept in step: a `NavigatedTo` that is
     /// not answered leaves the dialog showing the previous directory's files
     /// under the new directory's name, which is worse than showing nothing.
-    pub fn open_image_dialog(&mut self, start_dir: &str) {
+    pub fn open_image_dialog(&mut self, start_dir: &Path) {
         let mut dialog = FileDialog::open()
             .with_filter("Disk images", &["*.iso", "*.img", "*.bin"])
             .with_initial_path(start_dir);
@@ -1969,22 +1994,22 @@ impl DiskImagerApp {
     /// A read failure is reported in the status bar rather than swallowed: the
     /// user picked this file by name a moment ago, so "nothing happened" is
     /// the one response that gives them no way to work out why.
-    pub fn load_image_from_path(&mut self, path: &str) {
+    pub fn load_image_from_path(&mut self, path: &Path) {
         match fs::read(path) {
             Ok(data) => {
                 self.load_image(path, &data);
-                self.status_message = format!("Loaded {path}");
+                self.status_message = format!("Loaded {}", path.display());
                 self.status_is_error = false;
             }
             Err(e) => {
-                self.status_message = format!("Cannot read {path}: {e}");
+                self.status_message = format!("Cannot read {}: {e}", path.display());
                 self.status_is_error = true;
             }
         }
     }
 
     /// Load an image file and detect its format.
-    pub fn load_image(&mut self, path: &str, data: &[u8]) {
+    pub fn load_image(&mut self, path: &Path, data: &[u8]) {
         let format = if data.len() >= 0x8006 {
             ImageFormat::from_magic(data)
         } else {
@@ -2037,17 +2062,17 @@ impl DiskImagerApp {
         // Add to recent images
         self.add_recent(path, format, info.file_size);
         self.loaded_image = Some(info);
-        self.status_message = format!("Loaded: {}", path);
+        self.status_message = format!("Loaded: {}", path.display());
         self.status_is_error = false;
     }
 
     /// Add a path to the recent images list.
-    fn add_recent(&mut self, path: &str, format: ImageFormat, size: u64) {
+    fn add_recent(&mut self, path: &Path, format: ImageFormat, size: u64) {
         // Remove existing entry for same path
         self.recent_images.retain(|r| r.path != path);
 
         self.recent_images.push_front(RecentImage {
-            path: path.to_string(),
+            path: path.to_path_buf(),
             format,
             size_bytes: size,
             last_used_timestamp: self.tick_count,
@@ -2108,7 +2133,7 @@ impl DiskImagerApp {
             drive.node.clone(),
             image.file_size,
         );
-        let job = CopyJob::open(&image_path, &node)
+        let job = CopyJob::open(&image_path, Path::new(&node))
             .map_err(|e| format!("Cannot open {node} for writing: {e}"))?;
 
         self.write_options.image_path = image_path;
@@ -2120,7 +2145,7 @@ impl DiskImagerApp {
     }
 
     /// Start creating an image from the selected drive.
-    pub fn start_create(&mut self, output_path: &str) -> Result<(), String> {
+    pub fn start_create(&mut self, output_path: &Path) -> Result<(), String> {
         let drive_idx = self
             .selected_drive_index
             .ok_or_else(|| "No drive selected".to_string())?;
@@ -2136,11 +2161,11 @@ impl DiskImagerApp {
             drive.node.clone(),
             drive.size_bytes,
         );
-        let job = CopyJob::open(&node, output_path)
-            .map_err(|e| format!("Cannot copy {node} to {output_path}: {e}"))?;
+        let job = CopyJob::open(Path::new(&node), output_path)
+            .map_err(|e| format!("Cannot copy {node} to {}: {e}", output_path.display()))?;
 
         self.create_options.source_drive_id = drive_id.clone();
-        self.create_options.output_path = output_path.to_string();
+        self.create_options.output_path = output_path.to_path_buf();
         self.begin(Operation::CreatingImage, Job::Copy(job), total);
         self.locked_drive_id = Some(drive_id);
         self.status_message = format!("Creating image from {drive_name}...");
@@ -2162,7 +2187,7 @@ impl DiskImagerApp {
             .ok_or_else(|| "Invalid drive index".to_string())?;
 
         let (image_path, node, total) = (image.path.clone(), drive.node.clone(), image.file_size);
-        let job = CompareJob::open(&image_path, &node)
+        let job = CompareJob::open(&image_path, Path::new(&node))
             .map_err(|e| format!("Cannot read back {node}: {e}"))?;
 
         self.begin(Operation::VerifyingWrite, Job::Compare(job), total);
@@ -2183,7 +2208,7 @@ impl DiskImagerApp {
             .ok_or_else(|| "No image loaded".to_string())?;
         let path = image.path.clone();
         let job = HashJob::open(&path, self.hash_algorithm)
-            .map_err(|e| format!("Cannot read {path}: {e}"))?;
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
 
         // The length the file has *now*, not the length it had when it was
         // loaded: the bar is drawn against how far the read has got, and a
@@ -2283,7 +2308,10 @@ impl DiskImagerApp {
             }
             Operation::VerifyingWrite => "Write verified successfully".to_string(),
             Operation::CreatingImage => {
-                format!("Image created: {}", self.create_options.output_path)
+                format!(
+                    "Image created: {}",
+                    self.create_options.output_path.display()
+                )
             }
             Operation::ComputingHash => {
                 if let Some(Job::Hash(mut job)) = finished {
@@ -2446,7 +2474,7 @@ impl DiskImagerApp {
                         .loaded_image
                         .as_ref()
                         .map(|img| parent_directory(&img.path))
-                        .unwrap_or_else(|| ".".to_string());
+                        .unwrap_or_else(|| PathBuf::from("."));
                     self.open_image_dialog(&start);
                     return EventResult::Consumed;
                 }
@@ -2663,8 +2691,10 @@ impl DiskImagerApp {
         let Some(drive) = self.selected_drive() else {
             return false;
         };
+        // Lossy at the boundary where the name becomes a sentence the user
+        // reads; the path itself is never reconstructed from it.
         self.confirm_dialog = Some(write_confirmation(
-            image_display_name(&image.path),
+            &image_display_name(&image.path).to_string_lossy(),
             &drive.name,
             drive.size_bytes,
         ));
@@ -3999,7 +4029,8 @@ impl DiskImagerApp {
         rt.push(RenderCommand::Text {
             x: tx,
             y: ty,
-            text: filename.to_string(),
+            // Lossy only here, one step before the glyphs are measured.
+            text: filename.to_string_lossy().into_owned(),
             color: colors::TEXT,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -4414,8 +4445,12 @@ pub fn format_bytes(bytes: u64) -> String {
 /// an abort, not a layout glitch, and our paths admit every byte but `/` and
 /// NUL. It also compared `path.len()` (bytes) against a budget of "characters",
 /// so it cut accented paths that already fitted.
-pub fn truncate_path(path: &str, max_width: f32, size: f32) -> String {
-    text::elide_start(path, max_width, "...", size, FontWeightHint::Regular)
+pub fn truncate_path(path: &Path, max_width: f32, size: f32) -> String {
+    // Lossy, and deliberately so: this is the last step before the glyphs are
+    // measured, and a byte that is not text has no glyph. The replacement
+    // character is what the user should see for one.
+    let text = path.to_string_lossy();
+    text::elide_start(&text, max_width, "...", size, FontWeightHint::Regular)
 }
 
 /// The directory part of `path`, or `"."` when it has none.
@@ -4423,11 +4458,21 @@ pub fn truncate_path(path: &str, max_width: f32, size: f32) -> String {
 /// Both separators are cut, not just `/`: an image loaded from a path this
 /// program was handed on a host that writes `\` would otherwise re-open the
 /// dialog on the whole string as if it were a directory name.
-fn parent_directory(path: &str) -> String {
-    match path.rfind(['/', '\\']) {
-        Some(0) => "/".to_string(),
-        Some(i) => path.get(..i).unwrap_or(".").to_string(),
-        None => ".".to_string(),
+fn parent_directory(path: &Path) -> PathBuf {
+    // Byte-level rather than `Path::parent`, for two reasons. A filename may
+    // hold any byte but `/` and NUL, so there is not always a `str` to search;
+    // and `Path::parent` on a Windows *host* also splits on `\`, which is a
+    // legal character in one of our filenames -- the host's answer and the
+    // target's would differ, and the tests run on the host.
+    let bytes = path.as_os_str().as_encoded_bytes();
+    match bytes.iter().rposition(|b| *b == b'/' || *b == b'\\') {
+        Some(0) => PathBuf::from("/"),
+        // SAFETY: the slice ends at an ASCII `/` or `\`, which is a character
+        // boundary in every encoding `OsStr` admits, and starts at the start.
+        Some(i) => PathBuf::from(unsafe {
+            OsStr::from_encoded_bytes_unchecked(bytes.get(..i).unwrap_or(&[]))
+        }),
+        None => PathBuf::from("."),
     }
 }
 
@@ -4684,30 +4729,39 @@ mod tests {
     #[test]
     fn test_format_from_extension_iso() {
         assert_eq!(
-            ImageFormat::from_extension("file.iso"),
+            ImageFormat::from_extension(Path::new("file.iso")),
             ImageFormat::Iso9660
         );
     }
 
     #[test]
     fn test_format_from_extension_img() {
-        assert_eq!(ImageFormat::from_extension("file.img"), ImageFormat::Raw);
+        assert_eq!(
+            ImageFormat::from_extension(Path::new("file.img")),
+            ImageFormat::Raw
+        );
     }
 
     #[test]
     fn test_format_from_extension_bin() {
-        assert_eq!(ImageFormat::from_extension("file.bin"), ImageFormat::Raw);
+        assert_eq!(
+            ImageFormat::from_extension(Path::new("file.bin")),
+            ImageFormat::Raw
+        );
     }
 
     #[test]
     fn test_format_from_extension_raw() {
-        assert_eq!(ImageFormat::from_extension("file.raw"), ImageFormat::Raw);
+        assert_eq!(
+            ImageFormat::from_extension(Path::new("file.raw")),
+            ImageFormat::Raw
+        );
     }
 
     #[test]
     fn test_format_from_extension_gz() {
         assert_eq!(
-            ImageFormat::from_extension("file.img.gz"),
+            ImageFormat::from_extension(Path::new("file.img.gz")),
             ImageFormat::GzipCompressed
         );
     }
@@ -4715,7 +4769,7 @@ mod tests {
     #[test]
     fn test_format_from_extension_unknown() {
         assert_eq!(
-            ImageFormat::from_extension("file.txt"),
+            ImageFormat::from_extension(Path::new("file.txt")),
             ImageFormat::Unknown
         );
     }
@@ -4723,7 +4777,7 @@ mod tests {
     #[test]
     fn test_format_from_extension_case_insensitive() {
         assert_eq!(
-            ImageFormat::from_extension("FILE.ISO"),
+            ImageFormat::from_extension(Path::new("FILE.ISO")),
             ImageFormat::Iso9660
         );
     }
@@ -5089,7 +5143,7 @@ mod tests {
         fs::write(dir.join("disk.iso"), tiny_iso(b"OPEN_TEST")).expect("write iso");
 
         let mut app = DiskImagerApp::new();
-        app.open_image_dialog(&dir.to_string_lossy());
+        app.open_image_dialog(dir);
 
         let dialog = app.open_dialog.as_ref().expect("dialog is on screen");
         assert!(
@@ -5121,7 +5175,7 @@ mod tests {
 
         // Point it at the scratch directory the way navigation would, then
         // pick the only file in it.
-        app.open_image_dialog(&dir.to_string_lossy());
+        app.open_image_dialog(dir);
         let index = app
             .open_dialog
             .as_ref()
@@ -5171,7 +5225,7 @@ mod tests {
         fs::write(dir.join("boot.iso"), tiny_iso(b"CLICKED_LIVE")).expect("write iso");
 
         let mut app = DiskImagerApp::new();
-        app.open_image_dialog(&dir.to_string_lossy());
+        app.open_image_dialog(dir);
         let (w, h) = (app.window_width, app.window_height);
 
         let click = |app: &mut DiskImagerApp, target: DialogTarget| {
@@ -5232,7 +5286,7 @@ mod tests {
     fn the_picker_keeps_clicks_off_the_window_behind_it() {
         let mut app = DiskImagerApp::new();
         app.active_tab = MainTab::Write;
-        app.open_image_dialog("/");
+        app.open_image_dialog(Path::new("/"));
         let (w, h) = (app.window_width, app.window_height);
 
         for (x, y) in [
@@ -5292,7 +5346,7 @@ mod tests {
         fs::write(dir.join("x.img"), b"not an iso").expect("write img");
 
         let mut app = DiskImagerApp::new();
-        app.open_image_dialog(&dir.to_string_lossy());
+        app.open_image_dialog(dir);
         app.handle_event(&plain(Key::Escape));
 
         assert!(app.open_dialog.is_none(), "Escape left the dialog up");
@@ -5309,7 +5363,7 @@ mod tests {
         let scratch = scratchdir::ScratchDir::new("slate_diskimager_modal");
         let mut app = DiskImagerApp::new();
         app.active_tab = MainTab::Write;
-        app.open_image_dialog(&scratch.dir().to_string_lossy());
+        app.open_image_dialog(scratch.dir());
 
         assert_eq!(app.handle_event(&ctrl(Key::Num3)), EventResult::Consumed);
         assert_eq!(
@@ -5334,7 +5388,7 @@ mod tests {
         fs::write(dir.join("inner").join("nested.iso"), b"n").expect("write nested");
 
         let mut app = DiskImagerApp::new();
-        app.open_image_dialog(&dir.to_string_lossy());
+        app.open_image_dialog(dir);
         let index = app
             .open_dialog
             .as_ref()
@@ -5349,20 +5403,20 @@ mod tests {
             .select_entry(index);
         app.handle_event(&plain(Key::Enter));
 
-        let names: Vec<&str> = app
+        let names: Vec<String> = app
             .open_dialog
             .as_ref()
             .expect("dialog is still up after navigating")
             .entries()
             .iter()
-            .map(|e| e.name.as_str())
+            .map(|e| e.name.to_string_lossy().into_owned())
             .collect();
         assert!(
-            names.contains(&"nested.iso"),
+            names.iter().any(|n| n == "nested.iso"),
             "listing not refreshed: {names:?}"
         );
         assert!(
-            !names.contains(&"outer.iso"),
+            !names.iter().any(|n| n == "outer.iso"),
             "stale listing kept: {names:?}"
         );
     }
@@ -5377,7 +5431,7 @@ mod tests {
         let missing = scratch.dir().join("gone.iso");
 
         let mut app = DiskImagerApp::new();
-        app.load_image_from_path(&missing.to_string_lossy());
+        app.load_image_from_path(&missing);
 
         assert!(app.loaded_image.is_none());
         assert!(app.status_is_error, "a failed read was not flagged");
@@ -5390,10 +5444,59 @@ mod tests {
 
     #[test]
     fn parent_directory_handles_both_separators_and_neither() {
-        assert_eq!(parent_directory("/mnt/images/a.iso"), "/mnt/images");
-        assert_eq!(parent_directory(r"C:\images\a.iso"), r"C:\images");
-        assert_eq!(parent_directory("/a.iso"), "/");
-        assert_eq!(parent_directory("a.iso"), ".");
+        assert_eq!(
+            parent_directory(Path::new("/mnt/images/a.iso")),
+            Path::new("/mnt/images")
+        );
+        assert_eq!(
+            parent_directory(Path::new(r"C:\images\a.iso")),
+            Path::new(r"C:\images")
+        );
+        assert_eq!(parent_directory(Path::new("/a.iso")), Path::new("/"));
+        assert_eq!(parent_directory(Path::new("a.iso")), Path::new("."));
+    }
+
+    /// Both helpers cut a path on raw bytes, so a name that has no UTF-8
+    /// reading has to come through them unchanged rather than U+FFFD-ed.
+    ///
+    /// A lone high surrogate is a legal Windows filename with no UTF-8
+    /// spelling; a `0xFF` byte is the same thing everywhere else. This is the
+    /// case `Path::to_str()` returns `None` for, and the case the old
+    /// `String`-typed chain silently corrupted.
+    #[test]
+    fn splitting_a_path_never_decodes_the_name() {
+        #[cfg(windows)]
+        let name = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0x0062, 0xD800, 0x002E, 0x0069, 0x0073, 0x006F])
+        };
+        #[cfg(not(windows))]
+        let name = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![b'b', 0xFF, b'.', b'i', b's', b'o'])
+        };
+        assert!(
+            name.to_str().is_none(),
+            "the fixture is decodable after all"
+        );
+
+        let full = Path::new("/mnt/images").join(&name);
+        assert_eq!(parent_directory(&full), Path::new("/mnt/images"));
+        assert_eq!(image_display_name(&full), Path::new(&name));
+        // The extension is ASCII and sits after the undecodable byte, so it is
+        // still found -- which a `to_str()`-gated version would not have done.
+        assert_eq!(ImageFormat::from_extension(&full), ImageFormat::Iso9660);
+    }
+
+    /// A path that ends in a separator has no last component. Naming the whole
+    /// path is not right either, but it beats naming nothing at all, which is
+    /// what the old `rsplit(...).next()` produced.
+    #[test]
+    fn a_path_ending_in_a_separator_still_has_a_display_name() {
+        assert_eq!(
+            image_display_name(Path::new("/mnt/images/")),
+            Path::new("/mnt/images/")
+        );
     }
 
     #[test]
@@ -5741,7 +5844,7 @@ mod tests {
     #[test]
     fn a_path_that_fits_is_left_alone() {
         assert_eq!(
-            truncate_path("/tmp/a.img", 400.0, SMALL_FONT_SIZE),
+            truncate_path(Path::new("/tmp/a.img"), 400.0, SMALL_FONT_SIZE),
             "/tmp/a.img"
         );
     }
@@ -5750,7 +5853,7 @@ mod tests {
     /// from the start — and fits the room it was given, ellipsis included.
     #[test]
     fn a_cut_path_keeps_its_filename_and_fits() {
-        let long = "/home/user/projects/some/rather/deep/tree/disk.img";
+        let long = Path::new("/home/user/projects/some/rather/deep/tree/disk.img");
         let room = 120.0;
         let out = truncate_path(long, room, SMALL_FONT_SIZE);
         assert!(out.starts_with("..."), "{out:?} should be marked as cut");
@@ -5765,7 +5868,7 @@ mod tests {
     /// cut across a multi-byte sequence to prove it can't happen again.
     #[test]
     fn cutting_a_path_never_splits_a_character() {
-        let path = "/home/user/projets/déjà-vu/résumé-final.img";
+        let path = Path::new("/home/user/projets/déjà-vu/résumé-final.img");
         for room in [8.0, 17.0, 33.0, 65.0, 129.0, 257.0] {
             let out = truncate_path(path, room, SMALL_FONT_SIZE);
             let w = text::measure(&out, SMALL_FONT_SIZE, FontWeightHint::Regular);
@@ -5858,7 +5961,7 @@ mod tests {
     #[test]
     fn test_app_start_write_no_drive() {
         let mut app = DiskImagerApp::new();
-        app.loaded_image = Some(ImageInfo::new("test.img"));
+        app.loaded_image = Some(ImageInfo::new(Path::new("test.img")));
         assert!(app.start_write().is_err());
     }
 
@@ -5909,7 +6012,7 @@ mod tests {
     #[test]
     fn test_app_start_create() {
         let (mut app, scratch) = app_ready_to_write();
-        let out = scratch.path("out.img").display().to_string();
+        let out = scratch.path("out.img");
         assert!(app.start_create(&out).is_ok());
         assert_eq!(app.operation, Operation::CreatingImage);
     }
@@ -5917,7 +6020,7 @@ mod tests {
     #[test]
     fn test_app_start_create_no_drive() {
         let mut app = DiskImagerApp::new();
-        assert!(app.start_create("/tmp/out.img").is_err());
+        assert!(app.start_create(Path::new("/tmp/out.img")).is_err());
     }
 
     #[test]
@@ -5936,7 +6039,7 @@ mod tests {
     #[test]
     fn a_hash_of_a_file_that_is_not_there_fails_at_the_start() {
         let mut app = DiskImagerApp::new();
-        app.loaded_image = Some(ImageInfo::new("/definitely/not/an/image.iso"));
+        app.loaded_image = Some(ImageInfo::new(Path::new("/definitely/not/an/image.iso")));
         let err = app
             .start_hash()
             .expect_err("opened a file that is not there");
@@ -5992,7 +6095,6 @@ mod tests {
         let scratch = scratchdir::ScratchDir::new("slate_diskimager_hash");
         let path = scratch.path("abc.img");
         fs::write(&path, b"abc").expect("scratch dir is writable");
-        let path = path.display().to_string();
 
         // RFC 1321 A.5 and FIPS 180-4, for the input "abc".
         for (algorithm, expected) in [
@@ -6027,7 +6129,7 @@ mod tests {
         let path = scratch.path("abc.img");
         fs::write(&path, b"abc").expect("scratch dir is writable");
         let mut app = DiskImagerApp::new();
-        app.load_image(&path.display().to_string(), b"abc");
+        app.load_image(&path, b"abc");
         app.start_hash().expect("the image is on disk");
 
         app.handle_event(&Event::Tick { elapsed_ms: 16 });
@@ -6044,7 +6146,7 @@ mod tests {
         let path = scratch.path("abc.img");
         fs::write(&path, b"abc").expect("scratch dir is writable");
         let mut app = DiskImagerApp::new();
-        app.load_image(&path.display().to_string(), b"abc");
+        app.load_image(&path, b"abc");
         // Publishers print checksums in both cases and often with trailing
         // whitespace from a copy-paste, and none of that is a mismatch.
         app.expected_hash =
@@ -6123,7 +6225,7 @@ mod tests {
         let (mut app, scratch) = app_ready_to_write();
         fs::write(scratch.path("usb.raw"), vec![0x5Au8; 256]).expect("scratch dir is writable");
         let out = scratch.path("captured.img");
-        app.start_create(&out.display().to_string())
+        app.start_create(&out)
             .expect("device and output are both openable");
         run_to_completion(&mut app);
         assert!(!app.status_is_error, "{}", app.status_message);
@@ -6233,10 +6335,10 @@ removable=true
     fn test_app_load_image() {
         let mut app = DiskImagerApp::new();
         let data = vec![0u8; 100];
-        app.load_image("test.img", &data);
+        app.load_image(Path::new("test.img"), &data);
         assert!(app.loaded_image.is_some());
         let img = app.loaded_image.as_ref().unwrap();
-        assert_eq!(img.path, "test.img");
+        assert_eq!(img.path, Path::new("test.img"));
         assert_eq!(img.file_size, 100);
         assert_eq!(img.format, ImageFormat::Raw);
     }
@@ -6244,24 +6346,24 @@ removable=true
     #[test]
     fn test_app_recent_images() {
         let mut app = DiskImagerApp::new();
-        app.load_image("a.img", &[0u8; 10]);
-        app.load_image("b.img", &[0u8; 20]);
+        app.load_image(Path::new("a.img"), &[0u8; 10]);
+        app.load_image(Path::new("b.img"), &[0u8; 20]);
         assert_eq!(app.recent_images.len(), 2);
         // Most recent should be first
-        assert_eq!(app.recent_images.front().unwrap().path, "b.img");
+        assert_eq!(app.recent_images.front().unwrap().path, Path::new("b.img"));
     }
 
     #[test]
     fn test_app_recent_images_dedup() {
         let mut app = DiskImagerApp::new();
-        app.load_image("a.img", &[0u8; 10]);
-        app.load_image("b.img", &[0u8; 20]);
-        app.load_image("a.img", &[0u8; 30]);
+        app.load_image(Path::new("a.img"), &[0u8; 10]);
+        app.load_image(Path::new("b.img"), &[0u8; 20]);
+        app.load_image(Path::new("a.img"), &[0u8; 30]);
         // "a.img" should appear only once
         let count = app
             .recent_images
             .iter()
-            .filter(|r| r.path == "a.img")
+            .filter(|r| r.path == Path::new("a.img"))
             .count();
         assert_eq!(count, 1);
     }
@@ -6270,7 +6372,7 @@ removable=true
     fn test_app_recent_images_cap() {
         let mut app = DiskImagerApp::new();
         for i in 0..30_usize {
-            app.load_image(&format!("img{}.img", i), &[0u8; 10]);
+            app.load_image(Path::new(&format!("img{i}.img")), &[0u8; 10]);
         }
         assert!(app.recent_images.len() <= MAX_RECENT_IMAGES);
     }
@@ -6313,7 +6415,7 @@ removable=true
     #[test]
     fn test_handle_key_escape_cancels() {
         let mut app = DiskImagerApp::new();
-        let mut info = ImageInfo::new("t.img");
+        let mut info = ImageInfo::new(Path::new("t.img"));
         info.file_size = 1024;
         app.loaded_image = Some(info);
         app.select_drive(1);
@@ -6371,7 +6473,7 @@ removable=true
     #[test]
     fn test_render_with_image_loaded() {
         let mut app = DiskImagerApp::new();
-        app.load_image("test.iso", &[0u8; 100]);
+        app.load_image(Path::new("test.iso"), &[0u8; 100]);
         let mut rt = RenderTree::new();
         app.render(&mut rt);
         assert!(!rt.is_empty());
@@ -6407,7 +6509,7 @@ removable=true
     #[test]
     fn test_render_with_progress() {
         let mut app = DiskImagerApp::new();
-        let mut info = ImageInfo::new("t.img");
+        let mut info = ImageInfo::new(Path::new("t.img"));
         info.file_size = 1024;
         app.loaded_image = Some(info);
         app.select_drive(1);
@@ -6444,7 +6546,7 @@ removable=true
         let mut app = DiskImagerApp::new();
         app.drives = vec![test_drive("disk0"), usb];
         app.active_tab = MainTab::Write;
-        app.load_image(&image_path.display().to_string(), &image);
+        app.load_image(&image_path, &image);
         app.select_drive(1);
         (app, scratch)
     }
@@ -6732,7 +6834,7 @@ removable=true
 
         let mut with_image = DiskImagerApp::new();
         with_image.active_tab = MainTab::Write;
-        with_image.loaded_image = Some(ImageInfo::new("/images/slateos.iso"));
+        with_image.loaded_image = Some(ImageInfo::new(Path::new("/images/slateos.iso")));
         assert!(
             !with_image.confirm_write(),
             "confirmed a write with no target drive"
@@ -6847,8 +6949,8 @@ removable=true
 
     #[test]
     fn test_image_info_new() {
-        let info = ImageInfo::new("/path/to/file.iso");
-        assert_eq!(info.path, "/path/to/file.iso");
+        let info = ImageInfo::new(Path::new("/path/to/file.iso"));
+        assert_eq!(info.path, Path::new("/path/to/file.iso"));
         assert_eq!(info.format, ImageFormat::Unknown);
         assert!(!info.is_bootable);
     }

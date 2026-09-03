@@ -61,6 +61,8 @@ use crate::scroll_window;
 use crate::style::CornerRadii;
 use crate::wheel;
 use core::ops::Range;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 pub use tzrules::Tz;
 
 // --- Catppuccin Mocha palette ---
@@ -123,10 +125,17 @@ pub enum DialogMode {
 }
 
 /// One entry in the current directory listing.
+///
+/// The name is an [`OsString`] rather than a `String` because SlateOS
+/// filesystems accept every byte but `/` and NUL, so a name is not text — it is
+/// the key that identifies the file. Decoding it to UTF-8 is lossy, and a lossy
+/// name is a *different* name: `fs::read` on it either fails or, worse, finds
+/// some other file. The one place the name becomes text is the draw call, which
+/// is producing glyphs rather than a lookup key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirEntry {
     /// Display name (file or directory name, not full path).
-    pub name: String,
+    pub name: OsString,
     /// Whether this entry is a directory.
     pub is_dir: bool,
     /// File size in bytes (0 for directories).
@@ -134,7 +143,11 @@ pub struct DirEntry {
     /// Last-modified timestamp (Unix epoch seconds).
     pub modified_timestamp: u64,
     /// File extension (without the dot), empty for dirs/extensionless.
-    pub extension: String,
+    ///
+    /// Also an [`OsString`]: an extension that is not UTF-8 must fail to match
+    /// every UTF-8 pattern, and decoding it lossily could make it match one it
+    /// is not.
+    pub extension: OsString,
 }
 
 /// A file type filter (e.g. "Rust files" matching `*.rs`).
@@ -160,7 +173,7 @@ pub struct QuickAccess {
     /// Display label (e.g. "Home").
     pub label: String,
     /// Absolute path this entry navigates to.
-    pub path: String,
+    pub path: PathBuf,
 }
 
 /// Result of an action on the dialog.
@@ -169,9 +182,9 @@ pub enum DialogAction {
     /// Nothing happened (event was consumed but state unchanged meaningfully).
     None,
     /// Dialog navigated to a new directory.
-    NavigatedTo(String),
+    NavigatedTo(PathBuf),
     /// User confirmed a selection (path to the selected file/folder).
-    Selected(String),
+    Selected(PathBuf),
     /// User cancelled the dialog.
     Cancelled,
 }
@@ -241,17 +254,33 @@ pub enum DialogTarget {
 #[derive(Clone, Debug)]
 pub struct FileDialog {
     mode: DialogMode,
-    current_path: String,
+    current_path: PathBuf,
     entries: Vec<DirEntry>,
     selected_index: Option<usize>,
+    /// What the Save-mode name field shows, and what the user edits.
+    ///
+    /// Stays a `String` because it is genuinely text: it is typed a character
+    /// at a time and backspaced a character at a time, and a keyboard cannot
+    /// produce a byte sequence that is not UTF-8. See `filename_exact` for the
+    /// case this cannot represent.
     filename_input: String,
+    /// The exact bytes of the name when the field was filled from a listed
+    /// file, or `None` once the user has edited it.
+    ///
+    /// Clicking a file in Save mode means "overwrite this one", and the file
+    /// clicked may have a name that is not UTF-8. Round-tripping that through
+    /// `filename_input` would replace the undecodable bytes with U+FFFD and
+    /// quietly save to a *different*, newly created file instead of the one the
+    /// user pointed at. So the bytes are kept beside the text, and dropped the
+    /// moment a keystroke makes the text no longer describe them.
+    filename_exact: Option<OsString>,
     filters: Vec<FileFilter>,
     active_filter_index: usize,
     show_hidden: bool,
     sort_by: SortColumn,
     sort_ascending: bool,
-    history_back: Vec<String>,
-    history_forward: Vec<String>,
+    history_back: Vec<PathBuf>,
+    history_forward: Vec<PathBuf>,
     quick_access: Vec<QuickAccess>,
     cancelled: bool,
     /// Index of the first entry row drawn.
@@ -316,15 +345,19 @@ impl FileDialog {
 
     /// Set the initial directory the dialog opens to.
     #[must_use]
-    pub fn with_initial_path(mut self, path: &str) -> Self {
-        self.current_path = path.to_string();
+    pub fn with_initial_path(mut self, path: impl AsRef<Path>) -> Self {
+        self.current_path = path.as_ref().to_path_buf();
         self
     }
 
     /// Pre-fill the filename input (useful for Save mode).
+    ///
+    /// Takes an [`OsStr`] so a caller reopening a file it already holds a real
+    /// path to can pre-fill the exact name, undecodable bytes and all. The text
+    /// shown is a lossy rendering of it; the name saved to is not.
     #[must_use]
-    pub fn with_filename(mut self, name: &str) -> Self {
-        self.filename_input = name.to_string();
+    pub fn with_filename(mut self, name: impl AsRef<OsStr>) -> Self {
+        self.set_filename(name);
         self
     }
 
@@ -361,21 +394,22 @@ impl FileDialog {
 
     /// Navigate into the given directory path. Pushes the current path onto the
     /// back-history stack.
-    pub fn navigate_to(&mut self, path: &str) {
+    pub fn navigate_to(&mut self, path: impl AsRef<Path>) {
+        let path = path.as_ref();
         if path == self.current_path {
             return;
         }
         self.history_back.push(self.current_path.clone());
         self.history_forward.clear();
-        self.current_path = path.to_string();
+        self.current_path = path.to_path_buf();
         self.rewind();
     }
 
     /// Navigate to the parent directory.
     pub fn navigate_up(&mut self) {
-        let parent = parent_path(&self.current_path);
-        if parent != self.current_path {
-            self.navigate_to(&parent);
+        let parent = parent_path(self.current_path.as_os_str());
+        if parent != self.current_path.as_os_str() {
+            self.navigate_to(PathBuf::from(parent));
         }
     }
 
@@ -423,7 +457,8 @@ impl FileDialog {
                 && let Some(entry) = self.entries.get(index)
                 && !entry.is_dir
             {
-                self.filename_input = entry.name.clone();
+                let name = entry.name.clone();
+                self.fill_filename(name);
             }
         }
     }
@@ -440,22 +475,18 @@ impl FileDialog {
         };
 
         if entry.is_dir {
+            let full = self.child_path(&entry.name);
             if self.mode == DialogMode::SelectFolder {
-                let full = join_path(&self.current_path, &entry.name);
                 return DialogAction::Selected(full);
             }
-            let target = join_path(&self.current_path, &entry.name);
-            self.navigate_to(&target);
+            self.navigate_to(full);
             DialogAction::NavigatedTo(self.current_path.clone())
         } else {
             match self.mode {
-                DialogMode::Open => {
-                    let full = join_path(&self.current_path, &entry.name);
-                    DialogAction::Selected(full)
-                }
+                DialogMode::Open => DialogAction::Selected(self.child_path(&entry.name)),
                 DialogMode::Save => {
                     // Double-clicking a file in save mode fills the name input.
-                    self.filename_input = entry.name.clone();
+                    self.fill_filename(entry.name);
                     DialogAction::None
                 }
                 DialogMode::SelectFolder => {
@@ -466,9 +497,33 @@ impl FileDialog {
         }
     }
 
-    /// Set the filename input text (Save mode).
-    pub fn set_filename(&mut self, name: &str) {
-        self.filename_input = name.to_string();
+    /// Set the filename input (Save mode).
+    ///
+    /// The exact bytes are kept, so a name that is not valid UTF-8 survives to
+    /// [`confirm`](Self::confirm) even though the field can only *show* a lossy
+    /// rendering of it.
+    pub fn set_filename(&mut self, name: impl AsRef<OsStr>) {
+        self.fill_filename(name.as_ref().to_os_string());
+    }
+
+    /// Put `name` in the field and remember its exact bytes.
+    fn fill_filename(&mut self, name: OsString) {
+        self.filename_input = name.to_string_lossy().into_owned();
+        self.filename_exact = Some(name);
+    }
+
+    /// Drop the remembered bytes, because the text no longer describes them.
+    ///
+    /// Called from every edit. Once the user has typed, what they want is what
+    /// the field says — the previous file's exact name would be a stale answer
+    /// silently preferred over the one on screen.
+    fn edited_filename(&mut self) {
+        self.filename_exact = None;
+    }
+
+    /// `current_path` joined with a name from the listing.
+    fn child_path(&self, name: &OsStr) -> PathBuf {
+        PathBuf::from(join_path(self.current_path.as_os_str(), name))
     }
 
     /// Change the active file type filter by index.
@@ -481,7 +536,7 @@ impl FileDialog {
 
     /// Attempt to confirm the current selection. Returns `Some(path)` if a
     /// valid selection exists, or `None` if confirmation is not possible.
-    pub fn confirm(&self) -> Option<String> {
+    pub fn confirm(&self) -> Option<PathBuf> {
         match self.mode {
             DialogMode::Open => {
                 let idx = self.selected_index?;
@@ -489,14 +544,13 @@ impl FileDialog {
                 if entry.is_dir {
                     return None;
                 }
-                Some(join_path(&self.current_path, &entry.name))
+                Some(self.child_path(&entry.name))
             }
             DialogMode::Save => {
                 if self.filename_input.is_empty() {
                     return None;
                 }
-                let name = self.filename_with_extension();
-                Some(join_path(&self.current_path, &name))
+                Some(self.child_path(&self.filename_with_extension()))
             }
             DialogMode::SelectFolder => {
                 // In folder mode, confirming selects the current directory
@@ -505,7 +559,7 @@ impl FileDialog {
                     && let Some(entry) = self.entries.get(idx)
                     && entry.is_dir
                 {
-                    return Some(join_path(&self.current_path, &entry.name));
+                    return Some(self.child_path(&entry.name));
                 }
                 // Fall back to current directory itself.
                 Some(self.current_path.clone())
@@ -578,6 +632,7 @@ impl FileDialog {
                 } else {
                     // In save mode with text: delete last char of filename input.
                     self.filename_input.pop();
+                    self.edited_filename();
                     DialogAction::None
                 }
             }
@@ -598,7 +653,16 @@ impl FileDialog {
             _ => {
                 // Text input for save-mode filename.
                 if self.mode == DialogMode::Save {
+                    let before = self.filename_input.len();
                     self.filename_input.extend(event.typed());
+                    // Only an edit that actually changed the text invalidates
+                    // the remembered bytes: most keys reaching this arm — a
+                    // bare Shift, an unhandled function key — type nothing,
+                    // and dropping the exact name on one of those would turn a
+                    // harmless keypress into a silently different save target.
+                    if self.filename_input.len() != before {
+                        self.edited_filename();
+                    }
                 }
                 DialogAction::None
             }
@@ -818,7 +882,7 @@ impl FileDialog {
     // --- Queries ---
 
     /// The current directory being displayed.
-    pub fn current_path(&self) -> &str {
+    pub fn current_path(&self) -> &Path {
         &self.current_path
     }
 
@@ -847,7 +911,9 @@ impl FileDialog {
     pub fn set_entries(&mut self, mut entries: Vec<DirEntry>) {
         // Filter hidden files unless show_hidden is set.
         if !self.show_hidden {
-            entries.retain(|e| !e.name.starts_with('.'));
+            // Tested on the bytes: `.` is ASCII, so a leading one is a leading
+            // one whatever the rest of the name does or does not decode to.
+            entries.retain(|e| e.name.as_encoded_bytes().first() != Some(&b'.'));
         }
 
         // Filter by extension in Open/Save modes (not folder mode).
@@ -913,7 +979,7 @@ impl FileDialog {
                 _ => {}
             }
             let ordering = match self.sort_by {
-                SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                SortColumn::Name => sort_key(&a.name).cmp(&sort_key(&b.name)),
                 SortColumn::Size => a.size.cmp(&b.size),
                 SortColumn::Modified => a.modified_timestamp.cmp(&b.modified_timestamp),
             };
@@ -930,10 +996,11 @@ impl FileDialog {
     fn new(mode: DialogMode) -> Self {
         Self {
             mode,
-            current_path: String::from("/"),
+            current_path: PathBuf::from("/"),
             entries: Vec::new(),
             selected_index: None,
             filename_input: String::new(),
+            filename_exact: None,
             filters: Vec::new(),
             active_filter_index: 0,
             show_hidden: false,
@@ -965,23 +1032,38 @@ impl FileDialog {
         filters
     }
 
-    /// In save mode, if the user's filename input lacks an extension matching the
-    /// active filter, append the first extension from the filter.
-    fn filename_with_extension(&self) -> String {
-        let name = &self.filename_input;
+    /// In save mode, the name to save under: the field's contents plus the
+    /// active filter's extension if it lacks one.
+    ///
+    /// Built on the exact bytes when the field was filled from a listed file,
+    /// so an existing name that is not valid UTF-8 is saved to *as it is on
+    /// disk* rather than as the U+FFFD-substituted text the field can show.
+    /// Which suffix to append is still decided from the text, because the
+    /// patterns it is compared against are themselves UTF-8 and a byte that
+    /// cannot be decoded cannot match one of them.
+    fn filename_with_extension(&self) -> OsString {
+        let mut name = self
+            .filename_exact
+            .clone()
+            .unwrap_or_else(|| OsString::from(&self.filename_input));
         if name.is_empty() {
-            return String::new();
+            return OsString::new();
         }
+        if let Some(suffix) = self.extension_suffix() {
+            name.push(suffix);
+        }
+        name
+    }
 
+    /// The extension to append to the typed name, or `None` to leave it alone.
+    fn extension_suffix(&self) -> Option<String> {
+        let name = &self.filename_input;
         let filters = self.effective_filters();
-        let filter = match filters.get(self.active_filter_index) {
-            Some(f) => f,
-            None => return name.clone(),
-        };
+        let filter = filters.get(self.active_filter_index)?;
 
         // If filter is "all files", don't auto-append.
         if filter.patterns.iter().any(|p| p == "*" || p == "*.*") {
-            return name.clone();
+            return None;
         }
 
         // Check if the filename already has a matching extension.
@@ -989,18 +1071,14 @@ impl FileDialog {
             if let Some(ext) = pattern.strip_prefix("*.")
                 && name.ends_with(&format!(".{ext}"))
             {
-                return name.clone();
+                return None;
             }
         }
 
         // Append the first pattern's extension.
-        if let Some(first) = filter.patterns.first()
-            && let Some(ext) = first.strip_prefix("*.")
-        {
-            return format!("{name}.{ext}");
-        }
-
-        name.clone()
+        let first = filter.patterns.first()?;
+        let ext = first.strip_prefix("*.")?;
+        Some(format!(".{ext}"))
     }
 
     /// Move the selection `delta` rows, stopping at either end of the list, and
@@ -1204,7 +1282,10 @@ impl FileDialog {
         frame.push(RenderCommand::Text {
             x: x + 6.0,
             y: btn_y + 5.0,
-            text: self.current_path.clone(),
+            // One of the two places a path becomes text, and it is producing
+            // glyphs rather than a key to look anything up with, so lossy is
+            // correct here. See `DirEntry::name`.
+            text: self.current_path.to_string_lossy().into_owned(),
             color: COLOR_TEXT,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -1411,7 +1492,12 @@ impl FileDialog {
             frame.push(RenderCommand::Text {
                 x: name_col_x,
                 y: row_y + 6.0,
-                text: entry.name.clone(),
+                // The other place, and the reason `DirEntry::name` can be an
+                // `OsString` everywhere else: a row has to *show* a name that
+                // has no UTF-8 reading, and U+FFFD is the honest way to show
+                // one. What the row opens is rebuilt from the bytes, not from
+                // this.
+                text: entry.name.to_string_lossy().into_owned(),
                 color: name_color,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -1696,47 +1782,118 @@ fn default_quick_access() -> Vec<QuickAccess> {
     vec![
         QuickAccess {
             label: String::from("Home"),
-            path: String::from("/home/user"),
+            path: PathBuf::from("/home/user"),
         },
         QuickAccess {
             label: String::from("Documents"),
-            path: String::from("/home/user/documents"),
+            path: PathBuf::from("/home/user/documents"),
         },
         QuickAccess {
             label: String::from("Downloads"),
-            path: String::from("/home/user/downloads"),
+            path: PathBuf::from("/home/user/downloads"),
         },
         QuickAccess {
             label: String::from("Desktop"),
-            path: String::from("/home/user/desktop"),
+            path: PathBuf::from("/home/user/desktop"),
         },
         QuickAccess {
             label: String::from("Recent"),
-            path: String::from("/recent"),
+            path: PathBuf::from("/recent"),
         },
     ]
 }
 
+/// Reinterpret bytes taken from an [`OsStr`] as an [`OsStr`] again.
+///
+/// # Safety
+///
+/// `bytes` must be a subslice of `OsStr::as_encoded_bytes` output taken on
+/// boundaries of the ASCII bytes it was split at. `OsStr::from_encoded_bytes_unchecked`
+/// documents exactly that contract: the encoding is self-synchronising at
+/// ASCII, so splitting at an ASCII byte cannot land inside a multi-byte
+/// sequence on any platform.
+unsafe fn os_str_from_bytes(bytes: &[u8]) -> &OsStr {
+    // SAFETY: the caller guarantees `bytes` came from `as_encoded_bytes` and
+    // was cut only at ASCII `/`, which is a valid boundary in every encoding
+    // `OsStr` uses.
+    unsafe { OsStr::from_encoded_bytes_unchecked(bytes) }
+}
+
 /// Get the parent of a path (simple slash-based splitting).
-fn parent_path(path: &str) -> String {
-    if path == "/" || path.is_empty() {
-        return String::from("/");
+///
+/// Split on the raw bytes at `/` alone rather than through [`Path::parent`],
+/// because a SlateOS path is separated by `/` and may contain **every** other
+/// byte — including `\`, which `std::path` on a Windows *host* treats as a
+/// separator too. Going through `Path` would therefore give one answer in the
+/// host test suite and a different one on the target, for a filename the
+/// filesystem is specified to accept.
+fn parent_path(path: &OsStr) -> OsString {
+    let bytes = path.as_encoded_bytes();
+    if bytes == b"/" || bytes.is_empty() {
+        return OsString::from("/");
     }
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rfind('/') {
-        Some(0) => String::from("/"),
-        Some(idx) => trimmed[..idx].to_string(),
-        None => String::from("/"),
+    // `saturating_add` rather than `+`: `rposition` cannot in fact return
+    // `usize::MAX` for a slice that fits in memory, but the lint does not know
+    // that and an `allow` here would be a wider exemption than the one line
+    // needs.
+    let end = bytes
+        .iter()
+        .rposition(|b| *b != b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    let trimmed = bytes.get(..end).unwrap_or(bytes);
+    match trimmed.iter().rposition(|b| *b == b'/') {
+        Some(0) | None => OsString::from("/"),
+        // SAFETY: `idx` is the position of an ASCII `/` in bytes that came
+        // from `as_encoded_bytes`, so the prefix ends on a valid boundary.
+        Some(idx) => unsafe { os_str_from_bytes(trimmed.get(..idx).unwrap_or(&[])) }.to_os_string(),
     }
 }
 
-/// Join a directory path and a child name.
-fn join_path(dir: &str, name: &str) -> String {
-    if dir == "/" {
-        format!("/{name}")
-    } else {
-        format!("{dir}/{name}")
+/// Join a directory path and a child name, on `/` alone. See [`parent_path`]
+/// for why this does not use [`Path::join`].
+fn join_path(dir: &OsStr, name: &OsStr) -> OsString {
+    let mut out = OsString::new();
+    if dir.as_encoded_bytes() != b"/" {
+        out.push(dir);
     }
+    out.push("/");
+    out.push(name);
+    out
+}
+
+/// The part of `name` after its last `.`, ASCII-lowercased, or empty if it has
+/// none.
+///
+/// Split on the raw bytes rather than `Path::extension` so that a name which
+/// is not valid UTF-8 still yields the extension it actually has, and so that
+/// the `.` is found by its byte — `.` is ASCII, so it cannot occur inside a
+/// multi-byte sequence.
+fn extension_of(name: &OsStr) -> OsString {
+    let bytes = name.as_encoded_bytes();
+    let Some(dot) = bytes.iter().rposition(|b| *b == b'.') else {
+        return OsString::new();
+    };
+    let Some(ext) = bytes.get(dot.saturating_add(1)..) else {
+        return OsString::new();
+    };
+    let lowered = ext.to_ascii_lowercase();
+    // SAFETY: `ext` is a suffix of `as_encoded_bytes` output cut just after an
+    // ASCII `.`, which is a valid boundary; ASCII-lowercasing maps ASCII bytes
+    // to ASCII bytes and leaves every other byte alone, so the encoding holds.
+    unsafe { os_str_from_bytes(&lowered) }.to_os_string()
+}
+
+/// The key a listing is sorted by when sorting on Name.
+///
+/// Unicode-lowercased when the name is valid UTF-8 — which is what this has
+/// always done, and what makes `README` and `readme` sort together — and the
+/// raw bytes when it is not. A name that cannot be decoded still has to sort
+/// *somewhere* deterministic, and its own bytes are the only key it has.
+fn sort_key(name: &OsStr) -> Vec<u8> {
+    name.to_str().map_or_else(
+        || name.as_encoded_bytes().to_vec(),
+        |s| s.to_lowercase().into_bytes(),
+    )
 }
 
 /// Format a byte size into a human-readable string.
@@ -1771,11 +1928,25 @@ fn format_timestamp(epoch_secs: u64, zone: &Tz) -> String {
 
 /// Check whether a filename matches any of the given glob patterns.
 /// Supports simple `*.ext` patterns only (not full glob).
-fn matches_any_pattern(filename: &str, patterns: &[&str]) -> bool {
+///
+/// A name that is not valid UTF-8 matches only `*` / `*.*`. That is not a
+/// limitation to work around but the right answer: the patterns are UTF-8, so
+/// no undecodable name can equal one, and deciding otherwise would mean
+/// decoding the name lossily and matching on characters that are not in it.
+fn matches_any_pattern(filename: &OsStr, patterns: &[&str]) -> bool {
+    let mut catch_all = false;
     for pattern in patterns {
         if *pattern == "*" || *pattern == "*.*" {
-            return true;
+            catch_all = true;
         }
+    }
+    if catch_all {
+        return true;
+    }
+    let Some(filename) = filename.to_str() else {
+        return false;
+    };
+    for pattern in patterns {
         if let Some(ext) = pattern.strip_prefix("*.")
             && filename.ends_with(&format!(".{ext}"))
         {
@@ -1805,27 +1976,25 @@ fn matches_any_pattern(filename: &str, patterns: &[&str]) -> bool {
 /// they wandered into is a normal thing to find, not a failure of the program.
 /// Entries whose metadata cannot be read are skipped for the same reason.
 ///
-/// The name is taken from `file_name` as an `OsStr` and converted once. A path
-/// component is a byte string on this OS, and a listing is the one place a
-/// filename with no UTF-8 reading still has to be *shown*, so lossy conversion
-/// is the right answer here and only here — what is opened is rebuilt from
-/// `current_path` plus this name inside the dialog, so a substituted character
-/// would open the wrong file. That is a real limitation, and it belongs to
-/// [`DirEntry`]'s `String`-typed API rather than to this function; recorded in
-/// `known-issues.md`.
+/// The name is carried through as the `OsString` the filesystem gave, never
+/// decoded. It is the key that identifies the file — the dialog rebuilds what
+/// to open from `current_path` plus this name — and a lossy decode would make
+/// it the key to a different file, or to none. The only decode is at the draw
+/// call, which wants glyphs rather than a key.
 #[must_use]
-pub fn list_directory(path: &str) -> Vec<DirEntry> {
-    let Ok(iter) = std::fs::read_dir(path) else {
+pub fn list_directory(path: impl AsRef<Path>) -> Vec<DirEntry> {
+    let Ok(iter) = std::fs::read_dir(path.as_ref()) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for entry in iter.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let extension = name
-            .rsplit_once('.')
-            .map(|(_, ext)| ext.to_ascii_lowercase())
-            .unwrap_or_default();
+        let name = entry.file_name();
+        let extension = if meta.is_dir() {
+            OsString::new()
+        } else {
+            extension_of(&name)
+        };
         out.push(DirEntry {
             is_dir: meta.is_dir(),
             size: if meta.is_dir() { 0 } else { meta.len() },
@@ -1834,11 +2003,7 @@ pub fn list_directory(path: &str) -> Vec<DirEntry> {
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_secs()),
-            extension: if meta.is_dir() {
-                String::new()
-            } else {
-                extension
-            },
+            extension,
             name,
         });
     }
@@ -1873,24 +2038,167 @@ mod tests {
 
     fn file(name: &str) -> DirEntry {
         DirEntry {
-            name: String::from(name),
+            name: OsString::from(name),
             is_dir: false,
             size: 10,
             modified_timestamp: 1_000,
             extension: name
                 .rsplit_once('.')
-                .map_or(String::new(), |(_, e)| String::from(e)),
+                .map_or(OsString::new(), |(_, e)| OsString::from(e)),
         }
     }
 
     fn dir(name: &str) -> DirEntry {
         DirEntry {
-            name: String::from(name),
+            name: OsString::from(name),
             is_dir: true,
             size: 0,
             modified_timestamp: 1_000,
-            extension: String::new(),
+            extension: OsString::new(),
         }
+    }
+
+    /// A filename that no `String` can hold, built through the platform's own
+    /// safe API rather than by asserting bytes into an `OsStr`.
+    ///
+    /// Windows filenames are UTF-16 sequences that need not be well-formed, so
+    /// a lone high surrogate is a legal name there and has no UTF-8 spelling;
+    /// Unix filenames are byte strings, so `0xFF` — which starts no UTF-8
+    /// sequence — does the same job. Either way `to_string_lossy` turns the
+    /// bad unit into U+FFFD, which is what makes the round-trip observable:
+    /// a dialog that carried the name as a `String` hands back a *different*
+    /// name than the one it was given.
+    #[cfg(windows)]
+    fn unmappable_name() -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        // "b\u{D800}.txt"
+        OsString::from_wide(&[0x0062, 0xD800, 0x002E, 0x0074, 0x0078, 0x0074])
+    }
+
+    #[cfg(not(windows))]
+    fn unmappable_name() -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(vec![b'b', 0xFF, b'.', b't', b'x', b't'])
+    }
+
+    fn unmappable_entry() -> DirEntry {
+        DirEntry {
+            name: unmappable_name(),
+            is_dir: false,
+            size: 10,
+            modified_timestamp: 1_000,
+            extension: OsString::from("txt"),
+        }
+    }
+
+    /// Opening a file whose name is not UTF-8 must hand back that file, not a
+    /// neighbour with a similar-looking name.
+    ///
+    /// This is the whole of the defect the `OsString` conversion fixes: with a
+    /// `String` name the U+FFFD substitution happened on the way *in*, so the
+    /// path the caller received named a file that in general does not exist —
+    /// and if it does exist, is the wrong one.
+    #[test]
+    fn opening_a_name_that_is_not_utf8_returns_the_exact_bytes() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![unmappable_entry()]);
+        dialog.select_entry(0);
+
+        let chosen = dialog.confirm().expect("a file is selected");
+        assert_eq!(
+            chosen.file_name(),
+            Some(unmappable_name().as_os_str()),
+            "the name came back as {:?}, not the bytes it went in as",
+            chosen.file_name()
+        );
+        assert_eq!(chosen.parent(), Some(Path::new("/docs")));
+    }
+
+    /// Double-clicking such a file in Open mode goes through a different arm
+    /// of the code, so it gets its own test.
+    #[test]
+    fn activating_a_name_that_is_not_utf8_returns_the_exact_bytes() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![unmappable_entry()]);
+
+        let action = dialog.activate_entry(0);
+        let DialogAction::Selected(chosen) = action else {
+            panic!("activating a file in Open mode should select it: {action:?}");
+        };
+        assert_eq!(chosen.file_name(), Some(unmappable_name().as_os_str()));
+    }
+
+    /// Save mode: clicking an existing file to overwrite it must overwrite
+    /// *that* file.
+    ///
+    /// The name shown in the text field is a `String` — it has to be, because
+    /// the user types into it a character at a time — so filling it from a
+    /// listing is the one place where an unrepresentable name would be
+    /// flattened to U+FFFD and then written back out as a new, different file
+    /// sitting beside the one the user pointed at. The exact bytes are kept
+    /// beside the text for as long as the text is still the listing's.
+    #[test]
+    fn overwriting_a_name_that_is_not_utf8_targets_the_file_that_was_clicked() {
+        let mut dialog = FileDialog::save().with_initial_path("/docs");
+        dialog.set_entries(vec![unmappable_entry()]);
+        dialog.select_entry(0);
+
+        let chosen = dialog.confirm().expect("the name field was filled");
+        assert_eq!(
+            chosen.file_name(),
+            Some(unmappable_name().as_os_str()),
+            "save mode would have created {:?} beside the file that was clicked",
+            chosen.file_name()
+        );
+    }
+
+    /// ...but once the user *types*, the text is the name. Keeping the
+    /// remembered bytes past a keystroke would save over the clicked file no
+    /// matter what the user then typed, which is the worse of the two failures
+    /// — it ignores an explicit instruction rather than mangling an implicit
+    /// one.
+    ///
+    /// The keystroke goes through `handle_event` rather than `set_filename`,
+    /// because `set_filename` fills the remembered bytes as well and so cannot
+    /// tell whether they are being invalidated at all.
+    #[test]
+    fn typing_in_the_name_field_drops_the_remembered_bytes() {
+        let mut dialog = FileDialog::save().with_initial_path("/docs");
+        dialog.set_entries(vec![unmappable_entry()]);
+        dialog.select_entry(0);
+
+        // Backspace once to cut the field down, then type a character. Either
+        // is an edit; both arms are exercised.
+        dialog.handle_event(
+            &KeyEvent {
+                key: Key::Backspace,
+                pressed: true,
+                modifiers: crate::event::Modifiers::NONE,
+                text: String::new(),
+            },
+            H,
+        );
+        dialog.handle_event(
+            &KeyEvent {
+                key: Key::Z,
+                pressed: true,
+                modifiers: crate::event::Modifiers::NONE,
+                text: String::from("z"),
+            },
+            H,
+        );
+
+        let typed = dialog.filename_input.clone();
+        assert!(
+            typed.ends_with('z'),
+            "the keystroke never reached the field: {typed:?}"
+        );
+        let chosen = dialog.confirm().expect("the name field is not empty");
+        assert_eq!(
+            chosen,
+            Path::new(&join_path(OsStr::new("/docs"), OsStr::new(&typed))),
+            "confirm answered with the remembered name, not the typed one"
+        );
     }
 
     /// Aim a click at the middle of whatever the frame drew for `target`.
@@ -1992,25 +2300,25 @@ mod tests {
         let mut dialog = FileDialog::open();
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from("zebra.txt"),
+                name: OsString::from("zebra.txt"),
                 is_dir: false,
                 size: 100,
                 modified_timestamp: 1000,
-                extension: String::from("txt"),
+                extension: OsString::from("txt"),
             },
             DirEntry {
-                name: String::from("alpha"),
+                name: OsString::from("alpha"),
                 is_dir: true,
                 size: 0,
                 modified_timestamp: 2000,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("beta.rs"),
+                name: OsString::from("beta.rs"),
                 is_dir: false,
                 size: 200,
                 modified_timestamp: 3000,
-                extension: String::from("rs"),
+                extension: OsString::from("rs"),
             },
         ]);
 
@@ -2024,18 +2332,18 @@ mod tests {
         let mut dialog = FileDialog::open();
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from(".hidden"),
+                name: OsString::from(".hidden"),
                 is_dir: false,
                 size: 10,
                 modified_timestamp: 100,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("visible.txt"),
+                name: OsString::from("visible.txt"),
                 is_dir: false,
                 size: 20,
                 modified_timestamp: 200,
-                extension: String::from("txt"),
+                extension: OsString::from("txt"),
             },
         ]);
 
@@ -2048,18 +2356,18 @@ mod tests {
         let mut dialog = FileDialog::open().show_hidden(true);
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from(".hidden"),
+                name: OsString::from(".hidden"),
                 is_dir: false,
                 size: 10,
                 modified_timestamp: 100,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("visible.txt"),
+                name: OsString::from("visible.txt"),
                 is_dir: false,
                 size: 20,
                 modified_timestamp: 200,
-                extension: String::from("txt"),
+                extension: OsString::from("txt"),
             },
         ]);
 
@@ -2073,25 +2381,25 @@ mod tests {
         dialog.set_filter_index(0);
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from("main.rs"),
+                name: OsString::from("main.rs"),
                 is_dir: false,
                 size: 500,
                 modified_timestamp: 100,
-                extension: String::from("rs"),
+                extension: OsString::from("rs"),
             },
             DirEntry {
-                name: String::from("readme.md"),
+                name: OsString::from("readme.md"),
                 is_dir: false,
                 size: 300,
                 modified_timestamp: 200,
-                extension: String::from("md"),
+                extension: OsString::from("md"),
             },
             DirEntry {
-                name: String::from("src"),
+                name: OsString::from("src"),
                 is_dir: true,
                 size: 0,
                 modified_timestamp: 300,
-                extension: String::new(),
+                extension: OsString::new(),
             },
         ]);
 
@@ -2105,11 +2413,11 @@ mod tests {
     fn test_confirm_open_requires_file_selection() {
         let mut dialog = FileDialog::open();
         dialog.set_entries(vec![DirEntry {
-            name: String::from("file.txt"),
+            name: OsString::from("file.txt"),
             is_dir: false,
             size: 100,
             modified_timestamp: 1000,
-            extension: String::from("txt"),
+            extension: OsString::from("txt"),
         }]);
 
         // No selection yet.
@@ -2117,7 +2425,7 @@ mod tests {
 
         // Select the file.
         dialog.select_entry(0);
-        assert_eq!(dialog.confirm(), Some(String::from("/file.txt")));
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/file.txt")));
     }
 
     #[test]
@@ -2126,7 +2434,7 @@ mod tests {
         assert_eq!(dialog.confirm(), None);
 
         dialog.set_filename("report.txt");
-        assert_eq!(dialog.confirm(), Some(String::from("/docs/report.txt")));
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/docs/report.txt")));
     }
 
     #[test]
@@ -2138,7 +2446,7 @@ mod tests {
         dialog.set_filename("main");
 
         // confirm() should append .rs
-        assert_eq!(dialog.confirm(), Some(String::from("/src/main.rs")));
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/src/main.rs")));
     }
 
     #[test]
@@ -2150,24 +2458,24 @@ mod tests {
         dialog.set_filename("main.rs");
 
         // Should not double up the extension.
-        assert_eq!(dialog.confirm(), Some(String::from("/src/main.rs")));
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/src/main.rs")));
     }
 
     #[test]
     fn test_activate_entry_navigates_into_dir() {
         let mut dialog = FileDialog::open().with_initial_path("/home");
         dialog.set_entries(vec![DirEntry {
-            name: String::from("projects"),
+            name: OsString::from("projects"),
             is_dir: true,
             size: 0,
             modified_timestamp: 1000,
-            extension: String::new(),
+            extension: OsString::new(),
         }]);
 
         let action = dialog.activate_entry(0);
         assert_eq!(
             action,
-            DialogAction::NavigatedTo(String::from("/home/projects"))
+            DialogAction::NavigatedTo(PathBuf::from("/home/projects"))
         );
         assert_eq!(dialog.current_path(), "/home/projects");
     }
@@ -2176,17 +2484,17 @@ mod tests {
     fn test_activate_file_in_open_mode_selects() {
         let mut dialog = FileDialog::open().with_initial_path("/docs");
         dialog.set_entries(vec![DirEntry {
-            name: String::from("notes.txt"),
+            name: OsString::from("notes.txt"),
             is_dir: false,
             size: 50,
             modified_timestamp: 2000,
-            extension: String::from("txt"),
+            extension: OsString::from("txt"),
         }]);
 
         let action = dialog.activate_entry(0);
         assert_eq!(
             action,
-            DialogAction::Selected(String::from("/docs/notes.txt"))
+            DialogAction::Selected(PathBuf::from("/docs/notes.txt"))
         );
     }
 
@@ -2217,25 +2525,25 @@ mod tests {
         let mut dialog = FileDialog::open();
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from("a"),
+                name: OsString::from("a"),
                 is_dir: false,
                 size: 10,
                 modified_timestamp: 100,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("b"),
+                name: OsString::from("b"),
                 is_dir: false,
                 size: 20,
                 modified_timestamp: 200,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("c"),
+                name: OsString::from("c"),
                 is_dir: false,
                 size: 30,
                 modified_timestamp: 300,
-                extension: String::new(),
+                extension: OsString::new(),
             },
         ]);
 
@@ -2350,11 +2658,11 @@ mod tests {
     fn a_dialog_renders_the_modified_column_in_its_own_zone() {
         let est = Tz::parse(b"EST5").expect("a POSIX TZ string");
         let entry = DirEntry {
-            name: String::from("notes.txt"),
+            name: OsString::from("notes.txt"),
             is_dir: false,
             size: 10,
             modified_timestamp: 19_675 * 86_400,
-            extension: String::from("txt"),
+            extension: OsString::from("txt"),
         };
         let dated = |zone: Option<Tz>| {
             let mut dialog = FileDialog::open();
@@ -2381,18 +2689,18 @@ mod tests {
         let mut dialog = FileDialog::open();
         dialog.set_entries(vec![
             DirEntry {
-                name: String::from("a"),
+                name: OsString::from("a"),
                 is_dir: false,
                 size: 0,
                 modified_timestamp: 1,
-                extension: String::new(),
+                extension: OsString::new(),
             },
             DirEntry {
-                name: String::from("b"),
+                name: OsString::from("b"),
                 is_dir: false,
                 size: 0,
                 modified_timestamp: 1,
-                extension: String::new(),
+                extension: OsString::new(),
             },
         ]);
         dialog.move_selection(1, H);
@@ -2418,45 +2726,54 @@ mod tests {
 
     #[test]
     fn test_parent_path() {
-        assert_eq!(parent_path("/"), "/");
-        assert_eq!(parent_path("/home"), "/");
-        assert_eq!(parent_path("/home/user"), "/home");
-        assert_eq!(parent_path("/home/user/docs"), "/home/user");
-        assert_eq!(parent_path("/a/b/c/d"), "/a/b/c");
+        assert_eq!(parent_path(OsStr::new("/")), "/");
+        assert_eq!(parent_path(OsStr::new("/home")), "/");
+        assert_eq!(parent_path(OsStr::new("/home/user")), "/home");
+        assert_eq!(parent_path(OsStr::new("/home/user/docs")), "/home/user");
+        assert_eq!(parent_path(OsStr::new("/a/b/c/d")), "/a/b/c");
     }
 
     #[test]
     fn test_join_path() {
-        assert_eq!(join_path("/", "home"), "/home");
-        assert_eq!(join_path("/home", "user"), "/home/user");
-        assert_eq!(join_path("/a/b", "c"), "/a/b/c");
+        assert_eq!(join_path(OsStr::new("/"), OsStr::new("home")), "/home");
+        assert_eq!(
+            join_path(OsStr::new("/home"), OsStr::new("user")),
+            "/home/user"
+        );
+        assert_eq!(join_path(OsStr::new("/a/b"), OsStr::new("c")), "/a/b/c");
     }
 
     #[test]
     fn test_matches_any_pattern() {
-        assert!(matches_any_pattern("main.rs", &["*.rs"]));
-        assert!(!matches_any_pattern("main.rs", &["*.txt"]));
-        assert!(matches_any_pattern("anything", &["*"]));
-        assert!(matches_any_pattern("main.rs", &["*.txt", "*.rs"]));
-        assert!(matches_any_pattern("exact_match", &["exact_match"]));
+        assert!(matches_any_pattern(OsStr::new("main.rs"), &["*.rs"]));
+        assert!(!matches_any_pattern(OsStr::new("main.rs"), &["*.txt"]));
+        assert!(matches_any_pattern(OsStr::new("anything"), &["*"]));
+        assert!(matches_any_pattern(
+            OsStr::new("main.rs"),
+            &["*.txt", "*.rs"]
+        ));
+        assert!(matches_any_pattern(
+            OsStr::new("exact_match"),
+            &["exact_match"]
+        ));
     }
 
     #[test]
     fn test_select_folder_mode() {
         let mut dialog = FileDialog::select_folder().with_initial_path("/home");
         dialog.set_entries(vec![DirEntry {
-            name: String::from("projects"),
+            name: OsString::from("projects"),
             is_dir: true,
             size: 0,
             modified_timestamp: 1000,
-            extension: String::new(),
+            extension: OsString::new(),
         }]);
 
         // Activating a dir in select-folder mode selects it.
         let action = dialog.activate_entry(0);
         assert_eq!(
             action,
-            DialogAction::Selected(String::from("/home/projects"))
+            DialogAction::Selected(PathBuf::from("/home/projects"))
         );
     }
 
@@ -2503,8 +2820,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("sub")).expect("create the fixture");
         std::fs::write(dir.join("notes.TXT"), b"hello").expect("write the fixture");
 
-        let listing = list_directory(&dir.to_string_lossy());
-        let mut names: Vec<&str> = listing.iter().map(|e| e.name.as_str()).collect();
+        let listing = list_directory(&dir);
+        let mut names: Vec<&OsStr> = listing.iter().map(|e| e.name.as_os_str()).collect();
         names.sort_unstable();
         assert_eq!(names, ["notes.TXT", "sub"]);
 
@@ -2569,7 +2886,7 @@ mod tests {
 
         assert_eq!(
             action,
-            DialogAction::NavigatedTo(String::from("/home/projects"))
+            DialogAction::NavigatedTo(PathBuf::from("/home/projects"))
         );
         assert_eq!(dialog.current_path(), "/home/projects");
     }
@@ -2592,7 +2909,7 @@ mod tests {
 
         assert_eq!(
             action,
-            DialogAction::Selected(String::from("/docs/notes.txt")),
+            DialogAction::Selected(PathBuf::from("/docs/notes.txt")),
             "a double-click has to open the row it landed on even if no press \
              selected it first — the host may send only the double-click"
         );
@@ -2616,7 +2933,7 @@ mod tests {
 
         assert_eq!(
             click(&mut dialog, DialogTarget::Confirm),
-            DialogAction::Selected(String::from("/docs/b.txt"))
+            DialogAction::Selected(PathBuf::from("/docs/b.txt"))
         );
     }
 
@@ -2638,7 +2955,7 @@ mod tests {
         let mut dialog = FileDialog::open().with_initial_path("/home/user/docs");
         assert_eq!(
             click(&mut dialog, DialogTarget::Up),
-            DialogAction::NavigatedTo(String::from("/home/user"))
+            DialogAction::NavigatedTo(PathBuf::from("/home/user"))
         );
     }
 
@@ -2663,7 +2980,7 @@ mod tests {
 
         assert_eq!(
             click(&mut dialog, DialogTarget::Back),
-            DialogAction::NavigatedTo(String::from("/home"))
+            DialogAction::NavigatedTo(PathBuf::from("/home"))
         );
     }
 
@@ -2701,7 +3018,7 @@ mod tests {
 
         click(&mut dialog, DialogTarget::Header(SortColumn::Size));
 
-        let order: Vec<&str> = dialog.entries.iter().map(|e| e.name.as_str()).collect();
+        let order: Vec<&OsStr> = dialog.entries.iter().map(|e| e.name.as_os_str()).collect();
         assert_eq!(
             order,
             ["b.txt", "c.txt", "a.txt"],
@@ -2714,7 +3031,7 @@ mod tests {
         );
         assert_eq!(
             dialog.confirm().as_deref(),
-            Some("/docs/a.txt"),
+            Some(Path::new("/docs/a.txt")),
             "so sorting cannot change which file Open opens"
         );
     }

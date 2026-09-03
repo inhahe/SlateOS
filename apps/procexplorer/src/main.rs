@@ -21,6 +21,9 @@ use guitk::scroll_window;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::wheel;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::collections::HashMap;
 
@@ -799,7 +802,7 @@ impl ProcessExplorerState {
             let pid = self.processes.get(idx).map(|p| p.pid).unwrap_or(0);
             if let Some(kids) = children_map.get(&pid) {
                 for &child_idx in kids.iter().rev() {
-                    stack.push((child_idx, depth + 1));
+                    stack.push((child_idx, depth.saturating_add(1)));
                 }
             }
         }
@@ -1304,14 +1307,17 @@ impl ProcessExplorerState {
 
         let current = self.selected_index.unwrap_or(0) as i32;
         let max_idx = (self.visible_indices.len() as i32).saturating_sub(1);
-        let new_idx = (current + delta).clamp(0, max_idx) as usize;
+        // `saturating_add` before the clamp, not after: an i32 that has already
+        // overflowed is not a number the clamp can rescue.
+        #[allow(clippy::cast_sign_loss)]
+        let new_idx = current.saturating_add(delta).clamp(0, max_idx) as usize;
         self.selected_index = Some(new_idx);
 
         // Ensure the selection is visible by adjusting scroll.
         let visible_rows = self.visible_row_count();
         if new_idx < self.scroll_offset {
             self.scroll_offset = new_idx;
-        } else if new_idx >= self.scroll_offset + visible_rows {
+        } else if new_idx >= self.scroll_offset.saturating_add(visible_rows) {
             self.scroll_offset = new_idx.saturating_sub(visible_rows.saturating_sub(1));
         }
     }
@@ -1384,7 +1390,10 @@ impl ProcessExplorerState {
     // ========================================================================
 
     /// Render the complete process explorer UI into a `RenderTree`.
-    pub fn render(&self) -> RenderTree {
+    /// Named `render_tree` and not `render`: at equal arity an inherent method
+    /// silently wins method lookup over `oswindow::app::App::render`, so every
+    /// existing call would keep compiling while testing the other function.
+    pub fn render_tree(&self) -> RenderTree {
         let mut tree = RenderTree::new();
         let w = self.window_width as f32;
         let h = self.window_height as f32;
@@ -2208,8 +2217,8 @@ impl ProcessExplorerState {
             // margin for the last column. `User` is the one that matters: it is
             // whatever name the process runs as, so an over-long one used to be
             // drawn straight across "CPU time" and "Threads" beside it.
-            let next_x = if col + 1 < info_cols {
-                pad + (col + 1) as f32 * col_gap
+            let next_x = if col.saturating_add(1) < info_cols {
+                pad + (col.saturating_add(1)) as f32 * col_gap
             } else {
                 w - pad
             };
@@ -2385,7 +2394,7 @@ impl ProcessExplorerState {
                 cur_y += 16.0;
             }
             if proc.handles.len() > max_handles {
-                let more = proc.handles.len() - max_handles;
+                let more = proc.handles.len().saturating_sub(max_handles);
                 tree.text(
                     pad + 8.0,
                     cur_y,
@@ -2436,7 +2445,7 @@ impl ProcessExplorerState {
                 cur_y += 16.0;
             }
             if proc.environment.len() > max_env {
-                let more = proc.environment.len() - max_env;
+                let more = proc.environment.len().saturating_sub(max_env);
                 tree.text(
                     pad + 8.0,
                     cur_y,
@@ -2842,7 +2851,7 @@ impl ProcessExplorerState {
                 protocol: "UDP".to_string(),
                 local_addr: "0.0.0.0:68".to_string(),
                 remote_addr: "*:*".to_string(),
-                state: "".to_string(),
+                state: String::new(),
                 pid: 101,
                 process_name: "netd".to_string(),
             },
@@ -2911,7 +2920,7 @@ fn make_demo_process(
         priority,
         user: user.to_string(),
         command_line: format!("/usr/bin/{name}"),
-        start_time_secs: pid as u64 * 10,
+        start_time_secs: (pid as u64).saturating_mul(10),
         cpu_time_ms: (cpu * 1000.0) as u64,
         threads: Vec::new(),
         handles: Vec::new(),
@@ -2941,68 +2950,66 @@ fn format_uptime(secs: u64) -> String {
 // Main
 // ============================================================================
 
-fn main() {
+impl App for ProcessExplorerState {
+    fn title(&self) -> String {
+        "Process Explorer".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (self.window_width, self.window_height)
+    }
+
+    /// The user's chosen refresh rate, not a frame rate.
+    ///
+    /// **The one to get right for this app.** It handles `Event::Tick` and
+    /// refreshes on it, so the default `None` would have shipped a process
+    /// explorer whose numbers never change — a system monitor that monitors
+    /// nothing, with every one of its tests still passing, which is
+    /// `known-issues.md` lesson 47 exactly.
+    ///
+    /// It asks for the refresh interval itself rather than something faster:
+    /// the accumulator in the `Tick` arm means a coarser clock is still
+    /// correct, and an explorer that woke the machine sixty times a second to
+    /// redraw the same numbers would be the thing this method's own
+    /// documentation warns about. Asking at the refresh rate lets an idle
+    /// desktop park between refreshes.
+    ///
+    /// It reads the *current* setting rather than a constant, so changing the
+    /// refresh rate in the app changes the clock it is given.
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(Duration::from_millis(self.refresh_interval.ms()))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed: a compositor may grant a size
+        // that was never requested, and the first frame is drawn before any
+        // `Resize` arrives.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            self.window_width = width as u32;
+            self.window_height = height as u32;
+        }
+        self.render_tree()
+    }
+}
+
+fn main() -> ExitCode {
     let mut explorer = ProcessExplorerState::new();
-
-    // Load demo data for initial display.
+    // Until a real process source exists this is what there is to show, and
+    // the window is worth opening on it: an empty list would read as a broken
+    // explorer rather than an unimplemented one.
     explorer.load_demo_data();
-
-    // Render the initial view.
-    let render_tree = explorer.render();
-    println!("Process Explorer initialized");
-    println!("  {} processes loaded", explorer.processes.len());
-    println!(
-        "  {} visible (after filter)",
-        explorer.visible_indices.len()
-    );
-    println!("  {} render commands", render_tree.len());
-    println!("  Status: {}", explorer.status_message);
-
-    // Demonstrate tab switching.
-    explorer.active_tab = Tab::System;
-    let sys_tree = explorer.render();
-    println!("\nSystem tab: {} render commands", sys_tree.len());
-
-    explorer.active_tab = Tab::Network;
-    let net_tree = explorer.render();
-    println!("Network tab: {} render commands", net_tree.len());
-
-    // Demonstrate sorting.
-    explorer.active_tab = Tab::Processes;
-    explorer.set_sort_column(ProcessColumn::Memory);
-    println!(
-        "\nSorted by Memory ({}): first visible = {}",
-        match explorer.sort_direction {
-            SortDirection::Ascending => "asc",
-            SortDirection::Descending => "desc",
-        },
-        explorer
-            .visible_indices
-            .first()
-            .and_then(|&i| explorer.processes.get(i))
-            .map(|p| p.name.as_str())
-            .unwrap_or("(none)"),
-    );
-
-    // Demonstrate tree view.
-    explorer.toggle_view_mode();
-    let tree_render = explorer.render();
-    println!("Tree view: {} render commands", tree_render.len());
-
-    // Demonstrate filtering.
-    explorer.filter_text = "http".to_string();
-    explorer.rebuild_visible_list();
-    println!("Filter 'http': {} matches", explorer.visible_indices.len());
-
-    // Demonstrate details tab.
-    explorer.filter_text.clear();
-    explorer.rebuild_visible_list();
-    explorer.selected_index = Some(2); // compositor
-    explorer.active_tab = Tab::Details;
-    let details_tree = explorer.render();
-    println!("Details tab: {} render commands", details_tree.len());
-
-    println!("\nProcess Explorer ready.");
+    app::launch("procexplorer", &mut explorer)
 }
 
 // ============================================================================
@@ -3011,8 +3018,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
-
+    // A test that overflows or indexes out of range should fail loudly and
+    // point at the line that did it — that is the diagnosis. The defensive
+    // lints exist to keep panics out of code that runs on a user's data, which
+    // this is not.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
     use super::*;
     use guitk::event::MouseEvent;
 
@@ -3123,7 +3140,7 @@ mod tests {
     /// against *that*, so the two can drift together and the test still
     /// passes. This asks the renderer what it drew.
     fn rows_clip(app: &ProcessExplorerState) -> (f32, f32) {
-        app.render()
+        app.render_tree()
             .commands
             .iter()
             .find_map(|cmd| match cmd {
@@ -3659,7 +3676,7 @@ mod tests {
         let mut app = ProcessExplorerState::new();
         app.filter_focused = true;
         app.filter_text = String::from("\u{fc}ber");
-        let tree = app.render();
+        let tree = app.render_tree();
         let text_i = tree
             .commands
             .iter()
@@ -3873,5 +3890,81 @@ mod tests {
             drawn.contains(&"#5: [sock] short"),
             "a short handle entry was altered: {drawn:?}"
         );
+    }
+
+    // ====================================================================
+    // The clock — `tick_interval` is what makes the refresh real
+    // ====================================================================
+
+    /// The app asks for a clock, and asks for it at the rate it refreshes.
+    ///
+    /// `App::tick_interval` defaults to `None`, which means no `Event::Tick`
+    /// is ever delivered. For an app that *handles* `Event::Tick` — as this
+    /// one does, to re-read the process table — that default ships a system
+    /// monitor whose numbers never change, with every existing test still
+    /// passing, because a model test can assert the refresh works without
+    /// asserting that anything ever asks for it. That is `known-issues.md`
+    /// lesson 47, and it is the one thing the conversion recipe in
+    /// `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` singles out as easy to get wrong.
+    #[test]
+    fn the_explorer_asks_for_a_clock_at_its_own_refresh_rate() {
+        let mut state = ProcessExplorerState::new();
+        for interval in [
+            RefreshInterval::OneSecond,
+            RefreshInterval::TwoSeconds,
+            RefreshInterval::FiveSeconds,
+        ] {
+            state.refresh_interval = interval;
+            assert_eq!(
+                state.tick_interval(),
+                Some(Duration::from_millis(interval.ms())),
+                "the clock must follow the setting, not a constant"
+            );
+        }
+    }
+
+    /// A tick shorter than the interval does not refresh; one that reaches it
+    /// does.
+    ///
+    /// The interval `tick_interval` returns is a *floor*, not a promise — the
+    /// loop delivers ticks when it next runs and `Event::Tick` carries the
+    /// elapsed time that actually passed. So the accumulator has to be the
+    /// thing that decides, and this pins that it is.
+    #[test]
+    fn the_refresh_is_driven_by_elapsed_time_and_not_by_tick_count() {
+        let mut state = ProcessExplorerState::new();
+        state.refresh_interval = RefreshInterval::TwoSeconds;
+        state.ms_since_refresh = 0;
+
+        // Nine hundred milliseconds, twice: two ticks, still under two seconds.
+        for _ in 0..2 {
+            state.handle_event(&Event::Tick { elapsed_ms: 900 });
+        }
+        assert_eq!(
+            state.ms_since_refresh, 1800,
+            "the accumulator must carry the remainder between ticks"
+        );
+
+        // The one that crosses the line resets it.
+        state.handle_event(&Event::Tick { elapsed_ms: 300 });
+        assert_eq!(
+            state.ms_since_refresh, 0,
+            "reaching the interval must refresh and reset"
+        );
+    }
+
+    /// A single long tick refreshes once rather than being ignored.
+    ///
+    /// A loop that was busy elsewhere delivers one tick carrying the whole
+    /// gap. Comparing `elapsed_ms` against the interval instead of
+    /// accumulating would work here and fail the previous test; accumulating
+    /// without `>=` would fail this one.
+    #[test]
+    fn one_long_tick_still_refreshes() {
+        let mut state = ProcessExplorerState::new();
+        state.refresh_interval = RefreshInterval::OneSecond;
+        state.ms_since_refresh = 0;
+        state.handle_event(&Event::Tick { elapsed_ms: 5_000 });
+        assert_eq!(state.ms_since_refresh, 0, "a long tick must still refresh");
     }
 }

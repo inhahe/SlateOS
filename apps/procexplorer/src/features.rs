@@ -698,7 +698,12 @@ impl AffinityMask {
         let bits = if count >= 64 {
             u64::MAX
         } else {
-            (1u64 << count) - 1
+            // The `>= 64` branch above makes the shift in range and the
+            // subtraction non-zero; `checked_shl` states that here rather than
+            // four lines away, and `saturating_sub` costs nothing.
+            1u64.checked_shl(count)
+                .unwrap_or(u64::MAX)
+                .saturating_sub(1)
         };
         Self {
             bits,
@@ -723,7 +728,7 @@ impl AffinityMask {
         let mut i = 0u32;
         while i < count {
             bits |= 1u64 << i;
-            i += 2;
+            i = i.saturating_add(2);
         }
         Self {
             bits,
@@ -738,7 +743,7 @@ impl AffinityMask {
         let mut i = 1u32;
         while i < count {
             bits |= 1u64 << i;
-            i += 2;
+            i = i.saturating_add(2);
         }
         Self {
             bits,
@@ -752,7 +757,12 @@ impl AffinityMask {
         let mask = if count >= 64 {
             u64::MAX
         } else {
-            (1u64 << count) - 1
+            // The `>= 64` branch above makes the shift in range and the
+            // subtraction non-zero; `checked_shl` states that here rather than
+            // four lines away, and `saturating_sub` costs nothing.
+            1u64.checked_shl(count)
+                .unwrap_or(u64::MAX)
+                .saturating_sub(1)
         };
         Self {
             bits: bits & mask,
@@ -872,8 +882,10 @@ impl AffinityMask {
         let cols = cols.max(1);
 
         for cpu in 0..self.cpu_count {
-            let col = cpu % cols;
-            let row = cpu / cols;
+            // `cols` is `.max(1)` above, so neither can divide by zero — stated
+            // in the operation because the clamp is a dozen lines away.
+            let col = cpu.checked_rem(cols).unwrap_or(0);
+            let row = cpu.checked_div(cols).unwrap_or(0);
             let cx = x + FEATURE_TEXT_PAD + (col as f32 * (cell_size + cell_gap));
             let cell_y = cy + (row as f32 * (cell_size + cell_gap));
 
@@ -1529,7 +1541,7 @@ impl EnvViewer {
         let filtered = self.filtered_entries();
         let visible_count = max_rows.min(filtered.len().saturating_sub(self.scroll_offset));
         for i in 0..visible_count {
-            let entry_idx = self.scroll_offset + i;
+            let entry_idx = self.scroll_offset.saturating_add(i);
             let entry = match filtered.get(entry_idx) {
                 Some(e) => e,
                 None => break,
@@ -2078,6 +2090,17 @@ fn format_size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    // A test that overflows or indexes out of range should fail loudly and
+    // point at the line that did it — that is the diagnosis. The defensive
+    // lints exist to keep panics out of code that runs on a user's data.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
     use super::*;
 
     // -- Blocking chain tests ------------------------------------------------

@@ -97,6 +97,57 @@ Rules that follow from this:
   That is the intended cost: a shared `target/` between lanes would
   reintroduce exactly the interference the worktrees exist to remove.
 
+### Step 0.6 — prune your own `target/`, on a schedule
+
+**Your worktree's `target/` is yours to keep small, and "clean up after
+yourself" is not enough on its own.** On 2026-09-02 the three lane caches
+held **48 GB, 180 GB and ~50 GB**. Every lane was obeying the existing rule
+to the letter — there were no stray scratch target dirs anywhere. The growth
+was *inside* the sanctioned caches, which no rule and no tool covered.
+
+The mechanism: **cargo never garbage-collects `target/`.** When a unit's
+inputs change it mints a new `-<hash>` filename and writes beside the old
+one; the superseded artifact and its `.fingerprint/` directory stay forever.
+Over a few thousand commits that is most of the tree — lane B's `deps/` held
+63,841 files to lane A's 12,900, with `chown` alone at 28 distinct hashes,
+and 19,769 units that no build had touched in over a week.
+
+So the fill-up is silent and needs no mistake to happen. It is not caught by
+the emergency valve either: with 77 GiB still free, `reclaim-space.py`
+correctly reported "Nothing to do" while a quarter of a terabyte sat dead.
+
+**Run this periodically in your own worktree** — at a natural checkpoint,
+not mid-build:
+
+```bash
+python scripts/prune-build-cache.py              # dry run: reports, deletes nothing
+python scripts/prune-build-cache.py --yes        # actually prune
+```
+
+It is safe by construction and by test:
+
+- **Dry run is the default.** `--yes` is required to delete anything, and
+  `--self-test` (22 checks) exercises the classification against a synthetic
+  tree without touching a real one.
+- **It keeps the hot cache warm.** The discriminator is cargo's own
+  `.fingerprint/<unit>/invoked.timestamp`, which cargo touches on every build
+  the unit takes part in *including* ones where it was found fresh. So "stale"
+  means precisely "no build in N days needed this unit" — not "was built long
+  ago". Deliberately **not** mtime (what `cargo-sweep` uses: it ages out a
+  stable dependency's `.rlib` that every build still links) and **not** atime
+  (a current unchanged artifact has `atime == mtime`, because cargo only
+  `stat`s it). A unit with no timestamp at all is kept, never pruned.
+- Defaults are `--age-days 14`, and `--incremental-age-days 7` for
+  `incremental/`, which is pruned on a shorter clock because it fails
+  differently: it was 31.6 GB of lane A's 48.4 GB, it is never needed to
+  *link*, and deleting it costs exactly one non-incremental rebuild of the
+  crates that actually change again.
+
+`scripts/reclaim-space.py` remains the **emergency** valve — it deletes whole
+`target/` trees when the volume is near full, and whoever owned one pays a
+full cold rebuild. That is the right shape for an emergency and the wrong
+shape for routine housekeeping. Do not wait for it to fire.
+
 ### The three lanes
 
 | Lane | Name | You are this lane if `CLAUDE_CONFIG_DIR` is… | Owns (writes freely) | Never writes |

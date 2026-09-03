@@ -112434,3 +112434,63 @@ permanent silent skip. A test that never runs is indistinguishable from a test
 that passes, which is the same failure shape as
 `TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH`: a green
 report produced by a check that was not performed.
+
+---
+
+## TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED (lane B, 2026-09-03)
+
+**In short:** four checkers that verify kshell's quoting rules against *real
+bash* are not run by anything. They are now pinned as deliberately-unwired so
+the build is honest about it, but pinned is not the destination — they should
+run wherever WSL exists. Two specific defects block wiring them.
+
+`scripts/check-ansic-quoting-vs-bash.py`, `check-kshell-pipeline-vs-bash.py`,
+`check-kshell-rungs-vs-bash.py`, `check-shellquote-vs-bash.py`, all via
+`scripts/bashprobe.py`.
+
+**How this surfaced.** They shipped unwired, and on 2026-09-03 lane B's own
+wiring ratchet (`check-gates-are-wired.py`) started reporting them — which
+turned `main` red for all three lanes, because that ratchet runs before the
+boot test builds anything. Lane C filed
+`requests/c-b-four-of-your-new-shell-gates-are-unwired-and-main-is-red.md`
+rather than pinning them itself, on the correct grounds that a pin whose reason
+is "nobody has looked at this" is precisely what the ratchet exists to prevent,
+and only lane B had the real reason. The pin landed with that reason; this
+entry is the other half of it.
+
+**Why they cannot simply be wired.** Three defects, in the order they bite:
+
+1. **An absent WSL is reported as a finding.** `bashprobe.assert_transport_is_faithful()`
+   leaves via `raise SystemExit(msg)`, which exits **1**. So "this host has no
+   WSL, I could not ask bash" arrives in the same channel as "bash disagrees
+   with kshell" — a machine with no WSL is told its shell quoting is wrong. This
+   is exactly the no-verdict-vs-finding confusion that gates 2, 3, 4, 6 and 11
+   were converted away from (`TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH`),
+   and it is the first thing to fix regardless of wiring, because it is wrong
+   even when the gate is run by hand. It must exit **2**.
+2. **`run_checker` aborts the build on any exit but 0 or 1.** Once (1) is fixed,
+   a WSL-less host aborts instead of skipping. The fix is the opt-in
+   `run_checker --may-skip <name>` channel that lane A asked for in
+   `requests/a-b-yes-to-the-self-test-rule-and-one-half-it-does-not-cover.md` §3,
+   which `check-libc-shape.py` is also waiting on — five pinned gates now turn
+   on that one change.
+3. **None of the four has a `--self-test`.** Lane C's request flags this from
+   direct experience: three of the five gates it wired the same day shipped an
+   unrun `--self-test`, and a scanner that has stopped scanning reports zero
+   findings exactly as a clean tree does. These four scan `kernel/src/kshell.rs`
+   and `kernel/src/shellquote.rs` by regex for literals, which is the shape most
+   prone to silently matching nothing.
+
+**Proper fix**, in that order: (1) bashprobe exits 2 with a "no verdict"
+message when WSL is absent or the transport is broken; (2) `--may-skip` in
+`run-checker.sh`, with cases in `test-pre-push-run-checker.py`; (3) a
+`--self-test` per gate, each with a true-positive fixture proving it can still
+refuse, plus a floor so a gate that inspected nothing says so; (4) wire all
+four into `boot-test.sh` and delete the four `PINNED` entries in the same
+commit, which is what that dict is for.
+
+**If it is never fixed:** kshell's quoting rules are verified against bash only
+when someone remembers to ask by hand, on a machine that happens to have WSL.
+The verdicts are carried forward into kshell's self-test rungs, so the evidence
+does survive — but only the evidence gathered on the day the rule was written.
+A later edit to `shellquote.rs` that changes behaviour is caught by nothing.

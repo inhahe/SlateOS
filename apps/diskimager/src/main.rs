@@ -1918,19 +1918,50 @@ impl DiskImagerApp {
     /// its own bindings; `Some(EventResult::Consumed)` otherwise -- a modal
     /// that let Ctrl+1 switch tabs behind it would not be one.
     fn dispatch_to_open_dialog(&mut self, key: &KeyEvent) -> Option<EventResult> {
-        let dialog = self.open_dialog.as_mut()?;
-        match dialog.handle_event(key) {
+        let height = self.window_height;
+        let action = self.open_dialog.as_mut()?.handle_event(key, height);
+        Some(self.finish_open_dialog_action(action))
+    }
+
+    /// Feed a pointer event to the open dialog and act on what it returns.
+    ///
+    /// The dialog swallows every click it is given, including ones landing
+    /// outside its own edges, so nothing reaches the drive list or the tab bar
+    /// behind it. That is what makes it modal; the keyboard half above was
+    /// only half of it.
+    fn dispatch_mouse_to_open_dialog(&mut self, mouse: &MouseEvent) -> Option<EventResult> {
+        // The size the dialog hit-tests against has to be the size it was
+        // drawn at. The widget stores none of its own, so it comes from here.
+        let (width, height) = (self.window_width, self.window_height);
+        let action = self
+            .open_dialog
+            .as_mut()?
+            .handle_mouse(mouse, width, height);
+        Some(self.finish_open_dialog_action(action))
+    }
+
+    /// Act on the open dialog's answer, whichever kind of event asked it.
+    ///
+    /// The dialog does no I/O of its own -- it holds whatever listing it is
+    /// handed -- so a `NavigatedTo` is a *request* for one: leaving it
+    /// unanswered would show the previous directory's files under the new
+    /// directory's name.
+    fn finish_open_dialog_action(&mut self, action: DialogAction) -> EventResult {
+        match action {
             DialogAction::Selected(path) => {
                 self.open_dialog = None;
                 self.load_image_from_path(&path);
             }
             DialogAction::NavigatedTo(path) => {
-                dialog.set_entries(list_directory(&path));
+                let entries = list_directory(&path);
+                if let Some(dialog) = self.open_dialog.as_mut() {
+                    dialog.set_entries(entries);
+                }
             }
             DialogAction::Cancelled => self.open_dialog = None,
             DialogAction::None => {}
         }
-        Some(EventResult::Consumed)
+        EventResult::Consumed
     }
 
     /// Read `path` off disk and load it as an image.
@@ -2457,6 +2488,12 @@ impl DiskImagerApp {
     }
 
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        // The file-open dialog is drawn over everything else, so it gets the
+        // click before anything else can claim it -- and keeps it either way.
+        if let Some(result) = self.dispatch_mouse_to_open_dialog(mouse) {
+            return result;
+        }
+
         let mx = mouse.x;
         let my = mouse.y;
 
@@ -5115,6 +5152,109 @@ mod tests {
             app.iso_root.is_some(),
             "the Browse tab's file tree is still empty, so the tab has nothing to draw"
         );
+    }
+
+    /// The same journey with the mouse, which until now could not make it.
+    ///
+    /// The picker recorded no hit boxes, so a click on a row went to whatever
+    /// was underneath -- the drive list or the tab bar -- and a user who never
+    /// touches the keyboard had no way to open a file at all. This drives the
+    /// two clicks a user makes: one on the row, one on Open. Both aim at what
+    /// the dialog *drew*, read back out of its own frame, so a hit box that
+    /// drifts from the drawing fails here rather than in front of the user.
+    #[test]
+    fn two_clicks_load_an_image_from_disk() {
+        use guitk::dialog::DialogTarget;
+
+        let scratch = scratchdir::ScratchDir::new("slate_diskimager_click");
+        let dir = scratch.dir();
+        fs::write(dir.join("boot.iso"), tiny_iso(b"CLICKED_LIVE")).expect("write iso");
+
+        let mut app = DiskImagerApp::new();
+        app.open_image_dialog(&dir.to_string_lossy());
+        let (w, h) = (app.window_width, app.window_height);
+
+        let click = |app: &mut DiskImagerApp, target: DialogTarget| {
+            let (x, y) = app
+                .open_dialog
+                .as_ref()
+                .expect("a dialog is up")
+                .frame(w, h)
+                .rect_of(|t| *t == target)
+                .unwrap_or_else(|| panic!("{target:?} should have been drawn"))
+                .centre();
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+        };
+
+        let index = app
+            .open_dialog
+            .as_ref()
+            .expect("dialog")
+            .entries()
+            .iter()
+            .position(|e| e.name == "boot.iso")
+            .expect("boot.iso is listed");
+        click(&mut app, DialogTarget::Entry(index));
+        assert_eq!(
+            app.open_dialog
+                .as_ref()
+                .expect("the dialog is still up after one click")
+                .selected_index(),
+            Some(index),
+            "the click did not pick the row it landed on"
+        );
+
+        click(&mut app, DialogTarget::Confirm);
+
+        assert!(
+            app.open_dialog.is_none(),
+            "the dialog stayed up after Open was clicked"
+        );
+        assert_eq!(
+            app.loaded_image
+                .as_ref()
+                .expect("an image was loaded")
+                .volume_label,
+            "CLICKED_LIVE"
+        );
+    }
+
+    /// A click cannot reach the window while the picker is up.
+    ///
+    /// Including one past the dialog's own edges: a modal that only covered
+    /// its own rectangle would leave the tab bar and the drive list live
+    /// around it, which is not what a modal is.
+    #[test]
+    fn the_picker_keeps_clicks_off_the_window_behind_it() {
+        let mut app = DiskImagerApp::new();
+        app.active_tab = MainTab::Write;
+        app.open_image_dialog("/");
+        let (w, h) = (app.window_width, app.window_height);
+
+        for (x, y) in [
+            (w / 2.0, TOOLBAR_HEIGHT + 4.0),
+            (w - 1.0, h - 1.0),
+            (2.0, h - 2.0),
+        ] {
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert_eq!(
+                app.active_tab,
+                MainTab::Write,
+                "a click at ({x}, {y}) switched tabs behind the dialog"
+            );
+            assert!(
+                app.open_dialog.is_some(),
+                "a click at ({x}, {y}) dismissed the dialog"
+            );
+        }
     }
 
     /// A label the mastering tool padded with NULs is shown without them.

@@ -2939,16 +2939,45 @@ impl AppState {
     /// Returns `None` when no dialog is up so the caller falls through to its
     /// own bindings, and `Some` otherwise — a modal that let Delete remove
     /// rows from the list behind it would not be one.
-    fn dispatch_to_dialog(&mut self, key: &KeyEvent) -> Option<Action> {
+    ///
+    /// The size is passed in rather than read off `self.window_*`: the widget
+    /// stores no size of its own, so the size it works from must be the one it
+    /// was last drawn at, and only the caller knows that.
+    fn dispatch_key_to_dialog(&mut self, key: &KeyEvent, size: (f32, f32)) -> Option<Action> {
         let choice = self.choosing.as_mut()?;
         let purpose = choice.purpose;
-        match choice.dialog.handle_event(key) {
+        let action = choice.dialog.handle_event(key, size.1);
+        Some(self.finish_dialog_action(purpose, action))
+    }
+
+    /// Feed a pointer event to the dialog on screen and act on what it returns.
+    ///
+    /// The dialog swallows every pointer event it is handed, including ones
+    /// landing outside its own edges, which is what keeps the window behind it
+    /// unclickable — so this returns `Some` whenever a dialog is up.
+    fn dispatch_mouse_to_dialog(&mut self, mouse: &MouseEvent, size: (f32, f32)) -> Option<Action> {
+        let choice = self.choosing.as_mut()?;
+        let purpose = choice.purpose;
+        let action = choice.dialog.handle_mouse(mouse, size.0, size.1);
+        Some(self.finish_dialog_action(purpose, action))
+    }
+
+    /// Act on what the dialog answered, whichever kind of event asked it.
+    ///
+    /// The dialog does no I/O of its own, so a `NavigatedTo` is a *request* for
+    /// a listing: leaving it unanswered would show one directory's files under
+    /// another directory's name.
+    fn finish_dialog_action(&mut self, purpose: DialogPurpose, action: DialogAction) -> Action {
+        match action {
             DialogAction::Selected(path) => {
                 self.choosing = None;
                 self.finish_choice(purpose, &path);
             }
             DialogAction::NavigatedTo(path) => {
-                choice.dialog.set_entries(list_directory(&path));
+                let entries = list_directory(&path);
+                if let Some(choice) = self.choosing.as_mut() {
+                    choice.dialog.set_entries(entries);
+                }
                 self.last_directory = path;
             }
             DialogAction::Cancelled => {
@@ -2957,7 +2986,7 @@ impl AppState {
             }
             DialogAction::None => {}
         }
-        Some(Action::Redraw)
+        Action::Redraw
     }
 
     /// Act on the path the dialog came back with.
@@ -3255,7 +3284,7 @@ impl AppState {
         // A dialog is modal, so it gets the key first and keeps it. Falling
         // through would let Delete remove rows from the list the user cannot
         // see, and Escape close the window instead of the dialog.
-        if let Some(action) = self.dispatch_to_dialog(key) {
+        if let Some(action) = self.dispatch_key_to_dialog(key, size) {
             return action;
         }
         let (_, content_h) = self.content_band(size.1);
@@ -3368,14 +3397,18 @@ impl AppState {
 
     /// Route a whole event.
     pub fn handle_event(&mut self, event: &Event, size: (f32, f32)) -> Action {
-        // The file dialog is keyboard-driven and records no hit boxes, so a
-        // click over it would land on whatever is *behind* it — sorting a
-        // column, or selecting a row — with the dialog still on screen and
-        // nothing to say what happened. Swallow the pointer while it is up.
-        // The close button is not part of the window's own surface, so it
-        // still works: a modal that could not be dismissed by closing the
-        // window would be a program the user has to kill.
-        if self.choosing.is_some() && !matches!(event, Event::Key(_) | Event::CloseRequested) {
+        // The file dialog is modal, so the pointer is its own while it is up:
+        // it answers clicks on its rows and buttons and swallows the rest,
+        // including ones outside its edges, so nothing reaches the list behind
+        // it. `CloseRequested` still gets through — a modal that could not be
+        // dismissed by closing the window would be a program the user has to
+        // kill — and so does anything that is not input at all.
+        if let Event::Mouse(mouse) = event {
+            if let Some(action) = self.dispatch_mouse_to_dialog(mouse, size) {
+                return action;
+            }
+        } else if self.choosing.is_some() && !matches!(event, Event::Key(_) | Event::CloseRequested)
+        {
             return Action::None;
         }
         match event {
@@ -3603,9 +3636,11 @@ impl App for AppState {
         // itself out from its own origin, and a finished list of absolute
         // coordinates cannot be moved somewhere else afterwards.
         //
-        // It is drawn straight into the tree rather than through the frame
-        // because it records no hit boxes — see `handle_event`, which is what
-        // makes it modal instead.
+        // It is drawn straight into the tree rather than through this window's
+        // frame because it hit-tests against a frame of its own, built at the
+        // same size — see `dispatch_mouse_to_dialog`. Merging the two would
+        // put this window's targets and the dialog's in one namespace for no
+        // gain, and the dialog's are not this window's to interpret.
         if let Some(choice) = self.choosing.as_ref() {
             for cmd in choice.dialog.render(width, height) {
                 tree.push(cmd);
@@ -5475,23 +5510,90 @@ mod tests {
             "Delete reached the list through the dialog"
         );
 
-        // And a click cannot sort a column that is not visible.
+        // And a click cannot sort a column that is not visible. The dialog
+        // does answer the click — that is the point of it having hit boxes —
+        // so what this checks is where the click *stopped*, not that it was
+        // discarded.
         let sort_before = (state.sort.column, state.sort.direction);
-        assert_eq!(
-            state.handle_event(
-                &Event::Mouse(MouseEvent {
-                    x: SIZE.0 / 2.0,
-                    y: 100.0,
-                    kind: MouseEventKind::Press(MouseButton::Left),
-                }),
-                SIZE,
-            ),
-            Action::None,
+        state.handle_event(
+            &Event::Mouse(MouseEvent {
+                x: SIZE.0 / 2.0,
+                y: 100.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+            SIZE,
         );
         assert_eq!(
             (state.sort.column, state.sort.direction),
             sort_before,
             "a click got behind the dialog"
+        );
+
+        // Including one aimed past the dialog's own edges, which is what makes
+        // it modal rather than merely opaque.
+        state.handle_event(
+            &Event::Mouse(MouseEvent {
+                x: SIZE.0 - 1.0,
+                y: SIZE.1 - 1.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+            SIZE,
+        );
+        assert_eq!(
+            (state.sort.column, state.sort.direction),
+            sort_before,
+            "a click past the dialog's edge got behind it"
+        );
+        assert!(state.choosing.is_some(), "and must not dismiss the dialog");
+    }
+
+    #[test]
+    fn the_pickers_rows_can_be_clicked() {
+        let mut state = loaded();
+        state.open_dialog(DialogPurpose::OpenArchive);
+        let dialog = &mut state.choosing.as_mut().expect("a dialog is up").dialog;
+        // A listing of our own, so the test does not depend on what happens to
+        // be in the directory the app opened at.
+        dialog.set_entries(vec![
+            guitk::dialog::DirEntry {
+                name: String::from("one.zip"),
+                is_dir: false,
+                size: 1,
+                modified_timestamp: 1,
+                extension: String::from("zip"),
+            },
+            guitk::dialog::DirEntry {
+                name: String::from("two.zip"),
+                is_dir: false,
+                size: 2,
+                modified_timestamp: 2,
+                extension: String::from("zip"),
+            },
+        ]);
+        let (x, y) = dialog
+            .frame(SIZE.0, SIZE.1)
+            .rect_of(|t| *t == guitk::dialog::DialogTarget::Entry(1))
+            .expect("the second row is drawn")
+            .centre();
+
+        state.handle_event(
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+            SIZE,
+        );
+
+        assert_eq!(
+            state
+                .choosing
+                .as_ref()
+                .expect("the dialog is still up")
+                .dialog
+                .selected_index(),
+            Some(1),
+            "clicking a row in the picker has to pick it"
         );
     }
 

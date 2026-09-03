@@ -23,9 +23,13 @@
 
 use crate::color::Color;
 use crate::date::Date;
-use crate::event::{Key, KeyEvent};
+use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crate::frame::{Frame, Rect};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
+use crate::scroll_window;
 use crate::style::CornerRadii;
+use crate::wheel;
+use core::ops::Range;
 pub use tzrules::Tz;
 
 // --- Catppuccin Mocha palette ---
@@ -63,6 +67,16 @@ const FONT_SIZE_SMALL: f32 = 11.0;
 const BUTTON_WIDTH: f32 = 80.0;
 const BUTTON_HEIGHT: f32 = 30.0;
 const CORNER_RADIUS: f32 = 4.0;
+/// Width of the file list's scrollbar, when the list is long enough to have one.
+const SCROLLBAR_WIDTH: f32 = 10.0;
+/// Shortest the scrollbar thumb may get.
+///
+/// A thumb sized strictly in proportion to the visible fraction of a very long
+/// listing shrinks to a couple of pixels, which is both invisible and too small
+/// to grab. Every real scrollbar imposes a floor for the same reason; the cost
+/// is that the thumb's *size* stops being a faithful proportion once the list is
+/// long, which nobody reads it for, while its *position* stays exact.
+const MIN_THUMB_HEIGHT: f32 = 20.0;
 
 // --- Public types ---
 
@@ -131,6 +145,63 @@ pub enum DialogAction {
     Cancelled,
 }
 
+/// A part of a [`FileDialog`] that a click can land on.
+///
+/// Recorded by [`FileDialog::frame`] as it draws, so that what a click reaches
+/// and what the user sees come out of the same walk. See [`crate::frame`] for
+/// why that matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogTarget {
+    /// The `<` button: back through the navigation history.
+    Back,
+    /// The `>` button: forward again.
+    Forward,
+    /// The `^` button: to the parent directory.
+    Up,
+    /// The path display in the toolbar.
+    ///
+    /// Recorded, but clicking it does nothing yet: editing a path by hand needs
+    /// a text field with a caret, and the dialog has none. Recording it anyway
+    /// means a click there is *swallowed* rather than falling through to the
+    /// list behind, which is what the user expects of a control they can see.
+    AddressBar,
+    /// A quick-access shortcut in the sidebar, by position in the sidebar list.
+    Shortcut(usize),
+    /// A column header in the file list, which sorts by that column.
+    Header(SortColumn),
+    /// A row of the file list, by index into [`FileDialog::entries`].
+    ///
+    /// An index rather than a stable id — which is what [`crate::frame`]
+    /// recommends for rows — because the frame a click is tested against is
+    /// built from the listing as it stands at that moment, so there is no
+    /// interval in which the two could disagree. A `DirEntry` has no id to use
+    /// instead; its name would be one, at the cost of a `String` per row per
+    /// frame.
+    Entry(usize),
+    /// The empty part of the file list, below the last row.
+    List,
+    /// The scrollbar's track.
+    ScrollTrack,
+    /// The scrollbar's thumb.
+    ScrollThumb,
+    /// The filename box in the bottom bar (Save mode only).
+    ///
+    /// Like [`AddressBar`](Self::AddressBar): recorded so the click stops here,
+    /// not acted on. Typing goes to the box already, since Save mode has nowhere
+    /// else for a keystroke to go.
+    FilenameInput,
+    /// The Open/Save/Select button.
+    Confirm,
+    /// The Cancel button.
+    Cancel,
+    /// Dialog background: no control, but inside the dialog.
+    ///
+    /// The distinction from "no target at all" is what tells a host whether the
+    /// click was *outside* the dialog, which is the click a modal has to refuse
+    /// to pass through.
+    Chrome,
+}
+
 /// File open/save/folder-select dialog.
 ///
 /// Maintains internal state for navigation, selection, and input. Call
@@ -152,6 +223,27 @@ pub struct FileDialog {
     history_forward: Vec<String>,
     quick_access: Vec<QuickAccess>,
     cancelled: bool,
+    /// Index of the first entry row drawn.
+    ///
+    /// A request rather than a fact: it is clamped against the height the
+    /// dialog turns out to be drawn at, so a listing that shrank under a stale
+    /// offset shows its last page rather than blank space. See
+    /// [`scroll_window`], whose policy this is.
+    ///
+    /// The dialog stores no size of its own — [`render`](Self::render) is given
+    /// one and cannot write anything back — which is why every method that has
+    /// to move this takes the height as an argument.
+    scroll_top: usize,
+    /// Wheel fractions earned but not yet spent, so a high-resolution wheel or
+    /// a trackpad scrolls smoothly instead of discarding everything under one
+    /// notch.
+    wheel: wheel::Accumulator,
+    /// While the scrollbar thumb is being dragged, how far below the thumb's
+    /// top edge the pointer grabbed it.
+    ///
+    /// Kept so the thumb does not jump under the pointer on the first drag
+    /// event: the thumb follows the grab point, not the pointer.
+    thumb_grab: Option<f32>,
     /// The zone the Modified column is rendered in.
     ///
     /// Defaults to UTC because a toolkit has no business reading `TZ` behind
@@ -245,7 +337,7 @@ impl FileDialog {
         self.history_back.push(self.current_path.clone());
         self.history_forward.clear();
         self.current_path = path.to_string();
-        self.selected_index = None;
+        self.rewind();
     }
 
     /// Navigate to the parent directory.
@@ -261,7 +353,7 @@ impl FileDialog {
         if let Some(prev) = self.history_back.pop() {
             self.history_forward.push(self.current_path.clone());
             self.current_path = prev;
-            self.selected_index = None;
+            self.rewind();
         }
     }
 
@@ -270,8 +362,23 @@ impl FileDialog {
         if let Some(next) = self.history_forward.pop() {
             self.history_back.push(self.current_path.clone());
             self.current_path = next;
-            self.selected_index = None;
+            self.rewind();
         }
+    }
+
+    /// Forget where the *previous* listing was looking.
+    ///
+    /// Called by every navigation. A scroll position and a selected row are
+    /// both indices into the listing that is about to be replaced, so carrying
+    /// either into the new directory would pick an unrelated file, or open at
+    /// row 40 of a directory with three files in it. The wheel's banked
+    /// fraction goes too, so a fraction earned in one directory cannot deliver
+    /// a row in the next.
+    fn rewind(&mut self) {
+        self.selected_index = None;
+        self.scroll_top = 0;
+        self.wheel.reset();
+        self.thumb_grab = None;
     }
 
     // --- Selection / Interaction ---
@@ -381,7 +488,14 @@ impl FileDialog {
     }
 
     /// Handle a keyboard event. Returns the resulting action.
-    pub fn handle_event(&mut self, event: &KeyEvent) -> DialogAction {
+    ///
+    /// `height` is the height the dialog is being drawn at — the same number
+    /// [`render`](Self::render) is given. Moving the selection has to scroll the
+    /// list to keep the selection on screen, and how many rows are on screen
+    /// depends on the height; the dialog deliberately stores no size of its own,
+    /// because a stored size is a second answer to "how big is this dialog"
+    /// that can disagree with the one the renderer is using.
+    pub fn handle_event(&mut self, event: &KeyEvent, height: f32) -> DialogAction {
         if !event.pressed {
             return DialogAction::None;
         }
@@ -406,26 +520,30 @@ impl FileDialog {
                 }
             }
             Key::Up => {
-                self.move_selection(-1);
+                self.move_selection(-1, height);
                 DialogAction::None
             }
             Key::Down => {
-                self.move_selection(1);
+                self.move_selection(1, height);
                 DialogAction::None
             }
-            Key::Backspace if event.modifiers.alt => {
-                self.navigate_back();
-                if self.history_back.is_empty() {
-                    DialogAction::None
-                } else {
-                    DialogAction::NavigatedTo(self.current_path.clone())
-                }
+            Key::PageUp => {
+                // Saturating rather than plain `-`: negating `isize::MIN` is
+                // an overflow, and `page_step` is free to return whatever a
+                // window height implies. Saturation is exact for every value
+                // it can actually produce, so this is a guard, not a rounding.
+                self.move_selection(page_step(height).saturating_neg(), height);
+                DialogAction::None
             }
+            Key::PageDown => {
+                self.move_selection(page_step(height), height);
+                DialogAction::None
+            }
+            Key::Backspace if event.modifiers.alt => self.navigated(Self::navigate_back),
             Key::Backspace => {
                 // Without modifiers in non-save mode: go to parent.
                 if self.mode != DialogMode::Save || self.filename_input.is_empty() {
-                    self.navigate_up();
-                    DialogAction::NavigatedTo(self.current_path.clone())
+                    self.navigated(Self::navigate_up)
                 } else {
                     // In save mode with text: delete last char of filename input.
                     self.filename_input.pop();
@@ -435,12 +553,14 @@ impl FileDialog {
             Key::Home => {
                 if !self.entries.is_empty() {
                     self.selected_index = Some(0);
+                    self.reveal(height);
                 }
                 DialogAction::None
             }
             Key::End => {
                 if !self.entries.is_empty() {
                     self.selected_index = Some(self.entries.len().saturating_sub(1));
+                    self.reveal(height);
                 }
                 DialogAction::None
             }
@@ -457,11 +577,28 @@ impl FileDialog {
     // --- Rendering ---
 
     /// Produce render commands for the entire dialog at the given dimensions.
+    ///
+    /// A thin wrapper over [`frame`](Self::frame), which is the same walk with
+    /// the click targets kept. Callers that only paint can keep using this.
     pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+        self.frame(width, height).into_tree().commands
+    }
 
-        // Dialog background
-        cmds.push(RenderCommand::FillRect {
+    /// Draw the dialog at the given dimensions, recording what each part of it
+    /// can be clicked to reach.
+    ///
+    /// One walk produces both the ink and the hit boxes, so a control cannot be
+    /// drawn in one place and clicked in another — see [`crate::frame`]. This is
+    /// also what [`handle_mouse`](Self::handle_mouse) tests a click against, so
+    /// there is no second copy of the layout to keep in step with this one.
+    #[must_use]
+    pub fn frame(&self, width: f32, height: f32) -> Frame<DialogTarget> {
+        let mut frame = Frame::new(width, height);
+
+        // Dialog background. Recorded as a target so that a host drawing the
+        // dialog inset can tell a click on the dialog from a click past its
+        // edge — the click a modal must not let through.
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -469,25 +606,182 @@ impl FileDialog {
             color: COLOR_BASE,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
+        frame.hit(DialogTarget::Chrome, Rect::new(0.0, 0.0, width, height));
 
         // Toolbar
-        self.render_toolbar(&mut cmds, width);
+        self.draw_toolbar(&mut frame, width);
 
-        // Sidebar
+        // Sidebar. Clamped at zero because a dialog shorter than its own
+        // furniture would otherwise hand a negative height to the clip stack,
+        // and a negative-height clip is not a small one — it is one whose
+        // bottom edge is above its top.
         let content_top = TOOLBAR_HEIGHT;
-        let content_height = height - TOOLBAR_HEIGHT - BOTTOM_BAR_HEIGHT;
-        self.render_sidebar(&mut cmds, content_top, content_height);
+        let content_height = (height - TOOLBAR_HEIGHT - BOTTOM_BAR_HEIGHT).max(0.0);
+        self.draw_sidebar(&mut frame, content_top, content_height);
 
         // File list
         let list_x = SIDEBAR_WIDTH;
-        let list_width = width - SIDEBAR_WIDTH;
-        self.render_file_list(&mut cmds, list_x, content_top, list_width, content_height);
+        let list_width = (width - SIDEBAR_WIDTH).max(0.0);
+        self.draw_file_list(
+            &mut frame,
+            list_x,
+            content_top,
+            list_width,
+            content_height,
+            height,
+        );
 
         // Bottom bar (filename input for save, buttons)
         let bottom_y = height - BOTTOM_BAR_HEIGHT;
-        self.render_bottom_bar(&mut cmds, bottom_y, width);
+        self.draw_bottom_bar(&mut frame, bottom_y, width);
 
-        cmds
+        frame
+    }
+
+    /// Handle a mouse event. Returns the resulting action.
+    ///
+    /// `width` and `height` are the dimensions the dialog is drawn at — the
+    /// same numbers [`render`](Self::render) is given — because the click is
+    /// tested against a frame laid out at that size. A host that passes a
+    /// different size here than it draws at will find its clicks landing
+    /// somewhere else, which is the one way this can go wrong and is why the
+    /// dialog will not keep a second copy of the size for itself.
+    ///
+    /// Every mouse event should be forwarded while the dialog is up, not only
+    /// presses: a drag of the scrollbar is a press, a run of moves and a
+    /// release, and a dialog that only sees the press cannot follow the thumb.
+    pub fn handle_mouse(&mut self, event: &MouseEvent, width: f32, height: f32) -> DialogAction {
+        let frame = self.frame(width, height);
+        let target = frame.hit_test(event.x, event.y);
+
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => self.press(&frame, target, event.y, height),
+            MouseEventKind::Release(MouseButton::Left) => {
+                self.thumb_grab = None;
+                DialogAction::None
+            }
+            MouseEventKind::Move => {
+                self.drag_thumb(&frame, event.y, height);
+                DialogAction::None
+            }
+            MouseEventKind::DoubleClick(MouseButton::Left) => match target {
+                // Only rows act on the second click. Every other control has
+                // already acted on the press that came before it, and a Cancel
+                // button that cancelled twice would be no worse but a Back
+                // button that went back twice would be wrong.
+                Some(DialogTarget::Entry(index)) => {
+                    self.select_entry(index);
+                    self.activate_entry(index)
+                }
+                _ => DialogAction::None,
+            },
+            MouseEventKind::Scroll { dy, .. } => {
+                let rows = self.wheel.rows(dy);
+                // Start from where the list is actually looking, not from the
+                // stored request: after the keyboard has scrolled by revealing a
+                // selection, or after the list shrank, the two differ, and
+                // scrolling from the stale one makes the first notch jump.
+                self.scroll_top = self.visible_rows(height).start;
+                self.scroll_top = scroll_window::shift(self.scroll_top, rows);
+                DialogAction::None
+            }
+            _ => DialogAction::None,
+        }
+    }
+
+    /// Act on a left-button press on `target`.
+    fn press(
+        &mut self,
+        frame: &Frame<DialogTarget>,
+        target: Option<DialogTarget>,
+        y: f32,
+        height: f32,
+    ) -> DialogAction {
+        match target {
+            Some(DialogTarget::Back) => self.navigated(Self::navigate_back),
+            Some(DialogTarget::Forward) => self.navigated(Self::navigate_forward),
+            Some(DialogTarget::Up) => self.navigated(Self::navigate_up),
+            Some(DialogTarget::Shortcut(index)) => {
+                let Some(path) = self.quick_access.get(index).map(|qa| qa.path.clone()) else {
+                    return DialogAction::None;
+                };
+                self.navigated(|dialog| dialog.navigate_to(&path))
+            }
+            Some(DialogTarget::Header(column)) => {
+                self.toggle_sort(column);
+                DialogAction::None
+            }
+            Some(DialogTarget::Entry(index)) => {
+                self.select_entry(index);
+                DialogAction::None
+            }
+            Some(DialogTarget::ScrollThumb) => {
+                if let Some(thumb) = frame.rect_of(|t| *t == DialogTarget::ScrollThumb) {
+                    self.thumb_grab = Some(y - thumb.y);
+                }
+                DialogAction::None
+            }
+            Some(DialogTarget::ScrollTrack) => {
+                // A click on the track moves one windowful towards the click,
+                // which is what every scrollbar does and is more predictable
+                // than jumping to the exact spot: the thumb ends up under the
+                // pointer either way if you keep clicking.
+                let page = usize::try_from(page_step(height)).unwrap_or(1);
+                let above = frame
+                    .rect_of(|t| *t == DialogTarget::ScrollThumb)
+                    .is_some_and(|thumb| y < thumb.y);
+                self.scroll_top = self.visible_rows(height).start;
+                self.scroll_top = if above {
+                    self.scroll_top.saturating_sub(page)
+                } else {
+                    self.scroll_top.saturating_add(page)
+                };
+                DialogAction::None
+            }
+            Some(DialogTarget::Confirm) => match self.confirm() {
+                Some(path) => DialogAction::Selected(path),
+                None => DialogAction::None,
+            },
+            Some(DialogTarget::Cancel) => {
+                self.cancel();
+                DialogAction::Cancelled
+            }
+            // Inside the dialog but on nothing that acts: swallowed, because a
+            // click the user aimed at the dialog must not reach whatever is
+            // behind it. `None` — outside the dialog entirely — is swallowed
+            // the same way, and for the same reason: a modal that let the
+            // window behind it be clicked would only look modal.
+            _ => DialogAction::None,
+        }
+    }
+
+    /// Follow the scrollbar thumb while it is being dragged.
+    ///
+    /// Reads the track and thumb out of the frame that was just drawn rather
+    /// than recomputing where they are. Two answers to "where is the
+    /// scrollbar" is exactly the divergence [`crate::frame`] exists to prevent,
+    /// and a drag handler is where it would show: the thumb would follow the
+    /// pointer at an offset that grew with the window size.
+    fn drag_thumb(&mut self, frame: &Frame<DialogTarget>, y: f32, height: f32) {
+        let Some(grab) = self.thumb_grab else { return };
+        let (Some(track), Some(thumb)) = (
+            frame.rect_of(|t| *t == DialogTarget::ScrollTrack),
+            frame.rect_of(|t| *t == DialogTarget::ScrollThumb),
+        ) else {
+            // The list got short enough to lose its scrollbar mid-drag.
+            self.thumb_grab = None;
+            return;
+        };
+        let span = track.h - thumb.h;
+        let hidden = self
+            .entries
+            .len()
+            .saturating_sub(Self::row_capacity(height));
+        if span <= 0.0 || hidden == 0 {
+            return;
+        }
+        let fraction = ((y - grab - track.y) / span).clamp(0.0, 1.0);
+        self.scroll_top = (fraction * hidden as f32).round() as usize;
     }
 
     // --- Queries ---
@@ -537,9 +831,51 @@ impl FileDialog {
             }
         }
 
-        // Sort: directories first, then by selected column.
+        self.sort_entries(&mut entries);
+
+        self.entries = entries;
+        // A new listing is a new set of rows, so a scroll position or a
+        // selection into the old one means nothing.
+        self.rewind();
+    }
+
+    /// Toggle sort column. If already sorting by this column, flip direction.
+    ///
+    /// Re-orders the listing already on screen, rather than only changing the
+    /// order the *next* listing would arrive in. This used to set the field and
+    /// stop, which was invisible while nothing could reach it — and became a
+    /// column header that moved its own little sort arrow and nothing else the
+    /// moment the headers became clickable.
+    pub fn toggle_sort(&mut self, column: SortColumn) {
+        if self.sort_by == column {
+            self.sort_ascending = !self.sort_ascending;
+        } else {
+            self.sort_by = column;
+            self.sort_ascending = true;
+        }
+
+        // Follow the picked *entry* through the reordering, not its row number.
+        // The row number after a re-sort belongs to some other file, and the
+        // confirm button reads the selection — so keeping the number would let
+        // a click on "Size" change which file Open would open.
+        let picked = self
+            .selected_index
+            .and_then(|index| self.entries.get(index))
+            .map(|entry| entry.name.clone());
+        let mut entries = core::mem::take(&mut self.entries);
+        self.sort_entries(&mut entries);
+        self.entries = entries;
+        self.selected_index =
+            picked.and_then(|name| self.entries.iter().position(|entry| entry.name == name));
+    }
+
+    /// Order a listing by the current sort column and direction.
+    ///
+    /// Directories always come first, whatever the column: a listing that
+    /// interleaves them by size or date buries the way *out* of the directory
+    /// among the files in it.
+    fn sort_entries(&self, entries: &mut [DirEntry]) {
         entries.sort_by(|a, b| {
-            // Directories always come first.
             match (a.is_dir, b.is_dir) {
                 (true, false) => return core::cmp::Ordering::Less,
                 (false, true) => return core::cmp::Ordering::Greater,
@@ -556,19 +892,6 @@ impl FileDialog {
                 ordering.reverse()
             }
         });
-
-        self.entries = entries;
-        self.selected_index = None;
-    }
-
-    /// Toggle sort column. If already sorting by this column, flip direction.
-    pub fn toggle_sort(&mut self, column: SortColumn) {
-        if self.sort_by == column {
-            self.sort_ascending = !self.sort_ascending;
-        } else {
-            self.sort_by = column;
-            self.sort_ascending = true;
-        }
     }
 
     // --- Private helpers ---
@@ -589,6 +912,9 @@ impl FileDialog {
             history_forward: Vec::new(),
             quick_access: default_quick_access(),
             cancelled: false,
+            scroll_top: 0,
+            wheel: wheel::Accumulator::default(),
+            thumb_grab: None,
             timezone: Tz::UTC,
         }
     }
@@ -646,7 +972,8 @@ impl FileDialog {
         name.clone()
     }
 
-    /// Move the selection `delta` rows, stopping at either end of the list.
+    /// Move the selection `delta` rows, stopping at either end of the list, and
+    /// scroll far enough that the row it lands on is on screen.
     ///
     /// Done entirely in `usize` with saturating steps. The old version cast
     /// the index to `isize` to add a signed delta and clamped against
@@ -655,7 +982,7 @@ impl FileDialog {
     /// list, a delta small enough not to overflow. Saturating in the index's
     /// own type needs none of those proofs, and `checked_sub` on the length
     /// *is* the emptiness check.
-    fn move_selection(&mut self, delta: isize) {
+    fn move_selection(&mut self, delta: isize, height: f32) {
         let Some(last) = self.entries.len().checked_sub(1) else {
             return;
         };
@@ -666,13 +993,92 @@ impl FileDialog {
             current.saturating_add(delta.unsigned_abs())
         };
         self.selected_index = Some(next.min(last));
+        self.reveal(height);
+    }
+
+    /// Scroll the least distance that puts the selected row on screen.
+    ///
+    /// Called by everything that moves the selection with a keystroke, and by
+    /// nothing else: an explicit scroll — the wheel, a drag of the thumb — is
+    /// allowed to leave the selection behind, which is what every file manager
+    /// does and what makes it possible to look elsewhere without losing the row
+    /// you had picked.
+    fn reveal(&mut self, height: f32) {
+        let Some(selected) = self.selected_index else {
+            return;
+        };
+        let capacity = Self::row_capacity(height);
+        // Above the window: pull the top down to the selection.
+        self.scroll_top = self.scroll_top.min(selected);
+        // Below it: push the top up until the selection is the last row drawn.
+        // A window `capacity` rows tall ending at `selected` starts at
+        // `selected + 1 - capacity`; `checked_sub` returning `None` means the
+        // window already reaches row 0 from there, so there is nothing to push.
+        if let Some(top) = selected
+            .checked_add(1)
+            .and_then(|past_end| past_end.checked_sub(capacity))
+        {
+            self.scroll_top = self.scroll_top.max(top);
+        }
+    }
+
+    /// How many whole entry rows fit below the column headers at `height`.
+    ///
+    /// A partially-visible row does not count, so nothing is ever drawn across
+    /// the bottom edge of the list — [`scroll_window`]'s rule, applied from
+    /// [`scroll_window::capacity`] rather than restated here.
+    fn row_capacity(height: f32) -> usize {
+        scroll_window::capacity(
+            ROW_HEIGHT,
+            height - TOOLBAR_HEIGHT - BOTTOM_BAR_HEIGHT - ROW_HEIGHT,
+        )
+    }
+
+    /// Which rows of the listing are on screen at `height`.
+    ///
+    /// Derived rather than stored, and re-derived on every call: the listing can
+    /// be replaced between the keystroke that last moved [`Self::scroll_top`]
+    /// and the frame that asks what to draw, and this is the last chance to
+    /// notice it got shorter. [`scroll_window::visible_count`] is what turns
+    /// "shrank underneath us" into the last page rather than an empty list.
+    fn visible_rows(&self, height: f32) -> Range<usize> {
+        let rows = scroll_window::visible_count(
+            self.entries.len(),
+            Self::row_capacity(height),
+            self.scroll_top,
+        );
+        rows.start..rows.end()
+    }
+
+    /// Run `nav`, reporting a navigation only if the path actually moved.
+    ///
+    /// A host answers [`DialogAction::NavigatedTo`] by reading that directory
+    /// and handing the listing back through [`set_entries`](Self::set_entries),
+    /// so the answer has to be exact in both directions: claiming a move that
+    /// did not happen costs a pointless directory read, and failing to report
+    /// one that did leaves the previous directory's files on screen under the
+    /// new directory's name.
+    ///
+    /// The Alt+Backspace arm used to decide by asking whether any history
+    /// remained *afterwards*, which is a different question with a different
+    /// answer in exactly one case: going back to the first directory of the
+    /// session empties the history, so the one navigation that always happens
+    /// was the one always reported as not having happened.
+    fn navigated(&mut self, nav: impl FnOnce(&mut Self)) -> DialogAction {
+        let before = self.current_path.clone();
+        nav(self);
+        if self.current_path == before {
+            DialogAction::None
+        } else {
+            DialogAction::NavigatedTo(self.current_path.clone())
+        }
     }
 
     // --- Render sub-methods ---
 
-    fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
+    fn draw_toolbar(&self, frame: &mut Frame<DialogTarget>, width: f32) {
         // Toolbar background
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -689,13 +1095,23 @@ impl FileDialog {
         let btn_y = (TOOLBAR_HEIGHT - 24.0) / 2.0;
         let mut x = PADDING;
 
-        // Back button
+        // Navigation buttons. Each is a bare glyph, so its click target is the
+        // slot the glyph sits in rather than the glyph's own ink — a single
+        // character is a few pixels wide and would be a target nobody could
+        // hit. The whole toolbar's height is used, not the glyph's, for the
+        // same reason.
+        //
+        // Back and Forward are drawn greyed when there is nowhere to go, and
+        // are still recorded: the press is then swallowed by a control that
+        // visibly does nothing, which is what a disabled button is. Dropping
+        // the target instead would let the click fall through to the toolbar,
+        // which is not different here but would be if anything were behind it.
         let back_color = if self.history_back.is_empty() {
             COLOR_OVERLAY
         } else {
             COLOR_TEXT
         };
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x,
             y: btn_y + 4.0,
             text: String::from("<"),
@@ -705,6 +1121,7 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        frame.hit(DialogTarget::Back, Rect::new(x, 0.0, 24.0, TOOLBAR_HEIGHT));
         x += 24.0;
 
         // Forward button
@@ -713,7 +1130,7 @@ impl FileDialog {
         } else {
             COLOR_TEXT
         };
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x,
             y: btn_y + 4.0,
             text: String::from(">"),
@@ -723,10 +1140,14 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        frame.hit(
+            DialogTarget::Forward,
+            Rect::new(x, 0.0, 24.0, TOOLBAR_HEIGHT),
+        );
         x += 24.0;
 
         // Up button
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x,
             y: btn_y + 4.0,
             text: String::from("^"),
@@ -736,11 +1157,12 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        frame.hit(DialogTarget::Up, Rect::new(x, 0.0, 28.0, TOOLBAR_HEIGHT));
         x += 28.0;
 
         // Address bar
         let addr_width = width - x - PADDING;
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x,
             y: btn_y,
             width: addr_width,
@@ -748,7 +1170,7 @@ impl FileDialog {
             color: COLOR_SURFACE1,
             corner_radii: CornerRadii::all(3.0),
         });
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: x + 6.0,
             y: btn_y + 5.0,
             text: self.current_path.clone(),
@@ -758,11 +1180,15 @@ impl FileDialog {
             max_width: Some(addr_width - 12.0),
             overflow: TextOverflow::Ellipsis,
         });
+        frame.hit(
+            DialogTarget::AddressBar,
+            Rect::new(x, btn_y, addr_width, 24.0),
+        );
     }
 
-    fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>, top: f32, height: f32) {
+    fn draw_sidebar(&self, frame: &mut Frame<DialogTarget>, top: f32, height: f32) {
         // Sidebar background
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: top,
             width: SIDEBAR_WIDTH,
@@ -771,9 +1197,14 @@ impl FileDialog {
             corner_radii: CornerRadii::ZERO,
         });
 
+        // The sidebar is clipped to its own background so that a shortcut list
+        // longer than a short dialog cannot draw over the bottom bar, and — the
+        // part that matters here — so that a shortcut scrolled out of sight
+        // cannot still be clicked. `Frame::hit` trims to the clip in force.
+        frame.clip(Rect::new(0.0, top, SIDEBAR_WIDTH, height));
         let mut y = top + PADDING;
-        for qa in &self.quick_access {
-            cmds.push(RenderCommand::Text {
+        for (index, qa) in self.quick_access.iter().enumerate() {
+            frame.push(RenderCommand::Text {
                 x: PADDING + 4.0,
                 y,
                 text: qa.label.clone(),
@@ -783,29 +1214,36 @@ impl FileDialog {
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 4.0),
                 overflow: TextOverflow::Ellipsis,
             });
+            // The row, not the label: the gap between two labels belongs to the
+            // one above it, so there is no dead strip between shortcuts.
+            frame.hit(
+                DialogTarget::Shortcut(index),
+                Rect::new(0.0, y, SIDEBAR_WIDTH, ROW_HEIGHT),
+            );
             y += ROW_HEIGHT;
         }
+        frame.unclip();
     }
 
-    fn render_file_list(
+    fn draw_file_list(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        frame: &mut Frame<DialogTarget>,
         x: f32,
         top: f32,
         width: f32,
         height: f32,
+        dialog_height: f32,
     ) {
         // Clip the file list area
-        cmds.push(RenderCommand::PushClip {
-            x,
-            y: top,
-            width,
-            height,
-        });
+        frame.clip(Rect::new(x, top, width, height));
+        // The list's own background, below the rows, so that a click in the
+        // empty space under a short listing still counts as "in the list" — the
+        // wheel needs to know that much to decide whether to scroll.
+        frame.hit(DialogTarget::List, Rect::new(x, top, width, height));
 
         // Column headers
         let header_y = top;
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x,
             y: header_y,
             width,
@@ -818,8 +1256,24 @@ impl FileDialog {
         let size_col_x = x + width - 200.0;
         let date_col_x = x + width - 100.0;
 
+        // Each header is clickable across its whole column, not just under its
+        // label: the label sits at the column's left edge, and a target the
+        // width of the word "Size" leaves most of the column dead.
+        frame.hit(
+            DialogTarget::Header(SortColumn::Name),
+            Rect::new(x, header_y, size_col_x - x, ROW_HEIGHT),
+        );
+        frame.hit(
+            DialogTarget::Header(SortColumn::Size),
+            Rect::new(size_col_x, header_y, date_col_x - size_col_x, ROW_HEIGHT),
+        );
+        frame.hit(
+            DialogTarget::Header(SortColumn::Modified),
+            Rect::new(date_col_x, header_y, x + width - date_col_x, ROW_HEIGHT),
+        );
+
         // Header labels
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: name_col_x,
             y: header_y + 6.0,
             text: String::from("Name"),
@@ -829,7 +1283,7 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: size_col_x,
             y: header_y + 6.0,
             text: String::from("Size"),
@@ -839,7 +1293,7 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: date_col_x,
             y: header_y + 6.0,
             text: String::from("Modified"),
@@ -857,7 +1311,7 @@ impl FileDialog {
             SortColumn::Modified => date_col_x + 54.0,
         };
         let indicator = if self.sort_ascending { "v" } else { "^" };
-        cmds.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: indicator_x,
             y: header_y + 6.0,
             text: String::from(indicator),
@@ -868,19 +1322,27 @@ impl FileDialog {
             overflow: TextOverflow::Clip,
         });
 
-        // File entries
+        // File entries. Only the rows on screen are built at all: the loop used
+        // to walk the whole listing and break once a row fell past the bottom
+        // edge, which drew the right thing but had no way to reach anything
+        // below it — the tail of a long directory could not be got at by any
+        // means, since the selection did not scroll the list either.
+        let rows = self.visible_rows(dialog_height);
+        let first = rows.start;
         let entries_top = top + ROW_HEIGHT;
-        for (i, entry) in self.entries.iter().enumerate() {
-            let row_y = entries_top + (i as f32) * ROW_HEIGHT;
-
-            // Stop rendering if below visible area (simple culling).
-            if row_y > top + height {
-                break;
-            }
+        for (offset, entry) in self
+            .entries
+            .get(rows)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let index = first.saturating_add(offset);
+            let row_y = entries_top + (offset as f32) * ROW_HEIGHT;
 
             // Selection highlight
-            if self.selected_index == Some(i) {
-                cmds.push(RenderCommand::FillRect {
+            if self.selected_index == Some(index) {
+                frame.push(RenderCommand::FillRect {
                     x,
                     y: row_y,
                     width,
@@ -897,7 +1359,7 @@ impl FileDialog {
             } else {
                 COLOR_SUBTEXT
             };
-            cmds.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + PADDING,
                 y: row_y + 6.0,
                 text: String::from(icon_char),
@@ -915,7 +1377,7 @@ impl FileDialog {
                 COLOR_TEXT
             };
             let max_name_width = size_col_x - name_col_x - PADDING;
-            cmds.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: name_col_x,
                 y: row_y + 6.0,
                 text: entry.name.clone(),
@@ -928,7 +1390,7 @@ impl FileDialog {
 
             // Size (human-readable, only for files)
             if !entry.is_dir {
-                cmds.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: size_col_x,
                     y: row_y + 6.0,
                     text: format_size(entry.size),
@@ -941,7 +1403,7 @@ impl FileDialog {
             }
 
             // Modified timestamp (simplified display)
-            cmds.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: date_col_x,
                 y: row_y + 6.0,
                 text: format_timestamp(entry.modified_timestamp, &self.timezone),
@@ -951,14 +1413,80 @@ impl FileDialog {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
+
+            // The whole row, so that a click anywhere along it picks the file —
+            // aiming at the filename's ink would leave the size and date
+            // columns dead, and the row is what the highlight covers.
+            frame.hit(
+                DialogTarget::Entry(index),
+                Rect::new(x, row_y, width, ROW_HEIGHT),
+            );
         }
 
-        cmds.push(RenderCommand::PopClip);
+        self.draw_scrollbar(frame, x, entries_top, width, height, dialog_height);
+
+        frame.unclip();
     }
 
-    fn render_bottom_bar(&self, cmds: &mut Vec<RenderCommand>, y: f32, width: f32) {
+    /// Draw the file list's scrollbar, if the listing is longer than the space
+    /// it is drawn into.
+    ///
+    /// Nothing is drawn when everything fits — a track with a full-length thumb
+    /// says "there is more" as loudly as one with a short thumb, and there is
+    /// not.
+    fn draw_scrollbar(
+        &self,
+        frame: &mut Frame<DialogTarget>,
+        x: f32,
+        entries_top: f32,
+        width: f32,
+        height: f32,
+        dialog_height: f32,
+    ) {
+        let capacity = Self::row_capacity(dialog_height);
+        let total = self.entries.len();
+        if capacity == 0 || total <= capacity {
+            return;
+        }
+
+        let track = Rect::new(
+            x + width - SCROLLBAR_WIDTH,
+            entries_top,
+            SCROLLBAR_WIDTH,
+            (height - ROW_HEIGHT).max(0.0),
+        );
+        frame.push(RenderCommand::FillRect {
+            x: track.x,
+            y: track.y,
+            width: track.w,
+            height: track.h,
+            color: COLOR_SURFACE0,
+            corner_radii: CornerRadii::ZERO,
+        });
+        frame.hit(DialogTarget::ScrollTrack, track);
+
+        let thumb = thumb_rect(
+            track,
+            total,
+            capacity,
+            self.visible_rows(dialog_height).start,
+        );
+        frame.push(RenderCommand::FillRect {
+            x: thumb.x,
+            y: thumb.y,
+            width: thumb.w,
+            height: thumb.h,
+            color: COLOR_SURFACE2,
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
+        });
+        // Recorded after the track, so a press on the overlap reaches the thumb
+        // — `hit_test` answers with the last box drawn, which is the one on top.
+        frame.hit(DialogTarget::ScrollThumb, thumb);
+    }
+
+    fn draw_bottom_bar(&self, frame: &mut Frame<DialogTarget>, y: f32, width: f32) {
         // Bottom bar background
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y,
             width,
@@ -977,7 +1505,7 @@ impl FileDialog {
         // Filename input (save mode only)
         if self.mode == DialogMode::Save {
             let input_width = width - BUTTON_WIDTH * 2.0 - PADDING * 5.0;
-            cmds.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: PADDING,
                 y: input_y,
                 width: input_width,
@@ -985,7 +1513,11 @@ impl FileDialog {
                 color: COLOR_SURFACE1,
                 corner_radii: CornerRadii::all(3.0),
             });
-            cmds.push(RenderCommand::StrokeRect {
+            frame.hit(
+                DialogTarget::FilenameInput,
+                Rect::new(PADDING, input_y, input_width, 28.0),
+            );
+            frame.push(RenderCommand::StrokeRect {
                 x: PADDING,
                 y: input_y,
                 width: input_width,
@@ -1005,7 +1537,7 @@ impl FileDialog {
             } else {
                 COLOR_TEXT
             };
-            cmds.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: PADDING + 6.0,
                 y: input_y + 7.0,
                 text: display_text,
@@ -1033,7 +1565,7 @@ impl FileDialog {
             DialogMode::Save => "Save",
             DialogMode::SelectFolder => "Select",
         };
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: confirm_x,
             y: input_y,
             width: BUTTON_WIDTH,
@@ -1041,7 +1573,16 @@ impl FileDialog {
             color: confirm_bg,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-        cmds.push(RenderCommand::Text {
+        // Recorded whether or not it is enabled. A disabled Open button that let
+        // the click through would be a hole in the dialog exactly where the user
+        // aims most confidently; `confirm()` returning `None` is what makes the
+        // press do nothing, and it is asked again at press time rather than
+        // trusted from paint time.
+        frame.hit(
+            DialogTarget::Confirm,
+            Rect::new(confirm_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+        );
+        frame.push(RenderCommand::Text {
             x: confirm_x + (BUTTON_WIDTH - 30.0) / 2.0,
             y: input_y + 8.0,
             text: String::from(confirm_label),
@@ -1057,7 +1598,7 @@ impl FileDialog {
         });
 
         // Cancel button
-        cmds.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: cancel_x,
             y: input_y,
             width: BUTTON_WIDTH,
@@ -1065,7 +1606,11 @@ impl FileDialog {
             color: COLOR_SURFACE1,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-        cmds.push(RenderCommand::Text {
+        frame.hit(
+            DialogTarget::Cancel,
+            Rect::new(cancel_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+        );
+        frame.push(RenderCommand::Text {
             x: cancel_x + (BUTTON_WIDTH - 42.0) / 2.0,
             y: input_y + 8.0,
             text: String::from("Cancel"),
@@ -1079,6 +1624,41 @@ impl FileDialog {
 }
 
 // --- Free functions (utilities) ---
+
+/// How many rows Page Up or Page Down moves at `height`.
+///
+/// One windowful, and never zero: a page key that moved nothing in a dialog too
+/// short to show a whole row would be a key that appears broken, and one row is
+/// the smallest movement that is still movement.
+fn page_step(height: f32) -> isize {
+    isize::try_from(FileDialog::row_capacity(height).max(1)).unwrap_or(isize::MAX)
+}
+
+/// Where the scrollbar thumb sits in `track` for a listing of `total` rows
+/// showing `capacity` of them starting at row `first`.
+///
+/// Size shows how much of the listing is on screen; position shows where in it.
+/// The two are computed separately because [`MIN_THUMB_HEIGHT`] makes the size
+/// stop being proportional for a long listing while the position must stay
+/// exact — a thumb that reached the bottom of its track only when the last row
+/// was reached, but sat at 90% when the listing was at its end, would be worse
+/// than no thumb at all.
+fn thumb_rect(track: Rect, total: usize, capacity: usize, first: usize) -> Rect {
+    let shown = (capacity as f32 / total as f32).clamp(0.0, 1.0);
+    let thumb_h = (track.h * shown).clamp(MIN_THUMB_HEIGHT.min(track.h), track.h);
+    let hidden = total.saturating_sub(capacity);
+    let position = if hidden == 0 {
+        0.0
+    } else {
+        (first as f32 / hidden as f32).clamp(0.0, 1.0)
+    };
+    Rect::new(
+        track.x,
+        track.y + (track.h - thumb_h) * position,
+        track.w,
+        thumb_h,
+    )
+}
 
 /// Default quick-access sidebar entries.
 fn default_quick_access() -> Vec<QuickAccess> {
@@ -1251,6 +1831,65 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The size the tests render and dispatch at. The dialog stores no size of
+    /// its own — every handler is *given* one, exactly as a host gives it — so
+    /// the tests have to name one too rather than read it back off the widget.
+    /// 400 tall leaves room for ten rows, so a listing of a dozen has a tail
+    /// below the fold to scroll to.
+    const W: f32 = 600.0;
+    const H: f32 = 400.0;
+
+    fn file(name: &str) -> DirEntry {
+        DirEntry {
+            name: String::from(name),
+            is_dir: false,
+            size: 10,
+            modified_timestamp: 1_000,
+            extension: name
+                .rsplit_once('.')
+                .map_or(String::new(), |(_, e)| String::from(e)),
+        }
+    }
+
+    fn dir(name: &str) -> DirEntry {
+        DirEntry {
+            name: String::from(name),
+            is_dir: true,
+            size: 0,
+            modified_timestamp: 1_000,
+            extension: String::new(),
+        }
+    }
+
+    /// Aim a click at the middle of whatever the frame drew for `target`.
+    /// Deliberately *not* a recomputed coordinate: the point of recording hit
+    /// boxes during the draw is that no second copy of the geometry exists to
+    /// disagree with the first.
+    fn centre_of(dialog: &FileDialog, target: DialogTarget) -> (f32, f32) {
+        let frame = dialog.frame(W, H);
+        let rect = frame
+            .rect_of(|t| *t == target)
+            .unwrap_or_else(|| panic!("{target:?} should have been drawn"));
+        rect.centre()
+    }
+
+    fn click_at(dialog: &mut FileDialog, x: f32, y: f32) -> DialogAction {
+        dialog.handle_mouse(&press_at(x, y), W, H)
+    }
+
+    fn press_at(x: f32, y: f32) -> MouseEvent {
+        MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }
+    }
+
+    fn click(dialog: &mut FileDialog, target: DialogTarget) -> DialogAction {
+        let (x, y) = centre_of(dialog, target);
+        click_at(dialog, x, y)
+    }
 
     #[test]
     fn test_open_dialog_creation() {
@@ -1537,7 +2176,7 @@ mod tests {
             modifiers: crate::event::Modifiers::NONE,
             text: String::new(),
         };
-        let action = dialog.handle_event(&event);
+        let action = dialog.handle_event(&event, H);
         assert_eq!(action, DialogAction::Cancelled);
         assert!(dialog.is_cancelled());
     }
@@ -1575,14 +2214,14 @@ mod tests {
             modifiers: crate::event::Modifiers::NONE,
             text: String::new(),
         };
-        dialog.handle_event(&down);
+        dialog.handle_event(&down, H);
         assert_eq!(dialog.selected_index(), Some(1));
 
-        dialog.handle_event(&down);
+        dialog.handle_event(&down, H);
         assert_eq!(dialog.selected_index(), Some(2));
 
         // Should clamp at the end.
-        dialog.handle_event(&down);
+        dialog.handle_event(&down, H);
         assert_eq!(dialog.selected_index(), Some(2));
 
         let up = KeyEvent {
@@ -1591,7 +2230,7 @@ mod tests {
             modifiers: crate::event::Modifiers::NONE,
             text: String::new(),
         };
-        dialog.handle_event(&up);
+        dialog.handle_event(&up, H);
         assert_eq!(dialog.selected_index(), Some(1));
     }
 
@@ -1725,24 +2364,24 @@ mod tests {
                 extension: String::new(),
             },
         ]);
-        dialog.move_selection(1);
+        dialog.move_selection(1, H);
         assert_eq!(dialog.selected_index, Some(1));
         // Far past either end, including a delta that would overflow the
         // signed arithmetic the old implementation used.
-        dialog.move_selection(isize::MAX);
+        dialog.move_selection(isize::MAX, H);
         assert_eq!(dialog.selected_index, Some(1));
-        dialog.move_selection(isize::MIN);
+        dialog.move_selection(isize::MIN, H);
         assert_eq!(dialog.selected_index, Some(0));
-        dialog.move_selection(-1);
+        dialog.move_selection(-1, H);
         assert_eq!(dialog.selected_index, Some(0));
     }
 
     #[test]
     fn moving_the_selection_in_an_empty_list_selects_nothing() {
         let mut dialog = FileDialog::open();
-        dialog.move_selection(1);
+        dialog.move_selection(1, H);
         assert_eq!(dialog.selected_index, None);
-        dialog.move_selection(-1);
+        dialog.move_selection(-1, H);
         assert_eq!(dialog.selected_index, None);
     }
 
@@ -1861,5 +2500,579 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).expect("remove the fixture");
+    }
+
+    // --- Mouse ---
+
+    #[test]
+    fn clicking_a_row_selects_it_without_opening_it() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+
+        let action = click(&mut dialog, DialogTarget::Entry(1));
+
+        assert_eq!(dialog.selected_index(), Some(1));
+        assert_eq!(
+            action,
+            DialogAction::None,
+            "one click picks; it takes a second one, or Open, to act"
+        );
+        assert_eq!(dialog.current_path(), "/docs");
+    }
+
+    #[test]
+    fn double_clicking_a_directory_navigates_into_it() {
+        let mut dialog = FileDialog::open().with_initial_path("/home");
+        dialog.set_entries(vec![dir("projects"), file("notes.txt")]);
+
+        let (x, y) = centre_of(&dialog, DialogTarget::Entry(0));
+        let action = dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::DoubleClick(MouseButton::Left),
+            },
+            W,
+            H,
+        );
+
+        assert_eq!(
+            action,
+            DialogAction::NavigatedTo(String::from("/home/projects"))
+        );
+        assert_eq!(dialog.current_path(), "/home/projects");
+    }
+
+    #[test]
+    fn double_clicking_a_file_opens_it() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("notes.txt")]);
+
+        let (x, y) = centre_of(&dialog, DialogTarget::Entry(0));
+        let action = dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::DoubleClick(MouseButton::Left),
+            },
+            W,
+            H,
+        );
+
+        assert_eq!(
+            action,
+            DialogAction::Selected(String::from("/docs/notes.txt")),
+            "a double-click has to open the row it landed on even if no press \
+             selected it first — the host may send only the double-click"
+        );
+    }
+
+    #[test]
+    fn clicking_cancel_cancels() {
+        let mut dialog = FileDialog::open();
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Cancel),
+            DialogAction::Cancelled
+        );
+        assert!(dialog.is_cancelled());
+    }
+
+    #[test]
+    fn clicking_open_returns_the_selected_file() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("a.txt"), file("b.txt")]);
+        click(&mut dialog, DialogTarget::Entry(1));
+
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Confirm),
+            DialogAction::Selected(String::from("/docs/b.txt"))
+        );
+    }
+
+    #[test]
+    fn clicking_open_with_nothing_picked_does_nothing() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("a.txt")]);
+
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Confirm),
+            DialogAction::None,
+            "a disabled Open button must still swallow the click, but must not act"
+        );
+        assert!(!dialog.is_cancelled());
+    }
+
+    #[test]
+    fn clicking_up_navigates_and_reports_it() {
+        let mut dialog = FileDialog::open().with_initial_path("/home/user/docs");
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Up),
+            DialogAction::NavigatedTo(String::from("/home/user"))
+        );
+    }
+
+    #[test]
+    fn clicking_up_at_the_root_reports_no_move() {
+        let mut dialog = FileDialog::open().with_initial_path("/");
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Up),
+            DialogAction::None,
+            "claiming a move that did not happen costs the host a pointless read"
+        );
+    }
+
+    #[test]
+    fn clicking_back_at_the_start_of_the_session_still_reports_the_move() {
+        // The history is emptied by this very step, so an implementation that
+        // asks "is there history left?" afterwards concludes nothing happened
+        // and leaves the previous directory's files under the new name.
+        let mut dialog = FileDialog::open().with_initial_path("/home");
+        click(&mut dialog, DialogTarget::Up);
+        assert_eq!(dialog.current_path(), "/");
+
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Back),
+            DialogAction::NavigatedTo(String::from("/home"))
+        );
+    }
+
+    #[test]
+    fn clicking_a_sidebar_shortcut_navigates_there() {
+        let mut dialog = FileDialog::open().with_initial_path("/");
+        let expected = dialog.quick_access[1].path.clone();
+
+        assert_eq!(
+            click(&mut dialog, DialogTarget::Shortcut(1)),
+            DialogAction::NavigatedTo(expected.clone())
+        );
+        assert_eq!(dialog.current_path(), expected);
+    }
+
+    #[test]
+    fn clicking_a_header_re_sorts_and_keeps_the_picked_file() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![
+            DirEntry {
+                size: 300,
+                ..file("a.txt")
+            },
+            DirEntry {
+                size: 100,
+                ..file("b.txt")
+            },
+            DirEntry {
+                size: 200,
+                ..file("c.txt")
+            },
+        ]);
+        // Picked by name order: a, b, c -> row 0 is "a.txt".
+        click(&mut dialog, DialogTarget::Entry(0));
+
+        click(&mut dialog, DialogTarget::Header(SortColumn::Size));
+
+        let order: Vec<&str> = dialog.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            order,
+            ["b.txt", "c.txt", "a.txt"],
+            "the header has to reorder the listing, not just move its arrow"
+        );
+        assert_eq!(
+            dialog.selected_index(),
+            Some(2),
+            "the selection follows the file, not the row number"
+        );
+        assert_eq!(
+            dialog.confirm().as_deref(),
+            Some("/docs/a.txt"),
+            "so sorting cannot change which file Open opens"
+        );
+    }
+
+    // --- Scrolling ---
+
+    /// A listing long enough to have a tail below the fold at `H`.
+    fn long_listing() -> Vec<DirEntry> {
+        (0..30).map(|i| file(&format!("f{i:02}.txt"))).collect()
+    }
+
+    #[test]
+    fn everything_that_fits_gets_no_scrollbar() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(vec![file("a.txt"), file("b.txt")]);
+        let frame = dialog.frame(W, H);
+
+        assert!(
+            frame.rect_of(|t| *t == DialogTarget::ScrollTrack).is_none(),
+            "a scrollbar with nothing to scroll is a control that does nothing"
+        );
+    }
+
+    #[test]
+    fn the_wheel_reaches_the_rows_below_the_fold() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(long_listing());
+
+        let before = dialog.frame(W, H);
+        assert!(
+            before.rect_of(|t| *t == DialogTarget::Entry(29)).is_none(),
+            "the last row starts out below the fold, or this test proves nothing"
+        );
+
+        for _ in 0..10 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                },
+                W,
+                H,
+            );
+        }
+
+        let after = dialog.frame(W, H);
+        assert!(
+            after.rect_of(|t| *t == DialogTarget::Entry(29)).is_some(),
+            "scrolling to the end has to bring the last row on screen"
+        );
+        assert!(
+            after.rect_of(|t| *t == DialogTarget::Entry(0)).is_none(),
+            "and take the first one off it"
+        );
+    }
+
+    #[test]
+    fn the_wheel_stops_at_the_end_rather_than_scrolling_into_nothing() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        let capacity = FileDialog::row_capacity(H);
+
+        for _ in 0..50 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                },
+                W,
+                H,
+            );
+        }
+
+        let rows = dialog.visible_rows(H);
+        assert_eq!(
+            rows.start,
+            30 - capacity,
+            "the last page is the end of the list, not a screen of blank"
+        );
+        assert_eq!(rows.end, 30);
+    }
+
+    #[test]
+    fn a_row_clicked_after_scrolling_is_the_row_that_was_drawn_there() {
+        // The bug class this whole design exists to prevent: hit-testing
+        // against geometry recomputed without the scroll offset picks the row
+        // that *would* be there if the list had never moved.
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        for _ in 0..2 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                },
+                W,
+                H,
+            );
+        }
+        let first = dialog.visible_rows(H).start;
+        assert!(first > 0, "the list has to have actually scrolled");
+
+        // Aim at the topmost drawn row by its pixels, and check the dialog
+        // agrees about which entry lives there.
+        let rect = dialog
+            .frame(W, H)
+            .rect_of(|t| *t == DialogTarget::Entry(first))
+            .expect("the first visible row is drawn");
+        let (x, y) = rect.centre();
+        click_at(&mut dialog, x, y);
+
+        assert_eq!(dialog.selected_index(), Some(first));
+    }
+
+    #[test]
+    fn dragging_the_thumb_scrolls_the_list() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+
+        let (x, y) = centre_of(&dialog, DialogTarget::ScrollThumb);
+        click_at(&mut dialog, x, y);
+        assert!(
+            dialog.thumb_grab.is_some(),
+            "the press has to take the grab"
+        );
+
+        // Drag far past the bottom of the track; the offset clamps to the end.
+        dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y: y + H,
+                kind: MouseEventKind::Move,
+            },
+            W,
+            H,
+        );
+        assert_eq!(dialog.visible_rows(H).end, 30);
+
+        dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y: y - H,
+                kind: MouseEventKind::Move,
+            },
+            W,
+            H,
+        );
+        assert_eq!(dialog.visible_rows(H).start, 0);
+
+        dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Release(MouseButton::Left),
+            },
+            W,
+            H,
+        );
+        assert!(
+            dialog.thumb_grab.is_none(),
+            "releasing has to drop the grab"
+        );
+    }
+
+    #[test]
+    fn a_move_without_a_grab_does_not_scroll() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+
+        dialog.handle_mouse(
+            &MouseEvent {
+                x: W - 5.0,
+                y: H - 60.0,
+                kind: MouseEventKind::Move,
+            },
+            W,
+            H,
+        );
+
+        assert_eq!(
+            dialog.visible_rows(H).start,
+            0,
+            "the pointer merely passing over the scrollbar must not move it"
+        );
+    }
+
+    #[test]
+    fn clicking_the_track_pages_towards_the_click() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        let capacity = FileDialog::row_capacity(H);
+
+        let track = dialog
+            .frame(W, H)
+            .rect_of(|t| *t == DialogTarget::ScrollTrack)
+            .expect("a long listing has a scrollbar");
+        // Below the thumb, which sits at the top.
+        click_at(&mut dialog, track.centre().0, track.y + track.h - 1.0);
+
+        assert_eq!(dialog.visible_rows(H).start, capacity);
+    }
+
+    #[test]
+    fn the_thumb_sits_at_the_end_when_the_list_is_at_its_end() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        for _ in 0..50 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                },
+                W,
+                H,
+            );
+        }
+
+        let frame = dialog.frame(W, H);
+        let track = frame
+            .rect_of(|t| *t == DialogTarget::ScrollTrack)
+            .expect("track");
+        let thumb = frame
+            .rect_of(|t| *t == DialogTarget::ScrollThumb)
+            .expect("thumb");
+        assert!(
+            (thumb.y + thumb.h - (track.y + track.h)).abs() < 0.5,
+            "a thumb held to a minimum height still has to reach the bottom: \
+             {thumb:?} in {track:?}"
+        );
+    }
+
+    #[test]
+    fn keyboard_selection_scrolls_the_list_to_follow_it() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        let down = KeyEvent {
+            key: Key::Down,
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: String::new(),
+        };
+        for _ in 0..29 {
+            dialog.handle_event(&down, H);
+        }
+
+        assert_eq!(dialog.selected_index(), Some(29));
+        let rows = dialog.visible_rows(H);
+        assert!(
+            rows.contains(&29),
+            "walking off the bottom edge has to bring the list with it: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_wheel_may_scroll_away_from_the_selection() {
+        // Reveal is a consequence of *moving* the selection, not something
+        // render re-imposes: if it were the latter, every wheel notch would be
+        // undone by the next frame and the wheel would do nothing at all.
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        dialog.handle_event(
+            &KeyEvent {
+                key: Key::End,
+                pressed: true,
+                modifiers: crate::event::Modifiers::NONE,
+                text: String::new(),
+            },
+            H,
+        );
+        assert_eq!(dialog.selected_index(), Some(29));
+
+        for _ in 0..50 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: 3.0 },
+                },
+                W,
+                H,
+            );
+        }
+
+        assert_eq!(dialog.visible_rows(H).start, 0);
+        assert_eq!(
+            dialog.selected_index(),
+            Some(29),
+            "scrolling away from the selection must not change it"
+        );
+    }
+
+    #[test]
+    fn navigating_rewinds_the_scroll() {
+        let mut dialog = FileDialog::open().with_initial_path("/a");
+        dialog.set_entries(long_listing());
+        for _ in 0..5 {
+            dialog.handle_mouse(
+                &MouseEvent {
+                    x: W / 2.0,
+                    y: H / 2.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                },
+                W,
+                H,
+            );
+        }
+        assert!(dialog.visible_rows(H).start > 0);
+
+        click(&mut dialog, DialogTarget::Up);
+        dialog.set_entries(vec![file("only.txt")]);
+
+        assert_eq!(dialog.visible_rows(H).start, 0);
+        assert_eq!(dialog.selected_index(), None);
+    }
+
+    // --- Modality ---
+
+    #[test]
+    fn a_click_outside_the_dialog_is_swallowed() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("a.txt")]);
+
+        assert_eq!(
+            click_at(&mut dialog, W + 40.0, H + 40.0),
+            DialogAction::None,
+            "a modal that let the window behind it be clicked would only look modal"
+        );
+        assert!(!dialog.is_cancelled(), "and must not dismiss itself either");
+    }
+
+    #[test]
+    fn a_click_on_dead_chrome_is_swallowed() {
+        let mut dialog = FileDialog::open().with_initial_path("/docs");
+        dialog.set_entries(vec![file("a.txt")]);
+        // The toolbar strip to the right of the address bar acts on nothing.
+        assert_eq!(click_at(&mut dialog, W - 2.0, 2.0), DialogAction::None);
+        assert_eq!(dialog.selected_index(), None);
+    }
+
+    #[test]
+    fn every_control_the_frame_draws_is_reachable() {
+        // A hit box recorded but clipped away is a control the user can see and
+        // cannot press. `Frame` drops those, so asking the frame is the check.
+        let mut dialog = FileDialog::save().with_initial_path("/docs");
+        dialog.set_entries(long_listing());
+        let frame = dialog.frame(W, H);
+
+        for target in [
+            DialogTarget::Back,
+            DialogTarget::Forward,
+            DialogTarget::Up,
+            DialogTarget::AddressBar,
+            DialogTarget::Shortcut(0),
+            DialogTarget::Header(SortColumn::Name),
+            DialogTarget::Header(SortColumn::Size),
+            DialogTarget::Header(SortColumn::Modified),
+            DialogTarget::Entry(0),
+            DialogTarget::List,
+            DialogTarget::ScrollTrack,
+            DialogTarget::ScrollThumb,
+            DialogTarget::FilenameInput,
+            DialogTarget::Confirm,
+            DialogTarget::Cancel,
+            DialogTarget::Chrome,
+        ] {
+            assert!(
+                frame.rect_of(|t| *t == target).is_some(),
+                "{target:?} should be reachable"
+            );
+        }
+        assert!(frame.is_balanced(), "every clip has to be closed");
+    }
+
+    #[test]
+    fn the_address_bar_swallows_its_click_without_acting() {
+        let mut dialog = FileDialog::open().with_initial_path("/home/user");
+
+        assert_eq!(
+            click(&mut dialog, DialogTarget::AddressBar),
+            DialogAction::None
+        );
+        assert_eq!(
+            dialog.current_path(),
+            "/home/user",
+            "it is not editable yet, but it must not fall through to the list"
+        );
     }
 }

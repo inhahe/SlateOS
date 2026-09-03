@@ -144,8 +144,12 @@ def _executable_lines(text: str) -> list[str]:
     return [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
 
 
-def analyse(path: Path) -> tuple[set[str], list[str]]:
-    """Return (gates this file runs, `run_checker` calls we could not resolve).
+def analyse(path: Path) -> tuple[set[str], set[str], list[str]]:
+    """Return (gates run, gates self-tested, calls we could not resolve).
+
+    The first two are deliberately separate. Running a gate's own cases is not
+    running the gate, and conflating them certified a deleted check as present
+    -- see the comment at the `_SELFTEST_FLAG` test below.
 
     Unresolved calls are returned rather than dropped -- see the module
     docstring, "THE CONSERVATIVE DIRECTION".
@@ -153,10 +157,11 @@ def analyse(path: Path) -> tuple[set[str], list[str]]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        return set(), [f"{path}: could not be read: {exc}"]
+        return set(), set(), [f"{path}: could not be read: {exc}"]
 
     bound: dict[str, str] = {}
     runs: set[str] = set()
+    selftested: set[str] = set()
     unresolved: list[str] = []
 
     for line in _executable_lines(text):
@@ -184,23 +189,27 @@ def analyse(path: Path) -> tuple[set[str], list[str]]:
         #
         # Both spellings are in use here (`--selftest` and `--self-test`), so
         # match both rather than picking one and quietly missing the other.
-        if _SELFTEST_FLAG.search(line):
-            continue
-
         literal = _ANY_SCRIPT.findall(line)
-        if literal:
-            runs.update(n for n in literal if _GATE.fullmatch(n))
+        named = ([] if literal
+                 else [bound[v] for v in _VARREF.findall(line) if v in bound])
+        scripts = [n for n in (literal or named) if _GATE.fullmatch(n)]
+
+        if _SELFTEST_FLAG.search(line):
+            # Recorded separately, never as wiring. A gate's own cases are not
+            # the gate -- see above. But whether they run at all is its own
+            # question, and an unrun self-test rots in exactly the way a self-
+            # test exists to prevent.
+            selftested.update(scripts)
             continue
 
-        named = [bound[v] for v in _VARREF.findall(line) if v in bound]
-        if named:
-            runs.update(n for n in named if _GATE.fullmatch(n))
+        if literal or named:
+            runs.update(scripts)
             continue
 
         unresolved.append(f"{path.name}: cannot tell what this runs: "
                           f"{line.strip()[:110]}")
 
-    return runs, unresolved
+    return runs, selftested, unresolved
 
 
 def audit(root: Path,
@@ -219,6 +228,7 @@ def audit(root: Path,
     notes: list[str] = []
 
     wired: set[str] = set()
+    selftested: set[str] = set()
     for rel in CALLERS:
         caller = root / rel
         if not caller.is_file():
@@ -228,10 +238,12 @@ def audit(root: Path,
             findings.append(f"{rel.as_posix()}: missing -- cannot tell what "
                             f"it runs")
             continue
-        runs, unresolved = analyse(caller)
+        runs, tested, unresolved = analyse(caller)
         wired |= runs
+        selftested |= tested
         findings.extend(unresolved)
-        notes.append(f"{rel.as_posix()}: runs {len(runs)} gate(s)")
+        notes.append(f"{rel.as_posix()}: runs {len(runs)} gate(s), "
+                     f"self-tests {len(tested)}")
 
     gates = sorted(p.name for p in (root / "scripts").glob("check-*.py"))
     if not gates:
@@ -258,8 +270,33 @@ def audit(root: Path,
                 f"Remove the PINNED entry -- a stale exemption stops "
                 f"describing the tree.")
 
+    # Third arm: a gate that ships its own cases, is wired, and whose cases
+    # nothing runs. That is not a wiring gap, it is a rotting one -- a
+    # self-test only stays honest while something executes it. The concrete
+    # case: check-gates-can-refuse.py's first version was green and wrong, and
+    # only its own cases (run every time) would have caught the regression.
+    #
+    # Reported only for gates that ARE wired. For an unwired gate the unrun
+    # self-test is a consequence of the wiring finding above, and saying it
+    # twice trains the reader to skim.
+    for g in gates:
+        if g in unwired or g in selftested:
+            continue
+        try:
+            text = (root / "scripts" / g).read_text(encoding="utf-8",
+                                                    errors="replace")
+        except OSError as exc:
+            findings.append(f"{g}: could not be read: {exc}")
+            continue
+        if _SELFTEST_FLAG.search(text):
+            findings.append(
+                f"{g}: ships a self-test that nothing runs. Add a "
+                f"`run_checker {g[:-3]}-selftest ... --self-test` call beside "
+                f"the gate's own call, so a scanner that has stopped scanning "
+                f"is reported as one.")
+
     notes.append(f"{len(gates)} gate(s); {len(unwired)} unwired, "
-                 f"{len(pinned)} pinned")
+                 f"{len(pinned)} pinned; {len(selftested)} self-tested")
     return findings, notes
 
 
@@ -296,7 +333,7 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         caller = Path(tmp) / "fixture.sh"
         caller.write_text(_FIXTURE_CALLER, encoding="utf-8")
-        runs, unresolved = analyse(caller)
+        runs, tested, unresolved = analyse(caller)
 
         # Each of these was a real wrong answer before this file existed.
         check("check-literal.py" in runs, "a literal path must count as wiring")
@@ -324,6 +361,9 @@ def selftest() -> int:
               "the --self-test spelling must not count either")
         check(not any("selftest" in u for u in unresolved),
               "a self-test call is skipped deliberately, not unresolved")
+        check(tested == {"check-selftest-only.py",
+                         "check-hyphen-selftest-only.py"},
+              f"self-test calls must be recorded separately, got {tested!r}")
 
         # The exit-code contract, asserted rather than assumed: this file's
         # own bug would be reporting a finding and exiting 0.
@@ -375,6 +415,30 @@ def selftest() -> int:
             check(run(["x"]) == 0,
                   "wiring the gate must clear it -- otherwise this reports "
                   "everything and discriminates nothing")
+
+            # Third arm: the gate is wired, ships a self-test, and nothing
+            # runs it. Live case when this was written: check-option-refusal.py.
+            (fake / "scripts" / "check-orphan.py").write_text(
+                'if "--self-test" in sys.argv:\n    pass\n', encoding="utf-8")
+            check(any("nothing runs" in f
+                      for f in audit(fake, {})[0]),
+                  "a wired gate whose self-test nothing runs must be reported")
+
+            (fake / "scripts" / "boot-test.sh").write_text(
+                'run_checker orphan "$py" "$r/scripts/check-orphan.py"\n'
+                'run_checker orphan-selftest "$py" '
+                '"$r/scripts/check-orphan.py" --self-test\n',
+                encoding="utf-8")
+            check(run(["x"]) == 0,
+                  "adding the self-test call must clear it")
+
+            # And the arm must not fire for an unwired gate, where it would
+            # merely restate the wiring finding.
+            (fake / "scripts" / "boot-test.sh").write_text("", encoding="utf-8")
+            found = audit(fake, {})[0]
+            check(not any("nothing runs it. Add" in f or
+                          "ships a self-test" in f for f in found),
+                  "an unwired gate's unrun self-test must not be said twice")
         finally:
             sys.argv = real_argv
 

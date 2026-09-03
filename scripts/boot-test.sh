@@ -3429,6 +3429,22 @@ check_option_refusal() {
         return 0
     fi
 
+    # Its own cases first.  This gate shipped a `--self-test` that nothing ran
+    # -- found 2026-09-02 by check-gates-are-wired.py, which is the only reason
+    # anyone looked.  A self-test only stays honest while something executes
+    # it; unrun, it is a file that describes a scanner rather than tests one.
+    # This scanner reads Rust source, so its failure mode is the usual silent
+    # one: lose the parse and it reports no findings, which is spelled exactly
+    # like a clean kshell.rs.
+    if ! run_checker check-option-refusal-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-option-refusal.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The option-refusal scanner fails its" >&2
+        echo "own fixtures, so its verdict on kshell.rs is worthless -- and it" >&2
+        echo "fails by reporting nothing, which reads as a clean tree." >&2
+        return 1
+    fi
+
     echo "=== Checking that an option word is refused, not discarded ==="
     if run_checker check-option-refusal "$py" "$PROJECT_ROOT/scripts/check-option-refusal.py"; then
         return 0

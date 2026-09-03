@@ -1082,6 +1082,19 @@ impl ArchiveModel {
         self.rebuild_tree();
     }
 
+    /// Replace the entry list wholesale, bringing the totals and the tree with
+    /// it.
+    ///
+    /// The undo half of a refused save: the rows are put back exactly as they
+    /// were, ids included, so the source still knows every one of them. Assigning
+    /// `entries` directly would leave the sidebar tree and the size totals
+    /// describing the list from before the restore.
+    pub fn set_entries(&mut self, entries: Vec<ArchiveEntry>) {
+        self.entries = entries;
+        self.recalculate_stats();
+        self.rebuild_tree();
+    }
+
     /// Recalculate aggregate stats from current entries.
     pub fn recalculate_stats(&mut self) {
         self.total_size = 0;
@@ -1249,6 +1262,10 @@ pub enum DialogPurpose {
     ExtractAll,
     /// A folder to extract the selected members into.
     ExtractSelected,
+    /// A path for a new, empty archive.
+    NewArchive,
+    /// A file to add to the open archive.
+    AddFile,
 }
 
 impl DialogPurpose {
@@ -1260,6 +1277,8 @@ impl DialogPurpose {
             Self::OpenArchive => "Open archive",
             Self::ExtractAll => "Extract all — choose a folder",
             Self::ExtractSelected => "Extract selected — choose a folder",
+            Self::NewArchive => "New archive — choose where to put it",
+            Self::AddFile => "Add a file to this archive",
         }
     }
 }
@@ -1628,6 +1647,19 @@ fn new_frame(width: f32, height: f32) -> Frame {
 // UI rendering
 // ============================================================================
 
+/// Whether anything in the open archive is selected.
+///
+/// Split out because both [`toolbar_enabled`] and the message explaining why a
+/// disabled button did nothing ask it, and a second copy of the predicate is a
+/// second chance for the button and its explanation to disagree.
+#[must_use]
+pub fn has_selection(state: &AppState) -> bool {
+    state
+        .archive
+        .as_ref()
+        .is_some_and(|a| a.entries.iter().any(|e| e.selected))
+}
+
 /// Whether `action` is available in `state`.
 ///
 /// The renderer greys the button out with this and the click handler refuses
@@ -1636,14 +1668,19 @@ fn new_frame(width: f32, height: f32) -> Frame {
 #[must_use]
 pub fn toolbar_enabled(state: &AppState, action: ToolbarAction) -> bool {
     let has_archive = state.archive.is_some();
-    let has_selection = state
-        .archive
-        .as_ref()
-        .is_some_and(|a| a.entries.iter().any(|e| e.selected));
+    let has_selection = has_selection(state);
+    // Writing rebuilds the archive out of the bytes it was read from, so a
+    // model built by hand — the tests do that, and so does an empty model —
+    // has rows but nothing to rebuild from. Disabled rather than left to fail
+    // at the end: the two write actions are the only ones that could destroy
+    // something, and a button that cannot do its job should not look ready.
+    let can_write = state.archive.as_ref().is_some_and(|a| a.source.is_some());
     match action {
         ToolbarAction::Open | ToolbarAction::New => true,
-        ToolbarAction::ExtractAll | ToolbarAction::Add | ToolbarAction::Test => has_archive,
-        ToolbarAction::ExtractSelected | ToolbarAction::Delete => has_selection,
+        ToolbarAction::ExtractAll | ToolbarAction::Test => has_archive,
+        ToolbarAction::Add => can_write,
+        ToolbarAction::ExtractSelected => has_selection,
+        ToolbarAction::Delete => has_selection && can_write,
     }
 }
 
@@ -2765,7 +2802,14 @@ impl AppState {
                 "{} is unavailable — {}",
                 action.label(),
                 match action {
-                    ToolbarAction::ExtractSelected | ToolbarAction::Delete => "nothing is selected",
+                    ToolbarAction::ExtractSelected => "nothing is selected",
+                    ToolbarAction::Delete if !has_selection(self) => "nothing is selected",
+                    // Both write actions land here for the same reason, and it
+                    // is not "no archive is open" — one may well be, just not
+                    // one read from a file.
+                    ToolbarAction::Add | ToolbarAction::Delete if self.archive.is_some() => {
+                        "this archive was not read from a file"
+                    }
                     _ => "no archive is open",
                 }
             );
@@ -2784,13 +2828,35 @@ impl AppState {
                     })
                     .unwrap_or_default();
                 let count = paths.len();
+                // Taken before the removal, and used only if the save is
+                // refused. See `save`: the file is untouched on that path, so
+                // the rows have to come back or the window describes an archive
+                // that still contains them.
+                let undo = self
+                    .archive
+                    .as_ref()
+                    .map(|a| a.entries.clone())
+                    .unwrap_or_default();
                 if let Some(archive) = &mut self.archive {
                     archive.remove_entries(&paths);
                 }
                 // A removed entry cannot stay the cursor.
                 self.hovered_entry = None;
-                self.status_message =
-                    format!("Removed {count} entr{} from the list", plural(count));
+                // Removing from the list is half the operation, and on its own
+                // it is the misleading half: the user asked to delete files
+                // from an archive, and a message saying they were removed
+                // "from the list" is true about the wrong noun. The save is
+                // what makes Delete mean what the button says. It can refuse —
+                // an archive with an encrypted member cannot be rewritten by
+                // this build without losing it — and when it does, the rows
+                // are put back.
+                if self.save(undo, Vec::new()) {
+                    self.status_message = format!(
+                        "Deleted {count} entr{} — {}",
+                        plural(count),
+                        self.status_message
+                    );
+                }
                 Action::Redraw
             }
             ToolbarAction::Open => {
@@ -2806,16 +2872,12 @@ impl AppState {
                 self.open_dialog(DialogPurpose::ExtractSelected);
                 Action::Redraw
             }
-            // Creating and adding need a *writer* that can rebuild an archive
-            // around an existing file, which this build does not have: it
-            // reads archives. Saying which half is missing is the difference
-            // between a button that is not finished and a program that has
-            // stopped responding.
-            other @ (ToolbarAction::New | ToolbarAction::Add) => {
-                self.status_message = format!(
-                    "{}: this build reads archives, it cannot write them",
-                    other.label()
-                );
+            ToolbarAction::New => {
+                self.open_dialog(DialogPurpose::NewArchive);
+                Action::Redraw
+            }
+            ToolbarAction::Add => {
+                self.open_dialog(DialogPurpose::AddFile);
                 Action::Redraw
             }
         }
@@ -2858,6 +2920,14 @@ impl AppState {
             DialogPurpose::ExtractAll | DialogPurpose::ExtractSelected => {
                 FileDialog::select_folder().with_initial_path(&start)
             }
+            DialogPurpose::NewArchive => FileDialog::save()
+                .with_filter("Archives", &["*.zip"])
+                .with_initial_path(&start)
+                .with_filename("archive.zip"),
+            // No filter: anything on the disk can go *into* an archive, and a
+            // `*.zip` filter here would be the Open dialog's rule applied to
+            // the opposite question.
+            DialogPurpose::AddFile => FileDialog::open().with_initial_path(&start),
         };
         dialog.set_entries(list_directory(&start));
         self.choosing = Some(PendingChoice { purpose, dialog });
@@ -2893,10 +2963,125 @@ impl AppState {
     /// Act on the path the dialog came back with.
     fn finish_choice(&mut self, purpose: DialogPurpose, path: &str) {
         match purpose {
-            DialogPurpose::OpenArchive => self.open_path(Path::new(path)),
+            // The answer is for `save`, which has a stale list to worry about.
+            // Opening a file the user just named has nothing to fall back to.
+            DialogPurpose::OpenArchive => drop(self.open_path(Path::new(path))),
             DialogPurpose::ExtractAll => self.extract(Path::new(path), false),
             DialogPurpose::ExtractSelected => self.extract(Path::new(path), true),
+            DialogPurpose::NewArchive => self.create_archive(Path::new(path)),
+            DialogPurpose::AddFile => self.add_file(Path::new(path)),
         }
+    }
+
+    /// Write an empty archive at `path` and open it.
+    ///
+    /// Opening it afterwards is not a convenience: it is what makes the rest
+    /// of the program's state come from the file rather than from a guess
+    /// about what was just written. Every later Add and Delete rewrites *that*
+    /// file, so a model built in memory here would be a second answer to the
+    /// question of what the archive contains.
+    fn create_archive(&mut self, path: &Path) {
+        match backend::create_empty(path) {
+            // A file that was written and then would not read back is a real
+            // possibility — a path on a share that went away between the two —
+            // and `open_path` has already said why. "Created" over the top of
+            // that would leave the window empty with a success on the status
+            // line, which reads as "the new archive is open" and is not.
+            Ok(()) if self.open_path(path) => {
+                self.status_message = format!("Created {}", path.display());
+            }
+            Ok(()) => {}
+            Err(e) => self.status_message = format!("Cannot create {}: {e}", path.display()),
+        }
+    }
+
+    /// Read `path` and save it into the open archive.
+    fn add_file(&mut self, path: &Path) {
+        let add = match backend::read_for_add(path) {
+            Ok(a) => a,
+            Err(e) => {
+                self.status_message = format!("Cannot add {}: {e}", path.display());
+                return;
+            }
+        };
+        if let Some(dir) = path.parent().and_then(|p| p.to_str()) {
+            self.last_directory = dir.to_string();
+        }
+        // Add edits nothing before saving, so the list it would restore is the
+        // list already on screen — the undo is a no-op here, and passing it
+        // anyway keeps `save` with one shape rather than two.
+        let undo = self
+            .archive
+            .as_ref()
+            .map(|a| a.entries.clone())
+            .unwrap_or_default();
+        self.save(undo, vec![add]);
+    }
+
+    /// Rewrite the open archive from the current entry list, with `adding`
+    /// folded in.
+    ///
+    /// `undo` is the entry list as it stood *before* the caller edited it.
+    /// Passing it in rather than re-reading the file on failure is deliberate:
+    /// a refused save leaves the archive on disk exactly as it was, so the list
+    /// has to go back too, and a re-read is the one recovery that cannot be
+    /// relied on here — the write failed, and the likeliest reason (a removed
+    /// drive, a vanished file) is one that would fail the read as well. A
+    /// restore from memory cannot fail, so the window can never end up
+    /// describing an archive the file does not contain.
+    ///
+    /// On success the archive *is* re-read, and that is the point: `backend::save`
+    /// re-compresses every member, so the sizes, ratios and compressed totals on
+    /// screen are stale the moment it returns, an added member has no row yet,
+    /// and every member's id is newly assigned by the parse. Showing the file
+    /// rather than predicting it is what keeps the ids on screen usable for the
+    /// next save.
+    ///
+    /// Returns whether the file on disk was replaced.
+    fn save(&mut self, undo: Vec<ArchiveEntry>, adding: Vec<backend::PendingAdd>) -> bool {
+        let Some(archive) = self.archive.as_ref() else {
+            self.status_message = String::from("There is no archive open to save");
+            return false;
+        };
+        let path = archive.path.clone();
+        let report = match backend::save(archive, adding) {
+            Ok(report) => report,
+            Err(e) => {
+                if let Some(archive) = self.archive.as_mut() {
+                    archive.set_entries(undo);
+                }
+                self.hovered_entry = None;
+                self.status_message = format!("Not saved — {e}");
+                return false;
+            }
+        };
+
+        // Keep the user where they were: `open_path` resets the directory, the
+        // history and the scroll, which is right for a different archive and
+        // wrong for this one a moment older.
+        let (dir, scroll, tree_scroll) = (
+            self.current_dir.clone(),
+            self.list_scroll_y,
+            self.tree_scroll_y,
+        );
+        let reopened = self.open_path(&path);
+        // A failed re-read leaves `open_path`'s own message in place and the
+        // pre-save list on screen. Saying "Saved" over the top of that would
+        // describe the file correctly and the window wrongly, so the message
+        // says both: the write happened, the view is behind.
+        self.status_message = if reopened {
+            self.current_dir = dir;
+            self.list_scroll_y = scroll;
+            self.tree_scroll_y = tree_scroll;
+            report.summary(&path)
+        } else {
+            format!(
+                "{} — but it could not be read back, so this list is out of date. \
+                 Re-open it",
+                report.summary(&path)
+            )
+        };
+        true
     }
 
     /// Read `path` off disk and show it.
@@ -2905,7 +3090,12 @@ impl AppState {
     /// open: the user picked this file by name a moment ago, so "nothing
     /// happened" would be indistinguishable from a hang, and closing what
     /// they already had would punish them for a typo.
-    pub fn open_path(&mut self, path: &Path) {
+    ///
+    /// Returns whether the archive on screen is now the one at `path`. Because
+    /// a failure keeps the previous archive — which after a save is the *same*
+    /// path, one revision older — comparing paths afterwards cannot tell the
+    /// two apart, so the answer has to come from here.
+    pub fn open_path(&mut self, path: &Path) -> bool {
         match backend::open(path) {
             Ok(model) => {
                 if let Some(dir) = path.parent().and_then(|p| p.to_str()) {
@@ -2923,8 +3113,12 @@ impl AppState {
                 // file's verdict under the new file's name.
                 self.test_results = None;
                 self.status_message = self.status_text();
+                true
             }
-            Err(e) => self.status_message = format!("Cannot open {}: {e}", path.display()),
+            Err(e) => {
+                self.status_message = format!("Cannot open {}: {e}", path.display());
+                false
+            }
         }
     }
 
@@ -3450,7 +3644,10 @@ fn main() -> ExitCode {
     // exactly like a real one, and the first thing a user would do is press
     // Extract on files that do not exist.
     match std::env::args_os().nth(1) {
-        Some(arg) => state.open_path(Path::new(&arg)),
+        // A failure has already put its reason in the status line, and the
+        // window still opens: refusing to start because one argument would not
+        // read leaves the user with no way to pick another file.
+        Some(arg) => drop(state.open_path(Path::new(&arg))),
         None => state.status_message = state.status_text(),
     }
     app::launch("archivemanager", &mut state)
@@ -4856,6 +5053,20 @@ mod tests {
         }
     }
 
+    /// [`loaded`], but backed by a real file, and the directory to remove.
+    ///
+    /// The write actions rewrite the archive on disk, so a model whose `path`
+    /// names nothing is one they correctly refuse. Same contents as `loaded`,
+    /// so a test only has to change its fixture and not its assertions.
+    fn loaded_on_disk(tag: &str) -> (PathBuf, AppState) {
+        let dir = write_scratch(tag);
+        let path = dir.join("project.zip");
+        std::fs::write(&path, sample_archive_bytes()).expect("write the fixture");
+        let mut state = AppState::default();
+        assert!(state.open_path(&path), "{}", state.status_message);
+        (dir, state)
+    }
+
     fn click(state: &mut AppState, at: (f32, f32)) -> Action {
         state.handle_click(at.0, at.1, MouseButton::Left, SIZE)
     }
@@ -5108,7 +5319,10 @@ mod tests {
 
     #[test]
     fn delete_removes_exactly_the_selected_entries() {
-        let mut state = loaded();
+        // Backed by a real file, because Delete now rewrites the archive: the
+        // list after it is the list re-read from disk, so this asserts against
+        // what was actually written and not against an in-memory edit.
+        let (dir, mut state) = loaded_on_disk("delete-rows");
         let frame = build_frame(&state, SIZE.0, SIZE.1);
         let (target, rect) = frame
             .hits()
@@ -5118,6 +5332,18 @@ mod tests {
         let Target::FileRow(id) = *target else {
             panic!("non-row")
         };
+        // By path, not by id: the re-read after a save assigns fresh ids, so an
+        // id from before it would be comparing two different numbering schemes.
+        let gone = state
+            .archive
+            .as_ref()
+            .expect("archive")
+            .entries
+            .iter()
+            .find(|e| e.id == id)
+            .expect("the row that was hit")
+            .path
+            .clone();
         click(&mut state, (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0));
         let before = state.archive.as_ref().expect("archive").entries.len();
 
@@ -5128,12 +5354,74 @@ mod tests {
         );
         assert_eq!(click(&mut state, at), Action::Redraw);
         let archive = state.archive.as_ref().expect("archive");
-        assert_eq!(archive.entries.len(), before - 1);
+        assert_eq!(
+            archive.entries.len(),
+            before - 1,
+            "status was {:?}",
+            state.status_message
+        );
         assert!(
-            !archive.entries.iter().any(|e| e.id == id),
+            !archive.entries.iter().any(|e| e.path == gone),
             "the deleted entry is still in the list"
         );
         assert_eq!(state.hovered_entry, None, "cursor left on a deleted row");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_delete_the_archive_will_not_accept_puts_the_rows_back() {
+        // The failure this is really about is the silent one: rows vanish from
+        // the window, the file keeps them, and the user closes the program
+        // believing the deletion happened. The list has to end up describing
+        // the file again — and by restoring from memory, not by re-reading,
+        // since the reason a write failed is often the reason a read would.
+        let dir = write_scratch("delete-refused");
+        let path = dir.join("locked.zip");
+        std::fs::write(&path, sample_archive_bytes()).expect("write the fixture");
+
+        let mut state = AppState::default();
+        assert!(state.open_path(&path), "{}", state.status_message);
+        let before: Vec<String> = state
+            .archive
+            .as_ref()
+            .expect("archive")
+            .entries
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
+
+        // Make the rewrite fail without touching the archive: the rename lands
+        // on a *directory* of that name, which no filesystem will replace with
+        // a file. The bytes the model holds are still the real ones, so the
+        // refusal comes from the write and not from a broken model.
+        std::fs::remove_file(&path).expect("remove the fixture file");
+        std::fs::create_dir(&path).expect("put a directory in its place");
+
+        state.archive.as_mut().expect("archive").select_all();
+        state.run_toolbar(ToolbarAction::Delete);
+
+        let after: Vec<String> = state
+            .archive
+            .as_ref()
+            .expect("archive")
+            .entries
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
+        assert_eq!(after, before, "a refused delete threw the rows away");
+        assert!(
+            state.status_message.contains("Not saved"),
+            "a refused delete must say so rather than reporting a deletion: {:?}",
+            state.status_message
+        );
+        assert!(
+            !state.status_message.starts_with("Deleted"),
+            "status was {:?}",
+            state.status_message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -5325,19 +5613,130 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dest);
     }
 
+    /// A scratch directory nothing else is using, removed by the caller.
+    fn write_scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "archivemanager-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the scratch directory");
+        dir
+    }
+
     #[test]
-    fn creating_and_adding_say_which_half_is_missing() {
-        // "Not yet implemented" tells a user nothing; "this build reads
-        // archives, it cannot write them" tells them not to wait for it.
-        for action in [ToolbarAction::New, ToolbarAction::Add] {
-            let mut state = loaded();
-            state.run_toolbar(action);
-            assert!(
-                state.status_message.contains("cannot write"),
-                "{action:?} said {:?}",
-                state.status_message
-            );
+    fn new_opens_a_save_dialog_and_add_opens_an_open_dialog() {
+        // Both used to say "this build cannot write archives". The assertion
+        // that replaces that one is that each button now reaches the dialog
+        // belonging to its own half — New must not put up a file *chooser*, or
+        // it can only overwrite files that already exist.
+        let dir = write_scratch("dialogs");
+        let path = dir.join("a.zip");
+        std::fs::write(&path, ziparchive::create(&[])).expect("write a fixture");
+
+        let mut state = AppState::default();
+        state.open_path(&path);
+        assert!(state.archive.is_some(), "{}", state.status_message);
+
+        state.run_toolbar(ToolbarAction::New);
+        assert_eq!(
+            state.choosing.as_ref().map(|c| c.purpose),
+            Some(DialogPurpose::NewArchive),
+            "New said {:?}",
+            state.status_message
+        );
+
+        state.choosing = None;
+        state.run_toolbar(ToolbarAction::Add);
+        assert_eq!(
+            state.choosing.as_ref().map(|c| c.purpose),
+            Some(DialogPurpose::AddFile),
+            "Add said {:?}",
+            state.status_message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_then_add_then_delete_all_reach_the_file_on_disk() {
+        // End to end through the same calls the dialog makes, because the half
+        // that matters is the one after the picker returns: a status line
+        // saying "Saved" while the file is unchanged is the failure this test
+        // exists to catch. Every assertion is against bytes re-read from disk.
+        let dir = write_scratch("write-e2e");
+        let archive = dir.join("made.zip");
+        let payload = dir.join("hello.txt");
+        std::fs::write(&payload, b"hello from a real file").expect("write the file to add");
+
+        let mut state = AppState::default();
+        state.finish_choice(DialogPurpose::NewArchive, &archive.to_string_lossy());
+        assert!(
+            archive.is_file(),
+            "New wrote nothing: {}",
+            state.status_message
+        );
+        assert_eq!(
+            state.archive.as_ref().map(|a| a.entries.len()),
+            Some(0),
+            "New must leave the archive it created open and empty"
+        );
+
+        state.finish_choice(DialogPurpose::AddFile, &payload.to_string_lossy());
+        let after_add = backend::open(&archive).expect("the archive still opens");
+        assert_eq!(
+            after_add.entries.len(),
+            1,
+            "Add did not reach the file: {}",
+            state.status_message
+        );
+        assert_eq!(after_add.entries[0].path, "hello.txt");
+
+        // Delete the one member through the toolbar, exactly as a user would.
+        for entry in &mut state.archive.as_mut().expect("archive").entries {
+            entry.selected = true;
         }
+        state.run_toolbar(ToolbarAction::Delete);
+        let after_delete = backend::open(&archive).expect("the archive still opens");
+        assert!(
+            after_delete.entries.is_empty(),
+            "Delete left the member in the file: {}",
+            state.status_message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_buttons_that_would_write_are_dead_when_there_is_nothing_to_write_from() {
+        // A model built by hand has rows but no bytes to rebuild them from, so
+        // a rewrite would replace the file with an empty archive. Disabled
+        // rather than left to fail at the end: these are the only two buttons
+        // that can destroy something.
+        let mut state = loaded();
+        let archive = state.archive.as_mut().expect("archive");
+        // `loaded` parses real bytes, so it *has* a source. Dropping it is what
+        // makes this the hand-built shape — rows with nothing behind them.
+        archive.source = None;
+        for entry in &mut archive.entries {
+            entry.selected = true;
+        }
+        assert!(!toolbar_enabled(&state, ToolbarAction::Add));
+        assert!(!toolbar_enabled(&state, ToolbarAction::Delete));
+        assert!(
+            toolbar_enabled(&state, ToolbarAction::New),
+            "New needs no source — it is how you get one"
+        );
+
+        // And the click handler refuses with the same answer the greying used,
+        // rather than the message about nothing being selected.
+        state.run_toolbar(ToolbarAction::Delete);
+        assert!(
+            state.status_message.contains("not read from a file"),
+            "status was {:?}",
+            state.status_message
+        );
     }
 
     #[test]

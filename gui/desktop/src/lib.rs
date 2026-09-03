@@ -8264,6 +8264,43 @@ mod run_box_wiring_tests {
         );
     }
 
+    /// The other half of the same claim: a file that was pointed at once has to
+    /// be re-runnable from the history, which means the history has to hold its
+    /// bytes rather than the `U+FFFD` rendering the command field shows. Held
+    /// as text, pressing Up and Enter asks for a file that does not exist — and
+    /// asks *silently*, because `resolve_command` waves any leading `/`
+    /// through without checking it.
+    #[test]
+    fn a_browsed_name_that_is_not_utf8_survives_a_trip_through_the_history() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let name = unmappable_name();
+        browse_showing(&mut s, name.clone());
+
+        let mut expected = std::ffi::OsString::from("/");
+        expected.push(&name);
+
+        // Choose it in the chooser, then run it.
+        let _ = s.handle_hotkey(&chord(Key::Down, Modifiers::NONE));
+        let _ = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
+        assert_eq!(
+            s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
+                .launches,
+            [PathBuf::from(&expected)]
+        );
+
+        // Open the box again — `show` empties the field — and recall it.
+        s.toggle_run_dialog();
+        assert!(s.run_dialog.is_visible(), "the box did not reopen");
+        assert!(s.handle_hotkey(&chord(Key::Up, Modifiers::NONE)).consumed);
+        assert_eq!(
+            s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
+                .launches,
+            [PathBuf::from(&expected)],
+            "the recalled command named a lossy rendering rather than the file that ran"
+        );
+    }
+
     /// Cancelling has to be free. A Browse that cost the user the line they had
     /// typed is a Browse nobody presses twice.
     #[test]

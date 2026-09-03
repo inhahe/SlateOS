@@ -87962,19 +87962,14 @@ clear `command_exact` failed exactly one test
 `left: ["/z\u{FFFD}"] right: ["/z\u{d800}"]`), and disabling the chooser's key
 interception failed exactly three. Both reverted.
 
-**One consequence left standing, deliberately.** The command *history* is
-`Vec<String>` and is persisted as text, so a browsed path with no UTF-8 spelling
-is recorded in history in its lossy display form. Recalling it from history and
-pressing Enter would launch the U+FFFD spelling — a path that does not exist —
-so it fails rather than starting the wrong thing, which is the safe direction.
-It fails *quietly*, though: `RunDialog::resolve_command` returns `true` for
-anything beginning with `/` without stat'ing it, so the box hides and nothing
-starts. Filed as
+**One consequence found immediately afterwards**, and fixed the same day: the
+command *history* was `Vec<String>`, so a browsed path with no UTF-8 spelling was
+remembered in its lossy display form and could not be re-run. See
 `TD-C-RUN-HISTORY-CANNOT-HOLD-A-PATH-THAT-IS-NOT-UTF-8` below.
 
 ---
 
-### TD-C-RUN-HISTORY-CANNOT-HOLD-A-PATH-THAT-IS-NOT-UTF-8 — 2026-09-03 — OPEN
+### TD-C-RUN-HISTORY-CANNOT-HOLD-A-PATH-THAT-IS-NOT-UTF-8 — 2026-09-03 — **FIXED 2026-09-03**
 
 **In short:** the Run box remembers the commands you have run so you can press
 Up to get them back. It remembers them as text. Almost every filename is text,
@@ -88010,19 +88005,134 @@ file. But it is silent, which is the part worth fixing.
 
 **The proper fix**, in the order the value falls off:
 
-1. Make `history` a `Vec<PathBuf>` (or `Vec<OsString>`), and persist it as bytes
-   with a delimiter that cannot occur in a SlateOS filename — NUL, since `/` and
-   NUL are the only two bytes a name may not contain. Display is still lossy;
-   only the *stored* form becomes exact. This also fixes recall setting
-   `command_exact`, so re-running a browsed file works.
-2. Independently: make `resolve_command` stat an absolute path instead of
-   waving it through, so a command that cannot possibly start says so in the
-   box's own error line rather than appearing to work. That is worth doing on
-   its own merits — a typo'd absolute path today gets the same silent nothing.
+1. Make `history` a `Vec<OsString>`. Display is still lossy; only what is
+   *stored* becomes exact, and recall then sets `command_exact`, so re-running a
+   browsed file works.
+2. Independently: make `resolve_command` check that an absolute path exists
+   instead of waving it through, so a command that cannot possibly start says so
+   in the box's own error line rather than appearing to work. That is worth
+   doing on its own merits — a typo'd absolute path today gets the same silent
+   nothing.
 
 **Not a regression.** History was `Vec<String>` from the start; before
 2026-09-03 there was simply no way to get a non-UTF-8 name into the box, because
 Browse did nothing.
+
+### Fixed 2026-09-03 — step 1. Step 2 is split out below, still open.
+
+`history` is `Vec<OsString>`; `add_to_history` takes `&OsStr` and
+`execute_current` hands it the same exact bytes it puts in
+`RunDialogEvent::Execute`, rather than the trimmed field text.
+`a_browsed_name_that_is_not_utf8_survives_a_trip_through_the_history` drives the
+whole round trip through the shell — Browse, choose, run, reopen the box, Up,
+Enter — and fails with the `U+FFFD` spelling if the history holds text.
+
+**The autocomplete was the same hole by another route, and is fixed with it.**
+The dropdown offers history entries, and accepting one used to write
+`Suggestion::text` — a `String` — into the field. So a completion would *show*
+one file and *enter* another. `Suggestion` now carries `exact: OsString`
+alongside the text it displays: the fuzzy match still runs over the rendering,
+because a score against bytes the user cannot see would be a score against
+nothing they could have typed, but the entry's own bytes travel with it.
+`accepting_a_history_suggestion_fills_in_its_exact_bytes` pins it.
+
+Every route that fills the field from something the user did not *type* now goes
+through one private `fill_exact(&OsStr)` — Browse, both history-recall
+directions, and the accepted completion. Each was previously a separate
+`input.set_text` and so a separate opportunity to drop the bytes. Stepping
+*past* the newest entry deliberately does not use it: that text is the user's
+own, typed a character at a time, and has no exact bytes behind it.
+
+**A dead field went with it.** `history_path: Option<String>` was set by
+`with_config` and read by nothing — the history has never been written anywhere,
+despite the module doc claiming "history (with persistence)". The field and the
+`with_config` parameter are gone and the doc now says what is true. A parameter
+that only looks like it turns persistence on is worse than no parameter. What
+persisting it would take is `C-RUN-HISTORY-IS-NOT-PERSISTED` below.
+
+Mutation-checked: making `execute_current` remember the rendering failed exactly
+`a_browsed_name_that_is_not_utf8_survives_a_trip_through_the_history`, and making
+`accept_suggestion` enter the rendering failed exactly
+`accepting_a_history_suggestion_fills_in_its_exact_bytes`. Nothing else moved in
+either round.
+
+---
+
+### TD-C-THE-RUN-BOX-ACCEPTS-ANY-ABSOLUTE-PATH-WITHOUT-CHECKING-IT — 2026-09-03 — OPEN
+
+**In short:** type a path into the Run box that starts with `/` and press Enter
+and the box always closes, whether or not anything is there. Mistype
+`/usr/bin/fierfox` and the box behaves exactly as if it had worked: it hides,
+and you are left looking at a desktop where nothing happened. Any other kind of
+mistyped command gets a plain error line — *"…" is not recognized as an
+application or command.* — inside the box, which stays open so you can fix it.
+
+**Where.** `gui/desktop/src/run_dialog.rs`, `RunDialog::resolve_command`:
+
+```rust
+// Absolute paths pass through directly.
+if command.starts_with('/') {
+    return true;
+}
+```
+
+Everything below that line checks *something* (a known-apps list, a plausible
+program name). The absolute-path arm checks nothing, so `execute_current` takes
+the success branch, posts `RunDialogEvent::Execute` and hides the box. Whether
+the user ever learns depends on what the launcher does with a path to nothing —
+which today is nothing visible.
+
+**Why it has not been fixed with the rest.** Answering it means asking the
+filesystem whether the path exists, and `DesktopShell` performs no filesystem
+I/O — the property that keeps ~3037 shell tests offline (see
+`TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO` for why that is worth
+keeping, and for the pattern that answers it).
+
+**The proper fix.** The same pull model the chooser's listing uses: the box asks,
+the session answers, the answer comes back in. Concretely — on Enter with an
+absolute path that is not already known to exist, post the launch as it does now
+*or* hold it pending one `stat`, and have `ShellSession` answer. The cheaper
+alternative, and probably the right first move, is to let the **launcher** report
+failure back to the box: the shell already gets a `ShellAction::Launch(path)`
+answered by whoever starts programs, and a launch that could not start is a fact
+that side already has. That turns a silent close into a message without teaching
+the shell to read a disk at all.
+
+**Severity while open:** low, and it is a usability failure rather than a
+correctness one — nothing wrong is *started*; the box just stops saying that
+nothing was. It is the reason a mangled history entry used to fail invisibly.
+
+**Not a regression.** True since `resolve_command` was written.
+
+---
+
+### C-RUN-HISTORY-IS-NOT-PERSISTED — 2026-09-03 — OPEN
+
+**In short:** the Run box's command history is forgotten when the desktop shell
+restarts. Press Up to find the thing you ran yesterday and it is not there. It
+has never been saved; until 2026-09-03 there was a `history_path` setting that
+looked like it turned saving on, which is why this was easy to miss. That field
+has been removed, so the code no longer claims anything it does not do.
+
+**Where.** `gui/desktop/src/run_dialog.rs`. `RunDialog::history` is a plain
+`Vec<OsString>` in memory; `history()` and `load_history()` exist and are the
+right shape, and nothing calls either.
+
+**What it would take.** The shell reads no files (see
+`TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`), so this is another instance
+of the pull model: `ShellSession` reads the history file at startup and hands it
+to `load_history`, and writes `history()` back out when the box runs something.
+The on-disk form must be **bytes with a NUL delimiter**, not lines of text — an
+entry may be a path with no UTF-8 spelling, and `/` and NUL are the only two
+bytes a SlateOS filename may not contain, so NUL is the only separator that
+cannot occur inside an entry. A newline-delimited text file would reintroduce
+exactly the defect that was just fixed above.
+
+**Severity while open:** low. It is a convenience that is absent rather than
+broken, and its absence is obvious the first time you look for it.
+
+**Not a regression.** It has never worked. What changed on 2026-09-03 is only
+that the code stopped implying otherwise.
 
 ---
 

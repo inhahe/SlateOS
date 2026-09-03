@@ -232,7 +232,7 @@
 //!   leaves `b` alone.
 //! * `cp -f a dangling-link` still fails, because the open that fails there is
 //!   the `O_EXCL` one and `-f` acts on the other one. See
-//!   [`create_destination`], which is the single place all three meet.
+//!   [`copy::open_destination`], which is the single place all three meet.
 //!
 //! `-n` is the one with a surprise in it: it writes `cp: not replacing 'b'` to
 //! **stderr** and exits **1**. It is not a quiet skip — `copy.h`'s comment on
@@ -247,7 +247,7 @@
 
 use coreutils::backup::{self, BackupType, source_is_dst_backup, src_base_is_dot_or_dotdot};
 use coreutils::copy::{
-    self, Chowned, Made, ModeDebt, Source, chown_to_source, copy_bytes, current_mode, make_dir,
+    self, Chowned, Made, ModeDebt, Source, chown_to_source, copy_bytes, make_dir,
     preserve_attributes, read_dir_fastread,
 };
 use coreutils::diag;
@@ -255,7 +255,7 @@ use coreutils::errmsg::strerror;
 use coreutils::fileid::{
     Copied, EntryId, FileId, entry_id, file_id, is_same_file, nlink, same_entry, split_entry,
 };
-use coreutils::fsattr::{self, Link, On, chown_privileges, permission_bits};
+use coreutils::fsattr::{Link, On, permission_bits};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::hardlink;
 use coreutils::overwrite::{self, Interactive};
@@ -551,7 +551,7 @@ struct CpFlags {
     /// place and never unlinks anything, `cp -f a b` on a 0400 `b` unlinks and
     /// recreates, and `cp -f a dangling-link` still refuses — the open that
     /// fails there is the `O_EXCL` one, which is not this one.
-    /// See [`create_destination`], which is where the distinction lives.
+    /// See [`copy::open_destination`], which is where the distinction lives.
     force: bool,
     /// `--remove-destination`: GNU's `unlink_dest_before_opening`. The option
     /// `-f` is commonly mistaken for. It unlinks unconditionally, before the
@@ -1573,7 +1573,7 @@ enum Dest {
     /// `cannot stat 'loop': Too many levels of symbolic links` without it.
     ///
     /// Deliberately *not* folded into [`Dest::New`]: the difference decides
-    /// which `open` [`create_destination`] tries first, and that in turn
+    /// which `open` [`copy::open_destination`] tries first, and that in turn
     /// decides whether the destination is unlinked or the copy is refused as a
     /// dangling symlink.
     Opaque,
@@ -1655,7 +1655,7 @@ const fn libc_eloop() -> i32 {
 }
 
 /// Windows has no `ELOOP`, and `-f` on the development host therefore never
-/// reaches [`Dest::Opaque`]. See [`open_new`]'s non-unix arm for the same
+/// reaches [`Dest::Opaque`]. See `copy::open_new`'s non-unix arm for the same
 /// split.
 #[cfg(not(unix))]
 fn is_eloop(_e: &io::Error) -> bool {
@@ -1777,7 +1777,7 @@ fn overwrite_allowed<O: Write, E: Write>(
 /// `cannot overwrite directory 'dir' with non-directory` and `dir` survives.
 ///
 /// `dest` is updated to [`Dest::New`] on success, which is GNU's `new_dst =
-/// true` and matters twice over: [`create_destination`] must then create
+/// true` and matters twice over: [`copy::open_destination`] must then create
 /// rather than truncate, and [`place_source`]'s symlink arm must not announce
 /// a second `removed` for a name that is already gone.
 ///
@@ -2978,10 +2978,41 @@ fn copy_regular_file<O: Write, E: Write>(
         }
     };
 
-    let (mut output, new_dst) = match create_destination(src_meta, dst, dest_exists, &mut debt, job)
-    {
-        Ok(pair) => pair,
-        Err(DestError::Dangling) => {
+    // The flags are read into locals before the [`copy::Dest`] is built,
+    // because `Clobber::Unlink` borrows the stdout that lives on this same
+    // `Job` — and `job.flags` cannot be read through a `job` that is already
+    // borrowed mutably for `job.out`.
+    let force = job.flags.force;
+    let verbose = job.flags.verbose;
+    let preserve_xattr = job.flags.preserve.xattr;
+    let dest = if dest_exists {
+        copy::Dest::Exists(if force {
+            copy::Clobber::Unlink {
+                verbose,
+                out: &mut *job.out,
+            }
+        } else {
+            copy::Clobber::Never
+        })
+    } else {
+        copy::Dest::New
+    };
+    // On its own statement rather than as the `match` scrutinee: the borrow of
+    // `job.out` inside `dest` ends when the call returns, and a scrutinee's
+    // temporaries live to the end of the `match` — whose arms want `job.err`.
+    let opened = copy::open_destination(
+        dst,
+        permission_bits(src_meta),
+        dest,
+        preserve_xattr,
+        &mut debt,
+    );
+    let (mut output, new_dst) = match opened {
+        Ok(copy::Opened { file, new }) => (file, new),
+        Err(copy::DestError::Dangling(_)) => {
+            // The `EEXIST` is dropped: GNU's sentence for this names no error
+            // at all, because the failure is not the open's — the name resolved
+            // to nothing and writing through it would be a race.
             let _ = writeln!(
                 job.err,
                 "cp: not writing through dangling symlink {}",
@@ -2989,12 +3020,12 @@ fn copy_regular_file<O: Write, E: Write>(
             );
             return false;
         }
-        Err(DestError::Remove(e)) => {
+        Err(copy::DestError::Remove(e)) => {
             let why = strerror(&e);
             let _ = writeln!(job.err, "cp: cannot remove {}: {why}", quoteaf_os(dst));
             return false;
         }
-        Err(DestError::Io(e)) => {
+        Err(copy::DestError::Io(e)) => {
             let why = strerror(&e);
             let _ = writeln!(
                 job.err,
@@ -3039,197 +3070,6 @@ fn copy_regular_file<O: Write, E: Write>(
         &mut debt,
         &mut job.run(),
     )
-}
-
-/// Why a destination could not be opened for writing.
-enum DestError {
-    Io(io::Error),
-    /// The name is a symlink that points at nothing. Resolving it to a
-    /// (directory, name) pair to write through is racy by construction, so GNU
-    /// refuses and says so rather than creating the link's target.
-    Dangling,
-    /// `-f` had to unlink a destination that would not open, and could not.
-    /// A different sentence from [`DestError::Io`]'s — GNU's `cannot remove
-    /// %s` against `cannot create regular file %s` — which is why it is a
-    /// variant rather than an `io::Error` the caller has to guess about.
-    Remove(io::Error),
-}
-
-/// Open `dst` for writing, creating it with the source's mode if it is new and
-/// leaving its mode entirely alone if it is not.
-///
-/// This is GNU's `copy_reg` (`copy.c:1287`–`1349`) and the shape is load-bearing
-/// in three places, all of which are `-f`:
-///
-/// * **Which open is tried first is decided by `dest_exists`, not by what the
-///   first open answers.** GNU branches on `new_dst`: an existing destination
-///   gets `O_WRONLY|O_TRUNC` and a new one gets `O_WRONLY|O_CREAT|O_EXCL` with
-///   the mode. Deriving that from a failed `O_EXCL` would work for a plain
-///   file, and would get [`Dest::Opaque`] wrong — the whole point of that state
-///   is that a `stat` failed but the name is occupied.
-/// * **`-f` unlinks on the `O_TRUNC` failure only.** That is why `cp -f a
-///   dangling-link` still refuses: the open that fails there is the `O_EXCL`
-///   one, which reports `EEXIST` and is the dangling-symlink case below, not
-///   this one. Measured against 9.4 — the destination survives.
-/// * **A new file's mode goes to the kernel with the `O_CREAT`**, which is the
-///   only place the umask can narrow it without a window in which the file
-///   exists at the wider mode. That is true of the file `-f` recreates too, so
-///   `cp -f` over a 0400 destination leaves the *source's* mode behind rather
-///   than the one it removed.
-///
-/// The `bool` in the success case is GNU's `*new_dst` **as it stands after the
-/// open**, which is not `!dest_exists`: a destination that vanished between the
-/// stat and the open, and one that `-f` unlinked, both end up newly created.
-/// The distinction is what decides whether `-p` bothers to `chown`, whether
-/// `--no-preserve=mode` applies, and — through [`ModeDebt`] — whether any
-/// permissions were withheld at all.
-///
-/// # Errors
-///
-/// [`DestError::Dangling`] for a destination symlink that points at nothing,
-/// [`DestError::Remove`] for an unlink `-f` could not do, and
-/// [`DestError::Io`] for every other failure to open.
-fn create_destination<O: Write, E: Write>(
-    src_meta: &fs::Metadata,
-    dst: &Path,
-    dest_exists: bool,
-    debt: &mut ModeDebt,
-    job: &mut Job<'_, O, E>,
-) -> Result<(fs::File, bool), DestError> {
-    if dest_exists {
-        match open_truncating(dst) {
-            // Nothing was withheld, because nothing was created: an existing
-            // file's mode is not `cp`'s to narrow even for an instant. GNU
-            // zeroes the same two locals on this arm (`copy.c:1499`).
-            Ok(f) => {
-                debt.omitted = 0;
-                debt.extra = 0;
-                return Ok((f, false));
-            }
-            // It went away between the stat and the open. GNU reaches its
-            // `O_CREAT` arm in exactly this case too (`dest_errno == ENOENT`),
-            // so a race loses nothing.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => {
-                if !job.flags.force {
-                    return Err(DestError::Io(e));
-                }
-                if let Err(e) = fs::remove_file(dst)
-                    && e.kind() != io::ErrorKind::NotFound
-                {
-                    return Err(DestError::Remove(e));
-                }
-                // *After* the removal and *after* [`copy_regular_file`]'s
-                // `announce`, which is what puts `removed 'ro'` below
-                // `'a' -> 'ro'` where `--remove-destination` puts it above.
-                // GNU prints it from this same point inside `copy_reg`.
-                if job.flags.verbose {
-                    let _ = writeln!(job.out, "removed {}", quoteaf_os(dst));
-                }
-            }
-        }
-    }
-
-    // GNU's `open_mode` (`copy.c:1451`), whose second half is the whole reason
-    // `cp --preserve=xattr` of a read-only file works at all. See
-    // [`ModeDebt::extra`].
-    debt.extra = if job.flags.preserve.xattr && !chown_privileges() {
-        OWNER_WRITE
-    } else {
-        0
-    };
-
-    match open_new(
-        dst,
-        (permission_bits(src_meta) & !debt.omitted) | debt.extra,
-    ) {
-        Ok(f) => {
-            top_up_extra(&f, debt);
-            Ok((f, true))
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            // `symlink_metadata` sees the link itself; `metadata` follows it,
-            // so failing there is exactly "points at nothing".
-            if fs::symlink_metadata(dst).is_ok_and(|m| m.file_type().is_symlink())
-                && fs::metadata(dst).is_err()
-            {
-                Err(DestError::Dangling)
-            } else {
-                // Occupied by something that is not a dangling link — a race
-                // against another process, since the caller stat'd it as
-                // absent a moment ago. Reported as the open failure it is.
-                Err(DestError::Io(e))
-            }
-        }
-        Err(e) => Err(DestError::Io(e)),
-    }
-}
-
-/// `S_IWUSR` — the bit [`create_destination`] adds so the extended attributes
-/// can be written onto a copy of a read-only file. See [`ModeDebt::extra`].
-const OWNER_WRITE: u32 = 0o200;
-
-/// Put the extra owner-write bit on if the `open` did not manage it, and give up
-/// on it if that cannot be done either.
-///
-/// The mode handed to `open` is narrowed by the umask, which can perfectly well
-/// include `0o200` — `umask 0222` is unusual but legal, and under it the bit
-/// asked for at creation simply does not arrive. GNU makes the same repair in
-/// the same place and with the same fallback (`copy.c:1539`): *"if extra
-/// permissions needed for `copy_xattr` didn't happen (e.g., due to umask) chmod
-/// to add them temporarily; if that fails give up with extra permissions,
-/// letting `copy_attr` fail later."*
-///
-/// Giving up means clearing [`ModeDebt::extra`], which does two things at once
-/// and both are wanted: the extended-attribute step goes on to fail and *say
-/// so*, rather than the failure being hidden, and the settle-up does not chmod
-/// a file whose mode is already the one it should end with.
-///
-/// A failure to read the mode back is folded into the same fallback rather than
-/// given a diagnostic of its own. GNU has one — `cannot fstat %s` — but it
-/// reaches that `fstat` for other reasons too (it sizes the copy buffer from
-/// the result), so the call is free there and would be a stat-per-copy here,
-/// added solely to have somewhere to fail. On a descriptor this function was
-/// handed a moment ago there is no reachable failure to report.
-fn top_up_extra(f: &fs::File, debt: &mut ModeDebt) {
-    if debt.extra == 0 {
-        return;
-    }
-    let on = On::File(f);
-    let arrived = current_mode(on)
-        .is_ok_and(|now| now | debt.extra == now || fsattr::set_mode(on, now | debt.extra).is_ok());
-    if !arrived {
-        debt.extra = 0;
-    }
-}
-
-/// `O_WRONLY|O_TRUNC`, with no `O_CREAT` and no mode: the destination is known
-/// to be there and its permissions are not `cp`'s to change. See module docs,
-/// bug 8.
-fn open_truncating(dst: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new().write(true).truncate(true).open(dst)
-}
-
-/// `O_WRONLY|O_CREAT|O_EXCL` with `mode`, which the kernel narrows by the umask.
-#[cfg(unix)]
-fn open_new(dst: &Path, mode: u32) -> io::Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .open(dst)
-}
-
-/// The development host has no mode to give, so the file is created with
-/// whatever Windows would have given it. The target OS is the `#[cfg(unix)]`
-/// arm above; see [`permission_bits`].
-#[cfg(not(unix))]
-fn open_new(dst: &Path, _mode: u32) -> io::Result<fs::File> {
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dst)
 }
 
 /// [`permission_bits`] of the name `path`, without following a final symlink.

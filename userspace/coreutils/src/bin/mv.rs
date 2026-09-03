@@ -2559,7 +2559,7 @@ fn clear_destination(target: &Path) -> io::Result<()> {
 /// hand, in an order that is not free either:
 ///
 /// 1. **the bytes**, into a destination created with the group and other bits
-///    held back — see [`create_destination`];
+///    held back — see [`copy::open_destination`];
 /// 2. **the times**, from the source's `stat` at whatever resolution it has;
 /// 3. **the owner**, which may be refused, and a refusal costs the set-ID bits;
 /// 4. **the mode**, last, because a `chown` clears `S_ISUID`/`S_ISGID` for a
@@ -2651,10 +2651,45 @@ fn copy_across_devices<E: Write>(
     let mode = fsattr::permission_bits(metadata);
     let mut source = fs::File::open(src)
         .map_err(|e| Failed::new(format!("cannot open {} for reading", quoteaf_os(src)), e))?;
-    let (mut dest, mut debt) = create_destination(target, mode).map_err(|e| {
+    // `ModeDebt::new(true, …)`: `preserve_ownership` is unconditionally true
+    // for a move (`mv.c:134`), which is what withholds every group and other
+    // bit until the `chown` has run. See [`copy::ModeDebt`].
+    let mut debt = ModeDebt::new(true, mode, false);
+    // `Dest::New` unconditionally, and it is a fact about the caller rather
+    // than an assumption: `mv` unlinks the destination before opening
+    // (`unlink_dest_before_opening`, `mv.c:139`), so there is nothing at the
+    // name by the time the engine sees it. That is also why `Clobber::Never` is
+    // right — `unlink_dest_after_failed_open` is false for a move (`mv.c:140`),
+    // there being nothing left to unlink.
+    let mut dest = copy::open_destination(
+        target,
+        mode,
+        copy::Dest::New,
+        run.opts.preserve_xattr,
+        &mut debt,
+    )
+    .map(|opened| opened.file)
+    .map_err(|e| {
+        // All three variants collapse to one sentence, which is the one a move
+        // printed before this became shared code.
+        //
+        // `Remove` is unreachable — it is `-f`'s unlink, and the call above
+        // passes `Clobber::Never`. `Dangling` is reachable only in a race: the
+        // destination was unlinked a moment ago, so for it to be a dangling
+        // symlink now, something else must have created one. `cp` has GNU's
+        // separate sentence for that; `mv` has none, and inventing one here
+        // would be a divergence from upstream rather than a fix — `mv.c` never
+        // reaches `copy_reg`'s dangling branch either, because it always
+        // arrives with `new_dst`. Reporting the underlying `File exists` is
+        // exactly what the hand-written open did, which is why
+        // [`copy::DestError::Dangling`] carries the error rather than dropping
+        // it: a synthesised `io::Error` has no `errno` for `strerror` to name.
+        let err = match e {
+            copy::DestError::Io(e) | copy::DestError::Dangling(e) | copy::DestError::Remove(e) => e,
+        };
         Failed::new(
             format!("cannot create regular file {}", quoteaf_os(target)),
-            e,
+            err,
         )
     })?;
 
@@ -2708,127 +2743,6 @@ fn copy_across_devices<E: Write>(
     // See this function's header for why the two cannot share an error path.
     Ok(())
 }
-
-/// Create `target` for writing, with the source's mode *narrowed* to the owner.
-///
-/// The withholding is GNU's `omitted_permissions`, which for a move is
-/// `dst_mode & (S_IRWXG | S_IRWXO)` — every group and other bit — because
-/// `preserve_ownership` is on (`copy.c:2902`). The bits come back in the final
-/// [`fsattr::copy_permissions`], and the window they are missing from is the one
-/// between the file existing and it having the right owner. Without the
-/// withholding, a file whose source is group- or world-readable is briefly
-/// readable by *this* process's group and by everyone, holding the source's
-/// contents, before the `chown` hands it to whoever should have had it.
-///
-/// `create_new` is GNU's `O_EXCL`, which it uses whenever `new_dst`
-/// (`copy.c:1456`) — and after the destination has been unlinked, `new_dst` is
-/// what this caller always is. It is not an optimisation: without it a name
-/// created between the unlink and the open would be opened and truncated, which
-/// is the very thing the unlink was there to prevent.
-///
-/// The `S_IWUSR` that goes the other way is GNU's too, and it is there for the
-/// extended attributes rather than for the bytes: Linux's `xattr_permission`
-/// (`fs/xattr.c`) demands write access to the *inode* before it will set an
-/// attribute on it, so a read-only source — mode `0444` — would otherwise
-/// produce a copy that no `setxattr` could write to. `copy.c:1452` widens the
-/// open mode by exactly that bit, and only for a non-root caller, root's
-/// `setxattr` not being subject to the check. That condition is
-/// [`fsattr::chown_privileges`], which is upstream's `x->owner_privileges`
-/// under its other name; the `preserve_xattr &&` half of upstream's test is
-/// constant here, because `mv.c:145` sets it and mv's getopt never clears it.
-///
-/// It costs no exposure, which is why it can be ORed in beside a withholding
-/// that exists to prevent some. The bit is the *owner's* write bit, and the
-/// owner at this instant is the process doing the copying — which already holds
-/// a writable descriptor to the file it just created. Nothing is granted to
-/// anyone who did not have it.
-///
-/// GNU tracks it as `extra_permissions` so that its `omitted_permissions`
-/// fallback can take it off again; nothing here has to, because a move never
-/// reaches that branch. `if (x->preserve_mode || x->move_mode)` (`copy.c:1672`)
-/// claims the chain first and calls `copy_acl` with `src_mode`, which writes the
-/// mode absolutely. The `copy_permissions` that closes
-/// [`copy::preserve_attributes`] is that call, and it starts with the same
-/// absolute `set_mode`, so the extra bit leaves with the rest of the temporary
-/// mode.
-#[cfg_attr(not(unix), allow(unused_variables))]
-fn create_destination(target: &Path, mode: u32) -> io::Result<(fs::File, ModeDebt)> {
-    let extra = if fsattr::chown_privileges() {
-        0
-    } else {
-        OWNER_WRITE
-    };
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode((mode & !GROUP_AND_OTHER) | extra);
-    }
-    let file = opts.open(target)?;
-    top_up_extra(&file, extra);
-    // Returned rather than reconstructed by the caller, because this is the one
-    // place that knows both halves. Nothing a *move* does reads it — the mode
-    // step takes `preserve_mode`'s branch and returns before the settle-up — but
-    // an honest value costs a struct and a wrong one would be a landmine for
-    // whoever changes that; see the note on [`Job::umask`], which is the same
-    // argument about the same short-circuit.
-    let debt = ModeDebt {
-        omitted: mode & GROUP_AND_OTHER,
-        forced: None,
-        extra,
-    };
-    Ok((file, debt))
-}
-
-/// Put the extra owner-write bit on if the `open` did not manage it.
-///
-/// The mode handed to `open` is narrowed by the umask, which can perfectly well
-/// include `0o200` — `umask 0222` is unusual but legal, and under it the bit
-/// asked for at creation simply does not arrive. Asking is therefore not the
-/// same as having, and a move of a read-only file under such a umask carries no
-/// extended attributes at all: every `setxattr` onto the copy is refused by
-/// `xattr_permission`, and each refusal is reported, so what should be a silent
-/// move becomes a screenful of `Permission denied`.
-///
-/// GNU makes the same repair in the same place, immediately after the open and
-/// before any attribute is written (`copy.c:1539`), and states the fallback for
-/// when even that fails: *"if that fails give up with extra permissions, letting
-/// `copy_attr` fail later."* Which is why both failures here are discarded — the
-/// step is an optimisation of a permission check, and the thing it exists to
-/// make possible reports its own failure with a better sentence than this
-/// function could.
-///
-/// Nothing has to take the bit off again. The `copy_permissions` that closes
-/// [`copy::preserve_attributes`] writes the source's mode absolutely, so the
-/// temporary widening leaves with the rest of the temporary mode — that is
-/// `copy.c:1672`'s `if (x->preserve_mode || x->move_mode)` claiming the chain
-/// before GNU's own `extra_permissions` branch can be reached.
-fn top_up_extra(file: &fs::File, extra: u32) {
-    if extra == 0 {
-        return;
-    }
-    let Ok(meta) = file.metadata() else {
-        // See above: a descriptor opened a moment ago has no reachable stat
-        // failure, and the fallback for one is the same as for a refused chmod.
-        return;
-    };
-    let now = fsattr::permission_bits(&meta);
-    if now | extra != now {
-        // Discarded deliberately; see above.
-        let _ = fsattr::set_mode(On::File(file), now | extra);
-    }
-}
-
-/// `S_IRWXG | S_IRWXO` — the bits [`create_destination`] holds back until the
-/// owner is settled.
-#[cfg_attr(not(unix), allow(dead_code))]
-const GROUP_AND_OTHER: u32 = 0o077;
-
-/// `S_IWUSR` — the bit [`create_destination`] adds so the extended attributes
-/// can be written onto a read-only file, and [`top_up_extra`] re-adds if the
-/// umask took it off again.
-const OWNER_WRITE: u32 = 0o200;
 
 /// Unlink the source once the copy is complete, with GNU's `rm` sentence.
 ///
@@ -4674,7 +4588,7 @@ mod tests {
         );
     }
 
-    /// The unit for the `S_IWUSR` that [`create_destination`] ORs in. A `0444`
+    /// The unit for the `S_IWUSR` that [`copy::open_destination`] ORs in. A `0444`
     /// source produces a `0444` destination, and Linux's `xattr_permission`
     /// wants *write* access to an inode before it will set an attribute on it —
     /// so without the widening this `setxattr` fails with `EACCES`, the

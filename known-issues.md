@@ -106419,18 +106419,34 @@ engine is a red `main` for all three lanes:
    throughput**. Everything else must still be byte-identical, and the
    exception must be spent deliberately: any case that moves has to be one this
    note predicts, not one discovered afterwards and rationalised.
-3. The walk and `place_entity`, with `CpFlags` becoming the engine's options
+3. Opening the destination — `cp`'s `create_destination` against `mv`'s, the
+   one place the two programs genuinely differ rather than merely duplicate.
+   (This stage was always intended and always described in the progress note
+   below, but was missing from this list until 2026-09-02; the list said
+   "3. the walk", the prose said "stage 3 is the destination open, then the
+   walk, then stage 4", and the two disagreed by one for two days.)
+4. The walk and `place_entity`, with `CpFlags` becoming the engine's options
    struct.
-4. `mv`'s `copy_across_devices` directory arm drives the engine, then `rmdir`s.
+5. `mv`'s `copy_across_devices` directory arm drives the engine, then `rmdir`s.
 
-**Progress: stages 1 and 2 have landed.** `userspace/coreutils/src/copy.rs`
+**Progress: stages 1, 2 and 3 have landed.** `userspace/coreutils/src/copy.rs`
 holds the leaf helpers, the shared preserve tail (`preserve_attributes` and
-everything it calls), and now the shared byte copy (`copy_bytes`), all of which
-both programs call. The copy-body defect stage 2 predicted was real and is
-closed; see `design-decisions.md` §745, which supersedes §741. Stage 3 —
-opening the destination, which is `cp`'s `create_dest` against `mv`'s
-`create_destination` and where the two genuinely differ — is next, followed by
-the walk and then stage 4.
+everything it calls), the shared byte copy (`copy_bytes`), and now the shared
+destination open (`open_destination`), all of which both programs call. The
+copy-body defect stage 2 predicted was real and is closed; see
+`design-decisions.md` §745, which supersedes §741.
+
+Stage 3 unified the two `create_destination` functions behind one `copy::Dest`
+describing what is at the name — `New`, or `Exists(Clobber)` — and deleted 335
+lines from the two binaries. Folding `cp -f`'s unlink *inside* `Exists` is what
+makes the type honest: the unlink is only reachable when something is in fact
+there, so two independent booleans would have spelled a fourth combination the
+code must then remember to ignore. Both harnesses stayed byte-identical across
+the move: cp 581/0/30 and mv 360/0/11, before and after.
+
+What remains is **stage 4**, the walk and `place_entity`. Only after that can
+`mv`'s `copy_across_devices` grow a directory arm that drives the engine and
+`rmdir`s behind it — stage 5, which is what actually closes this entry.
 
 Each stage is certifiable the same way the `fsattr` moves in this chain were:
 `scripts/cp-diff.sh` and `scripts/mv-diff.sh` must stay byte-identical across

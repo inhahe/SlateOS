@@ -61542,6 +61542,98 @@ than saying so.
 
 ---
 
+## 749. The unified destination-open takes what is at the name as one value, not two booleans — and pays a vtable so that `mv` never has to invent a stdout
+
+**Date:** 2026-09-02
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `cp` and `mv` each had their own copy of the code that creates
+the file being copied *to*. They were 335 lines of near-duplicate, and stage 3
+of the copy-engine extraction merged them into one `copy::open_destination`.
+Three small choices inside that merge had a real argument on both sides, and
+this records them, because each one is the kind of thing a later reader would
+otherwise "simplify" straight back to the rejected option.
+
+### 1. `Dest::New` / `Dest::Exists(Clobber)`, not two booleans
+
+The merged function needs to know two things: is something already at the
+destination name, and — if the create fails — may it unlink and retry? (That
+retry is `cp -f`.) The obvious signature takes two `bool`s.
+
+It is the wrong signature, because **only three of the four combinations
+exist**. `cp`'s unlink-and-retry is reachable *only* inside the branch that
+already established something is there; `mv` always arrives at a name it has
+already cleared, so it is always the `New` case and never has a clobber policy
+at all. "Nothing is there, but unlink it if the create fails" is not a state
+the callers can produce, so with two booleans the function must contain a
+line deciding what to do about a case that cannot happen — and that line can
+never be tested, because no caller can reach it.
+
+Nesting the policy inside the variant that makes it meaningful deletes the
+fourth combination from the type rather than from a comment:
+
+| | two `bool`s | `Dest::Exists(Clobber)` |
+|---|---|---|
+| states spellable | 4 | 3 |
+| unreachable arm to write and never test | yes | none |
+| `mv`'s call | `open_destination(…, false, false, …)` | `open_destination(…, Dest::New, …)` |
+
+The cost is that `Clobber` is a second public type for what a reader skimming
+the signature might have taken in as a flag. That is the price, and it is
+worth it: a positional `false, false` at `mv`'s call site says nothing about
+*why* both are false, whereas `Dest::New` says exactly what `mv` knows.
+
+### 2. `&mut dyn Write` for the `-f` verbose message, not a type parameter
+
+`cp -f --verbose` prints `removed 'x'` when it unlinks, so the `Unlink` policy
+has to carry somewhere to print. Everywhere else in this crate that shape is a
+generic writer parameter (`Run::err`), which is faster and monomorphises away.
+
+Here it is a trait object, and the reason is the opposite of an inconsistency.
+A writer type parameter on `Clobber` propagates to `Dest`, and therefore to
+**every** construction of `Dest` — including `Dest::New`, which is `mv`'s only
+case. `mv` has no stdout in that function to name. It would have to name one
+anyway to satisfy the parameter: `io::Sink`, or `io::Stdout` it never writes
+to. **A type parameter satisfied by a fiction is worse than a vtable dispatch
+taken at most once per operand and only under `-f`** — the fiction is
+permanent and misleads every reader of `mv`, while the indirect call is
+invisible next to the `unlink` syscall it accompanies.
+
+Rejected alternative: keep the generic and give `Dest` a defaulted type
+parameter. Defaults do not apply to a type in argument position, so `mv` would
+still have had to write it.
+
+### 3. `DestError::Dangling` carries the `EEXIST` that revealed it
+
+GNU refuses to write through a destination symlink pointing at nothing, with
+its own sentence. `cp` prints that sentence and never reads the underlying
+error, so the payload looks dead — and a variant with an unused payload is
+exactly what a later cleanup deletes.
+
+It is not dead: `mv` reaches the same variant, and has no sentence of its own.
+`mv` reports the underlying `File exists`, which is what its hand-written open
+printed before the merge, and byte-identity in that case is the whole
+certification of the stage. Synthesising an equivalent error instead would not
+do, because a synthesised `io::Error` has **no `errno`**, and the message is
+rendered by `strerror` from that number. Dropping the payload would have
+changed `mv`'s output while every test stayed green, since the case is only
+reachable when another process replaces the destination mid-operation.
+
+The doc comment on the variant says this, so that the next reader who notices
+`cp` ignoring the payload finds the reason before deleting it.
+
+### How the whole stage was certified
+
+Not by the test suite — by the two differential harnesses, run immediately
+before the change to take a baseline and again after: `cp 581 passed, 0
+differed, 30 differ on purpose` and `mv 360/0/11`, identical on both sides. A
+pure move that changes those numbers has a bug in the move; that is the rule
+`known-issues.md` sets for every stage of this extraction, and it is the only
+check that would have caught choice 3 going the other way.
+
+---
+
 ## §670 — a benchmark's printed verdict is bound by the same evidence rules as the report that scores it
 
 **Date:** 2026-09-01

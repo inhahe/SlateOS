@@ -44,12 +44,16 @@
 //! constant `mv.c`'s `cp_option_init` supplies. A module that refused one would
 //! not be shareable; it would just be empty.
 //!
-//! What is **not** here yet is *opening* a destination — `cp`'s `create_dest`
-//! and `mv`'s `create_destination`, which differ in more than shape and are
-//! stage 3's business — and the walk that decides what to copy at all, which is
-//! stage 4's. Both are still `cp`'s. Everything in this module is reached from
-//! `cp.rs` and `mv.rs` alike through call sites that build a [`Run`] from each
-//! program's own `Job`.
+//! * **Stage 3, opening the destination** — [`open_destination`] and the
+//!   [`Dest`]/[`Clobber`]/[`Opened`]/[`DestError`] vocabulary around it. This
+//!   is the one step where the two programs had genuinely *diverged* rather
+//!   than merely been written twice, and all three differences ran the same
+//!   way: `cp` knew something `mv` did not. See that function's table.
+//!
+//! What is **not** here yet is the walk that decides what to copy at all, which
+//! is stage 4's, and which is still `cp`'s. Everything in this module is
+//! reached from `cp.rs` and `mv.rs` alike through call sites that build a
+//! [`Run`] from each program's own `Job`.
 
 use crate::errmsg::strerror;
 use crate::fsattr::{
@@ -351,6 +355,302 @@ pub fn create_dir_with_mode(path: &Path, mode: u32) -> io::Result<()> {
 #[cfg(not(unix))]
 pub fn create_dir_with_mode(path: &Path, _mode: u32) -> io::Result<()> {
     fs::create_dir(path)
+}
+
+/// What the caller found at the destination's name, which is GNU's `new_dst`
+/// (`copy.c:1456`) with the thing that may be done about it attached.
+///
+/// The two are one value because the second is only ever consulted inside the
+/// first. `-f`'s unlink is reached from the arm where a destination exists and
+/// would not open; there is no such thing as unlinking a destination that is
+/// not there. Two independent parameters would spell a fourth combination —
+/// "nothing is there, and you may remove it" — that the code would have to
+/// ignore and the reader would have to work out was impossible.
+///
+/// **Which arm is taken is decided by the caller's `stat`, not by what the
+/// first open answers.** GNU branches on `new_dst`, and deriving it instead
+/// from a failed `O_EXCL` would work for a plain file and get an *opaque*
+/// destination wrong — a name that is occupied by something a `stat` could not
+/// describe is still occupied.
+pub enum Dest<'a> {
+    /// GNU's `new_dst == true`: nothing is at the name, or the caller has
+    /// already unlinked what was. A move is always this — `mv` unlinks the
+    /// destination before opening (`unlink_dest_before_opening`, `mv.c:139`),
+    /// so by the time the engine sees it there is nothing there.
+    New,
+    /// Something is at the name, and it is to be truncated in place rather
+    /// than recreated: an existing file's mode is not a copy's to narrow, even
+    /// for an instant.
+    Exists(Clobber<'a>),
+}
+
+/// What may be done with a destination that exists but will not open, and
+/// where to say it was done.
+///
+/// The removal and the announcement are one thing rather than two flags,
+/// because the announcement is meaningless without the removal: GNU prints
+/// `removed %s` from inside the `unlink_dest_after_failed_open` branch, and
+/// nowhere else.
+pub enum Clobber<'a> {
+    /// GNU's `unlink_dest_after_failed_open = false` (`mv.c:140`): a
+    /// destination that will not open is an error to report, not something to
+    /// remove. Every move is this, and so is every `cp` without `-f`.
+    Never,
+    /// `cp -f`: unlink it and try the create again.
+    ///
+    /// `verbose` is `cp -v`, and the sentence goes out *after* the removal and
+    /// *after* the caller's own `'a' -> 'ro'` announcement — which is what puts
+    /// `removed 'ro'` below that line where `--remove-destination` puts it
+    /// above. GNU prints it from this same point inside `copy_reg`.
+    Unlink {
+        /// Whether to say so.
+        verbose: bool,
+        /// Standard output.
+        ///
+        /// `dyn` where [`Run::err`] is generic, and the reason is the opposite
+        /// of that one rather than an inconsistency. Making this generic would
+        /// put a writer type parameter on [`Dest`], which every [`Dest::New`]
+        /// construction would then have to name — and a move has no stdout
+        /// here to name, so it would have to invent one. A type parameter
+        /// satisfied by a fiction is worse than a vtable dispatch taken at most
+        /// once per operand and only under `-f`.
+        out: &'a mut dyn Write,
+    },
+}
+
+/// A destination that is open and ready to be written through.
+pub struct Opened {
+    /// The descriptor. Everything after this point works through it and not
+    /// through the name — see [`fsattr::On`] for why that matters to the
+    /// set-user-ID bit.
+    pub file: fs::File,
+    /// GNU's `*new_dst` **as it stands after the open**, which is not simply
+    /// `matches!(dest, Dest::New)`: a destination that vanished between the
+    /// caller's `stat` and the open, and one that `-f` unlinked, both end up
+    /// newly created.
+    ///
+    /// The distinction is what decides whether `-p` bothers to `chown`,
+    /// whether `--no-preserve=mode` applies, and — through [`ModeDebt`] —
+    /// whether any permissions were withheld at all.
+    pub new: bool,
+}
+
+/// Why a destination could not be opened for writing.
+///
+/// Three variants rather than one `io::Error` because GNU has three sentences,
+/// and which one is printed is information the caller cannot reconstruct from
+/// an `errno`.
+pub enum DestError {
+    /// Every other failure to open. `cp: cannot create regular file %s`.
+    Io(io::Error),
+    /// The name is a symlink that points at nothing. Resolving it to a
+    /// (directory, name) pair to write through is racy by construction, so GNU
+    /// refuses and says so rather than creating the link's target:
+    /// `cp: not writing through dangling symlink %s`.
+    ///
+    /// It carries the `EEXIST` that revealed it, which no `cp` reads — its
+    /// sentence names no error at all. `mv` does: a move reaches this only in a
+    /// race, has no sentence of its own for it, and reporting the underlying
+    /// `File exists` is what it did before this became shared code. A variant
+    /// that threw the error away would have forced a move to *synthesise* one,
+    /// and a synthesised `io::Error` has no `errno` for [`strerror`] to name.
+    Dangling(io::Error),
+    /// `-f` had to unlink a destination that would not open, and could not.
+    /// GNU's `cannot remove %s`, which is a different sentence from
+    /// [`DestError::Io`]'s — hence a variant rather than an `io::Error` the
+    /// caller has to guess about.
+    Remove(io::Error),
+}
+
+/// `S_IWUSR` — the bit [`open_destination`] adds so that extended attributes
+/// can be written onto a copy of a read-only file. See [`ModeDebt::extra`].
+const OWNER_WRITE: u32 = 0o200;
+
+/// Open `dst` for writing, creating it with `src_mode` if it is new and leaving
+/// its mode entirely alone if it is not.
+///
+/// This is GNU's `copy_reg` (`copy.c:1287`–`1349`), and it is the one step of
+/// the engine where `cp` and `mv` had genuinely *diverged* rather than merely
+/// been written twice. The differences were all in one direction — `cp` knew
+/// things `mv` did not — and none of them were `mv` being right:
+///
+/// | | `cp` before | `mv` before |
+/// |---|---|---|
+/// | destination exists | truncate in place, `-f` unlinks on failure | not modelled; `mv` unlinks first |
+/// | dangling symlink | refused with GNU's sentence | reported as `File exists` |
+/// | umask ate the extra bit | repaired, and the debt cleared if it could not be | repaired, debt left claiming a bit that is not there |
+///
+/// The last of those is the one worth stating, because it is the shape of
+/// defect this module exists to stop. `mv`'s [`ModeDebt::extra`] stayed set
+/// after a failed repair, which is a lie about the file — harmless only
+/// because a move takes [`settle_mode`]'s `preserve_mode` branch and returns
+/// before anything reads it. It was a landmine for whoever changed that branch,
+/// and it is gone rather than documented.
+///
+/// The shape is load-bearing in three places, all of which are `-f`:
+///
+/// * **Which open is tried first is decided by [`Dest`], not by what the first
+///   open answers.** See that type.
+/// * **`-f` unlinks on the `O_TRUNC` failure only.** That is why `cp -f a
+///   dangling-link` still refuses: the open that fails there is the `O_EXCL`
+///   one, which reports `EEXIST` and is [`DestError::Dangling`], not this.
+///   Measured against 9.4 — the destination survives.
+/// * **A new file's mode goes to the kernel with the `O_CREAT`**, which is the
+///   only place the umask can narrow it without a window in which the file
+///   exists at the wider mode. That is true of the file `-f` recreates too, so
+///   `cp -f` over a `0400` destination leaves the *source's* mode behind rather
+///   than the one it removed.
+///
+/// `preserve_xattr` is taken as a bare `bool` rather than as an [`Opts`], for
+/// [`ModeDebt::new`]'s reason and one of its own: `cp`'s caller holds its
+/// options and its stdout on the same `Job`, so asking for both an `Opts` and
+/// the [`Clobber::Unlink`] writer would be two mutable borrows of one value.
+///
+/// # Errors
+///
+/// [`DestError::Dangling`] for a destination symlink that points at nothing,
+/// [`DestError::Remove`] for an unlink `-f` could not do, and
+/// [`DestError::Io`] for every other failure to open.
+pub fn open_destination(
+    dst: &Path,
+    src_mode: u32,
+    dest: Dest<'_>,
+    preserve_xattr: bool,
+    debt: &mut ModeDebt,
+) -> Result<Opened, DestError> {
+    if let Dest::Exists(clobber) = dest {
+        match open_truncating(dst) {
+            // Nothing was withheld, because nothing was created: an existing
+            // file's mode is not a copy's to narrow even for an instant. GNU
+            // zeroes the same two locals on this arm (`copy.c:1499`).
+            Ok(file) => {
+                debt.omitted = 0;
+                debt.extra = 0;
+                return Ok(Opened { file, new: false });
+            }
+            // It went away between the caller's `stat` and the open. GNU
+            // reaches its `O_CREAT` arm in exactly this case too
+            // (`dest_errno == ENOENT`), so a race loses nothing.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => match clobber {
+                Clobber::Never => return Err(DestError::Io(e)),
+                Clobber::Unlink { verbose, out } => {
+                    if let Err(e) = fs::remove_file(dst)
+                        && e.kind() != io::ErrorKind::NotFound
+                    {
+                        return Err(DestError::Remove(e));
+                    }
+                    if verbose {
+                        let _ = writeln!(out, "removed {}", quoteaf_os(dst));
+                    }
+                }
+            },
+        }
+    }
+
+    // GNU's `open_mode` (`copy.c:1451`), whose second half is the whole reason
+    // `cp --preserve=xattr` of a read-only file works at all. See
+    // [`ModeDebt::extra`].
+    debt.extra = if preserve_xattr && !chown_privileges() {
+        OWNER_WRITE
+    } else {
+        0
+    };
+
+    match open_new(dst, (src_mode & !debt.omitted) | debt.extra) {
+        Ok(file) => {
+            top_up_extra(&file, debt);
+            Ok(Opened { file, new: true })
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // `symlink_metadata` sees the link itself; `metadata` follows it,
+            // so failing there is exactly "points at nothing".
+            if fs::symlink_metadata(dst).is_ok_and(|m| m.file_type().is_symlink())
+                && fs::metadata(dst).is_err()
+            {
+                Err(DestError::Dangling(e))
+            } else {
+                // Occupied by something that is not a dangling link — a race
+                // against another process, since the caller stat'd it as absent
+                // a moment ago. Reported as the open failure it is.
+                Err(DestError::Io(e))
+            }
+        }
+        Err(e) => Err(DestError::Io(e)),
+    }
+}
+
+/// Put the extra owner-write bit on if the `open` did not manage it, and give
+/// up on it if that cannot be done either.
+///
+/// The mode handed to `open` is narrowed by the umask, which can perfectly well
+/// include `0o200` — `umask 0222` is unusual but legal, and under it the bit
+/// asked for at creation simply does not arrive. Asking is therefore not the
+/// same as having, and a copy of a read-only file under such a umask would
+/// carry no extended attributes at all: every `setxattr` onto it is refused by
+/// `xattr_permission`, and each refusal is reported, so what should be a silent
+/// copy becomes a screenful of `Permission denied`.
+///
+/// GNU makes the same repair in the same place and with the same fallback
+/// (`copy.c:1539`): *"if extra permissions needed for `copy_xattr` didn't
+/// happen (e.g., due to umask) chmod to add them temporarily; if that fails
+/// give up with extra permissions, letting `copy_attr` fail later."*
+///
+/// Giving up means clearing [`ModeDebt::extra`], which does two things at once
+/// and both are wanted: the extended-attribute step goes on to fail and *say
+/// so*, rather than the failure being hidden, and the settle-up does not chmod
+/// a file whose mode is already the one it should end with.
+///
+/// A failure to read the mode back is folded into the same fallback rather than
+/// given a diagnostic of its own. GNU has one — `cannot fstat %s` — but it
+/// reaches that `fstat` for other reasons too (it sizes the copy buffer from
+/// the result), so the call is free there and would be a stat-per-copy here,
+/// added solely to have somewhere to fail. On a descriptor this function was
+/// handed a moment ago there is no reachable failure to report.
+fn top_up_extra(file: &fs::File, debt: &mut ModeDebt) {
+    if debt.extra == 0 {
+        return;
+    }
+    let on = On::File(file);
+    let arrived = current_mode(on)
+        .is_ok_and(|now| now | debt.extra == now || fsattr::set_mode(on, now | debt.extra).is_ok());
+    if !arrived {
+        debt.extra = 0;
+    }
+}
+
+/// `O_WRONLY|O_TRUNC`, with no `O_CREAT` and no mode: the destination is known
+/// to be there and its permissions are not a copy's to change. See `cp.rs`'s
+/// module docs, bug 8.
+fn open_truncating(dst: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new().write(true).truncate(true).open(dst)
+}
+
+/// `O_WRONLY|O_CREAT|O_EXCL` with `mode`, which the kernel narrows by the
+/// umask.
+///
+/// `O_EXCL` is not an optimisation. Without it a name created between a
+/// caller's unlink and this open would be opened and truncated, which is the
+/// very thing the unlink was there to prevent.
+#[cfg(unix)]
+fn open_new(dst: &Path, mode: u32) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(dst)
+}
+
+/// The development host has no mode to give, so the file is created with
+/// whatever Windows would have given it. The target OS is the `#[cfg(unix)]`
+/// arm above; see [`fsattr::permission_bits`].
+#[cfg(not(unix))]
+fn open_new(dst: &Path, _mode: u32) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)
 }
 
 /// A byte copy that failed, carrying the sentence GNU prints for it.

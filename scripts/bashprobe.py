@@ -23,8 +23,11 @@ must be true before these four can be wired with `--may-skip` and unpinned
 from `scripts/check-gates-are-wired.py`; see `known-issues.md ->
 TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED` for the other two.
 `bashprobe.py --self-test` proves all three transport outcomes on a host with
-no WSL at all -- which is the only kind of host any of this runs on today, and
-so was the only place the old code was never exercised.
+no WSL at all, by stubbing the transport -- so the decline paths are exercised
+even on a machine (like the one this was written on) where WSL is present and
+they would otherwise never run.  That asymmetry is why they were wrong for as
+long as they were: the code that handles a missing WSL can only be reached on
+a host where nobody is running these gates.
 
 Two things this fixes over the naive `bash -c <script>` in an argv element:
 
@@ -370,15 +373,108 @@ def words(line: str, setup: str = "HOME=/root; USER=root; EMPTY=''"):
     return fields[:n]
 
 
+def score_cases(cases, width: int = 26) -> int:
+    """Compare bash's answer to each expected answer; print, and count failures.
+
+    `cases` is `(line, want, why)`, where `want` is a list of byte-words or
+    `None` meaning "bash must reject this line". Returns the number of
+    disagreements, so a caller's `main` is `return 1 if fails else 0`.
+
+    Extracted because three of the four `check-*-vs-bash.py` gates carried a
+    byte-identical copy of this loop and none of them had ever executed a
+    failing case. A scoring loop that has only ever been run against a passing
+    table is the same defect as a checker nobody runs: the branch that reports
+    a disagreement is the entire product, and it was dead code in triplicate.
+
+    Two rules here are easy to get backwards, and both have a case in
+    `_selftest`:
+
+    * A `None` from `words()` means **bash rejected the line**, which is
+      legitimate data. It matches only when `want` is `None`. It must never be
+      scored as agreement with a list -- that is how a probe that has stopped
+      working reports a clean run.
+    * `ProbeError` is *not* caught here. It means the harness could not read
+      an answer bash did give, which is not data at all and must not be
+      counted, skipped, or summarised. Letting it escape to a traceback is
+      correct: `run_checker` aborts on a traceback rather than reading a
+      verdict, which is exactly the right outcome for a broken oracle.
+    """
+    fails = 0
+    for line, want, why in cases:
+        got = words(line)
+        ok = (got is None) if want is None else (got == want)
+        shown = "<bash error>" if got is None else repr(got)
+        if not ok:
+            fails += 1
+        print(f"{'ok  ' if ok else 'FAIL'} {line!r:{width}} -> {shown}")
+        if not ok:
+            print(f"       expected "
+                  f"{'<bash error>' if want is None else repr(want)}")
+            print(f"       ({why})")
+    return fails
+
+
+def table_problems(cases) -> list:
+    """Structural faults in a `(line, want, why)` table, as plain sentences.
+
+    Nothing here needs bash, which is the point: the four `*-vs-bash.py` gates
+    can only *run* on a host with WSL, so if the only thing they can check
+    without it is nothing, they are untestable on every machine this project
+    actually builds on.
+
+    What it catches is the class of fault that makes a case silently stop
+    testing what it was written for -- a duplicated input (the second entry
+    shadows nothing, but the reader believes two properties are pinned when
+    one is), an expectation written as `str` instead of `bytes` (which can
+    never equal what `words()` returns, so the case is a permanent failure or,
+    worse, permanently vacuous), and a missing `why` (the reason a case exists
+    is written down in exactly one place, and it is that field).
+    """
+    problems = []
+    seen = {}
+    for i, case in enumerate(cases):
+        if len(case) != 3:
+            problems.append(f"case {i}: has {len(case)} field(s), want "
+                            f"(line, want, why)")
+            continue
+        line, want, why = case
+        if line in seen:
+            problems.append(f"case {i}: input {line!r} is already case "
+                            f"{seen[line]}; one of the two is testing nothing "
+                            f"the other does not")
+        seen[line] = i
+        if not isinstance(why, str) or not why.strip():
+            problems.append(f"case {i} ({line!r}): no reason given, and the "
+                            f"reason is the only record of why the case is "
+                            f"here")
+        if want is None:
+            continue
+        if not isinstance(want, list):
+            problems.append(f"case {i} ({line!r}): expectation is "
+                            f"{type(want).__name__}, want a list of byte-words "
+                            f"or None")
+            continue
+        for j, w in enumerate(want):
+            if not isinstance(w, bytes):
+                problems.append(
+                    f"case {i} ({line!r}): word {j} is {type(w).__name__} "
+                    f"{w!r}, not bytes -- it can never equal what words() "
+                    f"returns, so this case is dead either way")
+    return problems
+
+
 def _selftest() -> int:
-    """Prove the three transport outcomes are three, on a host with no WSL.
+    """Prove the three transport outcomes are three, without needing WSL.
 
     This module's guards have always been self-firing (`_assert_framing_
     failure_is_loud` stubs `run` and insists the guard raises), but the
     *transport* half had no such treatment: every path through
-    `assert_transport_is_faithful` needed a real bash to reach, so on the
-    machines where it matters most -- the ones without WSL -- the only exercised
-    path was the one that crashed.
+    `assert_transport_is_faithful` needed a real bash to reach.  Which is
+    backwards, and is exactly why the decline paths were wrong for as long as
+    they were -- the code that handles a missing WSL can only be reached on a
+    host where nobody is running these gates.  Stubbing the transport is what
+    lets the machine that *has* WSL test the behaviour of the machines that do
+    not.
 
     What is checked is the exit code, not the prose, because the exit code is
     the entire interface `run_checker` has to this file:
@@ -542,6 +638,97 @@ def _selftest() -> int:
                 bad += 1
         finally:
             WSL = real_wsl
+
+        # ---- score_cases: the branch three gates shipped and never ran. ----
+        global words
+        real_words = words
+
+        def scoring(answers, cases):
+            """Run score_cases with `words` answering from a dict."""
+            nonlocal checks
+            global words
+            words = lambda line: answers[line]  # noqa: E731
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                n = score_cases(cases)
+            return n, out.getvalue()
+
+        try:
+            n, text = scoring({"x": [b"a"]}, [("x", [b"a"], "agrees")])
+            check("an agreement scores zero", n == 0)
+            check("...and is printed as ok", text.startswith("ok  "))
+
+            # The true positive. Every one of the four gates would have
+            # reported `0 disagreements with bash` with this branch broken,
+            # and that is spelled identically to a clean run.
+            n, text = scoring({"x": [b"b"]}, [("x", [b"a"], "why-it-matters")])
+            check("a disagreement scores one", n == 1)
+            check("...and is printed as FAIL", text.startswith("FAIL"))
+            check("...and shows what was expected", "[b'a']" in text)
+            check("...and says why the case exists, which is the only place "
+                  "that reason is written down", "why-it-matters" in text)
+
+            # bash rejecting a line: legitimate data, and the two directions
+            # must not collapse into each other.
+            n, _ = scoring({"x": None}, [("x", None, "must be rejected")])
+            check("a rejection expected and received scores zero", n == 0)
+            n, text = scoring({"x": None}, [("x", [b"a"], "must parse")])
+            check("a rejection where words were expected is a disagreement",
+                  n == 1)
+            check("...and is shown as a bash error, not as an empty list",
+                  "<bash error>" in text)
+            n, _ = scoring({"x": [b"a"]}, [("x", None, "must be rejected")])
+            check("words where a rejection was expected is a disagreement",
+                  n == 1)
+
+            # The empty-word case, which is the distinction this whole module
+            # exists for: zero words is not one empty word.
+            n, _ = scoring({"x": []}, [("x", [b""], "arity")])
+            check("no words is not one empty word", n == 1)
+
+            check("failures accumulate rather than latch",
+                  scoring({"a": [b"x"], "b": [b"x"], "c": [b"x"]},
+                          [("a", [b"y"], "-"), ("b", [b"x"], "-"),
+                           ("c", [b"y"], "-")])[0] == 2)
+
+            # ProbeError must escape: it means the harness could not read an
+            # answer bash gave, which is not a verdict and must not be
+            # counted as one.
+            def _raise(_line):
+                raise ProbeError("framing failed")
+
+            checks += 1
+            words = _raise
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    score_cases([("x", [b"a"], "-")])
+            except ProbeError:
+                print("ok   a ProbeError escapes rather than being scored")
+            else:
+                print("selftest FAIL: score_cases swallowed a ProbeError -- a "
+                      "harness failure would be counted as a disagreement",
+                      file=sys.stderr)
+                bad += 1
+
+            # ---- table_problems, in both directions. ----
+            good = [("a", [b"x"], "why a"), ("b", None, "why b")]
+            check("a well-formed table has no problems",
+                  table_problems(good) == [])
+            for label, table, needle in (
+                ("a duplicated input",
+                 [("a", [b"x"], "one"), ("a", [b"x"], "two")], "already case"),
+                ("an expectation written as str",
+                 [("a", "x", "why")], "want a list"),
+                ("a word written as str",
+                 [("a", ["x"], "why")], "not bytes"),
+                ("a missing reason", [("a", [b"x"], "")], "no reason given"),
+                ("a malformed row", [("a", [b"x"])], "field(s)"),
+            ):
+                found = table_problems(table)
+                check(f"{label} is reported",
+                      any(needle in p for p in found))
+        finally:
+            words = real_words
     finally:
         run = real_run
         _assert_word_probe_is_exact = real_word_probe

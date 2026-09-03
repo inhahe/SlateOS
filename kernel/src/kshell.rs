@@ -883,25 +883,35 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
     let len = bytes.len();
     let mut result: Vec<u8> = Vec::with_capacity(len);
     let mut i = 0;
-    let mut in_single_quote = false;
+    // The quoting context, from the scanner the rest of the shell shares.
+    //
+    // What stood here was a single `in_single_quote` flag flipped by *any*
+    // apostrophe, and that is the whole of why `echo "it's $HOME"` printed
+    // `$HOME` literally: the apostrophe inside the double quotes opened a
+    // region this loop read as single-quoted, and expansion stayed off until
+    // the next apostrophe or the end of the line. A one-bit model cannot
+    // express "inside double quotes an apostrophe is an ordinary character".
+    let mut scan = shellquote::scan(bytes);
 
     while i < len {
-        let b = bytes[i];
+        // Several arms below parse a construct themselves and move `i` past
+        // its body. Resyncing here is what keeps the quotes inside a `$(…)`
+        // or `$'…'` body from leaking into the outer line — they belong to
+        // the inner command, not to this one.
+        scan.skip_to(i);
+        let Some(tok) = scan.next() else { break };
+        let b = tok.byte;
 
-        if b == b'\'' && !in_single_quote {
-            // Enter single-quoted section (no expansion).
-            in_single_quote = true;
-            result.push(b'\'');
-            i = i.saturating_add(1);
-            continue;
-        }
-        if b == b'\'' && in_single_quote {
-            in_single_quote = false;
-            result.push(b'\'');
-            i = i.saturating_add(1);
-            continue;
-        }
-        if in_single_quote {
+        // Nothing expands inside `'…'`, and nothing expands for a byte a
+        // backslash escaped. Both halves matter: in `"\$HOME"` the `$` really
+        // *is* inside the double-quoted region, and it is the backslash, not
+        // the context, that suppresses it. A test of the context alone gets
+        // that case wrong, which is why the scanner answers it as `expands`.
+        //
+        // The byte is copied through with its quoting still attached; taking
+        // that off is `remove_quotes`'s job, one stage later. Expanding and
+        // unquoting in the same pass is what makes a shell unescape twice.
+        if !tok.expands() {
             result.push(b);
             i = i.saturating_add(1);
             continue;
@@ -1124,7 +1134,15 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
             // Tilde expansion: `~` or `~/...` at word start → $HOME.
             // Only expand when at position 0 or after whitespace/=/:
             // (assignment context, PATH-like lists).
-            let at_word_start = if i == 0 {
+            //
+            // `is_bare`, not `expands`: a tilde is the one construct here that
+            // double quotes DO suppress. `echo "$HOME"` prints the home
+            // directory but `echo "~"` prints a tilde, so the predicate that
+            // is right for `$` and backtick above is wrong for this arm. The
+            // `\~` and `'~'` cases fall out of the same test.
+            let at_word_start = if !tok.is_bare() {
+                false
+            } else if i == 0 {
                 true
             } else {
                 matches!(bytes[i.saturating_sub(1)], b' ' | b'\t' | b'=' | b':')
@@ -1258,48 +1276,22 @@ fn split_unquoted(s: &str, sep: u8) -> Vec<&str> {
 fn expand_braces(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let bytes = input.as_bytes();
-    let mut i = 0usize;
+    let mut prev_end = 0usize;
 
-    while i < bytes.len() {
-        // Copy the run of separators verbatim. Collapsing them here is what
-        // made `echo 'a   b'` print one space.
-        while let Some(&b) = bytes.get(i) {
-            if b == b' ' || b == b'\t' {
-                result.push(char::from(b));
-                i = i.saturating_add(1);
-            } else {
-                break;
-            }
-        }
-
-        // Scan one token: everything up to the next *unquoted* space or tab.
-        let start = i;
-        let mut quote: Option<u8> = None;
-        while let Some(&b) = bytes.get(i) {
-            match quote {
-                Some(q) => {
-                    if b == q {
-                        quote = None;
-                    }
-                }
-                None => {
-                    if b == b'\'' || b == b'"' {
-                        quote = Some(b);
-                    } else if b == b' ' || b == b'\t' {
-                        break;
-                    }
-                }
-            }
-            i = i.saturating_add(1);
-        }
-        if i == start {
-            break;
-        }
-        // Only ASCII bytes are ever matched above, and every byte of a
-        // multi-byte UTF-8 sequence is >= 0x80, so `start..i` is always a
-        // char boundary pair.
-        expand_braces_token(input.get(start..i).unwrap_or(""), &mut result);
+    for w in shellquote::split_bare_words(bytes) {
+        // The run of blanks *before* this word, copied verbatim rather than
+        // re-emitted as one: collapsing them here is what made `echo 'a   b'`
+        // print a single space.
+        result.push_str(input.get(prev_end..w.start).unwrap_or(""));
+        // Only ASCII bytes ever delimit a word, and every byte of a
+        // multi-byte UTF-8 sequence is >= 0x80, so these are always char
+        // boundaries and `unwrap_or("")` is unreachable.
+        expand_braces_token(input.get(w.start..w.end).unwrap_or(""), &mut result);
+        prev_end = w.end;
     }
+    // Trailing blanks have no following word to be the prefix of, so they are
+    // emitted here or lost.
+    result.push_str(input.get(prev_end..).unwrap_or(""));
 
     result
 }
@@ -1407,17 +1399,19 @@ fn expand_braces_token(token: &str, result: &mut String) {
 /// interior spacing of `'a   b'` cannot survive a rejoin. Here nothing is
 /// split, so it does.
 fn remove_quotes(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut quote: Option<char> = None;
-    for ch in s.chars() {
-        match quote {
-            Some(q) if ch == q => quote = None,
-            Some(_) => out.push(ch),
-            None if ch == '\'' || ch == '"' => quote = Some(ch),
-            None => out.push(ch),
-        }
-    }
-    out
+    // This scanner was the *least* wrong of the twelve: it remembered which
+    // quote opened the region, so `"it's fine"` already survived it. What it
+    // had no concept of was the backslash, so `a\ b` kept its backslash and
+    // `"\$HOME"` came out as `\$HOME` — the escape did its job in the
+    // expander and was then left in the text as litter.
+    //
+    // Quote removal can only ever delete ASCII bytes (`'`, `"`, `\`), and no
+    // multi-byte UTF-8 sequence contains an ASCII byte, so valid UTF-8 in
+    // gives valid UTF-8 out and the `Err` arm below is unreachable. It is
+    // spelled out rather than unwrapped because the lints forbid `unwrap`,
+    // and returning the line unchanged is the one fallback that cannot turn
+    // a command into a *different* command if that reasoning is ever wrong.
+    String::from_utf8(shellquote::strip_quotes(s.as_bytes())).unwrap_or_else(|_| s.to_string())
 }
 
 /// Whether a command receives its arguments with the quoting still in place.
@@ -3321,52 +3315,31 @@ fn eval_arith_stmt(expr: &str) -> Result<i64, ArithError> {
 /// - `'foo bar'` → single word `foo bar`.
 /// - Quotes can appear mid-word: `a"b c"d` → `ab cd`.
 fn split_words(s: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut chars = s.chars().peekable();
-
-    while let Some(&ch) = chars.peek() {
-        match ch {
-            ' ' | '\t' => {
-                if !current.is_empty() {
-                    words.push(core::mem::take(&mut current));
-                }
-                chars.next();
+    // The nested loops this replaces had the classic defect of the twelve
+    // scanners: on `"a'b" c` the inner `"`-loop stopped at the closing quote
+    // correctly, but nothing knew about backslashes, so `a\ b` split into two
+    // words where bash makes one. Splitting and quote removal are now the
+    // same traversal the rest of the shell uses.
+    //
+    // ARITY IS DELIBERATELY UNCHANGED HERE. `split_bare_words` reports the
+    // explicitly quoted empty word — bash gives `set -- ''` one argument, and
+    // that is the behaviour we eventually want — but adopting it changes the
+    // argument count seen by fifteen callers, two of which branch on
+    // `split_words(args).is_empty()`. Dropping empties keeps this commit a
+    // pure substitution; the arity fix is TD-KSHELL (b') and gets its own
+    // commit with those fifteen sites audited.
+    shellquote::split_bare_words(s.as_bytes())
+        .into_iter()
+        .filter_map(|w| {
+            let word = shellquote::strip_quotes(s.as_bytes().get(w.start..w.end)?);
+            if word.is_empty() {
+                return None;
             }
-            '"' => {
-                chars.next(); // consume opening quote
-                while let Some(&c) = chars.peek() {
-                    if c == '"' {
-                        chars.next(); // consume closing quote
-                        break;
-                    }
-                    current.push(c);
-                    chars.next();
-                }
-            }
-            '\'' => {
-                chars.next(); // consume opening quote
-                while let Some(&c) = chars.peek() {
-                    if c == '\'' {
-                        chars.next(); // consume closing quote
-                        break;
-                    }
-                    current.push(c);
-                    chars.next();
-                }
-            }
-            _ => {
-                current.push(ch);
-                chars.next();
-            }
-        }
-    }
-
-    if !current.is_empty() {
-        words.push(current);
-    }
-
-    words
+            // Unreachable for the same reason as in `remove_quotes`: only
+            // ASCII bytes are removed, and word boundaries are ASCII blanks.
+            String::from_utf8(word).ok()
+        })
+        .collect()
 }
 
 /// Execute a case statement: match the word against patterns and run
@@ -21973,6 +21946,167 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             parse_input_redirect("cat <<< word").is_none(),
             "a here-string is not input redirection"
         );
+    }
+
+    serial_println!(
+        "  kshell::self_test 115: the expansion pipeline agrees with bash -- \
+         `echo \"it's $HOME\"` expands, `\"\\$HOME\"` does not, `a\\ b` is one \
+         word, and a tilde in double quotes stays a tilde"
+    );
+    {
+        // Rung 115 -- the expansion half of
+        // A-KSHELL-REDIRECT-MISSED-WHEN-AN-APOSTROPHE-PRECEDES-IT, covering the
+        // four stages of the pipeline that were converted in one commit:
+        // `expand_braces`, `remove_quotes`, `split_words` and
+        // `expand_vars_bytes`.
+        //
+        // Every expectation here was measured against real bash before it was
+        // written down (build/scratch/pipeline-check.py, 40 cases, 0
+        // disagreements), because several of them are ones I would have
+        // guessed wrong: `"a\\b"` collapses to one backslash but `'a\\b'` keeps
+        // both; `"C:\dir"` keeps its backslash because `d` is not escapable in
+        // double quotes; and a tilde does *not* expand inside double quotes
+        // even though a `$` does.
+        //
+        // `$#` is the probe for the expander for the reason rung 113 gives: it
+        // expands unconditionally and cannot be accidentally empty.
+
+        // --- expand_vars_bytes: the bug itself. -----------------------------
+        // An apostrophe inside double quotes is an ordinary character, so the
+        // `$#` after it is in a *double*-quoted region and still expands. The
+        // old one-bit flag read the apostrophe as opening a single-quoted
+        // region and suppressed everything to end of line.
+        let out = expand_vars_bytes(b"\"it's $#\"");
+        assert!(
+            !out.ends_with(b"$#\""),
+            "an apostrophe inside double quotes must not stop expansion, got {:?}",
+            out
+        );
+
+        // The converse control, so the fix cannot have become "always expand":
+        // a double quote inside single quotes is equally ordinary.
+        let out = expand_vars_bytes(b"'say \"hi\" $#'");
+        assert_eq!(
+            out,
+            b"'say \"hi\" $#'".to_vec(),
+            "a double quote inside single quotes does not re-enable expansion"
+        );
+
+        // The escape, which is the part a context test alone gets wrong: in
+        // `"\$#"` the `$` genuinely *is* inside the double-quoted region, and
+        // it is the backslash that suppresses it. The backslash is left in
+        // place here on purpose -- removing it is `remove_quotes`'s job, and a
+        // shell that unescapes twice mangles `\\`.
+        let out = expand_vars_bytes(b"\"\\$#\"");
+        assert_eq!(
+            out,
+            b"\"\\$#\"".to_vec(),
+            "an escaped `$` inside double quotes does not expand, and keeps its backslash"
+        );
+        let out = expand_vars_bytes(b"\\$#");
+        assert_eq!(out, b"\\$#".to_vec(), "an escaped `$` unquoted does not expand");
+
+        // Tilde is the one construct double quotes suppress but `$` survives,
+        // so it is tested against the same three contexts to prove the two
+        // predicates really are different.
+        //
+        // `HOME` is set and put back rather than read, because the assertion
+        // is about *which* tildes expand and a rung that only works when the
+        // boot happened to populate `HOME` tests nothing on the boot where it
+        // did not. The restore matters as much: this runs inside the live
+        // shell's variable table, and a self-test that leaves `HOME` pointing
+        // at `/root` would change the behaviour of everything after it.
+        let saved_home = env_get("HOME");
+        assert!(env_set("HOME", "/root"), "HOME is not readonly");
+        assert_eq!(expand_vars_bytes(b"~"), b"/root".to_vec(), "bare tilde expands");
+        assert_eq!(
+            expand_vars_bytes(b"\"~\""),
+            b"\"~\"".to_vec(),
+            "a tilde inside double quotes does NOT expand, unlike a `$`"
+        );
+        assert_eq!(
+            expand_vars_bytes(b"'~'"),
+            b"'~'".to_vec(),
+            "nor inside single quotes"
+        );
+        assert_eq!(
+            expand_vars_bytes(b"\\~"),
+            b"\\~".to_vec(),
+            "nor when escaped -- and the backslash is left for quote removal"
+        );
+        match saved_home {
+            Some(h) => {
+                env_set("HOME", &h);
+            }
+            // Nothing to restore it to, and there is no `unset` helper here.
+            // Leaving the probe value would be worse than a stale `/root` on a
+            // boot that never had `HOME`, but this branch is the honest one to
+            // note rather than paper over.
+            None => {
+                env_set("HOME", "");
+            }
+        }
+
+        // --- remove_quotes: what survives. ----------------------------------
+        assert_eq!(remove_quotes("\"it's fine\""), "it's fine");
+        assert_eq!(
+            remove_quotes("a\\ b"),
+            "a b",
+            "the backslash the old scanner left behind is now removed"
+        );
+        assert_eq!(
+            remove_quotes("\"C:\\dir\""),
+            "C:\\dir",
+            "`\\d` is not escapable in double quotes, so the backslash is data"
+        );
+        assert_eq!(remove_quotes("\"say \\\"hi\\\"\""), "say \"hi\"");
+        assert_eq!(
+            remove_quotes("\"a\\\\b\""),
+            "a\\b",
+            "`\\\\` IS escapable in double quotes -- two become one"
+        );
+        assert_eq!(
+            remove_quotes("'a\\\\b'"),
+            "a\\\\b",
+            "but single quotes have no escapes at all, so both survive"
+        );
+        assert_eq!(remove_quotes("'a'\\''b'"), "a'b", "the idiom quote_word emits");
+        assert_eq!(remove_quotes("a'b'c"), "abc", "quotes vanish mid-word");
+
+        // --- split_words: what is one word. ---------------------------------
+        assert_eq!(split_words("a\\ b"), alloc::vec!["a b"], "an escaped blank does not split");
+        assert_eq!(
+            split_words("\"a b\" c"),
+            alloc::vec!["a b", "c"],
+            "a quoted blank does not split"
+        );
+        assert_eq!(split_words("a b  c"), alloc::vec!["a", "b", "c"], "runs collapse");
+        assert_eq!(split_words("x'y z'w"), alloc::vec!["xy zw"], "quotes vanish mid-word");
+        assert_eq!(
+            split_words("\"a'b\" c"),
+            alloc::vec!["a'b", "c"],
+            "an apostrophe inside double quotes does not swallow the split"
+        );
+
+        // --- expand_braces: quoting suppresses it. --------------------------
+        assert_eq!(expand_braces("x{1,2}y"), "x1y x2y", "prefix and suffix distribute");
+        assert_eq!(
+            expand_braces("\"{a,b}\""),
+            "\"{a,b}\"",
+            "a brace in double quotes does not expand"
+        );
+        assert_eq!(expand_braces("'{a,b}'"), "'{a,b}'", "nor in single quotes");
+        assert_eq!(
+            expand_braces("\\{a,b}"),
+            "\\{a,b}",
+            "nor when escaped -- no scanner here could see this before"
+        );
+        assert_eq!(
+            expand_braces("echo 'a   b'"),
+            "echo 'a   b'",
+            "interior spacing survives, which is why this stage does not rejoin words"
+        );
+        assert_eq!(expand_braces("{a}"), "{a}", "no comma is not a brace expansion");
     }
 
     serial_println!("  kshell::self_test PASSED");

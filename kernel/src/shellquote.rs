@@ -149,6 +149,28 @@ impl<'a> QuoteScan<'a> {
     pub const fn context(&self) -> Ctx {
         self.ctx
     }
+
+    /// Jump the cursor to `off` without interpreting the bytes skipped.
+    ///
+    /// This exists for the variable expander, which finds the end of a
+    /// `$(…)`, `$((…))` or `${…}` body itself and hands the body to a
+    /// *recursive* evaluation. Quotes inside a substitution belong to that
+    /// inner command, not to the outer line, so skipping them is the correct
+    /// reading rather than a shortcut — in bash, `echo $(echo "'")x` leaves
+    /// the outer line unquoted, and a scanner that let the inner `'` toggle
+    /// the outer context would swallow the rest of the line.
+    ///
+    /// Moving backwards is refused rather than asserted: a caller that has
+    /// already consumed past `off` cannot be given back a context it did not
+    /// keep, and silently rewinding would report quoting that never applied.
+    pub const fn skip_to(&mut self, off: usize) {
+        if off > self.i {
+            self.i = off;
+            // Whatever the pending backslash was going to escape is inside
+            // the skipped region, so it escapes nothing out here.
+            self.pending_escape = false;
+        }
+    }
 }
 
 /// Bytes that a backslash escapes *inside double quotes*. Anywhere else in a

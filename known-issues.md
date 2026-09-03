@@ -109239,3 +109239,49 @@ creates a file literally named `"out.txt"`, quotes included, and always has —
 quotes. Rung 114 asserts the *parser's* contract (split the line) rather than
 papering over this, because unquoting belongs to the executor
 (`execute_redirect` / `execute_input_redirect`) and is its own commit.
+
+### Two limits of the shared scanner, found while converting the rest
+
+**In short:** the shared scanner is not a complete model of shell quoting, and
+one of the twelve "copies" turns out not to be a shell scanner at all. Neither
+is a regression — both describe ground that was never covered — but both would
+otherwise look like oversights to whoever reads the conversion next.
+
+**`shellquote` does not model `$'…'` (ANSI-C quoting).** To the scanner, the
+`$` is an ordinary byte and the `'` opens an ordinary single-quoted region, so
+in `$'a\'b'` the backslash-escaped apostrophe — which bash reads as *data*
+inside the construct — is read as *closing* the region, and everything after it
+is misfiled as unquoted.
+
+- *Why it is not a regression:* every one of the twelve hand-rolled scanners had
+  exactly the same blind spot, so a converted site is no worse than it was. The
+  one place that does understand `$'…'` is `expand_vars_bytes`, which has its
+  own arm for it (rung 113) and drives the scanner past the body with
+  `QuoteScan::skip_to`, so the live expander is correct today.
+- *Why it is not fixed now:* `$'…'` is not a third quoting context but a fourth,
+  with its own escape alphabet (`\n`, `\t`, `\x41`, `\u00e9`, …). Adding it
+  means `Ctx` grows a variant and every `matches!(ctx, …)` in the scanner and
+  its callers has to be re-decided. That is a real change to the shared type
+  and belongs in its own commit with its own bash cross-check, not smuggled
+  into a substitution.
+- *What it costs meanwhile:* only sites that see a `$'…'` **and** ask about
+  quoting are affected, and the expander — the one that actually handles the
+  construct — is not among them, because it skips the body rather than scanning
+  it. Tracked as **TD-SHELLQUOTE-NO-ANSI-C-QUOTING**.
+
+**Site #10, `awk_split_print_args`, is deliberately excluded from the
+conversion.** It splits an *awk* `print` argument list, and awk is a different
+language: `'` is not a quote character there at all. Substituting the shell
+scanner would fix one case and break another — awk's `\"` escape would start
+being honoured (good), while a bare apostrophe in `print "it" 's'` would start
+opening a quoted region that awk says does not exist (bad). The site should
+stay a separate scanner; what it should *not* stay is wrong.
+
+- *The real bug there:* the loop toggles `in_quote` on every `"`, with no
+  concept of the backslash, so `print "a\",b"` splits at the comma inside the
+  string. The fix is four lines of awk's own escape rule, not this scanner.
+  Tracked as **A-KSHELL-AWK-PRINT-SPLITS-INSIDE-AN-ESCAPED-QUOTE**.
+- *Consequence for the count:* the "twelve scanners" figure includes one that
+  is not a shell scanner, so the shared-scanner goal is eleven sites, not
+  twelve. The agreement property proposed above becomes true by construction
+  over those eleven; site #10 is outside it on purpose.

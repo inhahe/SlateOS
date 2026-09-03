@@ -409,6 +409,13 @@ def main() -> int:
     findings = audit(paths)
     for name, why in findings:
         print(f"{name}: {why}")
+    # Flush before anything goes to stderr.  boot-test.sh's run_checker merges
+    # both streams into one log (`>"$log" 2>&1`), and Python block-buffers
+    # stdout to a file while stderr stays unbuffered -- so without this the
+    # summary overtakes the findings and the refusal text says "named above"
+    # about names printed below it.  Observed exactly that while testing the
+    # boot-test wiring, on a report of one line; a longer one would interleave.
+    sys.stdout.flush()
 
     if args.list:
         print(f"\n{len(findings)} gate(s) that cannot refuse.")

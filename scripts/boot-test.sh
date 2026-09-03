@@ -2920,6 +2920,74 @@ check_requests_not_deleted() {
 
 check_requests_not_deleted
 
+# Every gate in this script trusts that a checker which finds a problem will
+# *say so* by exiting non-zero.  `check-doc-links.py` did not.  A bare run of it
+# fell through to `ap.print_help(); return 0` while every refusal sat behind
+# `--check`, so it scanned the whole tree for 412 seconds, found dead links,
+# printed them where `pre-boot.py` discarded them, and reported success.  It was
+# found by accident, because a log ended in a usage message.
+#
+# Note what could not have found it.  Every self-test in `scripts/` aims at a
+# checker's *detector* -- feed it a planted defect, assert the finding appears.
+# All of them would have passed on that file, because its detector was fine.  A
+# gate has two halves, detect and *refuse*, and a suite pointed at the first
+# cannot see a hole in the second.
+#
+# So this gate checks the second half, mechanically: for each `check-*.py`, is
+# any non-zero exit reachable from a bare invocation?  It is a static AST walk,
+# not an execution -- running all 31 costs ~38 minutes, and running them could
+# not distinguish "passes on a clean tree" from "passes on everything" without
+# planting a defect in each.  It errs toward silence: an unrecognised guard or a
+# computed return counts as capable of refusing.
+#
+# It runs HERE, before the build, because it costs well under a second, and
+# because a suite that cannot fail is the one thing there is no point
+# discovering after ten minutes of compiling.
+check_gates_can_refuse() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== gate-refusal check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Its own cases first, for the reason this gate exists: an analyser that has
+    # stopped analysing reports an empty finding list, which is spelled exactly
+    # like a clean tree.  Its first version did precisely that -- green, and
+    # blind to the real defect, because it modelled `if args.flag:` but not
+    # `if args.flag is not None:`.
+    if ! run_checker check-gates-can-refuse-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-gates-can-refuse.py" --selftest; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The gate-refusal analyser fails its" >&2
+        echo "own cases, so its verdict on every other gate is worthless --" >&2
+        echo "and its failure mode is an empty report, which reads as a pass." >&2
+        return 1
+    fi
+
+    echo "=== Checking that every gate can still refuse ==="
+    if run_checker check-gates-can-refuse "$py" \
+            "$PROJECT_ROOT/scripts/check-gates-can-refuse.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each checker named above cannot reach a" >&2
+    echo "non-zero exit when run with no arguments -- which is how this script" >&2
+    echo "and scripts/pre-boot.py run it.  Whatever it enforces, it does not." >&2
+    echo "" >&2
+    echo "The usual cause is that the refusal sits behind a flag: a bare run" >&2
+    echo "prints help, or reports findings and returns 0.  The fix is to make" >&2
+    echo "the bare run the checking run and keep the flag as an accepted no-op," >&2
+    echo "as scripts/check-doc-links.py now does." >&2
+    exit 1
+}
+
+check_gates_can_refuse
+
 # A self-test that nothing calls is not a test.  It compiles, it reads as
 # coverage, it gets cited in a commit message as "tested" -- and it has never
 # executed.  `evdev::self_test` sat uncalled for exactly one commit, and the

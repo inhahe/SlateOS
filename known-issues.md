@@ -15985,6 +15985,51 @@ code is nevertheless correct, for a different reason: the fallback passes
 `line`, the original, not `args`. The comment should say so, because someone
 who believes the stated reason could "simplify" it into a real bug.
 
+**[A] 2026-09-02 — why (b) has to come first: without an escape, correct tab
+completion is not *expressible*, never mind unimplemented.**
+
+Pressing Tab on a file whose name contains a space produces a command line
+that does not refer to that file. `tab_complete` (kshell.rs:5967) inserts the
+matched name raw — line 6037 for the unique match, 6050 for the common prefix
+— with no escaping anywhere in the function. Completing `My Doc.txt` yields
+
+```
+cat My Doc.txt
+```
+
+which the very next stage splits into two arguments, so the command reports
+two missing files, both named after halves of a file that exists. The user did
+not type that line; the shell wrote it for them.
+
+**There is no way to fix this at the completion site.** The correct output is
+`cat My\ Doc.txt`, and today that is *worse* than the broken version:
+`remove_quotes` leaves the backslash in, so the argument becomes
+`My\ Doc.txt` and the file is still not found. Quoting it as `'My Doc.txt'`
+fails differently — completion would have to know whether the cursor is
+already inside a quoted region, and it cannot, because `word_start` at line
+6001 is a bare `text_before.rfind(' ')` with no quote or backslash awareness.
+Completing inside `cat "My D<TAB>` therefore starts the word at `D`.
+
+This is the argument for the sequencing, stated in terms of what is possible
+rather than what is convenient: **stage (b) is not a prerequisite of (d) by
+scheduling preference, it is a prerequisite by grammar.** Emitting an escape
+is only correct once something honours it; until then every candidate spelling
+of a completed name containing a space is wrong in a different way.
+
+Two consequences for the eventual (d):
+
+- Completion must **escape what it inserts**, using the rules (b) adds, and
+  the round-trip is the assertion worth writing: for any directory entry,
+  parsing what completion inserted must yield the original name back. One
+  property covers both the space case and the 0xFF case.
+- Completion must find the **word start** with the same scanner the parser
+  uses, not `rfind(' ')`. Two implementations of "where does this word begin"
+  is how the cursor ends up inside a quoted region the parser thinks it left.
+
+The 0xFF case (line 6027, which drops any candidate whose name is not UTF-8)
+is unchanged and still waits on (c) for the byte-clean word path — but it is
+now clearly the *second* reason completion is wrong, not the first.
+
 ### B-KSHELL-APPEND-TRUNCATES-BINARY-FILES. `cmd >> file` silently discarded the entire existing contents of any file that was not valid UTF-8, and reported success — 2026-08-24 — ✅ FIXED 2026-08-24 by lane A (`kernel/src/kshell.rs`, `redirect_write`)
 
 **Where:** `kernel/src/kshell.rs`. Four duplicated copies of the append path,

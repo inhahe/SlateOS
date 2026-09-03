@@ -108658,17 +108658,39 @@ else (see the header comment at `boot-test.sh:1168-1183`).
 
 `check-gates-can-refuse.py` answers "can this gate return non-zero?" It cannot
 answer "does anything run this gate?" — a different question about a different
-file (`boot-test.sh`). The set difference above is currently a one-off
-measurement, not a check. Making it a check is cheap and probably right; it is
-not done yet, and *that* is the honest status of this entry.
+file (`boot-test.sh`).
 
-When it is written it must be a **ratchet, not a gate**: eight gates are
-unwired today and six of them are lane C's, so a hard failure would block all
-three lanes on work that is not theirs to schedule. The shape is an explicit
-pinned list of known-unwired gates with a reason each, failing only when a
-*new* one appears — and equally when a pinned entry becomes wired or names a
-file that no longer exists, because an exemption list nobody prunes stops
-describing the tree it exempts.
+**Now checked, as of `809cac670`:** `scripts/check-gates-are-wired.py`, wired
+into `boot-test.sh` beside its sibling. It is a **ratchet, not a gate** — the
+eight unwired checkers are pinned in `PINNED` with a reason each, and it fails
+only when the set changes: a new unwired gate, a pinned entry that is now
+wired, or a pinned entry whose file is gone. Six of the eight are lane C's, so
+failing outright would have blocked three lanes on work none of them scheduled.
+Pruning is enforced in both directions, because an exemption list nobody prunes
+stops describing the tree it exempts.
+
+### The mutant that survived the first version of that ratchet
+
+Worth recording, because it is the same bug one more level down. Deleting the
+real call
+
+    run_checker check-tick-wiring "$py" ".../check-tick-wiring.py"
+
+from `boot-test.sh` changed the ratchet's verdict not at all. The line above it
+runs the *same script* with `--self-test`, and the first version counted any
+`run_checker` naming the script. So **a gate whose own cases still run, but
+whose actual check has been deleted, read as fully wired** — "appears enforced,
+is not", inside the checker written to catch exactly that.
+
+Self-test invocations are now excluded (both `--selftest` and `--self-test`
+spellings are live in this repo, so both are matched), the mutant is caught,
+and three self-test cases pin it. Re-measuring after the tightening changed no
+counts, which was the hoped-for answer: no gate here is wired *only* through
+its self-test.
+
+The general point, for the next checker of checkers: **running a gate's own
+cases is not running the gate**, and a wiring audit that cannot tell the two
+apart will certify a deleted check as present.
 
 ---
 ## TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH

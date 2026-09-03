@@ -188,7 +188,34 @@ CASES = [
     b'"a\\tb"',
     b'"a\\\\b"',
     b"\\\\",
-    b"a\\",
+    # NOTE: `a\` -- a *trailing* backslash -- is deliberately not here. It is
+    # not a scanner question at all, and kshell answers it differently from
+    # bash on purpose. See DIVERGENCES below, which tests it properly.
+]
+
+
+# Cases where kshell is intentionally NOT bash, with both answers pinned.
+#
+# These must not sit in CASES, because there they are failures, and a failure
+# that is expected trains the reader to ignore the count. They must not be
+# deleted either: an intended divergence is exactly the thing that needs a
+# test, since nothing else will notice when it stops being intended.
+#
+# (line, bash's words, kshell's words, why they differ)
+DIVERGENCES = [
+    (
+        b"a\\",
+        [b"a"],
+        [b"a\\"],
+        "A trailing backslash is a backslash-NEWLINE to bash, so bash splices\n"
+        "     the next input line and the backslash disappears. kshell has no\n"
+        "     continuation prompt, so the line really does end there and the\n"
+        "     backslash is data. shellquote.rs:250 says exactly this.\n"
+        "     WHEN THE CONTINUATION PROMPT LANDS (shellquote.rs:147 plans one)\n"
+        "     this entry is the thing that should start failing -- at which\n"
+        "     point the question moves to the line editor and `a\\` stops being\n"
+        "     answerable by a scanner at all.",
+    ),
 ]
 
 assert_port_matches_rust()
@@ -200,13 +227,36 @@ fails = 0
 for line in CASES:
     theirs = bash_words(line)
     if theirs is None:
-        print(f"SKIP (bash rejected): {line!r}")
+        # A skip is not a failure, so this branch is how a case disappears
+        # from the verdict without disturbing the "0 failures" line. Every
+        # case in CASES is one bash accepts -- that is a property of the list,
+        # checked here rather than assumed -- so reaching this is a defect in
+        # the list or in the probe, and either way the count below would be a
+        # lie about how much was tested. Counting it is the whole fix: `a\`
+        # sat in this branch printing SKIP for as long as the file existed.
+        print(f"FAIL (bash rejected a case that should parse): {line!r}")
+        fails += 1
         continue
     mine = ours_words(line)
     ok = mine == theirs
     if not ok:
         fails += 1
     print(f"{'ok  ' if ok else 'FAIL'} {line!r}\n      bash={theirs!r}\n      ours={mine!r}")
+
+print("\n--- intended divergences from bash (BOTH sides pinned) ---")
+for line, want_bash, want_ours, why in DIVERGENCES:
+    got_bash = bash_words(line)
+    got_ours = ours_words(line)
+    ok_bash = got_bash == want_bash
+    ok_ours = got_ours == want_ours
+    ok = ok_bash and ok_ours
+    if not ok:
+        fails += 1
+    print(f"{'ok  ' if ok else 'FAIL'} {line!r}")
+    print(f"      bash={got_bash!r} (want {want_bash!r}){'' if ok_bash else '  <-- CHANGED'}")
+    print(f"      ours={got_ours!r} (want {want_ours!r}){'' if ok_ours else '  <-- CHANGED'}")
+    if not ok:
+        print(f"     {why}")
 
 # Delimiter visibility: the redirect bug, asked directly.
 DELIM = [

@@ -56,6 +56,8 @@ Consequently every finding is actionable: the name is simply gone.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import re
 import sys
 from pathlib import Path
@@ -660,6 +662,40 @@ def selftest() -> int:
     # nothing, or every `assert_eq!(x, ...)` would make its local `x` an item.
     check("status" not in d.scope, "an std macro's argument was taken as a name")
 
+    # THE EXIT-CODE CONTRACT, which is not a detail of link-finding and is the
+    # one thing above that nothing above tests.
+    #
+    # Every case up to here asks "does the checker *find* the dead link?" On
+    # 2026-09-02 the answer was yes and it did not matter: a bare run -- which
+    # is how `pre-boot.py`'s `check-*.py` glob invokes every gate -- printed the
+    # findings and then returned 0 for a help screen. The detection was perfect
+    # and the gate could not fail. A suite that only tests the finder cannot see
+    # that, so these drive `main()` itself and assert on the status.
+    #
+    # `scan` is stubbed rather than given a fixture tree: the contract under
+    # test is "findings => non-zero", and a real scan would spend ~400s
+    # re-testing the finder instead.
+    real_scan = globals()["scan"]
+    real_argv = sys.argv
+    finding = [("f.rs", 1, "a::b", "crate")]
+    try:
+        for argv, findings_, want, why in (
+            (["x"], finding, 1, "a bare run with a dead link must FAIL"),
+            (["x"], [], 0, "a bare run with a clean tree must pass"),
+            (["x", "--check"], finding, 1, "--check is still accepted"),
+            (["x", "--check"], [], 0, "--check on a clean tree still passes"),
+            (["x", "--list"], finding, 0, "--list reports without failing"),
+        ):
+            globals()["scan"] = lambda repo, only, _f=findings_: list(_f)
+            sys.argv = argv
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                got = main()
+            check(got == want, f"{why}: argv={argv[1:]} -> exit {got}, want {want}")
+    finally:
+        globals()["scan"] = real_scan
+        sys.argv = real_argv
+
     if bad:
         print(f"selftest: {bad} of {checks} cases FAILED", file=sys.stderr)
         return 1
@@ -703,7 +739,9 @@ def read_path_list(source: str) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--check", action="store_true", help="fail if any link is dead")
+    ap.add_argument("--check", action="store_true",
+                    help="accepted and ignored: failing on a dead link is the "
+                         "default, and was not always (see main)")
     ap.add_argument("--selftest", action="store_true", help="verify the checker itself")
     ap.add_argument("--list", action="store_true", help="print findings and exit 0")
     ap.add_argument(
@@ -755,13 +793,31 @@ def main() -> int:
     if args.list:
         print(f"\n{len(findings)} dead intra-doc link(s).")
         return 0
-    if args.check:
-        if findings:
-            print(f"\n{len(findings)} dead intra-doc link(s).", file=sys.stderr)
-            return 1
-        print("ok -- no dead intra-doc links.")
-        return 0
-    ap.print_help()
+
+    # A bare run is a --check, NOT a help screen.
+    #
+    # It used to be `ap.print_help(); return 0`, and that made this the one
+    # gate in scripts/ that could not fail. `pre-boot.py` runs the `check-*.py`
+    # glob bare -- that is the convention here, and the other twenty scripts
+    # honour it -- so a bare run of this one scanned the whole tree (412s
+    # measured 2026-09-02), printed any findings it made, and then returned 0
+    # for a help screen. `_report` discarded the output of a passing gate, so
+    # the findings were not merely unenforced, they were unseen: seven minutes
+    # of every pre-boot run spent proving nothing.
+    #
+    # The hook (gate 11) passes --check explicitly and was never affected,
+    # which is why this survived; --check is kept as an accepted no-op so that
+    # call site, and any other, keeps working unchanged.
+    #
+    # Argparse convention would show help for a bare invocation. That
+    # convention loses to this directory's: a script named check-*.py is run
+    # bare by a glob whose entire purpose is to collect verdicts, and a gate
+    # that answers "here is my usage" to that question is a gate that passes.
+    # `--help` still prints the help.
+    if findings:
+        print(f"\n{len(findings)} dead intra-doc link(s).", file=sys.stderr)
+        return 1
+    print("ok -- no dead intra-doc links.")
     return 0
 
 

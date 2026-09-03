@@ -7,5 +7,13 @@ description = "SlateOS Font Library — bitmap and outline font rendering"
 name = "osfont"
 path = "src/lib.rs"
 
+[features]
+# Times each pass of `ScaledFont::shape_with` into a thread-local total, read
+# back through the `phase` module. Off by default and never on in a shipped
+# build: it is the only thing in this crate that reaches for `std::time`, which
+# the `no_std` intent recorded in `lib.rs` does not allow, and it charges two
+# `Instant::now()` calls to every pass it measures. See `src/phase.rs`.
+phase-timing = []
+
 [lints]
 workspace = true

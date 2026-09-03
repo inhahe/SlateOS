@@ -41,6 +41,7 @@ use crate::joining::{self, Form};
 use crate::lang::Lang;
 use crate::norm;
 use crate::norm::{Ignorable, Piece};
+use crate::phase::{Phase, Timer};
 use crate::raster::{GlyphMask, rasterize};
 use crate::script::{self, ScriptTags};
 use crate::sfnt::{Face, PathCmd, SfntError};
@@ -691,8 +692,20 @@ impl ScaledFont {
         // starts at — which is what a glyph's cluster is, whatever
         // substitution did to the glyph count. Empty for text that needs no
         // bidi at all, which is every left-to-right string.
-        let levels = byte_levels(text, base);
-        let mut pieces = norm::pieces(text, |ch| self.face.glyph_index(ch).is_some());
+        //
+        // The `Timer`s from here down are the phase instrument, and are
+        // nothing at all unless `osfont`'s `phase-timing` feature is on — see
+        // [`crate::phase`]. They are laid out so that at most one is alive at
+        // a time; two that overlapped would charge the same wall time twice.
+        let levels = {
+            let _t = Timer::start(Phase::ByteLevels);
+            byte_levels(text, base)
+        };
+        let mut pieces = {
+            let _t = Timer::start(Phase::Norm);
+            norm::pieces(text, |ch| self.face.glyph_index(ch).is_some())
+        };
+        let pre = Timer::start(Phase::PreScript);
         // Korean, which `norm::pieces` deliberately left spelled as the text
         // spelled it. Which spelling to draw is a question about the face —
         // whether it ships the 11,172 precomposed syllables, the conjoining
@@ -766,7 +779,15 @@ impl ScaledFont {
         // a letter joins to does not depend on which face is drawing it. Empty
         // for text that does not join, which is nearly all of it.
         let mut forms: Vec<Option<Form>> = Vec::new();
-        joining::forms(&pieces, &mut forms);
+        // Two guards for `PreScript`, either side of this one, rather than one
+        // spanning it: the totals accumulate, so a phase split around another
+        // phase adds up to the same number without ever overlapping it.
+        drop(pre);
+        {
+            let _t = Timer::start(Phase::Joining);
+            joining::forms(&pieces, &mut forms);
+        }
+        let pre = Timer::start(Phase::PreScript);
         // Split now, while glyphs are still one per piece, so that a run
         // boundary counted in pieces is a boundary counted in glyphs. That
         // stops being true the moment anything ligates. Both users need it
@@ -804,6 +825,8 @@ impl ScaledFont {
                 at = end;
             }
         }
+        drop(pre);
+        let build = Timer::start(Phase::GlyphBuild);
         let mut glyphs: Vec<SubGlyph> = Vec::with_capacity(pieces.len());
         let mut tabs: Vec<bool> = Vec::with_capacity(pieces.len());
         // The run the piece loop is inside, and the three things the fallback
@@ -963,8 +986,13 @@ impl ScaledFont {
             });
             tabs.push(tab);
         }
+        drop(build);
 
-        let segments = self.substitute_runs(&runs, lang, &mut glyphs, &mut tabs);
+        let segments = {
+            let _t = Timer::start(Phase::Gsub);
+            self.substitute_runs(&runs, lang, &mut glyphs, &mut tabs)
+        };
+        let prep = Timer::start(Phase::SegPrep);
 
         // The same question the piece loop asked, re-asked per *glyph*, because
         // the two are no longer the same list: a stretch that ligated is
@@ -1061,6 +1089,8 @@ impl ScaledFont {
         // an either/or and not a union. `SubGlyph::mark` carries the
         // character's half, because substitution is free to change the glyph
         // id and a cluster cannot tell a base from the marks that share it.
+        drop(prep);
+        let mark_timer = Timer::start(Phase::Marks);
         let by_gdef = self.face.classifies_glyphs();
         let marks: Vec<bool> = glyphs
             .iter()
@@ -1075,10 +1105,14 @@ impl ScaledFont {
                     }
             })
             .collect();
-        let advances: Vec<i32> = glyphs
-            .iter()
-            .map(|g| i32::from(self.face.advance_at(g.gid, &self.coords).unwrap_or(0)))
-            .collect();
+        drop(mark_timer);
+        let advances: Vec<i32> = {
+            let _t = Timer::start(Phase::Advances);
+            glyphs
+                .iter()
+                .map(|g| i32::from(self.face.advance_at(g.gid, &self.coords).unwrap_or(0)))
+                .collect()
+        };
         // `kept_at` says, glyph by glyph, that the positioning pass has already
         // had the last word on this mark's advance: it zeroed the mark *before*
         // the lookups ran and then let one of them — the face's `dist` feature,
@@ -1094,8 +1128,11 @@ impl ScaledFont {
         // their nominal `hmtx` advance unless the loop below takes it away.
         // `DejaVuMathTeXGyre.ttf` is exactly that face, and asking the script
         // instead left every Myanmar mark in it a missing-glyph box wide.
-        let (adjusted, kept_at) =
-            self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels);
+        let (adjusted, kept_at) = {
+            let _t = Timer::start(Phase::Gpos);
+            self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels)
+        };
+        let tail = Timer::start(Phase::Tail);
         // Whether pairs still have to be kerned one at a time here. They do
         // only where the run's kerning is the legacy `kern` table's, which the
         // positioning pass cannot read; pairs the pass has already charged must
@@ -1290,6 +1327,7 @@ impl ScaledFont {
             // find.
             self.synthesize_marks(&mut out, &visual, &roles, &levels);
         }
+        drop(tail);
         ShapedRun::reordered(out, visual, per_glyph)
     }
 

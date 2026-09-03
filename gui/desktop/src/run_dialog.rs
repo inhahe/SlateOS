@@ -2,7 +2,13 @@
 //!
 //! A Windows-style "Run" dialog (typically invoked via Ctrl+R or Super+R)
 //! that lets users type a command to execute. Supports text editing, command
-//! history (with persistence), fuzzy autocomplete, and path resolution.
+//! history, fuzzy autocomplete, and path resolution.
+//!
+//! The history lives in memory for the life of the shell and is **not** written
+//! anywhere. It used to claim persistence, on the strength of a `history_path`
+//! field that nothing ever read; the field is gone. Persisting it would need
+//! the same shape as the file chooser's listing — the shell performs no
+//! filesystem I/O of its own — and is tracked in known-issues.md.
 //!
 //! # Usage from the desktop shell
 //!
@@ -41,6 +47,9 @@ use guitk::text::TextCursor;
 // algorithm as the application launcher for consistency" — a promise with no
 // mechanism behind it.
 use guitk::textfind::fuzzy_score;
+
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 // ============================================================================
 // Colour
@@ -97,8 +106,15 @@ const MAX_HISTORY: usize = 50;
 /// Events produced by the Run dialog for the shell to act on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunDialogEvent {
-    /// User pressed OK or Enter — execute this command.
-    Execute(String),
+    /// User pressed OK or Enter — start the program at this path.
+    ///
+    /// A `PathBuf`, not a `String`. Most of the time it is simply the typed
+    /// text turned into a path, but a command the user chose through
+    /// **Browse** may name a file with no UTF-8 spelling — our filenames
+    /// admit every byte but `/` and NUL — and the text field can only *show*
+    /// a lossy rendering of such a name. Carrying the path keeps the program
+    /// that starts the one the user pointed at.
+    Execute(PathBuf),
     /// User clicked Browse — open a file picker.
     Browse,
     /// User pressed Cancel or Escape.
@@ -373,6 +389,17 @@ impl TextInput {
 struct Suggestion {
     /// Display text.
     text: String,
+    /// The bytes the suggestion actually names, which `text` may only
+    /// approximate.
+    ///
+    /// A history entry can be a path the user *pointed at* rather than typed,
+    /// and our filenames admit every byte but `/` and NUL — so the entry may
+    /// have no UTF-8 spelling and `text` is then a lossy rendering of it.
+    /// Accepting the suggestion has to put the real bytes back in the field, or
+    /// the completion silently names a different file from the history entry it
+    /// offered. For a known-app suggestion, which comes from a text config,
+    /// this is just `text` again.
+    exact: OsString,
     /// Score for sorting (higher is better).
     score: u32,
 }
@@ -388,7 +415,12 @@ pub struct RunDialog {
     /// Text input state.
     input: TextInput,
     /// Command history (most recent last).
-    history: Vec<String>,
+    ///
+    /// `OsString` rather than `String` because an entry can be a path the user
+    /// chose with Browse, and such a path may have no UTF-8 spelling. Held as
+    /// text, re-running it from history would ask for the `U+FFFD` rendering —
+    /// a file that does not exist — and start nothing, without saying why.
+    history: Vec<OsString>,
     /// Current position in history when cycling (-1 = not browsing history).
     history_index: Option<usize>,
     /// Text saved before entering history browse mode.
@@ -407,14 +439,21 @@ pub struct RunDialog {
     error_message: Option<String>,
     /// Pending events to drain.
     events: Vec<RunDialogEvent>,
-    /// Path to persist history (if set).
-    history_path: Option<String>,
     /// Which button is hovered.
     hovered_button: Option<ButtonId>,
     /// Dialog X position (centered on screen, set by caller or default).
     dialog_x: f32,
     /// Dialog Y position.
     dialog_y: f32,
+    /// The exact path Browse put in the field, if the field still shows it.
+    ///
+    /// The text field has to be a `String` — the user types into it a
+    /// character at a time — so a chosen path with no UTF-8 spelling can only
+    /// be *displayed* lossily. This holds the real bytes beside the text.
+    /// [`execute_current`](Self::execute_current) uses them only while the
+    /// text still matches their rendering, which is what makes an edit
+    /// discard them without every text-mutating site having to remember to.
+    command_exact: Option<PathBuf>,
 }
 
 impl RunDialog {
@@ -433,24 +472,86 @@ impl RunDialog {
             show_autocomplete: false,
             error_message: None,
             events: Vec::new(),
-            history_path: None,
             hovered_button: None,
             // Default to centered-ish position; caller should reposition.
             dialog_x: 200.0,
             dialog_y: 150.0,
+            command_exact: None,
         }
     }
 
+    /// Put a path the user *chose* — rather than typed — in the command field.
+    ///
+    /// The field shows what a `String` can show of it; the exact bytes are
+    /// kept beside the text so that pressing Enter starts the file that was
+    /// pointed at, even when that file's name has no UTF-8 spelling.
+    pub fn set_command_path(&mut self, path: &Path) {
+        self.fill_exact(path.as_os_str());
+        // The field's contents changed under the autocomplete list, and a
+        // stale dropdown over a name the user did not type is worse than none.
+        self.suggestions.clear();
+        self.suggestion_index = None;
+        self.show_autocomplete = false;
+        self.error_message = None;
+        self.history_index = None;
+    }
+
+    /// Put an exact byte string in the command field, showing what a `String`
+    /// can show of it and keeping the bytes themselves beside the text.
+    ///
+    /// Every route by which the field is filled from something the user did not
+    /// *type* goes through here — Browse, a history recall, an accepted
+    /// autocomplete — because each of them can be carrying a name with no UTF-8
+    /// spelling, and each of them was a separate opportunity to drop it.
+    fn fill_exact(&mut self, exact: &OsStr) {
+        self.input.set_text(&exact.to_string_lossy());
+        self.command_exact = Some(PathBuf::from(exact));
+    }
+
+    /// The directory a file chooser opened from this box should start in.
+    ///
+    /// Asked of the dialog rather than computed by whoever puts the chooser up,
+    /// because the useful answer depends on `command_exact` — which is private,
+    /// and has to stay private for the reason
+    /// [`set_command_path`](Self::set_command_path) exists at all. A second
+    /// Browse should re-open where the first one left off, and "where it left
+    /// off" is only spelled exactly by the bytes Browse itself chose; deriving
+    /// it from the field's text would send the chooser to a directory whose
+    /// name merely *looks* like the one the user picked.
+    ///
+    /// The field is validated against the text on the same terms
+    /// `execute_current` validates it, so a user who has since typed over the
+    /// chosen path gets the directory of what they typed.
+    ///
+    /// Falls back to the root, which is the only directory that certainly
+    /// exists: a bare command name like `terminal` is not a path and has no
+    /// directory to open, and starting the chooser in "the directory named
+    /// `terminal`" would show an empty list.
+    #[must_use]
+    pub fn browse_start(&self) -> PathBuf {
+        let text = self.input.text.trim();
+        if !text.starts_with('/') {
+            return PathBuf::from("/");
+        }
+        let shown = self
+            .command_exact
+            .as_ref()
+            .filter(|p| p.as_os_str().to_string_lossy().trim() == text)
+            .map_or_else(|| PathBuf::from(text), Clone::clone);
+        guitk::dialog::parent_of(&shown)
+    }
+
     /// Create a Run dialog with custom known apps and PATH dirs.
-    pub fn with_config(
-        known_apps: Vec<String>,
-        path_dirs: Vec<String>,
-        history_path: Option<String>,
-    ) -> Self {
+    ///
+    /// Took a third `history_path: Option<String>` argument until 2026-09-03,
+    /// which was stored in a field nothing ever read — the history has never
+    /// been written anywhere. A parameter that only *looks* like it turns
+    /// persistence on is worse than no parameter, so it is gone rather than
+    /// deprecated.
+    pub fn with_config(known_apps: Vec<String>, path_dirs: Vec<String>) -> Self {
         let mut dialog = Self::new();
         dialog.known_apps = known_apps;
         dialog.path_dirs = path_dirs;
-        dialog.history_path = history_path;
         dialog
     }
 
@@ -505,6 +606,11 @@ impl RunDialog {
         self.show_autocomplete = false;
         self.error_message = None;
         self.hovered_button = None;
+        // Harmless to leave — `command_exact` is only believed while the field
+        // still renders to it, and the field has just been emptied — but a
+        // freshly-shown box holding a path from the last time it was open is a
+        // thing a reader has to reason about rather than read.
+        self.command_exact = None;
     }
 
     /// Hide the dialog.
@@ -519,16 +625,25 @@ impl RunDialog {
     }
 
     /// Add a command to history (called after successful execution).
-    pub fn add_to_history(&mut self, command: &str) {
+    ///
+    /// Takes the *exact* bytes, not the text on screen: a command that came
+    /// from Browse may name a file with no UTF-8 spelling, and an entry
+    /// remembered in its lossy rendering names a different file — in practice
+    /// none at all, so recalling it would start nothing and say nothing.
+    pub fn add_to_history(&mut self, command: &OsStr) {
         // Remove duplicate if present, so re-running a command moves it to the
         // front rather than filling the list with one entry.
-        self.history.retain(|h| h != command);
-        self.history.push(command.to_string());
+        self.history.retain(|h| h.as_os_str() != command);
+        self.history.push(command.to_os_string());
         self.trim_history();
     }
 
-    /// Load history from a list of strings (e.g., read from file).
-    pub fn load_history(&mut self, commands: Vec<String>) {
+    /// Load a history read from somewhere else.
+    ///
+    /// Nothing calls this yet — the history is not persisted (see the module
+    /// documentation) — but whatever eventually does must hand over bytes, for
+    /// the reason [`add_to_history`](Self::add_to_history) takes them.
+    pub fn load_history(&mut self, commands: Vec<OsString>) {
         self.history = commands;
         self.trim_history();
     }
@@ -544,7 +659,7 @@ impl RunDialog {
     }
 
     /// Get current history for persistence.
-    pub fn history(&self) -> &[String] {
+    pub fn history(&self) -> &[OsString] {
         &self.history
     }
 
@@ -1072,10 +1187,32 @@ impl RunDialog {
             return;
         }
 
+        // The bytes Browse chose, but only while the field still *shows* them.
+        //
+        // Checking the rendering rather than clearing the field on every edit
+        // is deliberate: this dialog mutates its text from a dozen places —
+        // insert, backspace, delete, cut, paste, history recall, autocomplete
+        // accept — and an invalidation that has to be remembered in each of
+        // them is one that will eventually be forgotten in a new one. Deriving
+        // the answer from the text cannot go stale. A user who types back the
+        // exact glyphs on screen gets the file those glyphs came from, which
+        // is the only file they could have meant.
+        let exact = self
+            .command_exact
+            .as_ref()
+            .filter(|p| p.as_os_str().to_string_lossy().trim() == command)
+            .map_or_else(
+                || OsString::from(&command),
+                |p| p.as_os_str().to_os_string(),
+            );
+
         // Resolve the command.
         if self.resolve_command(&command) {
-            self.add_to_history(&command);
-            self.events.push(RunDialogEvent::Execute(command));
+            // The history gets the bytes, not the rendering, so that pressing
+            // Up and Enter re-runs the file that ran — see `add_to_history`.
+            self.add_to_history(&exact);
+            self.events
+                .push(RunDialogEvent::Execute(PathBuf::from(exact)));
             self.hide();
         } else {
             self.error_message = Some(format!(
@@ -1145,7 +1282,7 @@ impl RunDialog {
             self.pre_history_text = self.input.text.clone();
         }
         self.history_index = target;
-        self.input.set_text(&entry);
+        self.fill_exact(&entry);
         self.update_suggestions();
     }
 
@@ -1160,11 +1297,16 @@ impl RunDialog {
             {
                 Some((newer, entry)) => {
                     self.history_index = Some(newer);
-                    self.input.set_text(&entry);
+                    self.fill_exact(&entry);
                 }
                 None => {
                     // Past the newest entry: back to whatever was typed before
-                    // browsing started.
+                    // browsing started. Deliberately *not* through
+                    // `fill_exact` — this text is the user's own, typed a
+                    // character at a time, so there are no exact bytes behind
+                    // it. Any left over from the entry just stepped off stop
+                    // being believed the moment the field stops rendering to
+                    // them, which is now.
                     self.history_index = None;
                     let saved = core::mem::take(&mut self.pre_history_text);
                     self.input.set_text(&saved);
@@ -1204,8 +1346,11 @@ impl RunDialog {
             return;
         }
         let idx = self.suggestion_index.unwrap_or(0);
-        if let Some(suggestion) = self.suggestions.get(idx) {
-            self.input.set_text(&suggestion.text);
+        if let Some(exact) = self.suggestions.get(idx).map(|s| s.exact.clone()) {
+            // The bytes, not `text`: a history suggestion can be a path with no
+            // UTF-8 spelling, and completing to its rendering would silently
+            // offer one file and fill in another.
+            self.fill_exact(&exact);
             self.show_autocomplete = false;
             self.suggestions.clear();
             self.suggestion_index = None;
@@ -1228,18 +1373,24 @@ impl RunDialog {
             if let Some(score) = fuzzy_score(query, app) {
                 results.push(Suggestion {
                     text: app.clone(),
+                    exact: OsString::from(app),
                     score,
                 });
             }
         }
 
-        // Match against history.
+        // Match against history. The *rendering* is what gets matched and shown
+        // — a fuzzy score over bytes the user cannot see would be a score over
+        // nothing they could have typed — but the entry's own bytes travel with
+        // it so that accepting the suggestion fills in the file it named.
         for cmd in &self.history {
-            if let Some(score) = fuzzy_score(query, cmd) {
+            let shown = cmd.to_string_lossy();
+            if let Some(score) = fuzzy_score(query, &shown) {
                 // Avoid duplicates.
-                if !results.iter().any(|s| s.text == *cmd) {
+                if !results.iter().any(|s| s.exact == *cmd) {
                     results.push(Suggestion {
-                        text: cmd.clone(),
+                        text: shown.into_owned(),
+                        exact: cmd.clone(),
                         score: score.saturating_add(5), // slight history bonus
                     });
                 }
@@ -1664,9 +1815,9 @@ mod tests {
     fn test_history_cycling() {
         let mut dialog = RunDialog::new();
         dialog.show();
-        dialog.add_to_history("ls");
-        dialog.add_to_history("pwd");
-        dialog.add_to_history("cat file.txt");
+        dialog.add_to_history(OsStr::new("ls"));
+        dialog.add_to_history(OsStr::new("pwd"));
+        dialog.add_to_history(OsStr::new("cat file.txt"));
 
         // Navigate up through history.
         dialog.history_prev();
@@ -1691,7 +1842,7 @@ mod tests {
     fn test_history_preserves_current_text() {
         let mut dialog = RunDialog::new();
         dialog.show();
-        dialog.add_to_history("old-command");
+        dialog.add_to_history(OsStr::new("old-command"));
 
         // Type something.
         dialog.input.set_text("partial");
@@ -1709,7 +1860,7 @@ mod tests {
     fn test_history_max_entries() {
         let mut dialog = RunDialog::new();
         for i in 0..60 {
-            dialog.add_to_history(&format!("cmd{}", i));
+            dialog.add_to_history(OsStr::new(&format!("cmd{i}")));
         }
         assert_eq!(dialog.history.len(), MAX_HISTORY);
         // Oldest entries removed.
@@ -1719,9 +1870,9 @@ mod tests {
     #[test]
     fn test_history_dedup() {
         let mut dialog = RunDialog::new();
-        dialog.add_to_history("ls");
-        dialog.add_to_history("pwd");
-        dialog.add_to_history("ls"); // duplicate
+        dialog.add_to_history(OsStr::new("ls"));
+        dialog.add_to_history(OsStr::new("pwd"));
+        dialog.add_to_history(OsStr::new("ls")); // duplicate
         assert_eq!(dialog.history.len(), 2);
         // "ls" should be at the end (most recent).
         assert_eq!(dialog.history[0], "pwd");
@@ -1732,8 +1883,8 @@ mod tests {
     fn stepping_past_either_end_of_the_history_stops_rather_than_wrapping() {
         let mut dialog = RunDialog::new();
         dialog.show();
-        dialog.add_to_history("one");
-        dialog.add_to_history("two");
+        dialog.add_to_history(OsStr::new("one"));
+        dialog.add_to_history(OsStr::new("two"));
 
         // Older, older, and once more past the oldest.
         dialog.history_prev();
@@ -1828,6 +1979,66 @@ mod tests {
         assert!(!dialog.show_autocomplete);
     }
 
+    /// A name with no UTF-8 spelling, built through the platform's own safe API
+    /// rather than by asserting bytes into an `OsStr`: a lone high surrogate is
+    /// a legal Windows filename with no UTF-8 form, and `0xFF` is the same
+    /// everywhere else.
+    fn unmappable_name() -> OsString {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[u16::from(b'z'), 0xD800])
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![b'z', 0xFF])
+        }
+    }
+
+    /// Completing to a history entry has to fill in the entry's own bytes. The
+    /// dropdown can only *show* a lossy rendering, and a completion that put
+    /// the rendering in the field would offer one file and enter another —
+    /// which is the same defect as the history holding text, reached by a
+    /// different route.
+    #[test]
+    fn accepting_a_history_suggestion_fills_in_its_exact_bytes() {
+        let mut dialog = RunDialog::new();
+        dialog.show();
+
+        let mut chosen = OsString::from("/usr/bin/");
+        chosen.push(unmappable_name());
+        dialog.add_to_history(&chosen);
+
+        // "usr" matches the entry and none of the known apps.
+        dialog.input.set_text("usr");
+        dialog.update_suggestions();
+        assert!(
+            dialog.suggestions.iter().any(|s| s.exact == chosen),
+            "the history entry was not offered at all"
+        );
+        dialog.suggestion_index = dialog
+            .suggestions
+            .iter()
+            .position(|s| s.exact == chosen)
+            .map(Some)
+            .unwrap();
+
+        dialog.accept_suggestion();
+        assert_eq!(
+            dialog.command_exact.as_deref(),
+            Some(Path::new(&chosen)),
+            "the completion entered the rendering rather than the file"
+        );
+
+        // And it survives all the way out as a launch.
+        dialog.execute_current();
+        assert_eq!(
+            dialog.drain_events().first(),
+            Some(&RunDialogEvent::Execute(PathBuf::from(&chosen)))
+        );
+    }
+
     // ====================================================================
     // Event generation tests
     // ====================================================================
@@ -1842,7 +2053,7 @@ mod tests {
         dialog.handle_key_event(&event);
 
         let events = dialog.drain_events();
-        assert!(events.contains(&RunDialogEvent::Execute("terminal".to_string())));
+        assert!(events.contains(&RunDialogEvent::Execute(PathBuf::from("terminal"))));
         assert!(events.contains(&RunDialogEvent::Closed));
     }
 
@@ -1900,7 +2111,9 @@ mod tests {
         dialog.handle_key_event(&event);
 
         let events = dialog.drain_events();
-        assert!(events.contains(&RunDialogEvent::Execute("/usr/bin/something".to_string())));
+        assert!(events.contains(&RunDialogEvent::Execute(PathBuf::from(
+            "/usr/bin/something"
+        ))));
     }
 
     #[test]
@@ -1973,10 +2186,12 @@ mod tests {
                                     dialog.suggestions = vec![
                                         Suggestion {
                                             text: "firefox".into(),
+                                            exact: "firefox".into(),
                                             score: 10,
                                         },
                                         Suggestion {
                                             text: "files".into(),
+                                            exact: "files".into(),
                                             score: 5,
                                         },
                                     ];

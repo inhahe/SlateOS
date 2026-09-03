@@ -18,7 +18,8 @@
 //! representative data for initial development.
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
+use guitk::dialog::{DialogAction, FileDialog, list_directory};
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -614,6 +615,12 @@ pub struct VpnManager {
     /// The size the last frame was drawn at, so a click is tested against the
     /// geometry that produced it rather than against the default constants.
     pub window_size: (f32, f32),
+    /// The file chooser Import and Export put up, and which of the two asked.
+    ///
+    /// `None` most of the time. While it is `Some` the picker is modal: it
+    /// takes every key and every click, including clicks landing outside its
+    /// own edges, so nothing reaches the profile list behind it.
+    picker: Option<Picker>,
     /// Carries the fractional part of a trackpad's scroll between events, so
     /// slow scrolling moves rather than rounding to nothing every time.
     wheel: wheel::Accumulator,
@@ -649,6 +656,7 @@ impl VpnManager {
             allowed_ip_input: String::new(),
             status_message: String::new(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            picker: None,
             wheel: wheel::Accumulator::default(),
             uptime_carry_ms: 0,
         }
@@ -1686,6 +1694,19 @@ pub fn render_frame(app: &VpnManager, width: f32, height: f32) -> Frame {
         // dialog would otherwise still fire.
         frame.discard_hits();
         render_add_dialog(&mut frame, app);
+    }
+
+    // The file chooser goes over even that, and its ink alone: it hit-tests
+    // against a frame of its own, built at the same size (see
+    // `dispatch_mouse_to_picker`). Merging the two would put this window's
+    // targets and the chooser's into one namespace for no gain, and the
+    // chooser's are not this window's to interpret. The hits underneath are
+    // dropped for the reason above.
+    if let Some(picker) = app.picker.as_ref() {
+        frame.discard_hits();
+        for cmd in picker.dialog.render(frame.width, frame.height) {
+            frame.push(cmd);
+        }
     }
 
     frame
@@ -3588,15 +3609,14 @@ pub enum Action {
     Quit,
 }
 
-/// Where Export writes and Import reads, relative to `$HOME`.
+/// Where Export writes and Import reads *by default*, relative to `$HOME`.
 ///
-/// A fixed, *named* path rather than a chooser. `guitk::dialog::FileDialog`
-/// cannot serve as one here: it is keyboard-only, records no hit targets, and
-/// does not read the filesystem — it has to be handed its directory listing —
-/// so wiring it in would be a second application rather than a button. A path
-/// the status bar names after every Export is honest and usable; a button that
-/// says "not implemented" is neither. Tracked as
-/// `known-issues.md` → `C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER`.
+/// This used to be the only answer: Export wrote here and nowhere else,
+/// because `guitk::dialog::FileDialog` was keyboard-only and recorded no hit
+/// targets, so wiring it in would have given the user a picker they could not
+/// click. That is fixed, so both buttons now open a real chooser — and this
+/// stays as the directory it opens *at* and the name Export offers, which is
+/// what makes the common case still one click and an Enter.
 const PROFILE_FILE: &str = ".config/slateos/vpn/profiles.txt";
 
 /// The absolute path behind [`PROFILE_FILE`], or `None` when `$HOME` is unset.
@@ -3610,6 +3630,59 @@ fn profile_file() -> Option<std::path::PathBuf> {
         return None;
     }
     Some(std::path::Path::new(&home).join(PROFILE_FILE))
+}
+
+/// The file chooser on screen, and which button asked for it.
+struct Picker {
+    /// What to do with the path the user settles on.
+    purpose: PickerPurpose,
+    /// The widget. It holds whatever listing it was last handed and reads
+    /// nothing itself, so every navigation it reports has to be answered here.
+    dialog: FileDialog,
+}
+
+/// Which of the two buttons opened the chooser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerPurpose {
+    /// Read profiles out of the chosen file and add each as a new one.
+    Import,
+    /// Write every profile to the chosen file.
+    Export,
+}
+
+/// The directory the chooser opens at, and the name Export offers in it.
+///
+/// Split from [`profile_file`] rather than re-derived: the default path is one
+/// fact, and a chooser that opened somewhere other than where Export used to
+/// write would make the upgrade from "fixed path" to "picker" lose the user's
+/// existing file. Falls back to the root when `$HOME` is unset, because a
+/// chooser that refuses to open is worse than one that opens somewhere dull.
+///
+/// Answers in `PathBuf`/`OsString`, not `String`. `$HOME` is OS bytes and a
+/// filename admits every byte but `/` and NUL, so decoding either here would
+/// hand the chooser a name containing U+FFFD — and Export would then write
+/// beside the user's existing file instead of over it.
+fn picker_start() -> (std::path::PathBuf, std::ffi::OsString) {
+    // `PROFILE_FILE` is a *relative path*, not a leaf name, so the fallback
+    // takes its last component rather than the whole thing — spelling the leaf
+    // out a second time would let the two drift apart.
+    let default_name = || {
+        std::path::Path::new(PROFILE_FILE).file_name().map_or_else(
+            || std::ffi::OsString::from("profiles.txt"),
+            |n| n.to_os_string(),
+        )
+    };
+    let Some(path) = profile_file() else {
+        return (std::path::PathBuf::from("/"), default_name());
+    };
+    let name = path
+        .file_name()
+        .map_or_else(default_name, std::ffi::OsStr::to_os_string);
+    let dir = path.parent().map_or_else(
+        || std::path::PathBuf::from("/"),
+        std::path::Path::to_path_buf,
+    );
+    (dir, name)
 }
 
 /// Split an exported file into the blocks [`parse_profile_text`] understands.
@@ -3790,19 +3863,106 @@ impl VpnManager {
         Action::Redraw
     }
 
-    /// Write every profile to [`PROFILE_FILE`].
-    fn export_to_file(&mut self) -> Action {
-        let Some(path) = profile_file() else {
-            self.status_message = String::from("Cannot export: $HOME is not set");
-            return Action::Redraw;
+    /// Put the file chooser up for `purpose`.
+    ///
+    /// Both buttons open it at the directory the old fixed path lived in, so
+    /// the file a user exported before this became a chooser is the first
+    /// thing they see. Export additionally arrives with that file's name
+    /// already typed, which is what keeps the common case one click and Enter.
+    fn open_picker(&mut self, purpose: PickerPurpose) {
+        let (dir, name) = picker_start();
+        let mut dialog = match purpose {
+            PickerPurpose::Import => FileDialog::open()
+                .with_filter("Profile files", &["*.txt"])
+                .with_filter("All files", &["*"])
+                .with_initial_path(&dir),
+            PickerPurpose::Export => FileDialog::save()
+                .with_filter("Profile files", &["*.txt"])
+                .with_initial_path(&dir)
+                .with_filename(&name),
         };
+        // Export writes into a directory that may not exist yet -- it is
+        // created on the way out, not here, so a user who opens the chooser and
+        // then cancels leaves nothing behind. `list_directory` answers a
+        // missing directory with an empty listing rather than failing, so the
+        // chooser opens on an empty pane the user can navigate out of.
+        dialog.set_entries(list_directory(&dir));
+        self.picker = Some(Picker { purpose, dialog });
+        self.status_message = match purpose {
+            PickerPurpose::Import => String::from("Choose a file to import"),
+            PickerPurpose::Export => String::from("Choose where to save"),
+        };
+    }
+
+    /// Feed a key to the chooser and act on what it answers.
+    ///
+    /// `None` when no chooser is up, so the caller falls through to its own
+    /// bindings; `Some` otherwise -- a modal that let Delete remove a profile
+    /// behind it would not be one.
+    fn dispatch_key_to_picker(&mut self, key: &KeyEvent) -> Option<Action> {
+        let height = self.window_size.1;
+        let picker = self.picker.as_mut()?;
+        let purpose = picker.purpose;
+        let action = picker.dialog.handle_event(key, height);
+        Some(self.finish_picker_action(purpose, action))
+    }
+
+    /// Feed a pointer event to the chooser and act on what it answers.
+    ///
+    /// The chooser swallows every click it is handed, including ones landing
+    /// past its own edges, so nothing reaches the profile list behind it.
+    fn dispatch_mouse_to_picker(&mut self, mouse: &MouseEvent) -> Option<Action> {
+        // The size the chooser hit-tests against has to be the size it was
+        // drawn at; the widget keeps none of its own.
+        let (width, height) = self.window_size;
+        let picker = self.picker.as_mut()?;
+        let purpose = picker.purpose;
+        let action = picker.dialog.handle_mouse(mouse, width, height);
+        Some(self.finish_picker_action(purpose, action))
+    }
+
+    /// Act on the chooser's answer, whichever kind of event asked it.
+    fn finish_picker_action(&mut self, purpose: PickerPurpose, action: DialogAction) -> Action {
+        match action {
+            DialogAction::Selected(path) => {
+                self.picker = None;
+                match purpose {
+                    PickerPurpose::Import => self.import_from(&path),
+                    PickerPurpose::Export => self.export_to(&path),
+                }
+            }
+            DialogAction::NavigatedTo(path) => {
+                // The widget reads nothing itself, so a navigation is a
+                // *request* for a listing. Left unanswered it would show the
+                // previous directory's files under the new directory's name.
+                let entries = list_directory(&path);
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.dialog.set_entries(entries);
+                }
+                Action::Redraw
+            }
+            DialogAction::Cancelled => {
+                self.picker = None;
+                self.status_message = String::new();
+                Action::Redraw
+            }
+            DialogAction::None => Action::Redraw,
+        }
+    }
+
+    /// Write every profile to `path`.
+    fn export_to(&mut self, path: &std::path::Path) -> Action {
+        // The chooser can name a file in a directory that does not exist yet --
+        // the default one usually does not, on a fresh account -- and refusing
+        // at that point would be refusing the path the user just typed.
         if let Some(dir) = path.parent()
+            && !dir.as_os_str().is_empty()
             && let Err(why) = std::fs::create_dir_all(dir)
         {
             self.status_message = format!("Cannot create {}: {why}", dir.display());
             return Action::Redraw;
         }
-        self.status_message = match std::fs::write(&path, self.export_all()) {
+        self.status_message = match std::fs::write(path, self.export_all()) {
             Ok(()) => format!(
                 "Exported {} profiles to {}",
                 self.profiles.len(),
@@ -3813,18 +3973,14 @@ impl VpnManager {
         Action::Redraw
     }
 
-    /// Read profiles back out of [`PROFILE_FILE`], adding each as a new one.
+    /// Read profiles out of `path`, adding each as a new one.
     ///
     /// Imported profiles are *added*, never matched against what is already
     /// loaded: `add_profile` assigns a fresh id, and there is no field in the
     /// exported text that identifies a profile across two runs. Merging on name
     /// would silently overwrite a profile the user had since edited.
-    fn import_from_file(&mut self) -> Action {
-        let Some(path) = profile_file() else {
-            self.status_message = String::from("Cannot import: $HOME is not set");
-            return Action::Redraw;
-        };
-        let text = match std::fs::read_to_string(&path) {
+    fn import_from(&mut self, path: &std::path::Path) -> Action {
+        let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(why) => {
                 self.status_message = format!("Cannot read {}: {why}", path.display());
@@ -3932,8 +4088,14 @@ impl VpnManager {
                     .map_or_else(String::new, |p| p.name.clone());
                 self.report(outcome, &format!("Connected to {name}"))
             }
-            Target::Import => self.import_from_file(),
-            Target::Export => self.export_to_file(),
+            Target::Import => {
+                self.open_picker(PickerPurpose::Import);
+                Action::Redraw
+            }
+            Target::Export => {
+                self.open_picker(PickerPurpose::Export);
+                Action::Redraw
+            }
             Target::CycleSort => {
                 self.set_sort_order(self.sort_order.next());
                 self.status_message = format!("Sorted by {}", self.sort_order.label());
@@ -4103,6 +4265,20 @@ impl VpnManager {
         button: MouseButton,
         size: (f32, f32),
     ) -> Action {
+        // A second public door onto the pointer — `Probe` comes in this way —
+        // so the chooser gets the press here too. This is not what makes the
+        // chooser modal: `render_frame` discards the window's own hit targets
+        // while it is up, so `hit_test` below already finds nothing behind it.
+        // It is what makes the chooser *reachable* through this door — without
+        // it a click here would be swallowed by that empty frame and the
+        // chooser could be drawn but not operated.
+        if let Some(action) = self.dispatch_mouse_to_picker(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }) {
+            return action;
+        }
         if button != MouseButton::Left {
             return Action::None;
         }
@@ -4123,6 +4299,12 @@ impl VpnManager {
     pub fn handle_key(&mut self, key: &KeyEvent) -> Action {
         if !key.pressed {
             return Action::None;
+        }
+        // The file chooser is drawn over everything, including the add-profile
+        // dialog and any focused field, so it gets the key before either can
+        // claim it — and keeps it.
+        if let Some(action) = self.dispatch_key_to_picker(key) {
+            return action;
         }
         if let Some(field) = self.focus {
             return self.handle_key_in_field(key, field);
@@ -4298,6 +4480,13 @@ impl VpnManager {
     /// Route a whole event.
     pub fn handle_event(&mut self, event: &Event, size: (f32, f32)) -> Action {
         match event {
+            // The file chooser is modal, so the pointer is its own while it is
+            // up: it answers clicks on its rows and buttons, scrolls its own
+            // list, and swallows everything else — including clicks outside its
+            // edges, which is what keeps the profile list unclickable.
+            Event::Mouse(mouse) if self.picker.is_some() => self
+                .dispatch_mouse_to_picker(mouse)
+                .unwrap_or(Action::Redraw),
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 MouseEventKind::Scroll { dy, .. } => {
@@ -4426,7 +4615,6 @@ mod tests {
     )]
 
     use super::*;
-    use guitk::event::MouseEvent;
 
     // --- VpnProtocol tests ---
 
@@ -7177,6 +7365,283 @@ mod tests {
         // whatever it returns must be the documented path, and it must refuse
         // rather than guess when there is no home directory.
         assert!(profile_file().is_none_or(|path| path.ends_with(PROFILE_FILE)));
+    }
+
+    #[test]
+    fn the_default_start_agrees_with_the_path_export_used_to_write() {
+        // The chooser opening somewhere other than where Export wrote before
+        // it existed would hide the user's existing file behind a navigation.
+        let (dir, name) = picker_start();
+        match profile_file() {
+            Some(path) => {
+                assert_eq!(
+                    dir,
+                    path.parent().expect("the default path has a directory")
+                );
+                assert_eq!(name, "profiles.txt");
+            }
+            // No `$HOME`: a chooser that refuses to open is worse than a dull
+            // one, so it opens at the root rather than not at all.
+            None => assert_eq!(dir, std::path::Path::new("/")),
+        }
+    }
+
+    /// Put the chooser where a test wants it, and hand it that directory.
+    ///
+    /// Not a navigation: `picker_start` reads `$HOME`, which the test host may
+    /// not have and must not be made to have. This is the same two lines
+    /// `open_picker` ends with, aimed at a scratch directory.
+    fn aim_picker(app: &mut VpnManager, dir: &std::path::Path) {
+        let dir = dir.to_string_lossy().into_owned();
+        let picker = app.picker.as_mut().expect("a chooser is up");
+        picker.dialog.navigate_to(&dir);
+        picker.dialog.set_entries(list_directory(&dir));
+    }
+
+    /// Click the middle of whatever the chooser drew for `target`.
+    ///
+    /// Aims at the frame the widget produced rather than at a coordinate this
+    /// test worked out for itself — a second copy of the layout is the one
+    /// thing that must not exist, in a test as much as in the program.
+    fn click_picker(app: &mut VpnManager, target: guitk::dialog::DialogTarget) -> Action {
+        let (w, h) = VpnManager::SIZE;
+        let (x, y) = app
+            .picker
+            .as_ref()
+            .expect("a chooser is up")
+            .dialog
+            .frame(w, h)
+            .rect_of(|t| *t == target)
+            .unwrap_or_else(|| panic!("{target:?} should have been drawn"))
+            .centre();
+        app.handle_event(
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+            VpnManager::SIZE,
+        )
+    }
+
+    #[test]
+    fn export_and_import_round_trip_through_the_chooser() {
+        use guitk::dialog::DialogTarget;
+
+        let scratch = scratchdir::ScratchDir::new("slate_vpnmanager_picker");
+        let dir = scratch.dir();
+
+        // Export: the button opens a Save chooser, already carrying a name.
+        let mut app = VpnManager::new();
+        let exported = app.profiles.len();
+        app.activate(Target::Export);
+        aim_picker(&mut app, dir);
+        click_picker(&mut app, DialogTarget::Confirm);
+
+        assert!(app.picker.is_none(), "the chooser stayed up after Save");
+        let written = dir.join("profiles.txt");
+        assert!(
+            written.is_file(),
+            "Save wrote nothing: {}",
+            app.status_message
+        );
+
+        // Import: a second window reads it back, picked by clicking the row.
+        let mut fresh = VpnManager::new();
+        fresh.profiles.clear();
+        fresh.connections.clear();
+        fresh.activate(Target::Import);
+        aim_picker(&mut fresh, dir);
+        let row = fresh
+            .picker
+            .as_ref()
+            .expect("a chooser is up")
+            .dialog
+            .entries()
+            .iter()
+            .position(|e| e.name == "profiles.txt")
+            .expect("the file we just exported is listed");
+        click_picker(&mut fresh, DialogTarget::Entry(row));
+        click_picker(&mut fresh, DialogTarget::Confirm);
+
+        assert!(fresh.picker.is_none(), "the chooser stayed up after Open");
+        assert_eq!(
+            fresh.profiles.len(),
+            exported,
+            "the round trip lost profiles: {}",
+            fresh.status_message
+        );
+        for original in &app.profiles {
+            assert!(
+                fresh.profiles.iter().any(|p| p.name == original.name),
+                "{} did not survive the round trip",
+                original.name
+            );
+        }
+    }
+
+    #[test]
+    fn export_creates_the_directory_the_user_named() {
+        use guitk::dialog::DialogTarget;
+
+        let scratch = scratchdir::ScratchDir::new("slate_vpnmanager_mkdir");
+        // A directory that does not exist yet, which is the normal case for
+        // the default path on a fresh account.
+        let nested = scratch.dir().join("config").join("vpn");
+
+        let mut app = VpnManager::new();
+        app.activate(Target::Export);
+        aim_picker(&mut app, &nested);
+        click_picker(&mut app, DialogTarget::Confirm);
+
+        assert!(
+            nested.join("profiles.txt").is_file(),
+            "Export refused a directory it could have created: {}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn cancelling_the_chooser_writes_nothing() {
+        use guitk::dialog::DialogTarget;
+
+        let scratch = scratchdir::ScratchDir::new("slate_vpnmanager_cancel");
+        let dir = scratch.dir();
+
+        let mut app = VpnManager::new();
+        app.activate(Target::Export);
+        aim_picker(&mut app, dir);
+        click_picker(&mut app, DialogTarget::Cancel);
+
+        assert!(app.picker.is_none(), "Cancel left the chooser up");
+        assert!(
+            !dir.join("profiles.txt").exists(),
+            "Cancel wrote the file anyway"
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_chooser_rather_than_reaching_the_window() {
+        let mut app = VpnManager::new();
+        app.show_add_dialog = false;
+        app.activate(Target::Import);
+        assert!(app.picker.is_some());
+
+        app.handle_key(&KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+
+        assert!(app.picker.is_none(), "Escape did not close the chooser");
+    }
+
+    #[test]
+    fn the_chooser_keeps_clicks_and_keys_off_the_window_behind_it() {
+        let mut app = VpnManager::new();
+        app.select_profile(0);
+        let tab_before = app.current_tab;
+        let profiles_before = app.profiles.len();
+        app.activate(Target::Export);
+
+        // The whole window, on a coarse grid: the chooser covers all of it, so
+        // no point on it may reach a toolbar button, a tab or a sidebar row.
+        //
+        // Both public doors onto the pointer are swept, not just the usual one:
+        // `handle_click` is reachable directly -- it is how `Probe` clicks --
+        // so a modal that only covered `handle_event` would have a hole in it
+        // that every test in this file would walk through unnoticed.
+        let (w, h) = VpnManager::SIZE;
+        for i in 0..12 {
+            for j in 0..8 {
+                let x = w * (i as f32 + 0.5) / 12.0;
+                let y = h * (j as f32 + 0.5) / 8.0;
+                app.handle_event(
+                    &Event::Mouse(MouseEvent {
+                        x,
+                        y,
+                        kind: MouseEventKind::Press(MouseButton::Left),
+                    }),
+                    (w, h),
+                );
+                app.handle_click(x, y, MouseButton::Left, (w, h));
+                assert!(
+                    app.picker.is_some(),
+                    "a click at ({x}, {y}) dismissed the chooser"
+                );
+                assert_eq!(
+                    app.current_tab, tab_before,
+                    "a click at ({x}, {y}) switched tabs behind the chooser"
+                );
+                assert_eq!(
+                    app.profiles.len(),
+                    profiles_before,
+                    "a click at ({x}, {y}) changed the profile list behind the chooser"
+                );
+            }
+        }
+
+        // And the keyboard: Delete removes the selected profile when the list
+        // has focus.
+        app.handle_key(&KeyEvent {
+            key: Key::Delete,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(
+            app.profiles.len(),
+            profiles_before,
+            "Delete reached the profile list through the chooser"
+        );
+
+        // Blocking is the easy half, and this window would pass it by
+        // accident: `render_frame` discards its own hit targets while the
+        // chooser is up, so a press through either door finds nothing behind
+        // even with no guard at all. The half worth pinning is that the second
+        // door still *reaches* the chooser -- Cancel, clicked through
+        // `handle_click`, must close it.
+        let (cx, cy) = app
+            .picker
+            .as_ref()
+            .expect("a chooser is up")
+            .dialog
+            .frame(w, h)
+            .rect_of(|t| *t == guitk::dialog::DialogTarget::Cancel)
+            .expect("the chooser draws a Cancel button")
+            .centre();
+        app.handle_click(cx, cy, MouseButton::Left, (w, h));
+        assert!(
+            app.picker.is_none(),
+            "Cancel clicked through handle_click did not reach the chooser"
+        );
+    }
+
+    #[test]
+    fn the_chooser_is_drawn_and_covers_what_is_under_it() {
+        let mut app = VpnManager::new();
+        let plain = render_frame(&app, VpnManager::SIZE.0, VpnManager::SIZE.1);
+        let (x, y) = plain
+            .rect_of(|t| *t == Target::Export)
+            .expect("the Export button is drawn")
+            .centre();
+        let toolbar = plain
+            .hit_test(x, y)
+            .expect("something is under the Export button");
+        assert_eq!(toolbar, Target::Export);
+
+        app.activate(Target::Export);
+        let over = render_frame(&app, VpnManager::SIZE.0, VpnManager::SIZE.1);
+        assert!(
+            over.commands().len() > plain.commands().len(),
+            "the chooser drew nothing"
+        );
+        assert!(
+            over.rect_of(|t| *t == Target::Export).is_none(),
+            "the window's own targets survived under the chooser, so a click \
+             could reach one"
+        );
     }
 
     // --- Coverage ---

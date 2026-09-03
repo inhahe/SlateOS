@@ -96,7 +96,7 @@ fn main() {
     if let Some(row) = settings_row {
         let rect = desktop.start_menu_row_rect(row);
         match desktop.handle_mouse(&click(rect.x + 8.0, rect.y + 8.0)) {
-            ShellAction::Launch(path) => println!("Start menu asked to launch: {path}"),
+            ShellAction::Launch(path) => println!("Start menu asked to launch: {}", path.display()),
             other => println!("Start menu returned {other:?}"),
         }
     }
@@ -113,7 +113,7 @@ fn main() {
     if let Some(row) = shutdown_row {
         let rect = desktop.power_menu_row_rect(row);
         match desktop.handle_mouse(&click(rect.x + 8.0, rect.y + 8.0)) {
-            ShellAction::Launch(path) => println!("Power menu asked to launch: {path}"),
+            ShellAction::Launch(path) => println!("Power menu asked to launch: {}", path.display()),
             other => println!("Power menu returned {other:?}"),
         }
     }

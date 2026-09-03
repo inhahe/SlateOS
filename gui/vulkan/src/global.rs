@@ -86,16 +86,15 @@
 //!
 //! # The limit of the extension answer, stated where the promise is made
 //!
-//! The version paragraph above names a failure this module then commits, and
-//! the honest thing is to say so here rather than let a reader find it: **the
-//! loader reports extensions whose commands it cannot hand out.** An
-//! application that reads `VK_KHR_surface` from this union, enables it, and
-//! asks [`crate::entry::get_instance_proc_addr`] for
-//! `vkGetPhysicalDeviceSurfaceSupportKHR` gets null, because
-//! [`crate::physical`] knows exactly the nine core Vulkan 1.0 names and no
-//! others.
+//! The version paragraph above names a failure this module committed the day it
+//! was written, and the honest thing is to keep saying so here rather than let a
+//! reader find it: **the loader reported extensions whose commands it could not
+//! hand out.** An application that read `VK_KHR_surface` from this union,
+//! enabled it, and asked [`crate::entry::get_instance_proc_addr`] for
+//! `vkGetPhysicalDeviceSurfaceSupportKHR` got null, because [`crate::physical`]
+//! knows exactly the nine core Vulkan 1.0 names and no others.
 //!
-//! Why it cannot be fixed by forwarding is [`crate::physical`]'s argument
+//! Why it could not be fixed by forwarding is [`crate::physical`]'s argument
 //! restated: a `VkPhysicalDevice` this loader hands out is a loader-owned
 //! object the driver has never seen, so passing an unknown command straight
 //! through would hand a driver a pointer to a `crate::instance::PhysicalDevice`
@@ -109,12 +108,21 @@
 //! deny an application extensions that need no dispatching, and for the rest it
 //! would rebuild exactly the empty-list stub this module exists to avoid.
 //!
-//! The fix is a generic trampoline that swaps argument zero and tail-jumps,
-//! which is what `vk_icdGetPhysicalDeviceProcAddr` exists for and what
-//! [`crate::physical`] already asks through first. It is written up as
+//! **[`crate::unknown`] closed the physical-device half of it** on the same day,
+//! with the generic trampoline the paragraph above predicted: three instructions
+//! that swap argument zero and tail-jump, which is what
+//! `vk_icdGetPhysicalDeviceProcAddr` exists for and what [`crate::physical`]
+//! already asks through first. `vkGetPhysicalDeviceSurfaceSupportKHR` now
+//! resolves.
+//!
+//! **The instance-level half is still open**, and this is still the module that
+//! promises it: a command taking a `VkInstance` needs a *fan-out policy* per
+//! command — which of several drivers answers — and a policy is not something a
+//! trampoline can carry. So `vkDestroySurfaceKHR` and the platform
+//! `vkCreate*SurfaceKHR` calls are still null while `VK_KHR_surface` is still
+//! reported. It stays filed as
 //! `C-VKLOADER-ADVERTISES-EXTENSIONS-WHOSE-ENTRY-POINTS-IT-ANSWERS-NULL-FOR` in
-//! `known-issues.md`, with the instance-level half — which needs a fan-out
-//! policy per command and so cannot be mechanised — recorded as the harder one.
+//! `known-issues.md` until it is not.
 
 use crate::vk::{ExtensionProperties, MAX_EXTENSION_NAME_SIZE};
 use alloc::vec::Vec;

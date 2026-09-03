@@ -25,5 +25,13 @@ tzrules = { path = "../../tzrules" }
 # duplicated".
 randrange = { path = "../../randrange" }
 
+[features]
+# Turns on `osfont`'s per-pass timing so that `text::shaping_cost`'s phase
+# breakdown has something to report. Off by default: it charges two clock
+# reads to every pass of every shaping in the process, which is precisely what
+# one does not want under the instrument's other tests. See
+# gui/font/src/phase.rs.
+phase-timing = ["osfont/phase-timing"]
+
 [lints]
 workspace = true

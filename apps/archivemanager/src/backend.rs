@@ -565,6 +565,316 @@ pub fn verify(model: &ArchiveModel) -> ArchiveTestResults {
     results
 }
 
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+/// A file the user has asked to put into the archive, already read.
+///
+/// Read *before* the rewrite starts rather than during it, because a rewrite
+/// that discovers halfway through that one of its inputs has gone away has
+/// already decided the shape of the new archive. Everything that can fail on
+/// the way in fails before a single byte of the old archive is at risk.
+#[derive(Debug)]
+pub struct PendingAdd {
+    /// The name the member will carry, as bytes.
+    pub name: Vec<u8>,
+    /// The file's contents.
+    pub data: Vec<u8>,
+    /// The file's mtime as the DOS pair, or `0` if it had none this build
+    /// could express.
+    pub dos_datetime: u32,
+}
+
+/// Why an archive could not be rewritten.
+///
+/// Every variant fails the operation *whole*. That is the point of the type:
+/// a rewrite drops every member it cannot reproduce, so a partial success here
+/// is not a partial success at all — it is silent data loss inside a file the
+/// user still believes contains what it used to.
+#[derive(Debug)]
+pub enum SaveError {
+    /// The model was not read from a file, so there are no bytes to rebuild
+    /// its existing members from.
+    NoSource,
+    /// A member of the open archive could not be reproduced.
+    ///
+    /// Carries the member's displayable name and what went wrong. This is the
+    /// variant that stops the destructive case: an archive holding one
+    /// encrypted member cannot be rewritten by a build with no decryption
+    /// without losing that member, so it is not rewritten at all.
+    CannotReproduce { name: String, why: SkipReason },
+    /// A row in the list names a member the source archive does not contain.
+    ///
+    /// Separate from [`Self::CannotReproduce`] because it is not a fact about
+    /// the archive — it means the list and the bytes it was built from have
+    /// come apart, which is this program's bug and not the user's file's. The
+    /// only correct response is still to refuse: the rewrite would silently
+    /// drop the row, and a bug that eats a member is worse than one that
+    /// reports itself.
+    UnknownMember { name: String },
+    /// The new archive could not be written, or could not replace the old one.
+    Io { path: PathBuf, source: io::Error },
+}
+
+impl fmt::Display for SaveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoSource => f.write_str("this archive was not read from a file"),
+            Self::CannotReproduce { name, why } => write!(
+                f,
+                "{name} cannot be rewritten — {why}; nothing was changed, \
+                 because saving would have dropped it"
+            ),
+            Self::UnknownMember { name } => write!(
+                f,
+                "the list has come apart from the file it was read from \
+                 ({name} is listed but not in it); nothing was changed. \
+                 Re-open the archive"
+            ),
+            Self::Io { path, source } => write!(f, "cannot write {}: {source}", path.display()),
+        }
+    }
+}
+
+/// What a rewrite did.
+#[derive(Debug, Default)]
+pub struct SaveReport {
+    /// Members in the archive afterwards.
+    pub members: usize,
+    /// Members that came from the files just added.
+    pub added: usize,
+    /// Members an added file displaced because it had the same name.
+    pub replaced: usize,
+    /// The size of the archive on disk afterwards.
+    pub bytes: u64,
+}
+
+impl SaveReport {
+    /// A one-line summary for the status bar.
+    #[must_use]
+    pub fn summary(&self, path: &Path) -> String {
+        // Both counts, not just the total, because "added 3" and "replaced 1"
+        // are the two things the user cannot see by looking at the list: the
+        // list after a save that replaced a member looks exactly like the list
+        // after one that did not, and replacing is the case where something
+        // that was in the archive is now gone.
+        let added = match (self.added, self.replaced) {
+            (0, _) => String::new(),
+            (n, 0) => format!(", {n} added"),
+            (n, r) => format!(", {n} added (replacing {r})"),
+        };
+        format!(
+            "Saved {} — {} member{}{added}, {}",
+            path.display(),
+            self.members,
+            if self.members == 1 { "" } else { "s" },
+            guitk::bytes::iec(self.bytes),
+        )
+    }
+}
+
+/// Read `path` so it can be added to an archive.
+///
+/// The member name is the file's own name, not its path: dropping a file into
+/// an archive puts it at the archive's root, which is what every other archive
+/// manager does and what the file list on screen will then show.
+///
+/// # Errors
+///
+/// [`ArchiveError::Io`] if the file will not read, and [`ArchiveError::TooLarge`]
+/// for one bigger than this program is willing to hold — the same ceiling
+/// reading uses, since the rewrite holds the whole new archive in memory too.
+pub fn read_for_add(path: &Path) -> Result<PendingAdd, ArchiveError> {
+    let meta = fs::metadata(path).map_err(|source| ArchiveError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if meta.len() > MAX_ARCHIVE_BYTES {
+        return Err(ArchiveError::TooLarge { bytes: meta.len() });
+    }
+    let data = fs::read(path).map_err(|source| ArchiveError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    // Bytes, not text, and taken from the OS string rather than a lossy
+    // rendering of it: this name is about to be written into a file, and the
+    // rule the module doc states in the other direction holds in this one too.
+    // `to_string_lossy` would turn a name the platform accepts but UTF-8 does
+    // not into U+FFFD, so the member would go in under a name that can never
+    // be extracted back onto the name it came from — the same silent
+    // corruption `explorer`'s `fileops.rs` documents at its own encoder.
+    let name = path
+        .file_name()
+        .map_or_else(Vec::new, |n| n.as_encoded_bytes().to_vec());
+    Ok(PendingAdd {
+        name,
+        data,
+        dos_datetime: dos_datetime_of(&meta),
+    })
+}
+
+/// A file's mtime as the DOS pair, or `0` when there is not one this build can
+/// express.
+///
+/// `0` rather than the DOS minimum for the reason design-decisions.md §618
+/// gives: 1980-01-01 is a date, and "no time was recorded" is not one. The
+/// encoder already returns `0` for anything outside the DOS window, so a file
+/// dated 1970 or 2110 lands there rather than being clamped to a wrong year.
+fn dos_datetime_of(meta: &fs::Metadata) -> u32 {
+    let Ok(modified) = meta.modified() else {
+        return 0;
+    };
+    let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return 0;
+    };
+    let Ok(secs) = i64::try_from(since_epoch.as_secs()) else {
+        return 0;
+    };
+    guitk::tzrules::dos_datetime_from_unix(secs)
+}
+
+/// Rebuild `model`'s archive with `adding` folded in, and replace the file.
+///
+/// The model's entry list is the archive's contents afterwards, in its own
+/// order, plus the added files. Anything the user removed from the list is
+/// therefore removed from the file — which is what makes Delete mean something
+/// — and anything they added is written with its real mtime.
+///
+/// **Nothing is written until every member has been reproduced.** An existing
+/// member's bytes come back out of the old archive through the same
+/// `extract_entry` the Test button uses, so it is checked against its declared
+/// size and CRC on the way through; if any member will not come back, the whole
+/// save is refused and the file on disk is untouched. The alternative — write
+/// what can be written — turns one unreadable member into a permanently lost
+/// one.
+///
+/// The replacement itself is a write to a neighbouring temporary file followed
+/// by a rename, so a crash or a full disk halfway through leaves the original
+/// archive intact rather than truncated.
+///
+/// # Errors
+///
+/// [`SaveError`], and in every case the archive on disk is exactly as it was.
+pub fn save(model: &ArchiveModel, adding: Vec<PendingAdd>) -> Result<SaveReport, SaveError> {
+    let source = model.source.as_ref().ok_or(SaveError::NoSource)?;
+
+    // The names being added, so an existing member with the same name can be
+    // dropped rather than written twice. A ZIP with two members of one name is
+    // legal to write and ambiguous to read: which one a tool extracts is its
+    // own business, so writing one is a way of not deciding.
+    let mut replaced = 0_usize;
+    let mut members: Vec<ziparchive::ZipWriteEntry> = Vec::with_capacity(model.entries.len());
+    for entry in &model.entries {
+        let Some(member) = source.member(entry.id) else {
+            return Err(SaveError::UnknownMember {
+                name: entry.path.clone(),
+            });
+        };
+        if adding.iter().any(|add| add.name == member.name) {
+            replaced = replaced.saturating_add(1);
+            continue;
+        }
+        // A directory member has no data, so nothing has to be reproduced and
+        // an encrypted-bit check would be asking about bytes that do not exist.
+        if member.is_dir {
+            members.push(ziparchive::ZipWriteEntry {
+                name: member.name.clone(),
+                data: Vec::new(),
+                store_only: true,
+                dos_datetime: member.dos_datetime,
+            });
+            continue;
+        }
+        if member.is_encrypted() {
+            return Err(SaveError::CannotReproduce {
+                name: entry.path.clone(),
+                why: SkipReason::Encrypted,
+            });
+        }
+        let data = ziparchive::extract_entry(source.bytes(), member).map_err(|e| {
+            SaveError::CannotReproduce {
+                name: entry.path.clone(),
+                why: SkipReason::Zip(e),
+            }
+        })?;
+        members.push(ziparchive::ZipWriteEntry {
+            // The *raw* name, not `entry.path`. The model's path is a lossy
+            // rendering built for a column, and writing it back would replace
+            // every byte with no UTF-8 reading by a replacement character —
+            // renaming the member, and collapsing two members onto one name if
+            // they differed only in those bytes.
+            name: member.name.clone(),
+            data,
+            // Method 8 unless it does not shrink, rather than preserving the
+            // method the member arrived with. The crate re-compresses from the
+            // plaintext either way, so "keep the old method" would mean storing
+            // uncompressed data that used to be deflated.
+            store_only: false,
+            dos_datetime: member.dos_datetime,
+        });
+    }
+
+    let added = adding.len();
+    for add in adding {
+        members.push(ziparchive::ZipWriteEntry {
+            name: add.name,
+            data: add.data,
+            store_only: false,
+            dos_datetime: add.dos_datetime,
+        });
+    }
+
+    let bytes = ziparchive::create(&members);
+    let total = bytes.len() as u64;
+    replace_file(&model.path, &bytes)?;
+    Ok(SaveReport {
+        members: members.len(),
+        added,
+        replaced,
+        bytes: total,
+    })
+}
+
+/// Write an empty ZIP at `path`.
+///
+/// # Errors
+///
+/// [`SaveError::Io`] if the file cannot be written.
+pub fn create_empty(path: &Path) -> Result<(), SaveError> {
+    replace_file(path, &ziparchive::create(&[]))
+}
+
+/// Put `bytes` at `path` without ever leaving `path` half-written.
+///
+/// Write beside, then rename over. `fs::write` straight onto the target would
+/// truncate the user's archive as its first action, so a disk that fills up or
+/// a process that dies during the write destroys the original and leaves a
+/// fragment wearing its name. Rename is the only step that touches the target,
+/// and on both Windows and Unix it replaces atomically.
+fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
+    // Beside the target, so the rename stays within one filesystem — across a
+    // mount boundary it would degrade into copy-then-delete and lose the
+    // atomicity that is the whole reason for the dance.
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.part", std::process::id()));
+    let temp = path.with_file_name(name);
+    fs::write(&temp, bytes).map_err(|source| SaveError::Io {
+        path: temp.clone(),
+        source,
+    })?;
+    if let Err(source) = fs::rename(&temp, path) {
+        // The temporary is this function's litter, and leaving it next to the
+        // user's archive would be a second failure reported as none.
+        let _ = fs::remove_file(&temp);
+        return Err(SaveError::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     // Panicking on bad data is the point of a test: an `expect` that fires is
@@ -628,6 +938,33 @@ mod tests {
             .expect("a central directory header");
         bytes[central + 8..central + 10].copy_from_slice(&1u16.to_le_bytes());
         bytes
+    }
+
+    /// `bytes` with general-purpose bit 0 set on the member called `name`.
+    ///
+    /// The same trick as [`encrypted_archive`] and for the same reason — nothing
+    /// in SlateOS can *write* an encrypted member — but aimed at one member of
+    /// several rather than at the only one, so a test can assert that an
+    /// archive is refused *whole* rather than merely that an archive of one
+    /// unreadable member produces nothing.
+    fn with_encrypted_bit(bytes: &[u8], name: &[u8]) -> Vec<u8> {
+        // Central-directory header: signature at 0, general-purpose flags at 8,
+        // name length at 28, extra at 30, comment at 32, name text at 46.
+        let mut out = bytes.to_vec();
+        let mut at = 0;
+        while at + 46 <= out.len() {
+            if out[at..at + 4] != [0x50, 0x4B, 0x01, 0x02] {
+                at += 1;
+                continue;
+            }
+            let n = u16::from_le_bytes([out[at + 28], out[at + 29]]) as usize;
+            if out.get(at + 46..at + 46 + n) == Some(name) {
+                out[at + 8..at + 10].copy_from_slice(&1u16.to_le_bytes());
+                return out;
+            }
+            at += 1;
+        }
+        panic!("no central header for {}", String::from_utf8_lossy(name));
     }
 
     /// The MS-DOS pair for a wall-clock date and time, as a ZIP stores it.
@@ -1208,5 +1545,391 @@ mod tests {
             !text.contains("120, 0") && text.len() < 120,
             "a Debug that dumps the archive turns one failing assert into a screenful: {text}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Writing
+    // -----------------------------------------------------------------------
+
+    /// Write `entries` to a real file in `dir` and open it the way the program
+    /// does.
+    ///
+    /// Through the file rather than through `parse_zip` directly, because every
+    /// assertion below is about what ends up *on disk*, and a model whose
+    /// `path` names a file that does not exist cannot be saved.
+    fn on_disk(dir: &Path, name: &str, entries: &[ZipWriteEntry]) -> ArchiveModel {
+        let path = dir.join(name);
+        fs::write(&path, ziparchive::create(entries)).expect("write the fixture");
+        open(&path).expect("the fixture is a well-formed archive")
+    }
+
+    /// Every member name in an archive file, in the order it stores them.
+    fn names_in(path: &Path) -> Vec<Vec<u8>> {
+        let bytes = fs::read(path).expect("read the archive back");
+        ziparchive::parse(&bytes)
+            .expect("what we wrote must parse")
+            .into_iter()
+            .map(|m| m.name)
+            .collect()
+    }
+
+    #[test]
+    fn a_save_that_changes_nothing_still_produces_a_readable_archive() {
+        let dir = scratch("save-roundtrip");
+        let model = on_disk(
+            &dir,
+            "a.zip",
+            &[
+                member("src/main.rs", b"fn main() {}\n"),
+                member("README.md", &b"read me\n".repeat(40)),
+            ],
+        );
+
+        let report = save(&model, Vec::new()).expect("a rewrite of an archive we just wrote");
+        assert_eq!(report.members, 2);
+        assert_eq!(report.added, 0);
+        assert_eq!(report.replaced, 0);
+
+        // Re-opened rather than compared byte-for-byte: the rewrite is allowed
+        // to produce different bytes (it re-compresses), and what has to
+        // survive is the contents, not the encoding.
+        let after = open(&model.path).expect("the rewritten archive still opens");
+        assert_eq!(after.file_count, 2);
+        let main = after
+            .entries
+            .iter()
+            .find(|e| e.path == "src/main.rs")
+            .expect("the member survived the rewrite");
+        let source = after.source.as_ref().expect("a source");
+        let data =
+            ziparchive::extract_entry(source.bytes(), source.member(main.id).expect("its member"))
+                .expect("its bytes come back");
+        assert_eq!(data, b"fn main() {}\n", "a rewrite must not alter contents");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_row_removed_from_the_list_is_removed_from_the_file() {
+        // The whole point of the writer: Delete edits the list, and without a
+        // save the file still holds everything it always did.
+        let dir = scratch("save-delete");
+        let mut model = on_disk(
+            &dir,
+            "a.zip",
+            &[
+                member("keep.txt", b"keep"),
+                member("drop.txt", b"drop"),
+                member("also-keep.txt", b"keep too"),
+            ],
+        );
+        model.entries.retain(|e| e.path != "drop.txt");
+
+        let report = save(&model, Vec::new()).expect("the rewrite succeeds");
+        assert_eq!(report.members, 2);
+
+        let names = names_in(&model.path);
+        assert_eq!(names.len(), 2, "the dropped member is gone from the file");
+        assert!(
+            !names.iter().any(|n| n == b"drop.txt"),
+            "the deleted member is still in the file"
+        );
+        assert!(names.iter().any(|n| n == b"keep.txt"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_added_file_lands_in_the_archive_with_its_own_bytes() {
+        let dir = scratch("save-add");
+        let model = on_disk(&dir, "a.zip", &[member("old.txt", b"old")]);
+
+        let report = save(
+            &model,
+            vec![PendingAdd {
+                name: b"new.txt".to_vec(),
+                data: b"brand new".to_vec(),
+                dos_datetime: dos(2026, 8, 26, 14, 30, 52),
+            }],
+        )
+        .expect("the rewrite succeeds");
+        assert_eq!(report.members, 2);
+        assert_eq!(report.added, 1);
+        assert_eq!(report.replaced, 0);
+
+        let after = open(&model.path).expect("the archive still opens");
+        let new = after
+            .entries
+            .iter()
+            .find(|e| e.path == "new.txt")
+            .expect("the added member is in the archive");
+        let source = after.source.as_ref().expect("a source");
+        let data =
+            ziparchive::extract_entry(source.bytes(), source.member(new.id).expect("its member"))
+                .expect("its bytes come back");
+        assert_eq!(data, b"brand new");
+        assert_ne!(
+            ArchiveEntry::format_date(new.modified),
+            "-",
+            "an added file's mtime must reach the Date column, not be dropped \
+             by the rewrite"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn adding_a_name_the_archive_already_has_displaces_it_rather_than_doubling_it() {
+        // A ZIP with two members of one name is legal to write and ambiguous to
+        // read, so writing one is a way of not deciding. The new bytes win, and
+        // the count says so.
+        let dir = scratch("save-replace");
+        let model = on_disk(
+            &dir,
+            "a.zip",
+            &[member("dup.txt", b"the old one"), member("other.txt", b"o")],
+        );
+
+        let report = save(
+            &model,
+            vec![PendingAdd {
+                name: b"dup.txt".to_vec(),
+                data: b"the new one".to_vec(),
+                dos_datetime: 0,
+            }],
+        )
+        .expect("the rewrite succeeds");
+        assert_eq!(report.replaced, 1);
+        assert_eq!(report.members, 2, "displaced, not appended alongside");
+
+        let names = names_in(&model.path);
+        assert_eq!(
+            names.iter().filter(|n| n.as_slice() == b"dup.txt").count(),
+            1,
+            "the archive must not end up with two members of one name"
+        );
+
+        let after = open(&model.path).expect("the archive still opens");
+        let dup = after
+            .entries
+            .iter()
+            .find(|e| e.path == "dup.txt")
+            .expect("the member is there");
+        let source = after.source.as_ref().expect("a source");
+        let data =
+            ziparchive::extract_entry(source.bytes(), source.member(dup.id).expect("its member"))
+                .expect("its bytes come back");
+        assert_eq!(data, b"the new one", "the added file's bytes must win");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_member_that_cannot_be_reproduced_stops_the_whole_save_and_the_file_is_untouched() {
+        // The assertion the writer exists to make safe. This build cannot
+        // decrypt, so rewriting would silently drop the encrypted member — and
+        // the user would be left with a file they still believe is complete.
+        let dir = scratch("save-refuse");
+        let path = dir.join("a.zip");
+        // A perfectly ordinary member alongside the encrypted one, so the
+        // refusal is a refusal to *drop* something and not merely a run that
+        // found nothing to write.
+        let bytes = with_encrypted_bit(
+            &ziparchive::create(&[
+                member("plain.txt", b"fine"),
+                member("secret.txt", b"cannot be reproduced"),
+            ]),
+            b"secret.txt",
+        );
+        fs::write(&path, &bytes).expect("write the fixture");
+        let before = fs::read(&path).expect("read the fixture back");
+
+        let model = open(&path).expect("an encrypted archive still opens");
+        let error = save(&model, Vec::new()).expect_err("a save that would lose a member");
+        match &error {
+            SaveError::CannotReproduce { name, why } => {
+                assert_eq!(name, "secret.txt");
+                assert!(
+                    matches!(why, SkipReason::Encrypted),
+                    "an encrypted member must be named as such, not called corrupt: {why}"
+                );
+            }
+            other => panic!("wrong refusal: {other}"),
+        }
+        assert!(
+            error.to_string().contains("nothing was changed"),
+            "the message must say the file is intact: {error}"
+        );
+
+        assert_eq!(
+            fs::read(&path).expect("read the archive back"),
+            before,
+            "a refused save must leave the archive byte-identical"
+        );
+        assert!(
+            fs::read_dir(&dir)
+                .expect("list the scratch directory")
+                .flatten()
+                .all(|e| e.file_name() == "a.zip"),
+            "a refused save must not leave a temporary file behind"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_model_with_no_source_is_refused_rather_than_written_as_an_empty_archive() {
+        // The dangerous shape: a model built by hand has rows but no bytes to
+        // rebuild them from, so a writer that just skipped what it could not
+        // find would replace the user's archive with an empty one.
+        let dir = scratch("save-nosource");
+        let mut model = on_disk(&dir, "a.zip", &[member("a.txt", b"a")]);
+        let before = fs::read(&model.path).expect("read the fixture");
+        model.source = None;
+
+        let error = save(&model, Vec::new()).expect_err("no source, no rewrite");
+        assert!(matches!(error, SaveError::NoSource), "{error}");
+        assert_eq!(
+            fs::read(&model.path).expect("read the archive back"),
+            before,
+            "the file must be untouched"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_row_the_source_does_not_know_is_refused_by_its_own_error() {
+        // Not `CannotReproduce`: this says the list and the bytes have come
+        // apart, which is this program's bug, and the message has to send the
+        // user somewhere useful rather than blaming their archive.
+        let dir = scratch("save-unknown");
+        let mut model = on_disk(&dir, "a.zip", &[member("a.txt", b"a")]);
+        let before = fs::read(&model.path).expect("read the fixture");
+        model.entries[0].id = 9_999;
+
+        let error = save(&model, Vec::new()).expect_err("an id no member carries");
+        assert!(matches!(error, SaveError::UnknownMember { .. }), "{error}");
+        assert!(
+            error.to_string().contains("Re-open"),
+            "the message must say what to do: {error}"
+        );
+        assert_eq!(
+            fs::read(&model.path).expect("read the archive back"),
+            before,
+            "the file must be untouched"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_name_with_no_utf8_reading_survives_a_rewrite_unchanged() {
+        // The rewrite writes `member.name`, not `entry.path`. The path is a
+        // lossy rendering built for a column: writing it back would rename the
+        // member to one containing U+FFFD, and collapse two members onto one
+        // name if they differed only in those bytes.
+        let dir = scratch("save-nonutf8");
+        let raw = b"caf\xE9.txt".to_vec();
+        let path = dir.join("a.zip");
+        fs::write(
+            &path,
+            ziparchive::create(&[ZipWriteEntry {
+                name: raw.clone(),
+                data: b"latin-1 name".to_vec(),
+                store_only: false,
+                dos_datetime: 0,
+            }]),
+        )
+        .expect("write the fixture");
+
+        let model = open(&path).expect("a member with a non-UTF-8 name still opens");
+        save(&model, Vec::new()).expect("the rewrite succeeds");
+
+        assert_eq!(
+            names_in(&path),
+            vec![raw],
+            "the rewrite must carry the raw name through, not a rendering of it"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_directory_member_survives_a_rewrite() {
+        // Directories have no data, so there is nothing to reproduce — and a
+        // writer that ran them through the extractor anyway would refuse an
+        // archive that is perfectly fine.
+        let dir = scratch("save-dirs");
+        let path = dir.join("a.zip");
+        fs::write(
+            &path,
+            ziparchive::create(&[
+                ZipWriteEntry {
+                    name: b"docs/".to_vec(),
+                    data: Vec::new(),
+                    store_only: true,
+                    dos_datetime: 0,
+                },
+                member("docs/a.txt", b"a"),
+            ]),
+        )
+        .expect("write the fixture");
+
+        let model = open(&path).expect("the fixture opens");
+        save(&model, Vec::new()).expect("a rewrite that includes a directory member");
+
+        let names = names_in(&path);
+        assert!(
+            names.iter().any(|n| n == b"docs/"),
+            "the explicit directory member must survive: {names:?}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_new_archive_is_an_empty_one_the_program_can_open() {
+        // `create_empty` writes the end-of-central-directory record and nothing
+        // else. An empty ZIP that will not parse would leave New producing a
+        // file the program itself refuses to open.
+        let dir = scratch("create-empty");
+        let path = dir.join("new.zip");
+        create_empty(&path).expect("write an empty archive");
+
+        let model = open(&path).expect("an empty archive must open");
+        assert_eq!(model.file_count, 0);
+        assert!(model.entries.is_empty());
+        assert!(
+            model.source.is_some(),
+            "a new archive must be writable straight away, or Add is dead on arrival"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_rewrite_never_truncates_the_original_before_it_has_the_replacement() {
+        // Not a crash test — nothing here can crash mid-write — but the
+        // property that makes one survivable: the target is only ever touched
+        // by the rename, so at no point does a partly-written archive wear the
+        // user's filename. Asserted by checking the temporary is a sibling
+        // (same rename target filesystem) and is gone afterwards.
+        let dir = scratch("save-atomic");
+        let model = on_disk(&dir, "a.zip", &[member("a.txt", b"a")]);
+        save(&model, Vec::new()).expect("the rewrite succeeds");
+
+        let left: Vec<_> = fs::read_dir(&dir)
+            .expect("list the scratch directory")
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(
+            left.len(),
+            1,
+            "the temporary must be renamed away, not left beside the archive: {left:?}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

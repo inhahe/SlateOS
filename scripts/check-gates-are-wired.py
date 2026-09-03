@@ -103,18 +103,24 @@ CALLERS = (
 # Gates known to be unwired, with the reason. Pruning this list is part of
 # using it: see the module docstring on stale exemptions.
 PINNED: dict[str, str] = {
-    "check-diskcleanup-test-roots.py":
-        "lane C (apps/diskcleanup); filed to lane C 2026-09-02",
+    # The other five lane-C gates filed here on 2026-09-02 were wired into
+    # boot-test.sh on 2026-09-03 (check_lane_c_gui_gates) and their entries
+    # deleted with the same commit, which is what this dict is for.
     "check-evdev-elf-asm.py":
-        "lane C (ring-3 evdev test payload); filed to lane C 2026-09-02",
-    "check-frame-needles.py":
-        "lane C (windowed app test suites); filed to lane C 2026-09-02",
-    "check-generated-tables.py":
-        "lane C (gui/font generated tables); filed to lane C 2026-09-02",
-    "check-key-release-wiring.py":
-        "lane C (windowed programs); filed to lane C 2026-09-02",
-    "check-window-wiring.py":
-        "lane C (GUI programs' main); filed to lane C 2026-09-02",
+        "lane C, and DELIBERATELY unwired: it imports `capstone`, a "
+        "third-party disassembler that nothing in this repository declares as "
+        "a dependency and no build step installs. Wiring it would make a pip "
+        "package a hard requirement of every lane's boot test, to guard a "
+        "hand-assembled byte payload in kernel/src/proc/elf.rs that changes "
+        "very rarely -- and the gate would then be the reason all three lanes "
+        "could not build on a fresh checkout. Its own docstring says it is a "
+        "developer check, not part of the build. It exits 2 when capstone is "
+        "absent (as of 2026-09-03; it used to exit 1, claiming the payload was "
+        "wrong when it had not looked at it), so it is honest under pre-boot "
+        "and could not be wired anyway while run_checker aborts on 2. Run it "
+        "by hand after touching those byte literals. Decided by lane C "
+        "2026-09-03, answering "
+        "requests/b-c-six-gui-gates-are-never-run-by-anything.md",
     "check-selftest-reinit.py":
         "lane A (kernel/src); filed to lane A 2026-09-02",
     "check-libc-shape.py":

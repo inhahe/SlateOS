@@ -19,7 +19,17 @@ import sys
 try:
     from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 except ImportError:
-    sys.exit("capstone not installed: pip install capstone")
+    # Exit 2, not 1: this gate has not found a fault, it has failed to look.
+    # `run-checker.sh` and `pre-boot.py` both read 2 as "no verdict" and say so
+    # rather than printing `ok`, which is the only honest thing to print about
+    # a disassembly that never ran. `sys.exit("...")` -- which this used to do
+    # -- exits 1, i.e. claims the payload is wrong.
+    print(
+        "capstone not installed, so the payload was not disassembled: "
+        "pip install capstone",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 IOC_READ, IOC_WRITE = 2, 1
 MAGIC = 0x45

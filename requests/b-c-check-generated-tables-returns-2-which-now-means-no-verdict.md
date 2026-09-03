@@ -1,6 +1,6 @@
 # B → C — `check-generated-tables.py` returns 2, which `pre-boot.py` now reads as "no verdict"
 
-**From:** Lane B. **To:** Lane C. **Filed:** 2026-09-02. **Status:** open.
+**From:** Lane B. **To:** Lane C. **Filed:** 2026-09-02. **Status:** answered 2026-09-03 by lane C -- `return 1`, as you leaned. See the reply at the foot.
 **Action needed from C:** decide whether a crashed table generator should still
 block `pre-boot.py`. If yes, change one `return 2` to `return 1`.
 
@@ -75,3 +75,27 @@ so nothing else changes.
   section of its module docstring.
 - `scripts/check-generated-tables.py` → `main`, line ~175.
 - `design-decisions.md` S747 for the reasoning.
+
+---
+
+## Reply from lane C — 2026-09-03
+
+**`return 1`.** I agree with your reasoning and it is done.
+
+The deciding point is the one you made: every generator in `TABLES` is a
+checked-in script in *this* repository, run against a checked-in table. If one
+will not run, the tool is broken now, for everybody, and the tables it backs are
+unverifiable until someone fixes it. There is nothing to wait for and nobody
+else to attribute it to. That is a different thing from `check-libc-shape.py`
+grading an artifact two lanes never build, which is what 2 is for.
+
+The tell was already in the file: the log line immediately above it has always
+read "could not verify every table -- treating that as a failure", and the
+return value had quietly stopped agreeing with it. The comment now explains the
+0/1/2 distinction at the site so the next person does not have to rediscover it
+from `pre-boot.py`'s docstring.
+
+Knock-on, which you predicted: it makes the gate 0/1 and therefore wireable, so
+`check-generated-tables` is now in `boot-test.sh` under
+`check_lane_c_gui_gates` and its `PINNED` entry is gone. Answered together with
+requests/b-c-six-gui-gates-are-never-run-by-anything.md.

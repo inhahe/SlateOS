@@ -117,6 +117,30 @@ PINNED: dict[str, str] = {
         "lane C (GUI programs' main); filed to lane C 2026-09-02",
     "check-selftest-reinit.py":
         "lane A (kernel/src); filed to lane A 2026-09-02",
+    # The four bash oracles.  These are not gates that happen to be unwired --
+    # they are unwireable on the boot test's own terms, and their docstrings
+    # said so before this list existed.  Each shells out to real bash through
+    # `bashprobe.py`, which requires WSL (`wsl -d Ubuntu`), while the boot test
+    # must run on a host carrying only the Rust toolchain and QEMU.  Wiring one
+    # would red the build on every host without a Linux distro installed.
+    #
+    # They are run by hand when a quoting rule is written or changed, and their
+    # verdicts are carried forward into kshell's own self-test rungs -- which
+    # is the mechanism that makes bash's answers survive onto a host with no
+    # bash at all.  The rungs are wired; these are how the rungs are known to
+    # be right.
+    "check-shellquote-vs-bash.py":
+        "requires WSL (bashprobe.py); verdicts carried into kshell's rungs, "
+        "which are wired. Run by hand when a quoting rule changes.",
+    "check-kshell-pipeline-vs-bash.py":
+        "requires WSL (bashprobe.py); verdicts carried into kshell's rungs, "
+        "which are wired. Run by hand when a quoting rule changes.",
+    "check-kshell-rungs-vs-bash.py":
+        "requires WSL (bashprobe.py); pins the literals typed into rung 115 "
+        "against bash. Run by hand when a rung's cases change.",
+    "check-ansic-quoting-vs-bash.py":
+        "requires WSL (bashprobe.py); measures bash's $'...' rules for "
+        "TD-SHELLQUOTE-NO-ANSI-C-QUOTING, which is not implemented yet.",
     "check-libc-shape.py":
         "MUST NOT be wired as things stand: it grades a build artifact and "
         "returns 2 when libc.a is stale, and run_checker aborts the build on "

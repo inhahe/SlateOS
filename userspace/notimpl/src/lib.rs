@@ -14,6 +14,16 @@
         clippy::arithmetic_side_effects
     )
 )]
+// `needless_doctest_main` is right about what it measures and wrong here.
+// It fires because rustdoc already wraps a doctest body in `fn main`, so
+// writing one is redundant *to the compiler*. The `fn main` in "How to use
+// it" below is not addressed to the compiler: the whole instruction is
+// **where the line goes** — first statement, inside the caller's existing
+// `main` — and deleting the wrapper deletes the sentence. The alternatives
+// were worse: `text` would stop the example being compiled at all, and this
+// is the one place `guard`'s real signature is checked against its
+// documentation.
+#![allow(clippy::needless_doctest_main)]
 
 //! One place for "this command is not implemented on SlateOS".
 //!

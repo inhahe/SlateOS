@@ -86,7 +86,12 @@
 use std::io;
 use std::path::Path;
 
-use crate::quote::{os_bytes, os_from_bytes};
+use crate::quote::os_bytes;
+/// Only the non-unix half joins a name onto a path; the unix half hands the
+/// bytes straight to `openat`, which is the whole point of it. Importing this
+/// unconditionally is a warning on the target that actually ships.
+#[cfg(not(unix))]
+use crate::quote::os_from_bytes;
 
 /// What kind of thing an entry is.
 ///
@@ -300,13 +305,16 @@ fn c_name(component: &[u8]) -> io::Result<Vec<u8>> {
 
 // ---------------------------------------------------------------- unix --
 
-/// The syscalls `std` does not wrap, declared beside their callers rather than
-/// pulled from a libc binding — this crate depends on none, and the signatures
-/// are short enough to check against `posix/src/file.rs` by eye.
-///
-/// They are the `*at` forms, taking a directory descriptor and a single
-/// component. That is not a stylistic preference; it is the entire point of
-/// the module.
+// The syscalls `std` does not wrap, declared beside their callers rather than
+// pulled from a libc binding — this crate depends on none, and the signatures
+// are short enough to check against `posix/src/file.rs` by eye.
+//
+// They are the `*at` forms, taking a directory descriptor and a single
+// component. That is not a stylistic preference; it is the entire point of
+// the module.
+//
+// `//`, not `///`: rustdoc emits nothing for an extern block, so a doc comment
+// here is a warning rather than documentation.
 #[cfg(unix)]
 unsafe extern "C" {
     fn openat(dirfd: i32, path: *const u8, flags: i32, mode: u32) -> i32;

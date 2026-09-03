@@ -111414,3 +111414,69 @@ and `fs::remove_dir` on joined path strings, so a symlink swapped in mid-walk
 is followed. It is narrower there — the tree being removed is one the user just
 successfully copied, so the window is smaller — but it is the same bug, and the
 shared module is what makes fixing it once fix it everywhere.
+
+---
+
+## TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT (lane B, 2026-09-03)
+
+**In short:** the coreutils crates are built, linted and tested against the
+*Windows* host target, because that is the toolchain the machine has. Every
+piece of code marked "only on unix" is invisible to that build — the compiler
+never sees it, clippy never lints it, and the tests inside it never run. Since
+unix is the half that actually resembles SlateOS, the half that ships is the
+half nobody checks.
+
+**Found by accident, twice in one change.** The `rm`/`dirfd` work
+(`TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL`) passed
+`cargo test -p coreutils --target x86_64-pc-windows-gnu` (361 + 53 tests) and a
+full 89-minute `cargo clippy --all-targets` on the same target with **zero**
+warnings. Then `scripts/rm-diff.sh`, which builds for
+`x86_64-unknown-linux-gnu` inside WSL as a side effect of what it is really
+for, printed two warnings the host build could not have produced:
+
+  * `unused import: os_from_bytes` — used only in the `#[cfg(not(unix))]` half,
+    so it is genuinely unused on unix and genuinely used on the host;
+  * `unused doc comment` on the `#[cfg(unix)] unsafe extern "C"` block, which
+    the host build does not compile at all.
+
+And when the same suite was run for real on the Linux target, it reported
+**405** lib tests and **59** `rm` tests rather than 361 and 53. Forty-four lib
+tests and six `rm` tests exist that the host run silently skips — including all
+three of `dirfd`'s deliberate directory-swap refusals, which are the tests that
+certify the security property the module was written for. They pass; the point
+is that nothing in the normal workflow would have told anyone if they did not.
+
+**Why the host target is used at all.** It is fast, it needs no WSL round trip,
+and most of coreutils is portable. That is a real benefit and the answer is not
+to abandon it.
+
+**Proper fix**, roughly in order of value:
+
+1. A `scripts/coreutils-check.sh` that runs `cargo clippy` and `cargo test` for
+   **both** `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu` (the latter
+   through WSL, reusing `diff-wsl.sh`'s existing toolchain discovery and its
+   `~/.cache/slateos-diff-target` target dir, so it costs no extra disk).
+   Nothing today runs the Linux side except the `*-diff.sh` harnesses, and they
+   run it for a different reason and swallow the output.
+2. Wire the Linux side into the pre-push gates, or at least into the boot
+   test's pre-build tooling suite, so a `#[cfg(unix)]` regression cannot be
+   pushed. Note the cost before doing this: the host clippy run over
+   `-p coreutils --all-targets` took 89 minutes, so a second full pass is not
+   free and probably wants to be scoped to the crates a push touches, exactly
+   as gate 11 scopes itself.
+3. Until then, **run the Linux build by hand after touching any `#[cfg(unix)]`
+   code**:
+
+   ```sh
+   wsl -e sh -c 'cd "$(wslpath -u "D:\visual studio projects\os-lane-b")" && \
+     ~/.cargo/bin/cargo test -p coreutils --lib --bin <bin> \
+       --target x86_64-unknown-linux-gnu \
+       --target-dir ~/.cache/slateos-diff-target'
+   ```
+
+**If it is never fixed:** warnings and dead code accumulate in the unix half
+where nobody sees them, and — much worse — a unix-only test can rot into a
+permanent silent skip. A test that never runs is indistinguishable from a test
+that passes, which is the same failure shape as
+`TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH`: a green
+report produced by a check that was not performed.

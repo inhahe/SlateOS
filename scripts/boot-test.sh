@@ -5379,6 +5379,57 @@ check_kshell_vs_bash() {
 
 check_kshell_vs_bash
 
+# Grade the shape of the sysroot's `libc.a`, if there is a current one to grade.
+#
+# This is lane B's gate and lane B's tech debt (TD-B-TEN-GATES-ARE-NEVER-ASKED);
+# it is wired from here because `scripts/boot-test.sh` is lane A's file and the
+# thing that had blocked it was lane A's to build.  It was pinned as
+# `MUST NOT be wired as things stand` for one reason: it returns 2 -- meaning
+# "I could not look" -- on a fresh checkout with no sysroot, and `run_checker`
+# aborted the build on any exit but 0/1.  `--may-skip=2` is exactly that
+# missing channel, so the pin is now spent and goes with this commit.
+#
+# It has three ways to reach exit 2, and all three are honestly "could not
+# look" rather than "looked and found nothing": no `libc.a` at all, a `libc.a`
+# older than the `posix/src/*.rs` it was built from, and an archive it cannot
+# parse.  The middle one is the common case -- this worktree hits it right now,
+# with an archive from Aug 31 and seven newer inputs -- and it is the reason
+# wiring this had to wait for a skip channel rather than a `[ -f ... ]` guard.
+# A file-exists test would have called that stale archive present and graded
+# it, reporting on a `libc.a` the tree no longer produces.
+#
+# The skip is loud: `run_checker` prints the gate's last line as the reason and
+# records it in the skiplog, so a worktree that never builds a sysroot is told
+# every boot that this check is not being made, instead of accumulating green
+# runs that never opened the file.
+check_libc_shape() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== libc.a shape check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the shape of toolchain/sysroot/lib/libc.a ==="
+    if run_checker --may-skip=2 check-libc-shape "$py" -u \
+        "$PROJECT_ROOT/scripts/check-libc-shape.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  libc.a's object partitioning is wrong." >&2
+    echo "The gate's own output above names the offending symbols and says" >&2
+    echo "which of the two causes it is.  Both break gnulib-using ports at" >&2
+    echo "link time, not at compile time, so nothing downstream of here will" >&2
+    echo "tell you about it in terms you can act on." >&2
+    exit 1
+}
+
+check_libc_shape
+
 check_kernel_clippy
 
 # Compile every `#[cfg(unix)]` arm in the workspace, which nothing else does.

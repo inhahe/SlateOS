@@ -171,13 +171,6 @@ PINNED: dict[str, str] = {
         "for it to disagree with yet. UNPIN WHEN "
         "TD-SHELLQUOTE-NO-ANSI-C-QUOTING is implemented -- it then starts "
         "grading real code and belongs in boot-test.sh with --may-skip=2.",
-    "check-libc-shape.py":
-        "MUST NOT be wired as things stand: it grades a build artifact and "
-        "returns 2 when libc.a is stale, and run_checker aborts the build on "
-        "any exit but 0/1 -- so wiring it would stop the boot test on every "
-        "worktree without a fresh sysroot. Needs an opt-in skip channel in "
-        "run-checker.sh first. See known-issues.md -> "
-        "TD-B-TEN-GATES-ARE-NEVER-ASKED",
 }
 
 _GATE = re.compile(r"(check-[A-Za-z0-9_.-]+\.py)")

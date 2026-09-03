@@ -1048,6 +1048,51 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
                         }
                     }
                 }
+            } else if next == b'\'' {
+                // `$'...'` — ANSI-C quoting.  The escapes inside are
+                // deliberately *not* decoded here.  Decoding has to happen
+                // after quote removal, and it cannot happen at all until the
+                // word path carries bytes end to end, because the whole point
+                // of the construct is to produce bytes that no `String` can
+                // hold (see `known-issues.md`,
+                // `TD-KSHELL-LINE-EDITOR-IS-UTF8`).  What this arm owes the
+                // rest of the pipeline today is to copy the construct through
+                // unchanged and, above all, to leave the quote state alone.
+                //
+                // Without it, `$'` fell through to the "emit literally" arm
+                // below, which advanced one byte past the `$` and never set
+                // `in_single_quote`.  The `'` that *closes* the construct was
+                // then read as one that opens a quote, inverting quoting for
+                // the entire rest of the line: `$'a' $HOME` stopped expanding
+                // `$HOME`, and a later genuinely-quoted `'$HOME'` started
+                // expanding it.
+                //
+                // Not expanding inside the construct is also the correct
+                // behaviour in its own right -- bash does no parameter
+                // expansion within `$'...'`.
+                result.push(b'$');
+                result.push(b'\'');
+                i = i.saturating_add(1); // step over the opening `'`
+                while i < len {
+                    let c = bytes[i];
+                    if c == b'\\' {
+                        // A backslash escape is two bytes wide, so a `\'`
+                        // inside does not end the construct.  Copy the pair
+                        // verbatim; what it means is the decoder's business.
+                        result.push(c);
+                        i = i.saturating_add(1);
+                        if i < len {
+                            result.push(bytes[i]);
+                            i = i.saturating_add(1);
+                        }
+                        continue;
+                    }
+                    result.push(c);
+                    i = i.saturating_add(1);
+                    if c == b'\'' {
+                        break;
+                    }
+                }
             } else {
                 // `$` followed by something else — emit literally.
                 result.push(b'$');
@@ -21862,6 +21907,88 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"is not a parent namespace id",
         );
         assert_eq!(last_exit(), 1, "`pidns create 99` still errors, from pidns");
+    }
+
+    serial_println!(
+        "  kshell::self_test 113: `$'...'` no longer inverts quoting for the \
+         rest of the line -- the `'` that closes it was being read as one that \
+         opens a quote, so everything after an ANSI-C string stopped expanding"
+    );
+    {
+        // Rung 113 -- the quote-state half of
+        // `TD-KSHELL-LINE-EDITOR-IS-UTF8`. This is deliberately *not* a test
+        // that `$'\x41'` decodes to `A`: it cannot yet, because the decode has
+        // to land after quote removal and the word path still narrows through
+        // a `String` at `expand_vars`. What the `$'` arm owes callers today is
+        // narrower and entirely testable -- copy the construct through
+        // untouched, and do not corrupt the quoting state on the way past.
+        //
+        // The bug it fixes had nothing to do with bytes. With no `$'` arm at
+        // all, `$'` fell into the `$`-followed-by-anything-else case, which
+        // emitted both characters and advanced *one* byte without setting
+        // `in_single_quote`. The closing `'` was therefore read as an opening
+        // one, and quoting was inverted from there to end of line.
+        //
+        // `$#` is the probe rather than `$HOME` because it expands to the
+        // positional count unconditionally -- it cannot be empty by accident,
+        // and it does not depend on an environment a fresh boot may not have
+        // populated. Every assertion below is on the expander's return value,
+        // so the rung touches no subsystem and leaves nothing behind.
+
+        // The regression itself: an ANSI-C string must not swallow what
+        // follows it.
+        let out = expand_vars_bytes(b"$'a' $#");
+        assert!(
+            out.starts_with(b"$'a' "),
+            "`$'a'` is copied through verbatim, got {:?}",
+            out
+        );
+        assert!(
+            !out.ends_with(b"$#"),
+            "`$#` after `$'a'` still expands -- quoting was not inverted, got {:?}",
+            out
+        );
+
+        // A backslash-escaped quote is two bytes wide and does not end the
+        // construct, so the `$#` after *this* one is outside it too.
+        let out = expand_vars_bytes(b"$'a\\'b' $#");
+        assert!(
+            out.starts_with(b"$'a\\'b' "),
+            "`\\'` inside `$'...'` does not close it, got {:?}",
+            out
+        );
+        assert!(
+            !out.ends_with(b"$#"),
+            "`$#` after an escaped quote still expands, got {:?}",
+            out
+        );
+
+        // Nothing expands *inside* the construct -- bash does no parameter
+        // expansion within `$'...'`, and the decoder downstream needs the
+        // bytes it was given.
+        let out = expand_vars_bytes(b"$'$#'");
+        assert_eq!(
+            out,
+            b"$'$#'".to_vec(),
+            "`$'...'` contents are not expanded"
+        );
+
+        // The control. Without it an expander that simply never expanded
+        // anything would pass every assertion above: an ordinary single-quoted
+        // `$#` must still be left alone, which is the same outcome reached by
+        // the opposite path through the quote state.
+        let out = expand_vars_bytes(b"'$#'");
+        assert_eq!(
+            out,
+            b"'$#'".to_vec(),
+            "ordinary single quotes still suppress expansion"
+        );
+        let out = expand_vars_bytes(b"$#");
+        assert!(
+            !out.contains(&b'#'),
+            "and an unquoted `$#` really does expand, got {:?}",
+            out
+        );
     }
 
     serial_println!("  kshell::self_test PASSED");

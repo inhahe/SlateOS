@@ -1952,6 +1952,37 @@ check_temp_free_space() {
     echo "Toolchain temp OK: ${tmp_gb} GiB on ${tmp_vol%% *} ($tmpdir, floor ${MIN_FREE_TEMP_GB} GiB, ${phase})."
 }
 
+# The lowest free-space reading this run has seen, and the phase that produced
+# it, for record_boot_outcome.  Empty until the first successful measurement.
+#
+# The minimum rather than the last reading: the question a reader asks of this
+# file months later is "was the host short of disk when this cluster of boots
+# went red", and the worst moment of a run is not usually its final one -- a
+# build consumes tens of GiB and then the linker gives most of it back.
+BT_FREE_GB_MIN=""
+BT_FREE_GB_PHASE=""
+
+# Record a free-space reading if it is the lowest so far.
+#
+# Every measurement goes through here rather than only the successful ones, so
+# that a run which *refused to start* still records why: that row's whole value
+# is the number that caused the refusal.
+note_free_gb() {
+    local gb="$1" phase="$2"
+    # Guard against a non-numeric reading rather than trusting the caller.
+    # `measure_free_gb` returns non-zero when df gives nothing usable, and
+    # every caller checks -- but an arithmetic comparison on a stray word is a
+    # `set -e` abort under `[ ]`, which would turn a diagnostic into a failed
+    # boot test.
+    case "$gb" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    if [ -z "$BT_FREE_GB_MIN" ] || [ "$gb" -lt "$BT_FREE_GB_MIN" ]; then
+        BT_FREE_GB_MIN="$gb"
+        BT_FREE_GB_PHASE="$phase"
+    fi
+}
+
 check_tree_free_space() {
     local phase="$1"
     [ "$MIN_FREE_GB" = "0" ] && return 0
@@ -1973,6 +2004,8 @@ check_tree_free_space() {
              "floor is NOT being enforced for this run." >&2
         return 0
     fi
+
+    note_free_gb "$avail_gb" "$phase"
 
     if [ "$avail_gb" -lt "$MIN_FREE_GB" ]; then
         # --reclaim-space: try the remedy before refusing.
@@ -2007,6 +2040,10 @@ check_tree_free_space() {
                 if avail_gb="$(measure_free_gb)" && [ "$avail_gb" -ge "$MIN_FREE_GB" ]; then
                     echo "Free space OK after reclaim: ${avail_gb} GiB" \
                          "(floor ${MIN_FREE_GB} GiB, ${phase})."
+                    # Not noted: the pre-reclaim reading above is already the
+                    # minimum, and it is the honest one. Recording the
+                    # post-reclaim figure as this run's low-water mark would
+                    # hide the very pressure that forced a reclaim.
                     return 0
                 fi
                 echo "Reclaim ran but free space is still below the floor." >&2
@@ -2715,6 +2752,15 @@ record_boot_outcome() {
     # one is not.
     if [ -n "${BUILD_SECONDS:-}" ]; then
         args+=(--build-seconds "$BUILD_SECONDS")
+    fi
+    # Absent when nothing was measured -- --min-free-gb=0 disables the check
+    # entirely, and an unreadable df returns early -- because a run that did not
+    # look is not a run that saw zero GiB free.
+    if [ -n "${BT_FREE_GB_MIN:-}" ]; then
+        args+=(--free-gb-min "$BT_FREE_GB_MIN")
+        if [ -n "${BT_FREE_GB_PHASE:-}" ]; then
+            args+=(--free-gb-phase "$BT_FREE_GB_PHASE")
+        fi
     fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))

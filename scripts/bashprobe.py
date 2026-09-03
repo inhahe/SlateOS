@@ -81,6 +81,58 @@ _WORD_PROBE_SELF_TEST = [
 ]
 
 
+def _assert_framing_failure_is_loud():
+    """Prove a corrupt answer raises rather than returning None.
+
+    A guard is only worth having if it has been seen to fire, so this makes
+    the module fire it on itself every run instead of on the word of whoever
+    wrote it.  Each case below is a *successful* bash exit (returncode 0)
+    carrying output that cannot be framed -- exactly the shape that used to
+    return None and be scored by the callers as `SKIP (bash rejected)`.
+
+    Stubbing `run` is the whole point: these outputs cannot be provoked from
+    real bash, which is why the bug was invisible.  A defect that only shows
+    up when the transport misbehaves needs the transport made to misbehave.
+    """
+    global run
+    real_run = run
+
+    class _Fake:
+        def __init__(self, out):
+            self.returncode = 0
+            self.stdout = out
+            self.stderr = b""
+
+    # (stdout bash "returned", what is wrong with it)
+    corrupt = [
+        (b"", "empty output -- no count line at all"),
+        (b"2", "a count with no newline, i.e. a truncated read"),
+        (b"not-a-number\na\0b\0", "a first line that is not a count"),
+        (b"3\na\0b\0", "count says 3, payload frames 2 -- a short read"),
+        (b"1\na\0b\0", "count says 1, payload frames 2 -- an over-long read"),
+        (b"1\na", "a final word with no NUL terminator"),
+    ]
+    try:
+        for out, why in corrupt:
+            run = lambda _script, _o=out: _Fake(_o)  # noqa: E731
+            try:
+                got = words("x")
+            except ProbeError:
+                continue  # fired, as it must
+            raise SystemExit(
+                "THE PROBE'S OWN GUARD DOES NOT FIRE -- it would score a "
+                "broken harness as data.\n"
+                f"  corrupt output: {out!r}\n"
+                f"  what is wrong : {why}\n"
+                f"  words() returned {got!r} instead of raising ProbeError."
+                + ("\n  None is the value callers print as a bash rejection "
+                   "and\n  check-shellquote-vs-bash.py skips without counting "
+                   "it." if got is None else "")
+            )
+    finally:
+        run = real_run
+
+
 def _assert_word_probe_is_exact():
     """Prove `words()` itself before trusting a single one of its answers.
 
@@ -89,6 +141,7 @@ def _assert_word_probe_is_exact():
     The subtle half of this harness is the return path, and that is exactly
     where it was wrong for as long as no case happened to contain a newline.
     """
+    _assert_framing_failure_is_loud()
     for line, want in _WORD_PROBE_SELF_TEST:
         got = words(line)
         if got != want:
@@ -97,9 +150,30 @@ def _assert_word_probe_is_exact():
                 f"  line: {line!r}\n"
                 f"  want: {want!r}\n"
                 f"  got : {got!r}"
-                + ("\n  (None means the probe gave up, not that bash errored.)"
+                + ("\n  (None means bash itself rejected the line -- see stderr"
+                   "\n   by running the same script by hand. A framing failure"
+                   "\n   would have raised ProbeError instead of reaching here.)"
                    if got is None else "")
             )
+
+
+class ProbeError(RuntimeError):
+    """The probe could not read bash's answer, though bash gave one.
+
+    Distinct from `words()` returning None, which means bash *rejected* the
+    line -- a fact about bash, and legitimate data.  This means the harness
+    is broken, which is not data at all and must never be scored.
+
+    The distinction exists because the two were the same value for as long as
+    this file existed, and the callers do not treat them the same way by
+    accident -- they treat them the same way because they cannot tell them
+    apart.  `check-shellquote-vs-bash.py` prints `SKIP (bash rejected)` and
+    `continue`s on None, which is correct for a syntax error and catastrophic
+    for a framing bug: a skip is not a failure, so a malfunctioning probe
+    would drop cases silently and still print `0 disagreements with bash`.
+    That is a worse failure than the newline bug this module was fixed for
+    last -- that one at least announced itself as `<bash error>`.
+    """
 
 
 def words(line: str, setup: str = "HOME=/root; USER=root; EMPTY=''"):
@@ -108,6 +182,12 @@ def words(line: str, setup: str = "HOME=/root; USER=root; EMPTY=''"):
     Uses `set --` so the count is bash's own, then emits the words separated
     by NUL.  Returns a list of `bytes` whose *length* is authoritative,
     including the empty list.
+
+    Raises `ProbeError` -- never returns None -- when bash exited *successfully*
+    but its output could not be framed.  Only a non-zero exit is reported as
+    None, because only a non-zero exit is bash declining the line.  Every other
+    outcome is this module failing to read an answer that was given, and the
+    caller must not be allowed to mistake it for one.
 
     **The separator must be NUL, not a newline.**  This function used to print
     each word as `[%s]` on its own line and reject any line not wrapped in
@@ -129,26 +209,61 @@ def words(line: str, setup: str = "HOME=/root; USER=root; EMPTY=''"):
     the zero-word/one-empty-word distinction that `printf` cannot express is
     preserved: a `for` over zero arguments produces no output at all.
     """
+    # `line` MUST be the last thing in the script, and the emitter MUST be a
+    # function defined above it.
+    #
+    # The obvious layout -- `set -- <line>` with the printfs underneath -- is
+    # broken for any line ending in a continuation.  A trailing backslash is a
+    # backslash-newline, so `set -- a\` splices the *next line of this script*
+    # onto itself and the probe measures its own source code: bash returned
+    # the words `aprintf`, `%s\n`, `0` for the case `a\`, having consumed the
+    # count printf entirely.  With no count line the result was unframeable,
+    # which before ProbeError existed meant None, which
+    # `check-shellquote-vs-bash.py` printed as `SKIP (bash rejected)` and did
+    # not count -- so its trailing-backslash case had never once been tested,
+    # in a file whose entire subject is backslashes.
+    #
+    # Putting `line` last means a continuation can only ever splice EOF onto
+    # itself, which bash resolves by dropping the backslash-newline. There is
+    # no line left to eat, so the failure mode has no fuel rather than being
+    # detected after the fact.
     script = (
+        'emit() { printf "%s\\n" "$#"; '
+        'for w in "$@"; do printf "%s\\0" "$w"; done; }\n'
         f"{setup}\n"
-        f"set -- {line}\n"
-        'printf "%s\\n" "$#"\n'
-        'for w in "$@"; do printf "%s\\0" "$w"; done\n'
+        f"emit {line}\n"
     ).encode()
     r = run(script)
+    # The ONLY None in this function. bash was handed the line and declined
+    # it; that is a fact about bash and the caller is right to record it.
     if r.returncode != 0:
         return None
+
+    def broken(why: str):
+        return ProbeError(
+            f"{why}\n"
+            f"  line  : {line!r}\n"
+            f"  stdout: {r.stdout!r}\n"
+            f"  stderr: {r.stderr!r}\n"
+            "  bash exited 0, so it answered and we failed to read it."
+        )
+
     count, sep, rest = r.stdout.partition(b"\n")
     if not sep:
-        return None
+        raise broken("THE WORD PROBE IS BROKEN -- no count line in bash's output.")
     try:
         n = int(count)
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise broken(
+            f"THE WORD PROBE IS BROKEN -- first line {count!r} is not a count."
+        ) from exc
     # Every word is NUL-*terminated*, so n words leave a trailing empty field.
     # Checking for it is what catches a truncated or over-long read rather
     # than silently returning a short list.
     fields = rest.split(b"\0")
     if len(fields) != n + 1 or fields[-1] != b"":
-        return None
+        raise broken(
+            f"THE WORD PROBE IS BROKEN -- bash counted {n} word(s) but the "
+            f"payload framed as {len(fields) - 1}."
+        )
     return fields[:n]

@@ -1409,15 +1409,7 @@ answer later turns out to be A or C.
 Tracked in `known-issues.md` as
 `A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS`.
 
-# Resolved
-
-**The body above holds OPEN questions only.** When the operator answers one,
-write it up in `design-decisions.md` as a `Decided by: Operator` entry,
-**delete the entry from the body**, and add one line here. That is the whole
-point of the file: it is scanned for what still needs a decision, so an
-answered question left in the body is pure cost — and, being older, it sorts
-*first*, right where it is most in the way. (Why this is not append-only:
-`design-decisions.md` §437.)
+---
 
 ## A-Q2 — [A] Our C-test programs are built against a library nobody can identify, because the compiler that builds them cannot see the folder it is run from. The fix is in a different project. Who changes it? — Status: OPEN
 
@@ -1495,389 +1487,9 @@ The index is split by lane so three lanes adding a line at once land at three
 different offsets and the merge is automatic. Newest first within each lane.
 `(§n)` cites `design-decisions.md`.
 
-## Resolved — lane A
-
-- Q45 Convert the whole shell to bytes, or only the expanded word? — resolved
-  2026-08-21 (§261): **B, the expanded word.** One data path — keystroke to
-  syscall — goes byte-clean end to end; the source line stays text, as in bash.
-- Q49 Modern AMD graphics: write it blind, buy hardware, or say we don't
-  support it? — resolved 2026-08-21 (§262): **A for now**, C someday. The
-  operator's "write it blind but label it untested" variant is recorded in the
-  entry along with why it was not adopted.
-- Q50 The Intel iGPU driver we also cannot run — which way? — resolved
-  2026-08-21 (§263): **C.** Switch the iGPU on in firmware, boot SlateOS on
-  this PC's bare metal from a USB stick, then write i915 against the real chip.
-  Operator does the physical half; lane A readies the bootable-USB path first.
-- Q51 Start the Mesa port now, or leave 3D parked? — resolved 2026-08-21
-  (§264): **B, do the port** — sequenced after wifi, before Chromium. Chromium
-  uses Mesa heavily but bundles SwiftShader, so Mesa is a performance
-  prerequisite for it, not a functional one.
-- Q52 Should the contamination-canary check keep failing on noise? — resolved
-  2026-08-21 (§265): **D then C.** 20+ idle rounds first, then a shifted-band
-  rule instead of zero tolerance.
-- Q53 71% of benchmarks move >10% from a no-op rebuild — change the rule? —
-  resolved 2026-08-21 (§266): **E.** Restate the threshold against each
-  benchmark's measured band now; real hardware (unblocked by §263) is the fix
-  that makes it mean something again.
-- Q54 Switch to the 3.5× faster accelerator, split, or stay? — resolved
-  2026-08-21 (§267): **E then C.** Measure whether the fast accelerator removes
-  the noise; if so split — benchmarks fast, correctness gate stays on TCG where
-  SMEP/SMAP/UMIP are actually exercised.
-
-## Resolved — lane B
-
-- B-Q5 70 compiled programs are stored in git and go stale without git
-  noticing — keep storing them, or rebuild on demand? — resolved 2026-08-21
-  (§355, `Decided by: Claude (autonomous)`): **B, build on demand**, against my
-  own earlier "A for now" and against lane A's revised case for C. Measuring the
-  arrangement rather than arguing about it settled it: the stamp gate covers
-  **9 of the 70**, and **60 of the unguarded 61 were stale at that moment** — so
-  drift is the steady state, not an occasional accident. C cannot reach those 61
-  at all, because their compiler (fastpy) is a *different repository* whose
-  revision this tree cannot record. Rebuilding every fixture costs ~65 s, and the
-  kernel already `include_bytes!`s an untracked build output, so B demands no
-  toolchain the tree did not already demand. B ships with the guard inverted —
-  the rootfs build must refuse to stage a short fixture set, because
-  `load_test_elf` self-skips and naive B would otherwise turn stale tests into
-  *no* tests, silently green.
-- B-Q6 Should the console login prompt obey the system-wide failed-guess
-  delay? — resolved 2026-08-21 (§354): **A, and `su` joins with it.** Both obey
-  the shared tally for every account including root; the delay-your-neighbour
-  effect is accepted as bounded. `passwd` contributes but is never delayed,
-  because it gates the remedy rather than access.
-- B-Q4 Two user databases that drift apart — which one is real? — resolved
-  2026-08-21 (§353): **C, one store with two faces.** `/etc/users.yaml` is the
-  truth; `/etc/passwd` and `/etc/shadow` are generated from it on every change.
-- B-Q3 Password hashes that can no longer be checked: fail closed, or admit
-  those users once more? — resolved 2026-08-21 (§352): **A, fail closed.** Root
-  runs `passwd <user>`; no authentication code is kept alive to accept a known
-  non-hash.
-- B-Q2 GNU's curly quotes in diagnostics, or keep straight ones? — resolved
-  2026-08-21 (§351): **B, follow GNU.** Curly marks in the `invalid argument`
-  family only; file names stay straight, as they are in GNU.
-- Q48 Real kernel objects for "set the clock" / "bind port 80" / "raise your
-  own rlimit", or leave them denied? — resolved 2026-08-21 (§350): **B, objects
-  for all three.** The operator took B for the port too, where the
-  recommendation had been to drop the rule; an object can express "everyone may"
-  and dropping the check cannot express anything else.
-- B-Q1 Which tzdata do we ship, from where, and how is it updated? — resolved
-  2026-08-15 (§311): ship **full tzdata**, vendored as prebuilt TZif binaries
-  and updated as a `pkg/` package.
-
-## Resolved — lane C
-
-- C-Q1 Should normalization consult font coverage? — resolved 2026-08-15
-  (§428): **no** — normalization stays font-blind, and the font-fitting stage
-  decomposes what the face cannot draw. This was the last 339 sweep
-  disagreements, all one question.
-
-- C-Q3 Should all three lanes keep publishing finished work through the one
-  shared `os` worktree, after two collided in it? — answered 2026-08-21 by the
-  operator, **b**; written up 2026-08-24 (§538): no. A lane publishes with
-  `git push origin lane-<x>:main`, a fast-forward that needs no working
-  directory and is *refused* rather than tangled if another lane got there
-  first. `os` becomes a read-only window on the result.
-
-- C-Q5 Should this OS keep writing its own cryptography by hand? — answered
-  2026-08-21 by the operator, **c**; written up 2026-08-24 (§539): the
-  primitives (hash, cipher, password hash) are ported from vetted
-  implementations; the vault format and the service plumbing on top stay ours.
-  The line falls where testing stops reaching — a cipher can compute the right
-  answer and still leak the secret through its timing, and no test we write
-  sees that, whereas a file format that loses a record is an ordinary bug. The
-  eleven hand-written SHA-256 copies collapse to one ported one.
-
-- C-Q4 Nothing can print, and two disconnected halves of a printing system
-  exist — which should applications talk to? — answered 2026-08-21 by the
-  operator, **c**; written up 2026-08-24 (§540): neither. Printing becomes a
-  background service applications submit jobs to, so a job outlives the
-  application that started it. Lane C had recommended the cheaper shared
-  library (b); the operator overruled it as a stop-gap that would only be
-  rewritten, since a library and a service differ in *who owns the job*, and
-  every caller written against the library is a caller to migrate.
-
-- C-Q2 On a line mixing Hebrew or Arabic with English, should the Right arrow
-  key move the caret one character later in the sentence, or one step right on
-  the screen? — answered 2026-08-21 by the operator, **b (visual)**; written up
-  2026-08-24 (§541): the screen. A key named for a screen direction follows the
-  screen; Home/End and word-motion stay logical, because those name positions
-  in the sentence. Caveat carried into the implementation: a widget that does
-  not also remember which side of a direction boundary the caret is on will
-  **skip a whole right-to-left word** in one press — worse than the old
-  behaviour, so a half-switched widget is a regression, not a partial win.
-
-## Resolved — pre-split (unprefixed `Q<n>`, single-agent era)
-
-These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
-`C-Q<n>`.
-
-- Q55 [C] The installer read `size = "100 GB"` as 107 GB — should a decimal
-  spelling mean a decimal number? — answered 2026-08-21 by the operator, **c**;
-  written up 2026-08-24 (§542): neither spelling is guessed at. `GB` is
-  **refused**, with an error naming both alternatives; only `GiB` and bare `G`
-  are accepted. Lane C had weakly recommended honouring the spelling (b) while
-  naming c the honest option. The deciding point: both "pick one" answers leave
-  some existing config file meaning something its author did not intend, with
-  nothing announcing it — and a partition table is not a place to be helpful
-  about a guess.
-- Q45 Should `RenderCommand::Text` carry an overflow policy, rather than text
-  being cut mid-glyph with no ellipsis? — resolved 2026-08-15 (§427): **yes** —
-  the draw command carries the policy and the compositor draws the ellipsis.
-  (Note: `Q45` was reused by lane A for an open question while this one still
-  sat in the body — an ID collision the old append-only rule made unavoidable
-  and this split removes.)
-- Q44 Which mapping of our `(ResourceType, Rights)` handles onto Linux `CAP_*`
-  bits, given libc reported "all capabilities held" to everything? — resolved
-  2026-08-15 (§312): a **conservative projection** of the real handles, not a
-  fiction.
-- Q42 One-shot repo-wide rustfmt, or keep formatting only touched files? —
-  resolved 2026-08-15 (§310): **one-shot repo-wide**, with a
-  `.git-blame-ignore-revs` file alongside so the reformat does not poison
-  `git blame`.
-- Q40 Should osh reproduce bash's *null array element*, which looks like an
-  upstream defect? — resolved 2026-08-15 (§309): **no** — byte-fidelity with
-  bash has an "unless it is a defect" clause.
-- Q41 Should bash be cross-compiled instead of osh reimplemented? — resolved
-  2026-08-14 (§305): **both** — osh ships as the shell, cross-compiled bash
-  ships beside it, and osh's bash-fidelity scope is frozen.
-
-### Earlier (Q1–Q39)
-
-- Q38 Should osh be locale-aware, or UTF-8-only? — resolved 2026-08-07 (§104):
-  **option A — osh is UTF-8-only**, and `scripts/osh-bash-diff.py` moves to a
-  UTF-8 locale so the reference bash agrees. The rejected scope (making osh
-  locale-aware as bash is) stays written down in `known-issues.md` under
-  `TD-OILS-THE-CORPUS-HARNESS-RUNS-THE-REFERENCE-BASH-IN-THE-C-LOCALE`, at the
-  operator's request, so a future change of mind starts from a survey.
-
-- Q38 Add antivirus exclusions so the osh corpus sweep is runnable again? —
-  resolved 2026-08-07 (§106): **option A**, scoped to *process* exclusions for
-  `bash.exe` and `osh.exe` rather than blanket path exclusions. The command
-  itself still needs an elevated shell and is written out in §106.
-
-- Q37 How far osh's bash parity goes when the behaviour is an upstream bash
-  *defect* — resolved 2026-08-07 (§105): **option A — waive it.** A divergence
-  is waivable only when the bash side has been traced to its source and found
-  to be an unchecked error path with nothing suggesting intent; anything short
-  of that is designed behaviour and gets matched.
-
-- Q35 Whether promoted fastpy coreutils replace the Rust ones — resolved
-  2026-08-07 (§108): **option A for now**, with a stated trajectory toward B
-  per command, gated on a parity suite *and* a performance bar, and surfaced as
-  a user opt-in rather than a silent swap. fastpy's scope is explicitly not
-  coreutils — the operator's intent is OS functions such as a file explorer or
-  a settings dialog. The remaining sub-question (which way the shipping default
-  points) is carried forward as Q39.
-
-- Q34 Escalate to a full compiler-instrumented KASAN kernel to catch
-  B-KNULLJUMP? — resolved 2026-08-07 (§107): **option B.** The lighter shadow +
-  quarantine path was built, hardened and run at scale (100/100 clean, which is
-  inconclusive at a ~1-in-120 base rate) without localizing the wild store, so
-  the escalation lands as a separate instrumented debug build profile.
-
-- Q36 How osh splits `$PATH` on the Windows dev host — resolved 2026-08-04
-  (§103): **option B — split at the `$PATH` boundary only, with a drive-letter
-  escape.** `:` is the separator everywhere (the whole rule on SlateOS); on
-  Windows `;` is honoured too, since the inherited value is written that way;
-  and a `:` after a single letter *and followed by `/` or `\`* is a drive
-  letter, not a split point. Decided by Claude autonomously rather than by the
-  operator — the recommended option proved small, local and easy to reverse,
-  and leaving it open was blocking every corpus case needing a `$PATH` list.
-  The operator may overrule.
-
-- Q33 Next phase of the fastpy integration (initiative F) — resolved 2026-07-23
-  (§87): **option B — reduce the embedded-ELF kernel bloat (TD-KERNEL-EMBED-BLOAT)
-  first**, before promoting fastpy coreutils to real `/bin` commands. The ~48
-  self-test ELFs are `include_bytes!`'d into `.rodata` (~3.5 MiB each); move them
-  (and future fastpy binaries) onto the rootfs disk and load-from-disk. Operator
-  said "I lean towards B"; Claude recommended A (promote to `/bin`) but noted B as
-  a defensible prerequisite. B is a prerequisite-ish step toward a `/bin` that
-  lives on disk anyway.
-
-- Q32 Build KASAN-style heap-corruption detection to root-cause B-KNULLJUMP —
-  resolved 2026-07-23 (§86): **option A — build KASAN-style shadow memory now.** A
-  1/8-scale shadow region marking every heap byte addressable/poisoned, with
-  instrumented alloc/free and checked stores on the suspect paths, debug-gated to
-  protect the <200 ns heap target. Catches the whole live-write corruption class
-  at the corruptor's write rather than the victim's later read. Operator said
-  "A"; Claude recommended A. Targets the symbolized scheduler-`BTreeMap`-node
-  corruption (see `known-issues.md`).
-
-- Q31 SlateOS native-ABI main-thread ELF TLS setup (initiative F) — resolved
-  2026-07-21 (§82): **option A — the posix crt sets up main-thread TLS in
-  userspace** (finds `PT_TLS` via the linker-defined `__ehdr_start`, lays out a
-  variant-II TLS block + TCB, sets the thread pointer), **plus a new native
-  `SYS_SET_FS_BASE`** syscall calling the kernel's existing
-  `set_current_task_fs_base`. Keeps the microkernel loader minimal and matches
-  the kernel's "reset fs_base to 0, userspace sets it up" design. Operator said
-  "I'll go with A"; Claude recommended A. Unblocks fastpy binaries (whose C
-  runtime uses compiler `__thread`) running on-target.
-
-- Q30 C cross-toolchain for fastpy's SlateOS runtime (initiative F) — resolved
-  2026-07-21 (§81): **option A (a clang cross-toolchain to musl), realized via
-  `zig cc --target=x86_64-linux-musl`** — a self-contained, portable clang +
-  bundled musl headers + musl libc, so no heavyweight system-wide LLVM install
-  and no separately vendored musl headers were needed (sidesteps both cons of
-  A). Operator said "do A"; Claude picked zig as the concrete mechanism. The
-  pure-mode runtime now cross-compiles and a real fastpy program links to a
-  ~2.9 MB SlateOS ET_EXEC ELF with zero undefined symbols.
-
-- Q29 fastpy → SlateOS target strategy (initiative F) — resolved 2026-07-21
-  (§80): **pure-mode native compile first (A); add the CPython bridge later as a
-  superset (B)** — "A at first but eventually B." Unblocks *starting* initiative
-  F. Sequencing: mature the POSIX layer → add the `x86_64-slateos` fastpy target
-  + port the C runtime in pure mode → compile one real OS component. Claude
-  recommended A-first-then-B; operator confirmed.
-
-- Q28 `osh` `$EUID`/`$UID` identity — resolved 2026-07-21 (§79): **default root
-  (`0`/`0`) [option A], made per-user configurable** via `OSH_UID`/`OSH_EUID`.
-  Seeded as real readonly-integer vars (readonly-enforced, bash-faithful
-  listings). Claude recommended A; operator accepted and added the
-  default-plus-per-user-override framing. Implemented; known-issues
-  TD-OILS-IDVARS updated.
-
-- Q27 `osh` advertising as bash (`$BASH_VERSION`/`$BASH_VERSINFO`) — resolved
-  2026-07-21 (§78): **option A (advertise), as a per-user toggle
-  (`OSH_BASH_COMPAT`) defaulting on** — mirrors upstream Oils' own `bash_compat`
-  flag (which defaults on for `osh`, off for `ysh`; upstream sets
-  `BASH_VERSION='5.3'`). osh keeps its level at 5.2 (never claims a 5.3-only
-  feature). Claude recommended A + proposed the toggle; operator chose A and
-  asked for the per-user-default framing.
-
-- Q26 Oils (OSH) port strategy confirmed — resolved 2026-07-21 (§77): **finish
-  the Rust reimplementation (A) now; keep A as a permanent user option even if a
-  faithful C++ `oils-for-unix` port (B) lands later.** Claude recommended
-  finishing A; operator confirmed and added that B is an additive future option,
-  not a replacement.
-
-- Q25 next large initiative + fixed ordering — resolved 2026-07-18 (§69):
-  **Option A** (the interactive-shell userland) first, with the explicit
-  clarification that the shell is **Oils (OSH)** — a bash-*superset* shell —
-  **not bash itself** (roadmap-detailed.md §2.7). Fixed initiative order recorded
-  durably so it need not be re-asked: **A → F → B → C → D → E** (1. Oils/OSH +
-  coreutils, 2. fastpy build-system integration, 3. Mesa/GPU userspace [gated by
-  Q18/virgl], 4. Chromium, 5. WINE, 6. additional filesystems). Claude recommended
-  A-then-F; operator set the full ordering.
-
-- Q24 raw `spin::Mutex` holder-preemption — reactive vs. proactive audit —
-  resolved 2026-07-18 (§70): **Option B** (proactive kernel-wide audit/conversion)
-  — "no technical debt, do it the right way." Not a blind sed: the heap and other
-  deliberately-raw locks stay raw + manual-preempt; hot leaf locks move to a
-  preempt-aware `PreemptSpinMutex`; contended non-leaf locks move to
-  `crate::sync::Mutex` (lockdep); conversion is incremental and validated with
-  `wedge-soak.sh` green. Claude recommended A (reactive) with C as escalation;
-  operator overruled and chose the full proactive sweep.
-
-- Q23 session model for daemon-backed AF_INET **server** sockets — resolved
-  2026-07-18 (§71): **Option A** (shared, refcounted session; no daemon-ABI
-  change) for the interim, since the whole per-op synchronous socket path is a
-  stepping stone to the async socket server that will replace the ring-per-op
-  model wholesale. Standing operator guideline recorded: **do not gold-plate
-  interim/throwaway netstack infrastructure** — server sockets get A only; the
-  concurrency limitation is documented and temporary. Claude recommended A;
-  operator confirmed A.
-
-- Q22 netstack Phase 5 cutover — deletion scope + cutover strategy — resolved
-  2026-07-14 (§66): **Q22a → Option C** (phased deletion — L2–L4 core first, app
-  protocols re-homed to userspace individually) and **Q22b → (ii) staged**
-  (persistent daemon + socket-forwarding behind a default-off boot switch; prove
-  parity in QEMU, flip the default, then delete). Claude recommended both; operator
-  approved both.
-
-- The coreutils "which set is canonical?" question — resolved 2026-06-12;
-  standalone per-tool crates are canonical (§8).
-- Q1 `set_mempolicy_home_node` / NUMA mempolicy on UMA — resolved 2026-06-13,
-  **operator-confirmed 2026-06-14**; keep the UMA no-op returning 0, option A
-  (§10).
-- Q2 `/proc/sys/vm/overcommit_memory` & memory-commit policy — resolved
-  2026-06-13, **operator-confirmed 2026-06-14** (keep the shipped defaults:
-  native strict/committed, Linux lazy/overcommit; both configurable); build the
-  both-strategies model (Option 5); map the system-wide overcommit knob to a
-  fine-grained native cap (`admin.memory_policy`), not `CAP_SYS_ADMIN` (§11).
-- Q3 next major initiative — resolved 2026-06-13; terminal/dev before GUI,
-  GCC/CMake/Make toolchain first, CPython then fastpy (§9).
-- Q4 toolchain on Slate OS: run-prebuilt-Linux vs native-port — resolved
-  2026-06-13; **Path Z** (run prebuilt Linux toolchain binaries on the Linux-ABI
-  layer now, native-port selectively later), native-first/no-leak kept
-  inviolate, clang green-lit for install (§12).
-- Q5 file-backed `mmap` — how far to take the fix — resolved 2026-06-14
-  (§22), then **REOPENED 2026-06-14** by the operator, then **RE-RESOLVED
-  2026-06-14**: adopt **C-lite** (a unified *read-only* page cache for
-  shared-library text dedup + de-double-caching), deferred until a concrete
-  consumer appears (the dynamic linker is the likely first; stable VFS
-  file-identity is the precursor); writable `MAP_SHARED` writeback stays declined
-  / `ENOSYS` (§23). Deferral trigger logged in `todo.txt`.
-- Q6 cross-process memory introspection — resolved 2026-06-14: keep
-  channel/shared-memory IPC for *consensual* sharing; add a
-  **debug-capability-gated** cross-address-space `process_vm_readv`/`writev`
-  (`Rights::DEBUG` on a `Process` capability; `EPERM` without it). `ptrace`
-  remains a deferred follow-up behind the same gate (§24).
-- Q8 Path Z libc + rootfs — resolved 2026-06-14, **operator-delegated to
-  Claude**: go straight to **glibc** on an **ext4** rootfs, no musl
-  stepping-stone (§25). Claude reversed its own earlier musl-first recommendation
-  per the operator's stated preference for hard-work-upfront over throwaway
-  scaffolding, given the static-load path is already proven end-to-end.
-- Q7 kernel-task-stack-vs-IRQ overflow (B-DF1) — resolved 2026-06-15,
-  **operator-chosen option A** (Claude recommended A): per-CPU guard-page IRQ
-  stack with a manual nesting-aware switch + deferred preemption, plus the
-  `cli`/`sti` recursion guard the restructuring exposed (§26). Validated:
-  `http_gzip_8KiB` no longer double-faults at the gzip→dashboard transition.
-- Q9 bare-ELF ABI auto-classification — resolved 2026-06-24, **operator-chosen
-  option D** (Claude recommended D): default unmarked bare ELF → Linux ABI, add
-  `NT_GNU_ABI_TAG` note-walk as a positive Linux signal, stamp native binaries
-  with an explicit SlateOS marker; `spawn_process_with_abi` override kept (§33).
-- Q10 fullscreen-capture video codec — resolved 2026-06-24, **operator deferred
-  to Claude's recommendation**: hardware encode via the GPU driver long-term
-  (option C), defer the software-codec port near-term (option D), no stub
-  encoder meanwhile; if a software path is ever needed first, AV1/`rav1e` over
-  H.264 (§34).
-- Q11 zero-copy page-flipping for large channel messages — resolved 2026-06-24,
-  **operator-chosen option B** (Claude recommended B): explicit opt-in
-  `MSG_ZEROCOPY`-style flag + caller-provided page-aligned landing region; copy
-  path stays the default. Compiler follow-up: keep it programmer/library-
-  controlled (library-level auto-threshold helper), the compiler does not
-  auto-insert the flag (§35).
-- Q12 next large initiative — resolved 2026-06-24, **operator-chosen option E**:
-  build the C-lite read-only page cache now; lifts the §23 "not now" hold (§36).
-- Q13 de-double-cache file data — resolved 2026-06-30, **operator-chosen option A**
-  (Claude recommended A): page-cache-primary — the page cache is the single cache
-  for regular-file data, the buffer cache caches only filesystem metadata (§38).
-- Q14 connect the two cgroup subsystems — resolved 2026-06-30, **operator-chosen
-  option A** (Claude recommended A): cgroupfs as the frontend,
-  `kernel/src/cgroup.rs` as the enforcement engine; fork/clone/spawn inherit
-  `cgroup_id` (§39).
-- Q15 next focus — resolved 2026-06-30, **operator-chosen option A then C/D**:
-  execute Q13 + Q14 first, then a large initiative — C (GPU accel) or D (Docker /
-  container-runtime port) in operator-indifferent order; this is the explicit
-  go-ahead for the Docker port (§40).
-- Q16 `container diff` baseline semantics — resolved 2026-07-01, **Claude
-  autonomous (operator-approved Docker-port scope)**: implemented **option A**
-  (overlay-only diff). See `design-decisions.md` §41.
-- Q17 `container exec` semantics — resolved 2026-07-14, **operator-chosen
-  option B** (Claude recommended B): keep the netns-debug `container exec` facade
-  AND add real rootfs-binary exec under a distinct verb (`container run-in` /
-  `exec --rootfs`); the `docker exec` delegate + `docker build` `RUN`/`HEALTHCHECK`
-  route to the real path (§58).
-- Q18 GPU acceleration scope — resolved 2026-07-14, **operator-chosen option B**
-  (Claude recommended C): build the kernel-side virtio-gpu render-ioctl dispatch
-  now with honest "no-3D" reporting (GETPARAM `3D_FEATURES=0`, no capsets, correct
-  errno on 3D ioctls); defer the Mesa port until a virgl test environment exists
-  (§59).
-- Q19 container network model — resolved 2026-07-14, **operator-chosen option B**
-  (Claude recommended B): generalise to N-interface multi-network membership
-  (Docker parity) as its own dedicated increment (§60).
-- Q20 hard-lockup (BSP-dead) detector — resolved 2026-07-14, **operator-chosen
-  option A** (Claude recommended A): build the `i6300esb` watchdog + inject-nmi
-  detector, opt-in behind the existing `boot-test.sh --hard-lockup-watchdog` flag
-  (§61).
-- Q21 `nft`/`iptables` compat tooling — resolved 2026-07-14, **operator-chosen
-  option C** (Claude recommended C): keep `nft`/`iptables` as an explicit
-  parser/pretty-printer only, fix the docs, steer users to `fw`; defer full/minimal
-  kernel wiring (§62).
-
 ---
 
-## Q57 — Should the kernel run its own test suite on a user's boot? (lane A, 2026-08-22)
+## A-Q3 — [A] Should the kernel run its own test suite on a user's boot, and stop the machine when one fails? — Status: OPEN (raised 2026-08-22)
 
 **In short:** Right now, every time this OS starts, the kernel runs several
 hundred of its own built-in tests before handing the machine to the user —
@@ -1965,76 +1577,6 @@ Background: `known-issues.md` →
 
 ---
 
-## kshell's `grep` defaults differ from POSIX: line numbers and case-insensitivity are always on
-
-**Lane A.** Raised 2026-08-24. Code: `kernel/src/kshell.rs`, `GrepFlags::new()`.
-
-**In short:** In the kernel shell, `grep alpha file` prints `1:alpha` — with the
-line number — and matches `ALPHA` too. Every other `grep` in the world prints
-just `alpha` and does not match `ALPHA` unless you ask, with `-n` and `-i`
-respectively. Ours turns both on and gives no way to turn them off. This is
-pleasant when you are typing at a prompt and wrong when a script is reading the
-output, and I do not think it is my call which of those two users wins.
-
-### What it is now
-
-```rust
-impl GrepFlags {
-    fn new() -> Self {
-        Self {
-            case_insensitive: true, // default: case-insensitive (like original)
-            show_line_numbers: true,
-            ...
-```
-
-The `-i` and `-n` flags exist but only *set* these to `true` — the value they
-already have — so there is no spelling of `grep` in this shell that turns either
-off. The comment "like original" suggests this was inherited from an earlier
-kshell rather than chosen.
-
-Why it surfaced now: the shell just gained working exit statuses and working
-`$(…)` capture through pipelines, so `grep` output is for the first time
-something programs consume rather than something a human reads. `$(grep p f)`
-returns `1:match`, and stripping that prefix requires knowing it is there.
-
-### Options
-
-**A — leave both on, add `+i`/`+n` (or `--no-line-number`) to turn them off.**
-*What changes:* nothing by default; `grep +n p f` becomes a way to get bare
-lines. Existing habits and any existing scripts keep working.
-
-**B — default both off, matching POSIX; `-i`/`-n` turn them on as everywhere else.**
-*What changes:* `grep alpha f` prints `alpha` instead of `1:alpha`, and stops
-matching `ALPHA`. Anything that currently relies on the prefix breaks, and
-interactive use loses the line numbers unless you type `-n`.
-
-**C — split the difference: line numbers off (they corrupt piped output),
-case-insensitivity left on (it only widens the match set).**
-*What changes:* `grep alpha f` prints `alpha`; `grep ALPHA f` still finds
-`alpha`. `-n` starts working as a real flag.
-
-**D — leave it exactly as is and document it.**
-*What changes:* nothing; scripts must strip the `N:` prefix themselves.
-
-### My recommendation
-
-**C**, weakly. The two defaults are not equally defensible: a line-number prefix
-changes the *bytes* of every line, so it breaks any consumer of the output,
-whereas case-insensitivity only changes *which* lines are selected — surprising,
-but it yields a superset, and a caller who cares can pick a case-specific
-pattern. If you would rather not have a shell that is subtly non-standard in two
-places, **B** is the honest answer and the breakage is small: this shell has few
-scripts, and all of them are ours.
-
-### If this is never answered
-
-Safe, and it does not get worse quickly — but it gets more expensive with
-every script written against the current output, since each becomes a place
-that has to be re-checked if the default changes. Nothing is blocked. The
-inconsistency that *was* dangerous — the piped half printing `1: alpha` while
-the file half printed `1:alpha` — is already fixed (`afe5b0ae2`); what remains
-here is only the choice of default.
-
 ## An account with no password: should the lock screen let it through, or refuse forever? (lane C, 2026-08-24)
 
 **In short:** Some accounts have no password set at all. Today, if such an
@@ -2119,7 +1661,7 @@ interface shape.
 
 ---
 
-## Should `oci run` refuse to start when an option cannot be applied? (lane A)
+## A-Q4 — [A] Should `oci run` refuse to start when an option cannot be applied? — Status: OPEN
 
 **In short:** `oci run` starts a container. If you ask it for something extra —
 a shared folder (`-v`), a published port (`-p`), a file of labels or
@@ -2197,7 +1739,7 @@ is a place that would need revisiting if the contract later changes.
 
 ---
 
-## The shell's `grep` ignores case and numbers lines by default, unlike every other Unix (lane A, 2026-08-24)
+## A-Q5 — [A] The shell's `grep` ignores case and numbers lines by default, unlike every other Unix — Status: OPEN (raised 2026-08-24)
 
 **In short:** In our shell, typing `grep Error mylog.txt` also finds `error`
 and `ERROR`, and prints each result with a line number in front of it, like
@@ -2210,7 +1752,25 @@ different here. The question is whether to keep it.
 
 Where it lives: `GrepFlags::new()` in `kernel/src/kshell.rs` (~94901), which
 sets `case_insensitive: true` with the comment *"default: case-insensitive
-(like original)"*, and `show_line_numbers: true`.
+(like original)"*, and `show_line_numbers: true`:
+
+```rust
+impl GrepFlags {
+    fn new() -> Self {
+        Self {
+            case_insensitive: true, // default: case-insensitive (like original)
+            show_line_numbers: true,
+            ...
+```
+
+`-i` and `-n` both exist, and both only *set* these to `true` — the value they
+already hold. So there is no spelling of `grep` in this shell that turns either
+off: the two flags a user would reach for to control this are no-ops.
+
+Why it surfaced when it did: the shell had just gained working exit statuses
+and working `$(…)` capture through pipelines, so `grep` output became something
+*programs* consume rather than something a human reads. `$(grep p f)` returns
+`1:match`, and stripping that prefix requires knowing it is there.
 
 ### Why it is worth asking rather than just fixing
 
@@ -2274,10 +1834,23 @@ already has, and every command in every tutorial, becomes correct instead of
 subtly wrong. Convenience defaults are cheap to type back (`-i`, `-n`) and
 expensive to discover you were getting.
 
-If A feels too disruptive, **C** is the safer half-step: a wrong *set of lines*
-is a wrong answer, whereas a line-number prefix is visible on sight. **D** is
-the weakest — it fixes the cosmetic half and keeps the half that can hide a
-result.
+If A feels too disruptive, the safer half-step is **D**, not C — and this
+paragraph is a correction of what an earlier copy of this entry said. The
+earlier text argued for C on the grounds that a wrong *set of lines* is a wrong
+answer whereas a prefix is visible on sight. The first half is true in general
+and **false here**: case-insensitive matching returns a *superset*, so it can
+show you a line you did not want but can never hide one you did. The half that
+can actually corrupt an answer is the line-number prefix, because it changes
+the bytes of every line and silently shifts every `:`-splitting pipeline by one
+field. So if only one default moves, move `-n`.
+
+*(Filed twice, on the same day, by the same lane: once as "kshell's `grep`
+defaults differ from POSIX" and once as this entry, with opposite
+recommendations — C there, A here. The two have been merged into this one. Two
+contradictory recommendations from one lane on one question is worse than a
+plain duplicate: it makes the queue unanswerable, because there is no way for a
+reader to tell which of them is the lane's actual position. It is also what
+prompted `scripts/check-open-questions.py`.)*
 
 ### If this is never answered
 
@@ -2286,6 +1859,8 @@ Safe and stable; nothing degrades. The cost is ongoing and quiet: every
 and any pipeline that splits on `:` reads the wrong field. It also gets
 *slightly* more expensive to change over time, since each new script written
 against the current defaults is one more thing to check.
+
+---
 
 ## SlateOS has no way to encrypt anything. Which cipher do we add, and who owns it? (lane C, 2026-08-26)
 
@@ -2375,7 +1950,7 @@ work; I am carrying on down the roadmap.
 
 ---
 
-## Two commits that appear to delete the whole OS, and 33 commits signed by a fake name, are permanently in the published history. Leave them, or rewrite? (lane A, 2026-08-29)
+## A-Q6 — [A] Two commits that appear to delete the whole OS, and 33 commits signed by a fake name, are permanently in the published history. Leave them, or rewrite? — Status: OPEN (raised 2026-08-29)
 
 **In short:** on 2026-08-29 a safety check that runs just before uploading code
 accidentally committed to the real project instead of to the scratch copy it
@@ -2641,6 +2216,7 @@ ratchet lands, and it cannot cause data loss once the write-claiming sweep is
 done. So this is a "decide when you have a moment", not a "decide today".
 
 **Status:** OPEN
+
 ---
 
 ## C-Q10 — [C] In the light theme, small grey text on a shaded card is too faint to meet the readability standard, in about 850 places. Fixing it changes how the whole light theme looks. Which way? — Status: OPEN
@@ -2722,3 +2298,399 @@ accent be (i) adjusted for the mode like the presets are, (ii) accepted but
 warned about in the picker, or (iii) left exactly as chosen on the grounds that
 the user asked for it? I lean (i), matching what the presets already do.
 
+# Resolved
+
+**The body above holds OPEN questions only.** When the operator answers one,
+write it up in `design-decisions.md` as a `Decided by: Operator` entry,
+**delete the entry from the body**, and add one line here. That is the whole
+point of the file: it is scanned for what still needs a decision, so an
+answered question left in the body is pure cost — and, being older, it sorts
+*first*, right where it is most in the way. (Why this is not append-only:
+`design-decisions.md` §437.)
+
+## Resolved — lane A
+
+- Q45 Convert the whole shell to bytes, or only the expanded word? — resolved
+  2026-08-21 (§261): **B, the expanded word.** One data path — keystroke to
+  syscall — goes byte-clean end to end; the source line stays text, as in bash.
+- Q49 Modern AMD graphics: write it blind, buy hardware, or say we don't
+  support it? — resolved 2026-08-21 (§262): **A for now**, C someday. The
+  operator's "write it blind but label it untested" variant is recorded in the
+  entry along with why it was not adopted.
+- Q50 The Intel iGPU driver we also cannot run — which way? — resolved
+  2026-08-21 (§263): **C.** Switch the iGPU on in firmware, boot SlateOS on
+  this PC's bare metal from a USB stick, then write i915 against the real chip.
+  Operator does the physical half; lane A readies the bootable-USB path first.
+- Q51 Start the Mesa port now, or leave 3D parked? — resolved 2026-08-21
+  (§264): **B, do the port** — sequenced after wifi, before Chromium. Chromium
+  uses Mesa heavily but bundles SwiftShader, so Mesa is a performance
+  prerequisite for it, not a functional one.
+- Q52 Should the contamination-canary check keep failing on noise? — resolved
+  2026-08-21 (§265): **D then C.** 20+ idle rounds first, then a shifted-band
+  rule instead of zero tolerance.
+- Q53 71% of benchmarks move >10% from a no-op rebuild — change the rule? —
+  resolved 2026-08-21 (§266): **E.** Restate the threshold against each
+  benchmark's measured band now; real hardware (unblocked by §263) is the fix
+  that makes it mean something again.
+- Q54 Switch to the 3.5× faster accelerator, split, or stay? — resolved
+  2026-08-21 (§267): **E then C.** Measure whether the fast accelerator removes
+  the noise; if so split — benchmarks fast, correctness gate stays on TCG where
+  SMEP/SMAP/UMIP are actually exercised.
+
+## Resolved — lane B
+
+- B-Q5 70 compiled programs are stored in git and go stale without git
+  noticing — keep storing them, or rebuild on demand? — resolved 2026-08-21
+  (§355, `Decided by: Claude (autonomous)`): **B, build on demand**, against my
+  own earlier "A for now" and against lane A's revised case for C. Measuring the
+  arrangement rather than arguing about it settled it: the stamp gate covers
+  **9 of the 70**, and **60 of the unguarded 61 were stale at that moment** — so
+  drift is the steady state, not an occasional accident. C cannot reach those 61
+  at all, because their compiler (fastpy) is a *different repository* whose
+  revision this tree cannot record. Rebuilding every fixture costs ~65 s, and the
+  kernel already `include_bytes!`s an untracked build output, so B demands no
+  toolchain the tree did not already demand. B ships with the guard inverted —
+  the rootfs build must refuse to stage a short fixture set, because
+  `load_test_elf` self-skips and naive B would otherwise turn stale tests into
+  *no* tests, silently green.
+- B-Q6 Should the console login prompt obey the system-wide failed-guess
+  delay? — resolved 2026-08-21 (§354): **A, and `su` joins with it.** Both obey
+  the shared tally for every account including root; the delay-your-neighbour
+  effect is accepted as bounded. `passwd` contributes but is never delayed,
+  because it gates the remedy rather than access.
+- B-Q4 Two user databases that drift apart — which one is real? — resolved
+  2026-08-21 (§353): **C, one store with two faces.** `/etc/users.yaml` is the
+  truth; `/etc/passwd` and `/etc/shadow` are generated from it on every change.
+- B-Q3 Password hashes that can no longer be checked: fail closed, or admit
+  those users once more? — resolved 2026-08-21 (§352): **A, fail closed.** Root
+  runs `passwd <user>`; no authentication code is kept alive to accept a known
+  non-hash.
+- B-Q2 GNU's curly quotes in diagnostics, or keep straight ones? — resolved
+  2026-08-21 (§351): **B, follow GNU.** Curly marks in the `invalid argument`
+  family only; file names stay straight, as they are in GNU.
+- Q48 Real kernel objects for "set the clock" / "bind port 80" / "raise your
+  own rlimit", or leave them denied? — resolved 2026-08-21 (§350): **B, objects
+  for all three.** The operator took B for the port too, where the
+  recommendation had been to drop the rule; an object can express "everyone may"
+  and dropping the check cannot express anything else.
+- B-Q1 Which tzdata do we ship, from where, and how is it updated? — resolved
+  2026-08-15 (§311): ship **full tzdata**, vendored as prebuilt TZif binaries
+  and updated as a `pkg/` package.
+
+## Resolved — lane C
+
+- C-Q1 Should normalization consult font coverage? — resolved 2026-08-15
+  (§428): **no** — normalization stays font-blind, and the font-fitting stage
+  decomposes what the face cannot draw. This was the last 339 sweep
+  disagreements, all one question.
+
+- C-Q3 Should all three lanes keep publishing finished work through the one
+  shared `os` worktree, after two collided in it? — answered 2026-08-21 by the
+  operator, **b**; written up 2026-08-24 (§538): no. A lane publishes with
+  `git push origin lane-<x>:main`, a fast-forward that needs no working
+  directory and is *refused* rather than tangled if another lane got there
+  first. `os` becomes a read-only window on the result.
+
+- C-Q5 Should this OS keep writing its own cryptography by hand? — answered
+  2026-08-21 by the operator, **c**; written up 2026-08-24 (§539): the
+  primitives (hash, cipher, password hash) are ported from vetted
+  implementations; the vault format and the service plumbing on top stay ours.
+  The line falls where testing stops reaching — a cipher can compute the right
+  answer and still leak the secret through its timing, and no test we write
+  sees that, whereas a file format that loses a record is an ordinary bug. The
+  eleven hand-written SHA-256 copies collapse to one ported one.
+
+- C-Q4 Nothing can print, and two disconnected halves of a printing system
+  exist — which should applications talk to? — answered 2026-08-21 by the
+  operator, **c**; written up 2026-08-24 (§540): neither. Printing becomes a
+  background service applications submit jobs to, so a job outlives the
+  application that started it. Lane C had recommended the cheaper shared
+  library (b); the operator overruled it as a stop-gap that would only be
+  rewritten, since a library and a service differ in *who owns the job*, and
+  every caller written against the library is a caller to migrate.
+
+- C-Q2 On a line mixing Hebrew or Arabic with English, should the Right arrow
+  key move the caret one character later in the sentence, or one step right on
+  the screen? — answered 2026-08-21 by the operator, **b (visual)**; written up
+  2026-08-24 (§541): the screen. A key named for a screen direction follows the
+  screen; Home/End and word-motion stay logical, because those name positions
+  in the sentence. Caveat carried into the implementation: a widget that does
+  not also remember which side of a direction boundary the caret is on will
+  **skip a whole right-to-left word** in one press — worse than the old
+  behaviour, so a half-switched widget is a regression, not a partial win.
+
+## Resolved — pre-split (unprefixed `Q<n>`, single-agent era)
+
+These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
+`C-Q<n>`.
+
+- Q55 [C] The installer read `size = "100 GB"` as 107 GB — should a decimal
+  spelling mean a decimal number? — answered 2026-08-21 by the operator, **c**;
+  written up 2026-08-24 (§542): neither spelling is guessed at. `GB` is
+  **refused**, with an error naming both alternatives; only `GiB` and bare `G`
+  are accepted. Lane C had weakly recommended honouring the spelling (b) while
+  naming c the honest option. The deciding point: both "pick one" answers leave
+  some existing config file meaning something its author did not intend, with
+  nothing announcing it — and a partition table is not a place to be helpful
+  about a guess.
+- Q45 Should `RenderCommand::Text` carry an overflow policy, rather than text
+  being cut mid-glyph with no ellipsis? — resolved 2026-08-15 (§427): **yes** —
+  the draw command carries the policy and the compositor draws the ellipsis.
+  (Note: `Q45` was reused by lane A for an open question while this one still
+  sat in the body — an ID collision the old append-only rule made unavoidable
+  and this split removes.)
+- Q44 Which mapping of our `(ResourceType, Rights)` handles onto Linux `CAP_*`
+  bits, given libc reported "all capabilities held" to everything? — resolved
+  2026-08-15 (§312): a **conservative projection** of the real handles, not a
+  fiction.
+- Q42 One-shot repo-wide rustfmt, or keep formatting only touched files? —
+  resolved 2026-08-15 (§310): **one-shot repo-wide**, with a
+  `.git-blame-ignore-revs` file alongside so the reformat does not poison
+  `git blame`.
+- Q40 Should osh reproduce bash's *null array element*, which looks like an
+  upstream defect? — resolved 2026-08-15 (§309): **no** — byte-fidelity with
+  bash has an "unless it is a defect" clause.
+- Q41 Should bash be cross-compiled instead of osh reimplemented? — resolved
+  2026-08-14 (§305): **both** — osh ships as the shell, cross-compiled bash
+  ships beside it, and osh's bash-fidelity scope is frozen.
+
+### Earlier (Q1–Q39)
+
+- Q38 Should osh be locale-aware, or UTF-8-only? — resolved 2026-08-07 (§104):
+  **option A — osh is UTF-8-only**, and `scripts/osh-bash-diff.py` moves to a
+  UTF-8 locale so the reference bash agrees. The rejected scope (making osh
+  locale-aware as bash is) stays written down in `known-issues.md` under
+  `TD-OILS-THE-CORPUS-HARNESS-RUNS-THE-REFERENCE-BASH-IN-THE-C-LOCALE`, at the
+  operator's request, so a future change of mind starts from a survey.
+
+- Q38 Add antivirus exclusions so the osh corpus sweep is runnable again? —
+  resolved 2026-08-07 (§106): **option A**, scoped to *process* exclusions for
+  `bash.exe` and `osh.exe` rather than blanket path exclusions. The command
+  itself still needs an elevated shell and is written out in §106.
+  (Note, as on `Q45` above: `Q38` was issued twice, on the same day, for two
+  unrelated questions — the same append-only collision. Both were answered
+  before it could matter, and the numbers are left as they were rather than
+  edited, because this list records what the operator answered and the number
+  is part of what was answered. `scripts/check-open-questions.py` reports the
+  pair as a warning for that reason, and fails only on a collision involving a
+  question that is still open.)
+
+- Q37 How far osh's bash parity goes when the behaviour is an upstream bash
+  *defect* — resolved 2026-08-07 (§105): **option A — waive it.** A divergence
+  is waivable only when the bash side has been traced to its source and found
+  to be an unchecked error path with nothing suggesting intent; anything short
+  of that is designed behaviour and gets matched.
+
+- Q35 Whether promoted fastpy coreutils replace the Rust ones — resolved
+  2026-08-07 (§108): **option A for now**, with a stated trajectory toward B
+  per command, gated on a parity suite *and* a performance bar, and surfaced as
+  a user opt-in rather than a silent swap. fastpy's scope is explicitly not
+  coreutils — the operator's intent is OS functions such as a file explorer or
+  a settings dialog. The remaining sub-question (which way the shipping default
+  points) is carried forward as Q39.
+
+- Q34 Escalate to a full compiler-instrumented KASAN kernel to catch
+  B-KNULLJUMP? — resolved 2026-08-07 (§107): **option B.** The lighter shadow +
+  quarantine path was built, hardened and run at scale (100/100 clean, which is
+  inconclusive at a ~1-in-120 base rate) without localizing the wild store, so
+  the escalation lands as a separate instrumented debug build profile.
+
+- Q36 How osh splits `$PATH` on the Windows dev host — resolved 2026-08-04
+  (§103): **option B — split at the `$PATH` boundary only, with a drive-letter
+  escape.** `:` is the separator everywhere (the whole rule on SlateOS); on
+  Windows `;` is honoured too, since the inherited value is written that way;
+  and a `:` after a single letter *and followed by `/` or `\`* is a drive
+  letter, not a split point. Decided by Claude autonomously rather than by the
+  operator — the recommended option proved small, local and easy to reverse,
+  and leaving it open was blocking every corpus case needing a `$PATH` list.
+  The operator may overrule.
+
+- Q33 Next phase of the fastpy integration (initiative F) — resolved 2026-07-23
+  (§87): **option B — reduce the embedded-ELF kernel bloat (TD-KERNEL-EMBED-BLOAT)
+  first**, before promoting fastpy coreutils to real `/bin` commands. The ~48
+  self-test ELFs are `include_bytes!`'d into `.rodata` (~3.5 MiB each); move them
+  (and future fastpy binaries) onto the rootfs disk and load-from-disk. Operator
+  said "I lean towards B"; Claude recommended A (promote to `/bin`) but noted B as
+  a defensible prerequisite. B is a prerequisite-ish step toward a `/bin` that
+  lives on disk anyway.
+
+- Q32 Build KASAN-style heap-corruption detection to root-cause B-KNULLJUMP —
+  resolved 2026-07-23 (§86): **option A — build KASAN-style shadow memory now.** A
+  1/8-scale shadow region marking every heap byte addressable/poisoned, with
+  instrumented alloc/free and checked stores on the suspect paths, debug-gated to
+  protect the <200 ns heap target. Catches the whole live-write corruption class
+  at the corruptor's write rather than the victim's later read. Operator said
+  "A"; Claude recommended A. Targets the symbolized scheduler-`BTreeMap`-node
+  corruption (see `known-issues.md`).
+
+- Q31 SlateOS native-ABI main-thread ELF TLS setup (initiative F) — resolved
+  2026-07-21 (§82): **option A — the posix crt sets up main-thread TLS in
+  userspace** (finds `PT_TLS` via the linker-defined `__ehdr_start`, lays out a
+  variant-II TLS block + TCB, sets the thread pointer), **plus a new native
+  `SYS_SET_FS_BASE`** syscall calling the kernel's existing
+  `set_current_task_fs_base`. Keeps the microkernel loader minimal and matches
+  the kernel's "reset fs_base to 0, userspace sets it up" design. Operator said
+  "I'll go with A"; Claude recommended A. Unblocks fastpy binaries (whose C
+  runtime uses compiler `__thread`) running on-target.
+
+- Q30 C cross-toolchain for fastpy's SlateOS runtime (initiative F) — resolved
+  2026-07-21 (§81): **option A (a clang cross-toolchain to musl), realized via
+  `zig cc --target=x86_64-linux-musl`** — a self-contained, portable clang +
+  bundled musl headers + musl libc, so no heavyweight system-wide LLVM install
+  and no separately vendored musl headers were needed (sidesteps both cons of
+  A). Operator said "do A"; Claude picked zig as the concrete mechanism. The
+  pure-mode runtime now cross-compiles and a real fastpy program links to a
+  ~2.9 MB SlateOS ET_EXEC ELF with zero undefined symbols.
+
+- Q29 fastpy → SlateOS target strategy (initiative F) — resolved 2026-07-21
+  (§80): **pure-mode native compile first (A); add the CPython bridge later as a
+  superset (B)** — "A at first but eventually B." Unblocks *starting* initiative
+  F. Sequencing: mature the POSIX layer → add the `x86_64-slateos` fastpy target
+  + port the C runtime in pure mode → compile one real OS component. Claude
+  recommended A-first-then-B; operator confirmed.
+
+- Q28 `osh` `$EUID`/`$UID` identity — resolved 2026-07-21 (§79): **default root
+  (`0`/`0`) [option A], made per-user configurable** via `OSH_UID`/`OSH_EUID`.
+  Seeded as real readonly-integer vars (readonly-enforced, bash-faithful
+  listings). Claude recommended A; operator accepted and added the
+  default-plus-per-user-override framing. Implemented; known-issues
+  TD-OILS-IDVARS updated.
+
+- Q27 `osh` advertising as bash (`$BASH_VERSION`/`$BASH_VERSINFO`) — resolved
+  2026-07-21 (§78): **option A (advertise), as a per-user toggle
+  (`OSH_BASH_COMPAT`) defaulting on** — mirrors upstream Oils' own `bash_compat`
+  flag (which defaults on for `osh`, off for `ysh`; upstream sets
+  `BASH_VERSION='5.3'`). osh keeps its level at 5.2 (never claims a 5.3-only
+  feature). Claude recommended A + proposed the toggle; operator chose A and
+  asked for the per-user-default framing.
+
+- Q26 Oils (OSH) port strategy confirmed — resolved 2026-07-21 (§77): **finish
+  the Rust reimplementation (A) now; keep A as a permanent user option even if a
+  faithful C++ `oils-for-unix` port (B) lands later.** Claude recommended
+  finishing A; operator confirmed and added that B is an additive future option,
+  not a replacement.
+
+- Q25 next large initiative + fixed ordering — resolved 2026-07-18 (§69):
+  **Option A** (the interactive-shell userland) first, with the explicit
+  clarification that the shell is **Oils (OSH)** — a bash-*superset* shell —
+  **not bash itself** (roadmap-detailed.md §2.7). Fixed initiative order recorded
+  durably so it need not be re-asked: **A → F → B → C → D → E** (1. Oils/OSH +
+  coreutils, 2. fastpy build-system integration, 3. Mesa/GPU userspace [gated by
+  Q18/virgl], 4. Chromium, 5. WINE, 6. additional filesystems). Claude recommended
+  A-then-F; operator set the full ordering.
+
+- Q24 raw `spin::Mutex` holder-preemption — reactive vs. proactive audit —
+  resolved 2026-07-18 (§70): **Option B** (proactive kernel-wide audit/conversion)
+  — "no technical debt, do it the right way." Not a blind sed: the heap and other
+  deliberately-raw locks stay raw + manual-preempt; hot leaf locks move to a
+  preempt-aware `PreemptSpinMutex`; contended non-leaf locks move to
+  `crate::sync::Mutex` (lockdep); conversion is incremental and validated with
+  `wedge-soak.sh` green. Claude recommended A (reactive) with C as escalation;
+  operator overruled and chose the full proactive sweep.
+
+- Q23 session model for daemon-backed AF_INET **server** sockets — resolved
+  2026-07-18 (§71): **Option A** (shared, refcounted session; no daemon-ABI
+  change) for the interim, since the whole per-op synchronous socket path is a
+  stepping stone to the async socket server that will replace the ring-per-op
+  model wholesale. Standing operator guideline recorded: **do not gold-plate
+  interim/throwaway netstack infrastructure** — server sockets get A only; the
+  concurrency limitation is documented and temporary. Claude recommended A;
+  operator confirmed A.
+
+- Q22 netstack Phase 5 cutover — deletion scope + cutover strategy — resolved
+  2026-07-14 (§66): **Q22a → Option C** (phased deletion — L2–L4 core first, app
+  protocols re-homed to userspace individually) and **Q22b → (ii) staged**
+  (persistent daemon + socket-forwarding behind a default-off boot switch; prove
+  parity in QEMU, flip the default, then delete). Claude recommended both; operator
+  approved both.
+
+- The coreutils "which set is canonical?" question — resolved 2026-06-12;
+  standalone per-tool crates are canonical (§8).
+- Q1 `set_mempolicy_home_node` / NUMA mempolicy on UMA — resolved 2026-06-13,
+  **operator-confirmed 2026-06-14**; keep the UMA no-op returning 0, option A
+  (§10).
+- Q2 `/proc/sys/vm/overcommit_memory` & memory-commit policy — resolved
+  2026-06-13, **operator-confirmed 2026-06-14** (keep the shipped defaults:
+  native strict/committed, Linux lazy/overcommit; both configurable); build the
+  both-strategies model (Option 5); map the system-wide overcommit knob to a
+  fine-grained native cap (`admin.memory_policy`), not `CAP_SYS_ADMIN` (§11).
+- Q3 next major initiative — resolved 2026-06-13; terminal/dev before GUI,
+  GCC/CMake/Make toolchain first, CPython then fastpy (§9).
+- Q4 toolchain on Slate OS: run-prebuilt-Linux vs native-port — resolved
+  2026-06-13; **Path Z** (run prebuilt Linux toolchain binaries on the Linux-ABI
+  layer now, native-port selectively later), native-first/no-leak kept
+  inviolate, clang green-lit for install (§12).
+- Q5 file-backed `mmap` — how far to take the fix — resolved 2026-06-14
+  (§22), then **REOPENED 2026-06-14** by the operator, then **RE-RESOLVED
+  2026-06-14**: adopt **C-lite** (a unified *read-only* page cache for
+  shared-library text dedup + de-double-caching), deferred until a concrete
+  consumer appears (the dynamic linker is the likely first; stable VFS
+  file-identity is the precursor); writable `MAP_SHARED` writeback stays declined
+  / `ENOSYS` (§23). Deferral trigger logged in `todo.txt`.
+- Q6 cross-process memory introspection — resolved 2026-06-14: keep
+  channel/shared-memory IPC for *consensual* sharing; add a
+  **debug-capability-gated** cross-address-space `process_vm_readv`/`writev`
+  (`Rights::DEBUG` on a `Process` capability; `EPERM` without it). `ptrace`
+  remains a deferred follow-up behind the same gate (§24).
+- Q8 Path Z libc + rootfs — resolved 2026-06-14, **operator-delegated to
+  Claude**: go straight to **glibc** on an **ext4** rootfs, no musl
+  stepping-stone (§25). Claude reversed its own earlier musl-first recommendation
+  per the operator's stated preference for hard-work-upfront over throwaway
+  scaffolding, given the static-load path is already proven end-to-end.
+- Q7 kernel-task-stack-vs-IRQ overflow (B-DF1) — resolved 2026-06-15,
+  **operator-chosen option A** (Claude recommended A): per-CPU guard-page IRQ
+  stack with a manual nesting-aware switch + deferred preemption, plus the
+  `cli`/`sti` recursion guard the restructuring exposed (§26). Validated:
+  `http_gzip_8KiB` no longer double-faults at the gzip→dashboard transition.
+- Q9 bare-ELF ABI auto-classification — resolved 2026-06-24, **operator-chosen
+  option D** (Claude recommended D): default unmarked bare ELF → Linux ABI, add
+  `NT_GNU_ABI_TAG` note-walk as a positive Linux signal, stamp native binaries
+  with an explicit SlateOS marker; `spawn_process_with_abi` override kept (§33).
+- Q10 fullscreen-capture video codec — resolved 2026-06-24, **operator deferred
+  to Claude's recommendation**: hardware encode via the GPU driver long-term
+  (option C), defer the software-codec port near-term (option D), no stub
+  encoder meanwhile; if a software path is ever needed first, AV1/`rav1e` over
+  H.264 (§34).
+- Q11 zero-copy page-flipping for large channel messages — resolved 2026-06-24,
+  **operator-chosen option B** (Claude recommended B): explicit opt-in
+  `MSG_ZEROCOPY`-style flag + caller-provided page-aligned landing region; copy
+  path stays the default. Compiler follow-up: keep it programmer/library-
+  controlled (library-level auto-threshold helper), the compiler does not
+  auto-insert the flag (§35).
+- Q12 next large initiative — resolved 2026-06-24, **operator-chosen option E**:
+  build the C-lite read-only page cache now; lifts the §23 "not now" hold (§36).
+- Q13 de-double-cache file data — resolved 2026-06-30, **operator-chosen option A**
+  (Claude recommended A): page-cache-primary — the page cache is the single cache
+  for regular-file data, the buffer cache caches only filesystem metadata (§38).
+- Q14 connect the two cgroup subsystems — resolved 2026-06-30, **operator-chosen
+  option A** (Claude recommended A): cgroupfs as the frontend,
+  `kernel/src/cgroup.rs` as the enforcement engine; fork/clone/spawn inherit
+  `cgroup_id` (§39).
+- Q15 next focus — resolved 2026-06-30, **operator-chosen option A then C/D**:
+  execute Q13 + Q14 first, then a large initiative — C (GPU accel) or D (Docker /
+  container-runtime port) in operator-indifferent order; this is the explicit
+  go-ahead for the Docker port (§40).
+- Q16 `container diff` baseline semantics — resolved 2026-07-01, **Claude
+  autonomous (operator-approved Docker-port scope)**: implemented **option A**
+  (overlay-only diff). See `design-decisions.md` §41.
+- Q17 `container exec` semantics — resolved 2026-07-14, **operator-chosen
+  option B** (Claude recommended B): keep the netns-debug `container exec` facade
+  AND add real rootfs-binary exec under a distinct verb (`container run-in` /
+  `exec --rootfs`); the `docker exec` delegate + `docker build` `RUN`/`HEALTHCHECK`
+  route to the real path (§58).
+- Q18 GPU acceleration scope — resolved 2026-07-14, **operator-chosen option B**
+  (Claude recommended C): build the kernel-side virtio-gpu render-ioctl dispatch
+  now with honest "no-3D" reporting (GETPARAM `3D_FEATURES=0`, no capsets, correct
+  errno on 3D ioctls); defer the Mesa port until a virgl test environment exists
+  (§59).
+- Q19 container network model — resolved 2026-07-14, **operator-chosen option B**
+  (Claude recommended B): generalise to N-interface multi-network membership
+  (Docker parity) as its own dedicated increment (§60).
+- Q20 hard-lockup (BSP-dead) detector — resolved 2026-07-14, **operator-chosen
+  option A** (Claude recommended A): build the `i6300esb` watchdog + inject-nmi
+  detector, opt-in behind the existing `boot-test.sh --hard-lockup-watchdog` flag
+  (§61).
+- Q21 `nft`/`iptables` compat tooling — resolved 2026-07-14, **operator-chosen
+  option C** (Claude recommended C): keep `nft`/`iptables` as an explicit
+  parser/pretty-printer only, fix the docs, steer users to `fw`; defer full/minimal
+  kernel wiring (§62).

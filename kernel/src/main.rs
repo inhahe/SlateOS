@@ -171,6 +171,7 @@ mod sclatency;
 mod security;
 mod selftest;
 mod serial;
+mod shellquote;
 mod smep_smap;
 mod smp;
 mod sockact;
@@ -5304,6 +5305,17 @@ extern "C" fn kernel_main() -> ! {
             // site hit it, with nothing in the diff to show for it.
             if let Err(e) = bytestr::self_test() {
                 serial_println!("WARNING: bytestr self-test failed: {:?}", e);
+            }
+            // The one quoting scanner, which the kshell parser's eleven
+            // hand-rolled copies are being replaced by. Those eleven disagree
+            // with each other, and two of the disagreements are user-visible
+            // bugs (`echo "it's fine" > out` writes no file; `echo "it's
+            // $HOME"` does not expand) -- so this runs BEFORE kshell's own
+            // self-test on purpose. If the scanner is wrong, eleven call sites
+            // are wrong at once, and a failure here says so directly instead of
+            // surfacing as an unrelated-looking kshell rung.
+            if let Err(e) = shellquote::self_test() {
+                serial_println!("WARNING: shellquote self-test failed: {:?}", e);
             }
             // The shell's `echo -e` escape decoder. Worth a boot-battery slot
             // despite being one small function: it walked bytes while writing

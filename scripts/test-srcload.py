@@ -246,6 +246,7 @@ def test_the_real_scripts_still_load_through_it():
         "ctest-fixtures.py",
         "layout-sweep.py",
         "open-requests.py",
+        "prune-build-cache.py",
         "prune-build-trees.py",
         "reclaim-space.py",
         "straddle-check.py",

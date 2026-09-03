@@ -1420,6 +1420,27 @@ def build_record(serial: Serial | None, verdict: str, args,
         rec["wall_seconds"] = args.wall_seconds
     if args.build_seconds is not None:
         rec["build_seconds"] = args.build_seconds
+    # Disk pressure, which is a cause of boot-test failures this file could not
+    # previously distinguish from kernel failures.
+    #
+    # On 2026-08-15 the build volume reached zero bytes free and a half-written
+    # edit truncated a kernel source file; a part-way link can also leave a
+    # stale kernel staged in the ESP, which a later --no-build run boots as if
+    # it were current. Both produce rows here that look like the kernel
+    # misbehaving. boot-test.sh has measured free space at each phase since
+    # then and *printed* it, which helps only someone reading that one run's
+    # console -- not someone asking months later why a cluster of boots went
+    # red in the same week.
+    #
+    # Absent rather than zero when unmeasured, for the same reason
+    # `build_seconds` is: a run whose floor check was disabled with
+    # --min-free-gb=0, or whose `df` was unreadable, did not observe zero GiB
+    # free. A missing field is a question the reader can answer; a wrong one is
+    # not.
+    if args.free_gb_min is not None:
+        rec["free_gb_min"] = args.free_gb_min
+        if args.free_gb_phase:
+            rec["free_gb_phase"] = args.free_gb_phase
     if serial is not None:
         rec["serial_bytes"] = serial.n_bytes
         rec["serial_lines"] = len(serial.lines)
@@ -2036,6 +2057,26 @@ def main(argv=None) -> int:
                              "profile's cost. This is the half of "
                              "open-questions.md Q46's 'slower build, faster "
                              "boot' tradeoff that had never been measured.")
+    parser.add_argument("--free-gb-min", type=int, default=None,
+                        metavar="GIB",
+                        help="the LOWEST free space seen on the tree's volume "
+                             "during this run, in GiB. boot-test.sh already "
+                             "measures this several times -- before the build, "
+                             "before staging, before queueing to boot -- and "
+                             "until now printed each reading and threw it "
+                             "away. The minimum rather than the last reading, "
+                             "because the question this answers is 'was the "
+                             "host short of disk at the worst moment of this "
+                             "run', and the worst moment is not usually the "
+                             "final one. See --free-gb-phase.")
+    parser.add_argument("--free-gb-phase", default="",
+                        metavar="PHASE",
+                        help="which check produced --free-gb-min, in "
+                             "boot-test.sh's own words ('before building', "
+                             "'after building, before queueing to boot'). "
+                             "Without it the number cannot be acted on: 12 GiB "
+                             "before a build and 12 GiB after one are opposite "
+                             "situations.")
     parser.add_argument("--label", default="",
                         help="free-form run tag, e.g. 'soak-iter3'")
     parser.add_argument("--experiment", default="",

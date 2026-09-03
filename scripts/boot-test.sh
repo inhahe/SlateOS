@@ -208,6 +208,59 @@
 
 set -euo pipefail
 
+# --- Run from a snapshot of ourselves, not from the file in the tree ---------
+#
+# bash does not read a script into memory. It reads it in chunks, and it seeks
+# back to the byte offset it had reached each time it wants more -- so editing
+# a running script edits the part it has not executed yet. For a script that
+# runs for well over an hour, that is not a theoretical window: this file is
+# edited *during* its own runs, because the whole point of backgrounding a boot
+# test is to keep working while it goes, and the tree it tests is the tree the
+# agent is developing in.
+#
+# The failure is silent and it does not look like an edit. Bash resumes at the
+# old offset in the new file, which now lands in the middle of a different
+# line, and executes whatever text follows it: half a word as a command, an
+# unbalanced quote that swallows the rest of the file, a `fi` with no `if`.
+# What the operator sees is a syntax error on a line that is syntactically
+# fine, or -- much worse -- a run that quietly skips a gate and still says
+# PASSED.
+#
+# So the first thing this script does is copy itself somewhere private and hand
+# over to that copy. The copy is complete before the first gate runs and no
+# editor will ever touch it, which makes the run atomic with respect to the
+# tree. `BOOT_TEST_REEXEC` is the guard that stops the copy copying itself, and
+# `BOOT_TEST_ORIG_DIR` carries the one thing the copy cannot work out for
+# itself: `SCRIPT_DIR` is derived from `$0`, and `$0` in the copy points at the
+# temp directory, so every sibling script (`run-checker.sh`, the checkers, the
+# QEMU helpers) would be looked up in the wrong place.
+#
+# The copy is deleted by the trap below rather than by the copy itself, since
+# a script cannot reliably remove the file it is still being read from.
+if [ -z "${BOOT_TEST_REEXEC:-}" ]; then
+    _bt_self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    _bt_snapshot="$(mktemp -t boot-test-snapshot.XXXXXX)" || {
+        echo "boot-test.sh: could not create a snapshot of myself; refusing to"
+        echo "  run directly from the tree, because an edit during the run"
+        echo "  would be executed as if it had always been there."
+        exit 125
+    }
+    # `cat` rather than `cp` so the snapshot is a fresh inode with our own
+    # permissions: `cp` would preserve the source's, and on a checkout where
+    # the script is not executable that would produce a copy we cannot exec.
+    cat "$_bt_self" > "$_bt_snapshot"
+    chmod +x "$_bt_snapshot"
+    # The trap is installed in *this* shell, which stays alive as the parent
+    # only if we do not `exec`. That is the trade: one extra process for the
+    # lifetime of the run, in exchange for the snapshot being removed on every
+    # exit path including a signal.
+    trap 'rm -f "$_bt_snapshot"' EXIT INT TERM
+    BOOT_TEST_REEXEC=1 \
+    BOOT_TEST_ORIG_DIR="$(cd "$(dirname "$0")" && pwd)" \
+        bash "$_bt_snapshot" "$@"
+    exit $?
+fi
+
 # Scan the serial log for self-test failures that do NOT halt the boot.
 #
 # Many fs/subsystem self-tests are NON-FATAL: on failure main.rs logs a
@@ -1163,7 +1216,11 @@ EOF
     return 0
 }
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# `$0` is the snapshot in the temp directory, not this file's home in the tree
+# (see the re-exec at the top), so the real directory is passed in rather than
+# derived. The fallback keeps the script runnable if it is ever sourced or
+# invoked in a way that skips the re-exec.
+SCRIPT_DIR="${BOOT_TEST_ORIG_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Every gate below asks a Python checker whether the tree is clean, and until
@@ -1565,6 +1622,42 @@ MIN_FREE_TEMP_GB="${BOOT_TEST_MIN_FREE_TEMP_GB:-}"
 # never reclaimed -- see check_temp_free_space for why.
 RECLAIM_SPACE="${BOOT_TEST_RECLAIM_SPACE:-0}"
 
+# After a green run, if free space has fallen below this, prune *this*
+# worktree's build cache of units cargo has not invoked in a fortnight.
+# 0 disables.
+#
+# WHY THIS IS ON BY DEFAULT WHEN --reclaim-space IS NOT.  They answer opposite
+# problems.  --reclaim-space fires at the floor and its only remedy is to
+# delete another tree's build output, which is why a run should not do it
+# merely because it noticed.  This one fires far *above* the floor, touches
+# only the tree the run just built, and cannot cost anybody a rebuild: cargo
+# does not garbage-collect, so a unit it has not asked for in fourteen days --
+# across every build every lane ran in that fortnight -- is one it will not
+# ask for now.  See scripts/prune-build-cache.py for why "invoked" is the
+# sound test and mtime is not.
+#
+# WHY IT IS NEEDED AT ALL.  CLAUDE.md has told the lanes to clean up after
+# themselves since August, and on 2026-09-02 two worktrees were over 100 GB and
+# a third just under 50.  A rule nothing enforces is not a rule.  The reason it
+# went unnoticed is structural rather than negligent: cargo mints a new
+# -<hash> artifact whenever a unit's inputs change and keeps the old one
+# forever, so the growth is invisible in any single build and shows up only as
+# a volume that is mysteriously full weeks later.  Nothing was ever going to
+# notice it by hand.
+#
+# WHY *HERE*.  The prune's cost is minutes of metadata I/O, so it must not sit
+# in front of anybody's feedback: at the head of the run it would delay every
+# build, and at the floor it is already too late to be the gentle option.  A
+# green finish is the one moment when the run is over, the operator is not
+# waiting on the next line, and the tree is in a known state.
+#
+# WHY 100 AND NOT THE FLOOR.  A full debug build of this workspace is ~40 GiB
+# and there are four worktrees, so 100 GiB is roughly "less than two more
+# builds of headroom" -- late enough to be rare, early enough that the cheap
+# remedy still has room to work.  At the 20 GiB floor the only remedy left is
+# deleting a live tree.
+PRUNE_CACHE_BELOW_GB="${BOOT_TEST_PRUNE_CACHE_BELOW_GB:-100}"
+
 # Opt-in: when a git-ignored prerequisite is missing, run
 # scripts/bootstrap-worktree.sh and continue instead of refusing.  Off by
 # default for the same reason --reclaim-space is: provisioning builds six
@@ -1618,6 +1711,8 @@ for arg in "$@"; do
         --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
         --min-free-temp-gb=*) MIN_FREE_TEMP_GB="${arg#*=}" ;;
         --reclaim-space) RECLAIM_SPACE=1 ;;
+        --prune-cache-below-gb=*) PRUNE_CACHE_BELOW_GB="${arg#*=}" ;;
+        --no-prune-cache) PRUNE_CACHE_BELOW_GB=0 ;;
         --bootstrap) BOOTSTRAP=1 ;;
         # --usb-image boots the same bytes a flash drive would hold.
         #
@@ -1857,6 +1952,37 @@ check_temp_free_space() {
     echo "Toolchain temp OK: ${tmp_gb} GiB on ${tmp_vol%% *} ($tmpdir, floor ${MIN_FREE_TEMP_GB} GiB, ${phase})."
 }
 
+# The lowest free-space reading this run has seen, and the phase that produced
+# it, for record_boot_outcome.  Empty until the first successful measurement.
+#
+# The minimum rather than the last reading: the question a reader asks of this
+# file months later is "was the host short of disk when this cluster of boots
+# went red", and the worst moment of a run is not usually its final one -- a
+# build consumes tens of GiB and then the linker gives most of it back.
+BT_FREE_GB_MIN=""
+BT_FREE_GB_PHASE=""
+
+# Record a free-space reading if it is the lowest so far.
+#
+# Every measurement goes through here rather than only the successful ones, so
+# that a run which *refused to start* still records why: that row's whole value
+# is the number that caused the refusal.
+note_free_gb() {
+    local gb="$1" phase="$2"
+    # Guard against a non-numeric reading rather than trusting the caller.
+    # `measure_free_gb` returns non-zero when df gives nothing usable, and
+    # every caller checks -- but an arithmetic comparison on a stray word is a
+    # `set -e` abort under `[ ]`, which would turn a diagnostic into a failed
+    # boot test.
+    case "$gb" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    if [ -z "$BT_FREE_GB_MIN" ] || [ "$gb" -lt "$BT_FREE_GB_MIN" ]; then
+        BT_FREE_GB_MIN="$gb"
+        BT_FREE_GB_PHASE="$phase"
+    fi
+}
+
 check_tree_free_space() {
     local phase="$1"
     [ "$MIN_FREE_GB" = "0" ] && return 0
@@ -1878,6 +2004,8 @@ check_tree_free_space() {
              "floor is NOT being enforced for this run." >&2
         return 0
     fi
+
+    note_free_gb "$avail_gb" "$phase"
 
     if [ "$avail_gb" -lt "$MIN_FREE_GB" ]; then
         # --reclaim-space: try the remedy before refusing.
@@ -1912,6 +2040,10 @@ check_tree_free_space() {
                 if avail_gb="$(measure_free_gb)" && [ "$avail_gb" -ge "$MIN_FREE_GB" ]; then
                     echo "Free space OK after reclaim: ${avail_gb} GiB" \
                          "(floor ${MIN_FREE_GB} GiB, ${phase})."
+                    # Not noted: the pre-reclaim reading above is already the
+                    # minimum, and it is the honest one. Recording the
+                    # post-reclaim figure as this run's low-water mark would
+                    # hide the very pressure that forced a reclaim.
                     return 0
                 fi
                 echo "Reclaim ran but free space is still below the floor." >&2
@@ -2621,6 +2753,15 @@ record_boot_outcome() {
     if [ -n "${BUILD_SECONDS:-}" ]; then
         args+=(--build-seconds "$BUILD_SECONDS")
     fi
+    # Absent when nothing was measured -- --min-free-gb=0 disables the check
+    # entirely, and an unreadable df returns early -- because a run that did not
+    # look is not a run that saw zero GiB free.
+    if [ -n "${BT_FREE_GB_MIN:-}" ]; then
+        args+=(--free-gb-min "$BT_FREE_GB_MIN")
+        if [ -n "${BT_FREE_GB_PHASE:-}" ]; then
+            args+=(--free-gb-phase "$BT_FREE_GB_PHASE")
+        fi
+    fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
         if [ "$wall" -ge 0 ]; then
@@ -2702,8 +2843,49 @@ finish_pass() {
         exit 3
     fi
 
+    prune_build_cache_if_low
+
     echo "=== Boot test PASSED ==="
     exit 0
+}
+
+# Drop build-cache units no build has needed for a fortnight, if the volume is
+# getting full.  Rationale for the placement and the threshold: see
+# PRUNE_CACHE_BELOW_GB near the top of this file.
+#
+# Deliberately cannot change the verdict.  This runs after every gate has
+# already passed, its status is ignored, and the PASSED banner is printed
+# afterwards regardless.  A green build that housekeeping then failed to tidy
+# is still a green build, and a run that reported FAILED because a disk
+# cleanup hit a locked file would be actively misleading -- the failure would
+# read as the kernel's.
+prune_build_cache_if_low() {
+    [ "$PRUNE_CACHE_BELOW_GB" = "0" ] && return 0
+    [ -f "$SCRIPT_DIR/prune-build-cache.py" ] || return 0
+
+    local avail_gb
+    avail_gb="$(measure_free_gb)" || return 0
+    [ "$avail_gb" -ge "$PRUNE_CACHE_BELOW_GB" ] && return 0
+
+    local py=""
+    if command -v python &>/dev/null; then py=python
+    elif command -v python3 &>/dev/null; then py=python3
+    else return 0
+    fi
+
+    echo "=== ${avail_gb} GiB free (below ${PRUNE_CACHE_BELOW_GB}); pruning this tree's cold build cache ==="
+    echo "    Only units cargo has not invoked in 14 days, and only under $PROJECT_ROOT/target."
+    echo "    Nothing a build has asked for is touched; --no-prune-cache skips this."
+    # --target-dir is passed explicitly rather than left to the script's
+    # default.  The default is "the target/ beside the script", and this script
+    # is shared by four worktrees -- so in a checkout whose scripts/ came from
+    # somewhere else the default would name the wrong tree.  A run must only
+    # ever prune the tree it just built.
+    "$py" "$SCRIPT_DIR/prune-build-cache.py" \
+        --target-dir "$PROJECT_ROOT/target" --yes || true
+    if avail_gb="$(measure_free_gb)"; then
+        echo "=== ${avail_gb} GiB free after the prune ==="
+    fi
 }
 
 # Find QEMU
@@ -4350,7 +4532,9 @@ check_python_suites() {
     fi
 
     local failed=()
-    local out rc
+    local skipping=()
+    local skipped_groups=0
+    local out rc skips nskips skipline
     for f in "${suites[@]}"; do
         # `&& rc=0 || rc=$?` rather than a bare `rc=$?`: this file runs under
         # `set -e`, where a failing command in an assignment would abort the
@@ -4385,6 +4569,45 @@ check_python_suites() {
         out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
         if [ "$rc" -eq 0 ]; then
             printf '    %-32s %s\n' "$(basename "$f")" "$(printf '%s\n' "$out" | tail -1)"
+            # A passing suite is reported by its LAST LINE ONLY, so a suite that
+            # drops a group and still ends with "all N passed" reports a skip
+            # that nothing above this line can see.  That is not hypothetical:
+            # `test-bench-history.py` has seven skips that fire when the runs
+            # they name age out of `bench/history.jsonl`, and
+            # `test-rustemit.py`'s most valuable group vanishes if capstone is
+            # not installed.  Each is correct to skip; none of them was visible.
+            #
+            # The per-suite convention -- fold the skip into the summary line --
+            # works, and `test-rustemit.py` does exactly that.  It is not enough
+            # on its own: it is a rule every future suite has to remember, and
+            # the two suites above are the proof that it is not remembered.  So
+            # the harness that created the last-line-only display is also the
+            # thing that repairs it, and a new suite gets the behaviour without
+            # having to know the rule exists.
+            #
+            # Matched on the FIRST token, not by searching for "skip" anywhere.
+            # This project's tooling is largely *about* skips, so a substring
+            # match flags `PASS  a boot that skipped nothing yields an empty
+            # tuple` and every line the tools-under-test print about skipping a
+            # malformed record -- surveyed 2026-09-03, and those false hits are
+            # all of today's matches and none of them is a suite skip.  An
+            # annotation that is usually noise gets skimmed, which would leave
+            # the real skip exactly as hidden as it is now.
+            skips="$(printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP(PED)?\b' || true)"
+            if [ -n "$skips" ]; then
+                nskips=$(printf '%s\n' "$skips" | wc -l)
+                skipped_groups=$((skipped_groups + nskips))
+                skipping+=("$(basename "$f")")
+                # Indented under the suite's own line, so it reads as part of
+                # that suite's report rather than as a separate finding.  Line
+                # by line rather than one `printf '  ^ %s\n' "$skips"`: that
+                # passes every skip as a *single* argument containing newlines,
+                # so only the first would be marked and the rest would come out
+                # flush left, reading as output from the harness itself.
+                while IFS= read -r skipline; do
+                    printf '        ^ %s\n' "$skipline"
+                done <<< "$skips"
+            fi
             continue
         fi
         failed+=("$(basename "$f")")
@@ -4396,7 +4619,19 @@ check_python_suites() {
     done
 
     if [ "${#failed[@]}" -eq 0 ]; then
-        echo "=== Tooling test suites: ${#suites[@]} suites, all passed ==="
+        # The skip count rides on the section's closing line for the same reason
+        # it rides on each suite's: this line is what a reader scanning a
+        # 30,000-line boot log actually sees, and "all passed" with a silently
+        # reduced N is the exact claim this gate exists to refuse.  It is a
+        # count, not a failure -- every skip observed so far is legitimate (a
+        # tool genuinely absent, a run genuinely aged out), and failing on one
+        # would only teach the next author to phrase the skip differently.
+        if [ "$skipped_groups" -gt 0 ]; then
+            echo "=== Tooling test suites: ${#suites[@]} suites, all passed" \
+                 "(${skipped_groups} group(s) SKIPPED in ${#skipping[@]}: ${skipping[*]}) ==="
+            return 0
+        fi
+        echo "=== Tooling test suites: ${#suites[@]} suites, all passed, none skipped ==="
         return 0
     fi
 

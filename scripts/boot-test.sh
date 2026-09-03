@@ -4097,6 +4097,79 @@ _bash_oracle_disagreed() {
 
 check_bash_oracles
 
+# Is `libc.a` carved finely enough that a program can bring its own `getopt`?
+#
+# This is the GNU make failure of design-decisions.md S339: a member that
+# defines `getopt` *and* something every program needs is a member no program
+# can decline, so a program supplying its own `getopt` gets a duplicate symbol
+# and does not link.  The gate reads the archive's symbol index directly and
+# asks three questions of it -- each strict family owns its member outright, no
+# member mixes a replaceable name with an unavoidable one, and no replaceable
+# name shares a member with an ordinary one.
+#
+# It was pinned in check-gates-are-wired.py from the day it was written, with
+# the reason "needs an opt-in skip channel in run-checker.sh first".  That
+# channel now exists (`--may-skip`), so the pin is retired here.
+#
+# `--ignore-age` is load-bearing, not a convenience.  Bare, the gate declines
+# whenever `posix/` is newer than the sysroot -- which is nearly always, since
+# the sysroot is rebuilt by hand and posix/ is edited every day.  A gate that
+# declines on every run is the failure mode already logged as OPEN in
+# known-issues.md, and it would be self-inflicted here: we would have wired a
+# gate that never answers.  With the flag it always answers a sound but weaker
+# question -- is the archive *on disk* shaped correctly? -- and the staleness
+# it stops reporting is not lost, because the fixture-freshness block above
+# already prints a loud WARNING naming the newer posix/ sources.  Better a true
+# answer about a slightly old archive than no answer about a current one.
+#
+# So what is `--may-skip` still for?  The archive being absent entirely, on a
+# fresh checkout whose sysroot has never been built, and a symbol index that
+# yielded so little the gate refuses to grade it.  Both are declines -- "could
+# not look", exit 2 -- and neither is a pass.
+#
+# The self-test is NOT skippable, for the same reason the bash oracles' are
+# not: it builds its own `ar` archives in memory and needs no sysroot at all,
+# so on a machine with no `libc.a` it is the only thing still checking that
+# this gate can tell a bad archive from a good one.
+check_libc_shape() {
+    local py=""
+    py="$(find_python)" || return 0
+
+    echo "=== Checking libc.a member granularity ==="
+    if ! run_checker check-libc-shape-selftest "$py" "$PROJECT_ROOT/scripts/check-libc-shape.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-libc-shape.py no longer agrees" >&2
+        echo "with the synthetic archives it builds in its own source." >&2
+        echo "" >&2
+        echo "This needs no sysroot, so it did look, and what it found is that" >&2
+        echo "the checker is broken -- which makes its verdict about the real" >&2
+        echo "libc.a meaningless on every host, including this one." >&2
+        exit 1
+    fi
+
+    if run_checker --may-skip check-libc-shape "$py" "$PROJECT_ROOT/scripts/check-libc-shape.py" --ignore-age; then
+        if [ -n "$RUN_CHECKER_SKIPPED" ]; then
+            echo "=== libc.a shape: skipped (no archive to grade on this host) ==="
+        fi
+    else
+        echo "" >&2
+        echo "ERROR: refusing to build.  libc.a is carved too coarsely." >&2
+        echo "" >&2
+        echo "A program that defines its own copy of one of the names above" >&2
+        echo "cannot decline the member that also defines it, so it gets a" >&2
+        echo "duplicate definition and fails to link.  This is exactly how the" >&2
+        echo "GNU make port broke -- see design-decisions.md S339." >&2
+        echo "" >&2
+        echo "The fix is in how posix/ is compiled, not in this list: raising" >&2
+        echo "codegen-units will NOT split a member, because rustc partitions" >&2
+        echo "by module and a ceiling does not force a floor.  Move the named" >&2
+        echo "symbols into a module of their own." >&2
+        exit 1
+    fi
+}
+
+check_libc_shape
+
 # A diagnostic that names the wrong command is caught by nothing else.
 #
 # The operand helpers are handed their command's name as a bare string literal:

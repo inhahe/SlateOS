@@ -123,13 +123,14 @@ PINNED: dict[str, str] = {
         "requests/b-c-six-gui-gates-are-never-run-by-anything.md",
     "check-selftest-reinit.py":
         "lane A (kernel/src); filed to lane A 2026-09-02",
-    "check-libc-shape.py":
-        "MUST NOT be wired as things stand: it grades a build artifact and "
-        "returns 2 when libc.a is stale, and run_checker aborts the build on "
-        "any exit but 0/1 -- so wiring it would stop the boot test on every "
-        "worktree without a fresh sysroot. Needs an opt-in skip channel in "
-        "run-checker.sh first. See known-issues.md -> "
-        "TD-B-TEN-GATES-ARE-NEVER-ASKED",
+    # check-libc-shape.py was pinned here with the reason "needs an opt-in skip
+    # channel in run-checker.sh first"; it was unpinned on 2026-09-03, when that
+    # channel came to exist. It is wired into boot-test.sh as check_libc_shape:
+    # the gate `--may-skip --ignore-age` -- the age flag so it answers on every
+    # host rather than declining whenever posix/ is newer than the sysroot,
+    # which is nearly always -- and the self-test unconditionally, since it
+    # builds its own archives and needs no sysroot. See known-issues.md ->
+    # TD-B-TEN-GATES-ARE-NEVER-ASKED.
     # The four `check-*-vs-bash.py` oracles were pinned here from the day they
     # were written and were unpinned on 2026-09-03, when both of the things
     # their entry said had to change had changed: bashprobe now exits 2 (a

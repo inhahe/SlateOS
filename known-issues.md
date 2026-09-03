@@ -110078,6 +110078,48 @@ produced every wrong number above.
 
 ### One of the nine must NOT be wired, and that is not an oversight
 
+**RESOLVED 2026-09-03 — it is now wired, and the reasoning below is kept
+because its *general* claim is still true and its *specific* conclusion is
+not.** The generalisation ("a gate that can legitimately answer 'I could not
+look' cannot be wired as things stand") was correct and is what motivated
+`--may-skip`. What it did not anticipate is that the skip channel alone would
+not have been enough here: wiring this gate with `--may-skip` and nothing else
+would have made it decline on nearly every run, since the sysroot is rebuilt by
+hand and `posix/` changes daily — a wired gate that never answers, which is the
+*other* failure this entry warns about and is still OPEN as a general problem.
+
+What made it wirable was pairing the skip channel with `--ignore-age`, which
+changes the question rather than the answer: instead of "is the archive both
+current *and* well-shaped?", the boot test now asks "is the archive on disk
+well-shaped?" — weaker, but soundly answerable on every host. Nothing is lost,
+because staleness was already reported: `boot-test.sh`'s fixture-freshness
+block prints a loud WARNING naming the newer `posix/` sources, and deliberately
+warns rather than fails because repairing it means rebuilding lane B's tree.
+`--may-skip` still earns its place for the two declines that remain — no
+archive at all, and an index too small to grade.
+
+Wired as `check_libc_shape` in `boot-test.sh`; `PINNED` entry deleted in the
+same commit. The gate got a `--self-test` first (24 cases, run unconditionally
+because it builds its own `ar` archives in memory and so still checks the
+checker on a host with no sysroot) and a discovery floor of 100 members / 500
+symbols, an order of magnitude below the 615/3251 a real build produces.
+
+Two things worth keeping from doing it:
+
+- **A floor that nothing consults is decoration.** The floor's constants were
+  pinned by the self-test from the start; that nothing proved `main()` ever
+  *read* them was invisible until mutation testing deleted the floor block and
+  the suite stayed green. The same shape of hole as the shellquote gate's
+  verified-then-unused escape alphabet, found the same way. The fix was to
+  drive `main()` end to end, in both directions — it must refuse a small
+  archive *and* accept a large one, or "refuses everything" would pass too.
+- **A two-part condition needs its parts driven apart.** With the floor's
+  halves only ever tested together (fixtures below both floors, or above both),
+  a floor that checked only members, or only symbols, passed every case.
+  Killing those two mutants took fixtures that breach exactly one half each.
+
+The original reasoning follows.
+
 `check-libc-shape.py` grades a **build artifact** (`libc.a`), and since
 `533e34e00` it returns **2 — "could not look"** when the archive predates its
 own sources. `run_checker` (`scripts/run-checker.sh:105-128`) treats any exit
@@ -110107,18 +110149,28 @@ else (see the header comment at `boot-test.sh:1168-1183`).
    Filed as a request; not lane B's to change, because a gate that fails on
    lane C's tree blocks all three lanes.
 3. **Lane A: wire `check-selftest-reinit.py`** (`kernel/src/**`), same caveat.
-4. **Give `run_checker` an opt-in skip channel,** then wire
-   `check-libc-shape.py`. Until then it is correctly excluded, not forgotten.
+4. ~~**Give `run_checker` an opt-in skip channel,** then wire
+   `check-libc-shape.py`.~~ — **done.** The channel landed 2026-09-03
+   (design-decisions.md §753) and the gate was wired the same day, with
+   `--may-skip --ignore-age`; see the RESOLVED note above for why the age flag
+   was needed as well as the skip channel, and its `PINNED` entry is gone.
 
    **The channel is DONE as of 2026-09-03:** `run_checker --may-skip <label> …`
    treats exit 2 as a loud skip that returns 0 and sets `RUN_CHECKER_SKIPPED`,
    while an *unflagged* exit 2 keeps aborting (lane A's stated constraint — a
    floor must still stop the run). See design-decisions.md §753, and
-   `scripts/test-pre-push-run-checker.py` group 9. **Wiring the gates is the
-   half still outstanding**, and it is not merely mechanical: a gate wired with
-   `--may-skip` whose tool is missing everywhere is back to being an unrun gate
-   *without the ratchet reporting it as one*, because it now counts as wired.
-   That visibility regression is named in §753 and is not solved yet.
+   `scripts/test-pre-push-run-checker.py` group 9. ~~**Wiring the gates is the
+   half still outstanding**~~ — done for lane B's five (the four bash oracles,
+   `e891b2216`, and `check-libc-shape.py`); items 2 and 3 above, which are
+   lane C's and lane A's, are what remain.
+
+   The caution that came with the channel stands and is why `--ignore-age` was
+   needed here: a gate wired with `--may-skip` whose tool is missing everywhere
+   is back to being an unrun gate *without the ratchet reporting it as one*,
+   because it now counts as wired. That visibility regression is named in §753
+   and is **not solved** — it is only avoided, one call site at a time, by
+   arranging that each skippable gate can in fact answer on this host. Nothing
+   yet notices a gate that skips on every run.
 
 ### Why this was not caught by the meta-gate that found it
 

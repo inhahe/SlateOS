@@ -210,7 +210,7 @@
 //! impossible.
 
 use coreutils::backup::{self, BackupType};
-use coreutils::copy::{self, Made, ModeDebt, chown_to_source, preserve_attributes};
+use coreutils::copy::{self, Made, ModeDebt, Verdict, chown_to_source, preserve_attributes};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{
@@ -1831,27 +1831,6 @@ fn record_move(
         }
     }
     true
-}
-
-/// What the checks below decided about a destination that is already there.
-///
-/// Three outcomes and not a `bool`, because two of GNU's paths leave the
-/// destination alone and they disagree about the exit status. Upstream carries
-/// this as two locals — `skipped` and `return_val` (`copy.c:2341`) — and the
-/// second is written `return_val = x->interactive == I_ALWAYS_SKIP`, which is
-/// exactly the distinction this enum names.
-///
-/// It was a `bool` until `--update` arrived, and the reason it could be is that
-/// every refusal `mv` had was a *failure*. `--update=none` and `--update=older`
-/// are the first two that are not.
-#[derive(PartialEq, Eq, Debug)]
-enum Verdict {
-    /// Nothing stands in the way; go on to the rename.
-    Proceed,
-    /// Reported, and this operand counts against the exit status.
-    Refused,
-    /// Left alone on purpose, silently, and the command still succeeds.
-    Skipped,
 }
 
 /// The refusals that stand between "something is at the destination" and the

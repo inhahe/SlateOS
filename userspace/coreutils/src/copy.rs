@@ -2009,67 +2009,96 @@ fn overwrite_ok<E: Write>(
     )
 }
 
+/// What a check decided about a destination that is already there.
+///
+/// Three outcomes and not a `bool`, because two of GNU's paths leave the
+/// destination alone and they **disagree about the exit status**. Upstream
+/// carries the distinction as two locals — `skipped` and `return_val`
+/// (`copy.c:2341`) — and the second is written `return_val = x->interactive ==
+/// I_ALWAYS_SKIP`, which is exactly what this enum names.
+///
+/// It lived in `mv.rs`, and was a `bool` there until `--update` arrived: every
+/// refusal `mv` had until then was a *failure*, so one bit was enough.
+/// `--update=none` and `--update=older` are the first two that are not, and the
+/// bug that found this out was `mv --update=none` exiting 1 for a file it had
+/// deliberately left alone. It is in the engine now because
+/// [`overwrite_allowed`] needs the same three values for the same reason, and
+/// a second copy of a distinction that has already been got wrong once is how
+/// it gets got wrong twice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Verdict {
+    /// Nothing stands in the way; go on.
+    Proceed,
+    /// Reported, and this operand counts against the exit status.
+    Refused,
+    /// Left alone on purpose, silently, and the command still succeeds.
+    Skipped,
+}
+
 /// The whole of the "is this destination to be left alone" decision — GNU's
 /// one block at `copy.c:2422`, which handles `-n` and `-i` together because
 /// they are two values of one field.
 ///
-/// Returns `true` when the copy should go ahead. The two refusals differ in
-/// what they print — `-n` says `not replacing 'b'`, `-i` says nothing at all
-/// beyond the question it already asked — but not in the status: both make the
-/// operand a failure, which is `copy.h`'s "Skip and fail" for `I_ALWAYS_NO` and
-/// `return_val = x->interactive == I_ALWAYS_SKIP` (false here) for
-/// `I_ASK_USER`.
+/// The two *refusals* differ in what they print — `-n` says `not replacing
+/// 'b'`, `-i` says nothing at all beyond the question it already asked — but
+/// not in the status: both make the operand a failure, which is `copy.h`'s
+/// "Skip and fail" for `I_ALWAYS_NO` and `return_val = x->interactive ==
+/// I_ALWAYS_SKIP` (false here) for `I_ASK_USER`. [`Verdict::Skipped`] is the
+/// third answer and the reason a `bool` will not do: `--update=none` leaves the
+/// destination alone *and succeeds*.
 ///
-/// A **directory** source is exempt from both, as GNU's `! S_ISDIR (src_mode)`
-/// makes it: `cp -rn tree dest` descends and refuses the files inside one at a
-/// time, and `cp -ri tree dest` asks about them one at a time, rather than
-/// either putting a single question about the tree.
+/// A **directory** source is exempt from all of it, as GNU's `! S_ISDIR
+/// (src_mode)` makes it: `cp -rn tree dest` descends and refuses the files
+/// inside one at a time, and `cp -ri tree dest` asks about them one at a time,
+/// rather than either putting a single question about the tree.
 ///
-/// # Only `cp` may call this yet
+/// # Every value of [`Interactive`] now has an answer here
 ///
-/// The `bool` is the limit. `cp`'s parser can produce only three of
-/// [`Interactive`]'s five values, and for all three "go ahead" and "do not, and
-/// count it a failure" is the whole answer. `mv`'s parser produces the other
-/// two — `mv -f` is `AlwaysYes` and `mv --update=none` is `AlwaysSkip` — and
-/// `AlwaysSkip` is a **skip that succeeds**, which this return type cannot say.
-/// That is why `mv` still answers this question for itself, with its own
-/// three-valued `Verdict`, and why routing it through here (stage 5) means
-/// widening this signature first rather than discovering the wrong exit status
-/// afterwards. `mv` had exactly that bug once already.
+/// It used to have three, because `cp`'s parser produces three and the `bool`
+/// could say what all three needed. `mv`'s parser produces the other two — `mv
+/// -f` is `AlwaysYes`, `mv --update=none` is `AlwaysSkip` — and `AlwaysSkip`
+/// is the one that did not fit. Widening the return type is what makes routing
+/// `mv` through here possible; it is deliberately done *before* that routing,
+/// rather than discovering the wrong exit status afterwards, which is how `mv`
+/// found the same defect the first time.
 pub fn overwrite_allowed<E: Write>(
     src_meta: &fs::Metadata,
     target: &Path,
     dest: &DestState,
     run: &mut Run<'_, E>,
-) -> bool {
+) -> Verdict {
     if src_meta.is_dir() || !dest.exists() {
-        return true;
+        return Verdict::Proceed;
     }
     match run.opts.interactive {
         // `AlwaysYes` is `mv -f`, which no caller of this function sets yet —
         // `cp -f` is `unlink_dest_after_failed_open`, a different field. The arm
         // is here rather than under a catch-all so that a program which *does*
         // set it has to arrive at a compile error rather than a silent
-        // fall-through, and `true` is the answer waiting for it: `mv -f`
+        // fall-through, and `Proceed` is the answer waiting for it: `mv -f`
         // overwrites without asking.
-        Interactive::Unspecified | Interactive::AlwaysYes => true,
+        Interactive::Unspecified | Interactive::AlwaysYes => Verdict::Proceed,
         Interactive::AlwaysNo => {
             refuse_no_clobber(target, run);
-            false
+            Verdict::Refused
         }
         // `AlwaysSkip` is `--update=none`, which `mv` has and `cp` does not, so
-        // no caller reaches this arm either — and unlike the one above, its
-        // answer here is **wrong**, which is why the docs make it a
-        // precondition. Upstream's `return_val = x->interactive ==
-        // I_ALWAYS_SKIP` (`copy.c:2430`) is a *skip that succeeds*, and the
-        // `bool` this function returns cannot say that. Adding `cp --update`,
-        // or routing `mv` through here, means widening the return type first,
-        // exactly as `mv`'s `Verdict` was widened. Spelled out rather than
-        // folded into a catch-all so that doing either is a compile error at
-        // this line. Silent, at least, because that half of `AlwaysSkip` this
-        // signature *can* express.
-        Interactive::AlwaysSkip => false,
-        Interactive::AskUser => overwrite_ok(target, dest.metadata(), run),
+        // no caller reaches this arm yet — but unlike the one above it is
+        // reachable *wrongly*, and was: while this function returned `bool` the
+        // only thing it could say here was "do not copy, and fail", which is
+        // upstream's `return_val = x->interactive == I_ALWAYS_SKIP`
+        // (`copy.c:2430`) inverted. Silence was the half it could express and
+        // the exit status was the half it could not. Spelled out rather than
+        // folded into a catch-all so that a fifth [`Interactive`] value arrives
+        // as a compile error at this line.
+        Interactive::AlwaysSkip => Verdict::Skipped,
+        Interactive::AskUser => {
+            if overwrite_ok(target, dest.metadata(), run) {
+                Verdict::Proceed
+            } else {
+                Verdict::Refused
+            }
+        }
     }
 }
 
@@ -2730,8 +2759,13 @@ fn copy_entry<E: Write>(entry: &fs::DirEntry, dest: &Path, run: &mut Run<'_, E>)
     // same-file check `copy_one` makes just before this one is not here and
     // cannot fire: a tree is not being copied into itself, and if it were the
     // walk would not terminate to reach this point.
-    if !overwrite_allowed(&meta, &to, &dest_state, run) {
-        return false;
+    match overwrite_allowed(&meta, &to, &dest_state, run) {
+        Verdict::Proceed => {}
+        Verdict::Refused => return false,
+        // Unreachable from `cp`, whose parser has no `--update=none`, and
+        // correct for whoever adds one: the entry is left where it is and the
+        // walk goes on, without this operand counting against the status.
+        Verdict::Skipped => return true,
     }
     // The two kind mismatches, in `copy_one`'s order and with its wording,
     // because they are the same `copy_internal` lines. Reaching them here is

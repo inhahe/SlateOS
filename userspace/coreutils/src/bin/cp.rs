@@ -249,8 +249,8 @@
 
 use coreutils::backup::{self, BackupType};
 use coreutils::copy::{
-    self, Deref, DestState, Placed, overwrite_allowed, place_entity, remove_destination_first,
-    stat_destination,
+    self, Deref, DestState, Placed, Verdict, overwrite_allowed, place_entity,
+    remove_destination_first, stat_destination,
 };
 use coreutils::diag;
 use coreutils::errmsg::strerror;
@@ -1604,8 +1604,13 @@ fn copy_one<O: Write, E: Write>(
         // than `cannot overwrite directory`, and `cp -n a other/a d` says it
         // rather than `will not overwrite just-created`. Both measured, and
         // both go the same way for `-i`, which asks first and then refuses.
-        if !overwrite_allowed(&metadata, &target, &dest_state, &mut job.run()) {
-            return false;
+        match overwrite_allowed(&metadata, &target, &dest_state, &mut job.run()) {
+            Verdict::Proceed => {}
+            Verdict::Refused => return false,
+            // `cp`'s parser cannot produce `--update=none`, so this arm does
+            // not run today. It is the right answer if `cp` ever grows GNU's
+            // `--update=none`: the operand is left alone and still succeeds.
+            Verdict::Skipped => return true,
         }
 
         // Neither kind can be put where the other is. Without these two the

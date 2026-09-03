@@ -1577,78 +1577,6 @@ Background: `known-issues.md` →
 
 ---
 
-## kshell's `grep` defaults differ from POSIX: line numbers and case-insensitivity are always on
-
-**Lane A.** Raised 2026-08-24. Code: `kernel/src/kshell.rs`, `GrepFlags::new()`.
-
-**In short:** In the kernel shell, `grep alpha file` prints `1:alpha` — with the
-line number — and matches `ALPHA` too. Every other `grep` in the world prints
-just `alpha` and does not match `ALPHA` unless you ask, with `-n` and `-i`
-respectively. Ours turns both on and gives no way to turn them off. This is
-pleasant when you are typing at a prompt and wrong when a script is reading the
-output, and I do not think it is my call which of those two users wins.
-
-### What it is now
-
-```rust
-impl GrepFlags {
-    fn new() -> Self {
-        Self {
-            case_insensitive: true, // default: case-insensitive (like original)
-            show_line_numbers: true,
-            ...
-```
-
-The `-i` and `-n` flags exist but only *set* these to `true` — the value they
-already have — so there is no spelling of `grep` in this shell that turns either
-off. The comment "like original" suggests this was inherited from an earlier
-kshell rather than chosen.
-
-Why it surfaced now: the shell just gained working exit statuses and working
-`$(…)` capture through pipelines, so `grep` output is for the first time
-something programs consume rather than something a human reads. `$(grep p f)`
-returns `1:match`, and stripping that prefix requires knowing it is there.
-
-### Options
-
-**A — leave both on, add `+i`/`+n` (or `--no-line-number`) to turn them off.**
-*What changes:* nothing by default; `grep +n p f` becomes a way to get bare
-lines. Existing habits and any existing scripts keep working.
-
-**B — default both off, matching POSIX; `-i`/`-n` turn them on as everywhere else.**
-*What changes:* `grep alpha f` prints `alpha` instead of `1:alpha`, and stops
-matching `ALPHA`. Anything that currently relies on the prefix breaks, and
-interactive use loses the line numbers unless you type `-n`.
-
-**C — split the difference: line numbers off (they corrupt piped output),
-case-insensitivity left on (it only widens the match set).**
-*What changes:* `grep alpha f` prints `alpha`; `grep ALPHA f` still finds
-`alpha`. `-n` starts working as a real flag.
-
-**D — leave it exactly as is and document it.**
-*What changes:* nothing; scripts must strip the `N:` prefix themselves.
-
-### My recommendation
-
-**C**, weakly. The two defaults are not equally defensible: a line-number prefix
-changes the *bytes* of every line, so it breaks any consumer of the output,
-whereas case-insensitivity only changes *which* lines are selected — surprising,
-but it yields a superset, and a caller who cares can pick a case-specific
-pattern. If you would rather not have a shell that is subtly non-standard in two
-places, **B** is the honest answer and the breakage is small: this shell has few
-scripts, and all of them are ours.
-
-### If this is never answered
-
-Safe, and it does not get worse quickly — but it gets more expensive with
-every script written against the current output, since each becomes a place
-that has to be re-checked if the default changes. Nothing is blocked. The
-inconsistency that *was* dangerous — the piped half printing `1: alpha` while
-the file half printed `1:alpha` — is already fixed (`afe5b0ae2`); what remains
-here is only the choice of default.
-
----
-
 ## An account with no password: should the lock screen let it through, or refuse forever? (lane C, 2026-08-24)
 
 **In short:** Some accounts have no password set at all. Today, if such an
@@ -1824,7 +1752,25 @@ different here. The question is whether to keep it.
 
 Where it lives: `GrepFlags::new()` in `kernel/src/kshell.rs` (~94901), which
 sets `case_insensitive: true` with the comment *"default: case-insensitive
-(like original)"*, and `show_line_numbers: true`.
+(like original)"*, and `show_line_numbers: true`:
+
+```rust
+impl GrepFlags {
+    fn new() -> Self {
+        Self {
+            case_insensitive: true, // default: case-insensitive (like original)
+            show_line_numbers: true,
+            ...
+```
+
+`-i` and `-n` both exist, and both only *set* these to `true` — the value they
+already hold. So there is no spelling of `grep` in this shell that turns either
+off: the two flags a user would reach for to control this are no-ops.
+
+Why it surfaced when it did: the shell had just gained working exit statuses
+and working `$(…)` capture through pipelines, so `grep` output became something
+*programs* consume rather than something a human reads. `$(grep p f)` returns
+`1:match`, and stripping that prefix requires knowing it is there.
 
 ### Why it is worth asking rather than just fixing
 
@@ -1888,10 +1834,23 @@ already has, and every command in every tutorial, becomes correct instead of
 subtly wrong. Convenience defaults are cheap to type back (`-i`, `-n`) and
 expensive to discover you were getting.
 
-If A feels too disruptive, **C** is the safer half-step: a wrong *set of lines*
-is a wrong answer, whereas a line-number prefix is visible on sight. **D** is
-the weakest — it fixes the cosmetic half and keeps the half that can hide a
-result.
+If A feels too disruptive, the safer half-step is **D**, not C — and this
+paragraph is a correction of what an earlier copy of this entry said. The
+earlier text argued for C on the grounds that a wrong *set of lines* is a wrong
+answer whereas a prefix is visible on sight. The first half is true in general
+and **false here**: case-insensitive matching returns a *superset*, so it can
+show you a line you did not want but can never hide one you did. The half that
+can actually corrupt an answer is the line-number prefix, because it changes
+the bytes of every line and silently shifts every `:`-splitting pipeline by one
+field. So if only one default moves, move `-n`.
+
+*(Filed twice, on the same day, by the same lane: once as "kshell's `grep`
+defaults differ from POSIX" and once as this entry, with opposite
+recommendations — C there, A here. The two have been merged into this one. Two
+contradictory recommendations from one lane on one question is worse than a
+plain duplicate: it makes the queue unanswerable, because there is no way for a
+reader to tell which of them is the lane's actual position. It is also what
+prompted `scripts/check-open-questions.py`.)*
 
 ### If this is never answered
 

@@ -63,10 +63,29 @@ clean report is the one outcome that must never be produced by accident.
 That count is printed by a bare run and by `--write-baseline`, and not by
 `--check` -- see the comment in `main`. It is there to be read by a person
 deciding whether the scope is right, and nobody is reading in a push hook.
+
+# Which tree it judges
+
+    python scripts/argv-utf8.py --check              # judge the working tree
+    python scripts/argv-utf8.py --check --head <rev> # judge that revision
+
+Without `--head` this reads the working tree, which is what a run by hand
+means. The push hook passes `--head <sha>` for each commit being pushed,
+because the two are not the same question: a commit that reads argv as
+`String` is published whether or not the author has since edited the file, and
+a fix that exists only on disk does not travel. Everything the checker reads
+goes through the `Tree` seam in `scripts/gittree.py` -- the file list, each
+file's source, and the baseline -- so that "judge this revision" means all
+three, not just the ones that were easy to convert. A baseline read off the
+disk would be the worst of the three: an uncommitted line added to it silences
+a finding in a commit that does not contain the silencing line.
+
+`scripts/test-checkers-honour-head.py` is what keeps the flag honest.
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -74,11 +93,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = Path(__file__).resolve().parent / "argv-utf8-baseline.txt"
 
+# Repo-relative spellings, because that is the only kind of path a `Tree`
+# knows: a git revision has no directory to resolve an absolute path against.
+# This is where the disk stops being the subject and becomes one of two
+# possible answers to the same question.
+#
+# `BASELINE` above survives alongside `BASELINE_REL` and is not a duplicate:
+# `--write-baseline` writes to the disk, always, because that is the file the
+# author will commit. Only the *reading* moved onto the tree.
+BASELINE_REL = "scripts/argv-utf8-baseline.txt"
 # The gated tree: the real, shipped utilities.
-GATED = ROOT / "userspace" / "coreutils"
+GATED_REL = "userspace/coreutils"
 # Reported-but-not-gated, so the excluded scope is a number rather than a
 # silence. See the module docstring.
-SURVEYED = ROOT / "userspace"
+SURVEYED_REL = "userspace"
 
 # `strip_comments_and_strings` is imported rather than copied. It is forty lines
 # of Rust lexing that already earned its keep once -- `raced-globals.py` spent a
@@ -86,6 +114,7 @@ SURVEYED = ROOT / "userspace"
 # a second copy is a copy that drifts. The hyphen in the module's name is why
 # this needs a loader rather than `import`.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gittree  # noqa: E402
 import srcload  # noqa: E402
 
 # Loaded from source rather than through `importlib`: a `SourceFileLoader`
@@ -166,34 +195,38 @@ def _relpath(p: Path) -> str:
         return p.as_posix()
 
 
-def rust_files(under: Path) -> list[Path]:
-    """Every `.rs` file below `under`, skipping build output.
+def rust_files(tree: gittree.Tree, prefix: str) -> list[str]:
+    """Every `.rs` file below `prefix`, skipping build output.
 
-    `target/` is skipped by pruning rather than by filtering the results,
-    because it holds tens of gigabytes of generated sources and walking it is
-    the difference between a gate that runs in a second and one that gets
-    uninstalled.
+    Build output is skipped by the seam, which prunes `target/`, `.git` and the
+    `target-*` family while walking rather than filtering the results: that
+    directory holds tens of gigabytes of generated sources, and the difference
+    is a gate that runs in a second versus one that gets uninstalled.
+
+    This used to be a hand-rolled walk with its own copy of that rule. The copy
+    is gone rather than kept, because two spellings of one rule is one rule that
+    drifts -- and this one had already drifted the other way: the seam was
+    missing `target-*` until it was added for this conversion.
     """
-    out: list[Path] = []
-    stack = [under]
-    while stack:
-        d = stack.pop()
-        try:
-            entries = list(d.iterdir())
-        except OSError:
-            continue
-        for e in entries:
-            if e.is_dir():
-                if e.name in {"target", ".git"} or e.name.startswith("target-"):
-                    continue
-                stack.append(e)
-            elif e.suffix == ".rs":
-                out.append(e)
-    return out
+    return [rel for rel in tree.files_under(prefix)
+            if rel.rsplit("/", 1)[-1].endswith(".rs")]
 
 
-def analyse(path: Path) -> list[tuple[str, int, str]]:
+def analyse(tree: gittree.Tree, rel: str) -> list[tuple[str, int, str]]:
+    """Findings in one file, read from whichever tree is being judged."""
+    raw = tree.read_text(rel)
+    if raw is None:
+        return []
+    return analyse_text(raw)
+
+
+def analyse_text(raw: str) -> list[tuple[str, int, str]]:
     """Return `(rule, line number, the line)` for every finding in one file.
+
+    Split from [`analyse`] so the self-test can hand it a literal. It used to
+    write a temporary `x.rs` and read it back, which meant every rule case was
+    also a test of the filesystem, and none of them could run against a tree
+    that is not the disk.
 
     Only the *first* hit per rule is returned. The finding is "this file reads
     argv as String", which is one fact however many times it is spelled, and a
@@ -205,10 +238,6 @@ def analyse(path: Path) -> list[tuple[str, int, str]]:
     2857 of 2902 files through. A prefilter that cannot tell the defect from its
     own fix buys nothing and can only be wrong in the silent direction.
     """
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
     src = strip_comments_and_strings(raw)
     real = raw.splitlines()
     stripped = src.splitlines()
@@ -222,12 +251,11 @@ def analyse(path: Path) -> list[tuple[str, int, str]]:
     return out
 
 
-def findings(under: Path) -> dict[str, tuple[int, str]]:
-    """`{"<path>:<rule>": (line, text)}` for everything below `under`."""
+def findings(tree: gittree.Tree, prefix: str) -> dict[str, tuple[int, str]]:
+    """`{"<path>:<rule>": (line, text)}` for everything below `prefix`."""
     out: dict[str, tuple[int, str]] = {}
-    for path in sorted(rust_files(under)):
-        rel = _relpath(path)
-        for rule, line, text in analyse(path):
+    for rel in sorted(rust_files(tree, prefix)):
+        for rule, line, text in analyse(tree, rel):
             key = f"{rel}:{rule}"
             if key in IGNORE:
                 continue
@@ -235,11 +263,24 @@ def findings(under: Path) -> dict[str, tuple[int, str]]:
     return out
 
 
-def load_baseline() -> set[str]:
-    if not BASELINE.is_file():
+def load_baseline(tree: gittree.Tree) -> set[str]:
+    """The baselined backlog, read from the tree being judged.
+
+    From the tree, not the disk, for the same reason as everything else here:
+    a baseline edited but not committed would otherwise silence a finding in a
+    commit that does not contain the silencing line -- the ratchet answering
+    for a tree nobody is pushing.
+
+    `errors="strict"`, because a baseline that is not valid UTF-8 is not a
+    baseline to be read leniently: the replacement characters would land inside
+    finding keys and quietly stop matching, which reads as "the backlog is
+    fixed" rather than as an error.
+    """
+    text = tree.read_text(BASELINE_REL, errors="strict")
+    if text is None:
         return set()
     out = set()
-    for line in BASELINE.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
             out.add(line)
@@ -258,6 +299,27 @@ def stale_entries(known: set[str], gated: set[str]) -> list[str]:
     return sorted(known - gated)
 
 
+def _no_corpus(tree: gittree.Tree) -> bool:
+    """True when the tree being judged has no gated sources in it at all.
+
+    Every rule in `--selftest` proves the detector classifies a *given* file
+    correctly. None of them would notice if `GATED_REL` named a directory that
+    had been renamed away, or if `rust_files` pruned too eagerly: the listing
+    would come back empty, `--check` would find nothing new, and the gate would
+    pass forever while looking at nothing. That is the precise shape of failure
+    this tool exists to prevent -- a clean report produced by accident -- so it
+    is worth one explicit question.
+
+    Asked of the tree under judgement rather than of the disk, because that is
+    where the risk is: a commit that moves `userspace/coreutils` disarms the
+    gate *for that commit*, and a disk-side check would answer for a working
+    tree that still has the directory. Non-emptiness rather than a count: a
+    threshold would be a claim about this repository, and this checker is run
+    against fixtures too.
+    """
+    return not rust_files(tree, GATED_REL)
+
+
 def selftest() -> int:
     """Check the rules that decide what this tool reports.
 
@@ -267,13 +329,8 @@ def selftest() -> int:
     are counted from `rule()` calls rather than from a literal, so adding a case
     cannot leave the summary claiming a total that no longer matches what ran.
     """
-    import tempfile
-
     def classify(src: str) -> set[str]:
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "x.rs"
-            p.write_text(src, encoding="utf-8")
-            return {rule for rule, _line, _text in analyse(p)}
+        return {rule for rule, _line, _text in analyse_text(src)}
 
     failures: list[str] = []
     rules: list[str] = []
@@ -432,20 +489,17 @@ fn main() {
         ["a.rs:x", "m.rs:x", "z.rs:x"],
     )
 
-    # 8. The gated tree must be non-empty, and it is the one rule that cannot
-    #    be written against synthetic input.
-    #
-    #    Every case above proves the rules classify a *given* file correctly.
-    #    None of them would notice if `GATED` pointed at a directory that had
-    #    been renamed away, or if `rust_files` pruned too eagerly: the walk
-    #    would return nothing, `--check` would find nothing new, and the gate
-    #    would pass forever while looking at an empty set. That is the exact
-    #    shape of the failure this tool exists to prevent, and the cheapest
-    #    guard against it is to insist the corpus is really there.
-    rule("gated-tree-is-not-empty")
-    expect("gated/dir-exists", GATED.is_dir(), True)
-    expect("gated/has-files", len(rust_files(GATED)) > 50, True)
-
+    # Nothing here touches a tree, deliberately. "The corpus is really there"
+    # is the other thing that has to be true before a clean report means
+    # anything, and it used to be an eighth rule asking the working tree
+    # whether `userspace/coreutils` held more than fifty `.rs` files. That was
+    # wrong twice over. It asked the *disk* about a run that may be judging a
+    # revision -- a commit that renames the gated directory disarms the gate
+    # for that commit while a disk-side self-test says all is well -- and a
+    # threshold of fifty is a fact about this checkout, so the checker could not
+    # be self-tested anywhere else, which is exactly what its own end-to-end
+    # cases do. It now lives in [`main`], asked of whichever tree is being
+    # judged, where both of those stop being true. See `_no_corpus`.
     for f in failures:
         print(f"selftest FAIL {f}")
     print(f"selftest: {len(rules) - len({f.split(':')[0] for f in failures})}"
@@ -454,28 +508,60 @@ fn main() {
 
 
 def main() -> int:
-    args = sys.argv[1:]
-    if "--selftest" in args:
+    if "--selftest" in sys.argv[1:]:
         return selftest()
-    check = "--check" in args
-    write = "--write-baseline" in args
+    ap = argparse.ArgumentParser(add_help=True, description=__doc__.split("\n")[0])
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--write-baseline", action="store_true", dest="write")
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--head", metavar="REV",
+                    help="judge this revision instead of the working tree")
+    args = ap.parse_args()
+    check, write = args.check, args.write
 
-    gated = findings(GATED)
+    try:
+        tree = gittree.open_tree(str(ROOT), args.head)
+    except gittree.GitTreeError as exc:
+        # Exit 2, not 1. `scripts/run-checker.sh` reads 1 as "the checker found
+        # something" and prints the gate's refusal over it -- text that tells
+        # the author their code is wrong and offers the bypass. A revision that
+        # cannot be read is not a statement about anybody's code.
+        print(f"argv-utf8: cannot read {args.head!r}: {exc}", file=sys.stderr)
+        return 2
 
-    # Everything under `userspace/` that the gate does not cover. Counted so
-    # the excluded scope is a visible number that can be argued with, rather
-    # than an absence nobody notices.
-    #
-    # Not under `--check`. The survey walks ~2900 files and lexing them takes
-    # ~17s against ~0.5s for the gated tree alone; that cost buys four lines of
-    # context for a *human* reading the report, and in a push hook there is no
-    # such human -- only a wait, before output nobody acts on. A gate slow
-    # enough to be resented is a gate that gets bypassed, which is this tool's
-    # own failure mode by a longer route. So the number is computed where it is
-    # read: `--write-baseline` and a bare run print it, `--check` does not.
-    ungated: dict[str, tuple[int, str]] = {}
-    if not check:
-        ungated = {k: v for k, v in findings(SURVEYED).items() if k not in gated}
+    with tree:
+        # Before anything is reported, ask whether there is anything to report
+        # *on*. Exit 2 rather than 1 for run-checker.sh's reason: this is not a
+        # finding about anybody's code, and printing gate 4's refusal over it
+        # would tell the author their utility panics on a legal filename when
+        # what actually happened is that the gate lost its subject.
+        if _no_corpus(tree):
+            where = f"in {args.head}" if args.head else "in the working tree"
+            print(f"argv-utf8: no .rs files under {GATED_REL} {where} -- the "
+                  f"gate has nothing to judge, which is not the same as a "
+                  f"clean tree. Has the directory moved?", file=sys.stderr)
+            return 2
+
+        gated = findings(tree, GATED_REL)
+
+        # Everything under `userspace/` that the gate does not cover. Counted
+        # so the excluded scope is a visible number that can be argued with,
+        # rather than an absence nobody notices.
+        #
+        # Not under `--check`. The survey walks ~2900 files and lexing them
+        # takes ~17s against ~0.5s for the gated tree alone; that cost buys
+        # four lines of context for a *human* reading the report, and in a push
+        # hook there is no such human -- only a wait, before output nobody acts
+        # on. A gate slow enough to be resented is a gate that gets bypassed,
+        # which is this tool's own failure mode by a longer route. So the
+        # number is computed where it is read: `--write-baseline` and a bare
+        # run print it, `--check` does not.
+        ungated: dict[str, tuple[int, str]] = {}
+        if not check:
+            ungated = {k: v for k, v in findings(tree, SURVEYED_REL).items()
+                       if k not in gated}
+
+        known = load_baseline(tree)
 
     if write:
         body = [
@@ -504,7 +590,7 @@ def main() -> int:
         files = len({k.rsplit(":", 1)[0] for k in ungated})
         print(
             f"--- {len(ungated)} finding(s) in {files} file(s) under "
-            f"{_relpath(SURVEYED)}, outside the gate ---"
+            f"{SURVEYED_REL}, outside the gate ---"
         )
         print(
             "    Stub programs that print canned output, not shipped utilities.\n"
@@ -513,7 +599,6 @@ def main() -> int:
         )
         print()
 
-    known = load_baseline()
     new = sorted(k for k in gated if k not in known)
     stale = stale_entries(known, set(gated))
 

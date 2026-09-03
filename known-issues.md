@@ -31650,12 +31650,14 @@ phrase in it, which markdown and comment text make entirely plausible.
 
 ## C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE (lane C, 2026-08-17)
 
-**Status: OPEN, but 36-43x recovered — root-caused 2026-08-17 and three fixes
-landed the same day. Shaping now costs ~0.8 us/character where it cost ~29,
-and a 1,000-character line is 0.73 ms where it was 30 ms. That is still an
-order of magnitude off HarfBuzz, so the entry stays open — but it is no longer
-a cliff, and the editor work it was blocking can proceed. What remains is
-named under "What is left" below.**
+**Status: OPEN, but 38-45x recovered — root-caused 2026-08-17, three fixes
+landed the same day and a fourth on 2026-09-02. Shaping now costs ~0.7
+us/character where it cost ~29, and a 1,000-character line is 0.70 ms where it
+was 30 ms. That is still an order of magnitude off HarfBuzz, so the entry stays
+open — but it is no longer a cliff, and the editor work it was blocking can
+proceed. What remains is named under "What is left" below, and the phase table
+that says which pass to attack is now a permanent instrument rather than a
+patch someone has to rewrite.**
 
 **Read "How the numbers here were taken" before comparing any two tables in
 this entry.** Every figure recorded on the day of the fixes was a *median*, and
@@ -31677,7 +31679,8 @@ three orders of magnitude off.
 kept in the tree so the numbers can be re-taken elsewhere):
 
 ```
-cargo test --release -p guitk --lib shaping_cost -- --ignored --nocapture --test-threads=1
+cargo test --release -p guitk --lib shaping_cost \
+    --target x86_64-pc-windows-gnu -- --ignored --nocapture --test-threads=1
 ```
 
 | chars | system face | built-in bitmap face | ratio |
@@ -31838,10 +31841,12 @@ nearly three times below the bug, which sat at 1400-2200x. (Those two figures
 read 80x and 147x while the module reported medians. Nothing about the shaping
 changed.)
 
-**The phase breakdown, measured directly.** Once `GSUB` stopped dwarfing
-everything, the coarse A/B stopped being a useful guide, so `shape_with` was
-temporarily instrumented to time each pass and the medians taken over 51
-shapings of 80 characters (release build):
+**The first phase breakdown — SUPERSEDED, kept for the history.** Once `GSUB`
+stopped dwarfing everything, the coarse A/B stopped being a useful guide, so
+`shape_with` was temporarily instrumented to time each pass and the medians
+taken over 51 shapings of 80 characters (release build). **Do not act on this
+table** — see "The phase breakdown, re-taken" below, which contradicts two of
+the three items this one was used to predict:
 
 | phase | median | share |
 |---|---:|---:|
@@ -31947,23 +31952,136 @@ every absolute figure did not. The factor shrinks with workload size, which is
 the same fact as the sampling floor above: a 1 ms stall is 100% of a 1 ms
 shaping and 5% of a 20 ms one.
 
-**What is left.** Both continuations this entry originally named are done, and
-so is the `GPOS` one the re-measurement turned up. What remains:
+**The phase breakdown, re-taken (2026-09-02) — and this time the instrument
+lives in the tree.** The table above was taken by editing `shape_with` in place
+and throwing the edit away, which is why it went stale in two ways at once and
+why nobody could re-take it without rewriting the patch. The replacement is
+`gui/font/src/phase.rs`, behind `osfont`'s `phase-timing` feature, read out by
+`guitk`'s `text::shaping_cost::shaping_phases`. Off, it compiles to nothing at
+all — a unit struct with no destructor. On, each pass charges its own lifetime
+to a thread-local total.
 
-1. **Re-take the phase breakdown**, and with the minimum this time. The table
-   above predates the `GPOS` fix, so `gpos`'s 19.9% is now roughly 3 points
-   lower and every other share correspondingly higher; and it was taken with
-   the statistic that turned out to be measuring Windows. The patch that
-   produces it is small and is described above; do not attack anything on the
-   strength of the stale table.
-2. **The likely next items, from that table:** `norm::pieces` at 8.8% and the
-   `advances` loop at 6.3%. The latter is one `advance_at` per glyph — an
-   `hmtx` read plus a variation-store lookup — and is a plain caching
-   candidate. Neither is confirmed; **do not guess** — this entry's original
-   `cmap` hypothesis survived a careful reading of the code and was killed only
-   by measurement.
-3. `GSUB` remains the largest single item at ~55% and is not exhausted, but it
-   has now had two rounds of work and the next one will be harder than either.
+```
+cargo test --release -p guitk --features phase-timing --lib shaping_phases \
+    --target x86_64-pc-windows-gnu -- --ignored --nocapture --test-threads=1
+```
+
+(`--target` is not optional: the workspace defaults to the freestanding
+`x86_64-slateos` target and a host test built against it fails in the
+thousands.)
+
+Best of 101 shapings, taken **per phase** rather than by keeping the fastest
+shaping whole — a shaping quiet in every pass at once is far rarer than a quiet
+pass:
+
+| phase | 80 chars | 200 chars | 1,000 chars |
+|---|---:|---:|---:|
+| `gsub` | 41.9 us / **67.3%** | 99.5 us / **68.5%** | 481.1 us / **69.4%** |
+| `norm` | 7.9 us / **12.7%** | 18.9 us / **13.0%** | 92.6 us / **13.4%** |
+| `glyphbuild` | 3.5 us / 5.6% | 8.3 us / 5.7% | 39.3 us / 5.7% |
+| `pre+script` | 2.6 us / 4.2% | 6.2 us / 4.3% | 30.2 us / 4.4% |
+| `gpos` | 1.6 us / 2.6% | 3.2 us / 2.2% | 13.9 us / 2.0% |
+| `joining` | 1.0 us / 1.6% | 2.4 us / 1.7% | 12.2 us / 1.8% |
+| `tail` | 0.7 us / 1.1% | 1.7 us / 1.2% | 7.8 us / 1.1% |
+| `marks` | 0.5 us / 0.8% | 1.1 us / 0.8% | 5.5 us / 0.8% |
+| `advances` | 0.4 us / 0.6% | 0.9 us / 0.6% | 4.2 us / 0.6% |
+| `segprep` | 0.2 us / 0.3% | 0.3 us / 0.2% | 0.4 us / 0.1% |
+| `byte_levels` | 0.0 us / 0.0% | 0.1 us / 0.1% | 0.5 us / 0.1% |
+| unaccounted | 2.0 us / 3.2% | 2.7 us / 1.9% | 5.7 us / 0.8% |
+| instrumented total | 62.3 us | 145.3 us | 693.4 us |
+
+The `marks` row is a new phase, split out of what the old table counted inside
+`segprep`, and the split is why: `segprep` is per *segment* and measures 0.1%,
+while `marks` is per *glyph* and was 8.2-8.7% before the fix below. Lumped
+together they looked like one 8.9% item whose cost scaled with something
+unclear. The `unaccounted` row is the table's check on itself — the passes are
+laid out so no two are timed at once, and a `0.0` there would mean two had been
+allowed to double-charge the same wall time.
+
+**Three things the old table got wrong**, all of which would have been wasted
+work:
+
+* **`advances` is 0.6%, not 6.3%.** The entry named it a "plain caching
+  candidate". Caching it would buy six parts in a thousand.
+* **`gpos` is 2.0%, not 19.9% minus "roughly 3 points".** The third fix took
+  far more out of it than the entry predicted, and there is nothing left there.
+* **`gsub` is ~68%, not ~55%,** and it is now larger than everything else in
+  the pipeline put together. It is the only phase whose share *grows* with line
+  length.
+
+**The fourth fix: the same digests, in the mark test.** `marks` — one "is this
+glyph a combining mark?" per glyph of every shaped run, asked by the pass that
+decides which glyphs take no room — measured **8.2-8.7%**, spent almost
+entirely on searches that were always going to answer no. `MarkPositioning`
+now carries a `could_be_mark` digest built once at parse time: the union of
+both routes `is_mark` can take, `GDEF` class 3 and the mark coverage of every
+subtable. A glyph the union excludes is one neither route could claim, so the
+whole search is skipped in O(1). Marks are a small, tightly-clustered corner of
+a face's glyph space and ordinary text contains none, so on real text this
+answers "no" for essentially every glyph.
+
+The union widens to `Digest::full()` if any part of it could not be read —
+including when a subtable's coverage format is one the reader declines, where
+an empty digest would in fact have been exactly right. Widening there costs
+the shortcut for that face and cannot cost correctness; the alternative
+couples the digest to the searcher's opinion about which formats are readable,
+invisibly, with a dropped mark as the failure mode.
+
+Worth **1.044x-1.059x** of the whole shaping, by a same-day A/B in which the
+only difference between the two binaries is that one line:
+
+| chars | digest disabled | digest live | ratio |
+|---:|---:|---:|---:|
+| 80 | 63.0 us | 59.5 us | 1.059x |
+| 200 | 150.9 us | 143.9 us | 1.049x |
+| 1,000 | 727.0 us | 696.2 us | 1.044x |
+
+(The 5,000 and 20,000 rows moved by more than 10% between two runs of the
+*same* binary and are not reported. The instrument samples those far fewer
+times.)
+
+**A share is an upper bound on what deleting the pass buys — new, and worth
+carrying to the next optimisation.** The `marks` phase went from 8.5% to 0.8%,
+which is 55.7 us of the 1,000-character shaping; the whole shaping got only
+30.8 us faster. Nothing was mismeasured. A pass that walks the coverage tables
+leaves them in cache for the passes after it, so part of what it is charged is
+work its neighbours would otherwise have done themselves. Take the *ranking*
+from the phase table and the *win* from `shaping_cost_by_line_length`, with the
+change and without it.
+
+**Regression cover for the fourth fix.** `mark.rs` gained two tests, and they
+were checked by mutation rather than assumed: deleting the `GDEF` half of the
+digest makes both fail with `glyph 900 was classified wrongly`.
+`the_mark_digest_never_hides_a_mark` sweeps **all 65,536 glyph ids** against a
+fixture whose marks sit at 900-902, 4,000 and 60,000-60,010 — scattered on
+purpose, because ids 1-5 land in nearly the same bits of all three masks and a
+test built from small ids passes whatever the digest says. The other test
+covers the unreadable-class-definition path. All 29 host-installed-font tests
+also pass, including the two whose failure mode is exactly a false negative
+here.
+
+**What is left.** Both continuations this entry originally named are done, so
+is the `GPOS` one the re-measurement turned up, and so is the re-take that was
+item 1. What remains:
+
+1. **`GSUB` at ~68%** is now the whole question. It has had two rounds of work
+   and a third will be harder than either — but everything else in the pipeline
+   put together is less than a third of the cost, so no other target can pay
+   more than 1.5x even if it went to zero.
+2. **`norm::pieces` at ~13%** (`gui/font/src/norm.rs`) is the only other item
+   above 6%, and is unexamined. A first read — **not confirmed, do not act on
+   it without measuring** — is that the ASCII fast path still makes three whole
+   passes over the text (`needs_work`, `thai::present`, `khmer::present`), a
+   `char_indices().collect()`, and one `has_glyph` (`cmap`) lookup per
+   character in `fit_to_face` that duplicates the `glyph_id` lookup
+   `glyphbuild` then does again.
+3. **Nothing below `glyphbuild` at 5.7% is worth attacking** until one of the
+   two above lands. Six phases share 6% between them.
+
+**Do not guess** — this entry's original `cmap` hypothesis survived a careful
+reading of the code and was killed only by measurement, and the first phase
+table's `advances` and `gpos` predictions were both wrong by an order of
+magnitude.
 
 **How this was found.** Scoping `TD-EDITOR-IS-NOT-BIDIRECTIONAL`, whose item 3
 asks whether shape-whole-line-and-clip is affordable. The measurement that was

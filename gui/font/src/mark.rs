@@ -51,7 +51,8 @@
 use alloc::vec::Vec;
 
 use crate::device::Corrections;
-use crate::otl::{coverage_index, feature_subtables, glyph_class};
+use crate::digest::Digest;
+use crate::otl::{class_digest, coverage_digest, coverage_index, feature_subtables, glyph_class};
 use crate::sfnt::{Span, i16_at, u16_at};
 
 /// `Anchor` format 3: the coordinates, plus a device table per axis.
@@ -79,6 +80,19 @@ pub(crate) struct MarkPositioning {
     mkmk: Vec<usize>,
     /// `GDEF`'s `GlyphClassDef`, if the face has a readable one.
     class_def: Option<usize>,
+    /// Which glyphs [`is_mark`](Self::is_mark) could possibly say yes to,
+    /// summarised once at parse time.
+    ///
+    /// The union of both routes that function takes — `GDEF` class 3 and the
+    /// mark coverage of every subtable — so a glyph this excludes is one
+    /// neither route can claim, and the whole search can be skipped. Marks are
+    /// a small, tightly-clustered corner of a face's glyph space and ordinary
+    /// text contains none of them, so on real text this answers "no" for
+    /// essentially every glyph.
+    ///
+    /// [`Digest::full`] where any part of the union could not be read, which
+    /// costs the shortcut for that face and cannot cost correctness.
+    could_be_mark: Digest,
 }
 
 impl MarkPositioning {
@@ -121,10 +135,43 @@ impl MarkPositioning {
         if base.is_empty() && mkmk.is_empty() && class_def.is_none() {
             return None;
         }
+        // Summarise both routes `is_mark` can take, once, so that it can
+        // decline in O(1) instead of binary-searching the class definition and
+        // then every mark coverage in the face. Any part that cannot be read
+        // widens the whole thing to `full`, because the union of a known set
+        // and an unknown one is unknown — and a digest that guessed "no" here
+        // would leave a real mark advancing the pen.
+        let mut could_be_mark = Digest::EMPTY;
+        let mut readable = true;
+        if let Some(table) = class_def {
+            match class_digest(data, table, GDEF_CLASS_MARK) {
+                Some(digest) => could_be_mark.union(digest),
+                None => readable = false,
+            }
+        }
+        for &sub in base.iter().chain(mkmk.iter()) {
+            match mark_coverage(data, sub).and_then(|at| coverage_digest(data, at)) {
+                Some(digest) => could_be_mark.union(digest),
+                // Also the answer when the subtable's own format is one
+                // `mark_coverage` declines, where `in_mark_coverage` would
+                // have said "not a mark" and an empty digest would therefore
+                // have been exactly right. Widening instead keeps this
+                // function from having to agree with that one about which
+                // formats are readable — a coupling that would be invisible
+                // until a font exercised it, and whose failure mode is a
+                // dropped mark rather than a slow one.
+                None => readable = false,
+            }
+        }
         Some(Self {
             base,
             mkmk,
             class_def,
+            could_be_mark: if readable {
+                could_be_mark
+            } else {
+                Digest::full()
+            },
         })
     }
 
@@ -142,7 +189,19 @@ impl MarkPositioning {
 
     /// Whether `glyph` is a combining mark — one that is drawn onto what
     /// precedes it rather than after it.
+    ///
+    /// Asked once per glyph of every shaped run, by the pass that decides
+    /// which glyphs take no room, so the early exit below is not a
+    /// micro-optimisation: without it this was **8.7% of the cost of shaping a
+    /// line**, spent almost entirely on searches that were always going to
+    /// answer no. See `known-issues.md` →
+    /// `C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE`.
     pub(crate) fn is_mark(&self, data: &[u8], glyph: u16) -> bool {
+        // Conservative, so a `false` here is the same `false` the full search
+        // below would have reached — never a shortcut past a real mark.
+        if !self.could_be_mark.may_have(glyph) {
+            return false;
+        }
         if self
             .class_def
             .is_some_and(|table| glyph_class(data, table, glyph) == Some(GDEF_CLASS_MARK))
@@ -366,14 +425,26 @@ pub(crate) fn anchor(
 
 /// Whether `glyph` is in the mark coverage of one mark-attachment subtable.
 fn in_mark_coverage(data: &[u8], sub: usize, glyph: u16) -> bool {
-    let found = (|| {
-        if u16_at(data, sub)? != 1 {
-            return None;
-        }
-        let coverage = sub.checked_add(usize::from(u16_at(data, sub.checked_add(2)?)?))?;
-        coverage_index(data, coverage, glyph)
-    })();
+    let found = mark_coverage(data, sub).and_then(|at| coverage_index(data, at, glyph));
     found.is_some()
+}
+
+/// Where a mark-attachment subtable's *mark* coverage table starts.
+///
+/// The second field of both type 4 and type 6, which is why one function
+/// serves both. `None` for a `posFormat` other than 1 — the only one the spec
+/// defines for either type — so a subtable in some future format contributes
+/// no marks rather than a misread offset's worth of them.
+///
+/// Split out so that [`in_mark_coverage`] and the digest built in
+/// [`MarkPositioning::parse`] cannot disagree about which subtables have a
+/// readable mark coverage and where it is. They must agree: the digest is
+/// allowed to be wider than the search, and is never allowed to be narrower.
+fn mark_coverage(data: &[u8], sub: usize) -> Option<usize> {
+    if u16_at(data, sub)? != 1 {
+        return None;
+    }
+    sub.checked_add(usize::from(u16_at(data, sub.checked_add(2)?)?))
 }
 
 /// `GDEF`'s `GlyphClassDef`, as an absolute offset.
@@ -941,6 +1012,102 @@ mod tests {
         );
         assert!(!m.is_mark(&all, 4), "GDEF calls glyph 4 a base");
         assert!(!m.is_mark(&all, 1), "glyph 1 is the base being attached to");
+    }
+
+    /// A `GDEF` whose `GlyphClassDef` is format 2, listing `ranges` as
+    /// `(first, last, class)`.
+    ///
+    /// Format 2 rather than format 1 because format 1 is a dense array from a
+    /// start glyph, and a face whose marks sit thousands of ids apart — which
+    /// is every real face — cannot be spelled that way without megabytes of
+    /// filler.
+    fn gdef_ranges(ranges: &[(u16, u16, u16)]) -> Vec<u8> {
+        let mut gdef = Vec::new();
+        gdef.extend_from_slice(&be16(1)); // majorVersion
+        gdef.extend_from_slice(&be16(0)); // minorVersion
+        gdef.extend_from_slice(&be16(12)); // glyphClassDefOffset
+        gdef.extend_from_slice(&be16(0)); // attachList
+        gdef.extend_from_slice(&be16(0)); // ligCaretList
+        gdef.extend_from_slice(&be16(0)); // markAttachClassDef
+        gdef.extend_from_slice(&be16(2)); // ClassDef format 2
+        gdef.extend_from_slice(&be16(u16::try_from(ranges.len()).unwrap()));
+        for &(first, last, class) in ranges {
+            gdef.extend_from_slice(&be16(first));
+            gdef.extend_from_slice(&be16(last));
+            gdef.extend_from_slice(&be16(class));
+        }
+        gdef
+    }
+
+    /// `gpos` with `gdef` appended, and the two spans that name them.
+    fn with_gdef(gpos: &[u8], gdef: &[u8]) -> (Vec<u8>, Span, Span) {
+        let mut all = gpos.to_vec();
+        let at = all.len();
+        all.extend_from_slice(gdef);
+        (all, span(0, gpos.len()), span(at, gdef.len()))
+    }
+
+    /// The digest `is_mark` consults first is allowed to be *wider* than the
+    /// truth and is never allowed to be narrower: a false "yes" costs a search
+    /// that was going to happen anyway, while a false "no" leaves a real
+    /// combining mark advancing the pen — the accent lands beside its letter
+    /// instead of over it, and every glyph after it on the line is shifted.
+    ///
+    /// So this asks every glyph id there is, and compares against the set the
+    /// fixture declares rather than against the code's own opinion.
+    ///
+    /// The ids are deliberately scattered across the range instead of packed
+    /// into the first handful. A digest indexes by the glyph id shifted right
+    /// by 4, 0 and 9, so ids 1-5 land in almost the same bits and a digest
+    /// that had gone wrong would still admit all of them — a test built from
+    /// small ids passes whatever the digest says, which is the trap this
+    /// comment exists to keep the next author out of.
+    #[test]
+    fn the_mark_digest_never_hides_a_mark() {
+        // Glyph 2 is the mark in the `GPOS` coverage; the rest are marks by
+        // `GDEF` class alone, spread far enough apart to fall in different
+        // digest buckets. 1 and 4_001 are bases, next to a mark on purpose.
+        let gdef = gdef_ranges(&[
+            (900, 902, GDEF_CLASS_MARK),
+            (4_000, 4_000, GDEF_CLASS_MARK),
+            (4_001, 4_001, 1),
+            (60_000, 60_010, GDEF_CLASS_MARK),
+        ]);
+        let (all, gpos_at, gdef_at) = with_gdef(&acute_font(), &gdef);
+        let m = MarkPositioning::parse(&all, Some(gpos_at), Some(gdef_at)).unwrap();
+
+        let a_mark = |g: u16| {
+            g == 2 || (900..=902).contains(&g) || g == 4_000 || (60_000..=60_010).contains(&g)
+        };
+        for glyph in 0..=u16::MAX {
+            assert_eq!(
+                m.is_mark(&all, glyph),
+                a_mark(glyph),
+                "glyph {glyph} was classified wrongly"
+            );
+        }
+    }
+
+    /// A `GlyphClassDef` in a format this crate cannot read must not narrow
+    /// the digest to the marks it *can* see.
+    ///
+    /// The union of a known set and an unknown one is unknown, so the whole
+    /// digest has to widen — and the observable consequence is that the marks
+    /// the `GPOS` coverage names are still found. Getting this backwards would
+    /// produce a face whose accents silently stop being marks, which no
+    /// synthetic-fixture test of the *readable* path would ever notice.
+    #[test]
+    fn an_unreadable_class_definition_does_not_hide_the_covered_marks() {
+        let mut gdef = gdef_ranges(&[(900, 902, GDEF_CLASS_MARK)]);
+        // The ClassDef format, at offset 12 — 7 is not a format that exists.
+        gdef[12..14].copy_from_slice(&be16(7));
+        let (all, gpos_at, gdef_at) = with_gdef(&acute_font(), &gdef);
+        let m = MarkPositioning::parse(&all, Some(gpos_at), Some(gdef_at)).unwrap();
+        assert!(
+            m.is_mark(&all, 2),
+            "the mark in the GPOS coverage must survive an unreadable GDEF"
+        );
+        assert!(!m.is_mark(&all, 1), "the base must still be a base");
     }
 
     #[test]

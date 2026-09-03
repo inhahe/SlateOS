@@ -1409,15 +1409,7 @@ answer later turns out to be A or C.
 Tracked in `known-issues.md` as
 `A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS`.
 
-# Resolved
-
-**The body above holds OPEN questions only.** When the operator answers one,
-write it up in `design-decisions.md` as a `Decided by: Operator` entry,
-**delete the entry from the body**, and add one line here. That is the whole
-point of the file: it is scanned for what still needs a decision, so an
-answered question left in the body is pure cost — and, being older, it sorts
-*first*, right where it is most in the way. (Why this is not append-only:
-`design-decisions.md` §437.)
+---
 
 ## A-Q2 — [A] Our C-test programs are built against a library nobody can identify, because the compiler that builds them cannot see the folder it is run from. The fix is in a different project. Who changes it? — Status: OPEN
 
@@ -1494,6 +1486,648 @@ day it has something new to say, it looks like the noise it has been all along.
 The index is split by lane so three lanes adding a line at once land at three
 different offsets and the merge is automatic. Newest first within each lane.
 `(§n)` cites `design-decisions.md`.
+
+---
+
+## Q57 — Should the kernel run its own test suite on a user's boot? (lane A, 2026-08-22)
+
+**In short:** Right now, every time this OS starts, the kernel runs several
+hundred of its own built-in tests before handing the machine to the user —
+checking things like "is the backspace key still character 127". Most of those
+checks are written so that a failure **stops the machine dead** rather than
+printing a complaint and moving on. Nothing is failing today. The question is
+what *should* happen on a user's computer the first time one of them is wrong:
+refuse to boot, boot with a warning, or not run the checks there at all.
+
+Glossary, once: a **self-test** here is ordinary kernel code that checks some
+other kernel code and prints the result to the serial console. An **assertion**
+is a check written so that failing it panics — the kernel prints a message and
+halts. A **boot test** is what the developer runs in an emulator; a **production
+boot** is a user starting a real machine. Today these run the *same* code.
+
+### Why it is worth deciding
+
+The two audiences want opposite things and currently get the same behaviour:
+
+- On a **boot test**, halting is *good*. The panic names the file, the line and
+  the values that disagreed, which is better diagnostics than a log line, and
+  the run should fail loudly anyway.
+- On a **production boot**, halting is close to the worst option. A wrong
+  assertion about a terminal flag becomes a computer that will not start, and
+  the user has no way to skip it.
+
+Scale, for a sense of the exposure: 567 files under `kernel/src/` contain both a
+`self_test` function and assertions, 12 674 assertion sites in total. Only ~299
+sites use the alternative style that logs a failure and returns an error instead
+of panicking.
+
+### Options
+
+**A — Gate self-tests behind a boot flag; production boots skip them.**
+*What changes:* a user's machine starts faster and never halts over a self-test;
+the developer adds `selftest=1` (or the boot test does) to get today's
+behaviour.
+Cheapest by far — roughly one conditional around the self-test block in
+`kernel_main`. The cost is that a corrupted or mis-built kernel that a self-test
+would have caught now boots and misbehaves later instead.
+
+**B — Always run them, but never panic: convert assertions to logged failures.**
+*What changes:* a failing check prints `FAIL: ...` and the machine keeps
+booting, on developer and user machines alike.
+Keeps the coverage on real hardware, where it is arguably most valuable, since
+a production boot exercises drivers an emulator does not. The cost is 12 674
+edit sites, and each one *loses* information — an assertion reports the compared
+values and its own line number for free, whereas the replacement reports only
+what its author remembered to include. Realistically a slow migration, not a
+single change.
+
+**C — Run them on production boots and keep halting.** *What changes:* nothing;
+this is today's behaviour, made deliberate.
+Defensible on the "fail fast, never run a kernel that fails its own checks"
+argument. The objection is that the checks are not all equally load-bearing —
+halting the machine because `VERASE` is not 127 is not obviously better than
+booting with a warning.
+
+**D — Split the difference: keep assertions for checks about kernel integrity,
+log-and-continue for the rest.** *What changes:* a bad memory-manager invariant
+still halts; a cosmetic terminal-flag mismatch prints a warning and boots.
+Probably the right end state and the most work to get to, since it needs a
+judgement per self-test rather than a blanket rule.
+
+### My recommendation
+
+**A now, D eventually.** A is a one-line change that removes the user-facing
+risk immediately and costs nothing we are currently getting — the boot test,
+which is where these checks actually earn their keep, would still run them with
+the flag set. It also makes B-versus-D a much less urgent question, because
+after A the assertion style only affects developer boots, where panicking is the
+better behaviour anyway.
+
+### If this is never answered
+
+Safe for now — no self-test is failing, and the streak is 11 consecutive clean
+boots. It does not get worse on its own, but it gets *bigger*: the count grows
+every time someone adds a self-test, and A stays a one-line change forever while
+B and D get more expensive. Meanwhile new self-test code (`pathutil`, `net::raw`,
+`net::frag`) is being written in the log-and-continue style, which is the safe
+side of the question whichever way it goes.
+
+Background: `known-issues.md` →
+`TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING`.
+
+---
+
+## kshell's `grep` defaults differ from POSIX: line numbers and case-insensitivity are always on
+
+**Lane A.** Raised 2026-08-24. Code: `kernel/src/kshell.rs`, `GrepFlags::new()`.
+
+**In short:** In the kernel shell, `grep alpha file` prints `1:alpha` — with the
+line number — and matches `ALPHA` too. Every other `grep` in the world prints
+just `alpha` and does not match `ALPHA` unless you ask, with `-n` and `-i`
+respectively. Ours turns both on and gives no way to turn them off. This is
+pleasant when you are typing at a prompt and wrong when a script is reading the
+output, and I do not think it is my call which of those two users wins.
+
+### What it is now
+
+```rust
+impl GrepFlags {
+    fn new() -> Self {
+        Self {
+            case_insensitive: true, // default: case-insensitive (like original)
+            show_line_numbers: true,
+            ...
+```
+
+The `-i` and `-n` flags exist but only *set* these to `true` — the value they
+already have — so there is no spelling of `grep` in this shell that turns either
+off. The comment "like original" suggests this was inherited from an earlier
+kshell rather than chosen.
+
+Why it surfaced now: the shell just gained working exit statuses and working
+`$(…)` capture through pipelines, so `grep` output is for the first time
+something programs consume rather than something a human reads. `$(grep p f)`
+returns `1:match`, and stripping that prefix requires knowing it is there.
+
+### Options
+
+**A — leave both on, add `+i`/`+n` (or `--no-line-number`) to turn them off.**
+*What changes:* nothing by default; `grep +n p f` becomes a way to get bare
+lines. Existing habits and any existing scripts keep working.
+
+**B — default both off, matching POSIX; `-i`/`-n` turn them on as everywhere else.**
+*What changes:* `grep alpha f` prints `alpha` instead of `1:alpha`, and stops
+matching `ALPHA`. Anything that currently relies on the prefix breaks, and
+interactive use loses the line numbers unless you type `-n`.
+
+**C — split the difference: line numbers off (they corrupt piped output),
+case-insensitivity left on (it only widens the match set).**
+*What changes:* `grep alpha f` prints `alpha`; `grep ALPHA f` still finds
+`alpha`. `-n` starts working as a real flag.
+
+**D — leave it exactly as is and document it.**
+*What changes:* nothing; scripts must strip the `N:` prefix themselves.
+
+### My recommendation
+
+**C**, weakly. The two defaults are not equally defensible: a line-number prefix
+changes the *bytes* of every line, so it breaks any consumer of the output,
+whereas case-insensitivity only changes *which* lines are selected — surprising,
+but it yields a superset, and a caller who cares can pick a case-specific
+pattern. If you would rather not have a shell that is subtly non-standard in two
+places, **B** is the honest answer and the breakage is small: this shell has few
+scripts, and all of them are ours.
+
+### If this is never answered
+
+Safe, and it does not get worse quickly — but it gets more expensive with
+every script written against the current output, since each becomes a place
+that has to be re-checked if the default changes. Nothing is blocked. The
+inconsistency that *was* dangerous — the piped half printing `1: alpha` while
+the file half printed `1:alpha` — is already fixed (`afe5b0ae2`); what remains
+here is only the choice of default.
+
+---
+
+## An account with no password: should the lock screen let it through, or refuse forever? (lane C, 2026-08-24)
+
+**In short:** Some accounts have no password set at all. Today, if such an
+account's screen locks, pressing Enter dismisses it — no password is asked for,
+because there is none to ask for. That means anyone who walks up to that
+machine while it is locked gets straight into the session. The obvious fix is to
+refuse: a lock screen with nothing to check should let nobody in. But then the
+*real* user is locked out too, permanently, with no way back to their own
+desktop short of a reboot. I need you to pick which of those two you would
+rather ship.
+
+### Where it bites
+
+`apps/lockscreen/src/main.rs`, `LockScreen::unlocks_for` — one function, written
+specifically so that this is a one-line change once you decide. It is called by
+`submit_password` on every attempt.
+
+The verdict now comes back as one of six values borrowed from lane B's
+`userspace/authlib` (`Accepted`, `Rejected`, `Locked`, `NoPassword`, `Unusable`,
+`RateLimited`). Five of them decide themselves. `NoPassword` — meaning "the
+stored entry for this account is empty" — deliberately does not, because lane B
+made it the *caller's* policy: a console login may reasonably let an empty entry
+through, and a lock screen may not. So each caller must state its own rule, and
+this is ours to state.
+
+### Why it is not obvious
+
+The security argument is clean and lane B makes it: an empty-password account
+means anyone who closes the lid owns the machine.
+
+The counter-argument is that the hole was already open. If the account has no
+password, an attacker standing at that machine can log in as that user from the
+*login* screen without typing anything. Refusing at the lock screen protects an
+already-running session and nothing else — while creating a failure mode that
+is arguably worse than the hole: a desktop that cannot be got back into by the
+person it belongs to.
+
+### Options
+
+**A — accept it (what it does today).**
+*What changes:* nothing. A passwordless account's lock screen is dismissed by
+pressing Enter, as now.
+
+**B — refuse it.**
+*What changes:* a passwordless account that locks can never be unlocked. The
+screen says "This account has no password" and stays up until the machine is
+restarted.
+
+**C — never lock a passwordless account in the first place.**
+*What changes:* auto-lock is suppressed and the manual lock command is refused
+for an account with no password, so the trap in B cannot be entered. If the
+screen is somehow reached anyway it dismisses on any key, as in A. Costs a
+little more code: the suppression has to live wherever locking is triggered,
+not only in the screen.
+
+**D — accept it, but require the account to have been passwordless *before* the
+session started**, so that clearing a password while locked cannot open the
+screen.
+*What changes:* nothing a user would notice; closes a narrow race that only
+matters once `passwd` can be run by something other than the session owner.
+
+### My recommendation
+
+**C.** It is the only one of the four that is neither a hole nor a trap: it
+declines to offer a security boundary that does not exist, rather than
+pretending to enforce one (B) or pretending to have enforced one (A). B's
+failure mode is the one I would least like to explain to a user, because it
+takes a working desktop and makes it unusable through no action of theirs.
+
+If C is more machinery than you want here, **A** — the status quo — is the safer
+of the two remaining, for the reason above: it does not create a new way to lose
+a session, and the exposure it leaves is one the login screen already has.
+
+### If this is never answered
+
+Safe, and it does not get worse. The screen keeps behaving as it always has
+(option A) and the policy is isolated in one function, so answering later costs
+one line plus a test. Nothing is blocked on it. The reason it is worth asking at
+all is that the *refactor that surfaced it* deliberately did not change it —
+altering who can unlock a machine is not something to slip into a commit about
+interface shape.
+
+---
+
+## Should `oci run` refuse to start when an option cannot be applied? (lane A)
+
+**In short:** `oci run` starts a container. If you ask it for something extra —
+a shared folder (`-v`), a published port (`-p`), a file of labels or
+environment variables — and it cannot do that one thing, it currently prints a
+warning, starts the container anyway, and reports success. So you can ask for a
+container with your data folder attached, get one *without* it, and be told
+everything worked. Docker refuses to start at all in this situation. The
+question is which of those two behaviours we want.
+
+**Where:** `kernel/src/kshell.rs`, the `oci run` argument loop — eleven sites,
+all reading `[oci] Warning: could not …` or `[oci] Could not read …-file`.
+Raised during the exit-status sweep (`known-issues.md` →
+`A-KSHELL-3676-FAILING-COMMANDS-REPORTED-SUCCESS`), which deliberately left all
+eleven alone because changing the *status* without deciding the *contract*
+would be the dangerous half of the change on its own.
+
+### Why the sweep did not just fix it
+
+Every other failing command in the shell got a non-zero exit status. These
+eleven did not, because here a non-zero status is worse than the bug. The
+idiom `oci run … || cleanup` exists, and `cleanup` tears down a container.
+Flipping the status would make it tear down a container that is **up and
+running** — turning a wrong exit code into destroyed work. The rule the sweep
+used for this command instead was "did the container start?", and the one site
+that answers no (`Cannot allocate IP from network`) already sets a status and
+returns.
+
+That leaves the real question untouched: should asking for an option that
+cannot be applied mean the container should not have started?
+
+### Options
+
+**A — refuse to start (Docker's behaviour).** Validate every requested option
+before launching; if any cannot be applied, print the reason, start nothing,
+exit non-zero.
+*What changes:* `oci run -v /data:/data img` on an unmountable `/data` prints
+the error and you get **no container**, instead of a running container with no
+`/data`. `|| cleanup` becomes correct, because there is nothing to clean up.
+
+**B — start anyway, but exit non-zero** (today's behaviour plus a status).
+*What changes:* the container still starts without `/data`, but the command
+reports failure — so `|| cleanup` fires **against a live container** and
+destroys it. This is the option that looks like a small fix and is not.
+
+**C — leave exactly as is: warn, start, exit 0.**
+*What changes:* nothing. A script cannot tell that an option was dropped, and
+must inspect the container afterwards to find out.
+
+**D — split by option kind.** Treat options that change what the container *is*
+(`-v`, `-p`, `--label-file`, `--env-file`) as A, and options that are advisory
+(`--read-only` best-effort, tmpfs) as C.
+*What changes:* the dangerous ones fail closed, the cosmetic ones stay
+warnings. More faithful, and more code, and the boundary needs writing down or
+it will drift.
+
+### My recommendation
+
+**A**, matching Docker. The reason is that a container is not a partial
+artifact: you cannot inspect one to discover which options were silently
+dropped, so "started, but not as requested" is a state no caller can act on. A
+is also the only option under which the existing `|| cleanup` idiom is safe,
+because it guarantees there is nothing running to clean up. **D** is defensible
+if refusing to start over an unapplied tmpfs feels too strict — but it needs an
+explicit list, not a judgement call per site.
+
+**Not B.** It is the smallest diff and it is actively harmful.
+
+### If this is never answered
+
+Safe, and stable — today's behaviour destroys nothing and the sweep left it
+untouched on purpose. It does not degrade with time. What it costs is that
+`oci run` cannot be scripted reliably: any script that cares whether its
+options took effect has to verify them itself afterwards, and every such script
+is a place that would need revisiting if the contract later changes.
+
+---
+
+## The shell's `grep` ignores case and numbers lines by default, unlike every other Unix (lane A, 2026-08-24)
+
+**In short:** In our shell, typing `grep Error mylog.txt` also finds `error`
+and `ERROR`, and prints each result with a line number in front of it, like
+`42:error: disk full`. Real `grep` on Linux/macOS does neither: it matches
+`Error` exactly, and prints just the line. Our version behaves as though you
+had typed `grep -i -n`. This is very likely a deliberate choice made early on
+for interactive convenience, but it was never written down, and it means
+commands copied from any Unix documentation or tutorial quietly do something
+different here. The question is whether to keep it.
+
+Where it lives: `GrepFlags::new()` in `kernel/src/kshell.rs` (~94901), which
+sets `case_insensitive: true` with the comment *"default: case-insensitive
+(like original)"*, and `show_line_numbers: true`.
+
+### Why it is worth asking rather than just fixing
+
+Two things push this out of "obviously a bug":
+
+1. **The comment says it is intentional** — "like original" reads as
+   *preserve the behaviour kshell already had*, not as an oversight.
+2. **There is already an opt-out for the case half, and it is a made-up one.**
+   The shell accepts `-I` to mean "be case-sensitive after all". In GNU grep,
+   `-I` means something completely different (ignore binary files). So this is
+   not merely a changed default; a real flag has been re-purposed to undo it.
+   Restoring the GNU default would also have to decide what `-I` then means.
+
+The line-number half has no opt-out at all: there is no way to turn `-n` off.
+
+### What it costs today
+
+Copy-pasted commands silently mean something else. Two examples of the shape:
+
+| Written | Means elsewhere | Means here |
+|---|---|---|
+| `grep Error log` | lines containing `Error` | also `error`, `ERROR` |
+| `grep -c pat f` | a count | a count (unaffected — `-c` overrides output) |
+| `grep pat f \| cut -d: -f2` | the second `:`-field of the line | the *line*, because field 1 is now the line number |
+
+The last one is the sharp edge: `-n` on by default changes the *shape* of the
+output, so any pipeline that splits a grep result on `:` is reading one field
+off. Nothing errors; it just quietly reads the wrong column.
+
+It is also now load-bearing in a test. Self-test rung 25 asserts `1:alpha`
+rather than `alpha`, with a comment pointing here — so a change of default is a
+one-line test update, not a hunt.
+
+### The options
+
+**A — restore GNU defaults: case-sensitive, no line numbers.**
+*What changes:* `grep Error log` stops matching `error`; `grep pat f` prints
+`the matched line` instead of `42:the matched line`. `-i` and `-n` turn each
+back on. `-I` needs a new meaning (either drop it, or make it GNU's
+ignore-binary — which this shell already does implicitly under `-r`).
+
+**B — keep both defaults, and document them.**
+*What changes:* nothing in behaviour. `grep --help` and the shell's docs gain
+an explicit note that `-i -n` are implied, plus a way to switch them off.
+
+**C — split the two.** Restore GNU's case-sensitivity (the one that changes
+*which lines* you get, and can therefore hide a result you needed), keep `-n`
+(which only changes how they are printed).
+*What changes:* `grep Error log` stops matching `error`; output still carries
+line numbers.
+
+**D — keep case-insensitivity, drop the default `-n`.** The inverse of C.
+*What changes:* output shape matches GNU, so `:`-splitting pipelines work;
+matching stays lenient.
+
+### My recommendation
+
+**A**, with `-I` dropped rather than redefined. The value of matching the rest
+of Unix here is not aesthetic — it is that every piece of grep knowledge a user
+already has, and every command in every tutorial, becomes correct instead of
+subtly wrong. Convenience defaults are cheap to type back (`-i`, `-n`) and
+expensive to discover you were getting.
+
+If A feels too disruptive, **C** is the safer half-step: a wrong *set of lines*
+is a wrong answer, whereas a line-number prefix is visible on sight. **D** is
+the weakest — it fixes the cosmetic half and keeps the half that can hide a
+result.
+
+### If this is never answered
+
+Safe and stable; nothing degrades. The cost is ongoing and quiet: every
+`grep` command a user brings from outside behaves differently than they expect,
+and any pipeline that splits on `:` reads the wrong field. It also gets
+*slightly* more expensive to change over time, since each new script written
+against the current defaults is one more thing to check.
+
+---
+
+## SlateOS has no way to encrypt anything. Which cipher do we add, and who owns it? (lane C, 2026-08-26)
+
+**In short:** The whole operating system can *scramble* data so it can be
+checked (SHA-256, MD5, SHA-1, CRC32 — those are all one-way fingerprints), but
+it cannot **encrypt** anything: there is no code anywhere in the tree that turns
+readable data into unreadable data and back again with a key. So the password
+manager I just wired to a real window cannot save your passwords — not because
+nobody has written the save code, but because there is nothing to lock the file
+with. Adding a cipher is a few hours' work, but *which* one is a decision that
+sticks, because every file written under it has to stay readable forever.
+
+### Where it bites
+
+Anything that needs to store a secret on disk, which is at least:
+
+| Wants it | For | Status |
+|---|---|---|
+| `apps/credmanager` | the password vault | wired to a window, stores nothing — `known-issues.md` → `C-CREDMANAGER-HAS-NO-VAULT-ON-DISK` |
+| `gui/credentials` | saved Wi-Fi and site logins | same gap |
+| `apps/archivemanager` | encrypted zip members | can't read them either — `C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT` |
+| whole-disk encryption | the roadmap's storage section | not started |
+
+`pwkdf` already turns a master password into a 256-bit key correctly, with salt
+and a tunable cost. That half is done and tested. The missing half is what to
+*do* with the key.
+
+### The terms, since two of them do the work
+
+- **AEAD** — "authenticated encryption": a cipher that both hides the data and
+  detects tampering. The alternative (encrypt-only) lets an attacker flip bits
+  in your vault and have it decrypt to different, valid-looking garbage. Nobody
+  should ship encrypt-only in 2026; treat AEAD as settled and read the options
+  below as "which AEAD".
+- **AES-NI** — a CPU instruction that makes AES fast. Without it, a careful
+  software AES is ~5-10× slower *and* much harder to write without leaking the
+  key through timing. Every x86-64 chip since ~2010 has it, but we would be
+  choosing to depend on it.
+
+### Options
+
+**A — ChaCha20-Poly1305, written here.**
+*What changes:* one new `no_std` crate at the workspace root, ~400 lines, no CPU
+feature required. Fast and constant-time in plain Rust on any machine.
+This is what WireGuard and TLS 1.3 use on hardware without AES-NI.
+
+**B — AES-256-GCM, written here.**
+*What changes:* the same shape, but the software fallback is the part that is
+easy to get subtly wrong (timing leaks through table lookups), and doing it
+*properly* means writing the AES-NI path too — so it is really two
+implementations, and the interesting one is x86-only.
+
+**C — port a vetted C implementation instead of writing Rust.**
+*What changes:* no new hand-written crypto, but a C dependency in the build for
+every app that stores a secret, and `design.txt` already says C is for porting
+existing code — which this would be. Slower to land, harder to audit in-tree.
+
+**D — decide later; ship the apps without persistence.**
+*What changes:* nothing. credmanager keeps opening an empty vault every launch,
+`gui/credentials` keeps forgetting Wi-Fi passwords, and the gap spreads to
+whatever gets built next.
+
+### The part that is not mine to decide
+
+Even given a choice, **which lane owns it** is open. The hash crates (`sha2`,
+`sha1`, `md5`) live at the workspace root and are shared by all three lanes, so
+a cipher belongs there too — but that is outside every lane's write glob. If
+you pick A or B, say whether lane C should write it at the root, or whether I
+should file a request to lane A and pick up something else.
+
+### My recommendation
+
+**A, written by whichever lane you say.** ChaCha20-Poly1305 has no CPU
+dependency, so there is one implementation rather than a fast path and a
+dangerous fallback; it is the easiest of the three to write correctly and the
+easiest to test against published vectors. The reason I am asking rather than
+doing it is not the cipher — it is that hand-written crypto in an OS is exactly
+the kind of thing you may want to overrule on principle, and the file format it
+implies is permanent.
+
+### If this is never answered
+
+Nothing breaks and nothing gets worse on its own — but a growing number of
+finished, tested applications stay unable to do the one thing they exist for.
+credmanager is the third app now waiting on this. It is not blocking my current
+work; I am carrying on down the roadmap.
+
+---
+
+## Two commits that appear to delete the whole OS, and 33 commits signed by a fake name, are permanently in the published history. Leave them, or rewrite? (lane A, 2026-08-29)
+
+**In short:** on 2026-08-29 a safety check that runs just before uploading code
+accidentally committed to the real project instead of to the scratch copy it
+meant to use, and those commits got uploaded. As far as those two commits are
+concerned, every file in the operating system was deleted. **The current files
+are completely fine** — I repaired that within minutes, and nothing is missing.
+What
+remains is only the *record*: anyone scrolling back through the project's
+history will see two commits that look like a catastrophe. Removing them from
+the record is possible but requires an operation I am forbidden to perform
+without you saying so, because it can destroy other people's work.
+
+**Updated later the same day — the record is wrong in a second way.** The same
+accident also wrote a fake author name into the project's shared settings, so
+**33 commits are signed `selftest <selftest@example.invalid>` instead of your
+name**. That covers every commit all three sessions made over about an hour,
+including the ones that fixed the accident. The settings are repaired, so no
+*new* commit is affected; the 33 already made cannot be corrected except by the
+same forbidden operation. This does not change the question, but it does change
+what is at stake in it, so both are decided together.
+
+**Question.** Should the published history be rewritten — to remove the two
+commits (`7f6a6b446` "base" and `71f164f7e` "delete one, sweep another"), to
+re-sign the 33 misattributed ones, or neither?
+
+Two terms, glossed:
+
+- **Published history** — the copy on GitHub that all three lanes (the three
+  parallel Claude sessions) pull from. Everyone's work is built on top of it.
+- **Force-push** (the operation in question) — replacing that shared history
+  with a different one. It is the only way to remove a commit that is already
+  published. It is dangerous because any lane whose work sits on top of the
+  removed commits has its history invalidated, and anything not yet uploaded
+  can be lost outright. Standing project policy forbids it without your
+  explicit say-so, which is why this is a question and not something I did.
+
+**What the current state actually is.** The repair used a merge whose *content*
+is the correct tree, so the files are right and both branches moved forward
+normally — no rewriting was needed. The two bad commits survive as *ancestry*
+(steps in the chain) but not as *content* (no file reflects them). `git log`
+shows them; `git status` and every checkout are clean.
+
+**The misattributed commits, by branch.** All are pushed:
+
+| Branch | Commits signed `selftest` |
+|---|---|
+| `lane-a` | 16 |
+| `lane-b` | 9 |
+| `lane-c` | 3 |
+| `main` | 5 |
+
+Two facts that make this less bad than it sounds, and are the reason it is
+folded into an existing question rather than raised as an urgent one. First,
+**there is no attribution dispute to get wrong**: you are the sole author of
+record for this entire project, so a wrong name credits nobody else and steals
+credit from nobody. Second, **the commit messages are intact** — the *content*
+of the record is right, and only the signature is wrong. What it actually costs
+is that `git log --author` and any per-author statistic silently omit an hour
+of work, and anyone reading the log cold sees a contributor who does not exist.
+
+### Options
+
+**A. Leave both, documented.** *What changes:* nothing observable; `git log`
+keeps showing two alarming-looking commits and an hour of work signed by a
+name that is not yours, and `known-issues.md` explains why. *Pros:* zero risk;
+no force-push; the incident stays legible, which has value — the commits are
+the evidence for the post-mortem that produced the fix. *Cons:* anyone reading
+history cold gets a scare and has to go find the explanation; a future
+automated tool that audits history for mass deletions will flag them forever;
+per-author statistics stay wrong for those 33 commits.
+
+**B. Rewrite history to remove and re-sign them.** *What changes:* `git log`
+no longer shows the two commits, and the 33 carry your name. *Pros:* a clean
+and correctly-signed record. *Cons:* requires a force-push to `main` and all
+three lane branches — note that the authorship half touches **all four**,
+where removing the two commits alone would have touched two, so the blast
+radius is larger than it was when this question was first written. The other
+two lanes must re-sync, and any uncommitted or unpushed work of theirs is at
+risk; ~40 commits now sit on top of the bad ones, all of which get new
+identities, invalidating every commit hash cited in `known-issues.md`,
+`design-decisions.md` and the request files — including the citations *in the
+entry that explains this incident*.
+
+**C. Re-sign the 33, but leave the two commits.** *What changes:* the log
+still shows the two commits, but every commit carries your name.
+*Pros:* fixes the half that is factually wrong (a signature naming someone who
+does not exist) while leaving the half that is merely ugly-but-true (the
+commits really did happen). *Cons:* this is not actually cheaper than B —
+re-signing rewrites the same commits a removal would, needs the same
+force-push to the same four branches, and invalidates the same hashes. It buys
+less for the same risk, which is why I list it only to note that it is not the
+compromise it looks like.
+
+### If never answered
+
+Option A is the current state and it is safe. Nothing is blocked and nothing
+degrades functionally — but it does get *more* expensive to change with time,
+since every commit added on top is one more that a rewrite would have to
+rewrite. If you are ever going to pick B, sooner costs less.
+
+### Claude's recommendation
+
+**A, still, and the new evidence does not move me.** The content is correct,
+the incident is documented at length in `known-issues.md`
+(`A-A-PUSH-GATE-DELETED-THE-REPOSITORY-IT-WAS-GATING`), and trading a cosmetic
+blemish in the log for a force-push across three active lanes is a bad
+exchange — the cure has a real chance of destroying work, which is precisely
+the failure the original bug caused.
+
+The authorship damage is the kind of finding that *feels* like it should tip
+the balance, and I do not think it does: it makes the record uglier without
+making it wrong in any way that costs anyone anything, since you are the only
+author this project has. Meanwhile it makes option B strictly more dangerous
+than it was, because it drags the third lane's branch into a rewrite that
+previously did not need to touch it. The case for A got stronger, not weaker.
+
+I raise it only because it is your history, force-push authority is yours
+alone, and the cost of choosing B rises with every commit.
+
+**Where it bites.** Git history only: `7f6a6b446` and `71f164f7e`, repaired by
+`f0534726e`; plus 33 commits between 22:43 and 23:54 on 2026-08-29 whose author
+field reads `selftest <selftest@example.invalid>`. No file in the tree is
+affected, and the shared config that caused the misattribution is repaired, so
+the count cannot grow.
+
+**Status:** OPEN
+
+# Resolved
+
+**The body above holds OPEN questions only.** When the operator answers one,
+write it up in `design-decisions.md` as a `Decided by: Operator` entry,
+**delete the entry from the body**, and add one line here. That is the whole
+point of the file: it is scanned for what still needs a decision, so an
+answered question left in the body is pure cost — and, being older, it sorts
+*first*, right where it is most in the way. (Why this is not append-only:
+`design-decisions.md` §437.)
 
 ## Resolved — lane A
 
@@ -1874,631 +2508,3 @@ These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
   option C** (Claude recommended C): keep `nft`/`iptables` as an explicit
   parser/pretty-printer only, fix the docs, steer users to `fw`; defer full/minimal
   kernel wiring (§62).
-
----
-
-## Q57 — Should the kernel run its own test suite on a user's boot? (lane A, 2026-08-22)
-
-**In short:** Right now, every time this OS starts, the kernel runs several
-hundred of its own built-in tests before handing the machine to the user —
-checking things like "is the backspace key still character 127". Most of those
-checks are written so that a failure **stops the machine dead** rather than
-printing a complaint and moving on. Nothing is failing today. The question is
-what *should* happen on a user's computer the first time one of them is wrong:
-refuse to boot, boot with a warning, or not run the checks there at all.
-
-Glossary, once: a **self-test** here is ordinary kernel code that checks some
-other kernel code and prints the result to the serial console. An **assertion**
-is a check written so that failing it panics — the kernel prints a message and
-halts. A **boot test** is what the developer runs in an emulator; a **production
-boot** is a user starting a real machine. Today these run the *same* code.
-
-### Why it is worth deciding
-
-The two audiences want opposite things and currently get the same behaviour:
-
-- On a **boot test**, halting is *good*. The panic names the file, the line and
-  the values that disagreed, which is better diagnostics than a log line, and
-  the run should fail loudly anyway.
-- On a **production boot**, halting is close to the worst option. A wrong
-  assertion about a terminal flag becomes a computer that will not start, and
-  the user has no way to skip it.
-
-Scale, for a sense of the exposure: 567 files under `kernel/src/` contain both a
-`self_test` function and assertions, 12 674 assertion sites in total. Only ~299
-sites use the alternative style that logs a failure and returns an error instead
-of panicking.
-
-### Options
-
-**A — Gate self-tests behind a boot flag; production boots skip them.**
-*What changes:* a user's machine starts faster and never halts over a self-test;
-the developer adds `selftest=1` (or the boot test does) to get today's
-behaviour.
-Cheapest by far — roughly one conditional around the self-test block in
-`kernel_main`. The cost is that a corrupted or mis-built kernel that a self-test
-would have caught now boots and misbehaves later instead.
-
-**B — Always run them, but never panic: convert assertions to logged failures.**
-*What changes:* a failing check prints `FAIL: ...` and the machine keeps
-booting, on developer and user machines alike.
-Keeps the coverage on real hardware, where it is arguably most valuable, since
-a production boot exercises drivers an emulator does not. The cost is 12 674
-edit sites, and each one *loses* information — an assertion reports the compared
-values and its own line number for free, whereas the replacement reports only
-what its author remembered to include. Realistically a slow migration, not a
-single change.
-
-**C — Run them on production boots and keep halting.** *What changes:* nothing;
-this is today's behaviour, made deliberate.
-Defensible on the "fail fast, never run a kernel that fails its own checks"
-argument. The objection is that the checks are not all equally load-bearing —
-halting the machine because `VERASE` is not 127 is not obviously better than
-booting with a warning.
-
-**D — Split the difference: keep assertions for checks about kernel integrity,
-log-and-continue for the rest.** *What changes:* a bad memory-manager invariant
-still halts; a cosmetic terminal-flag mismatch prints a warning and boots.
-Probably the right end state and the most work to get to, since it needs a
-judgement per self-test rather than a blanket rule.
-
-### My recommendation
-
-**A now, D eventually.** A is a one-line change that removes the user-facing
-risk immediately and costs nothing we are currently getting — the boot test,
-which is where these checks actually earn their keep, would still run them with
-the flag set. It also makes B-versus-D a much less urgent question, because
-after A the assertion style only affects developer boots, where panicking is the
-better behaviour anyway.
-
-### If this is never answered
-
-Safe for now — no self-test is failing, and the streak is 11 consecutive clean
-boots. It does not get worse on its own, but it gets *bigger*: the count grows
-every time someone adds a self-test, and A stays a one-line change forever while
-B and D get more expensive. Meanwhile new self-test code (`pathutil`, `net::raw`,
-`net::frag`) is being written in the log-and-continue style, which is the safe
-side of the question whichever way it goes.
-
-Background: `known-issues.md` →
-`TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING`.
-
----
-
-## kshell's `grep` defaults differ from POSIX: line numbers and case-insensitivity are always on
-
-**Lane A.** Raised 2026-08-24. Code: `kernel/src/kshell.rs`, `GrepFlags::new()`.
-
-**In short:** In the kernel shell, `grep alpha file` prints `1:alpha` — with the
-line number — and matches `ALPHA` too. Every other `grep` in the world prints
-just `alpha` and does not match `ALPHA` unless you ask, with `-n` and `-i`
-respectively. Ours turns both on and gives no way to turn them off. This is
-pleasant when you are typing at a prompt and wrong when a script is reading the
-output, and I do not think it is my call which of those two users wins.
-
-### What it is now
-
-```rust
-impl GrepFlags {
-    fn new() -> Self {
-        Self {
-            case_insensitive: true, // default: case-insensitive (like original)
-            show_line_numbers: true,
-            ...
-```
-
-The `-i` and `-n` flags exist but only *set* these to `true` — the value they
-already have — so there is no spelling of `grep` in this shell that turns either
-off. The comment "like original" suggests this was inherited from an earlier
-kshell rather than chosen.
-
-Why it surfaced now: the shell just gained working exit statuses and working
-`$(…)` capture through pipelines, so `grep` output is for the first time
-something programs consume rather than something a human reads. `$(grep p f)`
-returns `1:match`, and stripping that prefix requires knowing it is there.
-
-### Options
-
-**A — leave both on, add `+i`/`+n` (or `--no-line-number`) to turn them off.**
-*What changes:* nothing by default; `grep +n p f` becomes a way to get bare
-lines. Existing habits and any existing scripts keep working.
-
-**B — default both off, matching POSIX; `-i`/`-n` turn them on as everywhere else.**
-*What changes:* `grep alpha f` prints `alpha` instead of `1:alpha`, and stops
-matching `ALPHA`. Anything that currently relies on the prefix breaks, and
-interactive use loses the line numbers unless you type `-n`.
-
-**C — split the difference: line numbers off (they corrupt piped output),
-case-insensitivity left on (it only widens the match set).**
-*What changes:* `grep alpha f` prints `alpha`; `grep ALPHA f` still finds
-`alpha`. `-n` starts working as a real flag.
-
-**D — leave it exactly as is and document it.**
-*What changes:* nothing; scripts must strip the `N:` prefix themselves.
-
-### My recommendation
-
-**C**, weakly. The two defaults are not equally defensible: a line-number prefix
-changes the *bytes* of every line, so it breaks any consumer of the output,
-whereas case-insensitivity only changes *which* lines are selected — surprising,
-but it yields a superset, and a caller who cares can pick a case-specific
-pattern. If you would rather not have a shell that is subtly non-standard in two
-places, **B** is the honest answer and the breakage is small: this shell has few
-scripts, and all of them are ours.
-
-### If this is never answered
-
-Safe, and it does not get worse quickly — but it gets more expensive with
-every script written against the current output, since each becomes a place
-that has to be re-checked if the default changes. Nothing is blocked. The
-inconsistency that *was* dangerous — the piped half printing `1: alpha` while
-the file half printed `1:alpha` — is already fixed (`afe5b0ae2`); what remains
-here is only the choice of default.
-
-## An account with no password: should the lock screen let it through, or refuse forever? (lane C, 2026-08-24)
-
-**In short:** Some accounts have no password set at all. Today, if such an
-account's screen locks, pressing Enter dismisses it — no password is asked for,
-because there is none to ask for. That means anyone who walks up to that
-machine while it is locked gets straight into the session. The obvious fix is to
-refuse: a lock screen with nothing to check should let nobody in. But then the
-*real* user is locked out too, permanently, with no way back to their own
-desktop short of a reboot. I need you to pick which of those two you would
-rather ship.
-
-### Where it bites
-
-`apps/lockscreen/src/main.rs`, `LockScreen::unlocks_for` — one function, written
-specifically so that this is a one-line change once you decide. It is called by
-`submit_password` on every attempt.
-
-The verdict now comes back as one of six values borrowed from lane B's
-`userspace/authlib` (`Accepted`, `Rejected`, `Locked`, `NoPassword`, `Unusable`,
-`RateLimited`). Five of them decide themselves. `NoPassword` — meaning "the
-stored entry for this account is empty" — deliberately does not, because lane B
-made it the *caller's* policy: a console login may reasonably let an empty entry
-through, and a lock screen may not. So each caller must state its own rule, and
-this is ours to state.
-
-### Why it is not obvious
-
-The security argument is clean and lane B makes it: an empty-password account
-means anyone who closes the lid owns the machine.
-
-The counter-argument is that the hole was already open. If the account has no
-password, an attacker standing at that machine can log in as that user from the
-*login* screen without typing anything. Refusing at the lock screen protects an
-already-running session and nothing else — while creating a failure mode that
-is arguably worse than the hole: a desktop that cannot be got back into by the
-person it belongs to.
-
-### Options
-
-**A — accept it (what it does today).**
-*What changes:* nothing. A passwordless account's lock screen is dismissed by
-pressing Enter, as now.
-
-**B — refuse it.**
-*What changes:* a passwordless account that locks can never be unlocked. The
-screen says "This account has no password" and stays up until the machine is
-restarted.
-
-**C — never lock a passwordless account in the first place.**
-*What changes:* auto-lock is suppressed and the manual lock command is refused
-for an account with no password, so the trap in B cannot be entered. If the
-screen is somehow reached anyway it dismisses on any key, as in A. Costs a
-little more code: the suppression has to live wherever locking is triggered,
-not only in the screen.
-
-**D — accept it, but require the account to have been passwordless *before* the
-session started**, so that clearing a password while locked cannot open the
-screen.
-*What changes:* nothing a user would notice; closes a narrow race that only
-matters once `passwd` can be run by something other than the session owner.
-
-### My recommendation
-
-**C.** It is the only one of the four that is neither a hole nor a trap: it
-declines to offer a security boundary that does not exist, rather than
-pretending to enforce one (B) or pretending to have enforced one (A). B's
-failure mode is the one I would least like to explain to a user, because it
-takes a working desktop and makes it unusable through no action of theirs.
-
-If C is more machinery than you want here, **A** — the status quo — is the safer
-of the two remaining, for the reason above: it does not create a new way to lose
-a session, and the exposure it leaves is one the login screen already has.
-
-### If this is never answered
-
-Safe, and it does not get worse. The screen keeps behaving as it always has
-(option A) and the policy is isolated in one function, so answering later costs
-one line plus a test. Nothing is blocked on it. The reason it is worth asking at
-all is that the *refactor that surfaced it* deliberately did not change it —
-altering who can unlock a machine is not something to slip into a commit about
-interface shape.
-
----
-
-## Should `oci run` refuse to start when an option cannot be applied? (lane A)
-
-**In short:** `oci run` starts a container. If you ask it for something extra —
-a shared folder (`-v`), a published port (`-p`), a file of labels or
-environment variables — and it cannot do that one thing, it currently prints a
-warning, starts the container anyway, and reports success. So you can ask for a
-container with your data folder attached, get one *without* it, and be told
-everything worked. Docker refuses to start at all in this situation. The
-question is which of those two behaviours we want.
-
-**Where:** `kernel/src/kshell.rs`, the `oci run` argument loop — eleven sites,
-all reading `[oci] Warning: could not …` or `[oci] Could not read …-file`.
-Raised during the exit-status sweep (`known-issues.md` →
-`A-KSHELL-3676-FAILING-COMMANDS-REPORTED-SUCCESS`), which deliberately left all
-eleven alone because changing the *status* without deciding the *contract*
-would be the dangerous half of the change on its own.
-
-### Why the sweep did not just fix it
-
-Every other failing command in the shell got a non-zero exit status. These
-eleven did not, because here a non-zero status is worse than the bug. The
-idiom `oci run … || cleanup` exists, and `cleanup` tears down a container.
-Flipping the status would make it tear down a container that is **up and
-running** — turning a wrong exit code into destroyed work. The rule the sweep
-used for this command instead was "did the container start?", and the one site
-that answers no (`Cannot allocate IP from network`) already sets a status and
-returns.
-
-That leaves the real question untouched: should asking for an option that
-cannot be applied mean the container should not have started?
-
-### Options
-
-**A — refuse to start (Docker's behaviour).** Validate every requested option
-before launching; if any cannot be applied, print the reason, start nothing,
-exit non-zero.
-*What changes:* `oci run -v /data:/data img` on an unmountable `/data` prints
-the error and you get **no container**, instead of a running container with no
-`/data`. `|| cleanup` becomes correct, because there is nothing to clean up.
-
-**B — start anyway, but exit non-zero** (today's behaviour plus a status).
-*What changes:* the container still starts without `/data`, but the command
-reports failure — so `|| cleanup` fires **against a live container** and
-destroys it. This is the option that looks like a small fix and is not.
-
-**C — leave exactly as is: warn, start, exit 0.**
-*What changes:* nothing. A script cannot tell that an option was dropped, and
-must inspect the container afterwards to find out.
-
-**D — split by option kind.** Treat options that change what the container *is*
-(`-v`, `-p`, `--label-file`, `--env-file`) as A, and options that are advisory
-(`--read-only` best-effort, tmpfs) as C.
-*What changes:* the dangerous ones fail closed, the cosmetic ones stay
-warnings. More faithful, and more code, and the boundary needs writing down or
-it will drift.
-
-### My recommendation
-
-**A**, matching Docker. The reason is that a container is not a partial
-artifact: you cannot inspect one to discover which options were silently
-dropped, so "started, but not as requested" is a state no caller can act on. A
-is also the only option under which the existing `|| cleanup` idiom is safe,
-because it guarantees there is nothing running to clean up. **D** is defensible
-if refusing to start over an unapplied tmpfs feels too strict — but it needs an
-explicit list, not a judgement call per site.
-
-**Not B.** It is the smallest diff and it is actively harmful.
-
-### If this is never answered
-
-Safe, and stable — today's behaviour destroys nothing and the sweep left it
-untouched on purpose. It does not degrade with time. What it costs is that
-`oci run` cannot be scripted reliably: any script that cares whether its
-options took effect has to verify them itself afterwards, and every such script
-is a place that would need revisiting if the contract later changes.
-
----
-
-## The shell's `grep` ignores case and numbers lines by default, unlike every other Unix (lane A, 2026-08-24)
-
-**In short:** In our shell, typing `grep Error mylog.txt` also finds `error`
-and `ERROR`, and prints each result with a line number in front of it, like
-`42:error: disk full`. Real `grep` on Linux/macOS does neither: it matches
-`Error` exactly, and prints just the line. Our version behaves as though you
-had typed `grep -i -n`. This is very likely a deliberate choice made early on
-for interactive convenience, but it was never written down, and it means
-commands copied from any Unix documentation or tutorial quietly do something
-different here. The question is whether to keep it.
-
-Where it lives: `GrepFlags::new()` in `kernel/src/kshell.rs` (~94901), which
-sets `case_insensitive: true` with the comment *"default: case-insensitive
-(like original)"*, and `show_line_numbers: true`.
-
-### Why it is worth asking rather than just fixing
-
-Two things push this out of "obviously a bug":
-
-1. **The comment says it is intentional** — "like original" reads as
-   *preserve the behaviour kshell already had*, not as an oversight.
-2. **There is already an opt-out for the case half, and it is a made-up one.**
-   The shell accepts `-I` to mean "be case-sensitive after all". In GNU grep,
-   `-I` means something completely different (ignore binary files). So this is
-   not merely a changed default; a real flag has been re-purposed to undo it.
-   Restoring the GNU default would also have to decide what `-I` then means.
-
-The line-number half has no opt-out at all: there is no way to turn `-n` off.
-
-### What it costs today
-
-Copy-pasted commands silently mean something else. Two examples of the shape:
-
-| Written | Means elsewhere | Means here |
-|---|---|---|
-| `grep Error log` | lines containing `Error` | also `error`, `ERROR` |
-| `grep -c pat f` | a count | a count (unaffected — `-c` overrides output) |
-| `grep pat f \| cut -d: -f2` | the second `:`-field of the line | the *line*, because field 1 is now the line number |
-
-The last one is the sharp edge: `-n` on by default changes the *shape* of the
-output, so any pipeline that splits a grep result on `:` is reading one field
-off. Nothing errors; it just quietly reads the wrong column.
-
-It is also now load-bearing in a test. Self-test rung 25 asserts `1:alpha`
-rather than `alpha`, with a comment pointing here — so a change of default is a
-one-line test update, not a hunt.
-
-### The options
-
-**A — restore GNU defaults: case-sensitive, no line numbers.**
-*What changes:* `grep Error log` stops matching `error`; `grep pat f` prints
-`the matched line` instead of `42:the matched line`. `-i` and `-n` turn each
-back on. `-I` needs a new meaning (either drop it, or make it GNU's
-ignore-binary — which this shell already does implicitly under `-r`).
-
-**B — keep both defaults, and document them.**
-*What changes:* nothing in behaviour. `grep --help` and the shell's docs gain
-an explicit note that `-i -n` are implied, plus a way to switch them off.
-
-**C — split the two.** Restore GNU's case-sensitivity (the one that changes
-*which lines* you get, and can therefore hide a result you needed), keep `-n`
-(which only changes how they are printed).
-*What changes:* `grep Error log` stops matching `error`; output still carries
-line numbers.
-
-**D — keep case-insensitivity, drop the default `-n`.** The inverse of C.
-*What changes:* output shape matches GNU, so `:`-splitting pipelines work;
-matching stays lenient.
-
-### My recommendation
-
-**A**, with `-I` dropped rather than redefined. The value of matching the rest
-of Unix here is not aesthetic — it is that every piece of grep knowledge a user
-already has, and every command in every tutorial, becomes correct instead of
-subtly wrong. Convenience defaults are cheap to type back (`-i`, `-n`) and
-expensive to discover you were getting.
-
-If A feels too disruptive, **C** is the safer half-step: a wrong *set of lines*
-is a wrong answer, whereas a line-number prefix is visible on sight. **D** is
-the weakest — it fixes the cosmetic half and keeps the half that can hide a
-result.
-
-### If this is never answered
-
-Safe and stable; nothing degrades. The cost is ongoing and quiet: every
-`grep` command a user brings from outside behaves differently than they expect,
-and any pipeline that splits on `:` reads the wrong field. It also gets
-*slightly* more expensive to change over time, since each new script written
-against the current defaults is one more thing to check.
-
-## SlateOS has no way to encrypt anything. Which cipher do we add, and who owns it? (lane C, 2026-08-26)
-
-**In short:** The whole operating system can *scramble* data so it can be
-checked (SHA-256, MD5, SHA-1, CRC32 — those are all one-way fingerprints), but
-it cannot **encrypt** anything: there is no code anywhere in the tree that turns
-readable data into unreadable data and back again with a key. So the password
-manager I just wired to a real window cannot save your passwords — not because
-nobody has written the save code, but because there is nothing to lock the file
-with. Adding a cipher is a few hours' work, but *which* one is a decision that
-sticks, because every file written under it has to stay readable forever.
-
-### Where it bites
-
-Anything that needs to store a secret on disk, which is at least:
-
-| Wants it | For | Status |
-|---|---|---|
-| `apps/credmanager` | the password vault | wired to a window, stores nothing — `known-issues.md` → `C-CREDMANAGER-HAS-NO-VAULT-ON-DISK` |
-| `gui/credentials` | saved Wi-Fi and site logins | same gap |
-| `apps/archivemanager` | encrypted zip members | can't read them either — `C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT` |
-| whole-disk encryption | the roadmap's storage section | not started |
-
-`pwkdf` already turns a master password into a 256-bit key correctly, with salt
-and a tunable cost. That half is done and tested. The missing half is what to
-*do* with the key.
-
-### The terms, since two of them do the work
-
-- **AEAD** — "authenticated encryption": a cipher that both hides the data and
-  detects tampering. The alternative (encrypt-only) lets an attacker flip bits
-  in your vault and have it decrypt to different, valid-looking garbage. Nobody
-  should ship encrypt-only in 2026; treat AEAD as settled and read the options
-  below as "which AEAD".
-- **AES-NI** — a CPU instruction that makes AES fast. Without it, a careful
-  software AES is ~5-10× slower *and* much harder to write without leaking the
-  key through timing. Every x86-64 chip since ~2010 has it, but we would be
-  choosing to depend on it.
-
-### Options
-
-**A — ChaCha20-Poly1305, written here.**
-*What changes:* one new `no_std` crate at the workspace root, ~400 lines, no CPU
-feature required. Fast and constant-time in plain Rust on any machine.
-This is what WireGuard and TLS 1.3 use on hardware without AES-NI.
-
-**B — AES-256-GCM, written here.**
-*What changes:* the same shape, but the software fallback is the part that is
-easy to get subtly wrong (timing leaks through table lookups), and doing it
-*properly* means writing the AES-NI path too — so it is really two
-implementations, and the interesting one is x86-only.
-
-**C — port a vetted C implementation instead of writing Rust.**
-*What changes:* no new hand-written crypto, but a C dependency in the build for
-every app that stores a secret, and `design.txt` already says C is for porting
-existing code — which this would be. Slower to land, harder to audit in-tree.
-
-**D — decide later; ship the apps without persistence.**
-*What changes:* nothing. credmanager keeps opening an empty vault every launch,
-`gui/credentials` keeps forgetting Wi-Fi passwords, and the gap spreads to
-whatever gets built next.
-
-### The part that is not mine to decide
-
-Even given a choice, **which lane owns it** is open. The hash crates (`sha2`,
-`sha1`, `md5`) live at the workspace root and are shared by all three lanes, so
-a cipher belongs there too — but that is outside every lane's write glob. If
-you pick A or B, say whether lane C should write it at the root, or whether I
-should file a request to lane A and pick up something else.
-
-### My recommendation
-
-**A, written by whichever lane you say.** ChaCha20-Poly1305 has no CPU
-dependency, so there is one implementation rather than a fast path and a
-dangerous fallback; it is the easiest of the three to write correctly and the
-easiest to test against published vectors. The reason I am asking rather than
-doing it is not the cipher — it is that hand-written crypto in an OS is exactly
-the kind of thing you may want to overrule on principle, and the file format it
-implies is permanent.
-
-### If this is never answered
-
-Nothing breaks and nothing gets worse on its own — but a growing number of
-finished, tested applications stay unable to do the one thing they exist for.
-credmanager is the third app now waiting on this. It is not blocking my current
-work; I am carrying on down the roadmap.
-
----
-
-## Two commits that appear to delete the whole OS, and 33 commits signed by a fake name, are permanently in the published history. Leave them, or rewrite? (lane A, 2026-08-29)
-
-**In short:** on 2026-08-29 a safety check that runs just before uploading code
-accidentally committed to the real project instead of to the scratch copy it
-meant to use, and those commits got uploaded. As far as those two commits are
-concerned, every file in the operating system was deleted. **The current files
-are completely fine** — I repaired that within minutes, and nothing is missing.
-What
-remains is only the *record*: anyone scrolling back through the project's
-history will see two commits that look like a catastrophe. Removing them from
-the record is possible but requires an operation I am forbidden to perform
-without you saying so, because it can destroy other people's work.
-
-**Updated later the same day — the record is wrong in a second way.** The same
-accident also wrote a fake author name into the project's shared settings, so
-**33 commits are signed `selftest <selftest@example.invalid>` instead of your
-name**. That covers every commit all three sessions made over about an hour,
-including the ones that fixed the accident. The settings are repaired, so no
-*new* commit is affected; the 33 already made cannot be corrected except by the
-same forbidden operation. This does not change the question, but it does change
-what is at stake in it, so both are decided together.
-
-**Question.** Should the published history be rewritten — to remove the two
-commits (`7f6a6b446` "base" and `71f164f7e` "delete one, sweep another"), to
-re-sign the 33 misattributed ones, or neither?
-
-Two terms, glossed:
-
-- **Published history** — the copy on GitHub that all three lanes (the three
-  parallel Claude sessions) pull from. Everyone's work is built on top of it.
-- **Force-push** (the operation in question) — replacing that shared history
-  with a different one. It is the only way to remove a commit that is already
-  published. It is dangerous because any lane whose work sits on top of the
-  removed commits has its history invalidated, and anything not yet uploaded
-  can be lost outright. Standing project policy forbids it without your
-  explicit say-so, which is why this is a question and not something I did.
-
-**What the current state actually is.** The repair used a merge whose *content*
-is the correct tree, so the files are right and both branches moved forward
-normally — no rewriting was needed. The two bad commits survive as *ancestry*
-(steps in the chain) but not as *content* (no file reflects them). `git log`
-shows them; `git status` and every checkout are clean.
-
-**The misattributed commits, by branch.** All are pushed:
-
-| Branch | Commits signed `selftest` |
-|---|---|
-| `lane-a` | 16 |
-| `lane-b` | 9 |
-| `lane-c` | 3 |
-| `main` | 5 |
-
-Two facts that make this less bad than it sounds, and are the reason it is
-folded into an existing question rather than raised as an urgent one. First,
-**there is no attribution dispute to get wrong**: you are the sole author of
-record for this entire project, so a wrong name credits nobody else and steals
-credit from nobody. Second, **the commit messages are intact** — the *content*
-of the record is right, and only the signature is wrong. What it actually costs
-is that `git log --author` and any per-author statistic silently omit an hour
-of work, and anyone reading the log cold sees a contributor who does not exist.
-
-### Options
-
-**A. Leave both, documented.** *What changes:* nothing observable; `git log`
-keeps showing two alarming-looking commits and an hour of work signed by a
-name that is not yours, and `known-issues.md` explains why. *Pros:* zero risk;
-no force-push; the incident stays legible, which has value — the commits are
-the evidence for the post-mortem that produced the fix. *Cons:* anyone reading
-history cold gets a scare and has to go find the explanation; a future
-automated tool that audits history for mass deletions will flag them forever;
-per-author statistics stay wrong for those 33 commits.
-
-**B. Rewrite history to remove and re-sign them.** *What changes:* `git log`
-no longer shows the two commits, and the 33 carry your name. *Pros:* a clean
-and correctly-signed record. *Cons:* requires a force-push to `main` and all
-three lane branches — note that the authorship half touches **all four**,
-where removing the two commits alone would have touched two, so the blast
-radius is larger than it was when this question was first written. The other
-two lanes must re-sync, and any uncommitted or unpushed work of theirs is at
-risk; ~40 commits now sit on top of the bad ones, all of which get new
-identities, invalidating every commit hash cited in `known-issues.md`,
-`design-decisions.md` and the request files — including the citations *in the
-entry that explains this incident*.
-
-**C. Re-sign the 33, but leave the two commits.** *What changes:* the log
-still shows the two commits, but every commit carries your name.
-*Pros:* fixes the half that is factually wrong (a signature naming someone who
-does not exist) while leaving the half that is merely ugly-but-true (the
-commits really did happen). *Cons:* this is not actually cheaper than B —
-re-signing rewrites the same commits a removal would, needs the same
-force-push to the same four branches, and invalidates the same hashes. It buys
-less for the same risk, which is why I list it only to note that it is not the
-compromise it looks like.
-
-### If never answered
-
-Option A is the current state and it is safe. Nothing is blocked and nothing
-degrades functionally — but it does get *more* expensive to change with time,
-since every commit added on top is one more that a rewrite would have to
-rewrite. If you are ever going to pick B, sooner costs less.
-
-### Claude's recommendation
-
-**A, still, and the new evidence does not move me.** The content is correct,
-the incident is documented at length in `known-issues.md`
-(`A-A-PUSH-GATE-DELETED-THE-REPOSITORY-IT-WAS-GATING`), and trading a cosmetic
-blemish in the log for a force-push across three active lanes is a bad
-exchange — the cure has a real chance of destroying work, which is precisely
-the failure the original bug caused.
-
-The authorship damage is the kind of finding that *feels* like it should tip
-the balance, and I do not think it does: it makes the record uglier without
-making it wrong in any way that costs anyone anything, since you are the only
-author this project has. Meanwhile it makes option B strictly more dangerous
-than it was, because it drags the third lane's branch into a rewrite that
-previously did not need to touch it. The case for A got stronger, not weaker.
-
-I raise it only because it is your history, force-push authority is yours
-alone, and the cost of choosing B rises with every commit.
-
-**Where it bites.** Git history only: `7f6a6b446` and `71f164f7e`, repaired by
-`f0534726e`; plus 33 commits between 22:43 and 23:54 on 2026-08-29 whose author
-field reads `selftest <selftest@example.invalid>`. No file in the tree is
-affected, and the shared config that caused the misattribution is repaired, so
-the count cannot grow.
-
-**Status:** OPEN

@@ -555,6 +555,19 @@ fi
 # scripts/argv-utf8-baseline.txt, this fails only on a finding that is *not* in
 # it, and it runs only when the push touches `userspace/`.
 #
+# WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. `--head "$sha"` makes the checker
+# read that revision — every `.rs` under `userspace/coreutils` *and the
+# baseline* — via scripts/gittree.py. The baseline is the sharper half here:
+# read from the disk it silences a finding in a commit that does not contain
+# the silencing line, so an uncommitted baseline edit publishes a panicking
+# utility and the gate stays green on every later push too, because by then the
+# edit is committed. Gate 7 shipped the worktree-reading version of this defect
+# and published two unformatted commits. Measured: the gated tree is ~0.5s
+# either way, so this costs nothing.
+#
+# One run per ref being pushed, as gates 2 and 3 do: this asks a question about
+# a *state* rather than a diff, so only each ref's tip matters.
+#
 # Bypass: ALLOW_ARGV_UTF8=1 git push origin <branch>
 # ---------------------------------------------------------------------------
 
@@ -568,6 +581,10 @@ fi
 argv="${repo_root:-.}/scripts/argv-utf8.py"
 [ -f "$argv" ] || skip_argv=1
 touches userspace/ || skip_argv=1
+# Nothing being published is nothing to judge — and this is also what stops the
+# `--head` loop below from silently degrading to zero runs while `note_gate` had
+# already reported the gate as having run.
+[ -n "${pushed_shas# }" ] || skip_argv=1
 note_gate argv-utf8 "$skip_argv"
 
 argv_failed=0
@@ -576,11 +593,21 @@ if [ "$skip_argv" != "1" ]; then
     # and more sharply here, because this defect cannot be reproduced on the
     # development host at all. Nothing but --selftest stands between a broken
     # regex and a permanently green gate.
+    #
+    # No `--head` here, deliberately, for gate 3's reason: --selftest runs the
+    # rules against source literals inside the script and touches no tree.
     if ! run_checker argv-utf8-selftest "$py" "$argv" --selftest; then
         echo "pre-push: argv-utf8.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         argv_failed=1
-    elif ! run_checker argv-utf8 "$py" "$argv" --check; then
-        argv_failed=1
+    else
+        for sha in $pushed_shas; do
+            # Per-sha gate name, for gate 9's reason: a shared name lets a
+            # later clean sha delete the kept log of an earlier failing one.
+            if ! run_checker "argv-utf8-$sha" "$py" "$argv" \
+                             --check --head "$sha"; then
+                argv_failed=1
+            fi
+        done
     fi
 fi
 

@@ -1,7 +1,12 @@
 # C → A — the `Transceiver` trait has landed; here are the exact signatures
 
-**From:** Lane C. **To:** Lane A. **Filed:** 2026-09-02. **Status:** open —
-waiting on lane A for an `impl` and one call site.
+**From:** Lane C. **To:** Lane A. **Filed:** 2026-09-02.
+**Status:** ✅ **BOTH ASKS LANDED 2026-09-03 by lane A** — `impl Transceiver for
+HwsimRadio` at `kernel/src/net/hwsim.rs:847`, and the call site is
+`kernel/src/net/hwsim_ap.rs`, an authenticator plus a 9-check association
+self-test run from `main.rs:6724` on every boot. Green in boot 615. Reply:
+`requests/a-c-the-transceiver-impl-and-the-call-site-are-in-and-both-of-your-asks-are-green.md`.
+(Status line as filed: *open — waiting on lane A for an `impl` and one call site.*)
 
 **Follows:** `requests/c-a-option-2-the-transceiver-trait-is-mine-and-i-am-writing-it-now.md`,
 which promised *"I will file a follow-up request with the exact signatures once

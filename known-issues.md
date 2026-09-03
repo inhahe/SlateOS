@@ -109195,3 +109195,60 @@ the caller. That is a second copy of the layout, and the bug is then in whicheve
 copy you are not reading — exactly the failure
 `C-NETMANAGER-CLICKED-ROWS-THAT-WERE-NOT-ON-SCREEN` documents, where two private
 copies of `Frame` disagreed about clipping.
+
+**Fixed 2026-09-03**, along the prescribed line and with the two rules intact:
+a single click selects, a double-click on a directory navigates, and every
+pointer event — including one landing past the dialog's own edges — is swallowed
+so nothing reaches the window behind. `render` is now a thin wrapper over
+`pub fn frame(width, height) -> Frame<DialogTarget>`, so no caller had to change
+how it draws; `handle_mouse(&mut self, event, width, height) -> DialogAction`
+hit-tests that same frame. `apps/archivemanager` (six pickers) and
+`apps/diskimager` forward the pointer to it now.
+
+Three things the fix turned out to require that the plan above did not name:
+
+- **Scrolling, or the fix would have been half a fix.** The list culled every
+  row past the bottom edge and had no offset at all, so the tail of a long
+  directory was unreachable by *any* means — the keyboard did not scroll to
+  follow its own selection either. Shipping a clickable list whose rows below
+  the fold cannot be reached would have been a picker that still could not open
+  most files. There is now a wheel, a keyboard reveal, a page step, and a
+  scrollbar that can be *dragged* — a drawn-but-inert one would only reproduce
+  `C-SPREADSHEET-SCROLLBARS-ARE-DRAWN-BUT-NOT-DRAGGABLE`. The thumb's track and
+  rect are read back out of the frame that was just drawn (`Frame::rect_of`),
+  not recomputed, for the reason the paragraph above gives.
+- **Reveal has to be stateful, not re-imposed at render time.** The obvious
+  design — "render always scrolls to show the selection" — makes the wheel
+  useless, because every notch is undone by the next frame. So the scroll
+  follows the selection only when a *keystroke moves* it; explicit scrolling is
+  allowed to leave the selection off screen, which is what every file manager
+  does. `the_wheel_may_scroll_away_from_the_selection` pins it.
+- **The dialog stores no size of its own.** `render(&self, width, height)` is
+  given its size and cannot write anything back, so a stored copy would be a
+  second answer to "how big is this dialog" that can disagree with the
+  renderer's — the same class of divergence as a recomputed hit box. Every
+  method that has to move the scroll takes the size as an argument instead,
+  which is why `handle_event` grew a `height` parameter and the three callers
+  had to be touched.
+
+Two pre-existing bugs surfaced while doing it, both invisible only because
+nothing could reach them, both fixed here:
+
+- `toggle_sort` set the sort field and never reordered `self.entries`. The
+  moment the headers became clickable that would have been a column header
+  which moves its own little arrow and nothing else. It now re-sorts, and
+  follows the picked *entry by name* through the reordering — keeping the row
+  *number* would let a click on "Size" change which file Open opens.
+- Alt+Backspace decided whether to report `NavigatedTo` by asking whether any
+  history remained *afterwards*. Going back to the first directory of the
+  session — the one case that empties the history — therefore reported no move,
+  and the host left the previous directory's files on screen under the new
+  directory's name. All three navigations now compare the path before and
+  after.
+
+**Still open after this:**
+`C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER` — the caller that declined to
+use the widget because of this bug — is now unblocked but not yet done. The
+start menu's Run box is likewise still waiting on a caller, not on the widget.
+`TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE`
+is untouched by this change and remains open.

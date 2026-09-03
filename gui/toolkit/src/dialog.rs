@@ -20,6 +20,37 @@
 //!     .with_filter("Text files", &["*.txt"])
 //!     .with_filename("untitled.txt");
 //! ```
+//!
+//! # Driving it
+//!
+//! Forward keys to [`FileDialog::handle_event`] and pointer events to
+//! [`FileDialog::handle_mouse`]; both answer with a [`DialogAction`]. Forward
+//! *every* pointer event while the dialog is up, including ones landing outside
+//! its edges — it swallows those deliberately, and that is what makes it modal.
+//!
+//! The dialog does no I/O of its own: it shows whatever listing it was handed,
+//! so a [`DialogAction::NavigatedTo`] is a *request* for a fresh one, answered
+//! with [`FileDialog::set_entries`]. Leaving one unanswered puts the previous
+//! directory's files on screen under the new directory's name.
+//!
+//! ## The dialog stores no size
+//!
+//! [`render`](FileDialog::render) is *given* a width and height and cannot
+//! write anything back, so a size kept on the widget would be a second answer
+//! to how big the dialog is, free to disagree with the one it was last drawn
+//! at. It keeps none — which is why the two handlers take the size too. Pass
+//! them the size of the most recent `render`, or clicks will be tested against
+//! a layout the user is not looking at.
+//!
+//! ## Hit-testing
+//!
+//! [`FileDialog::frame`] is the single walk that both draws the dialog and
+//! records where each control landed, as a [`Frame<DialogTarget>`](crate::frame::Frame);
+//! `render` is a thin wrapper over it. Hosts that only draw need nothing new,
+//! and hosts that want to name a control themselves — a test, usually — can ask
+//! the frame where it is rather than recomputing it. Recomputing row geometry
+//! outside this module is the one thing not to do: it is a second copy of the
+//! layout, and the bug then lives in whichever copy you are not reading.
 
 use crate::color::Color;
 use crate::date::Date;

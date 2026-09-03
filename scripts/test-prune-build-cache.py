@@ -16,9 +16,12 @@ ago.  A self-test that quietly stopped asserting would restore both.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import srcload  # noqa: E402 - the path has to be set up before this import
 
 # The number of checks the suite had when this wrapper was written.  Compared
 # with `<` rather than `==` so adding an assertion does not fail the build,
@@ -34,15 +37,17 @@ def load():
     name; the file is loaded by path instead.  It is named for the command it
     provides, and renaming it to suit Python's import rules would make the
     command harder to find for the sake of this one caller.
+
+    `srcload`, not `importlib.util.spec_from_file_location`, because the
+    latter consults `__pycache__` and decides the bytecode is current from the
+    source's `(mtime, size)` -- and the recorded mtime has one-second
+    resolution.  Two same-size writes inside one second therefore run the
+    *first* one, which is the shape every mutation-test and edit-rerun loop
+    has.  This wrapper had that defect until it was noticed by the `.pyc` it
+    left behind; see `srcload.py`'s own docstring for how it was originally
+    found.
     """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prune-build-cache.py")
-    spec = importlib.util.spec_from_file_location("prune_build_cache", path)
-    if spec is None or spec.loader is None:
-        print(f"FATAL: cannot load {path}")
-        sys.exit(1)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return srcload.load(os.path.join(HERE, "prune-build-cache.py"), "prune_build_cache")
 
 
 def main():

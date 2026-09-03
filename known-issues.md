@@ -31650,12 +31650,14 @@ phrase in it, which markdown and comment text make entirely plausible.
 
 ## C-FONT-SHAPING-IS-1400X-SLOWER-THAN-IT-SHOULD-BE (lane C, 2026-08-17)
 
-**Status: OPEN, but 36-43x recovered — root-caused 2026-08-17 and three fixes
-landed the same day. Shaping now costs ~0.8 us/character where it cost ~29,
-and a 1,000-character line is 0.73 ms where it was 30 ms. That is still an
-order of magnitude off HarfBuzz, so the entry stays open — but it is no longer
-a cliff, and the editor work it was blocking can proceed. What remains is
-named under "What is left" below.**
+**Status: OPEN, but 38-45x recovered — root-caused 2026-08-17, three fixes
+landed the same day and a fourth on 2026-09-02. Shaping now costs ~0.7
+us/character where it cost ~29, and a 1,000-character line is 0.70 ms where it
+was 30 ms. That is still an order of magnitude off HarfBuzz, so the entry stays
+open — but it is no longer a cliff, and the editor work it was blocking can
+proceed. What remains is named under "What is left" below, and the phase table
+that says which pass to attack is now a permanent instrument rather than a
+patch someone has to rewrite.**
 
 **Read "How the numbers here were taken" before comparing any two tables in
 this entry.** Every figure recorded on the day of the fixes was a *median*, and
@@ -31677,7 +31679,8 @@ three orders of magnitude off.
 kept in the tree so the numbers can be re-taken elsewhere):
 
 ```
-cargo test --release -p guitk --lib shaping_cost -- --ignored --nocapture --test-threads=1
+cargo test --release -p guitk --lib shaping_cost \
+    --target x86_64-pc-windows-gnu -- --ignored --nocapture --test-threads=1
 ```
 
 | chars | system face | built-in bitmap face | ratio |
@@ -31838,10 +31841,12 @@ nearly three times below the bug, which sat at 1400-2200x. (Those two figures
 read 80x and 147x while the module reported medians. Nothing about the shaping
 changed.)
 
-**The phase breakdown, measured directly.** Once `GSUB` stopped dwarfing
-everything, the coarse A/B stopped being a useful guide, so `shape_with` was
-temporarily instrumented to time each pass and the medians taken over 51
-shapings of 80 characters (release build):
+**The first phase breakdown — SUPERSEDED, kept for the history.** Once `GSUB`
+stopped dwarfing everything, the coarse A/B stopped being a useful guide, so
+`shape_with` was temporarily instrumented to time each pass and the medians
+taken over 51 shapings of 80 characters (release build). **Do not act on this
+table** — see "The phase breakdown, re-taken" below, which contradicts two of
+the three items this one was used to predict:
 
 | phase | median | share |
 |---|---:|---:|
@@ -31947,23 +31952,136 @@ every absolute figure did not. The factor shrinks with workload size, which is
 the same fact as the sampling floor above: a 1 ms stall is 100% of a 1 ms
 shaping and 5% of a 20 ms one.
 
-**What is left.** Both continuations this entry originally named are done, and
-so is the `GPOS` one the re-measurement turned up. What remains:
+**The phase breakdown, re-taken (2026-09-02) — and this time the instrument
+lives in the tree.** The table above was taken by editing `shape_with` in place
+and throwing the edit away, which is why it went stale in two ways at once and
+why nobody could re-take it without rewriting the patch. The replacement is
+`gui/font/src/phase.rs`, behind `osfont`'s `phase-timing` feature, read out by
+`guitk`'s `text::shaping_cost::shaping_phases`. Off, it compiles to nothing at
+all — a unit struct with no destructor. On, each pass charges its own lifetime
+to a thread-local total.
 
-1. **Re-take the phase breakdown**, and with the minimum this time. The table
-   above predates the `GPOS` fix, so `gpos`'s 19.9% is now roughly 3 points
-   lower and every other share correspondingly higher; and it was taken with
-   the statistic that turned out to be measuring Windows. The patch that
-   produces it is small and is described above; do not attack anything on the
-   strength of the stale table.
-2. **The likely next items, from that table:** `norm::pieces` at 8.8% and the
-   `advances` loop at 6.3%. The latter is one `advance_at` per glyph — an
-   `hmtx` read plus a variation-store lookup — and is a plain caching
-   candidate. Neither is confirmed; **do not guess** — this entry's original
-   `cmap` hypothesis survived a careful reading of the code and was killed only
-   by measurement.
-3. `GSUB` remains the largest single item at ~55% and is not exhausted, but it
-   has now had two rounds of work and the next one will be harder than either.
+```
+cargo test --release -p guitk --features phase-timing --lib shaping_phases \
+    --target x86_64-pc-windows-gnu -- --ignored --nocapture --test-threads=1
+```
+
+(`--target` is not optional: the workspace defaults to the freestanding
+`x86_64-slateos` target and a host test built against it fails in the
+thousands.)
+
+Best of 101 shapings, taken **per phase** rather than by keeping the fastest
+shaping whole — a shaping quiet in every pass at once is far rarer than a quiet
+pass:
+
+| phase | 80 chars | 200 chars | 1,000 chars |
+|---|---:|---:|---:|
+| `gsub` | 41.9 us / **67.3%** | 99.5 us / **68.5%** | 481.1 us / **69.4%** |
+| `norm` | 7.9 us / **12.7%** | 18.9 us / **13.0%** | 92.6 us / **13.4%** |
+| `glyphbuild` | 3.5 us / 5.6% | 8.3 us / 5.7% | 39.3 us / 5.7% |
+| `pre+script` | 2.6 us / 4.2% | 6.2 us / 4.3% | 30.2 us / 4.4% |
+| `gpos` | 1.6 us / 2.6% | 3.2 us / 2.2% | 13.9 us / 2.0% |
+| `joining` | 1.0 us / 1.6% | 2.4 us / 1.7% | 12.2 us / 1.8% |
+| `tail` | 0.7 us / 1.1% | 1.7 us / 1.2% | 7.8 us / 1.1% |
+| `marks` | 0.5 us / 0.8% | 1.1 us / 0.8% | 5.5 us / 0.8% |
+| `advances` | 0.4 us / 0.6% | 0.9 us / 0.6% | 4.2 us / 0.6% |
+| `segprep` | 0.2 us / 0.3% | 0.3 us / 0.2% | 0.4 us / 0.1% |
+| `byte_levels` | 0.0 us / 0.0% | 0.1 us / 0.1% | 0.5 us / 0.1% |
+| unaccounted | 2.0 us / 3.2% | 2.7 us / 1.9% | 5.7 us / 0.8% |
+| instrumented total | 62.3 us | 145.3 us | 693.4 us |
+
+The `marks` row is a new phase, split out of what the old table counted inside
+`segprep`, and the split is why: `segprep` is per *segment* and measures 0.1%,
+while `marks` is per *glyph* and was 8.2-8.7% before the fix below. Lumped
+together they looked like one 8.9% item whose cost scaled with something
+unclear. The `unaccounted` row is the table's check on itself — the passes are
+laid out so no two are timed at once, and a `0.0` there would mean two had been
+allowed to double-charge the same wall time.
+
+**Three things the old table got wrong**, all of which would have been wasted
+work:
+
+* **`advances` is 0.6%, not 6.3%.** The entry named it a "plain caching
+  candidate". Caching it would buy six parts in a thousand.
+* **`gpos` is 2.0%, not 19.9% minus "roughly 3 points".** The third fix took
+  far more out of it than the entry predicted, and there is nothing left there.
+* **`gsub` is ~68%, not ~55%,** and it is now larger than everything else in
+  the pipeline put together. It is the only phase whose share *grows* with line
+  length.
+
+**The fourth fix: the same digests, in the mark test.** `marks` — one "is this
+glyph a combining mark?" per glyph of every shaped run, asked by the pass that
+decides which glyphs take no room — measured **8.2-8.7%**, spent almost
+entirely on searches that were always going to answer no. `MarkPositioning`
+now carries a `could_be_mark` digest built once at parse time: the union of
+both routes `is_mark` can take, `GDEF` class 3 and the mark coverage of every
+subtable. A glyph the union excludes is one neither route could claim, so the
+whole search is skipped in O(1). Marks are a small, tightly-clustered corner of
+a face's glyph space and ordinary text contains none, so on real text this
+answers "no" for essentially every glyph.
+
+The union widens to `Digest::full()` if any part of it could not be read —
+including when a subtable's coverage format is one the reader declines, where
+an empty digest would in fact have been exactly right. Widening there costs
+the shortcut for that face and cannot cost correctness; the alternative
+couples the digest to the searcher's opinion about which formats are readable,
+invisibly, with a dropped mark as the failure mode.
+
+Worth **1.044x-1.059x** of the whole shaping, by a same-day A/B in which the
+only difference between the two binaries is that one line:
+
+| chars | digest disabled | digest live | ratio |
+|---:|---:|---:|---:|
+| 80 | 63.0 us | 59.5 us | 1.059x |
+| 200 | 150.9 us | 143.9 us | 1.049x |
+| 1,000 | 727.0 us | 696.2 us | 1.044x |
+
+(The 5,000 and 20,000 rows moved by more than 10% between two runs of the
+*same* binary and are not reported. The instrument samples those far fewer
+times.)
+
+**A share is an upper bound on what deleting the pass buys — new, and worth
+carrying to the next optimisation.** The `marks` phase went from 8.5% to 0.8%,
+which is 55.7 us of the 1,000-character shaping; the whole shaping got only
+30.8 us faster. Nothing was mismeasured. A pass that walks the coverage tables
+leaves them in cache for the passes after it, so part of what it is charged is
+work its neighbours would otherwise have done themselves. Take the *ranking*
+from the phase table and the *win* from `shaping_cost_by_line_length`, with the
+change and without it.
+
+**Regression cover for the fourth fix.** `mark.rs` gained two tests, and they
+were checked by mutation rather than assumed: deleting the `GDEF` half of the
+digest makes both fail with `glyph 900 was classified wrongly`.
+`the_mark_digest_never_hides_a_mark` sweeps **all 65,536 glyph ids** against a
+fixture whose marks sit at 900-902, 4,000 and 60,000-60,010 — scattered on
+purpose, because ids 1-5 land in nearly the same bits of all three masks and a
+test built from small ids passes whatever the digest says. The other test
+covers the unreadable-class-definition path. All 29 host-installed-font tests
+also pass, including the two whose failure mode is exactly a false negative
+here.
+
+**What is left.** Both continuations this entry originally named are done, so
+is the `GPOS` one the re-measurement turned up, and so is the re-take that was
+item 1. What remains:
+
+1. **`GSUB` at ~68%** is now the whole question. It has had two rounds of work
+   and a third will be harder than either — but everything else in the pipeline
+   put together is less than a third of the cost, so no other target can pay
+   more than 1.5x even if it went to zero.
+2. **`norm::pieces` at ~13%** (`gui/font/src/norm.rs`) is the only other item
+   above 6%, and is unexamined. A first read — **not confirmed, do not act on
+   it without measuring** — is that the ASCII fast path still makes three whole
+   passes over the text (`needs_work`, `thai::present`, `khmer::present`), a
+   `char_indices().collect()`, and one `has_glyph` (`cmap`) lookup per
+   character in `fit_to_face` that duplicates the `glyph_id` lookup
+   `glyphbuild` then does again.
+3. **Nothing below `glyphbuild` at 5.7% is worth attacking** until one of the
+   two above lands. Six phases share 6% between them.
+
+**Do not guess** — this entry's original `cmap` hypothesis survived a careful
+reading of the code and was killed only by measurement, and the first phase
+table's `advances` and `gpos` predictions were both wrong by an order of
+magnitude.
 
 **How this was found.** Scoping `TD-EDITOR-IS-NOT-BIDIRECTIONAL`, whose item 3
 asks whether shape-whole-line-and-clip is affordable. The measurement that was
@@ -108813,6 +108931,116 @@ already cost this project two published-unformatted commits.
 
 ---
 
+### A-CANARY-CONTROLLER-DISCARDS-THE-SERIAL-LINES-ALREADY-ON-DISK-WHEN-IT-IS-STOPPED. A `--until` on the last benchmark of a suite voids the whole run as `until-never-matched` — 2026-09-02 — **Status: ✅ FIXED 2026-09-02** (lane A)
+
+**In short:** the load controller tails the boot's serial log and turns the
+load off when a named benchmark finishes. When it is told to stop, it stopped
+*without reading the log one last time* — throwing away lines that were
+already written to the file. If the benchmark that closes the window was in
+that unread remainder, the controller reported that it had never seen it and
+the run's data was discarded.
+
+**Found the expensive way.** A `--bench` boot test was refused after **2517 s**
+of pre-build gates, before QEMU ever started, with:
+
+```
+ERROR: refusing to build.  1 tooling test suite(s) failed:
+    test-canary-load.py
+```
+
+and inside it:
+
+```
+spinner occupancy (live)
+  FAIL a loaded run measures spinner occupancy: record problem='until-never-matched'
+  FAIL a correctly-loaded run is not flagged as unapplied: until-never-matched
+```
+
+The suite then passed **twice in a row** on a quiet host. That pattern — fails
+under three-lane load, passes when idle — reads as a flake, and the standing
+advice in the entry above was to retry and move on. It was not a flake.
+
+**Cause.** `canary-load.py`'s poll loop checked the stop-file *before* reading
+the tail, and `break`ed on it:
+
+```python
+if args.stop_file and os.path.exists(args.stop_file):
+    record["outcome"] = "stopped"
+    break                      # <-- tail.lines() never called again
+if tail.opened():
+    seen = watcher.feed(tail.lines(), now)
+```
+
+So every line written since the previous poll was dropped unread. Not lines
+that had yet to arrive — lines **already on disk**. The other replay tests all
+hand the controller 0.3 s of quiet before stopping it, which is three poll
+intervals, so they pass whether or not the final read happens; the live
+occupancy test uses a 0.6 s window and two real CPU spinners, and under
+concurrent builds the controller's own 0.1 s poll can slip past the gap.
+
+**Why it is a production bug and not a test artefact.** `canary-load-test.sh`
+writes the stop-file immediately after `wait "$BOOT_PID"` returns — QEMU has
+exited and the serial log is complete and closed. So the *last* benchmark of a
+suite is separated from the stop by microseconds, and `--load-until` naming it
+loses every time the poll lands wrong. The whole boot's canary data is then
+voided over a line sitting in the file. This is the failure mode
+`canary-load.py`'s own module docstring says lost the second attempt.
+
+**Fix.** The poll body is factored into `consume(now, final=False)`, and the
+stop-file path calls it once more before breaking. The stop-file is what makes
+that read correct rather than racy: it is written only after the producer has
+exited, so the read cannot miss a line and cannot see a partial one. A
+`timeout` exit deliberately does **not** drain — a timeout carries no promise
+that the producer has finished, so stamping a release at the instant the
+controller gave up would date the window's right edge up to `--timeout`
+seconds late. A void run reported as void beats a void run reported with a
+plausible-looking window.
+
+**`release()` is allowed in the final drain; `fire()` is not,** and the
+asymmetry is the point. Releasing is a true statement — the load was on
+continuously from `on_at` until now, so every drained benchmark really did run
+under it, and the only error is a right edge late by the length of the stall
+(`occupancy_measured` divides by the span actually measured, so it stays
+physically bounded regardless). Firing would be a false one: the producer has
+already stopped, so a load applied at drain time covered nothing at all, and a
+record claiming `fired` over a zero-length window is worse than the honest
+`at-never-matched`.
+
+**`record["drained_after_stop"]`** counts what the final read picked up, and is
+initialised to 0 on every path so a reader can never mistake "this build
+predates the drain" for "the drain found nothing". A large value means the
+controller was starved near the end of the run, and those completions are
+stamped at drain time rather than at their own — the record now says so instead
+of hiding it.
+
+**Measured, both controllers on the same scenario** (trigger through a normal
+poll, then all 34 remaining lines in one burst, then stop with no grace):
+
+| controller | `completions_seen` | `released` | `problem` | `drained_after_stop` |
+|---|---|---|---|---|
+| at `HEAD` (no final drain) | **6** of 40 | `False` | `until-never-matched` | — |
+| with the drain | **40** of 40 | `True` | `None` | 34 |
+
+Six. The other thirty-four were on disk, in a closed file, and were never read.
+That is the whole defect, and it reproduces every time once the grace period is
+removed — the "flake" was only ever the grace period sometimes being enough.
+
+**Pinning test:** `test-canary-load.py`, "a line written just before the
+stop-file is still read". It lets the trigger land through a normal poll, then
+dumps the rest of the suite in one burst and stops with **no** grace period,
+which is what a starved controller effectively sees. The assertion to believe
+is `completions_seen == 40` — 40 only if nothing was discarded, and true under
+every interleaving. `drained_after_stop` is deliberately *not* asserted
+non-zero: a poll can legitimately land inside the burst, and pinning a number
+that depends on that would make the test the very kind of race it closes.
+
+**Amends the entry above.** "Not blocking — both retried green" was right about
+the immediate consequence and wrong about the diagnosis: at least one of those
+under-load tooling failures was a real defect that a retry hid. A suite that
+fails only under load is not thereby a suite that is wrong.
+
+---
+
 ### A-PIPING-A-BACKGROUNDED-RUN-THROUGH-`tail`-REPORTS-SOMEBODY-ELSE'S-EXIT-STATUS — 2026-09-02 — **Status: ✅ FIXED 2026-09-02** (lane A; a working-practice fix, no code change)
 
 **In short:** a boot test that *failed* was reported to me as "completed, exit
@@ -109117,7 +109345,13 @@ expensive run in the project.
 
 ---
 
-## C-VKLOADER-ADVERTISES-EXTENSIONS-WHOSE-ENTRY-POINTS-IT-ANSWERS-NULL-FOR — OPEN 2026-09-02 (lane C)
+## C-VKLOADER-ADVERTISES-EXTENSIONS-WHOSE-ENTRY-POINTS-IT-ANSWERS-NULL-FOR — PARTIALLY FIXED 2026-09-02 (lane C)
+
+**Physical-device half FIXED 2026-09-02** — design-decisions.md §803,
+`gui/vulkan/src/unknown.rs`. That is the WSI family and most other extension
+commands, and it is the half that was blocking real applications.
+**Instance-level half still OPEN**; see "What remains" at the bottom. The
+original report follows unchanged.
 
 **In short:** As of design-decisions.md §802 the Vulkan loader answers
 "which optional add-ons are available?" with the union of every installed
@@ -109209,5 +109443,199 @@ exactly the empty-list stub §578 refused to write.
 **Where it is:** `get_instance_proc_addr` in `gui/vulkan/src/entry.rs`;
 the nine-name match in `gui/vulkan/src/physical.rs`; the promise in
 `enumerate_instance_extension_properties` and `gui/vulkan/src/global.rs`.
+
+### What was fixed, 2026-09-02
+
+The first bullet above, exactly as described. `gui/vulkan/src/unknown.rs` adds a
+fixed pool of 128 `#[unsafe(naked)]` trampolines; `get_instance_proc_addr` now
+falls through to `unknown_across`, which asks every driver behind the instance
+through `vk_icdGetPhysicalDeviceProcAddr`, assigns the name a slot if any of
+them answered, records each driver's function in that driver's own table, and
+hands back the slot's trampoline. Full reasoning in design-decisions.md §803.
+
+An application enabling `VK_KHR_surface` now gets a working
+`vkGetPhysicalDeviceSurfaceSupportKHR` and its siblings.
+
+Two limitations came with it and are deliberate, not oversights:
+
+- **Drivers below interface version 4 contribute nothing to this path**, even
+  when they do export the symbol. `vkGetInstanceProcAddr` answers for
+  device-level commands too and does not say which kind it gave, so using it
+  here would eventually hand a trampoline a `VkDevice` and read two words out
+  of the middle of the driver's own object. There is no safe way to ask such a
+  driver the question, so it is not asked.
+- **The pool is 128 distinct physical-device extension command names**, never
+  recycled. The 129th is reported missing rather than stealing an earlier
+  slot, because a reassigned slot would silently turn one command into another
+  in an application that did nothing wrong. Raising the ceiling is a one-line
+  change if a real machine ever approaches it; the whole of WSI is a
+  single-figure number of names.
+
+### What remains
+
+The **instance-level** half of the second bullet, unchanged. A command whose
+first argument is a `VkInstance` still cannot be forwarded, because the loader
+holds several driver instances behind one handle and must decide *per command*
+which of them answers — a policy, not a forwarding rule, and not something a
+trampoline can encode. `vkCreateDebugUtilsMessengerEXT`,
+`vkDestroySurfaceKHR` and the platform `vkCreate*SurfaceKHR` calls are in this
+group, so WSI is reachable but not yet complete.
+
+The Khronos loader generates one trampoline per command from `vk.xml`. Ours
+would need the same, and it is the point at which "declare no Vulkan
+structures" (§802) finally becomes untenable — a surface-creation command takes
+a structure the loader has to read to know which platform it is for.
+
+---
+
+## C-THE-WIFI-SUPPLICANT-REJECTED-EVERY-MIC-FROM-AN-AP-THAT-DID-NOT-SEND-EAPOL-VERSION-2 — FIXED 2026-09-02 (lane C)
+
+**Status:** FIXED 2026-09-02 — awaiting a boot test on `main` before archiving.
+
+**Reported by lane A**, from the authenticator side, in
+`requests/a-c-the-ap-had-a-mic-bug-and-verify-frame-mic-is-the-api-that-would-have-prevented-it.md`.
+
+### What was wrong
+
+`net80211::supplicant`'s private `verify_frame_mic` verified a received
+EAPOL-Key frame's message integrity code by *rebuilding* the frame from the
+parsed `KeyFrame` and hashing the reconstruction, rather than hashing the frame
+that arrived. The MIC covers the frame from offset 0, and `KeyFrame` carries no
+field for two runs of octets inside that range:
+
+- the **EAPOL version octet** at frame offset 0, and
+- the **eight reserved octets** at body offsets 69–76 (frame 73–80).
+
+The rebuild substituted `eapol::version::V2` and eight zeroes for them
+unconditionally. Against any access point that sent EAPOL version 1 or 3 —
+which `eapol::version`'s own doc comment describes as commonplace, and which is
+what makes this a field bug rather than a theoretical one — every MIC failed.
+
+### Why it was invisible
+
+Three things hid it at once:
+
+1. **The symptom is the wrong one.** The handshake fails at message 3 with
+   `Error::BadMic`, which is character-for-character what a wrong passphrase
+   produces. A user would have retyped their password.
+2. **The tests could not catch it.** `run_handshake` builds its fixtures with
+   `eapol::write(..., version::V2, ...)` and all-zero reserved octets, so the
+   rebuild and the original agreed by construction. All 175 tests passed before
+   and after the fix; three new ones had to be written to see it.
+3. **The refutation was already in the file, several hundred lines away.**
+   `eapol::version`'s doc comment states that APs send 1, 2 and 3
+   interchangeably. Nothing checks that a constant's documentation and its
+   users agree.
+
+### The fix
+
+`verify_frame_mic` is deleted, not repaired. The rebuild strategy cannot be
+made correct — a MIC is defined over the octets the sender transmitted, so
+every octet in range must be hashed as received whether this crate models it or
+not. Both call sites (`on_m3`, `on_group_m1`) now use `kdf::verify_mic`, which
+already existed, was already public, and hashes the received frame in three
+pieces. `on_eapol` trims the incoming buffer once to
+`HEADER_LEN + <declared body length>`, because a frame padded to its carrier's
+minimum length would otherwise have the padding hashed.
+
+Reasoning in full, including why lane A's "make it public" suggestion was
+answered with a deletion instead, in `design-decisions.md` §804.
+
+### Regression tests
+
+In `net80211/src/supplicant.rs`:
+
+- `an_access_point_that_speaks_eapol_version_one_or_three_still_verifies`
+- `nonzero_reserved_octets_are_hashed_as_they_arrived`
+- `padding_past_the_declared_body_is_not_hashed`
+
+The first two were run against the pre-fix code and observed to fail there.
+They were spliced into the `HEAD` copy of `supplicant.rs`, so the old
+rebuilding verifier was the only thing that differed, and both failed with
+
+    version 1 should verify, got Err(BadMic)
+    nonzero reserved octets should verify, got Err(BadMic)
+
+— which is the bug reproducing exactly as reported, and is worth reading twice:
+`BadMic` is also what a wrong passphrase produces, so in the field this defect
+had no symptom of its own to distinguish it.
+
+The third passes against the old code, and that is not a weakness in it. The
+rebuild excluded trailing padding by construction — a frame reassembled from
+parsed fields has no room for octets nobody parsed — so the padding hazard is
+one this fix *introduced* by hashing the buffer as received, and the test
+guards the trimming that answers it.
+
+Each works by taking a canonical message 3, editing the octet under test, and
+re-MICing the result — so what is asserted is the property that matters (the
+*sender* hashed this octet, therefore we must too) rather than the one that is
+easy to assert.
+
+### Still worth knowing
+
+`eapol::KeyFrame::parse` takes a **body** while everything MIC-related indexes
+from the start of the **frame**. That asymmetry is what lane A transposed, and
+it survives this fix: both are `&[u8]`, so the compiler cannot tell them apart.
+Changing `parse` to take the frame would remove the trap at the type level, but
+it is a breaking change to an API `kernel/src/net/hwsim_ap.rs` (lane A's tree)
+calls, so it needs a coordinated change rather than a unilateral one. Filed as
+a request rather than done here.
+
+---
+
+## C-A-BUILD-THAT-NEVER-COMPILES-BECAUSE-THE-TARGET-DIRECTORY-CANNOT-BE-LISTED — ENVIRONMENT, WORKED AROUND 2026-09-02 (lane C)
+
+**Status:** worked around 2026-09-02 by deleting the affected tree. Not a code
+defect; recorded because the symptom is badly misleading and lanes A and B keep
+their own `target/` trees on the same volume.
+
+**In short:** a `cargo test` stopped finishing. It printed `Compiling net80211`
+and then sat there — twenty minutes, no error, no progress. It looks exactly
+like a slow machine or a compiler stuck in a loop, and it is neither: the
+compiler was blocked trying to *read the list of files* in its own build-output
+directory, which had reached a state where that listing never returns.
+
+### How to recognise it
+
+- `cargo` prints `Compiling <crate>` and stalls indefinitely. No error is ever
+  printed, and the timeout is the only thing that ends it.
+- The giveaway is **CPU time, not wall time**: `wmic process where
+  "name='rustc.exe'" get processid,kernelmodetime,usermodetime` showed ~1.2
+  seconds of CPU consumed across 15 minutes of wall clock. A compiler that is
+  merely slow burns CPU; one that is blocked does not. This one check separates
+  "the machine is busy" from "something is stuck", and is worth reaching for
+  before waiting any longer.
+- `ls target/<triple>/debug/deps` and `cmd /c dir` on the same directory both
+  hang forever, while every other operation on the same volume — `git status`,
+  reading files, listing sibling directories — returns instantly. A volume that
+  is slow is slow everywhere; this was one directory.
+
+### What it actually was
+
+A stack from `cdb -p <pid> -c "~*k12;qd"` put rustc's main thread in
+`rustc_session::search_paths::SearchPath::new` → `std::fs::DirEntry::path`.
+`SearchPath::new` enumerates each `-L dependency=…` directory at startup, so
+every rustc invocation lists `deps/` before it compiles anything. With that
+directory unreadable, no compile in the workspace could start.
+
+Root cause of the directory's state is not established — a damaged NTFS index
+or simply an enormous entry count both fit. What is established is that the
+volume was **not** at fault (88 GB free, no Defender scan running, 30 GB of
+physical memory free, and unrelated I/O on the same drive was instant).
+
+### The remedy
+
+Delete the affected tree; it is build output, so it is regenerable by
+definition and gitignored. `rd /s /q` from a real `cmd` (not `rm -rf` through
+MSYS), which is itself slow here — it reclaimed the large artifacts in the
+first minutes and then spent much longer on the small ones, at ~14 seconds of
+kernel CPU over 11 minutes, so let it finish rather than concluding it is stuck
+too. Stop every `cargo`/`rustc` process first: deleting a cache out from under
+a live build produces errors that look like new problems.
+
+**Worth knowing:** a `cdb` stack is a cheap first move on any silent hang here,
+not a last resort — it took one command to convert "the build is mysteriously
+slow" into "rustc is blocked in `SearchPath::new`", which named both the cause
+and the fix.
 
 ---

@@ -554,6 +554,12 @@ pub fn write(
     b.get_mut(13..45)?.copy_from_slice(&fields.nonce);
     b.get_mut(45..61)?.copy_from_slice(&fields.iv);
     b.get_mut(61..69)?.copy_from_slice(&fields.rsc);
+    // The reserved field. Zeroing it is not tidiness: `out` belongs to the
+    // caller and is routinely reused between frames, so anything left
+    // unwritten here is whatever that buffer held last — put on the air, in
+    // cleartext, inside the range the MIC covers. §12.7.2 requires zero on
+    // transmit, and this is the only place that can honour it.
+    b.get_mut(69..BODY_BEFORE_MIC)?.fill(0);
 
     let mic_end = BODY_BEFORE_MIC.checked_add(mic_len)?;
     b.get_mut(BODY_BEFORE_MIC..mic_end)?.fill(0);
@@ -714,6 +720,34 @@ mod tests {
             &[0u8; MIC_LEN_DEFAULT]
         );
         assert_eq!(n, HEADER_LEN + 77 + MIC_LEN_DEFAULT + 2);
+    }
+
+    #[test]
+    fn a_freshly_written_frame_has_zeroed_reserved_octets() {
+        // Same argument as the MIC field above, with a sharper edge: the
+        // reserved octets have no `KeyFrameFields` member, so if `write` does
+        // not zero them nothing else will, and the caller's previous buffer
+        // contents go on the air inside the range the MIC covers. §12.7.2 says
+        // zero on transmit.
+        let mut out = [0xAAu8; 256];
+        let fields = KeyFrameFields {
+            descriptor_type: descriptor_type::RSN,
+            key_info: key_info::PAIRWISE | key_info::KEY_MIC,
+            key_len: 16,
+            replay_counter: 7,
+            nonce: [0u8; NONCE_LEN],
+            iv: [0u8; IV_LEN],
+            rsc: [0u8; RSC_LEN],
+            key_data: &[],
+        };
+        write(&mut out, version::V2, &fields, MIC_LEN_DEFAULT).expect("fits");
+
+        let reserved = MIC_OFFSET - RESERVED_LEN;
+        assert_eq!(
+            &out[reserved..MIC_OFFSET],
+            &[0u8; RESERVED_LEN],
+            "the eight octets before the MIC are reserved and must be zero"
+        );
     }
 
     #[test]

@@ -51335,6 +51335,337 @@ along with the rewritten invariant section; `enumerate_instance_version`,
 `enumerate_instance_layer_properties` and
 `enumerate_instance_extension_properties` in `gui/vulkan/src/entry.rs`.
 
+## 803. Extension commands the loader has never heard of are forwarded by three instructions of assembly, from a fixed pool of 128 slots that is never recycled
+
+**Date:** 2026-09-02
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** A graphics driver can offer optional add-ons ("extensions") with
+extra functions in them. Our Vulkan loader sits between a program and the
+drivers, and §802 made it honestly report every add-on any driver offers. That
+immediately created a lie next to the truth: the program is told the add-on
+exists, asks the loader "where is its function?", and the loader answers
+*nowhere* — because it only knows how to hand over functions it was written to
+know about, and an add-on's functions are by definition ones nobody told it
+about. The fix is a piece of hand-written machine code that forwards a call to
+the driver **without knowing what the call looks like**: it swaps one pointer
+and jumps, leaving every other argument untouched wherever the caller left it.
+The decisions recorded here are that this is done at all, that there is a fixed
+supply of 128 such forwarders, that a forwarder once given to a function name
+keeps it for the life of the program, and that a driver too old to be asked the
+one question that makes this safe is simply not asked.
+
+### Why a signature is not needed
+
+The nine core commands that take a `VkPhysicalDevice` are each named in
+`physical.rs` and each get a hand-written Rust trampoline with the right
+argument list (§801). That is unavailable here: there is no argument list to
+write, because the loader does not know the extension exists.
+
+What makes it work anyway is a property of the calling conventions rather than
+of Vulkan. Both conventions the loader targets pass the first pointer argument
+in one register — `rdi` on System V, `rcx` on Windows x64 — and put every other
+argument somewhere that does not depend on what argument 0 is. So:
+
+```text
+    mov rax, [arg0 + EXT_OFFSET]     ; the driver's table of extension entry points
+    mov arg0, [arg0 + HANDLE_OFFSET] ; the driver's own VkPhysicalDevice
+    jmp [rax + 8*SLOT]               ; tail call: control never comes back here
+```
+
+is correct for **every signature at once**. The stack is not touched, so stack
+arguments, the return address and Windows' shadow space stay exactly as the
+caller built them; the floating-point argument registers are not touched; and
+because it jumps rather than calls, the driver returns straight to the
+application and the return value needs no handling either. `rax` is the only
+register clobbered, and it is caller-saved in both conventions and an argument
+register in neither.
+
+The order of the two loads is load-bearing: the table pointer must be read
+*before* argument 0 is overwritten, because both words live in the object
+argument 0 points at.
+
+The one signature shape this would break on is a function returning a large
+struct by value, where the ABI inserts a hidden result pointer as argument 0 and
+shifts everything along. No Vulkan command does that — every output is written
+through a caller-supplied pointer and every return value is a `VkResult`, a
+handle, or nothing — so the exception is recorded rather than guarded against.
+
+This cannot be expressed in Rust: there is no guaranteed tail call, and no way
+to name "the arguments I was not told about". It is `#[unsafe(naked)]` plus
+`naked_asm!`, and it is what the Khronos loader does for the same reason
+(`unknown_ext_chain_*.asm`). It is also the reason
+`vk_icdGetPhysicalDeviceProcAddr` exists in the Loader–Driver Interface at all.
+
+**Consequence, accepted:** the loader is now architecture-specific. A
+`compile_error!` on any target that is not x86-64 says so at the point of the
+assembly, with what a port would have to write. A portable fallback was
+considered and rejected as impossible rather than expensive: forwarding
+arguments the compiler was never told about is exactly the thing a
+high-level language cannot do.
+
+### Why a fixed pool, and why a slot is never taken back
+
+A forwarder must be a distinct *address* per command name, because the address
+is all the application keeps — there is nowhere in the call to put a "which
+command is this?" parameter. Distinct addresses that share one behaviour can
+come from only two places: code generated at run time, or code generated once
+per slot at compile time. Run-time code generation needs an executable
+allocation the OS does not yet offer and would be a far larger surface; so the
+pool is 128 entries of `tramp::<N>`, monomorphised at compile time.
+
+| | Fixed pool of 128 | Recycle the least-recently-used slot | Generate code at run time |
+|---|---|---|---|
+| *What changes:* | the 129th distinct extension command is reported missing | the 129th works, and some earlier one silently becomes it | any number work |
+| Cost | a hard ceiling | **a wrong function called by a correct program** | W^X mapping, a code cache, and an allocator the OS lacks |
+
+Recycling was rejected outright, not traded off. Vulkan explicitly permits an
+application to resolve a command once at startup and call the pointer for the
+life of the process; a slot that were ever reassigned would turn one command
+into another in a program that did nothing wrong, with no diagnostic anywhere.
+Exhaustion instead returns null — which is the C API's own way of saying "no
+such entry point", the answer the application already has to handle, and the
+answer it was getting for *every* extension command until this change.
+
+128 is a ceiling on *distinct extension commands that take a
+`VkPhysicalDevice`*, not on extensions: the whole of WSI (`VK_KHR_surface`,
+each platform surface extension, `VK_KHR_swapchain`) contributes a
+single-figure number of them. Raising it is a one-line change to `SLOTS` and
+the macro call beneath it.
+
+### An unclaimed slot aborts rather than holding null
+
+A machine can have three drivers where only one implements an extension. The
+table is per driver, so the other two have an entry for that slot with nothing
+to put in it. Leaving it null would make an application's mistake — calling an
+extension command on a device whose driver lacks it, without checking first —
+into a jump through address zero. Leaving it holding a *neighbour's* pointer
+would be worse: another driver's code called with this driver's handle.
+
+It holds a stub that panics with a sentence naming what happened. The
+application error is the same error either way; what differs is entirely how
+the resulting bug report reads, and the cost of the better one is one word per
+slot.
+
+### The version-4 gate is a memory-safety rule, not a preference
+
+**Only a name a driver answered through `vk_icdGetPhysicalDeviceProcAddr` may be
+given a slot.** `physical::Ask` legitimately falls back to the driver's
+`vkGetInstanceProcAddr` for the nine *known* commands (§801). Doing the same
+here would be memory corruption.
+
+The reason is that `vkGetInstanceProcAddr` answers for *device-level* commands
+too, and its answer does not say which kind it gave. An extension may define
+the same name at device level; a device command reached through a trampoline
+would have argument 0 — a `VkDevice` the loader hands back untouched, and which
+is the *driver's* object, not a loader wrapper — read as if it had the
+wrapper's layout, and two words pulled out of the middle of it and jumped
+through. The version-4 entry point exists precisely to answer "is this a
+physical-device command?" and nothing else.
+
+So a driver that settled below interface version 4 contributes nothing to this
+path, even when it does export the symbol — `Driver::physical_device_proc_addr`
+gates on **entitlement, not on the pointer being non-null** (§577). That is a
+real limitation, and it is the right one: such a driver cannot be asked the
+question safely, so it is not asked, and its extension commands stay
+unreachable rather than becoming unsafe. There is a dedicated test for it,
+because the failure it prevents is silent.
+
+### Resolution is redone on every lookup, and a slot is spent only after a yes
+
+Every `vkGetInstanceProcAddr` for an unknown name re-asks **all** the
+instance's drivers and rewrites their table entries. Caching the fact that a
+name had been resolved would leave a driver registered later reachable through
+a slot whose entry nobody ever filled. Re-asking costs a handful of
+`GetProcAddr` calls on a path an application walks at startup, which is not a
+hot path in any application that exists.
+
+The order within one lookup matters too: every driver is asked *first*, and the
+slot is assigned only if at least one said yes. A name nobody implements
+therefore costs nothing permanent — which is what stops an application probing
+for extensions it does not have from exhausting a pool that is never reclaimed.
+
+### Where the two pieces of state live
+
+- The **name-to-slot map** is on `Registry`, not a second `static` in `entry.rs`.
+  It is written in the same breath as the per-driver tables and under the same
+  lock; two locks over two halves of one operation is a deadlock waiting for an
+  ordering mistake.
+- The **per-driver table** is a `Box` on `Driver`. Its *address* is copied into
+  every physical-device wrapper that driver produced, and `Driver` itself lives
+  in a `Vec` that moves when the next driver registers. A box's contents do not
+  move when the box does; that is the entire reason for the indirection.
+
+Entries are `AtomicUsize` for the *writing* side. The reading side is a `mov`
+inside a naked function, outside Rust's memory model entirely. What makes that
+sound is that x86-64 does not reorder a load ahead of a prior store from the
+same thread, that a table entry is only ever written while the registry lock is
+held, and that the application obtains the trampoline's address only after that
+lock is released. The atomics keep the writing side defined and record the
+intent.
+
+### The offsets the assembly indexes with are derived, not written twice
+
+`PhysicalDevice::HANDLE_OFFSET` and `EXT_OFFSET` are `offset_of!` constants
+consumed by `naked_asm!`'s `const` operands. The alternative — two literals in
+the assembly — is a hand-maintained copy of a struct layout, and reordering the
+fields would not fail to compile; it would forward calls through the wrong two
+words. Deriving them means the layout and the code that indexes it move
+together.
+
+### The shape to remember
+
+The crash that came out of this change was not in any of it. It was a test
+fixture, `an_instance()`, that returned the fabricated address `0x1234_5678`
+with a comment justifying it: `vkGetInstanceProcAddr` never dereferences the
+instance handle. That was true when it was written, and the new fallback —
+whose entire job is to ask the instance's drivers a question — made it false.
+The whole test binary died with an access violation in a test at the far end of
+the file from the change.
+
+**A fixture justified by "nobody looks inside this" stops being a fixture the
+day somebody looks**, and the failure surfaces nowhere near the edit. The
+justification is the thing that ages, not the value.
+
+**Where it is:** `gui/vulkan/src/unknown.rs` (the whole module: `Slots`,
+`Table`, `unresolved`, `tramp`, the 128-entry `POOL`); `unknown_across` and
+`unknown_physical_device_command` in `gui/vulkan/src/entry.rs`, plus the new
+tail of the instance-level match in `get_instance_proc_addr`; the `ext` field,
+`HANDLE_OFFSET` and `EXT_OFFSET` on `PhysicalDevice` in
+`gui/vulkan/src/instance.rs`; `Driver::ext` and `Registry::slot_for` in
+`gui/vulkan/src/registry.rs`.
+
+## 804. A received message-integrity code is checked against the frame as it arrived, not against a frame rebuilt from the fields we understood
+
+**Date:** 2026-09-02
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** When a computer joins a WiFi network, the access point and the
+computer exchange four short messages to prove to each other that they know the
+password, without either one sending it. Each message carries a small checksum —
+a *MIC*, message integrity code — computed with a key derived from the password,
+so a message that was tampered with, or that came from someone who does not know
+the password, is detectable. Our WiFi client checked that checksum against a
+*reconstruction* of the message rather than against the message it actually
+received, and the reconstruction differed from the original in a couple of bytes
+we had no field for. Against an access point that set those bytes to anything
+other than what we assumed, every message failed its checksum — with the right
+password — and the user saw "wrong password" forever. The fix is to check the
+checksum against the bytes that arrived. Lane A found this from the other side
+while writing an access point to test against.
+
+### The bug, and why the strategy caused it
+
+`supplicant.rs` had a private `verify_frame_mic` that took the *parsed* frame —
+a `KeyFrame` — wrote a fresh frame out of its fields with `eapol::write`, and
+hashed that. Its doc comment gave the reason plainly, and the reason is the
+interesting part:
+
+> Rebuilding it from the parsed fields rather than zeroing a copy of the
+> original is deliberate: it means a frame whose fields we did not fully
+> understand cannot pass, because anything we failed to parse is not in what we
+> hash.
+
+The MIC covers the frame from offset 0 through the MIC field, with that field
+zeroed. Within that range `KeyFrame` carries the descriptor type, key
+information, key length, replay counter, nonce, IV and RSC — and does not carry
+two things:
+
+| Octets | What | What the rebuild substituted |
+|---|---|---|
+| frame offset 0 | The EAPOL protocol version | `version::V2`, always |
+| body offsets 69–76 | The eight reserved octets after the Key RSC | zeroes, always |
+
+`eapol::version`'s own doc comment says APs in the field "send 1, 2 and 3
+interchangeably" and that a receiver must ignore the value. Both halves are
+true, and together they are the bug: the version octet must be ignored as a
+*protocol* input and simultaneously honoured as a *hashed* one. An AP sending
+version 1 or 3 — which is common — had every MIC rejected. The symptom is
+`BadMic` on message 3, which is exactly and indistinguishably the symptom of a
+wrong passphrase.
+
+### Why the alternative is not merely cheaper but correct
+
+The rebuild's goal cannot be met, because a MIC is *defined* over the octets the
+sender put on the wire. Any octet in range must be hashed as it arrived, whether
+this crate models it or not. "Anything we failed to parse is not in what we
+hash" and "the MIC covers the whole frame" are contradictory requirements, and
+the wire format is not the one that can give way.
+
+The property the rebuild was reaching for — an attacker cannot smuggle content
+past us by hiding it where we do not look — is real, wanted, and *already held*,
+by the MIC itself. Changing any octet changes the MIC, and producing a matching
+one requires the KCK. Hashing the frame as received is precisely what makes that
+argument work; the rebuild weakened it by hashing something the attacker's
+changes could not affect.
+
+So `verify_frame_mic` is deleted rather than fixed, and both call sites use
+`kdf::verify_mic`, which already existed, is already public, and already hashes
+a received frame in three pieces (before the MIC, `mic_len` zeroes, after).
+
+| | Rebuild from parsed fields | Hash the frame as received |
+|---|---|---|
+| Octets with no field | invented; wrong whenever the sender disagreed | hashed as they arrived |
+| Extra code | a second frame writer, a 500-octet stack buffer | none; the function existed |
+| Guards against unparsed content | claimed, not achieved | achieved, by the MIC |
+| What the caller must get right | nothing | where the frame *ends* |
+
+### The one thing the new strategy does require
+
+`kdf::compute_mic` hashes everything after the MIC field to the end of the slice
+it is given. An EAPOL frame travels inside an 802.11 or Ethernet data frame and
+is padded to that frame's minimum length, so the buffer handed to `on_eapol` is
+routinely longer than what the sender hashed. The frame therefore has to be
+trimmed to `HEADER_LEN + <the body length the header declares>`.
+
+That is done once, in `on_eapol`, and the trimmed slice is passed down to `on_m3`
+and `on_group_m1`. Doing it once rather than at each check is the point: two
+verifiers that trim separately are two chances to disagree about where the frame
+ends, and disagreeing produces `BadMic`, which reads as a wrong password.
+
+### Lane A's suggestion, and why the answer is "deleted" rather than "made public"
+
+Lane A asked for `verify_frame_mic` to be made `pub`, having re-derived it in
+`kernel/src/net/hwsim_ap.rs` and got the frame/body distinction wrong in the
+process (`requests/a-c-the-ap-had-a-mic-bug-and-verify-frame-mic-is-the-api-that-would-have-prevented-it.md`).
+The request is right that a second authenticator should not have to rediscover
+this. But exporting the rebuilding version would have propagated the defect into
+the one place that had so far escaped it: lane A's AP calls `kdf::verify_mic` on
+the trimmed frame, which is the correct thing, and adopting the "better" API
+would have made it wrong for version 1 and 3.
+
+There is now one verifier, it was already the public one, and the supplicant has
+moved onto it. Nothing new is exported.
+
+### The shape to remember
+
+Two functions took `&[u8]`, sat four lines apart, and wanted different slices —
+one the body, one the whole frame. Lane A transposed them and lost a boot cycle
+to a failure that says nothing about which of four causes it was. The type
+system was no help because both are byte slices, and the doc comments were no
+help because a doc comment loses to two adjacent calls that look alike.
+
+What actually settled it was a *test* — `supplicant.rs`'s
+`message_two_carries_our_nonce_our_rsn_element_and_a_verifiable_mic`, which
+passes the whole frame and is green on the host. A test that demonstrates the
+calling convention outranks a paragraph describing it, and is worth writing for
+that reason alone.
+
+The second shape: the module's own doc comment recorded the fact that refutes
+the code ("APs in the field send 1, 2 and 3 interchangeably") several hundred
+lines from the code it refutes. Nothing checks that a constant's documentation
+and a constant's users agree.
+
+**Where it is:** `verify_frame_mic` deleted from `net80211/src/supplicant.rs`,
+replaced by the explanatory comment at the same place; the frame trim and its
+plumbing in `Supplicant::on_eapol`, `on_m3` and `on_group_m1`; the regression
+tests `an_access_point_that_speaks_eapol_version_one_or_three_still_verifies`,
+`nonzero_reserved_octets_are_hashed_as_they_arrived` and
+`padding_past_the_declared_body_is_not_hashed`, with the `remic` and
+`m3_after_editing` helpers, in the same file.
+
 ## 630. The shellcheck gate stops the build on a finding but waves it through when the tool is missing
 
 **Date:** 2026-08-29

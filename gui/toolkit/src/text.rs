@@ -1355,12 +1355,17 @@ pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint)
 /// timings on a loaded CI box would be noise. Run them deliberately:
 ///
 /// ```text
-/// cargo test --release -p guitk --lib shaping_cost -- --ignored --nocapture --test-threads=1
+/// cargo test --release -p guitk --lib shaping_cost \
+///     --target x86_64-pc-windows-gnu -- --ignored --nocapture --test-threads=1
 /// ```
 ///
 /// `--release` and `--test-threads=1` are both required for the numbers to
 /// mean anything: a debug build measures the absence of inlining, and two of
 /// these tests in parallel contend on the toolkit's global font-cache mutex.
+/// `--target` is required for the command to *build*: the workspace's
+/// `.cargo/config.toml` names the freestanding `x86_64-slateos` target by
+/// default, and a host test built against it fails in the thousands rather
+/// than in a way that suggests the flag is missing.
 ///
 /// **Every figure printed here is the fastest of many samples, not the median.**
 /// That is not the conventional choice and it was not the first one — see
@@ -1703,6 +1708,107 @@ mod shaping_cost {
             "\n(whichever column has the smallest spread is the statistic these \
              instruments should be reporting)"
         );
+    }
+
+    /// Where the time inside one shaping goes, pass by pass.
+    ///
+    /// The other instruments here measure `shape` as one number, which is the
+    /// right question right up until that number stops being dominated by a
+    /// single pass — and after three rounds of `GSUB` and `GPOS` work it is
+    /// not. This one says which pass to attack next.
+    ///
+    /// Needs `osfont`'s per-pass timers, so it compiles only with the feature
+    /// that turns them on:
+    ///
+    /// ```text
+    /// cargo test --release -p guitk --features phase-timing --lib shaping_phases \
+    ///     --target x86_64-pc-windows-gnu -- --ignored --nocapture --test-threads=1
+    /// ```
+    ///
+    /// **Read the shares, not the microseconds.** Each pass pays for its own
+    /// pair of clock reads, so the instrumented total runs above the
+    /// uninstrumented one that `shaping_cost_by_line_length` reports. An
+    /// overhead that lands on every pass alike cancels in a ratio and does not
+    /// cancel in a subtraction.
+    ///
+    /// **And read a share as an upper bound on what deleting the pass buys.**
+    /// The first optimisation this table pointed at — the mark digest in
+    /// `osfont`'s `mark.rs` — took its pass from 8.5% to 0.8%, worth 55.7us of
+    /// the 1000-char row here, and bought only 30.8us of the uninstrumented
+    /// shaping. Nothing was mismeasured: a pass that walks the coverage tables
+    /// leaves them in cache for the passes after it, so some of what it is
+    /// charged is work its neighbours no longer have to do. Take the win from
+    /// `shaping_cost_by_line_length` with the change and without it; take only
+    /// the *ranking* from here.
+    ///
+    /// `unacc` is the shaping's own time that no pass claimed — the glue
+    /// between passes plus the timers' cost. It is the table's check on
+    /// itself: the passes are laid out in `shape_with` so that no two are ever
+    /// timed at once, and a `0.0` there where the passes visibly do not fill
+    /// the shaping would mean two of them had been allowed to overlap and were
+    /// double-charging the same wall time.
+    #[cfg(feature = "phase-timing")]
+    #[test]
+    #[ignore = "timing instrument, not an assertion; see the module doc"]
+    fn shaping_phases() {
+        use osfont::phase::{Phase, Snapshot};
+
+        /// Enough shapings for each pass to catch the machine quiet once.
+        /// Smaller than the other instruments' 201 because a timer per pass is
+        /// a chance to be interrupted per pass, not one for the whole shaping,
+        /// so a given pass finds its floor in fewer samples than the shaping
+        /// as a whole finds its own.
+        const RUNS: usize = 101;
+
+        for chars in [80usize, 200, 1_000] {
+            let text = pathological(chars);
+            // The minimum is taken **per pass** rather than by keeping the
+            // fastest shaping whole: a shaping that happens to be quiet in
+            // every pass at once is far rarer than a quiet pass, and the
+            // passes do not have to be quiet together for each to be measured.
+            // See `Snapshot::min`.
+            let floor = with_font(SIZE, FontWeightHint::Regular, FontFamily::Mono, |font| {
+                // Warm-up outside the samples, for the same reason
+                // `samples_us` takes one: the first shaping at a size fills
+                // per-glyph caches inside the face, and charging that to a
+                // pass would libel it.
+                let _ = font.shape(&text);
+                let mut floor = Snapshot::worst();
+                for _ in 0..RUNS {
+                    osfont::phase::reset();
+                    let t = Instant::now();
+                    // Returned rather than dropped so the shaping cannot be
+                    // deleted as dead.
+                    let keep = font.shape(&text).width();
+                    let elapsed = u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    assert!(keep >= 0.0);
+                    floor = floor.min(osfont::phase::snapshot(elapsed));
+                }
+                floor
+            });
+
+            #[allow(clippy::cast_precision_loss)]
+            let us = |ns: u64| ns as f64 / 1000.0;
+            let total = us(floor.total());
+            println!("\n{chars} chars, best of {RUNS}: {total:.1}us instrumented");
+            println!("{:>12}  {:>10}  {:>8}", "phase", "us", "share");
+            let mut rows: Vec<(&str, f64)> = Phase::ALL
+                .iter()
+                .map(|&p| (p.name(), us(floor.get(p))))
+                .collect();
+            rows.push(("unacc", us(floor.unaccounted())));
+            // Costliest first: the table exists to name the next thing to
+            // attack, and that is its first row.
+            rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+            for (name, val) in rows {
+                let share = if total > 0.0 {
+                    val / total * 100.0
+                } else {
+                    0.0
+                };
+                println!("{name:>12}  {val:>10.2}  {share:>7.1}%");
+            }
+        }
     }
 
     /// The one assertion in this module, and the only one here that runs by

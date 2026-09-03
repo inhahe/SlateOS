@@ -330,6 +330,19 @@ impl<'a> Handshake<'a> {
         let key = eapol::KeyFrame::parse(body, self.mic_len).ok_or(Error::Malformed)?;
         let message = key.message().ok_or(Error::Unexpected)?;
 
+        // The MIC covers the frame from its first octet, so verifying one needs
+        // the frame and not the body — but it must be the frame the *sender*
+        // hashed, which is the header plus exactly the body length the header
+        // declares. An EAPOL frame rides inside an 802.11 or Ethernet data
+        // frame and is padded to that frame's minimum length, so `eapol_frame`
+        // routinely has octets on the end that the sender never hashed.
+        // Trimming here rather than at each check keeps the two verifiers from
+        // disagreeing about where the frame ends.
+        let frame_len = eapol::HEADER_LEN
+            .checked_add(body.len())
+            .ok_or(Error::Malformed)?;
+        let frame = eapol_frame.get(..frame_len).ok_or(Error::Malformed)?;
+
         // The MIC algorithm is dictated by the Key Descriptor Version rather
         // than by the AKM, and version 1 (HMAC-MD5 over RC4-wrapped key data)
         // is refused outright: accepting it would let an attacker who can
@@ -339,8 +352,8 @@ impl<'a> Handshake<'a> {
 
         match message {
             Message::PairwiseM1 => self.on_m1(&key, algo, out),
-            Message::PairwiseM3 => self.on_m3(&key, algo, out),
-            Message::GroupM1 => self.on_group_m1(&key, algo, out),
+            Message::PairwiseM3 => self.on_m3(&key, frame, algo, out),
+            Message::GroupM1 => self.on_group_m1(&key, frame, algo, out),
             // Messages 2 and 4 and group message 2 travel the other way. A
             // station receiving one is either talking to itself or being
             // probed; either way it is not a message to act on.
@@ -401,9 +414,13 @@ impl<'a> Handshake<'a> {
     }
 
     /// Message 3: verify, check for a downgrade, take the GTK, install.
+    ///
+    /// `frame` is the whole EAPOL frame `key` was parsed out of, trimmed to the
+    /// length its header declares — see [`Supplicant::on_eapol`].
     fn on_m3(
         &mut self,
         key: &eapol::KeyFrame<'_>,
+        frame: &[u8],
         algo: MicAlgo,
         out: &mut [u8],
     ) -> Result<Outcome, Error> {
@@ -416,7 +433,7 @@ impl<'a> Handshake<'a> {
         // The MIC first, and nothing from the frame is believed until it
         // passes: the key data that follows is attacker-supplied until this
         // check succeeds, and it is what carries the GTK.
-        if !verify_frame_mic(algo, &ptk.kck, key, self.mic_len) {
+        if !kdf::verify_mic(algo, &ptk.kck, frame, self.mic_len) {
             return Err(Error::BadMic);
         }
         // A different ANonce is a different handshake, and the PTK we hold
@@ -487,6 +504,7 @@ impl<'a> Handshake<'a> {
     fn on_group_m1(
         &mut self,
         key: &eapol::KeyFrame<'_>,
+        frame: &[u8],
         algo: MicAlgo,
         out: &mut [u8],
     ) -> Result<Outcome, Error> {
@@ -496,7 +514,7 @@ impl<'a> Handshake<'a> {
         self.check_replay(key.replay_counter)?;
 
         let ptk = self.ptk.as_ref().ok_or(Error::WrongState)?;
-        if !verify_frame_mic(algo, &ptk.kck, key, self.mic_len) {
+        if !kdf::verify_mic(algo, &ptk.kck, frame, self.mic_len) {
             return Err(Error::BadMic);
         }
 
@@ -593,44 +611,39 @@ impl<'a> Handshake<'a> {
     }
 }
 
-/// Verify a received frame's MIC.
-///
-/// The frame has to be reassembled to do this, because the MIC is computed
-/// over the whole EAPOL frame — header included — with the MIC field zeroed,
-/// and what we hold is a parsed body. Rebuilding it from the parsed fields
-/// rather than zeroing a copy of the original is deliberate: it means a frame
-/// whose fields we did not fully understand cannot pass, because anything we
-/// failed to parse is not in what we hash.
-fn verify_frame_mic(algo: MicAlgo, kck: &[u8], key: &eapol::KeyFrame<'_>, mic_len: usize) -> bool {
-    let mut buf = [0u8; eapol::HEADER_LEN + 77 + eapol::MIC_LEN_SUITE_B_192 + 2 + MAX_KEY_DATA_LEN];
-    let fields = KeyFrameFields {
-        descriptor_type: key.descriptor_type,
-        key_info: key.key_info,
-        key_len: key.key_len,
-        replay_counter: key.replay_counter,
-        nonce: key.nonce,
-        iv: key.iv,
-        rsc: key.rsc,
-        key_data: key.key_data,
-    };
-    let Some(len) = eapol::write(&mut buf, eapol::version::V2, &fields, mic_len) else {
-        return false;
-    };
-    let Some(frame) = buf.get(..len) else {
-        return false;
-    };
-    let mut expected = [0u8; eapol::MIC_LEN_SUITE_B_192];
-    let Some(tag) = expected.get_mut(..mic_len) else {
-        return false;
-    };
-    if kdf::compute_mic(algo, kck, frame, mic_len, tag).is_none() {
-        return false;
-    }
-    let Some(tag) = expected.get(..mic_len) else {
-        return false;
-    };
-    hmac::verify(tag, key.mic)
-}
+// A note on how a received MIC is checked, kept because this module used to do
+// it differently and the difference was a bug.
+//
+// There used to be a private `verify_frame_mic` here that rebuilt the frame
+// from the parsed `KeyFrame` and hashed the reconstruction. Its stated reason
+// was that "anything we failed to parse is not in what we hash", so a frame
+// whose fields we did not fully understand could not pass. That reason cannot
+// be satisfied and should not be wanted:
+//
+//   * It cannot be satisfied, because the MIC is *defined* over the octets the
+//     sender put on the wire. Every octet in the hashed range has to be hashed
+//     as it arrived, whether this crate has a field for it or not. The rebuild
+//     had no field for two of them — the EAPOL version octet at frame offset 0,
+//     and the eight reserved octets after the Key RSC — so it substituted
+//     version 2 and eight zeroes. An access point that sends version 1 or 3,
+//     which `eapol::version`'s own doc comment records as commonplace, had
+//     every MIC rejected with a correct passphrase, and the failure is
+//     indistinguishable from a wrong one.
+//
+//   * It should not be wanted, because the property it was reaching for is
+//     already held, and held by the MIC itself. An attacker cannot smuggle
+//     octets past us by putting them somewhere we do not parse: changing any
+//     octet in the frame changes the MIC, and computing a new one needs the
+//     KCK. Hashing the frame as received is what makes that true.
+//
+// So the check is `kdf::verify_mic` over the received frame, which hashes it in
+// three pieces — everything before the MIC field, `mic_len` zeroes, everything
+// after — and is therefore correct for any version octet and any reserved
+// octets. The one thing the caller must get right is where the frame *ends*,
+// which `on_eapol` settles once by trimming to the header's declared length.
+//
+// Reported by lane A, whose authenticator hit the same frame/body distinction
+// from the other side; see design-decisions.md §804.
 
 /// Copy the Key Data into `out`, unwrapping it first if it is encrypted.
 ///
@@ -1230,6 +1243,104 @@ mod tests {
 
         let (f3, n3) = m3(2, ANONCE, &GTK, 1);
         assert_eq!(hs.on_eapol(&f3[..n3], &mut out), Err(Error::BadMic));
+    }
+
+    // -- the octets inside the MIC that this crate has no field for ---------
+    //
+    // The MIC covers the frame from offset 0, which puts two runs of octets
+    // inside it that `KeyFrame` does not carry: the EAPOL version at offset 0,
+    // and the eight reserved octets after the Key RSC. A verifier that rebuilds
+    // the frame from the parsed fields has to invent both, and this module's
+    // did — version 2 and eight zeroes — so an AP that sent anything else had
+    // every MIC rejected with a correct passphrase. These pin the frame down as
+    // *received* instead. See design-decisions.md §804.
+
+    /// Recompute and reinstall the MIC over `frame[..len]`, so a test can edit
+    /// an octet the sender would have hashed and still present a valid frame.
+    fn remic(frame: &mut [u8], len: usize) {
+        let ptk = ptk();
+        let mut mic = [0u8; eapol::MIC_LEN_DEFAULT];
+        kdf::compute_mic(
+            MicAlgo::HmacSha1,
+            &ptk.kck,
+            &frame[..len],
+            eapol::MIC_LEN_DEFAULT,
+            &mut mic,
+        )
+        .expect("MIC computes");
+        eapol::set_mic(&mut frame[..len], &mic).expect("MIC fits");
+    }
+
+    /// Drive message 1, then hand over a message 3 that `edit` has altered and
+    /// which has been re-MICed afterwards.
+    fn m3_after_editing(edit: impl FnOnce(&mut [u8], usize)) -> Result<Outcome, Error> {
+        let mut hs = handshake();
+        let (f1, n1) = m1(1);
+        let mut out = [0u8; 256];
+        hs.on_eapol(&f1[..n1], &mut out).expect("accepted");
+
+        let (mut f3, n3) = m3(2, ANONCE, &GTK, 1);
+        edit(&mut f3, n3);
+        remic(&mut f3, n3);
+        hs.on_eapol(&f3[..n3], &mut out)
+    }
+
+    #[test]
+    fn an_access_point_that_speaks_eapol_version_one_or_three_still_verifies() {
+        // 802.1X requires the version to be ignored on receipt and APs in the
+        // field send 1, 2 and 3 interchangeably — but the octet is hashed, so
+        // "ignored" cannot mean "replaced with the one we happen to send".
+        for version in [eapol::version::V1, eapol::version::V3] {
+            let outcome = m3_after_editing(|frame, _| frame[0] = version);
+            assert!(
+                outcome.as_ref().is_ok_and(|o| o.installs_keys()),
+                "version {version} should verify, got {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nonzero_reserved_octets_are_hashed_as_they_arrived() {
+        // Reserved fields are "set to 0 on transmit and ignored on receipt",
+        // but a sender that sets them anyway MICed them, so ignoring them on
+        // receipt cannot extend to leaving them out of the hash.
+        let start = eapol::HEADER_LEN + 1 + 2 + 2 + eapol::REPLAY_COUNTER_LEN + eapol::NONCE_LEN;
+        let reserved = start + eapol::IV_LEN + eapol::RSC_LEN;
+        assert_eq!(
+            reserved + eapol::RESERVED_LEN,
+            eapol::MIC_OFFSET,
+            "the reserved field is the last thing before the MIC"
+        );
+
+        let outcome = m3_after_editing(|frame, _| {
+            frame[reserved..reserved + eapol::RESERVED_LEN].fill(0xA5);
+        });
+        assert!(
+            outcome.as_ref().is_ok_and(|o| o.installs_keys()),
+            "nonzero reserved octets should verify, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn padding_past_the_declared_body_is_not_hashed() {
+        // An EAPOL frame rides inside a data frame that is padded to a minimum
+        // length, so the buffer handed to `on_eapol` is routinely longer than
+        // the frame the sender MICed. The header's body length is what says
+        // where the sender stopped.
+        let mut hs = handshake();
+        let (f1, n1) = m1(1);
+        let mut out = [0u8; 256];
+        hs.on_eapol(&f1[..n1], &mut out).expect("accepted");
+
+        let (mut f3, n3) = m3(2, ANONCE, &GTK, 1);
+        let padded = n3 + 26;
+        f3[n3..padded].fill(0xFF);
+
+        assert!(
+            hs.on_eapol(&f3[..padded], &mut out)
+                .expect("padding is not part of the frame")
+                .installs_keys()
+        );
     }
 
     #[test]

@@ -26,6 +26,7 @@
 //! | [`device`] | What one `vkCreateDevice` means when exactly one driver is behind it: the record a device's dispatch word points at, and which of the two device-level commands the loader must answer itself. |
 //! | [`physical`] | The other side of that coin: the commands a wrapped `VkPhysicalDevice` forces the loader to name one by one, and the order a driver is asked for them in. |
 //! | [`global`] | The three commands asked with no handle at all, before an instance exists — so the loader has to answer them itself rather than forward them. |
+//! | [`unknown`] | The physical-device commands the loader has never heard of: how one piece of code forwards a signature nobody told it about. |
 //! | [`entry`] | The exported symbols, the process-wide driver registry, and the dispatch table their addresses come from. |
 //! | [`vk`] | The few Vulkan C types the loader's own signatures cannot avoid naming. Not a binding, and not becoming one. |
 //!
@@ -116,6 +117,21 @@
 //! layer above was therefore *unreachable by a conforming application* despite
 //! being complete and tested — a subsystem correct in isolation and inert in
 //! place. That is worth remembering as a shape: the tests all passed.
+//!
+//! Naming ten commands is affordable. Naming every physical-device command any
+//! extension will ever define is not, and [`global`] made that bill due the day
+//! it started reporting the drivers' extensions honestly: an application told
+//! `VK_KHR_surface` exists asks for an entry point [`physical`] has never heard
+//! of. [`unknown`] is the escape, and it is a narrow one — three instructions of
+//! assembly that swap argument 0 and *jump*, which forwards every signature at
+//! once because neither calling convention lets the first argument's identity
+//! affect where the others live. It costs the loader its portability, which is
+//! the honest price of the wrapping [`physical`] is the bill for.
+//!
+//! It does not extend upward. A command taking a `VkInstance` needs a per-command
+//! *fan-out policy* — which of several drivers answers — and a policy is not
+//! something three instructions can carry. That half is still open, and it is
+//! filed rather than hidden.
 
 #![no_std]
 
@@ -129,4 +145,5 @@ pub mod icd;
 pub mod instance;
 pub mod physical;
 pub mod registry;
+pub mod unknown;
 pub mod vk;

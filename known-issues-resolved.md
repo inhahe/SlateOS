@@ -51372,6 +51372,17 @@ should be settled before spending the churn.
 invariant is enforced. Keep writing `alloc::` paths: the point of doing so is
 that closing this stays a small change.
 
+**Update, 2026-09-02.** The crate gained one deliberate `std::` user:
+`src/phase.rs`, the shaping-phase timer, which needs `std::time::Instant`.
+It is behind the `phase-timing` cargo feature, off by default and never on in
+a shipped build, and the `std` import sits inside the `#[cfg(feature = …)]`
+half of a `sealed` module — the feature-off half is a unit struct with no
+imports at all. So it does not enlarge this entry: whoever adds `#![no_std]`
+puts it behind `#![cfg_attr(not(feature = "phase-timing"), no_std)]`, or
+declines to build the feature for the target, and nothing else changes. It is
+recorded here only so the next `grep` for `std::` in this crate finds an
+explanation rather than a violation.
+
 ---
 
 

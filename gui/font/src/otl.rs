@@ -1083,7 +1083,7 @@ fn subtable_coverage(data: &[u8], kind: u16, sub: usize, extension: u16) -> Opti
 /// `None` for a format this crate does not know, which the caller must read as
 /// "assume everything": a coverage it cannot parse is one it cannot exclude
 /// anything from.
-fn coverage_digest(data: &[u8], table: usize) -> Option<Digest> {
+pub(crate) fn coverage_digest(data: &[u8], table: usize) -> Option<Digest> {
     let mut digest = Digest::EMPTY;
     match u16_at(data, table)? {
         1 => {
@@ -1170,6 +1170,65 @@ pub(crate) fn coverage_index(data: &[u8], table: usize, glyph: u16) -> Option<u1
         }
         _ => None,
     }
+}
+
+/// The glyphs a class definition puts in class `want`, summarised.
+///
+/// The inverse of [`glyph_class`], asked once for a whole class instead of
+/// once per glyph — which is the point: a caller that wants to know whether
+/// *this* glyph is in *that* class can consult the digest in three shifts
+/// rather than binary-searching the table.
+///
+/// `None` for a format this crate does not know, or for an array it cannot
+/// read to the end, which the caller must read as "assume everything" for the
+/// same reason [`coverage_digest`] must.
+///
+/// **`want` must not be 0.** Class 0 is "every glyph not listed", so its true
+/// membership is the whole glyph space minus what the table names, and
+/// summarising only the listed entries would produce a digest that answers
+/// "no" for a glyph genuinely in the class — the one thing a digest is never
+/// allowed to do. There is no caller for class 0 and the assertion says so
+/// rather than the doc comment alone.
+pub(crate) fn class_digest(data: &[u8], table: usize, want: u16) -> Option<Digest> {
+    debug_assert!(
+        want != 0,
+        "class 0 is the unlisted glyphs and cannot be summarised"
+    );
+    if want == 0 {
+        return None;
+    }
+    let mut digest = Digest::EMPTY;
+    match u16_at(data, table)? {
+        1 => {
+            let start = u16_at(data, table.checked_add(2)?)?;
+            let count = u16_at(data, table.checked_add(4)?)?;
+            let first = table.checked_add(6)?;
+            for i in 0..count {
+                let at = first.checked_add(usize::from(i).checked_mul(2)?)?;
+                // A truncated array: everything past here is unknown, so the
+                // digest can no longer exclude anything.
+                let class = u16_at(data, at)?;
+                if class == want {
+                    digest.add(start.checked_add(i)?);
+                }
+            }
+        }
+        2 => {
+            let count = u16_at(data, table.checked_add(2)?)?;
+            let first = table.checked_add(4)?;
+            for i in 0..usize::from(count) {
+                let at = first.checked_add(i.checked_mul(6)?)?;
+                let start = u16_at(data, at)?;
+                let end = u16_at(data, at.checked_add(2)?)?;
+                let class = u16_at(data, at.checked_add(4)?)?;
+                if class == want {
+                    digest.add_range(start, end);
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(digest)
 }
 
 /// The class `glyph` belongs to. Class 0 is "everything not listed", which is

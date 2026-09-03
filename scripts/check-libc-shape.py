@@ -92,6 +92,19 @@ import struct
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gittree  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+
+# What the archive is built from. `posix` is the crate; build-sysroot.ps1 is
+# here because the regression this whole file exists to catch is *a dropped
+# compiler flag in that script* (`-C codegen-units=4096`, design-decisions.md
+# S339). An edit to it that has not been rebuilt leaves an archive describing
+# the old flags, which is exactly the state where a stale OK is most misleading.
+_ARCHIVE_INPUTS = ("posix",)
+_ARCHIVE_INPUT_FILES = ("toolchain/build-sysroot.ps1",)
+
 # Never let an un-encodable character eat the diagnostic.
 #
 # This script is invoked by toolchain/build-sysroot.ps1, i.e. from a Windows
@@ -494,6 +507,61 @@ def check(path: Path, verbose: bool) -> list[str]:
     return violations
 
 
+def stale_against_sources(archive: Path) -> tuple[int, str | None]:
+    """Inputs of `archive` that postdate it: how many, and the most recent.
+
+    WHY THIS EXISTS. `libc.a` is a build artifact and is not in git, so every
+    worktree holds whatever copy it last happened to build -- and two of the
+    three lanes never build `posix` at all. Lane C filed the request below after
+    this gate reported seven findings against an archive eleven days and
+    fifty-seven `posix/` commits old. Measured 2026-09-02 on a fresh archive:
+    all seven were already fixed. Every one of those was a lane being asked to
+    act on a fact about a tree nobody had.
+
+        requests/c-b-check-libc-shape-grades-a-build-artifact-without-checking-its-age.md
+
+    That direction is the harmless one. The dangerous one is the same staleness
+    with the opposite content: an old archive that happens to be clean prints
+    OK, and an OK here is precisely the signal that means "a GNU package will
+    link." A gate that can pass on eleven-day-old evidence is not a gate --
+    which is the same objection the missing-archive branch in `main` already
+    makes, one step earlier and for the same reason.
+
+    WHY MTIME. It is what every build system uses for this question, and it
+    needs nothing written down anywhere: no stamp file to fall out of date, no
+    recorded commit to be wrong after a checkout. A `git merge` rewrites only
+    the files it changes, so a merge that leaves `posix/` alone does not bump
+    anything here. The failure mode is a checkout touching a file whose content
+    did not change, which reports staleness that is not real -- and that
+    direction costs a skipped run, not a false pass.
+
+    The listing goes through `gittree.WorkTree` rather than a walk of its own,
+    so the rule for what counts as build output is not spelled a third time.
+    See known-issues.md's pre-push-gates entry, step 7: the second spelling of
+    that rule had already drifted from the first.
+    """
+    stamp = archive.stat().st_mtime
+    rels: list[str] = list(_ARCHIVE_INPUT_FILES)
+    with gittree.WorkTree(str(ROOT)) as tree:
+        for prefix in _ARCHIVE_INPUTS:
+            rels.extend(tree.files_under(prefix))
+
+    count = 0
+    newest_rel: str | None = None
+    newest_mtime = stamp
+    for rel in rels:
+        try:
+            mtime = (ROOT / rel).stat().st_mtime
+        except OSError:
+            # A path we cannot stat says nothing about the archive's age.
+            continue
+        if mtime > stamp:
+            count += 1
+            if mtime > newest_mtime:
+                newest_mtime, newest_rel = mtime, rel
+    return count, newest_rel
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
@@ -504,6 +572,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="print the member each strict family resolved to")
+    parser.add_argument("--ignore-age", action="store_true",
+                        help="grade the archive even if posix/ is newer than it")
     args = parser.parse_args(argv)
 
     if args.archive:
@@ -521,6 +591,21 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         print("       (This is exit 2, 'could not check', not a pass.)", file=sys.stderr)
         return 2
+
+    # Only the default archive is age-checked. An explicitly named one is
+    # somebody deliberately grading a different file -- a saved copy, another
+    # lane's, one under bisection -- and comparing *that* to this checkout's
+    # posix/ would be answering a question nobody asked.
+    if not args.archive and not args.ignore_age:
+        stale, newest = stale_against_sources(path)
+        if stale:
+            print(f"SKIP: {path} predates {stale} of its own input(s) -- the "
+                  f"most recent is {newest}.", file=sys.stderr)
+            print("      Run toolchain/build-sysroot.ps1 to grade the archive "
+                  "this tree would actually produce.", file=sys.stderr)
+            print("      (This is exit 2, 'could not check', not a pass. Use "
+                  "--ignore-age to grade it anyway.)", file=sys.stderr)
+            return 2
 
     try:
         violations = check(path, args.verbose)

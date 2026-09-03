@@ -109044,3 +109044,101 @@ written down rather than left as "obvious":
 
 **Where it is:** `scripts/boot-test.sh` (the whole file is the subject; the
 re-exec belongs immediately after the `set -u`/`SCRIPT_DIR` preamble).
+
+---
+
+## A-KSHELL-REDIRECT-MISSED-WHEN-AN-APOSTROPHE-PRECEDES-IT, and the eleven disagreeing quote scanners behind it — OPEN 2026-09-02
+
+**Lane:** A. **Severity:** silent wrong behaviour on an ordinary line; the
+output goes to the terminal instead of the file and the shell reports success.
+
+**In short:** `echo "it's fine" > out` does not redirect. It prints
+`it's fine > out` to the screen, creates no file, and exits 0. The cause is
+that `parse_redirect` decides "am I inside quotes?" with a **single on/off
+switch flipped by either quote character**, so an apostrophe inside a
+double-quoted string turns quoting *off* and the closing `"` turns it back
+*on* — leaving the scanner convinced the `>` is quoted when it is not.
+
+**Repro** (any odd number of quote characters before the operator):
+
+| Line | What happens | What should happen |
+|---|---|---|
+| `echo "it's fine" > out` | prints `it's fine > out`, no file | writes `it's fine` to `out` |
+| `cat < "don't.txt"` | no redirect; `don't.txt` treated as an argument | reads the file |
+| `echo 'a > b'` | correct — two quote chars, even | correct |
+| `echo "a" > b` | correct — two quote chars, even | correct |
+
+So the bug needs an **odd** count of `'`/`"` bytes to the left of the
+operator, which is exactly what an apostrophe inside a double-quoted string
+produces. That is why it has survived: every test written with balanced
+quotes passes.
+
+**Where it is:** `parse_redirect` (`kernel/src/kshell.rs:6615`) and
+`parse_input_redirect` (`:6784`). Both are literally
+
+```rust
+if b == b'"' || b == b'\'' {
+    in_quote = !in_quote;
+} else if !in_quote && b == b'>' {
+```
+
+One boolean, both quote characters. A `'` inside `"…"` is an ordinary
+character in every shell, and a `"` inside `'…'` likewise; a single toggle
+cannot represent that, because it has no idea *which* quote opened the region.
+
+### The root cause is not these two functions
+
+**Eleven places in `kshell.rs` independently decide whether a byte is inside
+a quote, and they do not agree with each other.** The two above are simply the
+weakest. Ranked by how much of the grammar each one knows:
+
+| # | Site | State it keeps | Knows `'` ≠ `"` | Knows `\` |
+|---|---|---|---|---|
+| 1 | `unquoted_positions` :1186 | `Option<u8>` | yes | no |
+| 2 | `first_unquoted_space` :1229 | `Option<u8>` | yes | no |
+| 3 | `split_unquoted` :1255 | `Option<u8>` | yes | no |
+| 4 | `expand_braces` :1337 | `Option<u8>` | yes | no |
+| 5 | `remove_quotes` :1469 | `Option<char>` | yes | no |
+| 6 | `split_words` :3383 | nested loops | yes | no |
+| 7 | `expand_vars_bytes` :885 | `in_single_quote: bool` | **only `'`** | no |
+| 8 | `parse_redirect` :6615 | `in_quote: bool` | **no** | no |
+| 9 | `parse_input_redirect` :6784 | `in_quote: bool` | **no** | no |
+| 10 | `awk_split_print_args` :141351 | `in_quote: bool` | n/a — awk has only `"` | no |
+| 11 | `tab_complete` :6001 | none — `rfind(' ')` | **no quoting at all** | no |
+
+Ten of the eleven are wrong in at least one way, and they are wrong
+*differently*, which is the part that makes this expensive: a line is scanned
+several times on its way to a command, by scanners that disagree about where
+its words begin and end. `#10` is the only one that is defensible as written,
+because awk really does have just one quote character.
+
+This is the "band-aid accumulation" case `CLAUDE.md` names: the same rule
+reimplemented until the copies drift. Patching the two redirect scanners would
+fix the repro above and leave nine implementations of one grammar.
+
+### The proper fix
+
+**One scanner, used by all eleven.** A single quote/escape state machine over
+bytes, exposing what each caller actually asks:
+
+- `is_quoted(s) -> impl Iterator<Item = bool>` (or a `QuoteScan` cursor), so
+  "find the first unquoted `X`" is a filter over one shared traversal rather
+  than a new loop each time;
+- the three context rules stated once — unquoted `\c` → `c`; inside `"…"` the
+  backslash is special only before `"`, `` ` ``, `$`, `\`; inside `'…'` there
+  are no escapes;
+- callers keep their current signatures, so this is a substitution at eleven
+  sites and not a redesign of the pipeline.
+
+That scanner is the *same object* `TD-KSHELL-LINE-EDITOR-IS-UTF8` stage (b)
+needs (backslash escapes) and stage (d) needs (completion must find a word
+start the way the parser does). **These are one piece of work, not three**, and
+this entry exists mainly to record that: doing (b) as "add backslash handling
+to `remove_quotes` and `split_words`" would be the third band-aid rather than
+the fix.
+
+**Verification when it lands:** a rung per row of the repro table, plus a
+property over the eleven sites — for a corpus of lines mixing `'`, `"`, `\`
+and an operator, every scanner must report the same quoted/unquoted
+classification for every byte. Disagreement *is* the bug, so agreement is the
+assertion.

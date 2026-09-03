@@ -469,20 +469,16 @@ struct Job<'a, O: Write, E: Write> {
 impl<O: Write, E: Write> Job<'_, O, E> {
     /// This job as the shared copy engine sees it.
     ///
-    /// Every field is a constant, because `mv` has no option that changes any of
-    /// them: `cp_option_init` (`mv.c:119`) sets them and mv's getopt writes none
-    /// of them back. That is the whole reason `mv` can drive the same engine
-    /// `cp` does without a single branch inside it that names a program — the
-    /// two differ only in what they put in this struct.
-    ///
-    /// Written out one field per line with its citation rather than as a
-    /// `Default`, because the point of the list is that it is *checkable*
-    /// against upstream. A default would hide which of these are upstream's
-    /// choices and which are Rust's zero values.
+    /// The whole difference between `mv` and `cp` is what goes in here: neither
+    /// program appears by name anywhere inside the engine, so the two drive the
+    /// same code with different [`copy::Opts`].
     fn run(&mut self) -> copy::Run<'_, E> {
         copy::Run {
-            opts: mv_opts(self.umask),
+            opts: mv_opts(self.flags, self.umask),
             err: self.err,
+            out: &mut *self.out,
+            copied: self.copied,
+            answers: self.answers,
         }
     }
 }
@@ -494,9 +490,32 @@ impl<O: Write, E: Write> Job<'_, O, E> {
 /// second one written beside it. A duplicated options list is a test that
 /// passes against itself: it would keep passing after a change to the real one,
 /// which is precisely the change a test of the preserve tail exists to catch.
-fn mv_opts(umask: u32) -> copy::Opts {
+///
+/// Two kinds of field, and that split is the whole content of the list. The
+/// constants are `cp_option_init`'s own, each carrying the line that sets it;
+/// the three that read [`MvFlags`] are the only `mv` options that reach the copy
+/// engine at all, and each carries the `case` that writes it *back* over the
+/// constant. Nothing here is a Rust default — a `..Default::default()` would
+/// hide which of the two kinds a field is, which is exactly what a reader
+/// checking this against upstream needs to know.
+fn mv_opts(flags: &MvFlags, umask: u32) -> copy::Opts<'_> {
     copy::Opts {
         prog: "mv",
+        // A move is always a deep one and never follows a symlink: `mv dir d`
+        // moves the tree, and `mv link d` moves the link and not its target.
+        recursive: true,                 // mv.c:147
+        dereference: copy::Deref::Never, // mv.c:126
+        preserve_links: true,            // mv.c:135
+        // `-f` is not this field for `mv`, which is the one place its option
+        // table diverges from `cp`'s in a way that matters here: `mv -f` sets
+        // `interactive` (mv.c:350), so the two unlink knobs stay off and a
+        // destination that cannot be opened is a failure rather than a retry.
+        unlink_dest_before_opening: false,    // mv.c:127
+        unlink_dest_after_failed_open: false, // mv.c:128
+        // The three the command line can move.
+        verbose: flags.verbose,           // mv.c:402
+        interactive: flags.interactive,   // mv.c:350, 353, 356
+        backup: &flags.backup,            // mv.c:519
         preserve_mode: true,              // mv.c:136
         preserve_timestamps: true,        // mv.c:137
         preserve_ownership: true,         // mv.c:134
@@ -2656,11 +2675,14 @@ fn copy_across_devices<E: Write>(
     // bit until the `chown` has run. See [`copy::ModeDebt`].
     let mut debt = ModeDebt::new(true, mode, false);
     // `Dest::New` unconditionally, and it is a fact about the caller rather
-    // than an assumption: `mv` unlinks the destination before opening
-    // (`unlink_dest_before_opening`, `mv.c:139`), so there is nothing at the
-    // name by the time the engine sees it. That is also why `Clobber::Never` is
-    // right — `unlink_dest_after_failed_open` is false for a move (`mv.c:140`),
-    // there being nothing left to unlink.
+    // than an assumption: [`clear_destination`] ran a few lines up in
+    // [`move_one`], so there is nothing at the name by the time the engine sees
+    // it. Note that this is *not* `unlink_dest_before_opening`, which `mv` sets
+    // false (`mv.c:127`) — upstream's general unlink is guarded by `!
+    // x->move_mode` (`copy.c:2571`) and it is the EXDEV fallback that clears
+    // and sets `new_dst` instead (`copy.c:2869-2892`). That is also why
+    // `Clobber::Never` is right: `unlink_dest_after_failed_open` is false for a
+    // move (`mv.c:128`), there being nothing left to unlink.
     let mut dest = copy::open_destination(
         target,
         mode,
@@ -2788,18 +2810,55 @@ mod tests {
         items.iter().map(OsString::from).collect()
     }
 
-    /// What [`copy_across_devices`] is handed by a test: `err`, plus the options
-    /// `mv` actually runs with.
+    /// The four things a [`copy::Run`] borrows that a test calling
+    /// [`copy_across_devices`] directly has no owner for.
     ///
-    /// Through [`mv_opts`] rather than an options list written here, which is
-    /// the difference between a test of the preserve tail and a test of a copy
-    /// of the preserve tail's arguments. The umask is read per call for the
-    /// same reason [`Job`] reads it per command: a test that sets the mask
-    /// around a move must get the mask it set.
-    fn cross_device_run<E: Write>(err: &mut E) -> copy::Run<'_, E> {
-        copy::Run {
-            opts: mv_opts(coreutils::umask::current()),
-            err,
+    /// A `Run` is five borrows, and a *function* can return one only for the
+    /// borrow it was handed — it cannot create the flags, the stdout sink, the
+    /// copied-inode table and the answer source itself and then hand out
+    /// references into its own frame. So the test owns them here and
+    /// [`CrossDevice::run`] lends them out. `err` stays a parameter because the
+    /// cases that inspect a diagnostic already own the `Vec` they read it from.
+    struct CrossDevice {
+        /// The no-options command line, which is what every case below runs.
+        /// A case that wants `-v` or `-b` sets this field rather than building
+        /// a second options list — see [`CrossDevice::run`].
+        flags: MvFlags,
+        out: Vec<u8>,
+        copied: Copied,
+        /// Empty, so a prompt that should never happen fails the case instead
+        /// of blocking on the harness's stdin.
+        answers: Canned,
+    }
+
+    impl Default for CrossDevice {
+        fn default() -> Self {
+            CrossDevice {
+                flags: MvFlags::default(),
+                out: Vec::new(),
+                copied: Copied::default(),
+                answers: Canned::new(&[]),
+            }
+        }
+    }
+
+    impl CrossDevice {
+        /// What [`copy_across_devices`] is handed by a test: `err`, plus the
+        /// options `mv` actually runs with.
+        ///
+        /// Through [`mv_opts`] rather than an options list written here, which
+        /// is the difference between a test of the preserve tail and a test of
+        /// a copy of the preserve tail's arguments. The umask is read per call
+        /// for the same reason [`Job`] reads it per command: a test that sets
+        /// the mask around a move must get the mask it set.
+        fn run<'a, E: Write>(&'a mut self, err: &'a mut E) -> copy::Run<'a, E> {
+            copy::Run {
+                opts: mv_opts(&self.flags, coreutils::umask::current()),
+                err,
+                out: &mut self.out,
+                copied: &mut self.copied,
+                answers: &mut self.answers,
+            }
         }
     }
 
@@ -4347,7 +4406,13 @@ mod tests {
         let moved = dir.path("moved");
 
         let meta = fs::symlink_metadata(&link).unwrap();
-        copy_across_devices(&link, &moved, &meta, &mut cross_device_run(&mut Vec::new())).unwrap();
+        copy_across_devices(
+            &link,
+            &moved,
+            &meta,
+            &mut CrossDevice::default().run(&mut Vec::new()),
+        )
+        .unwrap();
 
         let moved_meta = fs::symlink_metadata(&moved).unwrap();
         assert!(
@@ -4377,7 +4442,13 @@ mod tests {
         let b = dir.path("b");
         fs::write(&a, b"bytes").unwrap();
         let meta = fs::symlink_metadata(&a).unwrap();
-        copy_across_devices(&a, &b, &meta, &mut cross_device_run(&mut Vec::new())).unwrap();
+        copy_across_devices(
+            &a,
+            &b,
+            &meta,
+            &mut CrossDevice::default().run(&mut Vec::new()),
+        )
+        .unwrap();
         // See the symlink case above: removing the source is `move_one`'s step,
         // so that a removal that fails is not mistaken for a copy that did.
         assert!(
@@ -4513,7 +4584,13 @@ mod tests {
 
         let meta = fs::symlink_metadata(&a).unwrap();
         let want = meta.modified().unwrap();
-        copy_across_devices(&a, &b, &meta, &mut cross_device_run(&mut Vec::new())).unwrap();
+        copy_across_devices(
+            &a,
+            &b,
+            &meta,
+            &mut CrossDevice::default().run(&mut Vec::new()),
+        )
+        .unwrap();
 
         let got = fs::symlink_metadata(&b).unwrap().modified().unwrap();
         assert_eq!(got, want, "the copy must keep the source's stamp");
@@ -4535,7 +4612,13 @@ mod tests {
         fs::set_permissions(&a, fs::Permissions::from_mode(0o4741)).unwrap();
 
         let meta = fs::symlink_metadata(&a).unwrap();
-        copy_across_devices(&a, &b, &meta, &mut cross_device_run(&mut Vec::new())).unwrap();
+        copy_across_devices(
+            &a,
+            &b,
+            &meta,
+            &mut CrossDevice::default().run(&mut Vec::new()),
+        )
+        .unwrap();
 
         let got = fs::symlink_metadata(&b).unwrap().permissions().mode() & 0o7777;
         assert_eq!(got, 0o4741, "every bit, set-user-ID included");
@@ -4578,7 +4661,7 @@ mod tests {
 
         let meta = fs::symlink_metadata(&a).unwrap();
         let mut err = Vec::new();
-        copy_across_devices(&a, &b, &meta, &mut cross_device_run(&mut err)).unwrap();
+        copy_across_devices(&a, &b, &meta, &mut CrossDevice::default().run(&mut err)).unwrap();
 
         assert_eq!(String::from_utf8_lossy(&err), "");
         assert_eq!(
@@ -4616,7 +4699,7 @@ mod tests {
 
         let meta = fs::symlink_metadata(&a).unwrap();
         let mut err = Vec::new();
-        copy_across_devices(&a, &b, &meta, &mut cross_device_run(&mut err)).unwrap();
+        copy_across_devices(&a, &b, &meta, &mut CrossDevice::default().run(&mut err)).unwrap();
 
         assert_eq!(String::from_utf8_lossy(&err), "");
         assert_eq!(
@@ -4651,7 +4734,13 @@ mod tests {
         let meta = fs::symlink_metadata(&link).unwrap();
         let want = meta.modified().unwrap();
         let moved = dir.path("moved");
-        copy_across_devices(&link, &moved, &meta, &mut cross_device_run(&mut Vec::new())).unwrap();
+        copy_across_devices(
+            &link,
+            &moved,
+            &meta,
+            &mut CrossDevice::default().run(&mut Vec::new()),
+        )
+        .unwrap();
 
         let got = fs::symlink_metadata(&moved).unwrap().modified().unwrap();
         assert_eq!(got, want, "the link's own stamp must come across");
@@ -4745,7 +4834,7 @@ mod tests {
             &sub,
             &dir.path("elsewhere"),
             &meta,
-            &mut cross_device_run(&mut Vec::new()),
+            &mut CrossDevice::default().run(&mut Vec::new()),
         )
         .unwrap_err();
         assert_eq!(e.err.kind(), io::ErrorKind::Unsupported);

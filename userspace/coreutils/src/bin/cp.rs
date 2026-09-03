@@ -114,7 +114,8 @@
 //!      1777 directory produced 1777 where GNU produces 1755, and the copy was
 //!      made group- and other-writable *before* its contents were written —
 //!      a window in which anyone could add a file to a directory that is about
-//!      to look like a faithful copy. [`copy_tree`] now does GNU's dance:
+//!      to look like a faithful copy. `copy::copy_tree` — private to the
+//!      engine, which is why this is not a link — now does GNU's dance:
 //!      withhold group/other write at `mkdir`, force owner-rwx on if the source
 //!      lacked it, and put both back at the end, less the umask.
 //!
@@ -220,7 +221,8 @@
 //! the last of them on the command line wins and `cp -in` is `-n`. But they are
 //! not the same refusal: `-n` prints `not replacing 'b'`, `-i` prints nothing
 //! beyond the question, and `-n` also *suppresses* the "are the same file"
-//! check that `-i` still makes. See [`overwrite_allowed`] and [`overwrite_ok`].
+//! check that `-i` still makes. See [`overwrite_allowed`], and the private
+//! `overwrite_ok` beside it.
 //!
 //! Three consequences that fall out of the table and are each measurable:
 //!
@@ -245,20 +247,18 @@
 //! and the five behaviours a collapsed version could not produce — is
 //! `design-decisions.md` §727. The cases are `scripts/cp-diff.sh` section 16.
 
-use coreutils::backup::{self, BackupType, source_is_dst_backup, src_base_is_dot_or_dotdot};
+use coreutils::backup::{self, BackupType};
 use coreutils::copy::{
-    self, Chowned, Made, ModeDebt, Source, chown_to_source, copy_bytes, make_dir,
-    preserve_attributes, read_dir_fastread,
+    self, Deref, DestState, Placed, overwrite_allowed, place_entity, remove_destination_first,
+    stat_destination,
 };
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{
-    Copied, EntryId, FileId, entry_id, file_id, is_same_file, nlink, same_entry, split_entry,
+    Copied, EntryId, FileId, entry_id, file_id, is_same_file, same_entry, split_entry,
 };
-use coreutils::fsattr::{Link, On, permission_bits};
 use coreutils::getopt::{self, Opt, Program, Takes};
-use coreutils::hardlink;
-use coreutils::overwrite::{self, Interactive};
+use coreutils::overwrite::Interactive;
 use coreutils::quote::{os_bytes, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers};
@@ -341,32 +341,6 @@ const ALIASES: &[(&str, &str)] = &[("path", "parents")];
 /// those into silently wrong operand lists.
 const SHORT_OPTIONS: &str = "abdfHilLnprst:uvxPRS:TZ";
 
-/// Whether `cp` copies a symbolic link, or copies whatever it points at.
-///
-/// GNU's `enum Dereference_symlink` (`copy.h`), spelled the same way and with
-/// the same four members, including the one that is not a policy: `Undefined`
-/// means none of `-P`, `-H`, `-L` was given, and is resolved by
-/// [`CpFlags::resolved_deref`] rather than acted on.
-///
-/// Two policies and not one, because "follow a link" is answered differently
-/// depending on *where the link was found*. That distinction is the whole of
-/// `-H`, and it is invisible in any single boolean.
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, derive(Debug))]
-enum Deref {
-    /// None of the three options was given. Never observed outside
-    /// [`CpFlags::resolved_deref`].
-    #[default]
-    Undefined,
-    /// `-P` / `--no-dereference`: copy the link itself, wherever it was found.
-    Never,
-    /// `-H`: follow a link named as an operand; copy links found by walking a
-    /// directory.
-    CommandLine,
-    /// `-L` / `--dereference`: follow every link, wherever it was found.
-    Always,
-}
-
 /// One word of a `--preserve=` or `--no-preserve=` list.
 ///
 /// GNU's `enum File_attribute`, declared inside `decode_preserve_arg`
@@ -419,14 +393,15 @@ const PRESERVE_WORDS: &[(&str, Attribute)] = &[
 #[cfg_attr(test, derive(Debug))]
 struct Preserve {
     /// `--preserve=mode`: the whole of `07777`, not just `0777`. Restoring the
-    /// set-user-ID bit is the reason [`preserve_attributes`] takes an
-    /// [`On`](fsattr::On) and prefers a descriptor to a name.
+    /// set-user-ID bit is the reason [`copy::preserve_attributes`] takes an
+    /// [`On`](coreutils::fsattr::On) and prefers a descriptor to a name.
     mode: bool,
     /// `--preserve=timestamps`: the access and modification times. Not the
     /// change time, which no interface can set.
     timestamps: bool,
     /// `--preserve=ownership`: the owner and the group. Almost always fails for
-    /// a non-root user, and that failure is *silent* — see [`chown_privileges`].
+    /// a non-root user, and that failure is *silent* — see
+    /// [`coreutils::fsattr::chown_privileges`].
     ownership: bool,
     /// `--preserve=links`: when two sources turn out to be one inode, make the
     /// second destination a **hard link** to the first rather than a second
@@ -444,7 +419,8 @@ struct Preserve {
     /// Those two, `system.posix_acl_access` and `system.posix_acl_default`, go
     /// with [`Self::mode`] instead, which is not a tidying but gnulib's own
     /// split: `qcopy_acl` chmods and then copies the permission-class names,
-    /// while `copy_attr` copies everything else. See [`fsattr::Xattrs`].
+    /// while `copy_attr` copies everything else. See
+    /// [`coreutils::fsattr::Xattrs`].
     /// Carrying ACLs here would make `--preserve=xattr` change a file's
     /// permissions, which is not what its name says it does.
     xattr: bool,
@@ -535,12 +511,15 @@ struct CpFlags {
     /// replace, never a directory to copy *into*. `cp -T a d` overwrites `d`
     /// rather than writing `d/a` — or refuses to, when `d` is a directory.
     no_target_directory: bool,
-    /// `-v` / `--verbose`: name every copy as it is made. See [`announce`] for
-    /// where those lines come out and why they are not diagnostics.
+    /// `-v` / `--verbose`: name every copy as it is made. See the engine's
+    /// private `copy::announce` for where those lines come out and why they
+    /// are not diagnostics.
     verbose: bool,
     /// `-P` / `-H` / `-L`: what to do with a symbolic link. Stored exactly as
-    /// given, including "not given"; ask [`CpFlags::follow_operand`] and
-    /// [`CpFlags::follow_walked`] rather than reading it.
+    /// given, including "not given": ask [`CpFlags::follow_operand`] for an
+    /// operand, and [`copy::Deref::follow_walked`] — which the engine reaches
+    /// through [`copy::Opts`] — for anything found by walking. Never read the
+    /// field itself; `Undefined` means two different things depending on `-r`.
     dereference: Deref,
     /// `-n` / `--no-clobber` and, later, `-i`. See [`Interactive`].
     interactive: Interactive,
@@ -613,64 +592,50 @@ struct CpFlags {
 }
 
 impl CpFlags {
-    /// [`Self::dereference`] with `Undefined` replaced by what it means.
+    /// These flags as the shared copy engine sees them: the subset of them it
+    /// reads, and nothing else.
     ///
-    /// GNU does this once, after the option loop (`cp.c:1239`), and calls the
-    /// default "compatible with FreeBSD": recursive copies keep links, flat
-    /// copies follow them. That is why plain `cp link dst` writes a *file* and
-    /// plain `cp -r link dst` writes a *link* — one option that was never
-    /// given changing meaning because another one was.
+    /// The narrowing is the point, and exactly two fields do not survive it —
+    /// [`Self::target_directory`] and [`Self::no_target_directory`], which
+    /// shape the *operand list* before any copy starts and which no step inside
+    /// the engine can see. Everything else is one of GNU's `cp_options` fields
+    /// under GNU's name; see [`copy::Opts`], which documents each one and what
+    /// constant `mv` supplies for it.
     ///
-    /// Resolved on demand here rather than written back into the struct, so
-    /// that the parse tests can see `-r` and `-rP` as the different command
-    /// lines they are, and so that there is no window in which an unresolved
-    /// value could be read. GNU's `x.hard_link` also takes part in the rule
-    /// (`x.recursive && ! x.hard_link`); `-l` is not implemented here, so its
-    /// half of the condition is not yet expressible and is noted rather than
-    /// guessed at.
-    fn resolved_deref(&self) -> Deref {
-        match self.dereference {
-            Deref::Undefined if self.recursive => Deref::Never,
-            Deref::Undefined => Deref::Always,
-            given => given,
+    /// `umask` is a parameter rather than a field because it belongs to the
+    /// *run* and not to the command line: it is read from the kernel once, at
+    /// the two places a [`Job`] is built. See [`copy::Opts::umask`].
+    fn opts(&self, umask: u32) -> copy::Opts<'_> {
+        copy::Opts {
+            prog: "cp",
+            recursive: self.recursive,
+            verbose: self.verbose,
+            dereference: self.dereference,
+            interactive: self.interactive,
+            unlink_dest_after_failed_open: self.force,
+            unlink_dest_before_opening: self.remove_destination,
+            preserve_links: self.preserve.links,
+            backup: &self.backup,
+            preserve_mode: self.preserve.mode,
+            preserve_timestamps: self.preserve.timestamps,
+            preserve_ownership: self.preserve.ownership,
+            preserve_xattr: self.preserve.xattr,
+            require_preserve: self.require_preserve,
+            require_preserve_xattr: self.require_preserve_xattr,
+            reduce_diagnostics: self.reduce_diagnostics,
+            explicit_no_preserve_mode: self.explicit_no_preserve_mode,
+            umask,
         }
     }
 
     /// Whether a source *named on the command line* is stat'd through.
     ///
-    /// `copy.c:2250` picks `AT_SYMLINK_NOFOLLOW` exactly when the policy is
-    /// `DEREF_NEVER`, so `-H` follows here and `-P` does not.
+    /// Asked at three places that have no [`copy::Opts`] to hand — they are
+    /// deciding how to `stat` an operand, before the engine is entered — so it
+    /// delegates to [`copy::Deref::follow_operand`], which is where the rule
+    /// and its citation live, rather than restating it.
     fn follow_operand(&self) -> bool {
-        self.resolved_deref() != Deref::Never
-    }
-
-    /// Whether a source *found by walking a directory* is stat'd through.
-    ///
-    /// GNU expresses this by handing the recursion a modified copy of the
-    /// options: `copy.c:845` sets `non_command_line_options.dereference =
-    /// DEREF_NEVER` when the policy is `DEREF_COMMAND_LINE_ARGUMENTS`. So only
-    /// `-L` follows in here, which is what makes `cp -Hr` and `cp -Lr` differ
-    /// at all — they agree about the operand and disagree about everything
-    /// underneath it.
-    fn follow_walked(&self) -> bool {
-        self.resolved_deref() == Deref::Always
-    }
-
-    /// GNU's `should_dereference` (`copy.c:2151`), which is the same question
-    /// as the two above asked once with the *place* as a parameter rather than
-    /// baked into the name.
-    ///
-    /// `follow_operand()` is this with `true` and `follow_walked()` is this
-    /// with `false`; they stay as they are because their call sites read better
-    /// for it, and because each is asked where only one answer is possible.
-    /// This one exists for [`place_entity`], which is reached from both places
-    /// and so has to carry the distinction as data.
-    fn should_dereference(&self, command_line_arg: bool) -> bool {
-        match self.resolved_deref() {
-            Deref::Always => true,
-            Deref::CommandLine => command_line_arg,
-            Deref::Never | Deref::Undefined => false,
-        }
+        self.dereference.follow_operand(self.recursive)
     }
 }
 
@@ -1155,12 +1120,18 @@ fn decode_preserve(list: &OsString, on: bool, flags: &mut CpFlags) -> Result<(),
 /// Everything a copy needs that is not the two paths: what was asked for, and
 /// the two places it can say something.
 ///
-/// One value rather than three parameters, because it is the *recursion* that
-/// needs them. [`copy_tree`] and [`copy_entry`] could reach neither the flags
-/// nor stdout, so no option that changes what happens inside a directory could
-/// be written at all — and `--verbose`, `-p`, `-x`, `-L`/`-H` and
-/// `--copy-contents` are all of them that. Two of those now exist: `--verbose`
-/// reads `job.out`, and `-L` reads `job.flags` from inside [`copy_entry`].
+/// One value rather than six parameters, and the three functions that take one
+/// — [`copy_all`], [`copy_one`], [`place_source`] — are exactly the *operand*
+/// level: `cp`'s own handling of one thing named on the command line. Below
+/// that the walk belongs to [`copy`], which knows nothing of `CpFlags`, so
+/// `Job` stops at the engine's door and [`Job::run`] is the door: it narrows
+/// these six fields to the five a [`copy::Run`] carries.
+///
+/// It used to go all the way down — `copy_tree` and `copy_entry` took a `Job`,
+/// because otherwise they could reach neither the flags nor stdout and no
+/// option that changes what happens *inside* a directory could be written at
+/// all. That argument was right and is now the engine's: it is [`copy::Opts`]
+/// that carries `--verbose`, `-p`, `-x` and `-L`/`-H` past the top of the walk.
 ///
 /// Both sinks are parameters rather than `stdout()`/`stderr()` taken directly,
 /// so that a test can assert on what a copy said. The old file had no test of
@@ -1173,18 +1144,22 @@ struct Job<'a, O: Write, E: Write> {
     /// On `Job` and not on [`Seen`] because the *walk* needs it, twice over:
     /// two hard-linked files inside one source directory must come out linked
     /// too, and a directory reached by walking has to be checked against the
-    /// directories already copied. [`copy_entry`] can reach `Job` and cannot
-    /// reach `Seen`, so anything it must consult lives here.
+    /// directories already copied. The walk is [`copy`]'s now and reaches it
+    /// through [`copy::Run`], which [`Job::run`] lends it from here; `Seen` is
+    /// `cp`'s alone and the engine cannot see it at all.
     copied: &'a mut Copied,
     /// Where `--verbose` announces. Measured: GNU's `emit_verbose` uses
     /// `printf`, so the line is on stdout and is *not* a diagnostic.
     out: &'a mut O,
     err: &'a mut E,
-    /// Where `-i`'s prompts are answered. See [`overwrite_ok`].
+    /// Where `-i`'s prompts are answered. See [`overwrite_allowed`], and the
+    /// private `overwrite_ok` it wraps.
     ///
-    /// `dyn` rather than a third generic parameter: eleven signatures name
-    /// `Job`, and none of them but [`overwrite_ok`] cares what the answers come
-    /// from. The one indirect call is per *prompt*, which is per human keypress.
+    /// `dyn` rather than a third generic parameter, which is the same choice
+    /// [`copy::Run`] makes for the same reason: only the prompt cares what the
+    /// answers come from, and every other signature would have had to name the
+    /// type. The one indirect call is per *prompt*, which is per human
+    /// keypress.
     answers: &'a mut dyn Answers,
     /// The process's file-mode creation mask, read once per run.
     ///
@@ -1214,82 +1189,14 @@ impl<O: Write, E: Write> Job<'_, O, E> {
     /// [`same_name_backup_rewrite`]), so a copy of the options taken once at
     /// startup would be the pre-rewrite ones for the rest of the run. Reading
     /// them at the point of use is what makes the rewrite reach the tail. It
-    /// costs nine `bool`s and a word.
+    /// costs a dozen `bool`s and three words.
     fn run(&mut self) -> copy::Run<'_, E> {
         copy::Run {
-            opts: copy::Opts {
-                prog: "cp",
-                preserve_mode: self.flags.preserve.mode,
-                preserve_timestamps: self.flags.preserve.timestamps,
-                preserve_ownership: self.flags.preserve.ownership,
-                preserve_xattr: self.flags.preserve.xattr,
-                require_preserve: self.flags.require_preserve,
-                require_preserve_xattr: self.flags.require_preserve_xattr,
-                reduce_diagnostics: self.flags.reduce_diagnostics,
-                explicit_no_preserve_mode: self.flags.explicit_no_preserve_mode,
-                umask: self.umask,
-            },
+            opts: self.flags.opts(self.umask),
             err: self.err,
-        }
-    }
-}
-
-/// `--verbose`'s one line about one copy: `'src' -> 'dst'`, and with `-b`
-/// `'src' -> 'dst' (backup: 'dst~')`.
-///
-/// Three measured facts are packed into four lines of code, and each of them is
-/// a way the obvious implementation would be wrong:
-///
-/// * **It goes to stdout, not stderr.** GNU's `emit_verbose` (`copy.c:2082`) is
-///   a `printf`. So `cp -v a b > log` captures the line and `cp -v a b
-///   2>/dev/null` does not silence it — the reverse of what a diagnostic does.
-///   That is also why `run_main` has to route stdout through
-///   [`stdfd::close_stdout`]: with `-v` this utility finally *has* stdout
-///   output whose loss must change the exit status.
-/// * **Both names are quoted, in the same style as a diagnostic's.** GNU writes
-///   `quoteaf_n (0, src)` and `quoteaf_n (1, dst)` — two slots of one style, not
-///   two styles — so `cp -v 'a b' c` prints `'a b' -> c` and the reader can tell
-///   a space in a name from a space between names.
-/// * **There is no flush here.** The line is buffered like any other stdout
-///   write and lands in order with respect to nothing else, because `cp` writes
-///   nothing else to stdout. Interleaving with stderr is not a property GNU has
-///   either — piping the two together reorders them there too.
-///
-/// *When* it is called is the part that is not local to this function, and is
-/// documented at each of the two call sites: after every refusal and after the
-/// backup but before the copy for a non-directory, and only on the `mkdir`
-/// actually happening for a directory.
-///
-/// `backup` is `None` at the directory call site and always will be: `cp` backs
-/// a destination up only when it is *not* a directory (`copy.c:2526`), and a
-/// directory source onto a non-directory destination is refused earlier with
-/// `cannot overwrite non-directory`. `mv` is the utility for which that
-/// combination exists, and it does not share this function.
-fn announce<O: Write, E: Write>(
-    job: &mut Job<'_, O, E>,
-    src: &Path,
-    dst: &Path,
-    backup: Option<&Path>,
-) {
-    if !job.flags.verbose {
-        return;
-    }
-    match backup {
-        // One `writeln!` and not two, because the parenthesis is part of *this*
-        // line rather than a note after it: GNU's `emit_verbose` prints the
-        // arrow with `printf` and only then the suffix, with the newline last.
-        // Two writes would let a `cp -v … | head` truncate between them.
-        Some(name) => {
-            let _ = writeln!(
-                job.out,
-                "{} -> {} (backup: {})",
-                quoteaf_os(src),
-                quoteaf_os(dst),
-                quoteaf_os(name)
-            );
-        }
-        None => {
-            let _ = writeln!(job.out, "{} -> {}", quoteaf_os(src), quoteaf_os(dst));
+            out: &mut *self.out,
+            copied: self.copied,
+            answers: self.answers,
         }
     }
 }
@@ -1554,272 +1461,6 @@ impl Seen {
     }
 }
 
-/// What is at the destination path, as far as `cp` needs to know.
-///
-/// GNU carries the same three states in two variables — `new_dst` and whether
-/// `dst_sb` was filled in — and the third state is the one that makes an enum
-/// worth having: a destination that is *there* and cannot be stat'd. See
-/// [`Dest::Opaque`].
-enum Dest {
-    /// Nothing is there. GNU's `new_dst = true`.
-    New,
-    /// Something is there, and this is it.
-    Exists(fs::Metadata),
-    /// Something is there whose `stat` failed with `ELOOP`, under `-f`, which
-    /// asked for it to be unlinked rather than given up on. `copy.c:2326`
-    /// leaves `new_dst = false` here with the comment "leave new_dst=false so
-    /// we unlink later", and that is the whole of the variant: a
-    /// self-referential symlink is replaced by `cp -f a loop` and reported as
-    /// `cannot stat 'loop': Too many levels of symbolic links` without it.
-    ///
-    /// Deliberately *not* folded into [`Dest::New`]: the difference decides
-    /// which `open` [`copy::open_destination`] tries first, and that in turn
-    /// decides whether the destination is unlinked or the copy is refused as a
-    /// dangling symlink.
-    Opaque,
-}
-
-impl Dest {
-    /// The `stat`, when there is one. `None` covers both "nothing is there"
-    /// and "something is there that could not be stat'd", which is right for
-    /// every caller: all of them are asking a question about the destination's
-    /// *kind*, and neither state has one.
-    fn metadata(&self) -> Option<&fs::Metadata> {
-        match self {
-            Dest::Exists(m) => Some(m),
-            Dest::New | Dest::Opaque => None,
-        }
-    }
-
-    /// Whether something is there — GNU's `! new_dst`.
-    fn exists(&self) -> bool {
-        !matches!(self, Dest::New)
-    }
-}
-
-/// `stat` the destination, the way GNU's `copy_internal` does (`copy.c:2302`).
-///
-/// A regular file can be written *through* a symbolic link and nothing else
-/// can, so a regular source follows the destination name and a directory or a
-/// symlink does not. `--remove-destination` joins the second group even for a
-/// regular source, because it is going to unlink that name rather than write
-/// through it — which is what makes `cp --remove-destination a dangling-link`
-/// replace the link instead of refusing.
-///
-/// `--backup` joins that group for the same reason (`copy.c:2313`) and with the
-/// same kind of consequence. The destination is about to be *renamed*, and a
-/// rename moves the link rather than what it points at. Without this line, `cp
-/// -b a link-to-b` would follow the link, conclude it was looking at `b`, and
-/// then rename the link anyway — leaving `b` neither backed up nor overwritten
-/// while a fresh regular `link-to-b` appeared beside it. Measured against 9.4,
-/// which backs up the link itself.
-///
-/// # Errors
-///
-/// Any `stat` failure other than "it isn't there", which is [`Dest::New`], and
-/// other than `ELOOP` under `-f`, which is [`Dest::Opaque`].
-fn stat_destination(src_meta: &fs::Metadata, target: &Path, flags: &CpFlags) -> io::Result<Dest> {
-    let use_lstat = src_meta.is_dir()
-        || src_meta.file_type().is_symlink()
-        || flags.remove_destination
-        || flags.backup.enabled();
-    let stat = if use_lstat {
-        fs::symlink_metadata(target)
-    } else {
-        fs::metadata(target)
-    };
-    match stat {
-        Ok(m) => Ok(Dest::Exists(m)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Dest::New),
-        Err(e) if flags.force && is_eloop(&e) => Ok(Dest::Opaque),
-        Err(e) => Err(e),
-    }
-}
-
-/// Whether an `io::Error` is `ELOOP`.
-///
-/// By raw code rather than `ErrorKind`: `ErrorKind::FilesystemLoop` is still
-/// unstable, and the one place this is asked has to be right on the target
-/// rather than merely compile.
-#[cfg(unix)]
-fn is_eloop(e: &io::Error) -> bool {
-    e.raw_os_error() == Some(libc_eloop())
-}
-
-/// `ELOOP` is 40 on Linux, which is the only ABI this ships on; there is no
-/// `libc` dependency in this crate to read it from. Named rather than written
-/// inline so that a port to another target has one place to look.
-#[cfg(unix)]
-const fn libc_eloop() -> i32 {
-    40
-}
-
-/// Windows has no `ELOOP`, and `-f` on the development host therefore never
-/// reaches [`Dest::Opaque`]. See `copy::open_new`'s non-unix arm for the same
-/// split.
-#[cfg(not(unix))]
-fn is_eloop(_e: &io::Error) -> bool {
-    false
-}
-
-/// `-n`'s refusal: `cp: not replacing 'dst'`, on **stderr**, and the operand
-/// counts as a failure.
-///
-/// Both halves are measured against 9.4 and both are surprising. It is a
-/// diagnostic rather than a `--verbose`-style note, so `cp -n a b 2>/dev/null`
-/// is silent; and `cp -n` over an existing file *exits 1*, so `-n` is not
-/// "skip quietly" — `copy.h`'s comment on `I_ALWAYS_NO` reads "Skip and fail".
-/// The quiet spelling is `--update=none`, which this `cp` does not have yet.
-///
-/// Ubuntu's `cp` does neither: `debian/patches/cp-n.diff` makes `-n` a silent
-/// success. That patch is why the differential harness builds its own
-/// reference — see `scripts/diff-wsl.sh` and `design-decisions.md` §726.
-fn refuse_no_clobber<O: Write, E: Write>(target: &Path, job: &mut Job<'_, O, E>) {
-    let _ = writeln!(job.err, "cp: not replacing {}", quoteaf_os(target));
-}
-
-/// The three helpers this used to define privately — `can_write_any_file`,
-/// `writable_destination` and `dest_mode`, plus the `euidaccess`/`geteuid`
-/// binding under them — now live in [`coreutils::overwrite`], because `mv`
-/// needs the identical three and a second copy of a decision about whether to
-/// destroy a file is the kind of duplicate that is only noticed after the data
-/// is gone. Upstream shares them by construction: `cp` and `mv` are two front
-/// ends over one `copy.c`.
-/// `-i`'s question — [`coreutils::overwrite::overwrite_ok`] with this program's
-/// name and this program's answer to `clears_destination`.
-///
-/// That last is the whole of `cp`'s share of the decision. Upstream computes it
-/// as `x->move_mode || x->unlink_dest_before_opening ||
-/// x->unlink_dest_after_failed_open`; the first disjunct is `mv` and the other
-/// two are exactly `--remove-destination` and `-f`. It picks between
-///
-/// ```text
-/// cp: unwritable 'b' (mode 0444, r--r--r--); try anyway?
-/// cp: replace 'b', overriding mode 0444 (r--r--r--)?
-/// ```
-///
-/// which is the difference between a warning that the copy will probably fail
-/// and a warning that it will probably succeed by destroying something the mode
-/// was protecting.
-fn overwrite_ok<O: Write, E: Write>(
-    target: &Path,
-    dest_meta: Option<&fs::Metadata>,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    let clears_destination = job.flags.force || job.flags.remove_destination;
-    overwrite::overwrite_ok(
-        job.err,
-        "cp",
-        target,
-        dest_meta,
-        clears_destination,
-        job.answers,
-    )
-}
-
-/// The whole of the "is this destination to be left alone" decision — GNU's
-/// one block at `copy.c:2422`, which handles `-n` and `-i` together because
-/// they are two values of one field.
-///
-/// Returns `true` when the copy should go ahead. The two refusals differ in
-/// what they print — `-n` says `not replacing 'b'`, `-i` says nothing at all
-/// beyond the question it already asked — but not in the status: both make the
-/// operand a failure, which is `copy.h`'s "Skip and fail" for `I_ALWAYS_NO` and
-/// `return_val = x->interactive == I_ALWAYS_SKIP` (false here) for
-/// `I_ASK_USER`.
-///
-/// A **directory** source is exempt from both, as GNU's `! S_ISDIR (src_mode)`
-/// makes it: `cp -rn tree dest` descends and refuses the files inside one at a
-/// time, and `cp -ri tree dest` asks about them one at a time, rather than
-/// either putting a single question about the tree.
-fn overwrite_allowed<O: Write, E: Write>(
-    src_meta: &fs::Metadata,
-    target: &Path,
-    dest: &Dest,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    if src_meta.is_dir() || !dest.exists() {
-        return true;
-    }
-    match job.flags.interactive {
-        // `AlwaysYes` is `mv -f`, and this program's parser never produces it —
-        // `cp -f` is `unlink_dest_after_failed_open`, a different field. It is
-        // in the shared enum because it is in `copy.h`'s, and the arm is here
-        // rather than under a catch-all so that adding an option which *does*
-        // set it is a compile error rather than a silent fall-through.
-        Interactive::Unspecified | Interactive::AlwaysYes => true,
-        Interactive::AlwaysNo => {
-            refuse_no_clobber(target, job);
-            false
-        }
-        // `AlwaysSkip` is `--update=none`, which `mv` has and this `cp` does
-        // not, so its parser cannot produce this either. The arm is spelled out
-        // rather than folded into a catch-all so that adding `cp --update` is a
-        // compile error here — and it has to be, because the `bool` this
-        // function returns cannot say what `AlwaysSkip` means. Upstream's
-        // `return_val = x->interactive == I_ALWAYS_SKIP` (`copy.c:2430`) is a
-        // *skip that succeeds*, so implementing `cp -u` means widening this
-        // return type, exactly as `mv`'s [`Verdict`] was widened. Answering
-        // `false` in the meantime would be the same wrong exit status `mv` had
-        // before that change. Silent, at least, because that half of
-        // `AlwaysSkip` this signature *can* express.
-        Interactive::AlwaysSkip => false,
-        Interactive::AskUser => overwrite_ok(target, dest.metadata(), job),
-    }
-}
-
-/// `--remove-destination`: unlink an existing destination before the copy is
-/// attempted at all.
-///
-/// Returns `false` when it could not, having said so. A directory destination
-/// is left alone — GNU guards this with `! S_ISDIR (dst_sb.st_mode)`
-/// (`copy.c:2570`), so `cp -T --remove-destination a dir` still reports
-/// `cannot overwrite directory 'dir' with non-directory` and `dir` survives.
-///
-/// `dest` is updated to [`Dest::New`] on success, which is GNU's `new_dst =
-/// true` and matters twice over: [`copy::open_destination`] must then create
-/// rather than truncate, and [`place_source`]'s symlink arm must not announce
-/// a second `removed` for a name that is already gone.
-///
-/// **A destination that `--backup` is about to move aside is left alone.**
-/// Upstream this unlink is not a separate step but the `else if` of the backup
-/// block (`copy.c:2570`), and reading the two as independent removes the very
-/// file the backup exists to keep: `cp --remove-destination -b a b` would
-/// delete `b`, find nothing to rename, and report a plain copy — which is
-/// `--backup` silently doing nothing at all. See [`backup_takes_destination`],
-/// which is that `if`'s condition and is asked here for its `else`.
-fn remove_destination_first<O: Write, E: Write>(
-    src: &Path,
-    target: &Path,
-    dest: &mut Dest,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    if !job.flags.remove_destination || backup_takes_destination(src, dest, job.flags) {
-        return true;
-    }
-    match dest {
-        Dest::Exists(m) if !m.is_dir() => {}
-        _ => return true,
-    }
-    if let Err(e) = fs::remove_file(target)
-        && e.kind() != io::ErrorKind::NotFound
-    {
-        let why = strerror(&e);
-        let _ = writeln!(job.err, "cp: cannot remove {}: {why}", quoteaf_os(target));
-        return false;
-    }
-    *dest = Dest::New;
-    // On stdout and before the arrow line, unlike `-f`'s removal, which comes
-    // after it. The two are not printed from the same place in GNU either:
-    // this one is in `copy_internal` ahead of `emit_verbose`, `-f`'s is inside
-    // `copy_reg` behind it. Measured — `cp --remove-destination -v a ro` says
-    // `removed 'ro'` then `'a' -> 'ro'`, and `cp -fv a ro` says the reverse.
-    if job.flags.verbose {
-        let _ = writeln!(job.out, "removed {}", quoteaf_os(target));
-    }
-    true
-}
-
 /// Copy one source. Returns `false` if it should count against the exit status.
 fn copy_one<O: Write, E: Write>(
     src: &OsString,
@@ -1912,7 +1553,7 @@ fn copy_one<O: Write, E: Write>(
     // there" ends this operand rather than being rediscovered later while
     // opening it: `cp a b/c` where `b` is a file says `cannot stat 'b/c'`, not
     // `cannot create regular file 'b/c'`.
-    let mut dest_state = match stat_destination(&metadata, &target, flags) {
+    let mut dest_state = match stat_destination(&metadata, &target, flags.opts(job.umask)) {
         Ok(d) => d,
         Err(e) => {
             let why = strerror(&e);
@@ -1963,7 +1604,7 @@ fn copy_one<O: Write, E: Write>(
         // than `cannot overwrite directory`, and `cp -n a other/a d` says it
         // rather than `will not overwrite just-created`. Both measured, and
         // both go the same way for `-i`, which asks first and then refuses.
-        if !overwrite_allowed(&metadata, &target, &dest_state, job) {
+        if !overwrite_allowed(&metadata, &target, &dest_state, &mut job.run()) {
             return false;
         }
 
@@ -2025,7 +1666,7 @@ fn copy_one<O: Write, E: Write>(
     // just-created *symlink* one below (`copy.c:2592`). Which is observable —
     // the symlink guard re-`lstat`s, so a link this command created and then
     // unlinked here is not there to be complained about.
-    if !remove_destination_first(src_path, &target, &mut dest_state, job) {
+    if !remove_destination_first(src_path, &target, &mut dest_state, &mut job.run()) {
         return false;
     }
 
@@ -2071,7 +1712,8 @@ fn copy_one<O: Write, E: Write>(
     //
     // `remember`, not `lookup`: an operand *is* recorded, because a later
     // operand — or a walk that reaches this same directory from elsewhere —
-    // has to be able to find it. [`copy_entry`] takes the other half.
+    // has to be able to find it. The engine's `copy_entry` takes the other
+    // half.
     // Unconditional, where the rest of [`Seen`] is built only for two or more
     // operands, because the walk reads this table and a single operand's walk
     // can reach a directory it was itself given (`cp -r parent d` cannot, but
@@ -2142,7 +1784,7 @@ fn place_source<O: Write, E: Write>(
     src_path: &Path,
     metadata: &fs::Metadata,
     target: &Path,
-    dest: &Dest,
+    dest: &DestState,
     job: &mut Job<'_, O, E>,
 ) -> Placed {
     // Module docs, bug 2: without this, `cp -r a a` and `cp -r a .` copy what
@@ -2161,430 +1803,7 @@ fn place_source<O: Write, E: Write>(
 
     // `true`: this is the operand path, which is the whole of what
     // `command_line_arg` means to `-H` and to `--preserve=links`.
-    place_entity(src_path, metadata, target, dest, true, job)
-}
-
-/// What [`copy_tree`] achieved.
-///
-/// The distinction the caller needs is not "did everything work" but "is there
-/// a directory there to stamp": GNU leaves the reason in a comment at its
-/// `copy_dir` call (`copy.c:3017`) — "Don't just return if this fails --
-/// otherwise, the failure to read a single file in a source directory would
-/// cause the containing destination directory not to have owner/perms set
-/// properly." A `bool` return could not tell the two apart, and folding them
-/// together is how a `cp -rp` whose tree contains one unreadable file would
-/// leave the whole destination directory at the forced owner-rwx.
-enum TreeResult {
-    /// The directory is there. `new` is whether this run created it — GNU's
-    /// `new_dst`, which decides whether the ownership is worth setting and
-    /// whether `--no-preserve=mode` applies. `ok` is whether everything inside
-    /// it arrived.
-    Made { new: bool, ok: bool },
-    /// The directory itself could not be created or made usable, so there is
-    /// nothing to stamp and the failure has already been reported. GNU's
-    /// `goto un_backup`.
-    Unmade,
-}
-
-/// What [`place_entity`] did with one source.
-///
-/// `Linked` is not a variety of `Copied` that the caller may round off, and the
-/// reason is a measured GNU behaviour rather than a tidiness argument: a
-/// destination reached by hard-linking is **not** recorded in GNU's `dest_info`,
-/// because its `earlier_file` branch returns at `copy.c:2751`, well before the
-/// `record_file` at `copy.c:3217`. The consequence is visible —
-///
-/// ```text
-/// $ cp --preserve=links a b o/b d      # a and b hard-linked, o/b unrelated
-/// $ echo $?
-/// 0                                    # d/b is now o/b; the link is gone
-/// $ cp a b o/b d                       # the same command without the option
-/// cp: will not overwrite just-created 'd/b' with 'o/b'
-/// ```
-///
-/// — and it is faithfully reproduced by [`copy_one`] declining to
-/// [`Seen::record_dest`] a `Linked` destination. A `bool` return could not
-/// express that, which is the whole reason this enum exists.
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, derive(Debug))]
-enum Placed {
-    /// Nothing usable is at the destination, and the failure has been reported.
-    Failed,
-    /// The destination was written.
-    Copied,
-    /// The destination was made a hard link to an earlier one, under
-    /// `--preserve=links`. Nothing was copied and nothing was recorded.
-    Linked,
-}
-
-impl Placed {
-    /// Whether the operand succeeded, for the exit status. Both kinds of
-    /// success count; only [`Seen`] cares which.
-    fn is_ok(self) -> bool {
-        self != Placed::Failed
-    }
-}
-
-/// Copy one source of a known kind onto a settled destination path: the symlink,
-/// the directory and the regular file, and nothing else.
-///
-/// The single place all three kinds are dispatched, reached identically by an
-/// operand (through [`place_source`]) and by an entry found inside a tree
-/// (through [`copy_entry`]). GNU funnels both through one `copy_internal`, and
-/// the reason to match that is not tidiness: everything that happens *after* the
-/// bytes are written — `-p` and each `--preserve=` attribute — happens for all
-/// three kinds, so a second copy of this dispatch is a second place to forget
-/// one of them. The two callers had already drifted once, when the symlink arm's
-/// unlink of an existing destination reached an operand and not a walked entry,
-/// and `cp -r` over a tree it had copied before answered `cannot create symbolic
-/// link …: File exists`.
-fn place_entity<O: Write, E: Write>(
-    src_path: &Path,
-    metadata: &fs::Metadata,
-    target: &Path,
-    dest: &Dest,
-    command_line_arg: bool,
-    job: &mut Job<'_, O, E>,
-) -> Placed {
-    let src_mode = permission_bits(metadata);
-    // Computed here, before the kind is dispatched, because GNU computes it
-    // here — one expression covering all three kinds (`copy.c:2899`), read by
-    // whichever of them creates the destination and settled by the tail they
-    // share. See [`ModeDebt`].
-    let debt = ModeDebt::new(job.flags.preserve.ownership, src_mode, metadata.is_dir());
-    let mut dest_exists = dest.exists();
-
-    // Clearing the way, before anything is said or written. GNU's one unlink
-    // (`copy.c:2570`) covers every reason a destination has to *go* rather than
-    // be written through, and reaching it before `emit_verbose` (`copy.c:2630`)
-    // is what makes a `cp -v` that cannot clear the way announce nothing.
-    //
-    // Two of GNU's reasons apply to this `cp`, and they are `||`-ed there too:
-    //
-    // * **The source is a symlink that is not being followed.** `symlinkat` has
-    //   no "replace", and refusing instead would leave `cp -r` unable to update
-    //   a tree it had already copied once. GNU writes this as `dereference ==
-    //   DEREF_NEVER && ! S_ISREG (src_mode)`, which for this `cp` is exactly a
-    //   symlink source that survived the stat as one — reachable for an operand
-    //   under `-P`, or under `-r` with none of `-P`/`-H`/`-L`, never under `-H`.
-    // * **`--preserve=links`, and the destination has more than one link.**
-    //   Writing *through* it would change every other name for that inode, and
-    //   `--preserve=links` is the one option whose user is demonstrably paying
-    //   attention to link counts. Measured: `cp -v --preserve=links a b o/b d`
-    //   with `a` and `b` hard-linked prints `removed 'd/b'` before the third
-    //   operand's arrow line, and `d/a` keeps the bytes of `a`.
-    //
-    // Both reasons sit inside GNU's `else if (! S_ISDIR (dst_sb.st_mode) && …)`
-    // (`copy.c:2539`), and so do these. A directory is never unlinked to clear
-    // the way: `unlink` cannot remove one in the first place, so trying would
-    // turn `cp -T --preserve=links a existing_dir` into `cannot remove
-    // 'existing_dir': Is a directory` — an errno-shaped complaint about the
-    // wrong thing entirely, where GNU reaches its own `cannot overwrite
-    // directory %s with non-directory` and leaves the directory standing. Note
-    // that on ext4 *every* directory trips the link-count half of the test:
-    // `.` and the entry in its parent are two links before anything else
-    // points at it.
-    let dest_is_dir = dest.metadata().is_some_and(fs::Metadata::is_dir);
-    let dest_multiply_linked =
-        job.flags.preserve.links && dest.metadata().is_some_and(|m| nlink(m) > 1);
-
-    // `-b`: the destination is moved aside rather than written over, and this is
-    // GNU's block at `copy.c:2517`. It is the `if` whose `else if` is the unlink
-    // below, in upstream too — the two are alternatives, and reading them as
-    // independent would unlink the very destination that had just been renamed
-    // out of harm's way, which is the backup made and then thrown away. The
-    // condition itself is [`backup_takes_destination`], which documents its three
-    // clauses and is asked for its `else` by [`remove_destination_first`].
-    let mut moved_aside: Option<PathBuf> = None;
-    if backup_takes_destination(src_path, dest, job.flags) {
-        // The one refusal, and it is the reason `cp` needs the *suffix* even
-        // when the type is numbered: `cd /tmp; rm -f a a~; : > a; echo A > a~;
-        // cp --backup=simple a~ a` would name the backup of `a` exactly `a~`,
-        // rename the source on top of itself, and leave two empty files where
-        // there had been one empty and one full. Upstream's own comment carries
-        // that recipe verbatim. Numbered backups are exempt because the name
-        // they choose is never one the user typed.
-        if job.flags.backup.kind() != BackupType::Numbered
-            && source_is_dst_backup(src_path, metadata, target, job.flags.backup.simple_suffix())
-        {
-            let _ = writeln!(
-                job.err,
-                "cp: backing up {} might destroy source;  {} not copied",
-                quoteaf_os(target),
-                quoteaf_os(src_path)
-            );
-            return Placed::Failed;
-        }
-        match job.flags.backup.rename(target) {
-            Ok(name) => moved_aside = Some(name),
-            // "Nothing was there" is not a failure: upstream's `else if (errno
-            // != ENOENT)`. It can happen even though the `stat` above found
-            // something, because the two are separate syscalls — and it is the
-            // ordinary answer for a *dangling* symlink destination under a
-            // simple rename that has already moved it.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => {
-                let why = strerror(&e);
-                let _ = writeln!(job.err, "cp: cannot backup {}: {why}", quoteaf_os(target));
-                return Placed::Failed;
-            }
-        }
-        // Upstream's `new_dst = true`, set on both of the paths above: whether
-        // the destination was renamed away or was never there, the name is free
-        // now and the copy must create rather than open.
-        dest_exists = false;
-    } else if dest_exists
-        && !dest_is_dir
-        && (metadata.file_type().is_symlink() || dest_multiply_linked)
-    {
-        if !remove_before_writing(target, job) {
-            return Placed::Failed;
-        }
-        dest_exists = false;
-    }
-
-    // *After* the removal above and before anything is created, so that a
-    // failure to make the copy is still announced — `-v` reports what was
-    // attempted, not what worked. Directories are the exception and announce
-    // themselves, from inside [`copy_tree`], because GNU will not say it made
-    // one until the `mkdir` has actually happened (`copy.c:2625`).
-    //
-    // The backup name goes into the line, which is why the block above is
-    // *before* this one rather than after: `cp -vb a b` prints
-    // `'a' -> 'b' (backup: 'b~')`, one line naming both the copy and the move
-    // that made room for it.
-    if !metadata.is_dir() {
-        announce(job, src_path, target, moved_aside.as_deref());
-    }
-
-    // `--preserve=links`: the second name for an inode is a hard link to where
-    // the first one landed, not a second copy of its bytes. GNU's `earlier_file`
-    // block (`copy.c:2683`), whose condition this is:
-    //
-    // * **`1 < st_nlink`** — the source is *already* multiply linked, so a
-    //   second operand naming it is possible. This is the ordinary case.
-    // * **or the source is being dereferenced** — under `-L`, or `-H` for an
-    //   operand, two *different* symlinks resolve to one inode whose link count
-    //   is 1, and `cp --preserve=links -L la lb d` is measurably expected to
-    //   link `d/la` and `d/lb` even so.
-    //
-    // Directories are excluded: their branch of `earlier_file` is the
-    // hard-linked-directory refusal, which lives in [`copy_one`] because only
-    // an operand can reach it.
-    //
-    // On a host without hard links [`nlink`] answers 1 to everything, which
-    // switches `--preserve=links` off by exactly the amount that host cannot
-    // honour it: the first half of the condition never fires and the dereference
-    // half still does, so `cp --preserve=links -L la lb d` is the only spelling
-    // that reaches [`hardlink::force_link`] there — and it then fails with
-    // whatever the platform says about [`fs::hard_link`], which is the honest
-    // answer.
-    let mut recorded = None;
-    if !metadata.is_dir()
-        && job.flags.preserve.links
-        && (nlink(metadata) > 1 || job.flags.should_dereference(command_line_arg))
-        && let Some(id) = file_id(src_path, metadata)
-    {
-        if let Some(earlier) = job.copied.remember(&id, target) {
-            return if hardlink::force_link(
-                "cp",
-                &earlier,
-                target,
-                job.flags.verbose,
-                &mut *job.out,
-                &mut *job.err,
-            ) {
-                Placed::Linked
-            } else {
-                // GNU reaches its `un_backup` label from here too (`copy.c:2705`
-                // is one of eleven `goto`s to it), and does *not* run the
-                // `forget_created` half — `earlier_file` is non-null on this
-                // path, which is exactly the `recorded == None` this branch
-                // leaves behind. See the tail below.
-                backup::un_backup(
-                    "cp",
-                    moved_aside.as_deref(),
-                    target,
-                    job.flags.verbose,
-                    &mut *job.out,
-                    &mut *job.err,
-                );
-                Placed::Failed
-            };
-        }
-        recorded = Some(id);
-    }
-
-    let ok = place_bytes(src_path, metadata, src_mode, target, dest_exists, debt, job);
-
-    // GNU's `un_backup` label: a source recorded a moment ago whose copy then
-    // failed must be un-recorded, or a later operand naming the same inode
-    // would try to hard-link to a destination that does not exist and would
-    // report `cannot create hard link` in place of the failure that actually
-    // happened. The guard there is `earlier_file == nullptr`, which is this
-    // `recorded.is_some()` — the linking path above never reaches here.
-    if !ok {
-        if let Some(id) = &recorded {
-            job.copied.forget(id);
-        }
-        // And the half the label is named for. In upstream's order: forget
-        // first, then put the backup back.
-        backup::un_backup(
-            "cp",
-            moved_aside.as_deref(),
-            target,
-            job.flags.verbose,
-            &mut *job.out,
-            &mut *job.err,
-        );
-    }
-
-    if ok { Placed::Copied } else { Placed::Failed }
-}
-
-/// Whether [`place_entity`]'s backup block will move this destination aside —
-/// the `if` at `copy.c:2517`, written once because two places need it.
-///
-/// [`place_entity`] asks it to decide whether to make a backup;
-/// [`remove_destination_first`] asks it to decide whether *not* to unlink,
-/// because upstream that unlink is this block's `else if` rather than a step of
-/// its own. Keeping the condition in one function is what stops the two
-/// drifting into a state where both fire, which is a destination deleted and
-/// then "backed up" from nothing.
-///
-/// The three conditions are upstream's:
-///
-/// * **The destination is there.** Nothing to move aside otherwise, and the
-///   whole of `copy.c`'s surrounding block is inside `rename_errno == EEXIST`,
-///   which is set only when the destination's `stat` succeeded.
-/// * **The destination is not a directory.** Upstream writes this as
-///   `x->move_mode || ! S_ISDIR (…)`, with a `FIXME` saying `mv` backs up a
-///   destination directory and `cp` deliberately does not — so that `cp -rb`
-///   can merge into an existing hierarchy instead of renaming it away.
-/// * **The source's last component is not `.` or `..`.** `cp -rb a/. d` copies
-///   `a`'s *contents* into an existing `d`, so backing up `d` would move the
-///   directory the copy is about to fill.
-///
-/// [`Dest::Opaque`] answers `false` to the second, which reads like a
-/// difference from upstream and cannot be reached: a destination is only
-/// `Opaque` when its `stat` failed with `ELOOP`, and with backups on
-/// [`stat_destination`] uses `lstat`, which a symlink loop does not trouble.
-fn backup_takes_destination(src: &Path, dest: &Dest, flags: &CpFlags) -> bool {
-    flags.backup.enabled()
-        && dest.exists()
-        && !dest.metadata().is_some_and(fs::Metadata::is_dir)
-        && !src_base_is_dot_or_dotdot(src)
-}
-
-/// The three kinds, dispatched. Split from [`place_entity`] only so that the
-/// preamble it shares — the unlink, the announcement and the link bookkeeping —
-/// has one exit to attach the `un_backup` step to rather than one per arm.
-fn place_bytes<O: Write, E: Write>(
-    src_path: &Path,
-    metadata: &fs::Metadata,
-    src_mode: u32,
-    target: &Path,
-    dest_exists: bool,
-    mut debt: ModeDebt,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    if metadata.file_type().is_symlink() {
-        if let Err(e) = clone_symlink(src_path, target) {
-            let why = strerror(&e);
-            let _ = writeln!(
-                job.err,
-                "cp: cannot create symbolic link {}: {why}",
-                quoteaf_os(target)
-            );
-            return false;
-        }
-        // GNU chowns a just-created link *here*, inside the symlink arm
-        // (`copy.c:3175`), and not in the shared tail — whose ownership step
-        // skips a symlink destination outright (`!dest_is_symlink &&
-        // x->preserve_ownership`). Two calls that look like one: dropping this
-        // in favour of the tail's would leave `cp -P -p` unable to preserve a
-        // link's owner at all, because the tail would never reach it.
-        //
-        // Unconditional where the tail's is guarded by "the owner differs":
-        // the link was made a line ago, so it is new by construction, and GNU's
-        // guard is `new_dst || …` in the first place.
-        let src = Source::new(On::Path(src_path, Link::NoFollow), src_path, metadata);
-        // Read before `run` borrows the job, not because the value is expensive
-        // but because `run` holds `job` mutably for both calls below and this
-        // is the one thing outside the engine's own options they need.
-        let preserve_ownership = job.flags.preserve.ownership;
-        let run = &mut job.run();
-        if preserve_ownership
-            && chown_to_source(
-                src,
-                On::Path(target, Link::NoFollow),
-                target,
-                Made::Symlink,
-                true,
-                run,
-            ) == Chowned::Failed
-        {
-            return false;
-        }
-        return preserve_attributes(
-            src,
-            On::Path(target, Link::NoFollow),
-            target,
-            Made::Symlink,
-            true,
-            &mut debt,
-            run,
-        );
-    }
-
-    if metadata.is_dir() {
-        let (new, contents_ok) = match copy_tree(src_path, src_mode, target, &mut debt, job) {
-            TreeResult::Unmade => return false,
-            TreeResult::Made { new, ok } => (new, ok),
-        };
-        // Run whether or not the walk succeeded — see [`TreeResult`] — and
-        // *after* it, which is the other half of GNU's order: writing entries
-        // into a directory moves its modification time, so a `-p` that stamped
-        // the times before filling it would stamp them with a value the next
-        // `mkdir` inside overwrites.
-        let stamped = preserve_attributes(
-            Source::new(On::Path(src_path, Link::Follow), src_path, metadata),
-            On::Path(target, Link::Follow),
-            target,
-            Made::Directory,
-            new,
-            &mut debt,
-            &mut job.run(),
-        );
-        return contents_ok && stamped;
-    }
-
-    copy_regular_file(src_path, metadata, target, dest_exists, debt, job)
-}
-
-/// Unlink a destination that has to go before the copy can be made, and say so
-/// under `-v`. GNU's `unlinkat` at `copy.c:2580` with the `removed %s` that
-/// follows it.
-///
-/// The announcement is reached on "it was already gone" as well as on success,
-/// which is GNU's control flow rather than an oversight — its condition is
-/// `unlinkat (…) != 0 && errno != ENOENT`, so a destination that vanished
-/// between the stat and the unlink is still announced as removed. Only a race
-/// can produce that, and agreeing about it costs nothing.
-fn remove_before_writing<O: Write, E: Write>(target: &Path, job: &mut Job<'_, O, E>) -> bool {
-    if let Err(e) = fs::remove_file(target)
-        && e.kind() != io::ErrorKind::NotFound
-    {
-        let why = strerror(&e);
-        let _ = writeln!(job.err, "cp: cannot remove {}: {why}", quoteaf_os(target));
-        return false;
-    }
-    // On stdout, in its own sentence and before the arrow line
-    // (`copy.c:2586`).
-    if job.flags.verbose {
-        let _ = writeln!(job.out, "removed {}", quoteaf_os(target));
-    }
-    true
+    place_entity(src_path, metadata, target, dest, true, &mut job.run())
 }
 
 /// Where one source lands: GNU's `do_copy` (`cp.c:734`), whose four lines are
@@ -2680,442 +1899,6 @@ fn resolve_as_far_as_exists(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Copy the tree at `src`, whose permission bits are `src_mode`, to `dest`,
-/// reporting every failure to `err`.
-///
-/// A failure on one entry does not abandon the others — module docs, bug 6 —
-/// and does not stop the caller stamping the directory either; see
-/// [`TreeResult`].
-///
-/// The mode is taken as an argument rather than re-stat'd because the caller
-/// has already stat'd `src` and a second look could see a different directory.
-///
-/// `debt` arrives with the bits to withhold at `mkdir` already in it and leaves
-/// with what the caller has to put back. The settle-up itself is deliberately
-/// *not* here: with `-p` it is a different chmod, and it has to happen after
-/// the `chown` that the caller — not this function — performs. Doing it here
-/// would put a `chmod` before a `chown` and drop the set-user-ID bit off every
-/// directory copied by a non-root user. See [`preserve_attributes`].
-fn copy_tree<O: Write, E: Write>(
-    src: &Path,
-    src_mode: u32,
-    dest: &Path,
-    debt: &mut ModeDebt,
-    job: &mut Job<'_, O, E>,
-) -> TreeResult {
-    let mut ok = true;
-
-    let new = match make_dir(dest, src_mode & !debt.omitted) {
-        Ok(true) => match permission_bits_of(dest) {
-            Ok(made) => {
-                // A directory is announced *here* and nowhere else, and GNU
-                // says why in a comment of its own (`copy.c`, above the
-                // `emit_verbose` at 2991): "we don't always create the
-                // destination directory, so --verbose should not announce
-                // anything until we're sure we'll create a directory." So
-                // `cp -rv a b` where `b/a` already exists announces the files
-                // it refreshes and says nothing about the directory holding
-                // them — the directory was not copied, it was reused.
-                announce(job, src, dest, None);
-                // The adjustment in the opposite direction from the debt: a
-                // source that is not owner-rwx — 0500 is perfectly ordinary —
-                // would leave this process unable to fill the directory it has
-                // just made. So owner-rwx goes on now, and what the directory
-                // really got is remembered as the mode to go back to.
-                if made & 0o700 != 0o700 {
-                    debt.forced = Some(made);
-                    if let Err(e) = set_mode(dest, made | 0o700) {
-                        let why = strerror(&e);
-                        let _ = writeln!(
-                            job.err,
-                            "cp: setting permissions for {}: {why}",
-                            quoteaf_os(dest)
-                        );
-                        return TreeResult::Unmade;
-                    }
-                }
-                true
-            }
-            Err(e) => {
-                let why = strerror(&e);
-                let _ = writeln!(job.err, "cp: cannot stat {}: {why}", quoteaf_os(dest));
-                return TreeResult::Unmade;
-            }
-        },
-        Ok(false) => {
-            // The destination directory was already there. GNU leaves its mode
-            // alone — exactly as it leaves an existing *file*'s mode alone — so
-            // there is nothing to withhold and nothing to put back
-            // (`copy.c:2996`).
-            debt.omitted = 0;
-            false
-        }
-        Err(e) => {
-            let why = strerror(&e);
-            let _ = writeln!(
-                job.err,
-                "cp: cannot create directory {}: {why}",
-                quoteaf_os(dest)
-            );
-            return TreeResult::Unmade;
-        }
-    };
-
-    // An unreadable source directory is *not* a reason to leave the copy
-    // early: the directory has already been created, and it must still end up
-    // with the mode it is supposed to have. GNU carries the mode over in this
-    // case too, and a `dst` left at the forced owner-rwx would be a copy of a
-    // 0500 directory that anyone could write into.
-    match read_dir_fastread(src) {
-        Ok(entries) => {
-            for entry in entries {
-                if !copy_entry(&entry, dest, job) {
-                    ok = false;
-                }
-            }
-        }
-        Err(e) => {
-            // GNU's wording, and it is the only one it has for this: `copy_dir`
-            // slurps the whole directory with `savedir` and reports every way
-            // that can fail as `cannot access`. "cannot read directory" would
-            // be the more precise sentence and is what `rm` prints, but a
-            // utility that differs from GNU only in the words of a diagnostic
-            // is still a utility whose output a script cannot match on.
-            let why = strerror(&e);
-            let _ = writeln!(job.err, "cp: cannot access {}: {why}", quoteaf_os(src));
-            ok = false;
-        }
-    }
-
-    TreeResult::Made { new, ok }
-}
-
-/// One entry of a directory being walked. Split out of [`copy_tree`] only to
-/// keep the mode bookkeeping either side of the walk readable in one screen.
-///
-/// The containing directory is no longer a parameter: the `readdir` that could
-/// fail now happens in [`read_dir_fastread`], so the only caller that ever had
-/// to name the *source directory* in a diagnostic is the one that reads it.
-fn copy_entry<O: Write, E: Write>(
-    entry: &fs::DirEntry,
-    dest: &Path,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    let from = entry.path();
-    let to = dest.join(entry.file_name());
-
-    // `DirEntry::metadata` does **not** follow symlinks, unlike `Path::is_dir`.
-    // That is the whole of the fix for bug 1, and it also hands over the mode
-    // the copy is to be created with, which a second `stat` might not.
-    //
-    // `-L` is the one policy that wants the other answer *here*, and asking for
-    // it costs the extra `stat` that `entry.metadata()` was avoiding — there is
-    // no following variant of it. That is the right way round: the option that
-    // is not given pays nothing. See [`CpFlags::follow_walked`] for why `-H`
-    // takes this branch and not the other one.
-    let meta = if job.flags.follow_walked() {
-        fs::metadata(&from)
-    } else {
-        entry.metadata()
-    };
-    let meta = match meta {
-        Ok(m) => m,
-        Err(e) => {
-            let why = strerror(&e);
-            let _ = writeln!(job.err, "cp: cannot stat {}: {why}", quoteaf_os(&from));
-            return false;
-        }
-    };
-
-    // The destination is stat'd for an entry found by walking, exactly as it is
-    // for an operand: GNU reaches both through one `copy_internal`, so `-n`,
-    // `--remove-destination` and the replace-a-symlink unlink all apply inside
-    // a tree. Measured — `cp -rn s d` over an existing `d/x/f` says
-    // `not replacing 'd/x/f'` and exits 1, and `cp -r --remove-destination`
-    // announces `removed 'd/x/f'` for the same file.
-    //
-    // Of the refusals [`copy_one`] makes either side of this, the ones about a
-    // *file* named twice are not here and cannot arise — a file found by
-    // walking was not named on the command line, and nothing this command
-    // created can be reached inside the tree it is filling. The one about a
-    // *directory* seen twice is a different matter and is below: a walk can
-    // reach a directory an operand already copied.
-    let mut dest_state = match stat_destination(&meta, &to, job.flags) {
-        Ok(d) => d,
-        Err(e) => {
-            let why = strerror(&e);
-            let _ = writeln!(job.err, "cp: cannot stat {}: {why}", quoteaf_os(&to));
-            return false;
-        }
-    };
-    // `-n`'s refusal and `-i`'s question, for an entry found by walking. The
-    // same-file check [`copy_one`] makes just before this one is not here and
-    // cannot fire: a tree is not being copied into itself, and if it were the
-    // walk would not terminate to reach this point.
-    if !overwrite_allowed(&meta, &to, &dest_state, job) {
-        return false;
-    }
-    // The two kind mismatches, in [`copy_one`]'s order and with its wording,
-    // because they are the same `copy_internal` lines. Reaching them here is
-    // what stops a directory landing on a file as `cannot create directory …:
-    // File exists`, which named the right path and the wrong problem.
-    if let Some(dest_meta) = dest_state.metadata() {
-        if meta.is_dir() && !dest_meta.is_dir() {
-            let _ = writeln!(
-                job.err,
-                "cp: cannot overwrite non-directory {} with directory {}",
-                quoteaf_os(&to),
-                quoteaf_os(&from)
-            );
-            return false;
-        }
-        if !meta.is_dir() && dest_meta.is_dir() {
-            let _ = writeln!(
-                job.err,
-                "cp: cannot overwrite directory {} with non-directory",
-                quoteaf_os(&to)
-            );
-            return false;
-        }
-    }
-    if !remove_destination_first(&from, &to, &mut dest_state, job) {
-        return false;
-    }
-
-    // A directory the walk has arrived at whose inode was already copied is
-    // that directory a second time. `cp -r parent/child parent d` is the plain
-    // way to get here: `parent/child` is copied to `d/child`, and then the walk
-    // into `parent` finds the very same directory again. Writing it out a
-    // second time would put one inode in two places, which for a directory
-    // means hard-linking it, which is what GNU refuses (`copy.c:2690`).
-    //
-    // A *lookup*, never a `remember`: GNU records only command-line directories
-    // (`copy.c:2667`) because only those can be named twice, and recording
-    // walked ones would make the ordinary second visit to a shared subtree —
-    // there is none, but the table would not know that — into an accusation.
-    //
-    // Two of GNU's four arms for this are deliberately absent, and neither can
-    // be reached from a walk. Both compare the *earlier destination* with
-    // something: `same_nameat (AT_FDCWD, src_name, …, earlier_file)` with this
-    // source, `same_nameat (dst_dirfd, dst_relname, …, earlier_file)` with this
-    // target. The first needs the place an operand was copied *to* to be the
-    // directory the walk is now standing on, which is a copy into itself and is
-    // refused at the operand before any walk starts (see [`place_source`]); GNU
-    // can reach it only because it additionally records the inode of the first
-    // destination directory it creates (`copy.c:2982`), which this `cp` does
-    // not do — see design-decisions.md 724 for why it refuses up front instead.
-    // The second needs two operands to have been copied to one path, which
-    // [`copy_one`]'s own arm answers first, with the warning that names the
-    // operand.
-    if meta.is_dir()
-        && let Some(id) = file_id(&from, &meta)
-        && let Some(earlier) = job.copied.lookup(&id).map(Path::to_path_buf)
-    {
-        // GNU's third arm, with `command_line_arg` false so that only `-L`
-        // satisfies it: following symlinks was asked for, so two paths reaching
-        // one directory are a request for two independent copies of it and are
-        // made silently. `cp -RL a b d` with `a/l` and `b/l` both links to `c`
-        // is the case in its comment.
-        if !job.flags.follow_walked() {
-            let _ = writeln!(
-                job.err,
-                "cp: will not create hard link {} to directory {}",
-                quoteaf_os(&to),
-                quoteaf_os(&earlier)
-            );
-            return false;
-        }
-    }
-
-    // The same dispatch an operand goes through, and literally the same code:
-    // GNU reaches both through one `copy_internal`, so a link found inside a
-    // tree is named exactly as a link named on the command line is, and every
-    // attribute `-p` restores is restored in both. See [`place_entity`].
-    // `false`: an entry found by walking is not a command-line argument, which
-    // is what makes `-H` follow operands only and what keeps
-    // `--preserve=links` from consulting its table for a singly-linked file
-    // inside a tree.
-    place_entity(&from, &meta, &to, &dest_state, false, job).is_ok()
-}
-
-/// Copy the regular file `src` to `dst`.
-///
-/// This does by hand what `fs::copy` does in one call, for two reasons that are
-/// not about speed:
-///
-/// * **`fs::copy` reports four different failures as one error.** The source
-///   not opening, the destination not being creatable, a read fault and a write
-///   fault all arrive as a single `io::Error` with nothing to say which
-///   happened. GNU has a different sentence for each, and which sentence is
-///   printed is the difference between knowing that a disk is full and knowing
-///   that a file is unreadable.
-/// * **`fs::copy` ends by giving the destination the source's exact mode.**
-///   That is wrong twice: it ignores the umask on a file it has just created,
-///   so a 0777 source lands as 0777 where GNU lands it as 0755; and it
-///   overwrites the mode of a destination that *already existed*, so copying a
-///   0777 file over somebody's 0600 one published it. See module docs, bug 8.
-fn copy_regular_file<O: Write, E: Write>(
-    src: &Path,
-    src_meta: &fs::Metadata,
-    dst: &Path,
-    dest_exists: bool,
-    mut debt: ModeDebt,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    // The announcement is [`place_entity`]'s and has already happened, which is
-    // GNU's order: `emit_verbose` (`copy.c:2630`) runs before `copy_reg`, so an
-    // unreadable source is announced and *then* complained about.
-    let mut input = match fs::File::open(src) {
-        Ok(f) => f,
-        Err(e) => {
-            let why = strerror(&e);
-            let _ = writeln!(
-                job.err,
-                "cp: cannot open {} for reading: {why}",
-                quoteaf_os(src)
-            );
-            return false;
-        }
-    };
-
-    // The flags are read into locals before the [`copy::Dest`] is built,
-    // because `Clobber::Unlink` borrows the stdout that lives on this same
-    // `Job` — and `job.flags` cannot be read through a `job` that is already
-    // borrowed mutably for `job.out`.
-    let force = job.flags.force;
-    let verbose = job.flags.verbose;
-    let preserve_xattr = job.flags.preserve.xattr;
-    let dest = if dest_exists {
-        copy::Dest::Exists(if force {
-            copy::Clobber::Unlink {
-                verbose,
-                out: &mut *job.out,
-            }
-        } else {
-            copy::Clobber::Never
-        })
-    } else {
-        copy::Dest::New
-    };
-    // On its own statement rather than as the `match` scrutinee: the borrow of
-    // `job.out` inside `dest` ends when the call returns, and a scrutinee's
-    // temporaries live to the end of the `match` — whose arms want `job.err`.
-    let opened = copy::open_destination(
-        dst,
-        permission_bits(src_meta),
-        dest,
-        preserve_xattr,
-        &mut debt,
-    );
-    let (mut output, new_dst) = match opened {
-        Ok(copy::Opened { file, new }) => (file, new),
-        Err(copy::DestError::Dangling(_)) => {
-            // The `EEXIST` is dropped: GNU's sentence for this names no error
-            // at all, because the failure is not the open's — the name resolved
-            // to nothing and writing through it would be a race.
-            let _ = writeln!(
-                job.err,
-                "cp: not writing through dangling symlink {}",
-                quoteaf_os(dst)
-            );
-            return false;
-        }
-        Err(copy::DestError::Remove(e)) => {
-            let why = strerror(&e);
-            let _ = writeln!(job.err, "cp: cannot remove {}: {why}", quoteaf_os(dst));
-            return false;
-        }
-        Err(copy::DestError::Io(e)) => {
-            let why = strerror(&e);
-            let _ = writeln!(
-                job.err,
-                "cp: cannot create regular file {}: {why}",
-                quoteaf_os(dst)
-            );
-            return false;
-        }
-    };
-
-    // The engine's body rather than a loop here, which is what makes this arm
-    // and `mv`'s cross-device arm the same code. The gain is not only the
-    // de-duplication: the loop that used to live here never offloaded, so it
-    // pushed every byte of every copy through userspace where GNU hands the
-    // work to the kernel. See [`copy::copy_bytes`].
-    //
-    // The sentence comes back rather than being printed there because `mv` has
-    // a backup to undo before it can print; `cp` has nothing to undo, so it
-    // prints immediately and gives up on this operand — which is what the
-    // `false` says, and it is the same `false` the loop returned.
-    if let Err(copy::CopyError { what, err }) = copy_bytes(&mut input, &mut output, src, dst) {
-        let why = strerror(&err);
-        let _ = writeln!(job.err, "cp: {what}: {why}");
-        return false;
-    }
-
-    // Through the descriptor the bytes were just written through, and not
-    // through `dst`. GNU does the same (`copy_reg` passes `dest_desc` to
-    // `fdutimensat`, `set_owner` and `copy_acl`), and the reason is the
-    // set-user-ID bit: granting it *by name*, after the write, leaves a window
-    // in which the name can be made to mean a different file. See
-    // [`fsattr::On`]. This is also why the tail lives here rather than in
-    // [`place_entity`] — that is exactly GNU's split between `copy_reg` and
-    // `copy_internal`, whose tail is skipped for a regular file
-    // (`copy.c:3233`, `if (copied_as_regular) return delayed_ok;`).
-    preserve_attributes(
-        Source::new(On::File(&input), src, src_meta),
-        On::File(&output),
-        dst,
-        Made::Regular,
-        new_dst,
-        &mut debt,
-        &mut job.run(),
-    )
-}
-
-/// [`permission_bits`] of the name `path`, without following a final symlink.
-fn permission_bits_of(path: &Path) -> io::Result<u32> {
-    fs::symlink_metadata(path).map(|m| permission_bits(&m))
-}
-
-/// `chmod(path, mode)`.
-#[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-}
-
-/// `set_permissions` on Windows only toggles the read-only flag, which is not
-/// what POSIX is asking for; doing nothing is the honest answer. The target OS
-/// is the `#[cfg(unix)]` arm above.
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
-    Ok(())
-}
-
-/// Reproduce the symlink at `src` as a symlink at `at`.
-///
-/// The link's *text* is copied verbatim, so a relative link keeps meaning
-/// whatever it means relative to its new directory — which is what makes copying
-/// a self-consistent tree of relative links produce another self-consistent
-/// tree.
-#[cfg(unix)]
-fn clone_symlink(src: &Path, at: &Path) -> io::Result<()> {
-    let points_at = fs::read_link(src)?;
-    std::os::unix::fs::symlink(points_at, at)
-}
-
-/// Recreating a symlink needs a distinction between file and directory links on
-/// Windows, and a privilege the test host does not necessarily have. Refusing is
-/// the only answer that does not silently produce something other than a
-/// symlink — and silently producing something else is precisely bug 1.
-#[cfg(not(unix))]
-fn clone_symlink(_src: &Path, _at: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "recreating a symlink is not supported on this host",
-    ))
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -3125,6 +1908,25 @@ fn clone_symlink(_src: &Path, _at: &Path) -> io::Result<()> {
 )]
 mod tests {
     use super::*;
+    /// Both used only by the assertions below. They were top-level imports
+    /// until the walk moved into [`copy`] (stage 4) and left nothing outside
+    /// this module that reads a directory or counts a link — at which point a
+    /// non-test build of this binary reported them unused, which is the whole
+    /// reason they are down here.
+    use coreutils::copy::read_dir_fastread;
+    /// One assertion, and it is `cfg(unix)` — hard links are.
+    #[cfg(unix)]
+    use coreutils::fileid::nlink;
+    /// The module and not only its three items, which is what the `On::Path`
+    /// helpers below actually name. It is `cfg`-gated for the same reason they
+    /// are — and note that `cfg(unix)` deletes a name before it is resolved, so
+    /// nothing on this project's Windows host type-checks what follows. Both
+    /// the `self` and `chown_privileges` were missing until a deliberate
+    /// `cargo check --target x86_64-unknown-linux-gnu` went looking; see
+    /// `known-issues.md`,
+    /// `B-CP.RS'S-UNIX-ONLY-TESTS-NAME-A-MODULE-THE-FILE-NEVER-IMPORTS`.
+    #[cfg(unix)]
+    use coreutils::fsattr::{self, Link, On, chown_privileges};
     /// The canned answer queue is shared with `rm`'s prompt tests; see
     /// [`coreutils::yesno`].
     use coreutils::yesno::Canned;
@@ -5003,8 +3805,15 @@ mod tests {
                 dereference,
                 ..plain()
             };
+            // The walked half goes straight to the policy, which is where the
+            // rule lives and is the same call `copy::Opts::follow_walked`
+            // makes. `CpFlags` has no spelling of it because nothing in this
+            // file walks anything any more — the engine does.
             assert_eq!(
-                (flags.follow_operand(), flags.follow_walked()),
+                (
+                    flags.follow_operand(),
+                    flags.dereference.follow_walked(flags.recursive)
+                ),
                 (operand, walked),
                 "{recursive} {dereference:?}"
             );

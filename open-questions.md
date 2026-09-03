@@ -57,6 +57,22 @@ the `# Resolved` index, numbered with your lane's prefix (`A-Q<n>`, `B-Q<n>`,
 `C-Q<n>`). The unprefixed `Q<n>` numbers are pre-split and are not to be
 extended.
 
+**Read that last paragraph twice — it is the rule this file gets wrong.** "At
+the end of the body" is not the end of the file, and appending to the end of
+the file lands you *below* `# Resolved`, among the answered questions, where
+the operator will never reach you. Three lanes have now done exactly that, and
+eight entries had to be moved back. It is not carelessness: the end of the
+file is simply where a text editor puts you, and the archive looks like the
+place new things go because it is last.
+
+`scripts/check-open-questions.py` enforces it — run it before you commit, or
+let `scripts/boot-test.sh` run it for you. It **fails** the build on a question
+filed below the boundary, on a body entry whose `Status:` is no longer `OPEN`,
+and on two entries sharing an identifier while one is still open. It only
+**warns** about a missing `C-Q<n>`-style identifier and about the two historic
+duplicate numbers in the archive, both of which are another lane's text to fix
+or history's to keep. Reasoning: `design-decisions.md` §903.
+
 ## Q46 — [A] Every benchmark ever recorded measured an `opt-level = 0` kernel. Should the *non-bench* boot test also switch to release, or only the bench path? — Status: OPEN (costs now measured 2026-08-21; recommendation moved A → C)
 
 **Background.** `scripts/boot-test.sh:602` runs a bare `cargo build` and stages

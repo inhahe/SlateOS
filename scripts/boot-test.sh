@@ -4710,6 +4710,64 @@ check_design_decisions_bands() {
 
 check_design_decisions_bands
 
+# `open-questions.md` is the operator's decision queue, and its one structural
+# rule -- open questions in the body, answered ones below `# Resolved` -- was
+# broken eight times before anything checked it.  Three separate lanes filed a
+# new question into the archive, because that is simply where the file ends,
+# and an open question filed under `# Resolved` is invisible: the operator
+# reads the queue from the top and never reaches it.
+#
+# Warnings rather than failures for two of the rules, which is the whole
+# design: a missing `C-Q<n>` identifier and a duplicate number whose copies are
+# all *archived* are both reported and neither stops the build.  A gate that
+# hard-failed on another lane's heading text would be cross-lane breakage --
+# lane A's build would refuse over a sentence only lane C may edit -- and
+# rewriting an archived entry to satisfy a checker would falsify the record of
+# what those numbers meant when they were answered.  See design-decisions.md
+# §903.
+check_open_questions() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== open-questions.md check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the open-questions gate against its fixtures ==="
+    if ! run_checker check-open-questions-selftest "$py" -u \
+        "$PROJECT_ROOT/scripts/check-open-questions.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The open-questions gate no longer" >&2
+        echo "agrees with its own fixtures, so its verdict means nothing." >&2
+        exit 1
+    fi
+
+    echo "=== Checking open-questions.md structure ==="
+    if run_checker check-open-questions "$py" -u \
+        "$PROJECT_ROOT/scripts/check-open-questions.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  open-questions.md is structurally wrong." >&2
+    echo "" >&2
+    echo "Almost always this is a new question appended to the end of the" >&2
+    echo "file, which puts it below \`# Resolved\` among the answered ones." >&2
+    echo "The operator reads the queue from the top, so a question filed" >&2
+    echo "there is not a question that was asked -- move it up into the body." >&2
+    echo "" >&2
+    echo "The other two causes: a body entry whose \`Status:\` is no longer" >&2
+    echo "OPEN (it has been answered, so it belongs in the archive index)," >&2
+    echo "and two entries sharing one identifier while at least one is still" >&2
+    echo "open (an answer naming that number could not be acted on)." >&2
+    exit 1
+}
+
+check_open_questions
+
 # Refuse to build when a self-test skip has fired on every recorded boot.
 #
 # This reads `bench/boot-history.jsonl`, so it is about the *previous* runs and

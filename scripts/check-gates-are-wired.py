@@ -37,8 +37,8 @@ nobody has to think about.
 
 WHY THE PARSING IS FUSSY
 ------------------------
-Three obvious ways to measure this are wrong, and each produced a confidently
-wrong number before this file existed:
+Four obvious ways to measure this are wrong, and each produced a confidently
+wrong number -- the first three before this file existed, the fourth inside it:
 
 1. **Grep the basename.**  Over-counts.  `boot-test.sh` discusses gates in
    prose -- including a worked example named `check-thing.py` that has never
@@ -63,9 +63,24 @@ wrong number before this file existed:
    two hundred lines before calling `run_checker … "$doclinks"`.  Judged
    literally, the hook runs zero checkers.
 
+4. **Extract the `.py` token and, if it is not a `check-*.py`, call the line
+   out of scope.**  Under-counts, and this one was this file's own bug rather
+   than a hypothetical.  Wiring three gates as a `for` loop over their names
+   gives the argument
+
+       "$PROJECT_ROOT/scripts/$g.py"
+
+   from which the `.py` matcher extracts `g.py`.  That is a perfectly
+   well-formed token and it is not a gate, so it took the same exit as
+   `getopt-ambiguity-check.py` -- deliberately ignored.  Three self-tests ran
+   and this file counted none of them, and said nothing, because a *partial*
+   parse is indistinguishable from a complete parse of something irrelevant.
+   Which is method 1's mistake wearing different clothes.
+
 So: join `\` continuations, drop comment lines, resolve simple
-`var=<path>.py` assignments, and read the script argument of each
-`run_checker` call.
+`var=<path>.py` assignments, read the script argument of each `run_checker`
+call -- and report, rather than interpret, any call that builds the filename
+itself out of a variable.
 
 THE CONSERVATIVE DIRECTION
 --------------------------
@@ -163,6 +178,19 @@ _ASSIGN = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
 # `if`/`elif`/`then`/`!`. Not inside an echo, and not as a bare substring.
 _CALL = re.compile(r"(?:^|[;&|(]|\b(?:if|elif|then|else|do)\s+)\s*!?\s*run_checker\b")
 _VARREF = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+# A variable spliced into the *filename* -- `$g.py`, `${gate}-check.py` -- as
+# opposed to one standing for a directory, `$root/scripts/check-x.py`. The
+# distinction is the absence of a `/` between the expansion and the `.py`.
+#
+# This is the hole that motivated the rule. Wiring three gates as a `for` loop
+# over their names produced `"$PROJECT_ROOT/scripts/$g.py"`, from which the
+# `.py` matcher extracted the token `g.py`; that is not a `check-*.py`, so the
+# call was classified as an out-of-scope script and dropped. Three self-tests
+# ran and this file counted none of them, silently -- an under-count in the
+# checker whose entire job is to not under-count, arrived at by the same route
+# as every wrong answer in the docstring above: a partial parse mistaken for a
+# complete one.
+_INTERPOLATED_NAME = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[A-Za-z0-9_.-]*\.py")
 # Both spellings are live in this repo. A call carrying either runs the gate's
 # own cases, not the gate, and must not count as wiring.
 _SELFTEST_FLAG = re.compile(r"--self-?test\b")
@@ -219,6 +247,19 @@ def analyse(path: Path) -> tuple[set[str], set[str], list[str]]:
         #
         # Both spellings are in use here (`--selftest` and `--self-test`), so
         # match both rather than picking one and quietly missing the other.
+        # Checked before anything is extracted, because the failure mode is
+        # extraction *succeeding* on a fragment: `$g.py` yields `g.py`, which
+        # looks exactly like a resolvable out-of-scope script and is thrown
+        # away on that basis. Report and move on -- a name assembled at run
+        # time is a name this file cannot know, and the conservative direction
+        # for an unknown is noise, not silence.
+        if _INTERPOLATED_NAME.search(line):
+            unresolved.append(
+                f"{path.name}: a variable is spliced into the script's "
+                f"filename, so what it runs is only known at run time. "
+                f"Spell the path out: {line.strip()[:110]}")
+            continue
+
         literal = _ANY_SCRIPT.findall(line)
         named = ([] if literal
                  else [bound[v] for v in _VARREF.findall(line) if v in bound])
@@ -344,6 +385,8 @@ run_checker outofscope "$py" "$gopt"
 run_checker mystery "$py" "$undefined_var"
 if ! run_checker sto-selftest "$py" "$root/scripts/check-selftest-only.py" --selftest; then :; fi
 if ! run_checker sto2-selftest "$py" "$root/scripts/check-hyphen-selftest-only.py" --self-test; then :; fi
+run_checker interp "$py" "$root/scripts/$g.py"
+run_checker interp-st "$py" "$root/scripts/${gate}-thing.py" --self-test
 """
 
 
@@ -376,10 +419,31 @@ def selftest() -> int:
         check("check-echoed.py" not in runs,
               "a gate named only in an echo must NOT count -- this is the "
               "shape b5246478b added")
-        check(len(unresolved) == 1 and "mystery" in unresolved[0],
+        check(any("mystery" in u for u in unresolved),
               f"an unresolvable call must be reported, got {unresolved!r}")
         check(not any("outofscope" in u for u in unresolved),
               "a resolvable non-gate script is out of scope, not unresolved")
+
+        # A variable spliced into the filename, which is the shape that got
+        # past this file: `$g.py` extracts as the token `g.py`, which is not a
+        # `check-*.py` and so was discarded as out-of-scope -- indistinguishable
+        # from the `outofscope` case above, and wrong. Both spellings, and the
+        # self-test-flagged form too, because the real occurrence carried
+        # `--self-test` and would otherwise have been swallowed one branch
+        # later instead.
+        check(any("interp " in u or u.rstrip().endswith("$g.py\"")
+                  for u in unresolved),
+              f"`$g.py` must be reported, not dropped, got {unresolved!r}")
+        check(any("interp-st" in u for u in unresolved),
+              f"`${{gate}}-thing.py --self-test` must be reported too, "
+              f"got {unresolved!r}")
+        check("g.py" not in runs and "g.py" not in tested,
+              "the fragment left by an unexpanded variable must never be "
+              "recorded as a script that ran")
+        check(len(unresolved) == 3,
+              f"exactly three calls in the fixture are unresolvable; over-"
+              f"reporting is noise that trains the reader to skim: "
+              f"{unresolved!r}")
 
         # This pair is a regression test for a mutant that survived. Deleting
         # the real run_checker call for check-tick-wiring.py changed nothing,

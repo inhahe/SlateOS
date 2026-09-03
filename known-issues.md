@@ -90874,9 +90874,14 @@ The reading half landed on 2026-08-26; the writing half on 2026-09-02.
 **Three deviations from the plan above**, recorded because the plan is what a
 later reader would otherwise trust:
 
-- Step 2's file-picker worry was misplaced: `guitk::dialog::FileDialog` grew
-  `handle_click` and directory listing in the meantime, and the picker is now
-  four `DialogPurpose` variants over one dialog.
+- Step 2's file-picker worry was **half** right, and the half that survived is
+  still open. The directory-listing gap closed — the app hands the dialog a
+  listing through `list_directory`/`set_entries` — so a picker is now four
+  `DialogPurpose` variants over one dialog. But `FileDialog` **still records no
+  hit targets and has no `handle_click`**: every picker in this program, the two
+  new ones included, is keyboard-only. Clicking a filename in the Open, New or
+  Add dialog does nothing. Tracked at
+  `C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS`.
 - Step 5 guessed that `deflate/` might have no compressor and that storing
   uncompressed would be "a correct first cut". It does have one;
   `ziparchive::create` deflates, and members come back out smaller than they
@@ -109132,3 +109137,61 @@ slow" into "rustc is blocked in `SearchPath::new`", which named both the cause
 and the fix.
 
 ---
+
+## C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS (lane C, 2026-09-02)
+
+**In short:** every Open / Save / Choose-folder dialog in SlateOS can only be
+driven with the keyboard. The dialog draws a list of files, a sidebar of
+shortcuts, a toolbar and OK/Cancel buttons — and clicking any of them does
+nothing at all. Arrow keys, Enter, Backspace and Escape work; the mouse does
+not. A user who clicks a filename and then clicks OK has selected nothing, and
+the dialog will act on whatever row the keyboard cursor happened to be on.
+
+**Where it lives:** `gui/toolkit/src/dialog.rs`. `FileDialog::render` returns a
+flat `Vec<RenderCommand>` — pure ink, with no record of *where* anything was
+drawn — and there is no `handle_click` on the type at all. The absence is not
+hidden: `apps/archivemanager/src/main.rs` says so at its own call site, "it is
+drawn straight into the tree rather than through the frame because it records no
+hit boxes".
+
+**What a user sees:** the dialog looks exactly like a normal file picker. Rows
+highlight on the keyboard cursor, so it even looks live. Clicking a row does not
+select it; clicking OK does not press it; clicking a sidebar shortcut does not
+navigate. Nothing reports an error, because from the program's point of view
+nothing was clicked — the host window swallows the click to stay modal and
+throws it away.
+
+**Who is affected right now:** `apps/archivemanager` has four pickers (Open,
+Extract All, Extract Selected, and — since 2026-09-02 — New and Add, so six),
+and every one of them is keyboard-only.
+`C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER` is a caller that declined to
+use the widget *because* of this, and writes to one fixed path instead. The
+start menu's Run box wants the same widget (see the entry at the "What is
+actually missing" section for it). Every future app with an Open button
+inherits the bug.
+
+**Why it is like this:** the widget was written before `guitk::frame` existed and
+was never revisited — it had zero users tree-wide until 2026-08-25. The rest of
+the toolkit has since settled on "rendering and hit-testing are the *same
+walk*": a `Frame<T>` records a target for each rect as it is drawn, intersected
+with the clip and translation in force, so ink and click target cannot end up in
+different places. `FileDialog` is the last widget of any size that still draws
+into a bare command list.
+
+**What the proper fix looks like:** convert `render` into one walk that draws
+into a `guitk::frame::Frame<DialogTarget>`, with `DialogTarget` naming the file
+rows, sidebar shortcuts, toolbar buttons, sort headers, the filter control and
+the OK/Cancel pair. `render(width, height) -> Vec<RenderCommand>` stays as a
+thin wrapper over that walk so existing callers do not change. Add
+`handle_click(&mut self, x, y, width, height) -> DialogAction`, which hit-tests
+that frame and returns the same `DialogAction` the keyboard path already
+returns — so a host only has to forward mouse events the way it already forwards
+keys. Two rules the conversion must not break: a double-click on a directory
+navigates (a single click selects), and a click outside the dialog must not
+reach the window behind it, which is what makes it modal.
+
+**What must not be done instead:** hit-testing by recomputing the row geometry in
+the caller. That is a second copy of the layout, and the bug is then in whichever
+copy you are not reading — exactly the failure
+`C-NETMANAGER-CLICKED-ROWS-THAT-WERE-NOT-ON-SCREEN` documents, where two private
+copies of `Frame` disagreed about clipping.

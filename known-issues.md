@@ -31638,6 +31638,70 @@ width of `INT_MIN`, which allocated two gigabytes and stopped responding
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
+**Status: OPEN — all four items done. Only the per-line shaped cache (step (b),
+a cost concern) and the arrow keys (C-Q2, the operator's call) remain.**
+
+**Update 2026-09-03 — items 1 and 2 are fixed, and `measure_prefix` is gone.**
+
+`caret_offset_px` was `measure(line[..col])` — `width_upto` under another name,
+the quantity `TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL` was renamed away from
+precisely because it is not a caret position. It is now `text::caret_x`, which
+walks the shaped run. Hit-testing was a loop comparing prefix widths at every
+character boundary; it is now `text::cursor_at`, which walks the caret stops in
+*screen* order. The selection band was one rectangle between two measured
+prefixes; it is now `text::selection_boxes`, a list, because a range contiguous
+in the string need not be contiguous on screen — the single span painted the
+gap between the pieces, telling the user they had selected text they had not.
+
+`Document` gained `cursor_affinity` beside `cursor_col`, and
+`Document::set_cursor` is the one place a hit-test's answer becomes the caret,
+so dropping the affinity is something someone has to *do* rather than something
+that happens by writing `cursor_col = col` and forgetting the other field. It is
+a companion field rather than a `TextCursor` replacing `cursor_col` because
+every edit in the file is arithmetic on a byte offset — 99 sites — and none of
+them has an opinion about direction; only drawing and hit-testing do.
+
+**The click path was already live, and this entry said otherwise.** The earlier
+note that `apps/editor` "has no live input loop" is true of `main()` and false
+of `input.rs`, which has `handle_mouse` with press, double-click and drag. All
+three went through `caret_position_at`; all three now go through
+`caret_cursor_at` and `set_cursor`, so a real click's affinity reaches the caret
+it draws. Worth recording as a correction: the belief that nothing called the
+hit test nearly led to it being left alone.
+
+**`measure_prefix` is deleted, and `-D dead_code` is what proved the job was
+complete.** It had exactly two callers, the caret and the hit test, and when
+both were converted the lint reported it unused — a stronger statement than "I
+looked and found no others": the prefix-width measurement is gone from the
+editor rather than merely unused by the two sites that were examined.
+
+**Seven tests**, in `caret_tests`, on the string `guitk::pathbar` uses — two
+Latin letters, two Hebrew, two Latin — the smallest text where a prefix width
+and a caret position are different numbers. The bidirectional caret is asserted
+to *differ* from the prefix width, because that disagreement is the entire
+content of the bug and asserting a specific x would pin the font's metrics
+instead. A left-to-right regression test pins the ordinary case, which is every
+line of every source file anyone will actually open. A click sweep asserts the
+caret is drawn back within one character of where it was clicked, at points
+across the whole run including inside the right-to-left stretch — a click that
+does not land where the caret appears is the most immediately visible bug an
+editor can have. And two affinities at one boundary are asserted to be two
+screen positions, which is what makes the new field load-bearing rather than
+noise.
+
+Mutation-checked: restoring the prefix measurement fails exactly the three
+bidirectional tests and leaves the left-to-right one green.
+
+**What is left.** Step (b), the per-line shaped cache, which is a *cost*
+concern and not a correctness one — `caret_x`, `cursor_at` and
+`selection_boxes` each shape internally, so they were never waiting on it.
+Worth doing when something measures the editor as slow, with a clock rather
+than a profiler. And the arrow keys still step logically, which is C-Q2 and
+remains the operator's call; this entry was never blocked on it, since where a
+caret is *drawn* is wrong under either answer.
+
+The original status line follows.
+
 **Status: OPEN — items 3 and 4 (steps (c) and (d)) done 2026-08-17; 1 and 2
 remain.**
 
@@ -34002,6 +34066,87 @@ the strap to retire and the remaining work is the placeholder `main`s. The next
 one is a judgement call rather than a forced move: pick an app whose state type
 already exists and already has a `handle_event`, since that is most of the work,
 and expect roughly one live defect per app (three conversions, three defects).
+
+**Count corrected 2026-09-03: 55 to go, not 135.** The line above was written on
+2026-08-25 and never revised while the conversions continued. Measured today:
+143 crates under `apps/`, **88** of which now implement `oswindow::app::App`.
+The figure is worth re-measuring rather than trusting, and the command is
+`grep -rl 'impl App for' apps/*/src/main.rs | wc -l`.
+
+**`apps/fontmanager` is number 88, and the "one live defect per app" rule held.**
+The defect: **there was no `Event::Mouse` arm anywhere in the file.** A font
+manager whose list of fonts could not be clicked — only arrowed through.
+`MouseEvent`, `MouseButton` and `MouseEventKind` were imported and never named
+again, and a file-wide `#[allow(unused_imports)]` is what kept that quiet. It
+was invisible for the reason this entry exists: `main` rendered one frame and
+asserted it was non-empty, so nothing had ever delivered the app an event.
+
+Mouse handling now selects a sidebar filter, a category, or a font family. The
+row geometry was inline in the renderer, so it was extracted to
+`sidebar_rows()`/`font_list_top()` which the renderer and the hit test both
+walk — hand-writing a second copy of the arithmetic is how `apps/mixer` got a
+slider handler taking arguments nothing in the program computed. Seven tests,
+including a sweep asserting *every* drawn row is clickable (an off-by-one in the
+accumulator would strand exactly one row, which sampling two would miss) and one
+asserting a click above or below the list selects nothing, since a hit test that
+clamps looks like the program choosing for you. Mutation-checked: deleting the
+`Event::Mouse` arm fails exactly the four click tests.
+
+Three other things the conversion turned up, all pre-existing:
+
+- **Two latent panic sites in production code.** `select_next_font` and
+  `select_prev_font` indexed `visible[0]`, `visible[next_pos]` and computed
+  `visible.len() - 1`; `uninstall` indexed `self.fonts[idx]`. Each is in range
+  today because of a check a few lines above it, which is the guarantee that
+  stops holding the moment someone moves the check. All are now `get`/`first`/
+  `last`/`checked_sub`.
+- **The `render()` name collision the recipe warns about, from the other side.**
+  Renaming the inherent `render` to `render_tree` made five *test* call sites
+  resolve to the trait's `render(&mut self, w, h)` instead — the compiler found
+  every one, which is the argument for renaming rather than relying on care.
+- **A tail of hidden lint debt**: `float_cmp`, `unwrap_used` and
+  `indexing_slicing` in the test module (now carrying the standard allow block),
+  and three `sort()` on primitives (now `sort_unstable`).
+
+`check-window-wiring.py`'s baseline went 49 → 48 in the same commit, which is
+what a ratchet is for: ground gained and not held is ground that can be lost
+again without anything objecting.
+
+**`apps/procexplorer` is number 89**, and its defect was the other one the
+recipe singles out. It already handled mouse, resize *and* `Event::Tick` — so
+the conversion was mechanical except for `tick_interval`, which defaults to
+`None`, which means no tick is ever delivered. Shipping that default would have
+given a **process explorer whose numbers never change**: a system monitor that
+monitors nothing, with all 67 of its existing tests still green, because a model
+test can assert the refresh works without asserting anything ever asks for it.
+That is lesson 47 again, and the recipe calls `tick_interval` "the one to get
+right" for exactly this reason.
+
+It returns the *user's* refresh interval rather than a constant or a frame rate,
+so changing the setting changes the clock, and an idle desktop parks between
+refreshes instead of being woken sixty times a second to redraw the same
+numbers. Three tests: the clock follows the setting; the refresh is driven by
+*elapsed time* rather than tick count (the interval is a floor, not a promise —
+`Event::Tick` carries what actually elapsed); and one long tick after a busy
+loop still refreshes. Mutation-checked: returning `None` fails exactly the first.
+
+Pre-existing debt this one exposed was larger than fontmanager's, and in a file
+the conversion did not otherwise touch: **31 clippy findings under
+`-D warnings`**, across `main.rs` and `features.rs`. Seven were latent
+production sites — `(1u64 << count) - 1` in two places, `cpu % cols` and
+`cpu / cols`, `scroll_offset + i`, `current + delta` before a clamp that cannot
+rescue an addition that already overflowed, and `handles.len() - max_handles`
+guarded by a `>` three lines above it. Each is safe today because of a check
+somewhere nearby, which is the guarantee that stops holding when someone moves
+the check. The rest were the two test modules, which now carry the standard
+allow block.
+
+Baseline 48 → 47.
+
+**A note for the next conversion:** budget for the lint tail. Both apps so far
+were clippy-dirty under `-D warnings` *before* being touched, and the debt is
+not visible until the crate is looked at. It is worth fixing — these are real
+overflow and panic sites — but it is most of the work, not a footnote to it.
 
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 

@@ -5615,6 +5615,7 @@ name = "fontmanager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -13805,6 +13806,7 @@ name = "procexplorer"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

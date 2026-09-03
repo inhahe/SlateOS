@@ -6,5 +6,9 @@ description = "SlateOS Process Explorer — graphical system monitor and task ma
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
 
+# The app-facing compositor client. An app names `oswindow` and never
+# `guiremote`, for the reason a Unix program does not name the socket layer.
+oswindow = { path = "../../gui/window" }
+
 [lints]
 workspace = true

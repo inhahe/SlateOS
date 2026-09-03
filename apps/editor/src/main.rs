@@ -59,6 +59,23 @@ pub struct Document {
     pub cursor_line: usize,
     /// Cursor column (0-based, byte offset in line).
     pub cursor_col: usize,
+    /// Which of the column's two screen positions the caret is at.
+    ///
+    /// At a direction boundary one byte offset names two equally correct
+    /// places on screen — the end of the left-to-right run and the start of
+    /// the right-to-left one, which are at opposite ends of the line — and
+    /// nothing about the offset says which the user meant. A click knows,
+    /// because it landed somewhere; this is where that knowledge is kept
+    /// between the click and the next repaint.
+    ///
+    /// Beside `cursor_col` rather than replacing it with a
+    /// `guitk::text::TextCursor`: every edit in this file is arithmetic on a
+    /// byte offset (insert, remove, slice), 99 sites of it, and none of them
+    /// has an opinion about direction. Only drawing and hit-testing do.
+    ///
+    /// On text that runs one way the two affinities name the same point, so
+    /// this costs nothing to ignore — which is most files, most of the time.
+    pub cursor_affinity: text::Affinity,
     /// Selection anchor (line, col) — None if no selection.
     pub selection_anchor: Option<(usize, usize)>,
     /// Scroll offset (first visible line).
@@ -295,6 +312,21 @@ impl Default for Document {
 }
 
 impl Document {
+    /// Put the caret at `cursor` on `line`, keeping the affinity.
+    ///
+    /// The one place a hit-test's answer becomes the document's caret, so that
+    /// dropping the affinity is a thing someone has to *do* rather than a thing
+    /// that happens by writing `doc.cursor_col = col` and forgetting the other
+    /// field. At a direction boundary the affinity is the whole difference
+    /// between the caret appearing where the user clicked and appearing at the
+    /// far end of the line.
+    pub fn set_cursor(&mut self, line: usize, cursor: text::TextCursor) {
+        self.cursor_line = line.min(self.lines.len().saturating_sub(1));
+        let text = self.lines.get(self.cursor_line).map_or("", String::as_str);
+        self.cursor_col = snap_to_boundary(text, cursor.byte);
+        self.cursor_affinity = cursor.affinity;
+    }
+
     pub fn new() -> Self {
         Self {
             lines: vec![String::new()],
@@ -303,6 +335,7 @@ impl Document {
             modified: false,
             cursor_line: 0,
             cursor_col: 0,
+            cursor_affinity: text::Affinity::Downstream,
             selection_anchor: None,
             scroll_line: 0,
             wheel: guitk::wheel::Accumulator::default(),
@@ -354,6 +387,7 @@ impl Document {
             modified: false,
             cursor_line: 0,
             cursor_col: 0,
+            cursor_affinity: text::Affinity::Downstream,
             selection_anchor: None,
             scroll_line: 0,
             wheel: guitk::wheel::Accumulator::default(),
@@ -2049,24 +2083,41 @@ impl EditorState {
             // about and never shows, which reads as the selection keys doing
             // nothing at all.
             if let Some((from, to, trailing)) = Self::selection_on_line(doc, i) {
-                let start_px = self.measure_prefix(line, from);
-                let end_px = self.measure_prefix(line, to);
-                let x = self.text_x() + start_px - doc.scroll_px.max(0.0);
+                // A **list** of boxes, not one span between two measured
+                // prefixes. A range contiguous in the string need not be
+                // contiguous on the screen: select across a direction change
+                // and the selected characters are drawn as two separated runs
+                // with unselected text between them. The single-span form
+                // painted that gap too, telling the user they had selected
+                // text they had not — see known-issues.md ->
+                // `TD-EDITOR-IS-NOT-BIDIRECTIONAL` item 2, and `guitk::pathbar`
+                // for the same loop.
+                let mut boxes =
+                    text::selection_boxes(line, from, to, self.font_size, FontWeightHint::Regular);
                 // A line whose selection continues onto the next one gets a
                 // sliver past its last glyph, so the selected line break is
-                // visible rather than the band appearing to stop early.
-                let width = (end_px - start_px) + if trailing { self.font_size * 0.4 } else { 0.0 };
-                let left = self.text_x();
-                let clipped_x = x.max(left);
-                let clipped_w = (x + width - clipped_x).min(w - clipped_x);
-                if clipped_w > 0.0 {
-                    tree.fill_rect(
-                        clipped_x,
-                        y,
-                        clipped_w,
-                        self.line_height,
-                        Color::from_hex(0x45475A),
-                    );
+                // visible rather than the band appearing to stop early. It
+                // hangs off the end of the *line*, which is where the break
+                // is, rather than off the last box — those are different
+                // places when the line ends in a right-to-left run.
+                if trailing {
+                    let end = text::measure(line, self.font_size, FontWeightHint::Regular);
+                    boxes.push((end, self.font_size * 0.4));
+                }
+                for (box_x, box_w) in boxes {
+                    let x = self.text_x() + box_x - doc.scroll_px.max(0.0);
+                    let left = self.text_x();
+                    let clipped_x = x.max(left);
+                    let clipped_w = (x + box_w - clipped_x).min(w - clipped_x);
+                    if clipped_w > 0.0 {
+                        tree.fill_rect(
+                            clipped_x,
+                            y,
+                            clipped_w,
+                            self.line_height,
+                            Color::from_hex(0x45475A),
+                        );
+                    }
                 }
             }
 
@@ -2118,28 +2169,28 @@ impl EditorState {
     /// Ignores the scroll position on purpose — this is the caret's place *in
     /// the line*, and where that lands on screen is the caller's business.
     ///
-    /// Still a prefix measurement, and so still wrong for a bidirectional line:
-    /// the caret between two characters of a right-to-left run is not at the
-    /// summed width of the bytes before it. Fixing that needs the shaped run's
-    /// cluster positions rather than a width, which is item 5 (step (e)) of
-    /// `known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL`. It is at least now
-    /// wrong in one place instead of two, and consistently with nothing.
+    /// A caret *position*, not a prefix width, and the difference is the whole
+    /// point.
+    ///
+    /// This used to be `measure(line[..col])` — `width_upto` under another
+    /// name, the quantity `TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL` was renamed
+    /// away from precisely because it is not a caret position. On a line with
+    /// a right-to-left run it gave the distance *into* the text rather than
+    /// the position *across* the line, so the caret was drawn in the middle of
+    /// a Hebrew word while the text after it went the other way.
+    ///
+    /// [`text::caret_x`] walks the shaped run instead, which is why the
+    /// affinity is needed: at a direction boundary the same byte offset has
+    /// two correct answers and only the affinity says which.
     fn caret_offset_px(&self, doc: &Document) -> f32 {
         let line = doc.lines.get(doc.cursor_line).map_or("", String::as_str);
-        self.measure_prefix(line, doc.cursor_col)
-    }
-
-    /// Width of `line[..col]`, with `col` snapped to a character boundary.
-    ///
-    /// The one place a byte offset in a line becomes an x. Carries the same
-    /// caveat as [`Self::caret_offset_px`]: a prefix width is not a position in
-    /// a bidirectional line.
-    fn measure_prefix(&self, line: &str, col: usize) -> f32 {
-        // Snapped, not merely clamped: `col` is a byte offset and slicing
-        // inside a character panics.
-        let to = snap_to_boundary(line, col);
-        let before = line.get(..to).unwrap_or("");
-        text::measure(before, self.font_size, FontWeightHint::Regular)
+        let cursor = text::TextCursor {
+            // Snapped, not merely clamped: an offset that has drifted mid-
+            // character would otherwise index inside one.
+            byte: snap_to_boundary(line, doc.cursor_col),
+            affinity: doc.cursor_affinity,
+        };
+        text::caret_x(line, cursor, self.font_size, FontWeightHint::Regular)
     }
 
     /// The byte range of `line` covered by the selection, and whether the
@@ -2170,8 +2221,15 @@ impl EditorState {
     /// one before it, so clicking the right half of a character puts the caret
     /// after it, which is what every other editor does and what the eye
     /// expects.
+    ///
+    /// Returns the affinity as well as the offset, and it is not decoration:
+    /// clicking the left edge of a right-to-left word and clicking the right
+    /// edge of the left-to-right word before it give the *same* byte offset
+    /// and two different caret positions, at opposite ends of the line. The
+    /// offset alone cannot say which the user clicked; [`text::cursor_at`]
+    /// knows because it worked from the position.
     #[must_use]
-    pub fn caret_position_at(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+    pub fn caret_cursor_at(&self, x: f32, y: f32) -> Option<(usize, text::TextCursor)> {
         let bottom = self.window_height as f32 - STATUS_BAR_HEIGHT;
         if y < TAB_BAR_HEIGHT || y >= bottom || x < self.text_x() {
             return None;
@@ -2187,23 +2245,18 @@ impl EditorState {
         // Where the click falls along the line, in the line's own coordinates.
         let target = x - self.text_x() + doc.scroll_px.max(0.0);
 
-        // Walk the character boundaries, keeping the closest. Linear in the
-        // line's length and quadratic in it overall, which is fine for a click
-        // — it happens once, not once per frame — and is the only measurement
-        // that stays correct when glyph widths differ.
-        let mut best = 0usize;
-        let mut best_distance = f32::INFINITY;
-        for (offset, _) in text
-            .char_indices()
-            .chain(std::iter::once((text.len(), ' ')))
-        {
-            let distance = (self.measure_prefix(text, offset) - target).abs();
-            if distance < best_distance {
-                best_distance = distance;
-                best = offset;
-            }
-        }
-        Some((line, best))
+        // `cursor_at` walks the caret stops in *screen* order. The loop this
+        // replaces compared prefix widths, which is the same defect as the
+        // caret's own placement seen from the other side: on a bidirectional
+        // line the nearest prefix width is not the nearest caret stop, so a
+        // click inside a Hebrew word resolved to an offset whose caret is
+        // drawn somewhere else entirely — and a click that does not land where
+        // the caret is then drawn is the most immediately visible bug an
+        // editor can have.
+        Some((
+            line,
+            text::cursor_at(text, target, self.font_size, FontWeightHint::Regular),
+        ))
     }
 
     /// Scroll horizontally so the caret is inside the text area.
@@ -3434,6 +3487,185 @@ mod caret_tests {
             (caret_x(&editor) - expected).abs() < 0.01,
             "the caret is at {}, but the text before it ends at {expected}",
             caret_x(&editor)
+        );
+    }
+
+    // ---- Bidirectional text ----
+    //
+    // `ab<aleph><bet>cd` draws as `a b <bet> <aleph> c d`: the two Hebrew
+    // letters run right to left inside a left-to-right line, so the one stored
+    // second is painted first. The same string `guitk::pathbar` uses, for the
+    // same reason — it is the smallest text where a prefix width and a caret
+    // position are different numbers.
+    const MIXED: &str = "ab\u{05D0}\u{05D1}cd";
+
+    /// The caret is at a *position*, not at the width of the bytes before it.
+    ///
+    /// This is item 1 of known-issues.md -> `TD-EDITOR-IS-NOT-BIDIRECTIONAL`.
+    /// The editor placed its caret at `measure(line[..col])`, which on a
+    /// bidirectional line is the distance *into* the text rather than the
+    /// position *across* it: with the caret between the two Hebrew letters,
+    /// four bytes of prefix put it four characters along, while the character
+    /// it belongs between is drawn third.
+    ///
+    /// The assertion is that the two numbers *disagree*, which is the whole
+    /// content of the bug. Asserting a specific x would pin the font's metrics
+    /// rather than the property.
+    #[test]
+    fn the_caret_on_a_bidirectional_line_is_not_the_prefix_width() {
+        // Byte 4 is between the two Hebrew letters: `a`, `b`, then aleph at
+        // 2..4 and bet at 4..6.
+        let editor = editor_with(MIXED, 4);
+        let text_left = editor.gutter_width + 8.0;
+
+        let prefix = text::measure(&MIXED[..4], editor.font_size, FontWeightHint::Regular);
+        let drawn = caret_x(&editor) - text_left;
+
+        assert!(
+            (drawn - prefix).abs() > 0.5,
+            "the caret is still at the prefix width ({prefix}), so it is being \
+             measured through the string rather than across the screen"
+        );
+    }
+
+    /// On text that runs one way, nothing changed.
+    ///
+    /// The risk of the fix is a regression in the ordinary case, which is
+    /// every line of every source file anyone will actually open. A caret
+    /// position and a prefix width are the same number there, and they had
+    /// better stay that way.
+    #[test]
+    fn the_caret_on_a_left_to_right_line_is_still_the_prefix_width() {
+        for col in [0usize, 1, 5, 11] {
+            let editor = editor_with("hello world", col);
+            let expected = editor.gutter_width
+                + 8.0
+                + text::measure(
+                    &"hello world"[..col],
+                    editor.font_size,
+                    FontWeightHint::Regular,
+                );
+            assert!(
+                (caret_x(&editor) - expected).abs() < 0.01,
+                "at col {col} the caret moved to {}, expected {expected}",
+                caret_x(&editor)
+            );
+        }
+    }
+
+    /// A click lands where the caret is then drawn.
+    ///
+    /// The two halves of item 1 and item 2 have to agree or the editor is
+    /// worse than before: a click that does not put the caret where the user
+    /// clicked is the most immediately visible bug an editor can have. This
+    /// drives the round trip — click, store the answer *with its affinity*,
+    /// draw — at points across a bidirectional line.
+    #[test]
+    fn a_click_puts_the_caret_where_it_was_clicked() {
+        let base = editor_with(MIXED, 0);
+        let text_left = base.gutter_width + 8.0;
+        let width = text::measure(MIXED, base.font_size, FontWeightHint::Regular);
+        let y = TAB_BAR_HEIGHT + 2.0;
+
+        // Across the whole run, including inside the right-to-left stretch.
+        let mut checked = 0;
+        let mut step = 1;
+        while (step as f32) * 4.0 < width {
+            let click = text_left + (step as f32) * 4.0;
+            let mut editor = editor_with(MIXED, 0);
+            let (line, cursor) = editor
+                .caret_cursor_at(click, y)
+                .expect("a click inside the text area resolves");
+            editor.active_document_mut().set_cursor(line, cursor);
+
+            let drawn = caret_x(&editor);
+            // Within half a character: the caret goes to the nearest stop, not
+            // to the exact pixel clicked.
+            assert!(
+                (drawn - click).abs() <= editor.font_size,
+                "clicked at {click}, caret drawn at {drawn}"
+            );
+            checked += 1;
+            step += 1;
+        }
+        assert!(checked >= 4, "the sweep only checked {checked} points");
+    }
+
+    /// A selection across a direction change is more than one rectangle.
+    ///
+    /// This is item 2. A range contiguous in the string need not be contiguous
+    /// on screen: selecting from inside the Latin run to inside the Hebrew one
+    /// selects characters that are drawn with unselected text between them.
+    /// The single span the editor used to paint — `x(end) - x(start)` —
+    /// covered that gap too, telling the user they had selected text they had
+    /// not.
+    #[test]
+    fn a_selection_across_a_direction_change_is_drawn_as_separate_boxes() {
+        // From byte 1 (after `a`) to byte 4 (between the Hebrew letters).
+        let boxes = text::selection_boxes(MIXED, 1, 4, 14.0, FontWeightHint::Regular);
+        assert!(
+            boxes.len() > 1,
+            "a selection crossing a direction change came back as {} box(es); \
+             one box would paint the unselected text between the pieces",
+            boxes.len()
+        );
+    }
+
+    /// …and an ordinary selection is still exactly one.
+    #[test]
+    fn a_selection_within_one_direction_is_a_single_box() {
+        let boxes = text::selection_boxes("hello world", 0, 5, 14.0, FontWeightHint::Regular);
+        assert_eq!(
+            boxes.len(),
+            1,
+            "a left-to-right selection should not be split into pieces"
+        );
+    }
+
+    /// The affinity survives being stored, because that is the only reason it
+    /// exists.
+    ///
+    /// `set_cursor` is the one place a hit-test's answer becomes the caret. A
+    /// version of it that wrote `cursor_col` and forgot `cursor_affinity`
+    /// would pass every other test in this module — the affinity only shows at
+    /// a direction boundary — and would put the caret at the far end of the
+    /// line exactly there.
+    #[test]
+    fn set_cursor_keeps_the_affinity_it_was_given() {
+        for affinity in [text::Affinity::Downstream, text::Affinity::Upstream] {
+            let mut editor = editor_with(MIXED, 0);
+            editor
+                .active_document_mut()
+                .set_cursor(0, text::TextCursor { byte: 4, affinity });
+            assert_eq!(editor.active_document().cursor_affinity, affinity);
+            assert_eq!(editor.active_document().cursor_col, 4);
+        }
+    }
+
+    /// The two affinities at a direction boundary draw in two different
+    /// places, which is what makes the field load-bearing rather than noise.
+    #[test]
+    fn the_two_affinities_at_a_boundary_are_two_screen_positions() {
+        let mut down = editor_with(MIXED, 2);
+        down.active_document_mut().set_cursor(
+            0,
+            text::TextCursor {
+                byte: 2,
+                affinity: text::Affinity::Downstream,
+            },
+        );
+        let mut up = editor_with(MIXED, 2);
+        up.active_document_mut().set_cursor(
+            0,
+            text::TextCursor {
+                byte: 2,
+                affinity: text::Affinity::Upstream,
+            },
+        );
+        assert!(
+            (caret_x(&down) - caret_x(&up)).abs() > 0.5,
+            "both affinities drew the caret at the same x, so the field is \
+             doing nothing and a click at one end resolves to the other"
         );
     }
 

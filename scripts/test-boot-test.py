@@ -691,6 +691,120 @@ def test_a_host_that_never_recovers_is_reported_as_host_load_not_as_a_crash():
           "so memory explains it" in done.stderr, True)
 
 
+def _run_prune_hook(free_gb, below_gb, pruner_rc=0):
+    """Drive the real `prune_build_cache_if_low` against a stubbed volume.
+
+    Returns `(rc, stdout, argv)` where `argv` is the line the fake pruner was
+    invoked with, or `None` if it was never invoked at all -- which is the
+    thing most of these assertions are about.
+
+    `measure_free_gb` is stubbed rather than the host read, so nothing here
+    depends on how full the machine running the suite happens to be. Same
+    relative-path and `build/`-fixture constraints as `_run_clippy_gate`; see
+    its docstring for why absolute paths do not survive the MSYS boundary.
+    """
+    fixture_root = os.path.join(REPO_ROOT, "build")
+    os.makedirs(fixture_root, exist_ok=True)
+    tmp = tempfile.mkdtemp(dir=fixture_root)
+    try:
+        os.makedirs(os.path.join(tmp, "target"))
+        # A real Python file, because the hook picks the interpreter itself and
+        # runs it; a shell stub would not be exercising the same call.
+        with open(os.path.join(tmp, "prune-build-cache.py"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "import sys\n"
+                "open('argv.txt', 'w').write(' '.join(sys.argv[1:]))\n"
+                f"sys.exit({pruner_rc})\n")
+
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -u\n"
+                "PROJECT_ROOT=.\n"
+                "SCRIPT_DIR=.\n"
+                f"PRUNE_CACHE_BELOW_GB={below_gb}\n"
+                f"measure_free_gb() {{ echo {free_gb}; }}\n"
+                + extract_shell_function("prune_build_cache_if_low") + "\n\n"
+                "prune_build_cache_if_low\n"
+                # Printed only if the hook *returned*. A hook that exited would
+                # take the boot test's PASSED banner down with it.
+                "echo RETURNED rc=$?\n"
+            )
+
+        proc = subprocess.run(
+            ["bash", "harness.sh"], cwd=tmp, timeout=60,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        argv_path = os.path.join(tmp, "argv.txt")
+        argv = None
+        if os.path.exists(argv_path):
+            with open(argv_path, "r", encoding="utf-8") as handle:
+                argv = handle.read()
+        return proc.returncode, proc.stdout, argv
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_the_cache_prune_only_fires_when_the_volume_is_getting_full():
+    """Above the watermark it must cost nothing at all.
+
+    The prune is minutes of metadata I/O over hundreds of thousands of
+    directories. Running it on every green boot would add that to the tail of
+    every run for no benefit, which is how a housekeeping step earns itself a
+    `--no-prune-cache` in every invocation and stops running entirely.
+    """
+    _rc, out, argv = _run_prune_hook(free_gb=500, below_gb=100)
+    check("plenty of space: the pruner is not run", argv, None)
+    check("...and the hook says nothing about it", "pruning" in out, False)
+
+    _rc, _out, argv = _run_prune_hook(free_gb=42, below_gb=100)
+    check("below the watermark: the pruner is run", argv is not None, True)
+
+
+def test_the_cache_prune_can_be_switched_off_outright():
+    """0 means never, including when the volume is nearly full.
+
+    An operator who has a reason to keep a cold cache -- a bisect that will
+    want those units back, an investigation into the cache itself -- needs a
+    switch that holds at the moment the hook would otherwise be most eager.
+    Testing it only in the roomy case would not distinguish "disabled" from
+    "not triggered".
+    """
+    _rc, _out, argv = _run_prune_hook(free_gb=1, below_gb=0)
+    check("disabled: the pruner is not run even at 1 GiB free", argv, None)
+
+
+def test_the_cache_prune_names_the_tree_that_was_just_built():
+    """It must prune this worktree's target/, never the script's neighbour.
+
+    `boot-test.sh` is shared by four worktrees. The pruner's own default is
+    "the target/ beside the script", so leaving it implicit would prune the
+    wrong lane's cache in any checkout whose scripts/ came from elsewhere --
+    silently, and while that lane was still building.
+    """
+    _rc, _out, argv = _run_prune_hook(free_gb=42, below_gb=100)
+    check("the tree under test is named explicitly",
+          "--target-dir ./target" in (argv or ""), True)
+    check("...and the run actually deletes rather than reporting",
+          "--yes" in (argv or ""), True)
+
+
+def test_a_failed_cache_prune_cannot_turn_a_green_boot_red():
+    """Housekeeping must not be able to author a verdict.
+
+    This runs after every gate has passed, so the only thing left for it to
+    affect is the exit status -- and a boot test that reported FAILED because a
+    disk cleanup hit a locked file would be read as the *kernel* having failed.
+    That is a worse outcome than the space not being reclaimed, which is all
+    that has actually gone wrong.
+    """
+    rc, out, argv = _run_prune_hook(free_gb=42, below_gb=100, pruner_rc=3)
+    check("the pruner really was invoked and failed", argv is not None, True)
+    check("the hook returns rather than exiting", "RETURNED" in out, True)
+    check("...and reports success anyway", "RETURNED rc=0" in out, True)
+    check("the harness itself is green", rc, 0)
+
+
 def _sq(text):
     """Single-quote for POSIX sh."""
     return "'" + text.replace("'", "'\\''") + "'"

@@ -1565,6 +1565,42 @@ MIN_FREE_TEMP_GB="${BOOT_TEST_MIN_FREE_TEMP_GB:-}"
 # never reclaimed -- see check_temp_free_space for why.
 RECLAIM_SPACE="${BOOT_TEST_RECLAIM_SPACE:-0}"
 
+# After a green run, if free space has fallen below this, prune *this*
+# worktree's build cache of units cargo has not invoked in a fortnight.
+# 0 disables.
+#
+# WHY THIS IS ON BY DEFAULT WHEN --reclaim-space IS NOT.  They answer opposite
+# problems.  --reclaim-space fires at the floor and its only remedy is to
+# delete another tree's build output, which is why a run should not do it
+# merely because it noticed.  This one fires far *above* the floor, touches
+# only the tree the run just built, and cannot cost anybody a rebuild: cargo
+# does not garbage-collect, so a unit it has not asked for in fourteen days --
+# across every build every lane ran in that fortnight -- is one it will not
+# ask for now.  See scripts/prune-build-cache.py for why "invoked" is the
+# sound test and mtime is not.
+#
+# WHY IT IS NEEDED AT ALL.  CLAUDE.md has told the lanes to clean up after
+# themselves since August, and on 2026-09-02 two worktrees were over 100 GB and
+# a third just under 50.  A rule nothing enforces is not a rule.  The reason it
+# went unnoticed is structural rather than negligent: cargo mints a new
+# -<hash> artifact whenever a unit's inputs change and keeps the old one
+# forever, so the growth is invisible in any single build and shows up only as
+# a volume that is mysteriously full weeks later.  Nothing was ever going to
+# notice it by hand.
+#
+# WHY *HERE*.  The prune's cost is minutes of metadata I/O, so it must not sit
+# in front of anybody's feedback: at the head of the run it would delay every
+# build, and at the floor it is already too late to be the gentle option.  A
+# green finish is the one moment when the run is over, the operator is not
+# waiting on the next line, and the tree is in a known state.
+#
+# WHY 100 AND NOT THE FLOOR.  A full debug build of this workspace is ~40 GiB
+# and there are four worktrees, so 100 GiB is roughly "less than two more
+# builds of headroom" -- late enough to be rare, early enough that the cheap
+# remedy still has room to work.  At the 20 GiB floor the only remedy left is
+# deleting a live tree.
+PRUNE_CACHE_BELOW_GB="${BOOT_TEST_PRUNE_CACHE_BELOW_GB:-100}"
+
 # Opt-in: when a git-ignored prerequisite is missing, run
 # scripts/bootstrap-worktree.sh and continue instead of refusing.  Off by
 # default for the same reason --reclaim-space is: provisioning builds six
@@ -1618,6 +1654,8 @@ for arg in "$@"; do
         --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
         --min-free-temp-gb=*) MIN_FREE_TEMP_GB="${arg#*=}" ;;
         --reclaim-space) RECLAIM_SPACE=1 ;;
+        --prune-cache-below-gb=*) PRUNE_CACHE_BELOW_GB="${arg#*=}" ;;
+        --no-prune-cache) PRUNE_CACHE_BELOW_GB=0 ;;
         --bootstrap) BOOTSTRAP=1 ;;
         # --usb-image boots the same bytes a flash drive would hold.
         #
@@ -2702,8 +2740,49 @@ finish_pass() {
         exit 3
     fi
 
+    prune_build_cache_if_low
+
     echo "=== Boot test PASSED ==="
     exit 0
+}
+
+# Drop build-cache units no build has needed for a fortnight, if the volume is
+# getting full.  Rationale for the placement and the threshold: see
+# PRUNE_CACHE_BELOW_GB near the top of this file.
+#
+# Deliberately cannot change the verdict.  This runs after every gate has
+# already passed, its status is ignored, and the PASSED banner is printed
+# afterwards regardless.  A green build that housekeeping then failed to tidy
+# is still a green build, and a run that reported FAILED because a disk
+# cleanup hit a locked file would be actively misleading -- the failure would
+# read as the kernel's.
+prune_build_cache_if_low() {
+    [ "$PRUNE_CACHE_BELOW_GB" = "0" ] && return 0
+    [ -f "$SCRIPT_DIR/prune-build-cache.py" ] || return 0
+
+    local avail_gb
+    avail_gb="$(measure_free_gb)" || return 0
+    [ "$avail_gb" -ge "$PRUNE_CACHE_BELOW_GB" ] && return 0
+
+    local py=""
+    if command -v python &>/dev/null; then py=python
+    elif command -v python3 &>/dev/null; then py=python3
+    else return 0
+    fi
+
+    echo "=== ${avail_gb} GiB free (below ${PRUNE_CACHE_BELOW_GB}); pruning this tree's cold build cache ==="
+    echo "    Only units cargo has not invoked in 14 days, and only under $PROJECT_ROOT/target."
+    echo "    Nothing a build has asked for is touched; --no-prune-cache skips this."
+    # --target-dir is passed explicitly rather than left to the script's
+    # default.  The default is "the target/ beside the script", and this script
+    # is shared by four worktrees -- so in a checkout whose scripts/ came from
+    # somewhere else the default would name the wrong tree.  A run must only
+    # ever prune the tree it just built.
+    "$py" "$SCRIPT_DIR/prune-build-cache.py" \
+        --target-dir "$PROJECT_ROOT/target" --yes || true
+    if avail_gb="$(measure_free_gb)"; then
+        echo "=== ${avail_gb} GiB free after the prune ==="
+    fi
 }
 
 # Find QEMU

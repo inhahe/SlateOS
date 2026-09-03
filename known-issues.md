@@ -34067,6 +34067,51 @@ one is a judgement call rather than a forced move: pick an app whose state type
 already exists and already has a `handle_event`, since that is most of the work,
 and expect roughly one live defect per app (three conversions, three defects).
 
+**Count corrected 2026-09-03: 55 to go, not 135.** The line above was written on
+2026-08-25 and never revised while the conversions continued. Measured today:
+143 crates under `apps/`, **88** of which now implement `oswindow::app::App`.
+The figure is worth re-measuring rather than trusting, and the command is
+`grep -rl 'impl App for' apps/*/src/main.rs | wc -l`.
+
+**`apps/fontmanager` is number 88, and the "one live defect per app" rule held.**
+The defect: **there was no `Event::Mouse` arm anywhere in the file.** A font
+manager whose list of fonts could not be clicked — only arrowed through.
+`MouseEvent`, `MouseButton` and `MouseEventKind` were imported and never named
+again, and a file-wide `#[allow(unused_imports)]` is what kept that quiet. It
+was invisible for the reason this entry exists: `main` rendered one frame and
+asserted it was non-empty, so nothing had ever delivered the app an event.
+
+Mouse handling now selects a sidebar filter, a category, or a font family. The
+row geometry was inline in the renderer, so it was extracted to
+`sidebar_rows()`/`font_list_top()` which the renderer and the hit test both
+walk — hand-writing a second copy of the arithmetic is how `apps/mixer` got a
+slider handler taking arguments nothing in the program computed. Seven tests,
+including a sweep asserting *every* drawn row is clickable (an off-by-one in the
+accumulator would strand exactly one row, which sampling two would miss) and one
+asserting a click above or below the list selects nothing, since a hit test that
+clamps looks like the program choosing for you. Mutation-checked: deleting the
+`Event::Mouse` arm fails exactly the four click tests.
+
+Three other things the conversion turned up, all pre-existing:
+
+- **Two latent panic sites in production code.** `select_next_font` and
+  `select_prev_font` indexed `visible[0]`, `visible[next_pos]` and computed
+  `visible.len() - 1`; `uninstall` indexed `self.fonts[idx]`. Each is in range
+  today because of a check a few lines above it, which is the guarantee that
+  stops holding the moment someone moves the check. All are now `get`/`first`/
+  `last`/`checked_sub`.
+- **The `render()` name collision the recipe warns about, from the other side.**
+  Renaming the inherent `render` to `render_tree` made five *test* call sites
+  resolve to the trait's `render(&mut self, w, h)` instead — the compiler found
+  every one, which is the argument for renaming rather than relying on care.
+- **A tail of hidden lint debt**: `float_cmp`, `unwrap_used` and
+  `indexing_slicing` in the test module (now carrying the standard allow block),
+  and three `sort()` on primitives (now `sort_unstable`).
+
+`check-window-wiring.py`'s baseline went 49 → 48 in the same commit, which is
+what a ratchet is for: ground gained and not held is ground that can be lost
+again without anything objecting.
+
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY

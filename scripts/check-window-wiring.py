@@ -139,10 +139,14 @@ def main_line(text: str) -> int:
     return 1 if m is None else prod.count("\n", 0, m.start()) + 1
 
 
-# The count of findings as of 2026-09-01, so the gate can ratchet. Lower this
+# The count of findings as of 2026-09-03, so the gate can ratchet. Lower this
 # whenever apps are wired; the check fails if it is ever exceeded. It is a
 # ceiling, not a target -- see the module docstring on why it is not zero.
-BASELINE = 49
+#
+# 49 -> 48 when `apps/fontmanager` was wired onto `oswindow::app`. Lowering it
+# in the same commit is the point of a ratchet: ground gained and not held is
+# ground that can be lost again without anything objecting.
+BASELINE = 48
 
 
 # --------------------------------------------------------------------------

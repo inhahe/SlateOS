@@ -42,6 +42,7 @@
 
 use crate::bytestr::ByteStrExt;
 use crate::fs::path::{Path, PathBuf};
+use crate::shellquote;
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
@@ -152,18 +153,41 @@ pub fn capture_command(cmd: &str) -> Vec<u8> {
 /// disk error — would otherwise be laundered into an empty buffer and the
 /// file overwritten with just the new output, which is the same destruction
 /// arriving by a different route.
+///
+/// `path` is the *raw* text from the command line. Unquoting and resolution
+/// happen here, for the same reason the append logic does: all four call
+/// sites had to get it right and none of them did. `echo hi > "my file"`
+/// created a file whose name began with a quote character, and `echo hi > f`
+/// in `/tmp` wrote to `/f` rather than `/tmp/f`, because the raw text went
+/// straight to `Vfs::write_file` — which resolves nothing. The *input* side
+/// (`execute_input_redirect`) did call `resolve_path`, so a single command
+/// with both redirections read from one directory and wrote to another.
 fn redirect_write(path: &str, output: &[u8], append: bool) -> crate::error::KernelResult<()> {
     use crate::fs::vfs::Vfs;
+    let resolved = redirect_path(path);
     if !append {
-        return Vfs::write_file(path, output);
+        return Vfs::write_file(&resolved, output);
     }
-    let mut combined = match Vfs::read_file(path) {
+    let mut combined = match Vfs::read_file(&resolved) {
         Ok(existing) => existing,
         Err(crate::error::KernelError::NotFound) => Vec::new(),
         Err(e) => return Err(e),
     };
     combined.extend_from_slice(output);
-    Vfs::write_file(path, &combined)
+    Vfs::write_file(&resolved, &combined)
+}
+
+/// Turn the raw text of a redirection target into the path it names.
+///
+/// A redirection target is a word, so it carries quoting like any other word
+/// and has to have it removed before it names a file — `> "my file"` means the
+/// two-word name, not a name starting with `"`. Resolution against the working
+/// directory then makes it absolute, which the VFS does not do for us.
+///
+/// Both halves are here rather than at the call sites so that the input and
+/// output sides of a redirection cannot drift apart again.
+fn redirect_path(raw: &str) -> PathBuf {
+    resolve_path(remove_quotes(raw.trim()))
 }
 
 /// Write a string to the shell output destination.
@@ -882,25 +906,35 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
     let len = bytes.len();
     let mut result: Vec<u8> = Vec::with_capacity(len);
     let mut i = 0;
-    let mut in_single_quote = false;
+    // The quoting context, from the scanner the rest of the shell shares.
+    //
+    // What stood here was a single `in_single_quote` flag flipped by *any*
+    // apostrophe, and that is the whole of why `echo "it's $HOME"` printed
+    // `$HOME` literally: the apostrophe inside the double quotes opened a
+    // region this loop read as single-quoted, and expansion stayed off until
+    // the next apostrophe or the end of the line. A one-bit model cannot
+    // express "inside double quotes an apostrophe is an ordinary character".
+    let mut scan = shellquote::scan(bytes);
 
     while i < len {
-        let b = bytes[i];
+        // Several arms below parse a construct themselves and move `i` past
+        // its body. Resyncing here is what keeps the quotes inside a `$(…)`
+        // or `$'…'` body from leaking into the outer line — they belong to
+        // the inner command, not to this one.
+        scan.skip_to(i);
+        let Some(tok) = scan.next() else { break };
+        let b = tok.byte;
 
-        if b == b'\'' && !in_single_quote {
-            // Enter single-quoted section (no expansion).
-            in_single_quote = true;
-            result.push(b'\'');
-            i = i.saturating_add(1);
-            continue;
-        }
-        if b == b'\'' && in_single_quote {
-            in_single_quote = false;
-            result.push(b'\'');
-            i = i.saturating_add(1);
-            continue;
-        }
-        if in_single_quote {
+        // Nothing expands inside `'…'`, and nothing expands for a byte a
+        // backslash escaped. Both halves matter: in `"\$HOME"` the `$` really
+        // *is* inside the double-quoted region, and it is the backslash, not
+        // the context, that suppresses it. A test of the context alone gets
+        // that case wrong, which is why the scanner answers it as `expands`.
+        //
+        // The byte is copied through with its quoting still attached; taking
+        // that off is `remove_quotes`'s job, one stage later. Expanding and
+        // unquoting in the same pass is what makes a shell unescape twice.
+        if !tok.expands() {
             result.push(b);
             i = i.saturating_add(1);
             continue;
@@ -1048,6 +1082,51 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
                         }
                     }
                 }
+            } else if next == b'\'' {
+                // `$'...'` — ANSI-C quoting.  The escapes inside are
+                // deliberately *not* decoded here.  Decoding has to happen
+                // after quote removal, and it cannot happen at all until the
+                // word path carries bytes end to end, because the whole point
+                // of the construct is to produce bytes that no `String` can
+                // hold (see `known-issues.md`,
+                // `TD-KSHELL-LINE-EDITOR-IS-UTF8`).  What this arm owes the
+                // rest of the pipeline today is to copy the construct through
+                // unchanged and, above all, to leave the quote state alone.
+                //
+                // Without it, `$'` fell through to the "emit literally" arm
+                // below, which advanced one byte past the `$` and never set
+                // `in_single_quote`.  The `'` that *closes* the construct was
+                // then read as one that opens a quote, inverting quoting for
+                // the entire rest of the line: `$'a' $HOME` stopped expanding
+                // `$HOME`, and a later genuinely-quoted `'$HOME'` started
+                // expanding it.
+                //
+                // Not expanding inside the construct is also the correct
+                // behaviour in its own right -- bash does no parameter
+                // expansion within `$'...'`.
+                result.push(b'$');
+                result.push(b'\'');
+                i = i.saturating_add(1); // step over the opening `'`
+                while i < len {
+                    let c = bytes[i];
+                    if c == b'\\' {
+                        // A backslash escape is two bytes wide, so a `\'`
+                        // inside does not end the construct.  Copy the pair
+                        // verbatim; what it means is the decoder's business.
+                        result.push(c);
+                        i = i.saturating_add(1);
+                        if i < len {
+                            result.push(bytes[i]);
+                            i = i.saturating_add(1);
+                        }
+                        continue;
+                    }
+                    result.push(c);
+                    i = i.saturating_add(1);
+                    if c == b'\'' {
+                        break;
+                    }
+                }
             } else {
                 // `$` followed by something else — emit literally.
                 result.push(b'$');
@@ -1078,7 +1157,15 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
             // Tilde expansion: `~` or `~/...` at word start → $HOME.
             // Only expand when at position 0 or after whitespace/=/:
             // (assignment context, PATH-like lists).
-            let at_word_start = if i == 0 {
+            //
+            // `is_bare`, not `expands`: a tilde is the one construct here that
+            // double quotes DO suppress. `echo "$HOME"` prints the home
+            // directory but `echo "~"` prints a tilde, so the predicate that
+            // is right for `$` and backtick above is wrong for this arm. The
+            // `\~` and `'~'` cases fall out of the same test.
+            let at_word_start = if !tok.is_bare() {
+                false
+            } else if i == 0 {
                 true
             } else {
                 matches!(bytes[i.saturating_sub(1)], b' ' | b'\t' | b'=' | b':')
@@ -1135,36 +1222,12 @@ fn expand_vars(input: &str) -> String {
 
 /// Byte offsets of the first and last *unquoted* occurrences of `needle`.
 ///
-/// Quoting is tracked the way the rest of the shell's parsers track it: a
-/// `'` opens a region that only another `'` closes, likewise `"`, and the
-/// other quote character is ordinary inside such a region.
+/// Quoting comes from [`crate::shellquote`], the shell's one scanner, so this
+/// agrees with every other parser here by construction. It previously kept its
+/// own copy of the rules, which — like the other ten copies — knew nothing of
+/// the backslash, so `a\'b` looked like the start of a quoted region.
 fn unquoted_positions(s: &str, needle: u8) -> (Option<usize>, Option<usize>) {
-    let bytes = s.as_bytes();
-    let mut first = None;
-    let mut last = None;
-    let mut quote: Option<u8> = None;
-    let mut i = 0usize;
-    while let Some(&b) = bytes.get(i) {
-        match quote {
-            Some(q) => {
-                if b == q {
-                    quote = None;
-                }
-            }
-            None => {
-                if b == b'\'' || b == b'"' {
-                    quote = Some(b);
-                } else if b == needle {
-                    if first.is_none() {
-                        first = Some(i);
-                    }
-                    last = Some(i);
-                }
-            }
-        }
-        i = i.saturating_add(1);
-    }
-    (first, last)
+    shellquote::bare_positions(s.as_bytes(), needle)
 }
 
 /// Byte offset of the first *unquoted* space or tab in `s`, or `None` if the
@@ -1180,27 +1243,7 @@ fn unquoted_positions(s: &str, needle: u8) -> (Option<usize>, Option<usize>) {
 /// word can carry a quoted value: see [`parse_inline_assignment`], where the
 /// raw search made `FOO='a b' cmd` run the command `b'`.
 fn first_unquoted_space(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut quote: Option<u8> = None;
-    let mut i = 0usize;
-    while let Some(&b) = bytes.get(i) {
-        match quote {
-            Some(q) => {
-                if b == q {
-                    quote = None;
-                }
-            }
-            None => {
-                if b == b'\'' || b == b'"' {
-                    quote = Some(b);
-                } else if b == b' ' || b == b'\t' {
-                    return Some(i);
-                }
-            }
-        }
-        i = i.saturating_add(1);
-    }
-    None
+    shellquote::find_bare_space(s.as_bytes())
 }
 
 /// Split `s` on *unquoted* occurrences of `sep`, keeping the pieces verbatim.
@@ -1208,31 +1251,14 @@ fn first_unquoted_space(s: &str) -> Option<usize> {
 /// Always returns at least one piece, so `parts.len() > 1` is the test for
 /// "the separator actually occurred outside quotes".
 fn split_unquoted(s: &str, sep: u8) -> Vec<&str> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let mut quote: Option<u8> = None;
-    let mut i = 0usize;
-    while let Some(&b) = bytes.get(i) {
-        match quote {
-            Some(q) => {
-                if b == q {
-                    quote = None;
-                }
-            }
-            None => {
-                if b == b'\'' || b == b'"' {
-                    quote = Some(b);
-                } else if b == sep {
-                    out.push(s.get(start..i).unwrap_or(""));
-                    start = i.saturating_add(1);
-                }
-            }
-        }
-        i = i.saturating_add(1);
-    }
-    out.push(s.get(start..).unwrap_or(""));
-    out
+    // Every shell metacharacter is ASCII, so an offset the scanner reports can
+    // never fall inside a multi-byte UTF-8 sequence and these slices are always
+    // on char boundaries. `unwrap_or("")` is therefore unreachable, and is kept
+    // only because `get` is the non-panicking form the lints require.
+    shellquote::split_bare_ranges(s.as_bytes(), sep)
+        .into_iter()
+        .map(|(start, end)| s.get(start..end).unwrap_or(""))
+        .collect()
 }
 
 /// Expand shell brace patterns: `{a,b,c}` and `{N..M}` ranges.
@@ -1273,48 +1299,22 @@ fn split_unquoted(s: &str, sep: u8) -> Vec<&str> {
 fn expand_braces(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let bytes = input.as_bytes();
-    let mut i = 0usize;
+    let mut prev_end = 0usize;
 
-    while i < bytes.len() {
-        // Copy the run of separators verbatim. Collapsing them here is what
-        // made `echo 'a   b'` print one space.
-        while let Some(&b) = bytes.get(i) {
-            if b == b' ' || b == b'\t' {
-                result.push(char::from(b));
-                i = i.saturating_add(1);
-            } else {
-                break;
-            }
-        }
-
-        // Scan one token: everything up to the next *unquoted* space or tab.
-        let start = i;
-        let mut quote: Option<u8> = None;
-        while let Some(&b) = bytes.get(i) {
-            match quote {
-                Some(q) => {
-                    if b == q {
-                        quote = None;
-                    }
-                }
-                None => {
-                    if b == b'\'' || b == b'"' {
-                        quote = Some(b);
-                    } else if b == b' ' || b == b'\t' {
-                        break;
-                    }
-                }
-            }
-            i = i.saturating_add(1);
-        }
-        if i == start {
-            break;
-        }
-        // Only ASCII bytes are ever matched above, and every byte of a
-        // multi-byte UTF-8 sequence is >= 0x80, so `start..i` is always a
-        // char boundary pair.
-        expand_braces_token(input.get(start..i).unwrap_or(""), &mut result);
+    for w in shellquote::split_bare_words(bytes) {
+        // The run of blanks *before* this word, copied verbatim rather than
+        // re-emitted as one: collapsing them here is what made `echo 'a   b'`
+        // print a single space.
+        result.push_str(input.get(prev_end..w.start).unwrap_or(""));
+        // Only ASCII bytes ever delimit a word, and every byte of a
+        // multi-byte UTF-8 sequence is >= 0x80, so these are always char
+        // boundaries and `unwrap_or("")` is unreachable.
+        expand_braces_token(input.get(w.start..w.end).unwrap_or(""), &mut result);
+        prev_end = w.end;
     }
+    // Trailing blanks have no following word to be the prefix of, so they are
+    // emitted here or lost.
+    result.push_str(input.get(prev_end..).unwrap_or(""));
 
     result
 }
@@ -1422,17 +1422,19 @@ fn expand_braces_token(token: &str, result: &mut String) {
 /// interior spacing of `'a   b'` cannot survive a rejoin. Here nothing is
 /// split, so it does.
 fn remove_quotes(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut quote: Option<char> = None;
-    for ch in s.chars() {
-        match quote {
-            Some(q) if ch == q => quote = None,
-            Some(_) => out.push(ch),
-            None if ch == '\'' || ch == '"' => quote = Some(ch),
-            None => out.push(ch),
-        }
-    }
-    out
+    // This scanner was the *least* wrong of the twelve: it remembered which
+    // quote opened the region, so `"it's fine"` already survived it. What it
+    // had no concept of was the backslash, so `a\ b` kept its backslash and
+    // `"\$HOME"` came out as `\$HOME` — the escape did its job in the
+    // expander and was then left in the text as litter.
+    //
+    // Quote removal can only ever delete ASCII bytes (`'`, `"`, `\`), and no
+    // multi-byte UTF-8 sequence contains an ASCII byte, so valid UTF-8 in
+    // gives valid UTF-8 out and the `Err` arm below is unreachable. It is
+    // spelled out rather than unwrapped because the lints forbid `unwrap`,
+    // and returning the line unchanged is the one fallback that cannot turn
+    // a command into a *different* command if that reasoning is ever wrong.
+    String::from_utf8(shellquote::strip_quotes(s.as_bytes())).unwrap_or_else(|_| s.to_string())
 }
 
 /// Whether a command receives its arguments with the quoting still in place.
@@ -3336,52 +3338,31 @@ fn eval_arith_stmt(expr: &str) -> Result<i64, ArithError> {
 /// - `'foo bar'` → single word `foo bar`.
 /// - Quotes can appear mid-word: `a"b c"d` → `ab cd`.
 fn split_words(s: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut chars = s.chars().peekable();
-
-    while let Some(&ch) = chars.peek() {
-        match ch {
-            ' ' | '\t' => {
-                if !current.is_empty() {
-                    words.push(core::mem::take(&mut current));
-                }
-                chars.next();
+    // The nested loops this replaces had the classic defect of the twelve
+    // scanners: on `"a'b" c` the inner `"`-loop stopped at the closing quote
+    // correctly, but nothing knew about backslashes, so `a\ b` split into two
+    // words where bash makes one. Splitting and quote removal are now the
+    // same traversal the rest of the shell uses.
+    //
+    // ARITY IS DELIBERATELY UNCHANGED HERE. `split_bare_words` reports the
+    // explicitly quoted empty word — bash gives `set -- ''` one argument, and
+    // that is the behaviour we eventually want — but adopting it changes the
+    // argument count seen by fifteen callers, two of which branch on
+    // `split_words(args).is_empty()`. Dropping empties keeps this commit a
+    // pure substitution; the arity fix is TD-KSHELL (b') and gets its own
+    // commit with those fifteen sites audited.
+    shellquote::split_bare_words(s.as_bytes())
+        .into_iter()
+        .filter_map(|w| {
+            let word = shellquote::strip_quotes(s.as_bytes().get(w.start..w.end)?);
+            if word.is_empty() {
+                return None;
             }
-            '"' => {
-                chars.next(); // consume opening quote
-                while let Some(&c) = chars.peek() {
-                    if c == '"' {
-                        chars.next(); // consume closing quote
-                        break;
-                    }
-                    current.push(c);
-                    chars.next();
-                }
-            }
-            '\'' => {
-                chars.next(); // consume opening quote
-                while let Some(&c) = chars.peek() {
-                    if c == '\'' {
-                        chars.next(); // consume closing quote
-                        break;
-                    }
-                    current.push(c);
-                    chars.next();
-                }
-            }
-            _ => {
-                current.push(ch);
-                chars.next();
-            }
-        }
-    }
-
-    if !current.is_empty() {
-        words.push(current);
-    }
-
-    words
+            // Unreachable for the same reason as in `remove_quotes`: only
+            // ASCII bytes are removed, and word boundaries are ASCII blanks.
+            String::from_utf8(word).ok()
+        })
+        .collect()
 }
 
 /// Execute a case statement: match the word against patterns and run
@@ -5924,7 +5905,11 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
     let text_before = line.get(..cursor).unwrap_or("");
 
     // Determine if we're completing a command (first word) or a path.
-    let first_space = text_before.find(' ');
+    //
+    // A *bare* space, so a quoted or escaped one does not end the first word:
+    // with `find(' ')` the line `'my prog'` looked like a command plus an
+    // argument, and tab completed a filename where a command was wanted.
+    let first_space = shellquote::find_bare_space(text_before.as_bytes());
 
     if first_space.is_none() {
         // Completing a command name.
@@ -5952,9 +5937,34 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
         (suffix, display)
     } else {
         // Completing a file path argument.
-        // Find the start of the current word (last space before cursor).
-        let word_start = text_before.rfind(' ').map(|i| i + 1).unwrap_or(0);
-        let partial_path = text_before.get(word_start..).unwrap_or("");
+        //
+        // The word being completed starts after the last *bare* blank, not the
+        // last blank: `cat "My Doc` was treated as the word `Doc`, so the
+        // candidate list was drawn from a prefix the user never typed and the
+        // completion, if accepted, landed in the middle of their quoted name.
+        // Escapes have the same effect -- `cat My\ Doc` was one word to every
+        // other stage of the shell and two to this one.
+        //
+        // What this does NOT yet fix is the other half: the text inserted is
+        // still the raw filename, so completing `My Doc.txt` yields two
+        // arguments. shellquote::quote_word exists for that; it is TD-KSHELL
+        // (d) because it also has to decide what to do about the quote the
+        // user has already opened.
+        let word_start = shellquote::word_start_at(text_before.as_bytes(), text_before.len());
+
+        // The word as typed still carries its quoting, and no file is named
+        // `"My`, so it has to come off before the name is looked up -- finding
+        // the word boundary correctly and then searching for the quote
+        // characters would only move the failure. `remove_quotes` is the same
+        // stage the dispatcher applies to a finished command, so completion
+        // now searches for exactly the name the command would receive.
+        //
+        // The quote is deliberately allowed to be unterminated: the user is
+        // mid-word by definition, so `cat "My Fi` must complete. The scanner
+        // treats end-of-input inside a quote as the end of the region, which
+        // is the reading that makes that work.
+        let partial_owned = remove_quotes(text_before.get(word_start..).unwrap_or(""));
+        let partial_path = partial_owned.as_str();
 
         // Determine the directory to search and the prefix to match.
         // For relative paths, resolve against the current working directory.
@@ -5994,6 +6004,17 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
             if first.entry_type == crate::fs::EntryType::Directory {
                 result.push('/');
             } else {
+                // The word is finished, so a quote the user opened to type it
+                // has to be closed before the separating space -- otherwise
+                // completing `cat "My Fi` produced `cat "My File.txt `, whose
+                // unterminated quote swallows the rest of the line. The
+                // completion is only correct if the line is still parseable
+                // after it.
+                match shellquote::trailing_context(text_before.as_bytes()) {
+                    shellquote::Ctx::Single => result.push('\''),
+                    shellquote::Ctx::Double => result.push('"'),
+                    shellquote::Ctx::Unquoted => {}
+                }
                 result.push(' ');
             }
             return (result, Vec::new());
@@ -6568,30 +6589,28 @@ struct Redirect<'a> {
 ///
 /// Returns `None` if there is no redirection operator (or it's inside quotes).
 fn parse_redirect(line: &str) -> Option<Redirect<'_>> {
-    // Scan for `>>` first (longer match), then `>`.
-    // Ignore `>` inside quoted strings.
+    // The `>` must be *bare*: outside quotes and not backslash-escaped.
+    //
+    // This used to keep a private `in_quote: bool` toggled by either quote
+    // character, which cannot represent which quote opened the region. An
+    // apostrophe inside double quotes therefore looked like an opening quote
+    // and swallowed the rest of the line: `echo "it's fine" > out` printed
+    // `it's fine > out` and created no file at all. See known-issues.md
+    // A-KSHELL-REDIRECT-MISSED-WHEN-AN-APOSTROPHE-PRECEDES-IT.
     let bytes = line.as_bytes();
-    let mut in_quote = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'"' || b == b'\'' {
-            in_quote = !in_quote;
-        } else if !in_quote && b == b'>' {
-            let append = bytes.get(i.saturating_add(1)) == Some(&b'>');
-            let skip = if append { 2 } else { 1 };
-            let command = line.get(..i).unwrap_or("").trim();
-            let path = line.get(i.saturating_add(skip)..).unwrap_or("").trim();
-            if command.is_empty() || path.is_empty() {
-                return None;
-            }
-            return Some(Redirect {
-                command,
-                path,
-                append,
-            });
+    if let Some(i) = shellquote::find_bare(bytes, b'>') {
+        let append = bytes.get(i.saturating_add(1)) == Some(&b'>');
+        let skip = if append { 2 } else { 1 };
+        let command = line.get(..i).unwrap_or("").trim();
+        let path = line.get(i.saturating_add(skip)..).unwrap_or("").trim();
+        if command.is_empty() || path.is_empty() {
+            return None;
         }
-        i = i.saturating_add(1);
+        return Some(Redirect {
+            command,
+            path,
+            append,
+        });
     }
     None
 }
@@ -6605,34 +6624,25 @@ fn parse_redirect(line: &str) -> Option<Redirect<'_>> {
 /// Returns `(command, word)` if the pattern is found.
 /// The word is stripped of surrounding quotes if present.
 fn parse_here_string(line: &str) -> Option<(&str, String)> {
+    // The twelfth quote scanner. This one at least tracked `'` and `"`
+    // separately, so it never had the redirect parsers' apostrophe bug — but
+    // it was still blind to the backslash, and being a twelfth copy it could
+    // drift from the other eleven at any time. Now it cannot.
     let bytes = line.as_bytes();
-    let mut in_sq = false;
-    let mut in_dq = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\'' && !in_dq {
-            in_sq = !in_sq;
-            i = i.saturating_add(1);
+    // Preserves the original's jump over a fourth `<`, so `<<<<` is not read as
+    // a here-string starting at its second character.
+    let mut skip_past = 0usize;
+    for t in shellquote::scan(bytes).filter(shellquote::Tok::is_bare) {
+        let i = t.off;
+        if i < skip_past || t.byte != b'<' {
             continue;
         }
-        if b == b'"' && !in_sq {
-            in_dq = !in_dq;
-            i = i.saturating_add(1);
-            continue;
-        }
-        if in_sq || in_dq {
-            i = i.saturating_add(1);
-            continue;
-        }
-
-        if b == b'<'
-            && bytes.get(i.saturating_add(1)) == Some(&b'<')
+        if bytes.get(i.saturating_add(1)) == Some(&b'<')
             && bytes.get(i.saturating_add(2)) == Some(&b'<')
         {
             // Ensure it's not `<<<<`.
             if bytes.get(i.saturating_add(3)) == Some(&b'<') {
-                i = i.saturating_add(4);
+                skip_past = i.saturating_add(4);
                 continue;
             }
             let command = line.get(..i)?.trim();
@@ -6642,7 +6652,6 @@ fn parse_here_string(line: &str) -> Option<(&str, String)> {
             }
             return Some((command, String::from(strip_quotes(word))));
         }
-        i = i.saturating_add(1);
     }
     None
 }
@@ -6737,36 +6746,39 @@ fn parse_bare_assignment(line: &str) -> Option<(String, String)> {
 }
 
 fn parse_input_redirect(line: &str) -> Option<(&str, &str)> {
+    // Same fix as `parse_redirect`: the `<` must be bare, and "bare" comes from
+    // the one scanner. With a single `in_quote` bool, `cat < "don't.txt"` saw
+    // the apostrophe as an opening quote and found no redirect at all.
     let bytes = line.as_bytes();
-    let mut in_quote = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'"' || b == b'\'' {
-            in_quote = !in_quote;
-        } else if !in_quote && b == b'<' {
-            // Make sure this isn't `<<` / `<<<` (heredoc/here-string) or `<(`.
-            let next = bytes.get(i.saturating_add(1));
-            if next == Some(&b'<') {
-                // Skip all consecutive `<` chars (<<, <<<).
-                i = i.saturating_add(2);
-                while i < bytes.len() && bytes[i] == b'<' {
-                    i = i.saturating_add(1);
-                }
-                continue;
-            }
-            if next == Some(&b'(') {
-                i = i.saturating_add(2);
-                continue;
-            }
-            let command = line.get(..i).unwrap_or("").trim();
-            let path = line.get(i.saturating_add(1)..).unwrap_or("").trim();
-            if command.is_empty() || path.is_empty() {
-                return None;
-            }
-            return Some((command, path));
+    // `skip_past` reproduces the original's jump over a run of `<`, so `<<` and
+    // `<<<` are not mistaken for input redirection by matching at their second
+    // character.
+    let mut skip_past = 0usize;
+    for t in shellquote::scan(bytes).filter(shellquote::Tok::is_bare) {
+        let i = t.off;
+        if i < skip_past || t.byte != b'<' {
+            continue;
         }
-        i = i.saturating_add(1);
+        let next = bytes.get(i.saturating_add(1));
+        if next == Some(&b'<') {
+            // Skip all consecutive `<` chars (`<<`, `<<<`).
+            let mut j = i.saturating_add(2);
+            while bytes.get(j) == Some(&b'<') {
+                j = j.saturating_add(1);
+            }
+            skip_past = j;
+            continue;
+        }
+        if next == Some(&b'(') {
+            skip_past = i.saturating_add(2);
+            continue;
+        }
+        let command = line.get(..i).unwrap_or("").trim();
+        let path = line.get(i.saturating_add(1)..).unwrap_or("").trim();
+        if command.is_empty() || path.is_empty() {
+            return None;
+        }
+        return Some((command, path));
     }
     None
 }
@@ -6775,7 +6787,11 @@ fn parse_input_redirect(line: &str) -> Option<(&str, &str)> {
 ///
 /// Reads the file contents and feeds them as piped input to the command.
 fn execute_input_redirect(command: &str, path: &str) {
-    let resolved = resolve_path(path);
+    // `redirect_path`, not `resolve_path`: this side already resolved, but it
+    // did not unquote, so `sort < "my file"` looked for a file whose name
+    // began with a quote character. The output side is now the same call, so
+    // the two cannot disagree about what a target word means.
+    let resolved = redirect_path(path);
     let data = match crate::fs::vfs::Vfs::read_file(&resolved) {
         Ok(d) => d,
         Err(e) => {
@@ -21862,6 +21878,503 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"is not a parent namespace id",
         );
         assert_eq!(last_exit(), 1, "`pidns create 99` still errors, from pidns");
+    }
+
+    serial_println!(
+        "  kshell::self_test 113: `$'...'` no longer inverts quoting for the \
+         rest of the line -- the `'` that closes it was being read as one that \
+         opens a quote, so everything after an ANSI-C string stopped expanding"
+    );
+    {
+        // Rung 113 -- the quote-state half of
+        // `TD-KSHELL-LINE-EDITOR-IS-UTF8`. This is deliberately *not* a test
+        // that `$'\x41'` decodes to `A`: it cannot yet, because the decode has
+        // to land after quote removal and the word path still narrows through
+        // a `String` at `expand_vars`. What the `$'` arm owes callers today is
+        // narrower and entirely testable -- copy the construct through
+        // untouched, and do not corrupt the quoting state on the way past.
+        //
+        // The bug it fixes had nothing to do with bytes. With no `$'` arm at
+        // all, `$'` fell into the `$`-followed-by-anything-else case, which
+        // emitted both characters and advanced *one* byte without setting
+        // `in_single_quote`. The closing `'` was therefore read as an opening
+        // one, and quoting was inverted from there to end of line.
+        //
+        // `$#` is the probe rather than `$HOME` because it expands to the
+        // positional count unconditionally -- it cannot be empty by accident,
+        // and it does not depend on an environment a fresh boot may not have
+        // populated. Every assertion below is on the expander's return value,
+        // so the rung touches no subsystem and leaves nothing behind.
+
+        // The regression itself: an ANSI-C string must not swallow what
+        // follows it.
+        let out = expand_vars_bytes(b"$'a' $#");
+        assert!(
+            out.starts_with(b"$'a' "),
+            "`$'a'` is copied through verbatim, got {:?}",
+            out
+        );
+        assert!(
+            !out.ends_with(b"$#"),
+            "`$#` after `$'a'` still expands -- quoting was not inverted, got {:?}",
+            out
+        );
+
+        // A backslash-escaped quote is two bytes wide and does not end the
+        // construct, so the `$#` after *this* one is outside it too.
+        let out = expand_vars_bytes(b"$'a\\'b' $#");
+        assert!(
+            out.starts_with(b"$'a\\'b' "),
+            "`\\'` inside `$'...'` does not close it, got {:?}",
+            out
+        );
+        assert!(
+            !out.ends_with(b"$#"),
+            "`$#` after an escaped quote still expands, got {:?}",
+            out
+        );
+
+        // Nothing expands *inside* the construct -- bash does no parameter
+        // expansion within `$'...'`, and the decoder downstream needs the
+        // bytes it was given.
+        let out = expand_vars_bytes(b"$'$#'");
+        assert_eq!(out, b"$'$#'".to_vec(), "`$'...'` contents are not expanded");
+
+        // The control. Without it an expander that simply never expanded
+        // anything would pass every assertion above: an ordinary single-quoted
+        // `$#` must still be left alone, which is the same outcome reached by
+        // the opposite path through the quote state.
+        let out = expand_vars_bytes(b"'$#'");
+        assert_eq!(
+            out,
+            b"'$#'".to_vec(),
+            "ordinary single quotes still suppress expansion"
+        );
+        let out = expand_vars_bytes(b"$#");
+        assert!(
+            !out.contains(&b'#'),
+            "and an unquoted `$#` really does expand, got {:?}",
+            out
+        );
+    }
+
+    serial_println!(
+        "  kshell::self_test 114: an apostrophe inside double quotes no longer \
+         hides the redirect after it -- `echo \"it's fine\" > out` writes the \
+         file, and `cat < \"don't.txt\"` reads one"
+    );
+    {
+        // Rung 114 -- the redirect half of
+        // A-KSHELL-REDIRECT-MISSED-WHEN-AN-APOSTROPHE-PRECEDES-IT. Both parsers
+        // kept a private `in_quote: bool` toggled by *either* quote character,
+        // which cannot represent which quote opened the region: the apostrophe
+        // in `it's` read as an opening quote and swallowed the operator.
+        let r = parse_redirect("echo \"it's fine\" > out")
+            .ok_or(crate::error::KernelError::InternalError)?;
+        assert_eq!(r.command, "echo \"it's fine\"", "command half of the split");
+        assert_eq!(r.path, "out", "path half of the split");
+        assert!(!r.append, "`>` is not append");
+
+        let (cmd, path) = parse_input_redirect("cat < \"don't.txt\"")
+            .ok_or(crate::error::KernelError::InternalError)?;
+        assert_eq!(cmd, "cat");
+        assert_eq!(path, "\"don't.txt\"");
+
+        // The other half of the same bug: an operator that really *is* quoted
+        // must still be invisible. These passed before the fix too -- they are
+        // the control that stops the fix from over-correcting into "every `>`
+        // is a redirect".
+        assert!(
+            parse_redirect("echo 'a > b'").is_none(),
+            "a `>` inside single quotes is not a redirect"
+        );
+        assert!(
+            parse_redirect("echo \"a > b\"").is_none(),
+            "a `>` inside double quotes is not a redirect"
+        );
+        assert!(
+            parse_input_redirect("echo 'a < b'").is_none(),
+            "a `<` inside single quotes is not a redirect"
+        );
+
+        // A backslash-escaped operator is data. No scanner here could see this
+        // before, because none of the twelve knew the backslash existed.
+        assert!(
+            parse_redirect("echo a\\>b").is_none(),
+            "an escaped `>` is not a redirect"
+        );
+
+        // `>>` still parses as append, and `<<`/`<<<` are still not input
+        // redirection -- the run-skipping logic survived the rewrite.
+        let r = parse_redirect("echo hi >> out").ok_or(crate::error::KernelError::InternalError)?;
+        assert!(r.append, "`>>` is append");
+        assert_eq!(r.path, "out");
+        assert!(
+            parse_input_redirect("cat <<< word").is_none(),
+            "a here-string is not input redirection"
+        );
+    }
+
+    serial_println!(
+        "  kshell::self_test 115: the expansion pipeline agrees with bash -- \
+         `echo \"it's $HOME\"` expands, `\"\\$HOME\"` does not, `a\\ b` is one \
+         word, and a tilde in double quotes stays a tilde"
+    );
+    {
+        // Rung 115 -- the expansion half of
+        // A-KSHELL-REDIRECT-MISSED-WHEN-AN-APOSTROPHE-PRECEDES-IT, covering the
+        // four stages of the pipeline that were converted in one commit:
+        // `expand_braces`, `remove_quotes`, `split_words` and
+        // `expand_vars_bytes`.
+        //
+        // Every expectation here was measured against real bash before it was
+        // written down (build/scratch/pipeline-check.py, 40 cases, 0
+        // disagreements), because several of them are ones I would have
+        // guessed wrong: `"a\\b"` collapses to one backslash but `'a\\b'` keeps
+        // both; `"C:\dir"` keeps its backslash because `d` is not escapable in
+        // double quotes; and a tilde does *not* expand inside double quotes
+        // even though a `$` does.
+        //
+        // `$#` is the probe for the expander for the reason rung 113 gives: it
+        // expands unconditionally and cannot be accidentally empty.
+
+        // --- expand_vars_bytes: the bug itself. -----------------------------
+        // An apostrophe inside double quotes is an ordinary character, so the
+        // `$#` after it is in a *double*-quoted region and still expands. The
+        // old one-bit flag read the apostrophe as opening a single-quoted
+        // region and suppressed everything to end of line.
+        let out = expand_vars_bytes(b"\"it's $#\"");
+        assert!(
+            !out.ends_with(b"$#\""),
+            "an apostrophe inside double quotes must not stop expansion, got {:?}",
+            out
+        );
+
+        // The converse control, so the fix cannot have become "always expand":
+        // a double quote inside single quotes is equally ordinary.
+        let out = expand_vars_bytes(b"'say \"hi\" $#'");
+        assert_eq!(
+            out,
+            b"'say \"hi\" $#'".to_vec(),
+            "a double quote inside single quotes does not re-enable expansion"
+        );
+
+        // The escape, which is the part a context test alone gets wrong: in
+        // `"\$#"` the `$` genuinely *is* inside the double-quoted region, and
+        // it is the backslash that suppresses it. The backslash is left in
+        // place here on purpose -- removing it is `remove_quotes`'s job, and a
+        // shell that unescapes twice mangles `\\`.
+        let out = expand_vars_bytes(b"\"\\$#\"");
+        assert_eq!(
+            out,
+            b"\"\\$#\"".to_vec(),
+            "an escaped `$` inside double quotes does not expand, and keeps its backslash"
+        );
+        let out = expand_vars_bytes(b"\\$#");
+        assert_eq!(
+            out,
+            b"\\$#".to_vec(),
+            "an escaped `$` unquoted does not expand"
+        );
+
+        // Tilde is the one construct double quotes suppress but `$` survives,
+        // so it is tested against the same three contexts to prove the two
+        // predicates really are different.
+        //
+        // `HOME` is set and put back rather than read, because the assertion
+        // is about *which* tildes expand and a rung that only works when the
+        // boot happened to populate `HOME` tests nothing on the boot where it
+        // did not. The restore matters as much: this runs inside the live
+        // shell's variable table, and a self-test that leaves `HOME` pointing
+        // at `/root` would change the behaviour of everything after it.
+        let saved_home = env_get("HOME");
+        assert!(env_set("HOME", "/root"), "HOME is not readonly");
+        assert_eq!(
+            expand_vars_bytes(b"~"),
+            b"/root".to_vec(),
+            "bare tilde expands"
+        );
+        assert_eq!(
+            expand_vars_bytes(b"\"~\""),
+            b"\"~\"".to_vec(),
+            "a tilde inside double quotes does NOT expand, unlike a `$`"
+        );
+        assert_eq!(
+            expand_vars_bytes(b"'~'"),
+            b"'~'".to_vec(),
+            "nor inside single quotes"
+        );
+        assert_eq!(
+            expand_vars_bytes(b"\\~"),
+            b"\\~".to_vec(),
+            "nor when escaped -- and the backslash is left for quote removal"
+        );
+        match saved_home {
+            Some(h) => {
+                env_set("HOME", &h);
+            }
+            // Nothing to restore it to, and there is no `unset` helper here.
+            // Leaving the probe value would be worse than a stale `/root` on a
+            // boot that never had `HOME`, but this branch is the honest one to
+            // note rather than paper over.
+            None => {
+                env_set("HOME", "");
+            }
+        }
+
+        // --- remove_quotes: what survives. ----------------------------------
+        assert_eq!(remove_quotes("\"it's fine\""), "it's fine");
+        assert_eq!(
+            remove_quotes("a\\ b"),
+            "a b",
+            "the backslash the old scanner left behind is now removed"
+        );
+        assert_eq!(
+            remove_quotes("\"C:\\dir\""),
+            "C:\\dir",
+            "`\\d` is not escapable in double quotes, so the backslash is data"
+        );
+        assert_eq!(remove_quotes("\"say \\\"hi\\\"\""), "say \"hi\"");
+        assert_eq!(
+            remove_quotes("\"a\\\\b\""),
+            "a\\b",
+            "`\\\\` IS escapable in double quotes -- two become one"
+        );
+        assert_eq!(
+            remove_quotes("'a\\\\b'"),
+            "a\\\\b",
+            "but single quotes have no escapes at all, so both survive"
+        );
+        assert_eq!(
+            remove_quotes("'a'\\''b'"),
+            "a'b",
+            "the idiom quote_word emits"
+        );
+        assert_eq!(remove_quotes("a'b'c"), "abc", "quotes vanish mid-word");
+
+        // --- split_words: what is one word. ---------------------------------
+        assert_eq!(
+            split_words("a\\ b"),
+            alloc::vec!["a b"],
+            "an escaped blank does not split"
+        );
+        assert_eq!(
+            split_words("\"a b\" c"),
+            alloc::vec!["a b", "c"],
+            "a quoted blank does not split"
+        );
+        assert_eq!(
+            split_words("a b  c"),
+            alloc::vec!["a", "b", "c"],
+            "runs collapse"
+        );
+        assert_eq!(
+            split_words("x'y z'w"),
+            alloc::vec!["xy zw"],
+            "quotes vanish mid-word"
+        );
+        assert_eq!(
+            split_words("\"a'b\" c"),
+            alloc::vec!["a'b", "c"],
+            "an apostrophe inside double quotes does not swallow the split"
+        );
+
+        // --- expand_braces: quoting suppresses it. --------------------------
+        assert_eq!(
+            expand_braces("x{1,2}y"),
+            "x1y x2y",
+            "prefix and suffix distribute"
+        );
+        assert_eq!(
+            expand_braces("\"{a,b}\""),
+            "\"{a,b}\"",
+            "a brace in double quotes does not expand"
+        );
+        assert_eq!(expand_braces("'{a,b}'"), "'{a,b}'", "nor in single quotes");
+        assert_eq!(
+            expand_braces("\\{a,b}"),
+            "\\{a,b}",
+            "nor when escaped -- no scanner here could see this before"
+        );
+        assert_eq!(
+            expand_braces("echo 'a   b'"),
+            "echo 'a   b'",
+            "interior spacing survives, which is why this stage does not rejoin words"
+        );
+        assert_eq!(
+            expand_braces("{a}"),
+            "{a}",
+            "no comma is not a brace expansion"
+        );
+    }
+
+    // --- 116: tab completion reads the same words as the rest of the shell.
+    //
+    // This rung needs real directory entries, so unlike 115 it builds a
+    // fixture. The names are prefixed `zz_tc` so that a leftover from a
+    // failed run cannot be mistaken for anything else, and every one of them
+    // is removed at the end -- a stray `/tmp/zz_tc*` would change the answer
+    // this rung gets on the *next* boot, which is the kind of self-inflicted
+    // flake that costs an afternoon.
+    //
+    // The cursor is always at the end of the text, which is what the line
+    // editor passes when Tab is pressed at the end of a line.
+    {
+        const UNIQ: &str = "/tmp/zz_tc_uniq.txt";
+        const SPACED: &str = "/tmp/zz_tc two.txt";
+        let made_uniq = crate::fs::Vfs::write_file(UNIQ, b"x").is_ok();
+        let made_spaced = crate::fs::Vfs::write_file(SPACED, b"x").is_ok();
+        assert!(
+            made_uniq && made_spaced,
+            "could not build the rung-116 fixture"
+        );
+
+        // Baseline: an unquoted path completes as it always did.
+        let (suffix, _) = tab_complete("cat /tmp/zz_tc_uni", 18);
+        assert_eq!(suffix, "q.txt ", "an unquoted path still completes");
+
+        // The path is quoted. Before the shared scanner this returned nothing
+        // at all: the leading `"` stayed on the word, so the directory looked
+        // up was one literally named `"/tmp`.
+        let (suffix, _) = tab_complete("cat \"/tmp/zz_tc_uni", 19);
+        assert_eq!(
+            suffix, "q.txt\" ",
+            "a quoted path completes, and the quote is closed before the space"
+        );
+        let (suffix, _) = tab_complete("cat '/tmp/zz_tc_uni", 19);
+        assert_eq!(
+            suffix, "q.txt' ",
+            "the closing quote matches the one opened"
+        );
+
+        // The decisive case: a space *inside* the quotes. The old scan took
+        // the word to start after the last space of any kind, so it searched
+        // the working directory for names beginning `t` -- a prefix the user
+        // never typed, in a directory they never named.
+        let (suffix, _) = tab_complete("cat \"/tmp/zz_tc t", 17);
+        assert_eq!(
+            suffix, "wo.txt\" ",
+            "a quoted space does not start a new word for completion"
+        );
+        // An escaped space is the same word by the same rule, and the suffix
+        // is unquoted because the user's quoting style is theirs, not ours.
+        let (suffix, _) = tab_complete("cat /tmp/zz_tc\\ t", 17);
+        assert_eq!(
+            suffix, "wo.txt ",
+            "an escaped space does not start a new word"
+        );
+
+        // A quoted blank does not end the *first* word either, so this is
+        // still command completion and finds no command by that name.
+        let (suffix, candidates) = tab_complete("'zz no such cmd", 15);
+        assert!(
+            suffix.is_empty() && candidates.is_empty(),
+            "a quoted blank does not turn the command word into an argument"
+        );
+
+        let cleaned_uniq = crate::fs::Vfs::remove(UNIQ).is_ok();
+        let cleaned_spaced = crate::fs::Vfs::remove(SPACED).is_ok();
+        assert!(
+            cleaned_uniq && cleaned_spaced,
+            "the rung-116 fixture outlived the rung; a later boot would see it"
+        );
+    }
+
+    // --- 117: awk's print-argument splitter obeys awk's escape rule.
+    //
+    // Deliberately *not* the shared shellquote scanner: awk is a different
+    // language, and the two rules disagree about the apostrophe. The second
+    // assertion is the control that proves the difference matters -- swap in
+    // the shell scanner and the first case starts passing and this one starts
+    // failing, which is a wash, not a fix.
+    //
+    // The oracle here is awk, not bash. Measured before it was written down
+    // (`scripts/check-kshell-rungs-vs-bash.py`, AWK_CASES): real awk prints
+    // `a"b c` for the first and `it's x` for the second, so both are two
+    // arguments joined by OFS -- which is exactly the arity asserted below.
+    {
+        // `print "a\"b", c` -- the escaped quote does not close the string, so
+        // the comma that follows is a separator and not part of it. Before the
+        // escape was understood the whole line came back as one argument,
+        // which `awk_eval_expr` then rejected as unrecognised.
+        let parts = awk_split_print_args("\"a\\\"b\", c");
+        assert_eq!(parts.len(), 2, "an escaped quote does not end the string");
+        assert_eq!(
+            parts.first().map(alloc::string::String::as_str),
+            Some("\"a\\\"b\""),
+            "the escape is kept for the evaluator"
+        );
+        assert_eq!(parts.get(1).map(alloc::string::String::as_str), Some(" c"));
+
+        // In awk an apostrophe is an ordinary character. A shell scanner would
+        // read this as opening a quoted region and stop splitting.
+        let parts = awk_split_print_args("\"it's\", x");
+        assert_eq!(parts.len(), 2, "an apostrophe is not a quote in awk");
+        assert_eq!(
+            parts.first().map(alloc::string::String::as_str),
+            Some("\"it's\"")
+        );
+
+        // A comma genuinely inside a string is still not a separator.
+        assert_eq!(awk_split_print_args("\"a,b\"").len(), 1);
+        // And one outside a string still is.
+        assert_eq!(awk_split_print_args("$1, $2").len(), 2);
+        // A backslash with nothing after it escapes nothing and must not read
+        // off the end of the program text.
+        assert_eq!(awk_split_print_args("\"a\\").len(), 1);
+    }
+
+    // --- 118: a redirection target is a word, and names a file after
+    // unquoting and resolution.
+    //
+    // Both halves were missing on the output side. `> "my file"` created a
+    // file whose name literally began with a quote, and a relative target was
+    // handed to the VFS unresolved, so it landed at the root no matter what
+    // the working directory was. The input side already resolved (but did not
+    // unquote), so `cmd < a > b` could read and write in different
+    // directories -- which is the shape of bug that looks like a filesystem
+    // fault rather than a shell one.
+    {
+        let saved_cwd = CWD.lock().clone();
+        *CWD.lock() = PathBuf::from("/tmp");
+
+        assert_eq!(
+            redirect_path("\"zz rd.txt\"").to_str(),
+            Some("/tmp/zz rd.txt"),
+            "quotes come off, and the name they protected survives"
+        );
+        assert_eq!(
+            redirect_path("zz\\ rd.txt").to_str(),
+            Some("/tmp/zz rd.txt"),
+            "an escape is the same word by the same rule"
+        );
+        assert_eq!(
+            redirect_path("rel.txt").to_str(),
+            Some("/tmp/rel.txt"),
+            "a relative target resolves against the working directory"
+        );
+        assert_eq!(
+            redirect_path("  /tmp/abs.txt  ").to_str(),
+            Some("/tmp/abs.txt"),
+            "the blanks the parser leaves around the target are not part of it"
+        );
+
+        // End to end: the file that appears is the one the user named.
+        let raw = "\"zz rd end to end.txt\"";
+        redirect_write(raw, b"hi", false)?;
+        let named = "/tmp/zz rd end to end.txt";
+        assert_eq!(
+            crate::fs::Vfs::read_file(named)?.as_slice(),
+            &b"hi"[..],
+            "the redirection wrote to the unquoted, resolved name"
+        );
+        // Append must reach the same file, or `>>` would create a second one.
+        redirect_write(raw, b"!", true)?;
+        assert_eq!(crate::fs::Vfs::read_file(named)?.as_slice(), &b"hi!"[..]);
+        let cleaned = crate::fs::Vfs::remove(named).is_ok();
+
+        *CWD.lock() = saved_cwd;
+        assert!(cleaned, "the rung-118 fixture outlived the rung");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -141225,8 +141738,35 @@ fn awk_split_print_args(expr: &str) -> alloc::vec::Vec<alloc::string::String> {
     let bytes = expr.as_bytes();
     let mut i = 0;
 
-    while i < bytes.len() {
-        match bytes[i] {
+    while let Some(&b) = bytes.get(i) {
+        // awk's string escape, which this splitter did not know about: inside
+        // `"..."` a backslash makes the next byte literal. Without it, the `"`
+        // of `print "a\"b", c` closed the string, and the comma that followed
+        // -- which is *inside* the string -- split the argument in two, so awk
+        // printed `a"b` and ` c` as separate arguments.
+        //
+        // Note this is awk's rule, not the shell's: the shared shellquote
+        // scanner is deliberately NOT used here, because in awk `'` is not a
+        // quote character at all. Substituting the shell scanner would fix
+        // this case and simultaneously break `print "it's"`, which is a wash
+        // dressed up as progress. See A-KSHELL-AWK-PRINT-SPLITS-INSIDE-AN-
+        // ESCAPED-QUOTE in known-issues.md.
+        //
+        // Both bytes are kept verbatim, exactly as the quotes are: this stage
+        // only decides where the commas are, and `awk_eval_expr` is the one
+        // that interprets `\"` when it unwraps the literal.
+        if b == b'\\' && in_quote {
+            if let Some(&next) = bytes.get(i.saturating_add(1)) {
+                current.push(b'\\');
+                current.push(next);
+                i = i.saturating_add(2);
+                continue;
+            }
+            // A backslash at the very end escapes nothing. awk would reject
+            // the program; keeping the byte is the reading that does not
+            // invent an escape out of the end of the string.
+        }
+        match b {
             b'"' => {
                 in_quote = !in_quote;
                 current.push(b'"');
@@ -141238,10 +141778,10 @@ fn awk_split_print_args(expr: &str) -> alloc::vec::Vec<alloc::string::String> {
                 ));
             }
             _ => {
-                current.push(bytes[i]);
+                current.push(b);
             }
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
     if !current.is_empty() {
         parts.push(finish_ascii_scan(current, "awk print argument"));

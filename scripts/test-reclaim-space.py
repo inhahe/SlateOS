@@ -28,6 +28,7 @@ Exit: 0 all passed, 1 one or more failed.
 
 from __future__ import annotations
 
+import inspect
 import os
 import shutil
 import sys
@@ -257,6 +258,115 @@ def test_our_own_tree_is_never_promoted_by_being_detached(mod, tmp):
           "ours to pay" in why, why)
 
 
+class _FakePopen:
+    """Stand in for the pruner so the delegation can be tested without one.
+
+    Records the argv it was handed, and yields two lines so the streaming path
+    is exercised rather than merely constructed.
+    """
+
+    seen = []
+
+    def __init__(self, cmd, **_kw):
+        _FakePopen.seen.append(list(cmd))
+        self.stdout = iter(["scanning\n", "total: 0 stale units\n"])
+
+    def wait(self):
+        return 0
+
+
+def test_step_1_5_delegates_once_for_every_tree_it_was_given(mod, tmp):
+    """One invocation covering all trees, not one per tree.
+
+    The scan is minutes of metadata I/O, and `prune-build-cache.py` takes
+    `--target-dir` repeatably precisely so process start-up and reporting are
+    paid once.  Also pins that a tree with no `target/` is dropped here rather
+    than passed through to fail inside the pruner.
+    """
+    root = os.path.join(tmp, "delegation")
+    trees = []
+    for name in ("os", "os-lane-a", "os-lane-b"):
+        tree = os.path.join(root, name)
+        os.makedirs(os.path.join(tree, "target"))
+        trees.append(tree)
+    barren = os.path.join(root, "os-lane-c")
+    os.makedirs(barren)
+    trees.append(barren)
+
+    _FakePopen.seen = []
+    real = mod.subprocess.Popen
+    mod.subprocess.Popen = _FakePopen
+    try:
+        lines = []
+        mod.reclaim_stale_units(trees, 14.0, False, lines.append)
+    finally:
+        mod.subprocess.Popen = real
+
+    check("the pruner is run exactly once for all trees",
+          len(_FakePopen.seen) == 1, _FakePopen.seen)
+    if not _FakePopen.seen:
+        return
+    cmd = _FakePopen.seen[0]
+    dirs = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--target-dir"]
+    check("every tree that has a target/ is passed", len(dirs) == 3, dirs)
+    check("the tree without one is not",
+          all("os-lane-c" not in d for d in dirs), dirs)
+    check("the age threshold is passed through, not left at the pruner's default",
+          "--age-days" in cmd and cmd[cmd.index("--age-days") + 1] == "14.0", cmd)
+    check("--yes is passed when this run is not a dry run", "--yes" in cmd, cmd)
+    check("the pruner's output is streamed to the log, not swallowed",
+          any("scanning" in ln for ln in lines), lines)
+
+
+def test_step_1_5_deletes_nothing_on_a_dry_run(mod, tmp):
+    """A dry run of the remedy must stay a dry run through the delegation.
+
+    `prune-build-cache.py` defaults to reporting, so all this turns on is that
+    `--yes` is withheld -- but that default lives in *another* script, and a
+    reclaim run that quietly started deleting when asked only to report would
+    be exactly the kind of bookkeeping defect this file's header lists three
+    of.
+    """
+    tree = os.path.join(tmp, "dryrun", "os-lane-a")
+    os.makedirs(os.path.join(tree, "target"))
+    _FakePopen.seen = []
+    real = mod.subprocess.Popen
+    mod.subprocess.Popen = _FakePopen
+    try:
+        mod.reclaim_stale_units([tree], 14.0, True, lambda _s: None)
+    finally:
+        mod.subprocess.Popen = real
+    cmd = _FakePopen.seen[0] if _FakePopen.seen else []
+    check("--yes is withheld on a dry run", "--yes" not in cmd, cmd)
+
+
+def test_the_surgical_step_is_tried_before_the_destructive_one(mod, _tmp):
+    """Step 1.5 must run before step 2, which is the entire point of it.
+
+    Step 1.5 reclaims units cargo has not asked for since before the cutoff, so
+    it costs nobody anything.  Step 2 deletes a whole `target/` and charges the
+    lane that owns it a twenty-minute cold rebuild.  Run in the wrong order,
+    step 1.5 becomes dead code in every case that matters: step 2 would already
+    have met the target by destroying the very tree step 1.5 was about to make
+    small.
+
+    Asserted against the source rather than by running `main`, and that is a
+    real limitation worth stating.  `main` needs a git worktree, a volume
+    genuinely short of space, and trees it is willing to delete -- none of
+    which a unit test should manufacture.  The ordering is a fixed sequence of
+    statements in one function, so reading it back is a fair proxy: it catches
+    both the reordering and the deletion, which are what would actually go
+    wrong.
+    """
+    src = inspect.getsource(mod.main)
+    at_1_5 = src.find("reclaim_stale_units")
+    at_2 = src.find('log("Step 2')
+    check("step 1.5 is still wired into main at all", at_1_5 >= 0, at_1_5)
+    check("step 2 is still wired into main at all", at_2 >= 0, at_2)
+    check("the free step runs before the one that costs a rebuild",
+          0 <= at_1_5 < at_2, (at_1_5, at_2))
+
+
 def main():
     mod = load_module()
     tmp = tempfile.mkdtemp(prefix="reclaim-test-")
@@ -270,6 +380,9 @@ def main():
         test_classifies_worktrees_by_branch_not_by_name,
         test_scratch_targets_are_reclaimable_without_the_lane_flag,
         test_our_own_tree_is_never_promoted_by_being_detached,
+        test_step_1_5_delegates_once_for_every_tree_it_was_given,
+        test_step_1_5_deletes_nothing_on_a_dry_run,
+        test_the_surgical_step_is_tried_before_the_destructive_one,
     )
     try:
         for test in tests:

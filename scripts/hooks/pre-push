@@ -48,8 +48,24 @@
 # already runs every tooling suite and is required before any merge to `main`,
 # so a gate here would buy only earlier notice on a lane push -- at the cost of
 # more surface, and another bypass variable, on the boundary whose whole value
-# is that it is small and each piece is independent. The gap it would close is a
-# reader who does not know the suites exist, which is what this paragraph is for.
+# is that it is small and each piece is independent.
+#
+# That decision stands, but its stated cost was a guess, so here is a
+# measurement. On 2026-09-03, 034dffe2c taught `boot-history.py` to read
+# `args.free_gb_min` without adding the field to `test-boot-history.py`'s
+# `_Args` stub, reducing 117 tests to an AttributeError. The boot test caught
+# it correctly and before the build -- but "only earlier notice" turned out to
+# be worth 47 minutes, because the suite gate sits ~2800s into a run.
+#
+# Note also the failure mode, which the paragraph above did not predict. It was
+# not "a reader who does not know the suites exist": the author knew, edited
+# `scripts/boot-history.py`, and did not think to run the suite named after the
+# file they had just edited -- which takes 10.6s. So the cheap countermeasure
+# is a habit, not a gate: **if you change `scripts/X.py`, run `scripts/test-X.py`
+# before you commit.** That needs no bypass variable and closes the case that
+# actually happened. Recorded here rather than made into a gate because the
+# argument above is still right; a future reader weighing a twelfth gate should
+# have this data point instead of the guess it replaces.
 #
 # Gate 1 — why this exists
 # ------------------------

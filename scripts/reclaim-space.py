@@ -61,12 +61,30 @@ holder named, exactly as for any other class.
 Nothing outside a worktree root is ever touched, and nothing that git does not
 consider ignored is ever touched: both are asserted, not assumed.
 
+The ladder, cheapest consequence first
+--------------------------------------
+
+Steps run in order and stop as soon as the target is met, so the destructive
+ones are only reached when the gentle ones did not suffice:
+
+    0    staging directories an earlier run abandoned half-way -- wreckage
+    1    aged scratch files under build/                       -- disposable
+    1.5  build-cache units no build has invoked in a fortnight -- free
+    2    whole target/ trees                                   -- a cold rebuild
+
+Step 1.5 delegates to `scripts/prune-build-cache.py`; see the reasoning on
+`reclaim_stale_units`.  It is the only step that reclaims space at genuinely
+no cost to anyone, because cargo cannot want back a unit it has not asked for
+since before the cutoff -- so it belongs above step 2, which charges a lane
+twenty minutes of rebuild for a directory that was mostly dead weight.
+
 Usage
 -----
 
     python scripts/reclaim-space.py                 # report + dry run
     python scripts/reclaim-space.py --need 25 --yes # actually free 25 GiB
     python scripts/reclaim-space.py --yes --allow-lane-targets
+    python scripts/reclaim-space.py --yes --no-prune-units   # skip step 1.5
 
 Exit codes: 0 the target was met (or already was), 1 could not free enough,
 2 bad usage / not in a git worktree.
@@ -491,6 +509,83 @@ def reclaim_scratch(root, age_days, dry_run, log):
     return freed
 
 
+def reclaim_stale_units(trees, age_days, dry_run, log):
+    """Prune build-cache units no recent build has needed, across every worktree.
+
+    This runs *before* step 2 deliberately, and the ordering is the point.
+
+    Step 2 deletes whole `target/` trees.  It is safe -- the contents are
+    regenerable by definition -- but it is not cheap: the lane that owns the
+    tree pays a full cold rebuild of a ~200-crate workspace, twenty-odd
+    minutes it did not ask for and cannot see coming.  So step 2 charges a
+    real cost to a lane that may be entirely innocent, purely because its
+    directory sorted first.
+
+    Most of what fills the volume is not that tree.  Cargo never garbage
+    collects: a new `-<hash>` artifact is minted whenever a unit's inputs
+    change, and the superseded one is retained forever.  Measured 2026-09-02,
+    lane B was holding 19,769 units that no build had invoked in a fortnight,
+    about 32 GB -- while its live cache, the part a rebuild would actually
+    have to reproduce, was a fraction of that.  Deleting the dead units costs
+    that lane *nothing*: cargo cannot want back a unit it has not asked for
+    since before the fortnight started.
+
+    Reaching the target here therefore ends the run without any lane paying a
+    rebuild, and even when it does not reach it, every GB freed here is a GB
+    step 2 no longer has to take from a live tree.
+
+    Safe to run against worktrees that are mid-build, for the same reason the
+    rest of this script is: `prune-build-cache.py` renames each candidate
+    before deleting it, and a rename that succeeds is proof nothing held the
+    directory rather than a guess from a timestamp.  It also renames the
+    fingerprint before the artifacts, so an interrupted run leaves the one
+    state cargo recovers from cleanly (artifact present, fingerprint gone ->
+    rebuild it) and never the one it does not (fingerprint says fresh,
+    artifact missing -> link failure).
+
+    Output is streamed rather than captured: the scan is minutes of pure
+    metadata I/O over hundreds of thousands of directories, and a captured
+    subprocess would show nothing at all until it finished, which is
+    indistinguishable from a hang.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "prune-build-cache.py")
+    if not os.path.isfile(script):
+        log("  SKIP: %s is missing" % script)
+        return
+
+    targets = []
+    for tree in trees:
+        target = os.path.normpath(os.path.join(tree, "target"))
+        if os.path.isdir(target):
+            targets.append(target)
+    if not targets:
+        log("  no target/ directories to scan")
+        return
+
+    cmd = [sys.executable, script, "--age-days", str(age_days)]
+    for target in targets:
+        cmd += ["--target-dir", target]
+    if not dry_run:
+        cmd.append("--yes")
+
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+    except OSError as exc:
+        log("  SKIP: could not run %s (%s)" % (script, exc))
+        return
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        log("  " + line.rstrip())
+    rc = proc.wait()
+    if rc != 0:
+        # Not fatal.  A partial prune still freed whatever it freed, and the
+        # caller re-measures free space rather than trusting an exit status.
+        log("  (prune-build-cache.py exited %d; continuing)" % rc)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Free space on the shared build volume."
@@ -511,6 +606,24 @@ def main(argv=None):
         type=float,
         default=3.0,
         help="delete build/ scratch files older than this many days (default 3)",
+    )
+    ap.add_argument(
+        "--unit-age-days",
+        type=float,
+        default=14.0,
+        help="in step 1.5, prune build-cache units cargo has not invoked in "
+        "this many days (default 14). A fortnight, not a day, because the "
+        "signal is per-unit and quiet: a crate only this lane's rarely-run "
+        "target touches can go a week without being asked for and still be "
+        "wanted",
+    )
+    ap.add_argument(
+        "--no-prune-units",
+        action="store_true",
+        help="skip step 1.5 and go straight to deleting whole target/ trees. "
+        "Costs a lane a full cold rebuild that the surgical step may well "
+        "have avoided; here for when the scan's minutes of metadata I/O are "
+        "themselves the problem",
     )
     ap.add_argument(
         "--sizes",
@@ -575,6 +688,23 @@ def main(argv=None):
         return 0
 
     unique = candidate_order(trees, root, args.allow_lane_targets)
+
+    # Step 1.5 is scoped by the same list step 2 uses, not by every worktree.
+    # It has to be: pruning is cheap for the lane that owns the tree, but it is
+    # not free -- a unit dropped here is one cargo will recompile if it turns
+    # out to want it after all -- and --allow-lane-targets exists precisely so
+    # the operator can say which trees this script may touch.  Ignoring that
+    # here because the step is gentler would make the flag mean less than it
+    # says.
+    if not args.no_prune_units:
+        log("Step 1.5: build-cache units no build has invoked in %.0f days"
+            % args.unit_age_days)
+        reclaim_stale_units([tree for tree, _why in unique],
+                            args.unit_age_days, dry, log)
+        if not dry and free_gib(root) >= args.need:
+            log("Done: %.1f GiB free -- no lane had to pay a rebuild."
+                % free_gib(root))
+            return 0
 
     log("Step 2: target/ directories, unowned scratch trees first")
     considered = refused = 0

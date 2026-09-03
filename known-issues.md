@@ -106694,10 +106694,14 @@ the rename succeeds, nothing is recorded, and both lines really are `renamed`.
 
 **Still not covered, and deliberately.** Directories stay out of the table.
 Upstream's first arm handles them under `x->recursive` and produces `warning:
-source directory %s specified more than once`; this `mv` refuses a cross-device
-directory move outright, so the arm has nothing to protect yet. It belongs with
-`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`. So does the `--update` skip
-path (`copy.c:2380`), which records and links a skipped destination —
+source directory %s specified more than once`. This paragraph used to say the
+arm "has nothing to protect yet" because a cross-device directory move was
+refused outright; that refusal was lifted on 2026-09-03, so the gap is real now
+and is tracked as `B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY` —
+which also records how narrow the trigger turned out to be when measured.
+
+The `--update` skip path (`copy.c:2380`), which records and links a skipped
+destination —
 "we currently replace DST_NAME unconditionally, even if it was a newer separate
 file", in upstream's own words — and is tracked separately as
 `B-MVS-UPDATE-SKIP-DOES-NOT-LINK-A-REPEATED-INODE`.
@@ -106923,7 +106927,7 @@ programs share `copy::copy_bytes`; there is no funnelled sentence left here.
 
 ---
 
-## B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED — OPEN 2026-09-01
+## B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED — FIXED 2026-09-03
 
 **In short:** `mv dir /other/filesystem/` fails. Moving a directory between two
 filesystems means copying the whole subtree and then removing the original, and
@@ -107078,6 +107082,130 @@ compare against that.
 **How it is caught.** `scripts/mv-diff.sh` §22, one `xfail_case` naming this
 entry, whose fixture carries a setgid bit and a subdirectory so that the case
 keeps measuring something after the refusal is lifted.
+
+**FIXED 2026-09-03 — stage 5, which is what closes this.**
+`copy_across_devices` grew a directory arm of eleven lines, because the engine
+extracted by stages 1–4 already does all of it: `copy::stat_destination`
+followed by `copy::place_entity`, the same call `cp -r` makes for a directory
+operand. There is no second walk, which was the whole point of doing the
+extraction first.
+
+Three things had to join it, none of them the walk:
+
+- **`copy::Opts::move_mode`** — GNU's `x->move_mode` (`copy.h:169`). The *only*
+  thing it decides inside the engine is what `-v` prints, and the asymmetry is
+  upstream's rather than ours: a moved **file** is announced `copied 'FAR/d/f'
+  -> 'g/f'`, naming both ends (`copy.c:2887`), while a moved **directory** is
+  announced `created directory 'g'`, naming only the end that was made
+  (`copy.c:2988`). A copy says `'d' -> 'g'` for both.
+- **`clear_destination` learned `AT_REMOVEDIR`** — `rmdir` when the *source* is
+  a directory, `unlink` otherwise, which is GNU reading the source's kind to
+  decide what to do to the destination (`copy.c:2875`). Measured, the
+  consequence is that `mv -T FAR/d existing-empty-dir` succeeds and
+  `mv -T FAR/d existing-non-empty-dir` fails with
+  `unable to remove target: Directory not empty` — plain `rmdir` semantics, and
+  the sentence this `mv` already had.
+- **`remove_source` became `rm -r`** — depth-first, one `mv: cannot remove X`
+  per entry that will not go, and `-v`'s `removed X` / `removed directory X`
+  printed *by the walk* rather than by `move_one`, because a directory yields
+  one such line per entry and only the walk knows what it removed. A failed
+  child silently skips its ancestors, which is `mark_ancestor_dirs`
+  (`remove.c:431`) plus `prompt`'s `fts_number` check (`remove.c:206`): the
+  `ENOTEMPTY` they would earn says nothing the child's diagnostic did not.
+
+**`Failed` had to become an enum**, and that is the one design point worth
+reading twice. Every other step of the fallback fails with *one* sentence, which
+is why `Failed` carried it; a tree copy fails at as many entries as went wrong,
+and the engine has already reported each one where it happened. `Failed::Reported`
+is the variant that carries nothing on purpose — the caller's signal to stop and
+to put a `-b` backup back, and nothing else. GNU has the same silence:
+`copy_internal` reports and returns false, and `do_move` adds nothing on top of
+it (`mv.c:186`).
+
+**What the numbers did.** §22's `xfail_case` is a `run_case` now, taking
+`scripts/mv-diff.sh` from 360/0/11 to **361 passed, 0 differed, 10 differ on
+purpose**; `scripts/cp-diff.sh` stayed byte-identical at **581/0/30**, which is
+the certification that the engine change was confined to `move_mode`.
+
+**One gap the fix opened, logged rather than fixed**:
+`B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY`.
+
+---
+
+## B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY — OPEN 2026-09-03
+
+**In short:** naming the same directory twice on one `mv` command line can make
+GNU print `mv: warning: source directory 'd' specified more than once` and skip
+the repeat. This `mv` prints nothing and tries the move a second time. Nothing is
+destroyed either way — the second attempt copies the tree over the copy it
+already made — but the transcript differs, and the second attempt is work that
+GNU knows to skip.
+
+**Jargon, once.** *Operand* — one of the file names on the command line.
+*Cross-device* — source and destination on different filesystems, so `mv` has to
+copy and delete rather than rename.
+
+**How narrow this is — measured against GNU 9.4, not reasoned.** Three things
+must hold at once, and the third is what makes it rare:
+
+1. the same directory named as two operands, and
+2. the move must be cross-device (a same-device move renames, and GNU records
+   nothing for a rename that succeeded — `copy.c:2662`), and
+3. **the first attempt must have copied the tree and then failed to remove the
+   source.** A first attempt that *succeeded* takes the source away, so the
+   second operand gets `No such file or directory` from both `mv`s alike; a
+   first attempt that failed earlier calls `forget_created`, which takes the
+   entry back out of the table, so there is nothing for the second to find.
+
+The reproduction is therefore:
+
+```text
+$ mkdir -p FAR/d/sub; printf hello > FAR/d/f; mkdir dest; chmod 555 FAR
+$ mv -v FAR/d FAR/d dest
+created directory '.../dest/d'
+created directory '.../dest/d/sub'
+copied '.../FAR/d/f' -> '.../dest/d/f'
+removed '.../FAR/d/f'
+removed directory '.../FAR/d/sub'
+mv: cannot remove '.../FAR/d': Permission denied
+mv: warning: source directory '.../FAR/d' specified more than once
+$ echo $?
+1
+```
+
+Ours prints everything down to the `cannot remove`, then copies the tree a
+second time instead of printing the warning. The exit status is 1 either way.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `move_one`, the `src_id` block —
+`file_id` is asked only for a non-directory, so a directory never enters
+`Copied`. The comment there says the same thing.
+
+**What GNU does.** `copy.c:2664` records a directory operand too, under
+`x->recursive && S_ISDIR (src_mode) && command_line_arg`, into the same
+`src_to_dest` table the hard-link machinery uses. The `earlier_file` block below
+it then has a directory arm with two sentences, of which this is one. The other
+is `cannot copy a directory, X, into itself, Y`, which this `mv` cannot reach
+either — but that one needs source and destination nested, which is a same-device
+`rename` returning `EINVAL` and is already reported by the ordinary path with
+GNU's own wording.
+
+**The proper fix.** `Copied` starts holding directories, keyed the same way, and
+`move_one` asks for a `file_id` unconditionally. The reason it is not done here
+is that `Copied::forget` then means something new on every other path: today
+"this inode's destination was not created after all" is a claim about a *file*,
+and a directory whose subtree is half-copied is not the same claim. That wants
+its own stage with its own cases, not a rider on the one that made directories
+movable at all.
+
+**Cost of leaving it.** A duplicated directory operand does redundant work and
+prints a different transcript. It cannot lose data — the second pass writes the
+same tree over the same destination. Nothing else is blocked on it.
+
+**How it is caught.** Not yet. `scripts/mv-diff.sh` §22 cannot express it as it
+stands: the fixture needs the *far* directory made read-only after its contents
+are built, and the harness's `FAR` hook runs before the move rather than between
+the two operands. Teaching the harness that is part of the fix, not of this
+entry.
 
 ---
 
@@ -107497,6 +107625,17 @@ above are the prerequisites, because closing this one converts a silent,
 kernel-performed copy into `mv`'s copy, and `mv`'s copy currently refuses two
 shapes the kernel's accepts. Doing them in the other order is a regression that
 looks like a fix.
+
+**UNBLOCKED 2026-09-03 — request filed.** Both prerequisites are now closed:
+`B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS` on 2026-09-01 and
+`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED` on 2026-09-03. `mv` now
+handles every shape across a filesystem boundary that it handles within one,
+certified at 361/0/10 by `scripts/mv-diff.sh`, so the ordering hazard above no
+longer applies and the change is safe for lane A to make. Asked for in
+`requests/b-a-rename-across-a-mount-copies-instead-of-answering-exdev.md`.
+This entry stays **OPEN** until the kernel actually answers `CrossDevice`,
+because until then `mv`'s fallback remains unreachable on the target and the
+three-line `CrossDevice` deletion in `try_pinned_renameat` cannot be made.
 
 **How it would be caught.** `scripts/mv-diff.sh` runs against a real Linux and
 already has a second filesystem (`@FAR@`, `$XDG_RUNTIME_DIR`), so it measures
@@ -110968,3 +111107,74 @@ use the widget because of this bug — is now unblocked but not yet done. The
 start menu's Run box is likewise still waiting on a caller, not on the widget.
 `TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE`
 is untouched by this change and remains open.
+
+---
+
+## TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS (lane B, 2026-09-03)
+
+**In short:** deleting a directory and everything inside it is now written out
+twice in our coreutils — once in `rm`, and once in `mv`. `mv` grew its copy on
+2026-09-03, when a move across a disk boundary stopped being refused: such a
+move is a copy followed by a *recursive* delete of the original, and `mv` had
+no recursive delete to call. The two are not interchangeable today (see below),
+so this is duplicated behaviour rather than duplicated code that could simply
+have been shared — but two implementations of "delete a tree" will drift, and
+a fix or a security hardening applied to one will silently miss the other.
+
+**Where.**
+
+| | file | entry point |
+|---|---|---|
+| `rm`'s | `userspace/coreutils/src/bin/rm.rs` | `Rm::remove_tree` |
+| `mv`'s | `userspace/coreutils/src/bin/mv.rs` | `remove_tree` (called from `remove_source`) |
+
+**Why the second one was written rather than the first one reused.** Recorded
+in full as `design-decisions.md` §751; the short version is three facts:
+
+- GNU does share one implementation, but the thing it shares is `remove.c` — a
+  *library* module that both `rm.c` and `mv.c` link against, and that neither
+  of them owns. Our `rm.rs` is not that: it is a binary, and its walk is a
+  method on `Rm`, which is the parsed command line.
+- `Rm` carries eight knobs — `-i`/`-I`/`--interactive`, `-f`, `--one-file-system`,
+  `--preserve-root`, `-d`, `-v`, and the prompt state that `-I` needs — none of
+  which `mv` has an answer for. Reusing it means either inventing values for
+  all eight or splitting the walk away from the struct, which is the real fix.
+- The stage that introduced this was certified by "the two differential
+  harnesses do not move" (`cp-diff` 581/0/30, `mv-diff` 361/0/10). Refactoring
+  a third binary inside that stage would have destroyed the only check that the
+  stage was clean.
+
+**What actually differs today**, so nobody merges them by assuming they match:
+
+| | `rm` | `mv` |
+|---|---|---|
+| prompts before deleting | yes, under `-i`/`-I` | never — the copy already succeeded |
+| `--one-file-system` | honoured | not applicable; the source is one device by construction |
+| what `-v` prints | `removed 'f'` / `removed directory 'd'` | the same two sentences |
+| a child that cannot be removed | reports it, keeps going, and reports the parent too | reports it, keeps going, and stays **silent** about every ancestor |
+
+That last row is the interesting one and is not an accident on either side: it
+is GNU's `mark_ancestor_dirs` behaviour, which `mv.rs` reproduces by returning
+from `remove_tree` before the `rmdir` when any child failed. `rm.rs` predates
+that reasoning and has not been checked against it — which is exactly the kind
+of divergence this entry exists to flag.
+
+**Proper fix.** Lift the walk out of both binaries into a
+`userspace/coreutils/src/remove.rs`, shaped the way `copy.rs` already is after
+the five-stage copy-engine extraction — i.e. an `Opts` struct of the knobs, a
+`Run` carrying the output streams, and a free function taking both. `rm.rs`'s
+`Rm` becomes a producer of `remove::Opts` exactly as `cp.rs`'s `CpFlags`
+became a producer of `copy::Opts`; `mv.rs` passes an `Opts` with the prompting
+and the `--one-file-system` knobs off. The ancestor-silence rule then lives in
+one place and both binaries get it.
+
+**Sequencing.** Do this *after*, not before,
+`TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL` is understood,
+because that entry's fix changes the walk's *signature* — it threads a
+`(dirfd, path_for_messages)` pair through every level instead of a path. Doing
+the extraction first means doing it twice. Note that `mv.rs`'s new walk has the
+same weakness for the same reason: it calls `fs::read_dir`, `fs::remove_file`
+and `fs::remove_dir` on joined path strings, so a symlink swapped in mid-walk
+is followed. It is narrower there — the tree being removed is one the user just
+successfully copied, so the window is smaller — but it is the same bug, and the
+shared module is what makes fixing it once fix it everywhere.

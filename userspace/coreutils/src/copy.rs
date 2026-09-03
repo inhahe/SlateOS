@@ -224,7 +224,7 @@ pub struct Opts<'a> {
     ///
     /// Read by the walk, and — through [`Deref::resolved`] — by the rule
     /// that decides what a symlink operand means when no `-P`/`-H`/`-L` was
-    /// given. `mv` sets it true (`mv.c:133`): a move is recursive by nature,
+    /// given. `mv` sets it true (`mv.c:147`): a move is recursive by nature,
     /// because a rename moves a whole subtree in one call and the cross-device
     /// fallback has to reproduce that.
     pub recursive: bool,
@@ -243,7 +243,7 @@ pub struct Opts<'a> {
     /// reading it, because [`Deref::Undefined`] is a real value with a rule
     /// behind it.
     ///
-    /// `mv` sets `DEREF_NEVER` (`mv.c:131`), which is the only answer a move
+    /// `mv` sets `DEREF_NEVER` (`mv.c:126`), which is the only answer a move
     /// can give: renaming a symlink moves the link, so a cross-device fallback
     /// that followed it would turn a link into a copy of its target.
     pub dereference: Deref,
@@ -323,6 +323,41 @@ pub struct Opts<'a> {
     /// effect is not "leave the mode alone" but "give a newly created
     /// destination the mode it would have had if nobody had asked".
     pub explicit_no_preserve_mode: bool,
+    /// GNU's `move_mode` (`copy.h:169`): this engine is standing in for
+    /// `rename(2)`, not performing a copy the user asked for. `mv` sets it,
+    /// `cp` never does.
+    ///
+    /// Most of what upstream reads it for is settled elsewhere in this module —
+    /// `mv` supplies its own `Dest::New`, does its own clearing, and leaves
+    /// `unlink_dest_before_opening` false, each documented at the field that
+    /// would otherwise have been the obvious home for it. What is left, and the
+    /// only thing this field decides, is **what `-v` says**, which upstream
+    /// spells in two places and both are visible:
+    ///
+    /// ```text
+    /// $ cp -rv d g                 $ mv -v /other/fs/d g
+    /// 'd' -> 'g'                   created directory 'g'
+    /// 'd/f' -> 'g/f'               created directory 'g/sub'
+    ///                              copied '/other/fs/d/f' -> 'g/f'
+    ///                              removed '/other/fs/d/f'
+    ///                              removed directory '/other/fs/d/sub'
+    ///                              removed directory '/other/fs/d'
+    /// ```
+    ///
+    /// Both measured against 9.4. The first two lines are this field: a
+    /// directory that was created says `created directory %s` for a move
+    /// (`copy.c:2988`) and the arrow line for a copy, and a *non*-directory
+    /// gets the `copied ` prefix, which upstream prints from the EXDEV block
+    /// (`copy.c:2887`) and suppresses at the ordinary site with `x->verbose &&
+    /// !x->move_mode && !S_ISDIR (src_mode)` (`copy.c:2629`).
+    ///
+    /// Every entry inside a moved tree goes the same way, and that is not an
+    /// approximation of upstream but exactly it: `copy_internal` re-attempts
+    /// `renameatu` for each entry it recurses into (`copy.c:2232`), so a tree
+    /// crossing a filesystem boundary answers `EXDEV` once per entry and prints
+    /// `copied ` once per entry. The `removed` lines are `mv`'s own, from `rm`
+    /// (`mv.c:238`), and are not this module's.
+    pub move_mode: bool,
     /// The process's file-mode creation mask, read once and carried.
     ///
     /// **The one field that is not one of GNU's**, and the deviation is
@@ -1817,6 +1852,18 @@ fn announce<E: Write>(run: &mut Run<'_, E>, src: &Path, dst: &Path, backup: Opti
     if !run.opts.verbose {
         return;
     }
+    // The `copied ` a move puts in front of the same arrow. Upstream prints it
+    // from the EXDEV block (`copy.c:2887`) rather than here, and suppresses
+    // *this* line for a move at `copy.c:2629` — two sites for one sentence,
+    // because upstream's copy has to be silent between the failed rename and
+    // the fallback it chooses. This engine is only ever reached once that
+    // choice is made, so the two collapse into one line with a prefix, and the
+    // output is identical. A directory never reaches here at all: its own
+    // announce is in [`copy_tree`], where the `mkdir` is, and it says something
+    // else entirely.
+    if run.opts.move_mode {
+        let _ = write!(run.out, "copied ");
+    }
     match backup {
         // One `writeln!` and not two, because the parenthesis is part of *this*
         // line rather than a note after it: GNU's `emit_verbose` prints the
@@ -2256,7 +2303,12 @@ pub fn place_entity<E: Write>(
     // is what makes a `cp -v` that cannot clear the way announce nothing.
     //
     // Two of GNU's reasons are expressible here, and they are `||`-ed there
-    // too. The third is `x->move_mode`, which no caller sets yet:
+    // too. The third is `x->move_mode`, which `mv` does set — but a `mv` that
+    // reaches this engine has already cleared its own destination and comes in
+    // with a [`Dest::New`], so `dest_exists` is false and the whole block is
+    // dead for it either way. Adding `|| run.opts.move_mode` here would be
+    // faithful to upstream's spelling and would change nothing, which is why it
+    // is written down rather than written:
     //
     // * **The source is a symlink that is not being followed.** `symlinkat` has
     //   no "replace", and refusing instead would leave `cp -r` unable to update
@@ -2626,7 +2678,18 @@ fn copy_tree<E: Write>(
                 // `cp -rv a b` where `b/a` already exists announces the files
                 // it refreshes and says nothing about the directory holding
                 // them — the directory was not copied, it was reused.
-                announce(run, src, dest, None);
+                //
+                // A move says something else here, and it is a different
+                // *sentence* rather than the same one with a prefix: `created
+                // directory 'g'`, one name and no arrow (`copy.c:2988`). That
+                // asymmetry is upstream's and is worth reading twice — a moved
+                // *file* is announced as `copied 'a' -> 'b'`, naming both ends,
+                // while a moved *directory* names only the end that was made.
+                if run.opts.move_mode {
+                    let _ = writeln!(run.out, "created directory {}", quoteaf_os(dest));
+                } else {
+                    announce(run, src, dest, None);
+                }
                 // The adjustment in the opposite direction from the debt: a
                 // source that is not owner-rwx — 0500 is perfectly ordinary —
                 // would leave this process unable to fill the directory it has

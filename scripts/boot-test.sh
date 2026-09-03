@@ -3237,6 +3237,78 @@ check_gates_are_wired() {
 
 check_gates_are_wired
 
+# Run the *fixtures* of three gates whose real checks nothing runs.
+#
+# `check-gates-are-wired.py` pins these three as unwired because they judge
+# `apps/**`, which is lane C's tree: switching their real checks on would red
+# lane C's build on findings lane C did not schedule, so that call is theirs to
+# make and there is a request open asking them to make it.
+#
+# But "unwired" and "rotting" are different problems, and only one of them has
+# to wait for lane C. A checker sitting unwired is still a checker someone will
+# eventually turn on, and the thing they will turn on is whatever state it has
+# drifted into meanwhile -- a glob that no longer matches the tree, a regex
+# broken by a refactor -- with its own fixtures having gone stale unobserved
+# the entire time. Then the first real run reports nothing and reads as a pass.
+# Running the fixtures now is what makes that impossible: it costs about three
+# seconds in total, and it means the day lane C wires one, they are wiring a
+# checker known to still work rather than one that merely still parses.
+#
+# This is safe to run from here because a `--self-test` reads nothing but the
+# fixtures the checker carries in its own source. It opens no file under
+# `apps/`, so it cannot fail on lane C's *code* -- only on lane C's *checker*
+# disagreeing with itself, which is a defect in one file with one owner and no
+# ambiguity about who fixes it.
+#
+# `check-gates-are-wired.py` deliberately does not count a `--self-test`-only
+# invocation as wiring, so these three stay pinned and the ratchet does not go
+# green on a gate whose real check still runs nowhere.
+check_unwired_gate_selftests() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Unwired gates' self-tests: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the unwired lane-C gates against their fixtures ==="
+
+    # Spelled out one call per gate, with the path a literal, because
+    # `check-gates-are-wired.py` reads this file to decide what runs -- and a
+    # `for` loop over the three names defeats it. Written as a loop, the script
+    # argument is `"$PROJECT_ROOT/scripts/$g.py"`, which resolves to the token
+    # `g.py`; that is not a `check-*.py`, so the analyser classified the call as
+    # out of scope and dropped it. Three self-tests ran and the ratchet counted
+    # zero of them, with no complaint. Keeping the two call shapes it
+    # understands is the price of it being able to answer the question at all.
+    local failed=""
+    run_checker check-diskcleanup-test-roots-selftest "$py" -u \
+        "$PROJECT_ROOT/scripts/check-diskcleanup-test-roots.py" --self-test \
+        || failed="scripts/check-diskcleanup-test-roots.py"
+    run_checker check-key-release-wiring-selftest "$py" -u \
+        "$PROJECT_ROOT/scripts/check-key-release-wiring.py" --self-test \
+        || failed="scripts/check-key-release-wiring.py"
+    run_checker check-window-wiring-selftest "$py" -u \
+        "$PROJECT_ROOT/scripts/check-window-wiring.py" --self-test \
+        || failed="scripts/check-window-wiring.py"
+
+    [ -z "$failed" ] && return 0
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  $failed no longer agrees with its own" >&2
+    echo "fixtures.  Nothing runs its real check yet (it is pinned as unwired" >&2
+    echo "in scripts/check-gates-are-wired.py), so this is the only thing" >&2
+    echo "standing between it and silent rot -- and a checker that has stopped" >&2
+    echo "matching reports no findings, which is exactly what a clean tree" >&2
+    echo "looks like." >&2
+    exit 1
+}
+
+check_unwired_gate_selftests
+
 # A self-test that nothing calls is not a test.  It compiles, it reads as
 # coverage, it gets cited in a commit message as "tested" -- and it has never
 # executed.  `evdev::self_test` sat uncalled for exactly one commit, and the

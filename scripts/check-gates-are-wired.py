@@ -103,8 +103,14 @@ CALLERS = (
 # Gates known to be unwired, with the reason. Pruning this list is part of
 # using it: see the module docstring on stale exemptions.
 PINNED: dict[str, str] = {
+    # Three of lane C's, whose *fixtures* the boot test now runs
+    # (`check_unwired_gate_selftests`) even though their real checks stay
+    # unwired. A `--self-test` is not wiring and is not counted as such below;
+    # it only stops the checker rotting while it waits for lane C to switch it
+    # on, so that what gets switched on is known to still work.
     "check-diskcleanup-test-roots.py":
-        "lane C (apps/diskcleanup); filed to lane C 2026-09-02",
+        "lane C (apps/diskcleanup); filed to lane C 2026-09-02; "
+        "self-test wired 2026-09-03",
     "check-evdev-elf-asm.py":
         "lane C (ring-3 evdev test payload); filed to lane C 2026-09-02",
     "check-frame-needles.py":
@@ -112,9 +118,11 @@ PINNED: dict[str, str] = {
     "check-generated-tables.py":
         "lane C (gui/font generated tables); filed to lane C 2026-09-02",
     "check-key-release-wiring.py":
-        "lane C (windowed programs); filed to lane C 2026-09-02",
+        "lane C (windowed programs); filed to lane C 2026-09-02; "
+        "self-test wired 2026-09-03",
     "check-window-wiring.py":
-        "lane C (GUI programs' main); filed to lane C 2026-09-02",
+        "lane C (GUI programs' main); filed to lane C 2026-09-02; "
+        "self-test wired 2026-09-03",
     # The four bash oracles.  These are not gates that happen to be unwired --
     # they are unwireable on the boot test's own terms, and their docstrings
     # said so before this list existed.  Each shells out to real bash through

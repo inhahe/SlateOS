@@ -110110,6 +110110,16 @@ else (see the header comment at `boot-test.sh:1168-1183`).
 4. **Give `run_checker` an opt-in skip channel,** then wire
    `check-libc-shape.py`. Until then it is correctly excluded, not forgotten.
 
+   **The channel is DONE as of 2026-09-03:** `run_checker --may-skip <label> …`
+   treats exit 2 as a loud skip that returns 0 and sets `RUN_CHECKER_SKIPPED`,
+   while an *unflagged* exit 2 keeps aborting (lane A's stated constraint — a
+   floor must still stop the run). See design-decisions.md §753, and
+   `scripts/test-pre-push-run-checker.py` group 9. **Wiring the gates is the
+   half still outstanding**, and it is not merely mechanical: a gate wired with
+   `--may-skip` whose tool is missing everywhere is back to being an unrun gate
+   *without the ratchet reporting it as one*, because it now counts as wired.
+   That visibility regression is named in §753 and is not solved yet.
+
 ### Why this was not caught by the meta-gate that found it
 
 `check-gates-can-refuse.py` answers "can this gate return non-zero?" It cannot
@@ -112468,12 +112478,14 @@ entry is the other half of it.
    were converted away from (`TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH`),
    and it is the first thing to fix regardless of wiring, because it is wrong
    even when the gate is run by hand. It must exit **2**.
-2. **`run_checker` aborts the build on any exit but 0 or 1.** Once (1) is fixed,
-   a WSL-less host aborts instead of skipping. The fix is the opt-in
-   `run_checker --may-skip <name>` channel that lane A asked for in
-   `requests/a-b-yes-to-the-self-test-rule-and-one-half-it-does-not-cover.md` §3,
-   which `check-libc-shape.py` is also waiting on — five pinned gates now turn
-   on that one change.
+2. ~~**`run_checker` aborts the build on any exit but 0 or 1.**~~ **DONE
+   2026-09-03.** `run_checker --may-skip <label> …` is in, with group 9 of
+   `scripts/test-pre-push-run-checker.py` behind it and design-decisions.md
+   §753 recording the tradeoff. An unflagged exit 2 still aborts, which is what
+   lane A asked to keep. Note for step (1): the skip arm rejects a decline whose
+   output carries a `usage:` banner, because **argparse also exits 2** — so
+   whatever bashprobe prints on a missing WSL must not begin `usage:`, or the
+   gate will abort rather than skip.
 3. **None of the four has a `--self-test`.** Lane C's request flags this from
    direct experience: three of the five gates it wired the same day shipped an
    unrun `--self-test`, and a scanner that has stopped scanning reports zero

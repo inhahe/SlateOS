@@ -44,6 +44,55 @@
 # finding, it lands in the no-verdict arm too, and the run is still refused —
 # the misclassification costs a confusing message, never a missed defect.
 #
+# ## `--may-skip`: the fourth outcome, and why it is opt-in per call site
+#
+# Some gates are right to decline. `check-libc-shape.py` grades a build
+# artifact and returns 2 when `libc.a` is stale; the four `check-*-vs-bash.py`
+# oracles ask real bash through WSL and cannot ask at all on a host without it.
+# For those, "the checker did not reach a verdict" is not a defect in the tree
+# and not a reason to refuse the build — but under the rule above it aborts, so
+# five such gates sat pinned as unwired, i.e. never asked even on the hosts
+# where they *would* have worked. That is the worse failure: a gate nothing
+# runs enforces nothing.
+#
+# The loosening is **per call site, never global**, at lane A's explicit
+# request, and the reason is that the abort-on-2 rule is load-bearing for
+# everything else. A floor — "this run inspected fewer files than it must have"
+# — reports 2 as well, and for a floor, aborting is exactly right. A global
+# "treat 2 as skip" would convert every floor in the tree into a shrug. So the
+# flag names the *skip* case at the one call site that has established the
+# right to it, and an unflagged 2 keeps aborting exactly as before.
+#
+# Four conditions, all required, because a skip that nobody notices is the
+# thing this whole file exists to prevent:
+#
+# 1. **The call site passed `--may-skip`.** Whoever wired the gate asserted that
+#    this gate has a legitimate can't-answer.
+# 2. **No Python traceback.** A crash that happens to exit 2 is a crash. Without
+#    this, adding the flag to a call site would also silence its crashes, and
+#    the flag would be a bypass rather than a channel.
+# 3. **No `usage:` banner.** This one is not obvious and is the reason the flag
+#    is nearly a footgun: **`argparse` exits 2 for a usage error.** So a call
+#    site carrying `--may-skip` whose invocation later grows a typo — a renamed
+#    flag, an argument that stopped being accepted — would exit 2, print, and be
+#    read as a legitimate decline. The gate would then skip on *every* host,
+#    forever, reporting a reason that is really argparse complaining. Nothing
+#    else in the run would say so. argparse's first line is `usage: …`, which
+#    makes it as cheaply detectable as the traceback banner, and is caught the
+#    same way for the same reason.
+# 4. **The checker printed something.** A skip is a claim — "I could not answer,
+#    and here is why" — and a claim with no evidence is indistinguishable from a
+#    gate that silently did nothing, which is precisely the shape being guarded
+#    against. A silent exit 2 is therefore *not* a skip; it takes the no-verdict
+#    arm and aborts, flag or no flag.
+#
+# A skip returns **0**, so the call site's `if ! run_checker …` keeps its shape,
+# and sets `RUN_CHECKER_SKIPPED` (with `RUN_CHECKER_SKIP_REASON` carrying the
+# checker's first line) so a caller that reports "N gates ran" can report "and M
+# skipped" truthfully rather than counting a skip as a pass. Both are cleared at
+# the top of *every* call, including calls without the flag: a stale flag from
+# three gates ago is how a skip gets attributed to the wrong gate.
+#
 # ## The no-verdict message reads the exit code before advising
 #
 # "No verdict" is one outcome but not one *cause*, and until 2026-09-02 the
@@ -106,10 +155,33 @@
 #                     The hook uses it to say why the gate's bypass is the wrong
 #                     reaction; boot-test has no bypass and leaves it unset.
 
-# run_checker <label> <command> [args...]
+# run_checker [--may-skip] <label> <command> [args...]
 run_checker() {
+    # Cleared on every call, flagged or not — see the header on stale state.
+    # Both are the *outward* channel: this file only ever writes them, and the
+    # caller reads them, which is why shellcheck cannot see a use.
+    # shellcheck disable=SC2034
+    RUN_CHECKER_SKIPPED=
+    # shellcheck disable=SC2034
+    RUN_CHECKER_SKIP_REASON=
+    _rc_may_skip=
+    if [ "$1" = "--may-skip" ]; then
+        _rc_may_skip=1
+        shift
+    fi
     _rc_label=$1
     shift
+    # A miscall is worth catching here rather than downstream. `"$@"` with
+    # nothing in it runs nothing and reports success, so `run_checker --may-skip
+    # libc-shape` -- the flag typed where the label goes, or a command that got
+    # word-split away -- would be a gate that passes without existing. That is
+    # the same green-report-without-a-check failure the rest of this file is
+    # about, so it aborts rather than returning.
+    if [ "$#" -eq 0 ]; then
+        echo "${CHECKER_PROG:-checker}: run_checker: no command given for gate '$_rc_label'." >&2
+        echo "usage: run_checker [--may-skip] <label> <command> [args...]" >&2
+        exit 1
+    fi
     _rc_prog=${CHECKER_PROG:-checker}
     _rc_dir=${CHECKER_LOGDIR:-${TMPDIR:-/tmp}}
     # `$$` disambiguates concurrent runs, and it is not belt-and-braces on top
@@ -154,7 +226,63 @@ run_checker() {
     _rc_first=$(head -n 1 "$_rc_log" 2>/dev/null)
     [ -n "$_rc_first" ] || _rc_first="(it printed nothing)"
 
+    # The declined-verdict arm. All four conditions are checked here rather
+    # than folded into one test so that a future reader can see which one a
+    # given call failed: the empty-output and `usage:` cases in particular fall
+    # through to the no-verdict message below *on purpose*, and that is not
+    # obvious from a single `&&` chain. See the header for why a `usage:`
+    # banner disqualifies a skip -- argparse exits 2 too.
+    if [ -n "$_rc_may_skip" ] && [ "$_rc" = "2" ] &&
+       ! grep -q '^Traceback (most recent call last):' "$_rc_log" &&
+       ! grep -q '^usage: ' "$_rc_log" &&
+       [ -s "$_rc_log" ]; then
+        # shellcheck disable=SC2034  # outward channel; see the top of the function
+        RUN_CHECKER_SKIPPED=1
+        # shellcheck disable=SC2034
+        RUN_CHECKER_SKIP_REASON=$_rc_first
+        rm -f "$_rc_log"
+        # Loud, and on its own line, because the one thing a skip must never do
+        # is read like a pass in a scrollback of twenty-eight gates. The reason
+        # is quoted inline for the same purpose the 126/127 arms quote it: the
+        # log is deleted here (a skip is an expected outcome on hosts that lack
+        # the tool, and one file per skipped gate per run is litter), so the
+        # transcript is where the evidence has to live.
+        echo "$_rc_prog: SKIPPED $_rc_label -- it declined to answer, and this call site allows that." >&2
+        echo "$_rc_prog:   reason: $_rc_first" >&2
+        echo "$_rc_prog:   nothing was checked here. This is not a pass." >&2
+        return 0
+    fi
+
     case "$_rc" in
+    2)
+        # Reached only when the skip arm above declined the case, so this text
+        # has to cover both shapes: no flag, or the flag with nothing printed.
+        _rc_why="2 is this tree's code for \"I did not reach a verdict\" -- a checker saying it
+could not judge, rather than judging. Its first line of output was
+
+    $_rc_first
+
+There are three ways to be here, and that line tells them apart.
+
+If it begins \"usage:\", the invocation is wrong -- argparse exits 2 for a bad
+flag or a missing argument. Nothing was checked, and no host will behave any
+differently: fix the call site. (This case is deliberately never treated as a
+skip, even where skipping is allowed, because a typo in a wired gate would
+otherwise silence it on every host forever.)
+
+If the checker named something it needed and could not get -- a build artifact,
+WSL, a baseline file -- then it behaved correctly and this call site simply does
+not allow it to decline. If that gate is one that legitimately cannot answer on
+some hosts, pass --may-skip before its label and it will skip loudly instead of
+stopping the run. Do NOT add that flag to silence a gate whose inputs *should*
+have been there: for a floor -- \"I inspected fewer files than I must have\" --
+exiting 2 is the whole point and aborting is the correct response.
+
+If instead it printed nothing at all, that is why it is here even if the call
+site did pass --may-skip: a skip has to say what it could not do. A checker that
+exits 2 in silence is indistinguishable from one that did nothing, so it is
+never taken as a skip. Fix the checker to explain itself."
+        ;;
     126)
         _rc_why="126 is the shell's code for \"found it, could not execute it\", which no
 checker in this tree ever returns as a verdict of its own. Something about the

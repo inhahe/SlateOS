@@ -201,22 +201,34 @@ def write_driver(
     script: Path,
     *args: str,
     configured: bool = True,
+    may_skip: bool = False,
 ) -> Path:
     """The one-shot shell script that calls `run_checker` as a caller would.
 
     Named after the checker it drives rather than a fixed `driver.sh`, because
     group 8 runs two drivers at once and a shared name would have the second
-    rewrite the first's script out from under a running `sh`.
+    rewrite the first's script out from under a running `sh`. `may_skip` is in
+    the name for the same reason: several checkers below are driven both with
+    and without the flag, and that is the whole comparison.
+
+    The marker line reports `RUN_CHECKER_SKIPPED` on *every* run, not just the
+    flagged ones. A skip returns 0 exactly as a pass does, so the variable is
+    the only thing that tells them apart -- and printing it unconditionally is
+    what lets an unflagged call assert that it did **not** come back set.
     """
-    driver = tmp / f"driver-{script.stem}.sh"
+    driver = tmp / f"driver-{script.stem}{'-mayskip' if may_skip else ''}.sh"
     driver.write_text(
         "set -u\n"
         + preamble(tmp, configured)
         + f"{func}\n"
-        + f'run_checker testgate "{sys.executable}" "{script.as_posix()}" '
+        + f"run_checker {'--may-skip ' if may_skip else ''}testgate "
+        + f'"{sys.executable}" "{script.as_posix()}" '
         + " ".join(args)
         + "\n"
-        + 'echo "MARKER-RETURNED rc=$?"\n',
+        # `$?` first: anything between the call and this line would overwrite it.
+        + 'echo "MARKER-RETURNED rc=$?"\n'
+        + 'echo "MARKER-SKIPPED=[${RUN_CHECKER_SKIPPED:-}]"\n'
+        + 'echo "MARKER-REASON=[${RUN_CHECKER_SKIP_REASON:-}]"\n',
         encoding="utf-8",
     )
     return driver
@@ -228,13 +240,15 @@ def run(
     script: Path,
     *args: str,
     configured: bool = True,
+    may_skip: bool = False,
 ) -> subprocess.CompletedProcess:
     """Drive `run_checker` once, in a shell, exactly as a caller would.
 
     `MARKER-RETURNED` is echoed only if the helper *returns*; the no-verdict
     path exits the caller, so its absence is the assertion that it did.
     """
-    driver = write_driver(tmp, func, script, *args, configured=configured)
+    driver = write_driver(tmp, func, script, *args, configured=configured,
+                          may_skip=may_skip)
     return subprocess.run(
         ["sh", str(driver)],
         capture_output=True,
@@ -309,8 +323,17 @@ def code_lines(text: str) -> list[str]:
 # "runs every checker through it" count assertion below drops and says so --
 # which is the intended failure, and better than a regex that quietly accepts
 # anything and goes back to matching prose.
+#
+# `--may-skip` has to be consumed explicitly rather than left to fall out of the
+# label class, because it does not fall out: the class is `[a-z0-9$-]+`, which
+# contains `-`, so the flag matches it perfectly and the first `--may-skip` call
+# site wired would be recorded as a *gate named `--may-skip`*. Every assertion
+# below reads that name -- the duplicate-label check would then collide the
+# moment a second such call site existed, and the collision would name a gate
+# that does not exist. Caught here before any call site used the flag.
 LABEL_RE = re.compile(
-    r"^[ \t]*(?:if[ \t]+)?(?:![ \t]*)?run_checker[ \t]+\"?([a-z0-9$-]+)",
+    r"^[ \t]*(?:if[ \t]+)?(?:![ \t]*)?run_checker[ \t]+"
+    r"(?:--may-skip[ \t]+)?\"?([a-z0-9$-]+)",
     re.MULTILINE,
 )
 
@@ -496,21 +519,27 @@ def main() -> int:
         log.unlink(missing_ok=True)
 
         # ------------------------------------------------------------------
-        # A checker invoked wrongly by the caller is also not the operator's
-        # defect. Several checkers use exit 2 for a usage error.
-        print("group 4: a checker that exited 2")
-        usage = fake_checker(
+        # A checker that died in a way nothing here has a specific reading for
+        # is not the operator's defect either, and gets the fallback advice.
+        #
+        # This group used to use exit 2 as its "ordinary code". It cannot any
+        # more: 2 is now this tree's declined-verdict code and has an arm of
+        # its own (group 4c), so using it here would have asserted the very
+        # message the new arm replaces. Exit 3 is the replacement precisely
+        # because nothing reads it -- which is what "ordinary" meant all along.
+        print("group 4: a checker that exited in a way nothing reads")
+        odd = fake_checker(
             tmp_root,
-            "usage",
-            "import sys\nprint('--fix needs at least one path')\nsys.exit(2)\n",
+            "odd",
+            "import sys\nprint('the index is corrupt')\nsys.exit(3)\n",
         )
-        r = run(tmp_root, func, usage)
+        r = run(tmp_root, func, odd)
         out = r.stdout + r.stderr
         flat = flatten(out)
         check("does not return to the gate", "MARKER-RETURNED" not in out)
         check("aborts the run", r.returncode == 1, f"rc={r.returncode}")
         check("says no verdict was reached", "never reached a verdict" in flat)
-        check("reports the exit code it saw", "exited 2" in flat)
+        check("reports the exit code it saw", "exited 3" in flat)
         # The negative half of group 4b's discrimination, and it has to live
         # here rather than there: a patch that printed the launch-failure
         # reading for *every* non-verdict code would satisfy every assertion
@@ -521,6 +550,41 @@ def main() -> int:
         check("does not offer the launch-failure reading",
               "could not execute it" not in flat
               and "could not run it at all" not in flat)
+        # And the same guard for the exit-2 reading, for the same reason.
+        check("does not offer the declined-verdict reading",
+              "did not reach a verdict" not in flat)
+        log.unlink(missing_ok=True)
+
+        # ------------------------------------------------------------------
+        # Exit 2 is not an ordinary code in this tree: checkers use it to say
+        # "I could not judge" -- inputs missing, a floor unmet, a tool absent.
+        # Advising "re-run it alone, the machine was busy" is wrong for all of
+        # those. Without --may-skip it still aborts, which is the half lane A
+        # asked to keep intact.
+        print("group 4c: a checker that declined to answer, at a call site that does not allow it")
+        declines = fake_checker(
+            tmp_root,
+            "declines",
+            "import sys\n"
+            "print('libc.a is older than the sources -- nothing to judge')\n"
+            "sys.exit(2)\n",
+        )
+        r = run(tmp_root, func, declines)
+        out = r.stdout + r.stderr
+        flat = flatten(out)
+        check("does not return to the gate", "MARKER-RETURNED" not in out)
+        check("an unflagged decline still aborts", r.returncode == 1,
+              f"rc={r.returncode}")
+        check("reports the exit code it saw", "exited 2" in flat)
+        check("reads 2 as a declined verdict", "did not reach a verdict" in flat)
+        check("quotes what the checker said it lacked", "libc.a is older" in flat)
+        check("names the flag that would allow the decline", "--may-skip" in flat)
+        check("warns against using the flag to silence a floor",
+              "aborting is the correct response" in flat)
+        # The fallback advice is wrong here and must not appear: nothing about
+        # a missing input is fixed by re-running on a quieter machine.
+        check("does not give the contention advice",
+              "Re-run it alone before concluding anything" not in flat)
         log.unlink(missing_ok=True)
 
         # ------------------------------------------------------------------
@@ -689,6 +753,14 @@ def main() -> int:
         check("the label extractor ignores run_checker named in prose",
               "makes" not in found and "call" not in found, f"found {found}")
 
+        # `--may-skip` is spelled out of a character class that would otherwise
+        # swallow it. Asserted here rather than left to the first real call
+        # site, which would have reported a gate named `--may-skip`.
+        flagged = run_checker_labels(
+            'run_checker --may-skip libc-shape "$py" scripts/check-libc-shape.py')
+        check("the label extractor reads past --may-skip to the real label",
+              flagged == ["libc-shape"], f"found {flagged}")
+
         hook_gates = run_checker_labels(hook)
         check("every pre-push call is named", all(hook_gates),
               f"found {len(hook_gates)} calls")
@@ -735,6 +807,208 @@ def main() -> int:
               not stale,
               f"{', '.join(stale)} is pinned but no longer duplicated -- "
               "drop it from HOOK_DUPES_OK")
+        # ------------------------------------------------------------------
+        # `--may-skip` exists because five gates were pinned as unwired rather
+        # than run: each has a legitimate "I cannot answer here" (a stale build
+        # artifact, a host without WSL), and abort-on-2 made wiring them mean
+        # aborting every build on such a host. A gate nothing runs enforces
+        # nothing, so the decline needed a channel.
+        #
+        # Every assertion below is really one question: can a skip ever be
+        # mistaken for a pass? It returns 0, so the answer has to come from
+        # everything around it -- the notice, the variable, and above all the
+        # three shapes that look like a decline and are not.
+        print("group 9: a gate allowed to decline")
+        skipper = fake_checker(
+            tmp_root,
+            "skipper",
+            "import sys\n"
+            "print('wsl is not installed -- cannot ask bash, nothing to judge')\n"
+            "sys.exit(2)\n",
+        )
+        r = run(tmp_root, func, skipper, may_skip=True)
+        out = r.stdout + r.stderr
+        flat = flatten(out)
+        check("returns to the gate rather than aborting",
+              "MARKER-RETURNED rc=0" in out, out.strip()[-300:])
+        check("says it skipped, in those words", "SKIPPED testgate" in out)
+        check("quotes the reason the checker gave",
+              "wsl is not installed" in flat)
+        # The load-bearing sentence. A skip returns 0 and a pass returns 0, so
+        # this is the only thing in the transcript that keeps them apart for a
+        # reader scrolling past twenty-eight gates.
+        check("says plainly that this is not a pass",
+              "This is not a pass" in flat)
+        check("sets RUN_CHECKER_SKIPPED so a caller can count it",
+              "MARKER-SKIPPED=[1]" in out, out.strip()[-300:])
+        check("carries the reason to the caller too",
+              "MARKER-REASON=[wsl is not installed" in out)
+        check("does not keep a log for an expected outcome",
+              not KeptLog(tmp_root, "pre-push", "testgate").exists())
+        # It must not read as a refusal either: the run is continuing.
+        check("does not print the refusal boilerplate",
+              "never reached a verdict" not in flat and "REFUSING" not in flat)
+
+        # --- the three shapes that must NOT be taken as a decline -----------
+        # A crash that lands on 2. Without this the flag would be a bypass:
+        # adding it to a call site would silence that gate's crashes too.
+        #
+        # The fixture has to exit **2**, and getting that wrong is easy: the
+        # first version here raised out of a failed `open`, which exits 1, so it
+        # was caught by the exit-1 traceback rule that predates this group and
+        # never reached the skip arm at all. It passed while the guard it exists
+        # to pin was deleted -- found by mutation, not by reading. The shape
+        # below is realistic as well as correct: a checker that means to report
+        # "I could not judge", and leaks the traceback into its own message.
+        crashes2 = fake_checker(
+            tmp_root,
+            "crashes2",
+            "import sys, traceback\n"
+            "try:\n"
+            "    open('/nonexistent-input-file')\n"
+            "except OSError:\n"
+            "    traceback.print_exc()\n"
+            "    sys.exit(2)\n",
+        )
+        r = run(tmp_root, func, crashes2, may_skip=True)
+        out = r.stdout + r.stderr
+        check("the crash fixture really does exit 2, not 1",
+              "exited 2" in flatten(out), out.strip()[-300:])
+        check("a traceback is never a decline, flag or no flag",
+              "MARKER-RETURNED" not in out and r.returncode == 1,
+              out.strip()[-300:])
+        check("and it is not reported as a skip", "SKIPPED" not in out)
+        log.unlink(missing_ok=True)
+
+        # An argparse usage error. This is the one that makes the flag nearly a
+        # footgun: argparse exits 2, so a wired call site whose invocation grew
+        # a typo would skip on every host, forever, and nothing else in the run
+        # would say so. Driven through real argparse rather than a printed
+        # `usage:` string, because the thing being pinned is argparse's actual
+        # behaviour, not this test's idea of it.
+        argp = fake_checker(
+            tmp_root,
+            "argp",
+            "import argparse\n"
+            "ap = argparse.ArgumentParser()\n"
+            "ap.add_argument('--check', action='store_true')\n"
+            "ap.parse_args()\n"
+            "print('ok -- 0 sites')\n",
+        )
+        r = run(tmp_root, func, argp, "--reneamed-flag", may_skip=True)
+        out = r.stdout + r.stderr
+        flat = flatten(out)
+        check("a usage error exits 2, which is the hazard this guards",
+              "usage:" in out, out.strip()[-300:])
+        check("a bad invocation is never a decline",
+              "MARKER-RETURNED" not in out and r.returncode == 1,
+              out.strip()[-300:])
+        check("and it is not reported as a skip", "SKIPPED" not in out)
+        check("the message says the invocation is what is wrong",
+              "the invocation is wrong" in flat)
+        log.unlink(missing_ok=True)
+
+        # A silent decline. "I could not answer" with no reason is
+        # indistinguishable from a gate that did nothing at all, which is the
+        # failure this whole file exists to prevent.
+        mute = fake_checker(tmp_root, "mute", "import sys\nsys.exit(2)\n")
+        r = run(tmp_root, func, mute, may_skip=True)
+        out = r.stdout + r.stderr
+        flat = flatten(out)
+        check("a silent decline is not a skip",
+              "MARKER-RETURNED" not in out and r.returncode == 1,
+              out.strip()[-300:])
+        check("and it says why it was not accepted as one",
+              "a skip has to say what it could not do" in flat)
+        log.unlink(missing_ok=True)
+
+        # --- the flag loosens exit 2 and nothing else -----------------------
+        r = run(tmp_root, func, found_checker_for_skip_group := fake_checker(
+            tmp_root, "found2", "import sys\nprint('src/a.rs: 3 sites')\n"
+            "sys.exit(1)\n"), may_skip=True)
+        out = r.stdout + r.stderr
+        check("a finding is still a finding at a skip-allowed call site",
+              "MARKER-RETURNED rc=1" in out, out.strip()[-300:])
+        check("a finding is not miscounted as a skip",
+              "MARKER-SKIPPED=[]" in out, out.strip()[-300:])
+        check("the log of a finding is still kept",
+              KeptLog(tmp_root, "pre-push", "testgate").exists())
+        log.unlink(missing_ok=True)
+        del found_checker_for_skip_group
+
+        r = run(tmp_root, func, clean, may_skip=True)
+        out = r.stdout + r.stderr
+        check("a pass at a skip-allowed call site is still a pass",
+              "MARKER-RETURNED rc=0" in out, out.strip()[-300:])
+        check("a pass does not set the skipped flag",
+              "MARKER-SKIPPED=[]" in out, out.strip()[-300:])
+
+        # 126/127 are the shell's, not the checker's, so the flag does not
+        # reach them: a gate that could not be launched has not declined.
+        nolaunch = fake_checker(
+            tmp_root, "nolaunch",
+            "import sys\nprint('boom')\nsys.exit(127)\n")
+        r = run(tmp_root, func, nolaunch, may_skip=True)
+        out = r.stdout + r.stderr
+        check("a launch failure is not a decline even where declining is allowed",
+              "MARKER-RETURNED" not in out and r.returncode == 1,
+              out.strip()[-300:])
+        log.unlink(missing_ok=True)
+
+        # --- the flag does not leak between calls ---------------------------
+        # `RUN_CHECKER_SKIPPED` is set by one gate and read by the caller after
+        # the next, so a variable left standing is how a skip gets attributed to
+        # a gate that really ran. Two calls in ONE shell, which is the only way
+        # to observe it -- every other case here is a fresh process, where a
+        # stale variable cannot exist by construction.
+        leak_driver = tmp_root / "driver-leak.sh"
+        leak_driver.write_text(
+            "set -u\n"
+            + preamble(tmp_root, True)
+            + f"{func}\n"
+            + f'run_checker --may-skip gate_one "{sys.executable}" '
+            + f'"{skipper.as_posix()}"\n'
+            + 'echo "AFTER-ONE=[${RUN_CHECKER_SKIPPED:-}]"\n'
+            + f'run_checker gate_two "{sys.executable}" "{clean.as_posix()}"\n'
+            + 'echo "AFTER-TWO=[${RUN_CHECKER_SKIPPED:-}]"\n'
+            + 'echo "AFTER-TWO-REASON=[${RUN_CHECKER_SKIP_REASON:-}]"\n',
+            encoding="utf-8",
+        )
+        r = subprocess.run(["sh", str(leak_driver)], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           env=child_env())
+        out = r.stdout + r.stderr
+        check("the skipping gate sets the flag", "AFTER-ONE=[1]" in out,
+              out.strip()[-300:])
+        check("the next gate clears it, so a skip is not attributed to it",
+              "AFTER-TWO=[]" in out, out.strip()[-300:])
+        check("and clears the reason with it",
+              "AFTER-TWO-REASON=[]" in out, out.strip()[-300:])
+        KeptLog(tmp_root, "pre-push", "gate_one").unlink(missing_ok=True)
+        KeptLog(tmp_root, "pre-push", "gate_two").unlink(missing_ok=True)
+
+        # --- a miscall is not a silent pass ---------------------------------
+        # `run_checker --may-skip libc-shape` with the command word-split away
+        # would run nothing and report success: a gate that passes without
+        # existing. Same shape as everything else here, so it aborts.
+        miscall = tmp_root / "driver-miscall.sh"
+        miscall.write_text(
+            "set -u\n"
+            + preamble(tmp_root, True)
+            + f"{func}\n"
+            + "run_checker --may-skip lonely\n"
+            + 'echo "MARKER-RETURNED rc=$?"\n',
+            encoding="utf-8",
+        )
+        r = subprocess.run(["sh", str(miscall)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=child_env())
+        out = r.stdout + r.stderr
+        check("a call with no command aborts rather than passing",
+              "MARKER-RETURNED" not in out and r.returncode == 1,
+              out.strip()[-300:])
+        check("and names the gate whose call is malformed",
+              "no command given for gate 'lonely'" in out, out.strip()[-300:])
+
         # ------------------------------------------------------------------
         # The distinct-label rule group 7 checks is about one invocation
         # overwriting itself. This is the other axis, which no assertion

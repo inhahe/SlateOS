@@ -366,7 +366,21 @@ def main() -> int:
         failures += verdict == "fail"
         skipped += verdict == "skip"
 
-    # The .py gate suite, in the same order boot-test.sh globs it.
+    # The .py gate suite.  This glob is a SUPERSET of what boot-test.sh runs,
+    # and the difference is the point of running this script at all.
+    #
+    # The comment here used to read "in the same order boot-test.sh globs it",
+    # which was false in both halves: boot-test.sh does not glob, it names each
+    # checker in an explicit `run_checker` line, and it does not run all of
+    # them.  Measured 2026-09-02: of 31 `check-*.py`, **10 are named nowhere in
+    # boot-test.sh**, and 9 of those 10 are absent from the pre-push hook too --
+    # so they run here and nowhere else, in a script no one is obliged to run.
+    # See known-issues.md -> TD-B-TEN-GATES-ARE-NEVER-ASKED.
+    #
+    # Being a superset is the right shape for this script -- a pre-flight is
+    # supposed to catch more than the blocking gate, not exactly as much -- but
+    # a *silent* superset teaches the reader that a clean run here means a
+    # clean boot test, and it does not.
     for path in sorted(SCRIPTS.glob("check-*.py")):
         t = time.monotonic()
         rc, out = _run([sys.executable, str(path)])

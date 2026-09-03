@@ -21967,11 +21967,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // expansion within `$'...'`, and the decoder downstream needs the
         // bytes it was given.
         let out = expand_vars_bytes(b"$'$#'");
-        assert_eq!(
-            out,
-            b"$'$#'".to_vec(),
-            "`$'...'` contents are not expanded"
-        );
+        assert_eq!(out, b"$'$#'".to_vec(), "`$'...'` contents are not expanded");
 
         // The control. Without it an expander that simply never expanded
         // anything would pass every assertion above: an ordinary single-quoted

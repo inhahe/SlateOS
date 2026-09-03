@@ -108324,6 +108324,65 @@ rather than letting a run produce numbers from a harness that had just failed
 its own test.
 
 ---
+## TD-B-PRE-BOOT-QUICK-IS-NOT-QUICK
+
+**Filed:** 2026-09-02 by Lane B, measured while verifying the §747 SKIP
+rendering end to end (two runs killed by their own timeout, which is how this
+was noticed at all).
+**Status:** open. Not a correctness bug; it costs time and it misleads.
+
+**In short:** `scripts/pre-boot.py --quick` is documented as skipping "the
+slowest gate". It is not the slowest gate — it is the sixth. `--quick` removes
+about **5%** of the run, and the run is about **forty minutes**. Anyone who
+reaches for `--quick` expecting a pre-flight they can sit and wait for will
+instead sit for forty minutes, or kill it and get nothing, which is what
+happened twice here.
+
+**Measured 2026-09-02**, `--quick --no-fmt --no-unix-check` on `os-lane-b`:
+**2261s across 27 gates (37.7 min)**, and **two gates had not started** when a
+2400s cap killed the tree. So the true figure is higher than 37.7 min; it has
+never been observed to completion in this configuration.
+
+| Gate | Time |
+|---|---|
+| `check-variant-lists.py` | **834s** |
+| `check-doc-links.py` | **412s** |
+| `check-user-access-sites.py` | 144s |
+| `check-live-counter-reads.py` | 127s |
+| `check-tick-wiring.py` | 116s |
+| *clippy, what `--quick` skips* | *~113s* |
+| `check-key-release-wiring.py` | 83s |
+| (21 others) | ≤ 80s each |
+
+Two of the 29 gates are 55% of the wall clock.
+
+**Why it matters beyond the wait.** `pre-boot.py` exists to be run *before* the
+boot test, i.e. often. A gate suite nobody can afford to run is a gate suite
+that does not run, and the failure mode is silent: you skip the pre-flight,
+push, and find out from the shared blocking `boot-test.sh` instead — which is
+the one that serialises QEMU across all three worktrees. The cost lands on the
+other two lanes.
+
+**What the proper fix looks like**, in the order I would do it:
+
+1. **Profile `check-variant-lists.py` and `check-doc-links.py` specifically.**
+   834s and 412s for scripts that read source text is far off what the work
+   requires; at a guess (untested) each is re-parsing the tree per query rather
+   than once. Two scripts fixed would return more than half the run.
+2. **Run the `check-*.py` gates concurrently.** They are independent, read-only,
+   and separate processes already — a `ThreadPoolExecutor` over the glob would
+   collapse the tail to roughly the longest single gate. This changes the output
+   ordering, so results must be buffered per gate and printed in glob order, and
+   it must stay sequential for anything that writes (`cargo fmt` already runs
+   first and alone).
+3. **Only then rename or re-scope `--quick`.** Once the phase is minutes rather
+   than forty, the flag can mean what its name says.
+
+Corrected the two places that stated the false claim (module docstring Usage
+section, and the `--quick` argparse help) rather than leaving the measurement
+only here — but the numbers above are the debt, not the wording.
+
+---
 ## TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH
 
 **Filed:** 2026-09-02 by Lane B, out of the gate-7 fix (`dcdd711fe`).

@@ -88,8 +88,18 @@ Usage
 -----
     python scripts/pre-boot.py                  # everything
     python scripts/pre-boot.py --no-fmt         # skip the rustfmt pass
-    python scripts/pre-boot.py --quick          # skip clippy (the ~113 second pole)
+    python scripts/pre-boot.py --quick          # skip clippy (~113s of ~40 min)
     python scripts/pre-boot.py --no-unix-check  # skip the cfg(unix) compile gate
+
+`--quick` is not a fast mode, and its name oversells it.  Measured 2026-09-02
+on this worktree: the `check-*.py` phase alone is **2261s across 27 gates
+(37.7 min)**, and two more had not started when a 2400s cap killed the run.
+Clippy at ~113s is the sixth-longest thing here, not the first --
+`check-variant-lists.py` is **834s** and `check-doc-links.py` **412s**.  So
+`--quick` removes about 5% of the wall clock.  Budget forty minutes for any
+invocation of this script, run it in the background, and do not reach for
+`--quick` expecting a pre-flight you can wait on.  Tracked in known-issues.md
+as TD-B-PRE-BOOT-QUICK-IS-NOT-QUICK.
 
 Exit codes: 0 all clear; 1 a gate failed (its output is printed); 2 could not
 run (bad cwd, missing cargo, or a boot test appears to be in progress).
@@ -307,7 +317,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--no-fmt", action="store_true", help="skip the rustfmt pass")
     ap.add_argument(
-        "--quick", action="store_true", help="skip clippy (the slowest gate)"
+        # NOT "the slowest gate" -- it is the sixth.  See the Usage section of
+        # the module docstring for the measured table; this flag saves ~113s of
+        # a ~40 minute run.
+        "--quick", action="store_true", help="skip clippy (~113s of a ~40min run)"
     )
     ap.add_argument(
         "--force",

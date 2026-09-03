@@ -50,6 +50,7 @@ go and look at. Anything that needs real name resolution wants `syn`, not this.
 from __future__ import annotations
 
 import re
+import sys
 
 # The indentation before a `fn`, in callers' regexes.
 #
@@ -373,3 +374,105 @@ def fn_body(text: str, start: int) -> str | None:
             return text[j + 1 : end - 1]
         j += 1
     return None
+
+
+def _self_test() -> int:
+    """Pin the lexer's behaviour on the shapes that are easy to get wrong.
+
+    This module is a library, not a gate, and it had no test of any kind until
+    2026-09-03 -- while four checkers
+    (`check-window-wiring`, `check-key-release-wiring`, `check-frame-needles`
+    via its own copy, `check-diskcleanup-test-roots`) decide what to report
+    based on what it returns. A wrong answer here does not raise; it silently
+    changes what those gates can see, in the direction of seeing less.
+
+    The cases below are the ones where a plausible reimplementation diverges:
+    nesting, raw strings whose body contains the delimiter, the lifetime/char
+    ambiguity, and escapes. Each is a real Rust construct that appears in this
+    tree.
+
+        python scripts/rustscan.py --self-test
+    """
+    failures = 0
+
+    def check(what: str, got: object, want: object) -> None:
+        nonlocal failures
+        if got != want:
+            failures += 1
+            print(f"FAIL {what}\n  got  {got!r}\n  want {want!r}")
+
+    # Comments are blanked, and the offsets of everything else are unchanged --
+    # which is what lets a gate report a line number the reader can go to.
+    check(
+        "line comment",
+        strip_comments("let a = 1; // note\nlet b = 2;"),
+        "let a = 1;        \nlet b = 2;",
+    )
+    check(
+        "newlines survive a block comment",
+        strip_comments("a\n/* one\ntwo */\nb"),
+        "a\n      \n      \nb",
+    )
+    # Rust block comments nest; `find(\"*/\")` stops at the inner one and leaves
+    # the tail of the file unblanked.
+    check(
+        "nested block comment",
+        strip_comments("a /* x /* y */ z */ b"),
+        "a                   b",
+    )
+    # A raw string's body may contain the plain delimiter, so the close must be
+    # matched on the hash count it opened with.
+    check(
+        "raw string containing a quote",
+        strip_comments('r#"raw " str"# end'),
+        "               end",
+    )
+    check(
+        "escaped quote does not close the string",
+        strip_comments('"esc \\" still" out'),
+        "               out",
+    )
+    # The one genuine ambiguity in Rust's grammar here: `'a'` is a literal and
+    # `&'a T` is a lifetime, and blanking the latter would eat the type.
+    check(
+        "char literal goes, lifetime stays",
+        strip_comments("let c='a'; let l:&'a T;"),
+        "let c=   ; let l:&'a T;",
+    )
+    check(
+        "keep_literals leaves the string standing",
+        strip_comments('let s = "keep"; // go', keep_literals=True),
+        'let s = "keep";      ',
+    )
+    # `keep_literals` still has to *parse* literals, or a `//` inside one opens
+    # a comment that swallows the rest of the line.
+    check(
+        "a slash inside a kept literal does not open a comment",
+        strip_comments('let u = "http://x"; let v = 1;', keep_literals=True),
+        'let u = "http://x"; let v = 1;',
+    )
+    # `#[cfg(test)]` items go, and the production item after them stays.
+    check(
+        "cfg(test) module is blanked, the item after it is not",
+        "fn keep()" in strip_cfg_test("#[cfg(test)]\nmod t { fn gone() {} }\nfn keep() {}"),
+        True,
+    )
+    check(
+        "the cfg(test) body really is gone",
+        "gone" in strip_cfg_test("#[cfg(test)]\nmod t { fn gone() {} }\nfn keep() {}"),
+        False,
+    )
+
+    if failures:
+        print(f"\n{failures} self-test failure(s) in rustscan.py")
+        return 1
+    print("ok: rustscan self-test passed")
+    return 0
+
+
+if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(_self_test())
+    print(__doc__)
+    print("This is a library. Run it with --self-test to check it.")
+    sys.exit(0)

@@ -45,10 +45,10 @@
 //! not be shareable; it would just be empty.
 //!
 //! * **Stage 3, opening the destination** — [`open_destination`] and the
-//!   [`Dest`]/[`Clobber`]/[`Opened`]/[`DestError`] vocabulary around it. This
-//!   is the one step where the two programs had genuinely *diverged* rather
-//!   than merely been written twice, and all three differences ran the same
-//!   way: `cp` knew something `mv` did not. See that function's table.
+//!   [`Dest`]/[`Opened`]/[`DestError`] vocabulary around it. This is the one
+//!   step where the two programs had genuinely *diverged* rather than merely
+//!   been written twice, and all three differences ran the same way: `cp` knew
+//!   something `mv` did not. See that function's table.
 //!
 //! What is **not** here yet is the walk that decides what to copy at all, which
 //! is stage 4's, and which is still `cp`'s. Everything in this module is
@@ -224,7 +224,7 @@ pub struct Opts<'a> {
     ///
     /// Read by the walk, and — through [`Deref::resolved`] — by the rule
     /// that decides what a symlink operand means when no `-P`/`-H`/`-L` was
-    /// given. `mv` sets it true (`mv.c:133`): a move is recursive by nature,
+    /// given. `mv` sets it true (`mv.c:147`): a move is recursive by nature,
     /// because a rename moves a whole subtree in one call and the cross-device
     /// fallback has to reproduce that.
     pub recursive: bool,
@@ -243,7 +243,7 @@ pub struct Opts<'a> {
     /// reading it, because [`Deref::Undefined`] is a real value with a rule
     /// behind it.
     ///
-    /// `mv` sets `DEREF_NEVER` (`mv.c:131`), which is the only answer a move
+    /// `mv` sets `DEREF_NEVER` (`mv.c:126`), which is the only answer a move
     /// can give: renaming a symlink moves the link, so a cross-device fallback
     /// that followed it would turn a link into a copy of its target.
     pub dereference: Deref,
@@ -323,6 +323,41 @@ pub struct Opts<'a> {
     /// effect is not "leave the mode alone" but "give a newly created
     /// destination the mode it would have had if nobody had asked".
     pub explicit_no_preserve_mode: bool,
+    /// GNU's `move_mode` (`copy.h:169`): this engine is standing in for
+    /// `rename(2)`, not performing a copy the user asked for. `mv` sets it,
+    /// `cp` never does.
+    ///
+    /// Most of what upstream reads it for is settled elsewhere in this module —
+    /// `mv` supplies its own `Dest::New`, does its own clearing, and leaves
+    /// `unlink_dest_before_opening` false, each documented at the field that
+    /// would otherwise have been the obvious home for it. What is left, and the
+    /// only thing this field decides, is **what `-v` says**, which upstream
+    /// spells in two places and both are visible:
+    ///
+    /// ```text
+    /// $ cp -rv d g                 $ mv -v /other/fs/d g
+    /// 'd' -> 'g'                   created directory 'g'
+    /// 'd/f' -> 'g/f'               created directory 'g/sub'
+    ///                              copied '/other/fs/d/f' -> 'g/f'
+    ///                              removed '/other/fs/d/f'
+    ///                              removed directory '/other/fs/d/sub'
+    ///                              removed directory '/other/fs/d'
+    /// ```
+    ///
+    /// Both measured against 9.4. The first two lines are this field: a
+    /// directory that was created says `created directory %s` for a move
+    /// (`copy.c:2988`) and the arrow line for a copy, and a *non*-directory
+    /// gets the `copied ` prefix, which upstream prints from the EXDEV block
+    /// (`copy.c:2887`) and suppresses at the ordinary site with `x->verbose &&
+    /// !x->move_mode && !S_ISDIR (src_mode)` (`copy.c:2629`).
+    ///
+    /// Every entry inside a moved tree goes the same way, and that is not an
+    /// approximation of upstream but exactly it: `copy_internal` re-attempts
+    /// `renameatu` for each entry it recurses into (`copy.c:2232`), so a tree
+    /// crossing a filesystem boundary answers `EXDEV` once per entry and prints
+    /// `copied ` once per entry. The `removed` lines are `mv`'s own, from `rm`
+    /// (`mv.c:238`), and are not this module's.
+    pub move_mode: bool,
     /// The process's file-mode creation mask, read once and carried.
     ///
     /// **The one field that is not one of GNU's**, and the deviation is
@@ -619,21 +654,24 @@ pub fn create_dir_with_mode(path: &Path, _mode: u32) -> io::Result<()> {
 }
 
 /// What the caller found at the destination's name, which is GNU's `new_dst`
-/// (`copy.c:1456`) with the thing that may be done about it attached.
-///
-/// The two are one value because the second is only ever consulted inside the
-/// first. `-f`'s unlink is reached from the arm where a destination exists and
-/// would not open; there is no such thing as unlinking a destination that is
-/// not there. Two independent parameters would spell a fourth combination —
-/// "nothing is there, and you may remove it" — that the code would have to
-/// ignore and the reader would have to work out was impossible.
+/// (`copy.c:1456`).
 ///
 /// **Which arm is taken is decided by the caller's `stat`, not by what the
 /// first open answers.** GNU branches on `new_dst`, and deriving it instead
 /// from a failed `O_EXCL` would work for a plain file and get an *opaque*
 /// destination wrong — a name that is occupied by something a `stat` could not
 /// describe is still occupied.
-pub enum Dest<'a> {
+///
+/// This carried a second value until 2026-09-03 — a `Clobber` saying whether
+/// `-f` might unlink a destination that would not open, and carrying the
+/// stdout to announce the removal on. Both are now read from the [`Run`] that
+/// [`open_destination`] takes, because both were always *options*, and an
+/// option that travels in the argument the caller computes is an option the
+/// caller can get wrong. The old shape existed only because `cp`'s options and
+/// its stdout lived on the same `Job`, so a function asking for both would
+/// have taken two mutable borrows of one value; [`Run`] holds them as two
+/// fields of one struct, which is exactly the thing that dissolves that.
+pub enum Dest {
     /// GNU's `new_dst == true`: nothing is at the name, or the caller has
     /// already unlinked what was. A move is always this, but *not* because of
     /// [`Opts::unlink_dest_before_opening`], which `mv` sets false
@@ -646,41 +684,7 @@ pub enum Dest<'a> {
     /// Something is at the name, and it is to be truncated in place rather
     /// than recreated: an existing file's mode is not a copy's to narrow, even
     /// for an instant.
-    Exists(Clobber<'a>),
-}
-
-/// What may be done with a destination that exists but will not open, and
-/// where to say it was done.
-///
-/// The removal and the announcement are one thing rather than two flags,
-/// because the announcement is meaningless without the removal: GNU prints
-/// `removed %s` from inside the `unlink_dest_after_failed_open` branch, and
-/// nowhere else.
-pub enum Clobber<'a> {
-    /// GNU's `unlink_dest_after_failed_open = false` (`mv.c:128`): a
-    /// destination that will not open is an error to report, not something to
-    /// remove. Every move is this, and so is every `cp` without `-f`.
-    Never,
-    /// `cp -f`: unlink it and try the create again.
-    ///
-    /// `verbose` is `cp -v`, and the sentence goes out *after* the removal and
-    /// *after* the caller's own `'a' -> 'ro'` announcement — which is what puts
-    /// `removed 'ro'` below that line where `--remove-destination` puts it
-    /// above. GNU prints it from this same point inside `copy_reg`.
-    Unlink {
-        /// Whether to say so.
-        verbose: bool,
-        /// Standard output.
-        ///
-        /// `dyn` where [`Run::err`] is generic, and the reason is the opposite
-        /// of that one rather than an inconsistency. Making this generic would
-        /// put a writer type parameter on [`Dest`], which every [`Dest::New`]
-        /// construction would then have to name — and a move has no stdout
-        /// here to name, so it would have to invent one. A type parameter
-        /// satisfied by a fiction is worse than a vtable dispatch taken at most
-        /// once per operand and only under `-f`.
-        out: &'a mut dyn Write,
-    },
+    Exists,
 }
 
 /// A destination that is open and ready to be written through.
@@ -766,24 +770,24 @@ const OWNER_WRITE: u32 = 0o200;
 ///   `cp -f` over a `0400` destination leaves the *source's* mode behind rather
 ///   than the one it removed.
 ///
-/// `preserve_xattr` is taken as a bare `bool` rather than as an [`Opts`], for
-/// [`ModeDebt::new`]'s reason and one of its own: `cp`'s caller holds its
-/// options and its stdout on the same `Job`, so asking for both an `Opts` and
-/// the [`Clobber::Unlink`] writer would be two mutable borrows of one value.
+/// The options and both output streams arrive together, in the [`Run`]. That
+/// is what lets `-f`'s unlink and the `removed %s` it prints be read from the
+/// same place every other option is read from, rather than being precomputed
+/// into the `dest` argument by each caller.
 ///
 /// # Errors
 ///
 /// [`DestError::Dangling`] for a destination symlink that points at nothing,
 /// [`DestError::Remove`] for an unlink `-f` could not do, and
 /// [`DestError::Io`] for every other failure to open.
-pub fn open_destination(
+pub fn open_destination<E: Write>(
     dst: &Path,
     src_mode: u32,
-    dest: Dest<'_>,
-    preserve_xattr: bool,
+    dest: Dest,
+    run: &mut Run<'_, E>,
     debt: &mut ModeDebt,
 ) -> Result<Opened, DestError> {
-    if let Dest::Exists(clobber) = dest {
+    if matches!(dest, Dest::Exists) {
         match open_truncating(dst) {
             // Nothing was withheld, because nothing was created: an existing
             // file's mode is not a copy's to narrow even for an instant. GNU
@@ -797,26 +801,36 @@ pub fn open_destination(
             // reaches its `O_CREAT` arm in exactly this case too
             // (`dest_errno == ENOENT`), so a race loses nothing.
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => match clobber {
-                Clobber::Never => return Err(DestError::Io(e)),
-                Clobber::Unlink { verbose, out } => {
-                    if let Err(e) = fs::remove_file(dst)
-                        && e.kind() != io::ErrorKind::NotFound
-                    {
-                        return Err(DestError::Remove(e));
-                    }
-                    if verbose {
-                        let _ = writeln!(out, "removed {}", quoteaf_os(dst));
-                    }
+            Err(e) => {
+                // GNU's `unlink_dest_after_failed_open = false` (`mv.c:128`):
+                // a destination that will not open is an error to report, not
+                // something to remove. Every move is this, and so is every
+                // `cp` without `-f`.
+                if !run.opts.unlink_dest_after_failed_open {
+                    return Err(DestError::Io(e));
                 }
-            },
+                if let Err(e) = fs::remove_file(dst)
+                    && e.kind() != io::ErrorKind::NotFound
+                {
+                    return Err(DestError::Remove(e));
+                }
+                // The sentence goes out *after* the removal and *after* the
+                // caller's own `'a' -> 'ro'` announcement — which is what puts
+                // `removed 'ro'` below that line where `--remove-destination`
+                // puts it above. GNU prints it from this same point inside
+                // `copy_reg`, and nowhere else: the announcement is meaningless
+                // without the removal, which is why the two are one branch.
+                if run.opts.verbose {
+                    let _ = writeln!(run.out, "removed {}", quoteaf_os(dst));
+                }
+            }
         }
     }
 
     // GNU's `open_mode` (`copy.c:1451`), whose second half is the whole reason
     // `cp --preserve=xattr` of a read-only file works at all. See
     // [`ModeDebt::extra`].
-    debt.extra = if preserve_xattr && !chown_privileges() {
+    debt.extra = if run.opts.preserve_xattr && !chown_privileges() {
         OWNER_WRITE
     } else {
         0
@@ -1817,6 +1831,18 @@ fn announce<E: Write>(run: &mut Run<'_, E>, src: &Path, dst: &Path, backup: Opti
     if !run.opts.verbose {
         return;
     }
+    // The `copied ` a move puts in front of the same arrow. Upstream prints it
+    // from the EXDEV block (`copy.c:2887`) rather than here, and suppresses
+    // *this* line for a move at `copy.c:2629` — two sites for one sentence,
+    // because upstream's copy has to be silent between the failed rename and
+    // the fallback it chooses. This engine is only ever reached once that
+    // choice is made, so the two collapse into one line with a prefix, and the
+    // output is identical. A directory never reaches here at all: its own
+    // announce is in [`copy_tree`], where the `mkdir` is, and it says something
+    // else entirely.
+    if run.opts.move_mode {
+        let _ = write!(run.out, "copied ");
+    }
     match backup {
         // One `writeln!` and not two, because the parenthesis is part of *this*
         // line rather than a note after it: GNU's `emit_verbose` prints the
@@ -2009,67 +2035,96 @@ fn overwrite_ok<E: Write>(
     )
 }
 
+/// What a check decided about a destination that is already there.
+///
+/// Three outcomes and not a `bool`, because two of GNU's paths leave the
+/// destination alone and they **disagree about the exit status**. Upstream
+/// carries the distinction as two locals — `skipped` and `return_val`
+/// (`copy.c:2341`) — and the second is written `return_val = x->interactive ==
+/// I_ALWAYS_SKIP`, which is exactly what this enum names.
+///
+/// It lived in `mv.rs`, and was a `bool` there until `--update` arrived: every
+/// refusal `mv` had until then was a *failure*, so one bit was enough.
+/// `--update=none` and `--update=older` are the first two that are not, and the
+/// bug that found this out was `mv --update=none` exiting 1 for a file it had
+/// deliberately left alone. It is in the engine now because
+/// [`overwrite_allowed`] needs the same three values for the same reason, and
+/// a second copy of a distinction that has already been got wrong once is how
+/// it gets got wrong twice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Verdict {
+    /// Nothing stands in the way; go on.
+    Proceed,
+    /// Reported, and this operand counts against the exit status.
+    Refused,
+    /// Left alone on purpose, silently, and the command still succeeds.
+    Skipped,
+}
+
 /// The whole of the "is this destination to be left alone" decision — GNU's
 /// one block at `copy.c:2422`, which handles `-n` and `-i` together because
 /// they are two values of one field.
 ///
-/// Returns `true` when the copy should go ahead. The two refusals differ in
-/// what they print — `-n` says `not replacing 'b'`, `-i` says nothing at all
-/// beyond the question it already asked — but not in the status: both make the
-/// operand a failure, which is `copy.h`'s "Skip and fail" for `I_ALWAYS_NO` and
-/// `return_val = x->interactive == I_ALWAYS_SKIP` (false here) for
-/// `I_ASK_USER`.
+/// The two *refusals* differ in what they print — `-n` says `not replacing
+/// 'b'`, `-i` says nothing at all beyond the question it already asked — but
+/// not in the status: both make the operand a failure, which is `copy.h`'s
+/// "Skip and fail" for `I_ALWAYS_NO` and `return_val = x->interactive ==
+/// I_ALWAYS_SKIP` (false here) for `I_ASK_USER`. [`Verdict::Skipped`] is the
+/// third answer and the reason a `bool` will not do: `--update=none` leaves the
+/// destination alone *and succeeds*.
 ///
-/// A **directory** source is exempt from both, as GNU's `! S_ISDIR (src_mode)`
-/// makes it: `cp -rn tree dest` descends and refuses the files inside one at a
-/// time, and `cp -ri tree dest` asks about them one at a time, rather than
-/// either putting a single question about the tree.
+/// A **directory** source is exempt from all of it, as GNU's `! S_ISDIR
+/// (src_mode)` makes it: `cp -rn tree dest` descends and refuses the files
+/// inside one at a time, and `cp -ri tree dest` asks about them one at a time,
+/// rather than either putting a single question about the tree.
 ///
-/// # Only `cp` may call this yet
+/// # Every value of [`Interactive`] now has an answer here
 ///
-/// The `bool` is the limit. `cp`'s parser can produce only three of
-/// [`Interactive`]'s five values, and for all three "go ahead" and "do not, and
-/// count it a failure" is the whole answer. `mv`'s parser produces the other
-/// two — `mv -f` is `AlwaysYes` and `mv --update=none` is `AlwaysSkip` — and
-/// `AlwaysSkip` is a **skip that succeeds**, which this return type cannot say.
-/// That is why `mv` still answers this question for itself, with its own
-/// three-valued `Verdict`, and why routing it through here (stage 5) means
-/// widening this signature first rather than discovering the wrong exit status
-/// afterwards. `mv` had exactly that bug once already.
+/// It used to have three, because `cp`'s parser produces three and the `bool`
+/// could say what all three needed. `mv`'s parser produces the other two — `mv
+/// -f` is `AlwaysYes`, `mv --update=none` is `AlwaysSkip` — and `AlwaysSkip`
+/// is the one that did not fit. Widening the return type is what makes routing
+/// `mv` through here possible; it is deliberately done *before* that routing,
+/// rather than discovering the wrong exit status afterwards, which is how `mv`
+/// found the same defect the first time.
 pub fn overwrite_allowed<E: Write>(
     src_meta: &fs::Metadata,
     target: &Path,
     dest: &DestState,
     run: &mut Run<'_, E>,
-) -> bool {
+) -> Verdict {
     if src_meta.is_dir() || !dest.exists() {
-        return true;
+        return Verdict::Proceed;
     }
     match run.opts.interactive {
         // `AlwaysYes` is `mv -f`, which no caller of this function sets yet —
         // `cp -f` is `unlink_dest_after_failed_open`, a different field. The arm
         // is here rather than under a catch-all so that a program which *does*
         // set it has to arrive at a compile error rather than a silent
-        // fall-through, and `true` is the answer waiting for it: `mv -f`
+        // fall-through, and `Proceed` is the answer waiting for it: `mv -f`
         // overwrites without asking.
-        Interactive::Unspecified | Interactive::AlwaysYes => true,
+        Interactive::Unspecified | Interactive::AlwaysYes => Verdict::Proceed,
         Interactive::AlwaysNo => {
             refuse_no_clobber(target, run);
-            false
+            Verdict::Refused
         }
         // `AlwaysSkip` is `--update=none`, which `mv` has and `cp` does not, so
-        // no caller reaches this arm either — and unlike the one above, its
-        // answer here is **wrong**, which is why the docs make it a
-        // precondition. Upstream's `return_val = x->interactive ==
-        // I_ALWAYS_SKIP` (`copy.c:2430`) is a *skip that succeeds*, and the
-        // `bool` this function returns cannot say that. Adding `cp --update`,
-        // or routing `mv` through here, means widening the return type first,
-        // exactly as `mv`'s `Verdict` was widened. Spelled out rather than
-        // folded into a catch-all so that doing either is a compile error at
-        // this line. Silent, at least, because that half of `AlwaysSkip` this
-        // signature *can* express.
-        Interactive::AlwaysSkip => false,
-        Interactive::AskUser => overwrite_ok(target, dest.metadata(), run),
+        // no caller reaches this arm yet — but unlike the one above it is
+        // reachable *wrongly*, and was: while this function returned `bool` the
+        // only thing it could say here was "do not copy, and fail", which is
+        // upstream's `return_val = x->interactive == I_ALWAYS_SKIP`
+        // (`copy.c:2430`) inverted. Silence was the half it could express and
+        // the exit status was the half it could not. Spelled out rather than
+        // folded into a catch-all so that a fifth [`Interactive`] value arrives
+        // as a compile error at this line.
+        Interactive::AlwaysSkip => Verdict::Skipped,
+        Interactive::AskUser => {
+            if overwrite_ok(target, dest.metadata(), run) {
+                Verdict::Proceed
+            } else {
+                Verdict::Refused
+            }
+        }
     }
 }
 
@@ -2227,7 +2282,12 @@ pub fn place_entity<E: Write>(
     // is what makes a `cp -v` that cannot clear the way announce nothing.
     //
     // Two of GNU's reasons are expressible here, and they are `||`-ed there
-    // too. The third is `x->move_mode`, which no caller sets yet:
+    // too. The third is `x->move_mode`, which `mv` does set — but a `mv` that
+    // reaches this engine has already cleared its own destination and comes in
+    // with a [`Dest::New`], so `dest_exists` is false and the whole block is
+    // dead for it either way. Adding `|| run.opts.move_mode` here would be
+    // faithful to upstream's spelling and would change nothing, which is why it
+    // is written down rather than written:
     //
     // * **The source is a symlink that is not being followed.** `symlinkat` has
     //   no "replace", and refusing instead would leave `cp -r` unable to update
@@ -2597,7 +2657,18 @@ fn copy_tree<E: Write>(
                 // `cp -rv a b` where `b/a` already exists announces the files
                 // it refreshes and says nothing about the directory holding
                 // them — the directory was not copied, it was reused.
-                announce(run, src, dest, None);
+                //
+                // A move says something else here, and it is a different
+                // *sentence* rather than the same one with a prefix: `created
+                // directory 'g'`, one name and no arrow (`copy.c:2988`). That
+                // asymmetry is upstream's and is worth reading twice — a moved
+                // *file* is announced as `copied 'a' -> 'b'`, naming both ends,
+                // while a moved *directory* names only the end that was made.
+                if run.opts.move_mode {
+                    let _ = writeln!(run.out, "created directory {}", quoteaf_os(dest));
+                } else {
+                    announce(run, src, dest, None);
+                }
                 // The adjustment in the opposite direction from the debt: a
                 // source that is not owner-rwx — 0500 is perfectly ordinary —
                 // would leave this process unable to fill the directory it has
@@ -2730,8 +2801,13 @@ fn copy_entry<E: Write>(entry: &fs::DirEntry, dest: &Path, run: &mut Run<'_, E>)
     // same-file check `copy_one` makes just before this one is not here and
     // cannot fire: a tree is not being copied into itself, and if it were the
     // walk would not terminate to reach this point.
-    if !overwrite_allowed(&meta, &to, &dest_state, run) {
-        return false;
+    match overwrite_allowed(&meta, &to, &dest_state, run) {
+        Verdict::Proceed => {}
+        Verdict::Refused => return false,
+        // Unreachable from `cp`, whose parser has no `--update=none`, and
+        // correct for whoever adds one: the entry is left where it is and the
+        // walk goes on, without this operand counting against the status.
+        Verdict::Skipped => return true,
     }
     // The two kind mismatches, in `copy_one`'s order and with its wording,
     // because they are the same `copy_internal` lines. Reaching them here is
@@ -2857,62 +2933,44 @@ fn copy_regular_file<E: Write>(
         }
     };
 
-    // [`Clobber::Unlink`] borrows the stdout it would announce the removal on,
-    // and the two options read beside it are *different fields* of the same
-    // [`Run`] — which is why all three can be read in one expression. Before
-    // stage 4 they could not be: the options lived on `cp`'s `Job` and this
-    // code had to hoist each one into a local first, because the value it read
-    // them through was the same one already borrowed for its stdout.
-    let dest = if dest_exists {
-        Dest::Exists(if run.opts.unlink_dest_after_failed_open {
-            Clobber::Unlink {
-                verbose: run.opts.verbose,
-                out: &mut *run.out,
+    // Inlined as the scrutinee, which it could not be until `Dest` stopped
+    // carrying a writer: the old `Dest::Exists(Clobber::Unlink { out, .. })`
+    // held a live borrow of `run.out`, and a scrutinee's temporaries live to
+    // the end of the `match` — whose arms want `run.err`. So this needed a
+    // `let` first. A fieldless `Dest` ends that: the `&mut *run` reborrowed for
+    // the call is not kept alive, because nothing in the returned
+    // `Result<Opened, DestError>` borrows from it. Verified by compiling it
+    // both ways rather than by reasoning about it.
+    let dest = if dest_exists { Dest::Exists } else { Dest::New };
+    let (mut output, new_dst) =
+        match open_destination(dst, permission_bits(src_meta), dest, run, &mut debt) {
+            Ok(Opened { file, new }) => (file, new),
+            Err(DestError::Dangling(_)) => {
+                // The `EEXIST` is dropped: GNU's sentence for this names no error
+                // at all, because the failure is not the open's — the name resolved
+                // to nothing and writing through it would be a race.
+                let _ = writeln!(
+                    run.err,
+                    "{prog}: not writing through dangling symlink {}",
+                    quoteaf_os(dst)
+                );
+                return false;
             }
-        } else {
-            Clobber::Never
-        })
-    } else {
-        Dest::New
-    };
-    // On its own statement rather than as the `match` scrutinee: the borrow of
-    // `run.out` inside `dest` ends when the call returns, and a scrutinee's
-    // temporaries live to the end of the `match` — whose arms want `run.err`.
-    let opened = open_destination(
-        dst,
-        permission_bits(src_meta),
-        dest,
-        run.opts.preserve_xattr,
-        &mut debt,
-    );
-    let (mut output, new_dst) = match opened {
-        Ok(Opened { file, new }) => (file, new),
-        Err(DestError::Dangling(_)) => {
-            // The `EEXIST` is dropped: GNU's sentence for this names no error
-            // at all, because the failure is not the open's — the name resolved
-            // to nothing and writing through it would be a race.
-            let _ = writeln!(
-                run.err,
-                "{prog}: not writing through dangling symlink {}",
-                quoteaf_os(dst)
-            );
-            return false;
-        }
-        Err(DestError::Remove(e)) => {
-            let why = strerror(&e);
-            let _ = writeln!(run.err, "{prog}: cannot remove {}: {why}", quoteaf_os(dst));
-            return false;
-        }
-        Err(DestError::Io(e)) => {
-            let why = strerror(&e);
-            let _ = writeln!(
-                run.err,
-                "{prog}: cannot create regular file {}: {why}",
-                quoteaf_os(dst)
-            );
-            return false;
-        }
-    };
+            Err(DestError::Remove(e)) => {
+                let why = strerror(&e);
+                let _ = writeln!(run.err, "{prog}: cannot remove {}: {why}", quoteaf_os(dst));
+                return false;
+            }
+            Err(DestError::Io(e)) => {
+                let why = strerror(&e);
+                let _ = writeln!(
+                    run.err,
+                    "{prog}: cannot create regular file {}: {why}",
+                    quoteaf_os(dst)
+                );
+                return false;
+            }
+        };
 
     // The engine's body rather than a loop here, which is what makes this arm
     // and `mv`'s cross-device arm the same code. The gain is not only the

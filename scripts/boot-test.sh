@@ -3237,77 +3237,23 @@ check_gates_are_wired() {
 
 check_gates_are_wired
 
-# Run the *fixtures* of three gates whose real checks nothing runs.
+# `check_unwired_gate_selftests` used to stand here. It ran the *fixtures* of
+# three lane-C gates whose real checks nothing ran, on the reasoning that
+# "unwired" and "rotting" are different problems: a checker waiting to be
+# switched on drifts meanwhile, and the first real run of a drifted checker
+# reports nothing, which reads exactly like a pass.
 #
-# `check-gates-are-wired.py` pins these three as unwired because they judge
-# `apps/**`, which is lane C's tree: switching their real checks on would red
-# lane C's build on findings lane C did not schedule, so that call is theirs to
-# make and there is a request open asking them to make it.
+# Lane C wired all three for real on 2026-09-03 (`check_lane_c_gui_gates`,
+# below), and ran each gate's `--self-test` immediately before the check it
+# guards -- the same protection, sited better. Keeping both would have run
+# three fixtures twice per boot under duplicate `run_checker` labels, which is
+# itself a gate failure: `test-pre-push-run-checker.py` requires the labels in
+# this file to be distinct, because a label is how a run is identified in the
+# skiplog and in `bench/boot-history.jsonl`.
 #
-# But "unwired" and "rotting" are different problems, and only one of them has
-# to wait for lane C. A checker sitting unwired is still a checker someone will
-# eventually turn on, and the thing they will turn on is whatever state it has
-# drifted into meanwhile -- a glob that no longer matches the tree, a regex
-# broken by a refactor -- with its own fixtures having gone stale unobserved
-# the entire time. Then the first real run reports nothing and reads as a pass.
-# Running the fixtures now is what makes that impossible: it costs about three
-# seconds in total, and it means the day lane C wires one, they are wiring a
-# checker known to still work rather than one that merely still parses.
-#
-# This is safe to run from here because a `--self-test` reads nothing but the
-# fixtures the checker carries in its own source. It opens no file under
-# `apps/`, so it cannot fail on lane C's *code* -- only on lane C's *checker*
-# disagreeing with itself, which is a defect in one file with one owner and no
-# ambiguity about who fixes it.
-#
-# `check-gates-are-wired.py` deliberately does not count a `--self-test`-only
-# invocation as wiring, so these three stay pinned and the ratchet does not go
-# green on a gate whose real check still runs nowhere.
-check_unwired_gate_selftests() {
-    local py=""
-    if command -v python &>/dev/null; then
-        py=python
-    elif command -v python3 &>/dev/null; then
-        py=python3
-    else
-        echo "=== Unwired gates' self-tests: skipped (no python) ===" >&2
-        return 0
-    fi
-
-    echo "=== Checking the unwired lane-C gates against their fixtures ==="
-
-    # Spelled out one call per gate, with the path a literal, because
-    # `check-gates-are-wired.py` reads this file to decide what runs -- and a
-    # `for` loop over the three names defeats it. Written as a loop, the script
-    # argument is `"$PROJECT_ROOT/scripts/$g.py"`, which resolves to the token
-    # `g.py`; that is not a `check-*.py`, so the analyser classified the call as
-    # out of scope and dropped it. Three self-tests ran and the ratchet counted
-    # zero of them, with no complaint. Keeping the two call shapes it
-    # understands is the price of it being able to answer the question at all.
-    local failed=""
-    run_checker check-diskcleanup-test-roots-selftest "$py" -u \
-        "$PROJECT_ROOT/scripts/check-diskcleanup-test-roots.py" --self-test \
-        || failed="scripts/check-diskcleanup-test-roots.py"
-    run_checker check-key-release-wiring-selftest "$py" -u \
-        "$PROJECT_ROOT/scripts/check-key-release-wiring.py" --self-test \
-        || failed="scripts/check-key-release-wiring.py"
-    run_checker check-window-wiring-selftest "$py" -u \
-        "$PROJECT_ROOT/scripts/check-window-wiring.py" --self-test \
-        || failed="scripts/check-window-wiring.py"
-
-    [ -z "$failed" ] && return 0
-
-    echo "" >&2
-    echo "ERROR: refusing to build.  $failed no longer agrees with its own" >&2
-    echo "fixtures.  Nothing runs its real check yet (it is pinned as unwired" >&2
-    echo "in scripts/check-gates-are-wired.py), so this is the only thing" >&2
-    echo "standing between it and silent rot -- and a checker that has stopped" >&2
-    echo "matching reports no findings, which is exactly what a clean tree" >&2
-    echo "looks like." >&2
-    exit 1
-}
-
-check_unwired_gate_selftests
+# The reasoning is preserved here rather than in a deleted commit because it is
+# the argument for running a fixture at all, and it will be needed again the
+# next time a gate is written before its tree is ready for it.
 
 # A self-test that nothing calls is not a test.  It compiles, it reads as
 # coverage, it gets cited in a commit message as "tested" -- and it has never
@@ -4298,6 +4244,155 @@ check_tick_wiring() {
 }
 
 if ! check_tick_wiring; then
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Five lane-C gates that existed but were asked by nothing.
+#
+# Requested by lane B in
+# requests/b-c-six-gui-gates-are-never-run-by-anything.md: a checker sitting in
+# scripts/ looks like an enforced rule, and is only enforced if something calls
+# it.  These five ran solely inside scripts/pre-boot.py, a local pre-flight
+# nobody is obliged to run, so the rules they hold could be broken, merged and
+# pushed with nothing objecting.
+#
+# All five were verified 0-or-1 before being wired: `run_checker` treats any
+# other exit as "no verdict" and aborts the build, so a gate that can answer
+# "I could not look" must not be here.  check-frame-needles.py has a `return 2`
+# that is reachable only when an app named on its command line does not exist,
+# which no call here can do.  check-generated-tables.py had one for a crashed
+# generator and it is now `return 1` -- see that file, and lane B's request
+# requests/b-c-check-generated-tables-returns-2-which-now-means-no-verdict.md.
+#
+# The sixth, check-evdev-elf-asm.py, stays unwired on purpose; its PINNED entry
+# in scripts/check-gates-are-wired.py carries the reason.
+#
+# Measured cost, 2026-09-03: about 3.5 minutes for all five on the development
+# machine, and it is dominated by *reading files* -- 80 ms per file, the same
+# for read_text and read_bytes, and no faster on a second pass, which is a
+# property of this filesystem rather than of the scripts.  Against a build that
+# takes ten minutes and reads far more, and given a failure here saves that
+# build, that is worth paying.  Do not "optimise" the scanners on the strength
+# of a cProfile run: one was tried on 2026-09-03 and the profile's per-call
+# overhead pointed at the wrong function entirely.  Measure with a clock.
+check_lane_c_gui_gates() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Lane C GUI gates: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # The shared lexer the wiring gates read Rust with. It had no test at all
+    # until 2026-09-03, while four checkers decided what to report from what it
+    # returns -- and a wrong answer there does not raise, it just makes those
+    # gates see less. Same argument as the tick gate's fixture above.
+    echo "=== Checking the Rust source scanner against its own cases ==="
+    if ! run_checker rustscan-selftest "$py" "$PROJECT_ROOT/scripts/rustscan.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  scripts/rustscan.py no longer agrees" >&2
+        echo "with its own cases.  Four gates read Rust through it, so their" >&2
+        echo "verdicts on the tree mean nothing until it does -- a lexer that" >&2
+        echo "has stopped seeing a construct reports zero findings exactly as" >&2
+        echo "a clean tree does." >&2
+        return 1
+    fi
+
+    # A gate that has stopped scanning reports zero findings exactly as a
+    # clean tree does, so the window-wiring gate is checked against its own
+    # fixture before its verdict on the tree is believed.
+    if ! run_checker check-window-wiring-selftest "$py" "$PROJECT_ROOT/scripts/check-window-wiring.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The window-wiring gate no longer agrees with" >&2
+        echo "its own fixture, so it can no longer be trusted to find" >&2
+        echo "a program whose main never opens a window." >&2
+        return 1
+    fi
+
+    echo "=== Checking that GUI programs open a window ==="
+    if ! run_checker check-window-wiring "$py" "$PROJECT_ROOT/scripts/check-window-wiring.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  Each program above draws -- it builds" >&2
+        echo "RenderTree or RenderCommand -- but its main never reaches" >&2
+        echo "app::launch, so nothing it draws is ever put on a screen.  Its" >&2
+        echo "tests can be green and its window has never opened." >&2
+        return 1
+    fi
+
+    # A gate that has stopped scanning reports zero findings exactly as a
+    # clean tree does, so the key-release gate is checked against its own
+    # fixture before its verdict on the tree is believed.
+    if ! run_checker check-key-release-wiring-selftest "$py" "$PROJECT_ROOT/scripts/check-key-release-wiring.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The key-release gate no longer agrees with" >&2
+        echo "its own fixture, so it can no longer be trusted to find" >&2
+        echo "a program that acts on a key going the wrong way." >&2
+        return 1
+    fi
+
+    echo "=== Checking that a key coming up is not read as a second press ==="
+    if ! run_checker check-key-release-wiring "$py" \
+        "$PROJECT_ROOT/scripts/check-key-release-wiring.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  Each program above acts on a key event" >&2
+        echo "without asking whether the key was going down or coming up, so" >&2
+        echo "every keystroke is handled twice: one press moves the cursor two" >&2
+        echo "cells, one Enter submits a form twice." >&2
+        return 1
+    fi
+
+    echo "=== Checking that whole-frame needles are scoped to their band ==="
+    if ! run_checker check-frame-needles "$py" "$PROJECT_ROOT/scripts/check-frame-needles.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  Each assertion above looks for a needle" >&2
+        echo "over the whole frame when the needle is painted in more than one" >&2
+        echo "place, so it passes on the wrong one and would keep passing if the" >&2
+        echo "band it is about stopped being drawn (known-issues lesson 91)." >&2
+        echo "Scope the assertion to the band's Rect." >&2
+        return 1
+    fi
+
+    echo "=== Checking that generated tables match their generators ==="
+    if ! run_checker check-generated-tables "$py" \
+        "$PROJECT_ROOT/scripts/check-generated-tables.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A checked-in generated table is not" >&2
+        echo "what its generator produces, or a generator would not run at all." >&2
+        echo "Re-run the generator named above and READ THE DIFF: a table that" >&2
+        echo "changes when you did not mean to change one is the finding." >&2
+        return 1
+    fi
+
+    # A gate that has stopped scanning reports zero findings exactly as a
+    # clean tree does, so the diskcleanup-root gate is checked against its own
+    # fixture before its verdict on the tree is believed.
+    if ! run_checker check-diskcleanup-test-roots-selftest "$py" "$PROJECT_ROOT/scripts/check-diskcleanup-test-roots.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The diskcleanup-root gate no longer agrees with" >&2
+        echo "its own fixture, so it can no longer be trusted to find" >&2
+        echo "a test aimed at a real host path." >&2
+        return 1
+    fi
+
+    echo "=== Checking that diskcleanup's tests do not point at the host ==="
+    if ! run_checker check-diskcleanup-test-roots "$py" \
+        "$PROJECT_ROOT/scripts/check-diskcleanup-test-roots.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A test in apps/diskcleanup hands a real" >&2
+        echo "host path to something that deletes.  Point it at a scratch" >&2
+        echo "directory: this is the one test suite in the tree that can do" >&2
+        echo "damage by running." >&2
+        return 1
+    fi
+
+    return 0
+}
+
+if ! check_lane_c_gui_gates; then
     exit 1
 fi
 

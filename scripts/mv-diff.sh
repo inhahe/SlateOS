@@ -1855,14 +1855,17 @@ TREE=''
 FAR='printf hello > a; ln a b'
 run_case -v @FAR@/a g
 
-# A directory. GNU recurses; this `mv` refuses, and the refusal is deliberate
-# rather than an oversight — see `mv.rs`'s cross-device fallback. The setgid
-# bit and the subdirectory are on the fixture so that the case keeps measuring
-# something after the refusal is lifted.
+# A directory, which is the whole recursive fallback in one case: the tree is
+# rebuilt on the far side and then removed here. `-v` is what makes it sharp,
+# because a moved directory says three different things — `created directory
+# 'g'` for each directory made (one name, no arrow), `copied 'FAR/d/f' -> 'g/f'`
+# for each file, and then `removed 'FAR/d/f'` / `removed directory 'FAR/d'` as
+# the source goes, depth-first. The setgid bit and the subdirectory are on the
+# fixture so that the mode carried onto the far side and the ordering of the
+# removals are both measured.
 TREE=''
 FAR='mkdir -p d/sub; printf hello > d/f; chmod 2750 d'
-xfail_case "B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED" \
-  -v @FAR@/d g
+run_case -v @FAR@/d g
 
 # `-u` across the boundary. The comparison is made before the fallback is
 # chosen, so the option decides whether the copy happens at all. Older

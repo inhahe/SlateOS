@@ -165,11 +165,6 @@
 //! decides whether an abbreviation is ambiguous — drop `--verbose` and `mv --v`
 //! resolves to `--version` and prints a banner instead of failing.
 //!
-//! Moving a **directory across a filesystem boundary** is also not implemented:
-//! it needs a recursive copy that preserves modes, symlinks and hard links, and
-//! doing it wrong loses data quietly. It reports that it is not implemented
-//! rather than attempting a partial job. Logged in `known-issues.md`.
-//!
 //! # The cross-device fallback, and what §22 found in it
 //!
 //! §22 of the harness arrived long after the rest and is the one section not
@@ -210,7 +205,7 @@
 //! impossible.
 
 use coreutils::backup::{self, BackupType};
-use coreutils::copy::{self, Made, ModeDebt, chown_to_source, preserve_attributes};
+use coreutils::copy::{self, Made, ModeDebt, Verdict, chown_to_source, preserve_attributes};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{
@@ -524,6 +519,7 @@ fn mv_opts(flags: &MvFlags, umask: u32) -> copy::Opts<'_> {
         require_preserve_xattr: false,    // mv.c:146
         reduce_diagnostics: false,        // mv.c:141
         explicit_no_preserve_mode: false, // mv.c:138
+        move_mode: true,                  // mv.c:131
         umask,
     }
 }
@@ -1457,11 +1453,23 @@ fn move_one<O: Write, E: Write>(
     // Nothing is asked when the rename *succeeded* (`copy.c:2663`), and this
     // function has already returned in that case.
     //
-    // Directories are left out. Upstream's first arm handles them under
-    // `x->recursive` and produces `warning: source directory specified more than
-    // once`; this `mv` refuses a cross-device directory move outright, so the
-    // arm has nothing to protect yet. It belongs with the recursive fallback —
-    // `known-issues.md` → `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`.
+    // Directories are left out, and unlike the rest of this block that *is* a
+    // gap rather than upstream's shape: `copy.c:2664` records a directory
+    // operand too, under `x->recursive && S_ISDIR`, and the `earlier_file` arm
+    // it feeds produces two sentences this `mv` therefore never says —
+    // `cannot copy a directory, X, into itself, Y` and `warning: source
+    // directory X specified more than once`.
+    //
+    // What keeps it small is how narrow the trigger is, which was measured
+    // rather than reasoned: the same directory operand twice over, *and* the
+    // first move must have got as far as copying and then failed to remove the
+    // source — a `forget_created` on any earlier failure takes the entry back
+    // out, and a success takes the source away, and either one leaves the
+    // second operand with nothing to find. `mv -v FAR/d FAR/d dest` with `FAR`
+    // read-only is the whole of it. Logged rather than fixed here because the
+    // table would have to start holding directories, which changes what
+    // [`Copied::forget`] means on every other path. See `known-issues.md` →
+    // `B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY`.
     let src_id = if src_meta.is_dir() {
         None
     } else {
@@ -1474,7 +1482,14 @@ fn move_one<O: Write, E: Write>(
             job.copied.lookup(id).map(Path::to_path_buf)
         };
         if let Some(earlier) = earlier {
-            return link_to_earlier(job, &earlier, src, target, moved_aside.as_deref());
+            return link_to_earlier(
+                job,
+                &earlier,
+                src,
+                &src_meta,
+                target,
+                moved_aside.as_deref(),
+            );
         }
     }
 
@@ -1542,26 +1557,6 @@ fn move_one<O: Write, E: Write>(
         return false;
     }
 
-    // The one shape this fallback cannot do, asked **before** the destination is
-    // cleared and not inside [`copy_across_devices`] with the rest of the kind
-    // analysis. GNU's order is clear-then-copy, and it can afford that because
-    // its copy handles a directory; ours does not, so clearing first would
-    // delete a destination that this command is then going to refuse to
-    // replace — losing a file to a move that did not happen, which is worse
-    // than either the refusal or the move.
-    //
-    // No `copied` line precedes it, matching GNU's `!S_ISDIR (src_mode)` guard
-    // and reading correctly besides: announcing a copy about to be declined
-    // would be a lie rather than an oddity.
-    if src_meta.is_dir() {
-        return give_up_cross_device(
-            job,
-            &no_directories(src, target),
-            target,
-            moved_aside.as_deref(),
-        );
-    }
-
     // Clear the destination, so that the copy standing in for the rename ends
     // with a *new* file at that name rather than the old one rewritten. GNU
     // says why in as many words — "remove any existing destination file so that
@@ -1577,7 +1572,7 @@ fn move_one<O: Write, E: Write>(
     // may have been freed — or taken — since. `ENOENT` is therefore the
     // ordinary answer rather than a failure, and it is the *only* one excused;
     // GNU spells the test `errno != ENOENT` exactly.
-    if let Err(e) = clear_destination(target) {
+    if let Err(e) = clear_destination(target, src_meta.is_dir()) {
         let why = strerror(&e);
         let _ = writeln!(
             job.err,
@@ -1609,7 +1604,16 @@ fn move_one<O: Write, E: Write>(
     // like one; it is what the reference does, and `scripts/mv-diff.sh` compares
     // both streams byte-for-byte, so "fixing" it here would turn a passing case
     // red.
-    announce(job, "copied", src, target, moved_aside.as_deref());
+    //
+    // **A directory is not announced here**, which is upstream's `if (x->verbose
+    // && !S_ISDIR (src_mode))` on that same block. A directory's line is
+    // `created directory 'g'` and it is printed by the engine, from the site
+    // where the `mkdir` actually happened, because until then there may be no
+    // directory to name. See [`copy::Opts::move_mode`], which carries both
+    // sentences and the measurement behind them.
+    if !src_meta.is_dir() {
+        announce(job, "copied", src, target, moved_aside.as_deref());
+    }
 
     if let Err(failure) = copy_across_devices(src, target, &src_meta, &mut job.run()) {
         // Upstream's `un_backup:` label forgets too, guarded by `earlier_file ==
@@ -1636,19 +1640,17 @@ fn move_one<O: Write, E: Write>(
     // is on the hard-link path — see [`link_to_earlier`], whose header carries
     // the argument in full, and [`copy_across_devices`], which no longer does
     // this itself so that the two failures can be told apart here.
-    if let Err(failure) = remove_source(src) {
-        let why = strerror(&failure.err);
-        let what = &failure.what;
-        let _ = writeln!(job.err, "mv: {what}: {why}");
+    // The second line of the pair comes from somewhere else entirely in GNU:
+    // `mv.c:238` hands the source to `rm()` with `rm_options.verbose` set, and
+    // it is `remove.c:400` that prints it. That is why the wording is
+    // `removed 'src'` with no arrow and no destination — it is `rm -v`'s
+    // sentence, not `mv`'s, which is also why [`remove_source`] prints it rather
+    // than this caller: a directory yields one such line *per entry*, and only
+    // the walk knows what it removed. Reached only on success, because `do_move`
+    // only calls `rm()` when `copy` returned true.
+    if !remove_source(job, src, &src_meta) {
         return false;
     }
-    // The second line of the pair, and it comes from somewhere else entirely in
-    // GNU: `mv.c:238` hands the source to `rm()` with `rm_options.verbose` set,
-    // and it is `remove.c:400` that prints it. That is why the wording is
-    // `removed 'src'` with no arrow and no destination — it is `rm -v`'s
-    // sentence, not `mv`'s. Reached only on success, because `do_move` only
-    // calls `rm()` when `copy` returned true.
-    announce_removed(job, src);
     recorded
 }
 
@@ -1699,15 +1701,22 @@ fn announce<O: Write, E: Write>(
 /// cross-device copy (`remove.c:400`, reached through `mv.c:238`).
 ///
 /// Separate from [`announce`] because it is a different sentence with a
-/// different shape — one name, no arrow — and because upstream's is
-/// `removed directory %s` for a directory. This `mv` cannot reach that case: it
-/// refuses cross-device directory moves outright, so the only file it ever
-/// removes here is a non-directory.
-fn announce_removed<O: Write, E: Write>(job: &mut Job<'_, O, E>, src: &Path) {
+/// different shape — one name, no arrow — and because the wording turns on what
+/// was removed: `removed directory 'd'` for a directory, `removed 'f'` for
+/// everything else. Upstream picks between them with the same `is_dir` that
+/// picked `AT_REMOVEDIR` a line earlier (`remove.c:399`), so the two cannot
+/// disagree; here [`remove_tree`] passes the one it just used, for the same
+/// reason.
+fn announce_removed<O: Write, E: Write>(job: &mut Job<'_, O, E>, src: &Path, is_dir: bool) {
     if !job.flags.verbose {
         return;
     }
-    let _ = writeln!(job.out, "removed {}", quoteaf_os(src));
+    let what = if is_dir {
+        "removed directory"
+    } else {
+        "removed"
+    };
+    let _ = writeln!(job.out, "{what} {}", quoteaf_os(src));
 }
 
 /// GNU's `forget_created`: drop this source's entry from the table because the
@@ -1759,6 +1768,7 @@ fn link_to_earlier<O: Write, E: Write>(
     job: &mut Job<'_, O, E>,
     earlier: &Path,
     src: &Path,
+    src_meta: &fs::Metadata,
     target: &Path,
     moved_aside: Option<&Path>,
 ) -> bool {
@@ -1780,14 +1790,9 @@ fn link_to_earlier<O: Write, E: Write>(
         );
         return false;
     }
-    if let Err(failure) = remove_source(src) {
-        let why = strerror(&failure.err);
-        let what = &failure.what;
-        let _ = writeln!(job.err, "mv: {what}: {why}");
-        return false;
-    }
-    announce_removed(job, src);
-    true
+    // A hard link's source is never a directory — `link(2)` cannot make one —
+    // so this walk is always the one-`unlink` case, and the `lstat` says so.
+    remove_source(job, src, src_meta)
 }
 
 /// Note that the file just moved now sits at `relname`, so a later source that
@@ -1831,27 +1836,6 @@ fn record_move(
         }
     }
     true
-}
-
-/// What the checks below decided about a destination that is already there.
-///
-/// Three outcomes and not a `bool`, because two of GNU's paths leave the
-/// destination alone and they disagree about the exit status. Upstream carries
-/// this as two locals — `skipped` and `return_val` (`copy.c:2341`) — and the
-/// second is written `return_val = x->interactive == I_ALWAYS_SKIP`, which is
-/// exactly the distinction this enum names.
-///
-/// It was a `bool` until `--update` arrived, and the reason it could be is that
-/// every refusal `mv` had was a *failure*. `--update=none` and `--update=older`
-/// are the first two that are not.
-#[derive(PartialEq, Eq, Debug)]
-enum Verdict {
-    /// Nothing stands in the way; go on to the rename.
-    Proceed,
-    /// Reported, and this operand counts against the exit status.
-    Refused,
-    /// Left alone on purpose, silently, and the command still succeeds.
-    Skipped,
 }
 
 /// The refusals that stand between "something is at the destination" and the
@@ -2456,17 +2440,53 @@ fn is_cross_device(e: &io::Error) -> bool {
 /// with `quoteaf` almost everywhere and with `quotef` in the permissions
 /// sentence, and a helper that took the names and picked a style would have to
 /// know which sentence it was building anyway.
+/// A step of the cross-device fallback that failed and has **already said so**,
+/// in as many sentences as it needed.
+///
+/// This is the recursive arm, where "the sentence for the failure" stops being a
+/// thing that exists: a tree copy can fail at ten entries and the engine reports
+/// each one where it happened, naming that entry. Squeezing them back into one
+/// `what` would either invent a sentence GNU never prints or throw nine of them
+/// away. GNU has the same shape and the same silence — `copy_internal` reports
+/// and returns false, and `do_move` adds nothing on top of it (`mv.c:186`).
+///
+/// So this variant carries no message on purpose. It is the caller's signal to
+/// stop and to put a `-b` backup back, and nothing else.
 #[cfg_attr(test, derive(Debug))]
-struct Failed {
-    /// e.g. `cannot open 'f' for reading`.
-    what: String,
-    /// The errno, appended after `: `.
-    err: io::Error,
+enum Failed {
+    /// A single step, with the sentence GNU prints for it and the errno.
+    Step {
+        /// e.g. `cannot open 'f' for reading`.
+        what: String,
+        /// The errno, appended after `: `.
+        err: io::Error,
+    },
+    /// Reported already — say nothing more.
+    Reported,
 }
 
 impl Failed {
     fn new(what: String, err: io::Error) -> Self {
-        Failed { what, err }
+        Failed::Step { what, err }
+    }
+
+    /// The failure that has already been reported. See [`Failed::Reported`].
+    fn silent() -> Self {
+        Failed::Reported
+    }
+
+    /// Write the diagnostic, if this failure still owes one.
+    ///
+    /// Every consumer of a [`Failed`] goes through here rather than reaching for
+    /// the fields, which is what keeps the two variants from drifting: a printer
+    /// that destructured `Step` itself would silently print nothing for
+    /// `Reported` only if its author remembered to, and there are three of them.
+    fn report<E: Write>(&self, err: &mut E) {
+        let Failed::Step { what, err: cause } = self else {
+            return;
+        };
+        let why = strerror(cause);
+        let _ = writeln!(err, "mv: {what}: {why}");
     }
 }
 
@@ -2484,9 +2504,7 @@ fn give_up_cross_device<O: Write, E: Write>(
     target: &Path,
     moved_aside: Option<&Path>,
 ) -> bool {
-    let why = strerror(&failure.err);
-    let what = &failure.what;
-    let _ = writeln!(job.err, "mv: {what}: {why}");
+    failure.report(&mut *job.err);
     // **The only place `mv` puts a backup back**, and that is upstream's shape
     // rather than an omission here: the move-mode rename failures above it all
     // say `return false` outright (`copy.c:2866`). So `mv -b a b` whose rename
@@ -2504,34 +2522,28 @@ fn give_up_cross_device<O: Write, E: Write>(
     false
 }
 
-/// What a cross-device move of a directory is refused with. See
-/// `known-issues.md` → `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`, and
-/// `scripts/mv-diff.sh` §22 for the case that becomes an XPASS the moment a
-/// recursive fallback lands.
-///
-/// The one sentence in this fallback that is *not* GNU's, because GNU has no
-/// equivalent — it does the move. `cannot move X to Y` is what the whole
-/// fallback used to say and is the right shape for a refusal of the operation
-/// rather than of a step within it.
-fn no_directories(src: &Path, target: &Path) -> Failed {
-    Failed::new(
-        format!("cannot move {} to {}", quoteaf_os(src), quoteaf_os(target)),
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            "moving a directory across filesystems is not implemented by this mv",
-        ),
-    )
-}
-
 /// Unlink whatever is at `target`, treating "nothing was there" as done.
 ///
-/// The kind comes from the caller having already established that the source is
-/// not a directory, which is GNU's `S_ISDIR (src_mode) ? AT_REMOVEDIR : 0` with
-/// the directory arm unreachable: a directory source against a non-directory
-/// destination was refused much further up, so the two kinds agree, and the
-/// source is the one whose `stat` is already in hand.
-fn clear_destination(target: &Path) -> io::Result<()> {
-    match fs::remove_file(target) {
+/// `src_is_dir` selects the flag, which is GNU's `S_ISDIR (src_mode) ?
+/// AT_REMOVEDIR : 0` (`copy.c:2875`) — and note that it reads the **source**'s
+/// kind to decide what to do to the *destination*. Upstream leaves the reason
+/// in a comment beside it: "both src and dst must both be directories or not,
+/// and this is enforced above", so the source's mode is the one already in hand
+/// and answers for both.
+///
+/// The directory arm is a `rmdir`, so it removes an *empty* destination
+/// directory and refuses a full one with `ENOTEMPTY`. That refusal is the
+/// intended behaviour and not a gap: the caller reports it as `inter-device
+/// move failed: … unable to remove target: Directory not empty`, which is what
+/// GNU prints for `mv -T /other/fs/d full-dir`, measured. A move replaces its
+/// destination whole; it does not merge into it.
+fn clear_destination(target: &Path, src_is_dir: bool) -> io::Result<()> {
+    let removed = if src_is_dir {
+        fs::remove_dir(target)
+    } else {
+        fs::remove_file(target)
+    };
+    match removed {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         other => other,
     }
@@ -2599,11 +2611,10 @@ fn clear_destination(target: &Path) -> io::Result<()> {
 ///
 /// # Errors
 ///
-/// The first step that failed, carrying [`Failed`]'s sentence for it. A
-/// directory never reaches here — [`move_one`] refuses it before the destination
-/// is cleared, because clearing first and refusing second would destroy a file
-/// for a move that then did not happen — but the arm is kept so that the
-/// function is safe to call directly, which is how it is tested.
+/// The first step that failed, carrying [`Failed`]'s sentence for it — except
+/// on the directory arm, which hands back [`Failed::Reported`] because the walk
+/// under it has already printed one sentence per entry that went wrong, and no
+/// single sentence stands for all of them.
 fn copy_across_devices<E: Write>(
     src: &Path,
     target: &Path,
@@ -2664,7 +2675,43 @@ fn copy_across_devices<E: Write>(
     }
 
     if kind.is_dir() {
-        return Err(no_directories(src, target));
+        // The whole of the recursive fallback: the engine already walks a tree
+        // and reproduces every kind inside it, and it is the same walk `cp -r`
+        // uses, so this arm is a call rather than a second implementation.
+        // Upstream's shape is identical — `copy_internal`'s directory arm runs
+        // `mkdir` and then `copy_dir`, in move mode exactly as in copy mode,
+        // with `x->move_mode` changing only what `-v` prints.
+        //
+        // `Dest::New` is not passed and cannot be: unlike the regular-file arm
+        // below, a directory's destination is created by [`copy::copy_tree`],
+        // which decides for itself whether it made the directory or found it —
+        // GNU's `new_dst`, and the thing that decides whether the ownership is
+        // worth setting. [`copy::stat_destination`] is therefore asked afresh
+        // here rather than the caller's earlier `stat` being reused: the
+        // `rmdir` in [`clear_destination`] has run since, so the name is free
+        // by construction and any older answer is stale.
+        //
+        // `command_line_arg` is `true`. This source *is* an operand — the walk
+        // has not started yet — and the flag is read by `--preserve=links` and
+        // by the `-H`/`-L` rule, neither of which a move can reach:
+        // `preserve_links` is on but a directory is excluded from that block,
+        // and `dereference` is `DEREF_NEVER`.
+        let dest = copy::stat_destination(metadata, target, run.opts)
+            .map_err(|e| Failed::new(format!("cannot stat {}", quoteaf_os(target)), e))?;
+        // `Placed::Linked` cannot arrive: it is `--preserve=links` finding an
+        // earlier destination for the same inode, and that block excludes
+        // directories outright. `Placed::Failed` has already been reported by
+        // the engine, one sentence per thing that went wrong, so the [`Failed`]
+        // built here must not add another — it is only the caller's signal to
+        // stop and to put a `-b` backup back. The empty sentence is what
+        // [`Failed::silent`] exists for.
+        if copy::place_entity(src, metadata, target, &dest, true, run) == copy::Placed::Failed {
+            return Err(Failed::silent());
+        }
+        // The source tree is still standing. Removing it is [`move_one`]'s next
+        // step, exactly as it is for every other kind — see this function's
+        // header for why the copy and the removal cannot share an error path.
+        return Ok(());
     }
 
     let mode = fsattr::permission_bits(metadata);
@@ -2680,40 +2727,38 @@ fn copy_across_devices<E: Write>(
     // it. Note that this is *not* `unlink_dest_before_opening`, which `mv` sets
     // false (`mv.c:127`) — upstream's general unlink is guarded by `!
     // x->move_mode` (`copy.c:2571`) and it is the EXDEV fallback that clears
-    // and sets `new_dst` instead (`copy.c:2869-2892`). That is also why
-    // `Clobber::Never` is right: `unlink_dest_after_failed_open` is false for a
-    // move (`mv.c:128`), there being nothing left to unlink.
-    let mut dest = copy::open_destination(
-        target,
-        mode,
-        copy::Dest::New,
-        run.opts.preserve_xattr,
-        &mut debt,
-    )
-    .map(|opened| opened.file)
-    .map_err(|e| {
-        // All three variants collapse to one sentence, which is the one a move
-        // printed before this became shared code.
-        //
-        // `Remove` is unreachable — it is `-f`'s unlink, and the call above
-        // passes `Clobber::Never`. `Dangling` is reachable only in a race: the
-        // destination was unlinked a moment ago, so for it to be a dangling
-        // symlink now, something else must have created one. `cp` has GNU's
-        // separate sentence for that; `mv` has none, and inventing one here
-        // would be a divergence from upstream rather than a fix — `mv.c` never
-        // reaches `copy_reg`'s dangling branch either, because it always
-        // arrives with `new_dst`. Reporting the underlying `File exists` is
-        // exactly what the hand-written open did, which is why
-        // [`copy::DestError::Dangling`] carries the error rather than dropping
-        // it: a synthesised `io::Error` has no `errno` for `strerror` to name.
-        let err = match e {
-            copy::DestError::Io(e) | copy::DestError::Dangling(e) | copy::DestError::Remove(e) => e,
-        };
-        Failed::new(
-            format!("cannot create regular file {}", quoteaf_os(target)),
-            err,
-        )
-    })?;
+    // and sets `new_dst` instead (`copy.c:2869-2892`). It is also why `-f`'s
+    // unlink cannot fire inside the call: that arm is reached only from
+    // `Dest::Exists`, and `mv` sets `unlink_dest_after_failed_open` false
+    // besides (`mv.c:128`), there being nothing left to unlink.
+    let mut dest = copy::open_destination(target, mode, copy::Dest::New, run, &mut debt)
+        .map(|opened| opened.file)
+        .map_err(|e| {
+            // All three variants collapse to one sentence, which is the one a move
+            // printed before this became shared code.
+            //
+            // `Remove` is unreachable — it is `-f`'s unlink, which is inside the
+            // `Dest::Exists` arm the call above does not take. `Dangling` is
+            // reachable only in a race: the destination was unlinked a moment
+            // ago, so for it to be a dangling symlink now, something else must
+            // have created one. `cp` has GNU's separate sentence for that; `mv`
+            // has none, and inventing one here would be a divergence from
+            // upstream rather than a fix — `mv.c` never reaches `copy_reg`'s
+            // dangling branch either, because it always arrives with `new_dst`.
+            // Reporting the underlying `File exists` is exactly what the
+            // hand-written open did, which is why [`copy::DestError::Dangling`]
+            // carries the error rather than dropping it: a synthesised
+            // `io::Error` has no `errno` for `strerror` to name.
+            let err = match e {
+                copy::DestError::Io(e)
+                | copy::DestError::Dangling(e)
+                | copy::DestError::Remove(e) => e,
+            };
+            Failed::new(
+                format!("cannot create regular file {}", quoteaf_os(target)),
+                err,
+            )
+        })?;
 
     // The engine's body, which is the same call `cp` makes. It was `io::copy`
     // here and a 64 KiB read/write loop there, each missing exactly what the
@@ -2766,13 +2811,172 @@ fn copy_across_devices<E: Write>(
     Ok(())
 }
 
-/// Unlink the source once the copy is complete, with GNU's `rm` sentence.
+/// Take the source away once the copy is complete, with GNU's `rm` sentences.
 ///
 /// `mv` does this through `rm()` (`mv.c:238`) rather than in `copy.c`, which is
-/// why the wording is `rm`'s: `remove.c:352` reports a failed unlink as
-/// `cannot remove %s`.
-fn remove_source(src: &Path) -> Result<(), Failed> {
-    fs::remove_file(src).map_err(|e| Failed::new(format!("cannot remove {}", quoteaf_os(src)), e))
+/// why the wording is `rm`'s throughout: `remove.c:430` reports a failed unlink
+/// as `cannot remove %s`, and `remove.c:399` prints the `-v` line. The options
+/// `mv` hands it are fixed (`mv.c:87`) — recursive, never interactive, not `-f`
+/// — so the only one that varies is `verbose`, which is why this takes the whole
+/// [`Job`] and not a flag.
+///
+/// Returns whether the source is gone. **Every failure has already been
+/// reported**, one sentence per entry, which is why there is no error value to
+/// hand back: upstream's `do_move` reads `status == RM_ERROR` and sets `ok =
+/// false` without printing anything of its own (`mv.c:240`).
+fn remove_source<O: Write, E: Write>(
+    job: &mut Job<'_, O, E>,
+    src: &Path,
+    metadata: &fs::Metadata,
+) -> bool {
+    // `metadata` is the `lstat` from the top of [`move_one`], so a symlink to a
+    // directory is a *file* here and gets unlinked rather than descended. That
+    // is the same distinction `AT_REMOVEDIR` draws in [`clear_destination`], and
+    // getting it wrong the other way would delete the pointed-at tree.
+    remove_tree(job, src, metadata.is_dir())
+}
+
+/// `rm -r` over one path, depth-first, reporting each failure where it happens.
+///
+/// # Why the children are removed first, and what happens when one cannot be
+///
+/// `rmdir` refuses a directory that still has entries, so the walk is
+/// post-order: contents, then the directory. When a child cannot be removed, its
+/// parent therefore cannot be either — and the `ENOTEMPTY` that would come back
+/// says nothing the already-printed child diagnostic did not. GNU suppresses it:
+/// a failed `excise` calls `mark_ancestor_dirs` (`remove.c:431`), and `prompt`
+/// answers `RM_USER_DECLINED` for a marked directory before `excise` is reached
+/// (`remove.c:206`), so the ancestors are skipped **silently**. Here the same
+/// thing falls out of not attempting the `remove_dir` when the walk below it
+/// failed. One unremovable file deep in a tree therefore yields exactly one
+/// sentence, not one per level up to the root.
+///
+/// # An unreadable directory still gets one attempt
+///
+/// Failing to read a directory does not skip it: `fts` hands the entry over as
+/// `FTS_DNR` and `remove.c:571` still calls `excise` on it, because an
+/// unreadable directory may well be empty and `rmdir` does not need to read it.
+/// If that `rmdir` then fails with `ENOTEMPTY`, upstream reports the *earlier*
+/// error instead — "they would be meaningless in a diagnostic" (`remove.c:420`)
+/// — so `mv` says `cannot remove 'd': Permission denied` and not
+/// `Directory not empty`. That substitution is reproduced below.
+///
+/// # Depth
+///
+/// Recursive, like [`copy::place_entity`]'s own descent, so the two arms of a
+/// cross-device directory move fail at the same depth rather than the copy
+/// succeeding and the removal overflowing.
+fn remove_tree<O: Write, E: Write>(job: &mut Job<'_, O, E>, path: &Path, is_dir: bool) -> bool {
+    if !is_dir {
+        return match fs::remove_file(path) {
+            Ok(()) => {
+                announce_removed(job, path, false);
+                true
+            }
+            Err(e) => {
+                report_unremovable(job, path, &e);
+                false
+            }
+        };
+    }
+
+    let mut ok = true;
+    // Held rather than reported: it is only printed if the `remove_dir` below
+    // comes back with an errno that would be less informative. See the header.
+    let mut unreadable = None;
+    match fs::read_dir(path) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        // `DirEntry::file_type` does not follow symlinks, which
+                        // is the difference between unlinking a link to a
+                        // directory and deleting what it points at.
+                        let child_is_dir = match entry.file_type() {
+                            Ok(kind) => kind.is_dir(),
+                            Err(e) => {
+                                report_unremovable(job, &entry.path(), &e);
+                                ok = false;
+                                continue;
+                            }
+                        };
+                        if !remove_tree(job, &entry.path(), child_is_dir) {
+                            ok = false;
+                        }
+                    }
+                    Err(e) => {
+                        report_unremovable(job, path, &e);
+                        ok = false;
+                    }
+                }
+            }
+        }
+        Err(e) => unreadable = Some(e),
+    }
+
+    if !ok {
+        // Silently. See the header: the `ENOTEMPTY` this would earn adds a
+        // second sentence about a failure already reported one level down.
+        return false;
+    }
+
+    match fs::remove_dir(path) {
+        Ok(()) => {
+            announce_removed(job, path, true);
+            true
+        }
+        Err(e) => {
+            report_unremovable(
+                job,
+                path,
+                unreadable
+                    .filter(|_| is_uninformative(&e))
+                    .as_ref()
+                    .unwrap_or(&e),
+            );
+            false
+        }
+    }
+}
+
+/// GNU's `cannot remove %s` (`remove.c:430`), which is the same sentence for a
+/// file and for a directory — only the `-v` line distinguishes them.
+fn report_unremovable<O: Write, E: Write>(job: &mut Job<'_, O, E>, path: &Path, err: &io::Error) {
+    let why = strerror(err);
+    let _ = writeln!(job.err, "mv: cannot remove {}: {why}", quoteaf_os(path));
+}
+
+/// Whether a failed `rmdir`'s errno is one of the ones upstream throws away in
+/// favour of the earlier `opendir` failure (`remove.c:424`).
+///
+/// The list is upstream's verbatim, oddities included: `EISDIR` and `ENOTDIR`
+/// are there because kernels have been observed to return them from `rmdir` on
+/// an unreadable directory, and `EEXIST` because Solaris 10 spells `ENOTEMPTY`
+/// that way.
+fn is_uninformative(err: &io::Error) -> bool {
+    /// `ENOTEMPTY`, `EISDIR`, `ENOTDIR`, `EEXIST` — Linux's numbers, in the
+    /// order `remove.c` lists them. See [`blames_the_destination`] for why the
+    /// values are open-coded and why the host takes the `ErrorKind` arm below.
+    const UNINFORMATIVE_CODES: &[i32] = &[
+        39, // ENOTEMPTY
+        21, // EISDIR
+        20, // ENOTDIR
+        17, // EEXIST
+    ];
+    if cfg!(unix)
+        && err
+            .raw_os_error()
+            .is_some_and(|n| UNINFORMATIVE_CODES.contains(&n))
+    {
+        return true;
+    }
+    matches!(
+        err.kind(),
+        io::ErrorKind::DirectoryNotEmpty
+            | io::ErrorKind::IsADirectory
+            | io::ErrorKind::NotADirectory
+            | io::ErrorKind::AlreadyExists
+    )
 }
 
 #[cfg(unix)]
@@ -3737,10 +3941,11 @@ mod tests {
             Path::new("/other/g"),
             None,
         );
-        announce_removed(&mut job, Path::new("g"));
+        announce_removed(&mut job, Path::new("g"), false);
+        announce_removed(&mut job, Path::new("d"), true);
         assert_eq!(
             String::from_utf8_lossy(&out),
-            "copied 'g' -> '/other/g'\nremoved 'g'\n"
+            "copied 'g' -> '/other/g'\nremoved 'g'\nremoved directory 'd'\n"
         );
         assert!(err.is_empty());
     }
@@ -3765,7 +3970,8 @@ mod tests {
         };
         announce(&mut job, "renamed", Path::new("a"), Path::new("b"), None);
         announce(&mut job, "copied", Path::new("a"), Path::new("b"), None);
-        announce_removed(&mut job, Path::new("a"));
+        announce_removed(&mut job, Path::new("a"), false);
+        announce_removed(&mut job, Path::new("a"), true);
         assert!(out.is_empty());
     }
 
@@ -4768,7 +4974,7 @@ mod tests {
         fs::write(&one, b"original").unwrap();
         fs::hard_link(&one, &two).unwrap();
 
-        clear_destination(&one).unwrap();
+        clear_destination(&one, false).unwrap();
 
         assert!(fs::symlink_metadata(&one).is_err(), "the name is free");
         assert_eq!(
@@ -4784,7 +4990,7 @@ mod tests {
     #[test]
     fn clearing_a_destination_that_is_not_there_succeeds() {
         let dir = scratch("xdev_clear_absent");
-        clear_destination(&dir.path("never-existed")).unwrap();
+        clear_destination(&dir.path("never-existed"), false).unwrap();
     }
 
     /// A symlink at the destination is unlinked as itself. Following it would
@@ -4799,7 +5005,7 @@ mod tests {
         fs::write(&real, b"kept").unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        clear_destination(&link).unwrap();
+        clear_destination(&link, false).unwrap();
 
         assert!(fs::symlink_metadata(&link).is_err(), "the link is gone");
         assert_eq!(fs::read(&real).unwrap(), b"kept", "its target is not");
@@ -4817,28 +5023,202 @@ mod tests {
         fs::create_dir(&sub).unwrap();
         fs::write(sub.join("inside"), b"x").unwrap();
 
-        clear_destination(&sub).unwrap_err();
+        clear_destination(&sub, false).unwrap_err();
 
         assert!(sub.join("inside").is_file(), "nothing may be removed");
     }
 
-    /// Not implemented, and it says so rather than moving part of the tree.
+    /// The other half of the flag: a *directory* source picks `remove_dir`, and
+    /// it is `rmdir` semantics all the way down — an empty destination directory
+    /// goes, a full one does not. GNU reads the source's kind to decide what to
+    /// do to the destination (`copy.c:2875`), which is why this is a parameter
+    /// and not a stat of the target.
     #[test]
-    fn the_cross_device_fallback_refuses_a_directory() {
+    fn clearing_a_directory_destination_uses_rmdir() {
+        let dir = scratch("xdev_clear_rmdir");
+        let empty = dir.path("empty");
+        let full = dir.path("full");
+        fs::create_dir(&empty).unwrap();
+        fs::create_dir(&full).unwrap();
+        fs::write(full.join("keep"), b"x").unwrap();
+
+        clear_destination(&empty, true).unwrap();
+        assert!(fs::symlink_metadata(&empty).is_err(), "the name is free");
+
+        clear_destination(&full, true).unwrap_err();
+        assert!(full.join("keep").is_file(), "nothing may be removed");
+    }
+
+    /// A directory goes across, contents and mode and all. The fallback used to
+    /// refuse this outright; `known-issues.md` →
+    /// `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED` was that refusal.
+    ///
+    /// The *source* is untouched here, because removing it is [`move_one`]'s
+    /// step and not this function's — see [`remove_source`]. So this asserts
+    /// both halves: the tree arrived, and nothing was taken away yet.
+    #[test]
+    fn the_cross_device_fallback_copies_a_directory() {
         let dir = scratch("xdev_dir");
         let sub = dir.path("sub");
         fs::create_dir(&sub).unwrap();
+        fs::create_dir(sub.join("nested")).unwrap();
         fs::write(sub.join("inside"), b"x").unwrap();
         let meta = fs::symlink_metadata(&sub).unwrap();
-        let e = copy_across_devices(
+        let far = dir.path("elsewhere");
+
+        copy_across_devices(
             &sub,
-            &dir.path("elsewhere"),
+            &far,
             &meta,
             &mut CrossDevice::default().run(&mut Vec::new()),
         )
-        .unwrap_err();
-        assert_eq!(e.err.kind(), io::ErrorKind::Unsupported);
-        assert!(sub.join("inside").is_file(), "nothing may be moved");
+        .unwrap();
+
+        assert_eq!(fs::read(far.join("inside")).unwrap(), b"x");
+        assert!(far.join("nested").is_dir(), "the subdirectory came too");
+        assert!(sub.join("inside").is_file(), "the source is still there");
+    }
+
+    // ----------------------------------------------- taking the source away --
+
+    /// True when a mode of 0555 would deny nothing, which is the condition the
+    /// unremovable-entry test needs and cannot create. `cp.rs`'s test module has
+    /// the same helper for the same reason.
+    #[cfg(unix)]
+    fn running_as_root() -> bool {
+        unsafe extern "C" {
+            fn geteuid() -> u32;
+        }
+        // SAFETY: `geteuid` takes no arguments, dereferences nothing, and
+        // cannot fail — POSIX gives it no error return.
+        unsafe { geteuid() == 0 }
+    }
+
+    /// Drive one step that needs a [`Job`] without going through a whole `mv`,
+    /// and hand back what it said on each stream.
+    ///
+    /// The `Job` literal is six fields, four of which are scratch buffers that
+    /// have to outlive the borrow; writing it out per test is what the closure
+    /// avoids. [`mv_to`] is the equivalent for a whole command.
+    fn on_a_job<T>(
+        verbose: bool,
+        run: impl FnOnce(&mut Job<'_, Vec<u8>, Vec<u8>>) -> T,
+    ) -> (T, String, String) {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let mut answers = Canned::new(&[]);
+        let flags = MvFlags {
+            verbose,
+            ..MvFlags::default()
+        };
+        let mut copied = Copied::default();
+        let got = {
+            let mut job = Job {
+                flags: &flags,
+                out: &mut out,
+                err: &mut err,
+                answers: &mut answers,
+                copied: &mut copied,
+                umask: coreutils::umask::current(),
+            };
+            run(&mut job)
+        };
+        (
+            got,
+            String::from_utf8_lossy(&out).into_owned(),
+            String::from_utf8_lossy(&err).into_owned(),
+        )
+    }
+
+    /// A whole tree goes, and `-v` names every piece of it in the order it went:
+    /// contents before their directory, because `rmdir` will not take a
+    /// directory that still has entries.
+    #[test]
+    fn removing_the_source_is_depth_first_and_says_so() {
+        let dir = scratch("rm_tree_order");
+        let top = dir.path("top");
+        fs::create_dir(&top).unwrap();
+        fs::create_dir(top.join("sub")).unwrap();
+        fs::write(top.join("sub").join("deep"), b"x").unwrap();
+        let meta = fs::symlink_metadata(&top).unwrap();
+
+        let (ok, out, err) = on_a_job(true, |job| remove_source(job, &top, &meta));
+
+        assert!(ok);
+        assert!(err.is_empty());
+        assert!(fs::symlink_metadata(&top).is_err(), "the tree is gone");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "one line per entry: {out}");
+        assert!(lines[0].starts_with("removed '"), "the file first: {out}");
+        assert!(lines[0].ends_with("deep'"));
+        assert!(lines[1].starts_with("removed directory '"));
+        assert!(lines[1].ends_with("sub'"));
+        assert!(lines[2].starts_with("removed directory '"));
+        assert!(lines[2].ends_with("top'"));
+    }
+
+    /// A symlink to a directory is *unlinked*, not descended. Following it would
+    /// delete a tree the user never named — the worst thing this function could
+    /// do — so the flag comes from the `lstat` in [`move_one`] and the walk uses
+    /// `DirEntry::file_type`, which does not follow either.
+    #[test]
+    #[cfg(unix)]
+    fn removing_the_source_does_not_follow_a_symlink_to_a_directory() {
+        let dir = scratch("rm_tree_link");
+        let real = dir.path("real");
+        let top = dir.path("top");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("keep"), b"x").unwrap();
+        fs::create_dir(&top).unwrap();
+        std::os::unix::fs::symlink(&real, top.join("link")).unwrap();
+        let meta = fs::symlink_metadata(&top).unwrap();
+
+        let (ok, _out, err) = on_a_job(false, |job| remove_source(job, &top, &meta));
+
+        assert!(ok, "{err}");
+        assert!(fs::symlink_metadata(&top).is_err(), "the tree is gone");
+        assert!(real.join("keep").is_file(), "what it pointed at is not");
+    }
+
+    /// One unremovable entry yields **one** sentence, not one per level up to
+    /// the root. GNU suppresses the ancestors' `ENOTEMPTY` because it says
+    /// nothing the child's diagnostic did not (`remove.c:431`, `remove.c:206`);
+    /// a walk that reported every level would bury the one line that names the
+    /// file to go and look at.
+    ///
+    /// Unix-only because the unremovable entry is made by taking write
+    /// permission off its *parent*, which is what `unlink` consults; on Windows
+    /// the mode bits do not mean that. Skipped as root, who is not refused.
+    #[test]
+    #[cfg(unix)]
+    fn one_unremovable_entry_is_reported_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("rm_tree_stuck");
+        let top = dir.path("top");
+        let locked = top.join("locked");
+        fs::create_dir(&top).unwrap();
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("stuck"), b"x").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        let meta = fs::symlink_metadata(&top).unwrap();
+
+        let (ok, _out, err) = on_a_job(true, |job| remove_source(job, &top, &meta));
+
+        // Restore before asserting, so a failure does not leave a directory the
+        // scratch teardown cannot remove either.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if running_as_root() {
+            return;
+        }
+        assert!(!ok);
+        assert_eq!(err.lines().count(), 1, "one sentence only: {err}");
+        assert!(err.contains("cannot remove "), "{err}");
+        assert!(
+            err.trim_end().ends_with("stuck': Permission denied"),
+            "{err}"
+        );
+        assert!(top.is_dir(), "and the ancestors are left where they are");
     }
 
     // ------------------------------------------------- the src_to_dest table --

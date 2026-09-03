@@ -4,8 +4,22 @@
 //! can quickly switch between work contexts (e.g., "Development" with editor
 //! + terminal + browser, "Communication" with email + chat, etc.).
 //!
-//! Also handles session persistence across logouts/reboots — remembering
-//! which apps were open and where they were placed.
+//! **What it does not do yet: persist anything.** The module opened by claiming
+//! "session persistence across logouts/reboots" from the day it was written,
+//! and nothing here has ever read or written a file, so every workspace a user
+//! creates lives in the running shell's memory and is gone when the shell
+//! exits. The claim is removed rather than softened, because a doc comment that
+//! describes an intention in the present tense is how a missing feature stops
+//! being noticed.
+//!
+//! What exists as of 2026-09-03 is the *format*: [`SessionManager::to_yaml`]
+//! and [`SessionManager::load_yaml`] round-trip every field of every workspace
+//! and of [`SessionState`]. What is missing is a caller — there is no moment to
+//! hang a save on until the shell has an event loop that can notice a logout,
+//! and no moment to hang a load on until it can notice a start. See
+//! known-issues.md ->
+//! `TD-C-WORKSPACES-CANNOT-SURVIVE-A-LOGOUT-AND-THE-MODULE-SAYS-THEY-CAN` and
+//! `TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`.
 
 use appearance::Palette;
 use guitk::color::Color;
@@ -13,6 +27,7 @@ use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
 use guitk::style::CornerRadii;
+use yamldoc::Document;
 
 // This module used to open with seven `const … : Color` holding Catppuccin
 // Mocha values, so the workspace picker was a dark-mode overlay whatever the
@@ -413,31 +428,6 @@ impl SessionManager {
     pub fn sort_by_name(&mut self) {
         self.workspaces.sort_by(|a, b| a.name.cmp(&b.name));
     }
-
-    /// Serialize all workspaces to a text format (for config persistence).
-    pub fn export_workspaces(&self) -> String {
-        let mut output = String::new();
-        for ws in &self.workspaces {
-            output.push_str(&format!(
-                "workspace:{}:{}:{}:{}\n",
-                ws.id, ws.name, ws.icon, ws.auto_launch
-            ));
-            for win in &ws.windows {
-                output.push_str(&format!(
-                    "  window:{}:{}:{}:{}:{}:{}:{:?}:{}\n",
-                    win.app_id,
-                    win.title_hint,
-                    win.x,
-                    win.y,
-                    win.width,
-                    win.height,
-                    win.state,
-                    win.desktop
-                ));
-            }
-        }
-        output
-    }
 }
 
 impl Default for SessionManager {
@@ -692,6 +682,293 @@ impl WorkspacePicker {
 // ============================================================================
 // Tests
 // ============================================================================
+
+// =============================================================================
+// Persistence
+// =============================================================================
+
+/// The configuration file workspaces are written to and read from.
+pub const WORKSPACES_FILE: &str = "workspaces.yaml";
+
+impl SavedWindowMode {
+    /// The spelling this mode has in the configuration file.
+    ///
+    /// Written out rather than derived from `Debug`. The format used
+    /// `format!("{:?}")` until 2026-09-03, which makes the *Rust identifier*
+    /// the file format: renaming a variant would silently change what every
+    /// saved file means, and the compiler would say nothing because `Debug` is
+    /// still implemented. A `match` costs four lines and turns that into a
+    /// non-exhaustive-match error.
+    #[must_use]
+    pub fn as_yaml(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Maximized => "maximized",
+            Self::Minimized => "minimized",
+            Self::Fullscreen => "fullscreen",
+        }
+    }
+
+    /// The mode a configuration file's spelling names, if it names one.
+    ///
+    /// An unknown spelling is `None` rather than a default: a file written by a
+    /// newer build may hold a mode this one does not have, and silently reading
+    /// it as `Normal` would unmaximise the user's window and look like the
+    /// layout was simply wrong.
+    #[must_use]
+    pub fn from_yaml(text: &str) -> Option<Self> {
+        match text {
+            "normal" => Some(Self::Normal),
+            "maximized" => Some(Self::Maximized),
+            "minimized" => Some(Self::Minimized),
+            "fullscreen" => Some(Self::Fullscreen),
+            _ => None,
+        }
+    }
+}
+
+/// `#RRGGBB`, or `#RRGGBBAA` when the colour is not fully opaque.
+fn color_to_yaml(c: Color) -> String {
+    if c.a == u8::MAX {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// The colour a `#RRGGBB` or `#RRGGBBAA` string names.
+fn color_from_yaml(text: &str) -> Option<Color> {
+    let hex = text.strip_prefix('#')?;
+    // `checked_add` rather than `+`: the callers below pass 0, 2, 4 and 6, so
+    // it cannot overflow, but a bound stated in the operation survives an
+    // edit to the callers and a comment does not.
+    let byte = |i: usize| u8::from_str_radix(hex.get(i..i.checked_add(2)?)?, 16).ok();
+    match hex.len() {
+        6 => Some(Color::rgb(byte(0)?, byte(2)?, byte(4)?)),
+        8 => Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
+        _ => None,
+    }
+}
+
+/// `path` with one more component on the end.
+///
+/// `yamldoc` addresses values by path, and every write below is "this map, plus
+/// one leaf". A free function rather than a closure because a closure returning
+/// a `Vec<&str>` borrowed from its own argument cannot name the lifetime.
+fn at<'a>(path: &[&'a str], leaf: &'a str) -> Vec<&'a str> {
+    let mut v = path.to_vec();
+    v.push(leaf);
+    v
+}
+
+/// Write one window under `path`.
+fn window_to_yaml(doc: &mut Document, path: &[&str], w: &SavedWindowState) {
+    doc.set_str(&at(path, "app_id"), &w.app_id);
+    doc.set_str(&at(path, "title_hint"), &w.title_hint);
+    doc.set_i64(&at(path, "x"), i64::from(w.x));
+    doc.set_i64(&at(path, "y"), i64::from(w.y));
+    doc.set_i64(&at(path, "width"), i64::from(w.width));
+    doc.set_i64(&at(path, "height"), i64::from(w.height));
+    doc.set_str(&at(path, "state"), w.state.as_yaml());
+    doc.set_i64(&at(path, "desktop"), i64::from(w.desktop));
+    doc.set_bool(&at(path, "focused"), w.focused);
+    doc.set_i64(&at(path, "z_index"), i64::from(w.z_index));
+}
+
+/// Read one window from under `path`, or `None` if it is not one.
+fn window_from_yaml(doc: &Document, path: &[&str]) -> Option<SavedWindowState> {
+    // `app_id`, the geometry and the mode are required: a window without them
+    // is not a window, and defaulting them would put a zero-sized window at the
+    // origin rather than admitting the entry was unreadable.
+    Some(SavedWindowState {
+        app_id: doc.get_str(&at(path, "app_id"))?,
+        title_hint: doc.get_str(&at(path, "title_hint")).unwrap_or_default(),
+        x: i32::try_from(doc.get_i64(&at(path, "x"))?).ok()?,
+        y: i32::try_from(doc.get_i64(&at(path, "y"))?).ok()?,
+        width: u32::try_from(doc.get_i64(&at(path, "width"))?).ok()?,
+        height: u32::try_from(doc.get_i64(&at(path, "height"))?).ok()?,
+        state: SavedWindowMode::from_yaml(&doc.get_str(&at(path, "state"))?)?,
+        desktop: u32::try_from(doc.get_i64(&at(path, "desktop")).unwrap_or(0)).ok()?,
+        focused: doc.get_bool(&at(path, "focused")).unwrap_or(false),
+        z_index: u32::try_from(doc.get_i64(&at(path, "z_index")).unwrap_or(0)).ok()?,
+    })
+}
+
+impl SessionManager {
+    /// Every workspace and the live session, as the text of a YAML document.
+    ///
+    /// **This replaced a format that could not read back what it wrote.** Until
+    /// 2026-09-03 the only serialiser was `export_workspaces`, which joined
+    /// fields with `:` and quoted nothing — so a workspace named
+    /// `Build: nightly` produced a line with more fields than the parser
+    /// expected, and any window whose title hint held a colon did the same. It
+    /// also carried four of `Workspace`'s eleven fields and none of
+    /// [`SessionState`], and spelled the window mode with `{:?}`. There was no
+    /// reader, and writing one against that format would have meant writing a
+    /// parser for something that cannot round-trip its own inputs.
+    ///
+    /// YAML because `design.txt` says configuration is YAML, through `yamldoc`
+    /// because it preserves the comments and formatting of a file a user has
+    /// edited. Quoting is `yamldoc`'s job, which is the whole point: it is what
+    /// makes a colon in a user's workspace name a non-event.
+    ///
+    /// Windows are an index-keyed map rather than a sequence because
+    /// `yamldoc`'s sequences hold strings, not maps. The keys are the position
+    /// in the list, zero-padded so that a plain sort keeps them in order.
+    ///
+    /// **Nothing calls this yet**, and that is the remaining half of the
+    /// problem rather than an oversight: there is no moment to hang a save on
+    /// until the shell has an event loop that can notice a logout. See
+    /// known-issues.md ->
+    /// `TD-C-WORKSPACES-CANNOT-SURVIVE-A-LOGOUT-AND-THE-MODULE-SAYS-THEY-CAN`.
+    #[must_use]
+    pub fn to_yaml(&self) -> String {
+        let mut doc = Document::new();
+
+        for (i, ws) in self.workspaces.iter().enumerate() {
+            let key = format!("{i:04}");
+            let base: [&str; 2] = ["workspaces", key.as_str()];
+
+            doc.set_i64(&at(&base, "id"), i64::try_from(ws.id).unwrap_or(i64::MAX));
+            doc.set_str(&at(&base, "name"), &ws.name);
+            doc.set_str(&at(&base, "description"), &ws.description);
+            doc.set_str(&at(&base, "icon"), &ws.icon);
+            doc.set_i64(
+                &at(&base, "created_at"),
+                i64::try_from(ws.created_at).unwrap_or(i64::MAX),
+            );
+            doc.set_i64(
+                &at(&base, "last_used"),
+                i64::try_from(ws.last_used).unwrap_or(i64::MAX),
+            );
+            doc.set_bool(&at(&base, "auto_launch"), ws.auto_launch);
+            // The three optional fields are *omitted* when absent rather than
+            // written as an empty string: "the user set no shortcut" and "the
+            // user set the shortcut to nothing" must not become the same file.
+            if let Some(shortcut) = &ws.shortcut {
+                doc.set_str(&at(&base, "shortcut"), shortcut);
+            }
+            if let Some(desktop) = ws.pinned_desktop {
+                doc.set_i64(&at(&base, "pinned_desktop"), i64::from(desktop));
+            }
+            if let Some(color) = ws.color {
+                doc.set_str(&at(&base, "color"), &color_to_yaml(color));
+            }
+            for (j, w) in ws.windows.iter().enumerate() {
+                let wkey = format!("{j:04}");
+                window_to_yaml(&mut doc, &["workspaces", &key, "windows", &wkey], w);
+            }
+        }
+
+        doc.set_i64(
+            &["session", "active_desktop"],
+            i64::from(self.session.active_desktop),
+        );
+        doc.set_i64(
+            &["session", "saved_at"],
+            i64::try_from(self.session.saved_at).unwrap_or(i64::MAX),
+        );
+        doc.set_bool(
+            &["session", "restore_on_login"],
+            self.session.restore_on_login,
+        );
+        for (j, w) in self.session.windows.iter().enumerate() {
+            let wkey = format!("{j:04}");
+            window_to_yaml(&mut doc, &["session", "windows", &wkey], w);
+        }
+
+        doc.to_text()
+    }
+
+    /// Read back what [`to_yaml`](Self::to_yaml) wrote.
+    ///
+    /// Everything the file does not carry keeps this manager's current value,
+    /// so a file written by an older build loses nothing that was not in it.
+    /// An entry that cannot be read is *skipped* rather than defaulted: a
+    /// workspace whose windows are unreadable is better restored empty than
+    /// restored wrong, and a window read as `Normal` because its mode was
+    /// unrecognised would un-maximise something the user had maximised.
+    pub fn load_yaml(&mut self, text: &str) {
+        let doc = Document::parse(text);
+
+        self.workspaces.clear();
+        let mut keys = doc.keys(&["workspaces"]);
+        keys.sort();
+        for key in keys {
+            let base: [&str; 2] = ["workspaces", key.as_str()];
+
+            let Some(id) = doc
+                .get_i64(&at(&base, "id"))
+                .and_then(|v| u64::try_from(v).ok())
+            else {
+                continue;
+            };
+            let Some(name) = doc.get_str(&at(&base, "name")) else {
+                continue;
+            };
+
+            let mut ws = Workspace::new(id, &name);
+            ws.description = doc.get_str(&at(&base, "description")).unwrap_or_default();
+            if let Some(icon) = doc.get_str(&at(&base, "icon")) {
+                ws.icon = icon;
+            }
+            if let Some(v) = doc
+                .get_i64(&at(&base, "created_at"))
+                .and_then(|v| u64::try_from(v).ok())
+            {
+                ws.created_at = v;
+            }
+            if let Some(v) = doc
+                .get_i64(&at(&base, "last_used"))
+                .and_then(|v| u64::try_from(v).ok())
+            {
+                ws.last_used = v;
+            }
+            ws.auto_launch = doc.get_bool(&at(&base, "auto_launch")).unwrap_or(false);
+            ws.shortcut = doc.get_str(&at(&base, "shortcut"));
+            ws.pinned_desktop = doc
+                .get_i64(&at(&base, "pinned_desktop"))
+                .and_then(|v| u32::try_from(v).ok());
+            ws.color = doc
+                .get_str(&at(&base, "color"))
+                .as_deref()
+                .and_then(color_from_yaml);
+
+            let mut wkeys = doc.keys(&["workspaces", &key, "windows"]);
+            wkeys.sort();
+            for wkey in wkeys {
+                if let Some(w) = window_from_yaml(&doc, &["workspaces", &key, "windows", &wkey]) {
+                    ws.windows.push(w);
+                }
+            }
+            self.workspaces.push(ws);
+        }
+
+        if let Some(v) = doc
+            .get_i64(&["session", "active_desktop"])
+            .and_then(|v| u32::try_from(v).ok())
+        {
+            self.session.active_desktop = v;
+        }
+        if let Some(v) = doc
+            .get_i64(&["session", "saved_at"])
+            .and_then(|v| u64::try_from(v).ok())
+        {
+            self.session.saved_at = v;
+        }
+        if let Some(v) = doc.get_bool(&["session", "restore_on_login"]) {
+            self.session.restore_on_login = v;
+        }
+        self.session.windows.clear();
+        let mut skeys = doc.keys(&["session", "windows"]);
+        skeys.sort();
+        for wkey in skeys {
+            if let Some(w) = window_from_yaml(&doc, &["session", "windows", &wkey]) {
+                self.session.windows.push(w);
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1075,18 +1352,221 @@ mod tests {
         assert_eq!(mgr.all_workspaces()[0].name, "New");
     }
 
-    // ---- Export ----
+    // ---- Persistence format ----
 
+    /// Every field of every workspace survives a write and a read.
+    ///
+    /// The format this replaced carried four of `Workspace`'s eleven fields and
+    /// none of `SessionState`, so "it round-trips" was not a claim anyone could
+    /// make about it. This asserts field by field rather than comparing a
+    /// rendering, because a serialiser that drops a field and a reader that
+    /// ignores it agree with each other perfectly.
     #[test]
-    fn export_workspaces() {
+    fn every_workspace_field_survives_a_round_trip() {
         let mut mgr = make_mgr();
         let id = mgr.create_workspace("Dev").unwrap();
+        {
+            let ws = mgr.get_mut(id).unwrap();
+            ws.description = "the development layout".into();
+            ws.icon = "hammer".into();
+            ws.created_at = 1_700_000_000;
+            ws.last_used = 1_700_000_999;
+            ws.auto_launch = true;
+            ws.shortcut = Some("Super+1".into());
+            ws.pinned_desktop = Some(2);
+            ws.color = Some(Color::rgb(0x89, 0xB4, 0xFA));
+            ws.add_window(sample_window("editor", 10, 20));
+        }
+        mgr.session.active_desktop = 3;
+        mgr.session.saved_at = 1_700_001_234;
+        mgr.session.restore_on_login = true;
+        mgr.session.windows.push(sample_window("terminal", 5, 6));
+
+        let text = mgr.to_yaml();
+        let mut back = make_mgr();
+        back.load_yaml(&text);
+
+        assert_eq!(back.workspaces.len(), 1);
+        let a = &mgr.workspaces[0];
+        let b = &back.workspaces[0];
+        assert_eq!(b.id, a.id);
+        assert_eq!(b.name, a.name);
+        assert_eq!(b.description, a.description);
+        assert_eq!(b.icon, a.icon);
+        assert_eq!(b.created_at, a.created_at);
+        assert_eq!(
+            b.last_used, a.last_used,
+            "recency decides the picker's order"
+        );
+        assert_eq!(b.auto_launch, a.auto_launch);
+        assert_eq!(b.shortcut, a.shortcut);
+        assert_eq!(b.pinned_desktop, a.pinned_desktop);
+        assert_eq!(b.color, a.color);
+        assert_eq!(b.windows, a.windows);
+
+        assert_eq!(back.session.active_desktop, 3);
+        assert_eq!(back.session.saved_at, 1_700_001_234);
+        assert!(back.session.restore_on_login);
+        assert_eq!(back.session.windows, mgr.session.windows);
+    }
+
+    /// A colon in a user's own text is a non-event.
+    ///
+    /// This is the defect that made the old format unreadable rather than
+    /// merely incomplete: fields were joined with `:` and nothing was quoted,
+    /// so a workspace named `Build: nightly` produced a line with six
+    /// colon-separated fields where the parser expected four. The name, the
+    /// description and a window's title hint are all free-form user strings and
+    /// all three are exercised here.
+    #[test]
+    fn colons_and_quotes_in_user_text_survive_the_format() {
+        let mut mgr = make_mgr();
+        let id = mgr.create_workspace("Build: nightly").unwrap();
+        {
+            let ws = mgr.get_mut(id).unwrap();
+            ws.description = "reads: \"like this\", and: more".into();
+            ws.icon = "#not-a-comment".into();
+            let mut w = sample_window("editor", 0, 0);
+            w.title_hint = "main.rs: 12:40 — unsaved".into();
+            ws.windows.push(w);
+        }
+
+        let mut back = make_mgr();
+        back.load_yaml(&mgr.to_yaml());
+
+        assert_eq!(back.workspaces.len(), 1, "the workspace did not come back");
+        let b = &back.workspaces[0];
+        assert_eq!(b.name, "Build: nightly");
+        assert_eq!(b.description, "reads: \"like this\", and: more");
+        assert_eq!(b.icon, "#not-a-comment");
+        assert_eq!(b.windows[0].title_hint, "main.rs: 12:40 — unsaved");
+    }
+
+    /// An absent optional field comes back absent, not empty.
+    ///
+    /// `None` and `Some("")` are different states — "the user set no shortcut"
+    /// against "the user set the shortcut to nothing" — and a format that wrote
+    /// both as an empty string would collapse them on the first save.
+    #[test]
+    fn an_unset_optional_field_does_not_come_back_as_an_empty_one() {
+        let mut mgr = make_mgr();
+        let id = mgr.create_workspace("Plain").unwrap();
+        {
+            let ws = mgr.get_mut(id).unwrap();
+            assert_eq!(ws.shortcut, None, "the fixture must start unset");
+            ws.description = String::new();
+        }
+
+        let mut back = make_mgr();
+        back.load_yaml(&mgr.to_yaml());
+        let b = &back.workspaces[0];
+        assert_eq!(b.shortcut, None);
+        assert_eq!(b.pinned_desktop, None);
+        assert_eq!(b.color, None);
+        assert_eq!(b.description, "");
+    }
+
+    /// Order is preserved, which the picker's list depends on.
+    #[test]
+    fn workspaces_and_windows_come_back_in_the_order_they_went_out() {
+        let mut mgr = make_mgr();
+        for name in ["one", "two", "three", "four", "five"] {
+            let id = mgr.create_workspace(name).unwrap();
+            let ws = mgr.get_mut(id).unwrap();
+            for app in ["a", "b", "c"] {
+                ws.add_window(sample_window(app, 0, 0));
+            }
+        }
+
+        let mut back = make_mgr();
+        back.load_yaml(&mgr.to_yaml());
+
+        let names: Vec<&str> = back.workspaces.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["one", "two", "three", "four", "five"]);
+        let apps: Vec<&str> = back.workspaces[0]
+            .windows
+            .iter()
+            .map(|w| w.app_id.as_str())
+            .collect();
+        assert_eq!(apps, ["a", "b", "c"]);
+    }
+
+    /// Every window mode has a spelling, and it is not the `Debug` one.
+    ///
+    /// The old format wrote the mode with `{:?}`, which makes the Rust
+    /// identifier the file format — renaming a variant would silently change
+    /// what every saved file means, with the compiler saying nothing. This
+    /// pins the spellings, and `as_yaml`'s `match` is what makes adding a
+    /// variant a compile error rather than a silent omission.
+    #[test]
+    fn every_window_mode_round_trips_by_an_explicit_spelling() {
+        for mode in [
+            SavedWindowMode::Normal,
+            SavedWindowMode::Maximized,
+            SavedWindowMode::Minimized,
+            SavedWindowMode::Fullscreen,
+        ] {
+            let text = mode.as_yaml();
+            assert!(
+                text.chars().all(|c| c.is_ascii_lowercase()),
+                "{text} is the Debug spelling, not a chosen one"
+            );
+            assert_eq!(SavedWindowMode::from_yaml(text), Some(mode));
+
+            let mut mgr = make_mgr();
+            let id = mgr.create_workspace("W").unwrap();
+            let mut w = sample_window("app", 0, 0);
+            w.state = mode;
+            mgr.get_mut(id).unwrap().windows.push(w);
+
+            let mut back = make_mgr();
+            back.load_yaml(&mgr.to_yaml());
+            assert_eq!(back.workspaces[0].windows[0].state, mode);
+        }
+        assert_eq!(SavedWindowMode::from_yaml("Maximized"), None);
+        assert_eq!(SavedWindowMode::from_yaml("something-newer"), None);
+    }
+
+    /// A window this build cannot read is dropped, not guessed at.
+    ///
+    /// Reading an unrecognised mode as `Normal` would un-maximise a window the
+    /// user had maximised, which looks like the layout being restored wrong
+    /// rather than not being restored.
+    #[test]
+    fn an_unreadable_window_is_skipped_rather_than_defaulted() {
+        let mut mgr = make_mgr();
+        let id = mgr.create_workspace("W").unwrap();
         mgr.get_mut(id)
             .unwrap()
-            .add_window(sample_window("editor", 0, 0));
-        let exported = mgr.export_workspaces();
-        assert!(exported.contains("Dev"));
-        assert!(exported.contains("editor"));
+            .add_window(sample_window("keep", 0, 0));
+        let text = mgr.to_yaml().replace("state: normal", "state: hologram");
+
+        let mut back = make_mgr();
+        back.load_yaml(&text);
+        assert_eq!(back.workspaces.len(), 1, "the workspace itself still loads");
+        assert!(
+            back.workspaces[0].windows.is_empty(),
+            "a window with a mode this build does not know must not be invented"
+        );
+    }
+
+    /// Colours survive, including a translucent one.
+    #[test]
+    fn a_colour_tag_survives_including_its_alpha() {
+        for c in [
+            Color::rgb(0x89, 0xB4, 0xFA),
+            Color::rgba(0xF3, 0x8B, 0xA8, 0x80),
+            Color::rgb(0, 0, 0),
+            Color::rgb(0xFF, 0xFF, 0xFF),
+        ] {
+            let mut mgr = make_mgr();
+            let id = mgr.create_workspace("W").unwrap();
+            mgr.get_mut(id).unwrap().color = Some(c);
+
+            let mut back = make_mgr();
+            back.load_yaml(&mgr.to_yaml());
+            assert_eq!(back.workspaces[0].color, Some(c), "{c:?} did not survive");
+        }
     }
 
     // ---- Picker ----

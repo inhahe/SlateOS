@@ -61639,6 +61639,13 @@ Three small choices inside that merge had a real argument on both sides, and
 this records them, because each one is the kind of thing a later reader would
 otherwise "simplify" straight back to the rejected option.
 
+> **The title above is now out of date, deliberately.** Choices 1 and 2 were
+> superseded on 2026-09-03 — there is no `Clobber` and no vtable any more; see
+> the "SUPERSEDED" subsection between choices 2 and 3. The heading is left as
+> written because these headings are cross-referenced by number and by name,
+> and because the superseding note is only legible next to the reasoning it
+> replaced. Choice 3 stands unchanged.
+
 ### 1. `Dest::New` / `Dest::Exists(Clobber)`, not two booleans
 
 The merged function needs to know two things: is something already at the
@@ -61687,6 +61694,60 @@ invisible next to the `unlink` syscall it accompanies.
 Rejected alternative: keep the generic and give `Dest` a defaulted type
 parameter. Defaults do not apply to a type in argument position, so `mv` would
 still have had to write it.
+
+### Choices 1 and 2 are SUPERSEDED (2026-09-03) — by an option neither of them considered
+
+**Decided by:** Claude (autonomous)
+
+`Clobber` is deleted. `Dest` is now two fieldless variants, and
+`open_destination` takes `&mut Run<'_, E>`, reading the unlink policy, the
+`-v` flag and the stdout from it.
+
+**The reasoning above was not wrong; its premise moved.** Choice 1 asked "two
+booleans, or one nested value?" and answered correctly — but both options
+assume the clobber policy is an *argument the caller computes*. It never had
+to be. `unlink_dest_after_failed_open` was already a field of `Opts`, and
+`Opts` is already inside `Run`. The third option is "the policy is an option,
+like every other option," and it is better than either:
+
+| | two `bool`s | `Dest::Exists(Clobber)` | read from `Run` |
+|---|---|---|---|
+| states spellable | 4 | 3 | 2 |
+| unreachable arm to write | yes | none | none |
+| `mv`'s call | `…, false, false, …` | `…, Dest::New, …` | `…, Dest::New, run, …` |
+| callers that can get it wrong | 2 | 2 | 0 |
+
+The last row is the point. Under the old shape both call sites had to
+*recompute* the policy from the options — `cp`'s did
+`if run.opts.unlink_dest_after_failed_open { Clobber::Unlink { … } } else {
+Clobber::Never }`, and `mv`'s passed `Dest::New` with a comment explaining why
+that was safe. Two callers deriving the same fact from the same field is two
+chances to derive it differently. Choice 1's "fourth combination" argument
+survives intact and is in fact strengthened: the impossible state is not
+merely unspellable, it is unspeakable, because the policy is not in the type
+at all.
+
+Choice 2 evaporates with it. There is no writer on `Dest` to make generic or
+`dyn`, so there is no fiction for `mv` to invent and no vtable to justify.
+(`Run::out` is independently `&mut dyn Write`, for its own reasons.)
+
+**What actually unblocked this** was stage 4, which put the options and both
+streams on one `Run`. Choice 2's whole difficulty — and the note in
+`open_destination`'s header that `preserve_xattr` had to be a bare `bool` —
+came from `cp`'s options and stdout living on the same `Job`, so a function
+asking for both took two mutable borrows of one value. `Run` holds them as two
+fields of one struct, which is exactly what dissolves that. The lesson worth
+keeping: **when a signature is contorted to avoid a borrow, the fix is usually
+to group the things being borrowed, not to weaken the signature.**
+
+A bonus the collapse revealed: `cp`'s call site had been hoisted into a `let`
+because `Dest` held a live borrow of `run.out` and a scrutinee's temporaries
+live to the end of its `match`. With `Dest` fieldless the call inlines into the
+scrutinee — verified by compiling it both ways, not by reasoning, after the
+comment asserting otherwise turned out to be false.
+
+Certified as a no-op the same way stage 3 was: `scripts/cp-diff.sh` 581/0/30
+and `scripts/mv-diff.sh` 361/0/10, both unchanged.
 
 ### 3. `DestError::Dangling` carries the `EEXIST` that revealed it
 
@@ -62993,6 +63054,231 @@ means an AP built from an independent implementation, which is a much larger
 piece of work and should be weighed against simply testing against real
 hardware or against `hostapd` under QEMU, either of which removes the
 circularity outright rather than trading it for a second unverified encoder.
+
+## 751. A cross-device directory move drives the shared copy engine but keeps its own `rm -r`, and its failure carries no sentence
+
+**Date:** 2026-09-03
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `mv dir /other/filesystem/` has to copy the tree and then delete
+the original. The *copy* half is now one call into the engine that `cp -r`
+already uses — that was the point of the four-stage extraction. The *delete*
+half is thirty lines newly written in `mv.rs`, even though `rm.rs` in the same
+crate is a recursive deleter. And the error type had to grow a case that
+carries no message at all. Both of those look like the wrong call at a glance,
+which is why they are written down.
+
+### 1. The copy is shared; the removal is not
+
+`rm.rs` deletes trees. Writing a second walk that deletes trees is exactly the
+"two places for the same bug" this whole extraction exists to avoid, and the
+argument for sharing is the same one that moved 1,300 lines of `cp`'s walk into
+`copy.rs` in stage 4 (§750).
+
+It is nonetheless the wrong shape here, and the reason is that **GNU does not
+share it either — what it shares is a different thing.** Upstream's `mv` calls
+`rm()` (`mv.c:238`), but `rm()` is `remove.c`, a library module, and what `mv`
+hands it is a `struct rm_options` with nine fields fixed at `rm_option_init`
+(`mv.c:87`): never interactive, not `-f`, recursive, `preserve_root` on,
+`one_file_system` off. Our `rm.rs` is not that module. Its `Rm` struct is a
+350-line machine wired to `rm`'s own command line — the `-i`/`-I` prompts, the
+write-protected-file question, `--preserve-root=all`, `--one-file-system`, its
+own `Verdict` and `Question` enums, and byte-slice paths rather than `Path`.
+`mv` needs none of it and can supply none of it.
+
+| | share `rm.rs`'s walk | `mv.rs` writes its own |
+|---|---|---|
+| what has to move first | `Rm`'s prompts, preserve-root, one-file-system and byte-path plumbing, split into a policy `mv` can fill in | nothing |
+| size of that | a second extraction on the scale of stages 1–4, in a *different* binary | — |
+| what `mv` ends up calling | a walk with eight knobs, seven of them pinned | a walk with one (`-v`) |
+| duplicated logic | none | post-order descent plus `unlink`/`rmdir`, ≈30 lines |
+| where a divergence would show | one place | two |
+
+The deciding fact is the last row's cost weighed against the second row's. What
+is duplicated is *the shape of a post-order walk*, not a policy: `rm`'s
+interesting behaviour is all in the questions it asks before deleting, and `mv`
+asks none of them. So the two walks cannot come to disagree about anything a
+user can observe except the wording of two sentences, and those are pinned by
+`scripts/mv-diff.sh` §22 against GNU directly.
+
+**This is a deferral, not a refusal.** The right end state is a shared `remove`
+module — `remove.c`'s position in the tree — with `rm.rs` and `mv.rs` both
+driving it, and it should be done when `rm.rs` is next opened for its own
+reasons. It is logged as tech debt — `known-issues.md` →
+`TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS`, which also records the
+one place the two walks already behave differently and why the extraction has
+to wait on `TD-B-RM-WALKS-BY-PATH-…` — so the second walk cannot quietly become
+permanent. What it must *not* be is a rider on the stage that made directories
+movable at all: that stage's certification is "the harness numbers do not
+move", and refactoring a third binary inside it would destroy the meaning of
+that check.
+
+### 2. `Failed` gains a variant that carries no message
+
+`mv`'s cross-device fallback reports failures as `Failed { what, err }` — the
+sentence GNU prints for that step, plus the errno. The type exists precisely
+because the sentence *cannot* be derived from the errno: an unreadable source
+and an unwritable destination directory both give `EACCES`, and GNU answers
+`cannot open 'f' for reading` for one and `cannot create regular file 'd/g'`
+for the other.
+
+A tree copy breaks that premise. It fails at as many entries as went wrong, and
+the engine has already reported each one, naming that entry, where it happened.
+There is no single sentence left to carry.
+
+Three ways to express it:
+
+| | *What changes* |
+|---|---|
+| invent a sentence (`cannot move X to Y`) | the user gets a summary line GNU never prints, under the ten real ones |
+| carry the first failure's sentence | nine diagnostics are silently dropped and the one kept is arbitrary |
+| **a variant with no message** | the caller stops and restores the `-b` backup; nothing extra is printed |
+
+The third is chosen, and it is GNU's own behaviour rather than a compromise:
+`copy_internal` reports and returns false, and `do_move` prints nothing on top
+of it (`mv.c:186`). The cost is that `Failed` is no longer a struct whose
+fields can be read — every printer goes through `Failed::report`, and there are
+three of them. That is enforced by construction rather than by memory: a
+printer added later cannot destructure past the enum, which is the failure mode
+a `bool` flag beside the struct would have had.
+
+### Reversing either
+
+Decision 1 reverses by extracting `rm.rs`'s walk into a shared module and
+deleting `mv.rs`'s `remove_tree`; the three `removing_the_source_*` tests are
+the specification the shared one would have to meet, and they are written
+against `remove_source` rather than against the walk so that they survive the
+swap. Decision 2 reverses by giving `Failed::Reported` a sentence — the arm in
+`copy_across_devices` is the only place that constructs it — but doing so means
+printing something upstream does not, and `scripts/mv-diff.sh` compares stderr
+byte for byte.
+
+## 752. A recursive walk descends by descriptor and then checks the descriptor's identity, rather than waiting for libc's `openat` to stop resolving by path
+
+**Date:** 2026-09-03
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `rm -r` used to delete things by building up path *strings* —
+`dir`, then `dir/sub`, then `dir/sub/file` — and every one of those strings is
+re-walked from the top by the kernel, so a second program could swap `sub` for
+a pointer to somewhere else in the gap and redirect the deletions out of the
+tree. The fix is the standard one: keep the directory *open* and delete
+"the entry named `f` inside this open directory", a request that has no path in
+it to re-point. Doing that needs one call SlateOS does not yet provide honestly
+— the one that opens a subdirectory relative to an open directory. Rather than
+wait for the kernel, the walk opens the subdirectory the old way and then
+**asks the descriptor what it actually opened**, refusing to go on if it is not
+the thing that was there a moment ago. That check is cheap, works identically
+on Linux and on SlateOS, and needs nothing from another lane.
+
+### The situation
+
+`TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL` was filed on
+2026-08-30 and annotated the same day as *blocked on the kernel*: the `*at`
+family in `posix/src/file.rs` had the right names but the wrong behaviour,
+every member joining the descriptor's remembered path string to the caller's
+name and calling the ordinary path-based syscall. The annotation drew the
+correct conclusion at the time — that rewriting `rm` would close the race on
+the certification target (`x86_64-unknown-linux-gnu`, where these are glibc's
+genuinely fd-relative calls) *and nowhere else*, retiring the entry while
+shipping the bug.
+
+That is no longer the situation. Lane A pinned the family member by member —
+`unlinkat` (662), `fstatat` (663), `getdents` (664), `fchmodat` (665),
+`mkdirat`/`symlinkat`/`linkat`/`utimensat` (666–669), `renameat` (670) — each
+of which now resolves the *handle*. Reading them one at a time rather than
+trusting the summary comment turned up the one member the family's own
+"completed" note omits: **`openat` is still textual.**
+`posix/src/file.rs:3638` goes straight to `resolve_dirfd_path` and then
+`open(full)`. `O_NOFOLLOW` guards only the *final* component of that join, so
+an already-descended **ancestor** swap still redirects the open — which is
+exactly the residual the original entry described, surviving at depth ≥ 2.
+
+So the walk's four syscalls split: listing, classifying and removing are pinned
+and safe; only *descending* is not.
+
+### Option A — make libc's `openat` forward to `SYS_FS_OPENAT2` (rejected)
+
+`SYS_FS_OPENAT2` (661) genuinely pins: `openat2_forward` passes `entry.handle`
+as the base, and lane A has since enforced `RESOLVE_BENEATH` in the VFS. Making
+`openat` forward to it would fix this for *every* program on SlateOS at once,
+not just `rm`, which is the more fundamental fix and would normally win on that
+ground alone.
+
+It was rejected on evidence from lane A's own request
+(`requests/a-b-openat2-resolve-beneath-is-enforced.md`), which says plainly
+that the marshalling in `sys_openat_beneath` between the `AT_FDCWD` → cwd
+lookup and `dirfd_to_guest_dir` is **reached by no test**. Routing every
+SlateOS program's `openat` — which is to say every program's file opening —
+through code that nothing exercises, in order to close a race that needs a
+hostile local process, trades a conditional bug for an unconditional one. It is
+also not lane B's tree to change the guarantees of.
+
+### Option B — open, then verify what was opened (chosen)
+
+After `openat(fd, name, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`, `fstat` the new
+descriptor and compare `(st_dev, st_ino)` against the `fstatat` the walk
+already took to decide the entry *was* a directory. On mismatch the descriptor
+is dropped and the descent refused with `ESTALE` (116) — the same errno the
+pinned family already answers for this condition.
+
+What makes this sound is that it does not try to prevent the redirection; it
+detects it. An attacker who wants the walk to descend somewhere else has to
+make the textual open land on a file whose device and inode match the one the
+walk already saw — which is to say, on the file the walk meant. The window
+between the `fstatat` and the `fstat` is not closed, but nothing observable
+passes through it: no entry is removed on the strength of the pre-check, only
+descended into, and the descent is what is being verified.
+
+Its costs, in order of how much they matter:
+
+- **One extra `fstat` per directory entered.** Not per entry — per directory.
+  A tree of *n* files costs *n* `fstatat`s either way and gains one `fstat` per
+  interior node. That is noise beside the `unlinkat` per file.
+- **It is a caller-side workaround for a libc defect,** and so has to be
+  remembered when the defect is fixed. Filed to lane A separately; the check
+  becomes redundant, not wrong, when `openat` pins — at which point it costs
+  one `fstat` per directory and can be deleted at leisure.
+- **It cannot be tested by racing.** The tests instead swap the target
+  *between* the two lookups deterministically, which is the same code path an
+  attacker would win by hitting.
+
+Chosen over doing nothing (which leaves the entry blocked on another lane
+indefinitely) and over an `rm`-local copy of `tar`'s private descriptor walk
+(see below).
+
+### Where it lives, and why not in `rm.rs`
+
+The layer is `userspace/coreutils/src/dirfd.rs`, shared, not a private helper
+in `rm.rs`. `tar` had grown its own descriptor walk to fix
+`B-tar-WALKS-THROUGH-A-PRE-EXISTING-SYMLINK-…`, and copying it a second time
+would mean two utilities carrying two versions of a *security* invariant, which
+is a stronger reason to share code than the interface-agreement reasons already
+written into `lib.rs`'s header: two utilities disagreeing about a rendering is
+a cosmetic bug, but two disagreeing about whether a descent is verified means
+one of them is exploitable and nobody can tell which by reading either file.
+
+The module owns the rule "every step below a walk's starting point is
+(open directory, one component)" and nothing else. Tar-specific machinery —
+`locate`, symlink-hop budgets, `EXDEV` handling — stays in `tar.rs`.
+Converting `tar` onto the shared module is a separate, separately-certified
+change; until it lands the duplication is real and is tracked as such.
+
+The walk's *starting point* is still reached by path, because at an operand
+there is no descriptor above it to reach it through. That is GNU's position
+too, and it is not a gap: the operand is a name the user typed, and re-reading
+it means reading what the user asked for.
+
+### Reversing it
+
+Delete the identity comparison in `Dir::open_child` and the module keeps
+working — it degrades to exactly what `tar` does today, which is correct on
+Linux and textual on SlateOS. Reverse the whole layer by giving `Loc` back a
+plain `path` and restoring the `fs::` calls; the `rm-diff.sh` cases are written
+against printed output and are unchanged by either direction, which is what
+makes them a usable check that the rewrite was a behavioural no-op.
 
 ---
 

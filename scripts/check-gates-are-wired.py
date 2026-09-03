@@ -118,26 +118,29 @@ CALLERS = (
 # Gates known to be unwired, with the reason. Pruning this list is part of
 # using it: see the module docstring on stale exemptions.
 PINNED: dict[str, str] = {
-    # Three of lane C's, whose *fixtures* the boot test now runs
-    # (`check_unwired_gate_selftests`) even though their real checks stay
-    # unwired. A `--self-test` is not wiring and is not counted as such below;
-    # it only stops the checker rotting while it waits for lane C to switch it
-    # on, so that what gets switched on is known to still work.
-    "check-diskcleanup-test-roots.py":
-        "lane C (apps/diskcleanup); filed to lane C 2026-09-02; "
-        "self-test wired 2026-09-03",
+    # The other five lane-C gates filed here on 2026-09-02 were wired into
+    # boot-test.sh on 2026-09-03 (check_lane_c_gui_gates) and their entries
+    # deleted with the same commit, which is what this dict is for. Lane A's
+    # `check_unwired_gate_selftests` -- which ran three of their *fixtures* to
+    # stop them rotting while they waited -- went with them: a self-test run
+    # beside a real check that is now also run is duplicated work, and lane C's
+    # version runs the fixture immediately before the check it guards.
     "check-evdev-elf-asm.py":
-        "lane C (ring-3 evdev test payload); filed to lane C 2026-09-02",
-    "check-frame-needles.py":
-        "lane C (windowed app test suites); filed to lane C 2026-09-02",
-    "check-generated-tables.py":
-        "lane C (gui/font generated tables); filed to lane C 2026-09-02",
-    "check-key-release-wiring.py":
-        "lane C (windowed programs); filed to lane C 2026-09-02; "
-        "self-test wired 2026-09-03",
-    "check-window-wiring.py":
-        "lane C (GUI programs' main); filed to lane C 2026-09-02; "
-        "self-test wired 2026-09-03",
+        "lane C, and DELIBERATELY unwired: it imports `capstone`, a "
+        "third-party disassembler that nothing in this repository declares as "
+        "a dependency and no build step installs. Wiring it would make a pip "
+        "package a hard requirement of every lane's boot test, to guard a "
+        "hand-assembled byte payload in kernel/src/proc/elf.rs that changes "
+        "very rarely -- and the gate would then be the reason all three lanes "
+        "could not build on a fresh checkout. Its own docstring says it is a "
+        "developer check, not part of the build. It exits 2 when capstone is "
+        "absent (as of 2026-09-03; it used to exit 1, claiming the payload was "
+        "wrong when it had not looked at it), so it is honest under pre-boot. "
+        "Now that run_checker has `--may-skip=2` this COULD be wired as a "
+        "skipping gate; lane C's decision to keep it out stands until lane C "
+        "revisits it. Run it by hand after touching those byte literals. "
+        "Decided by lane C 2026-09-03, answering "
+        "requests/b-c-six-gui-gates-are-never-run-by-anything.md",
     # Two of the four bash oracles.  The "requires WSL" reason all four carried
     # until 2026-09-03 is GONE, and deliberately not replaced by a softer
     # version of itself: `run_checker --may-skip=2` plus bashprobe's exit-2

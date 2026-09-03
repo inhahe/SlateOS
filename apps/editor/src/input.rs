@@ -556,7 +556,7 @@ impl EditorState {
         match mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => self.mouse_press(mouse.x, mouse.y),
             MouseEventKind::DoubleClick(MouseButton::Left) => {
-                if self.caret_position_at(mouse.x, mouse.y).is_none() {
+                if self.caret_cursor_at(mouse.x, mouse.y).is_none() {
                     return Response::Idle;
                 }
                 self.mouse_press(mouse.x, mouse.y);
@@ -580,12 +580,14 @@ impl EditorState {
                 // caret is clamped to the nearest position rather than the
                 // selection freezing, which is what makes selecting past the
                 // bottom of the screen possible at all.
-                let Some((line, col)) = self.caret_position_at(mouse.x, mouse.y) else {
+                let Some((line, cursor)) = self.caret_cursor_at(mouse.x, mouse.y) else {
                     return Response::Idle;
                 };
-                let doc = self.active_document_mut();
-                doc.cursor_line = line;
-                doc.cursor_col = col;
+                // Through `set_cursor` so the affinity travels with the offset:
+                // a drag that ends inside a right-to-left run has a side, and
+                // dropping it would snap the caret to the far end of the line
+                // on the next repaint.
+                self.active_document_mut().set_cursor(line, cursor);
                 self.after_cursor_move();
                 Response::Redraw
             }
@@ -632,9 +634,10 @@ impl EditorState {
             }
             return Response::Redraw;
         }
-        let Some((line, col)) = self.caret_position_at(x, y) else {
+        let Some((line, cursor)) = self.caret_cursor_at(x, y) else {
             return Response::Idle;
         };
+        let col = cursor.byte;
         // Shift-click extends from wherever the selection already starts, so
         // shift-clicking twice grows one selection rather than starting two.
         let extend = self.modifiers.shift;
@@ -650,8 +653,11 @@ impl EditorState {
             // selection, which is what keeps a plain click from arming a delete.
             doc.selection_anchor = Some((line, col));
         }
-        doc.cursor_line = line;
-        doc.cursor_col = col;
+        // `set_cursor` rather than the two fields, so the affinity the click
+        // carried is the one the caret is drawn with. A press at the seam
+        // between a Latin and a Hebrew run has the same byte offset from
+        // either side, and only the side says where the caret goes.
+        doc.set_cursor(line, cursor);
         self.dragging = true;
         self.after_cursor_move();
         Response::Redraw

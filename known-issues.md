@@ -31638,6 +31638,70 @@ width of `INT_MIN`, which allocated two gigabytes and stopped responding
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
+**Status: OPEN — all four items done. Only the per-line shaped cache (step (b),
+a cost concern) and the arrow keys (C-Q2, the operator's call) remain.**
+
+**Update 2026-09-03 — items 1 and 2 are fixed, and `measure_prefix` is gone.**
+
+`caret_offset_px` was `measure(line[..col])` — `width_upto` under another name,
+the quantity `TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL` was renamed away from
+precisely because it is not a caret position. It is now `text::caret_x`, which
+walks the shaped run. Hit-testing was a loop comparing prefix widths at every
+character boundary; it is now `text::cursor_at`, which walks the caret stops in
+*screen* order. The selection band was one rectangle between two measured
+prefixes; it is now `text::selection_boxes`, a list, because a range contiguous
+in the string need not be contiguous on screen — the single span painted the
+gap between the pieces, telling the user they had selected text they had not.
+
+`Document` gained `cursor_affinity` beside `cursor_col`, and
+`Document::set_cursor` is the one place a hit-test's answer becomes the caret,
+so dropping the affinity is something someone has to *do* rather than something
+that happens by writing `cursor_col = col` and forgetting the other field. It is
+a companion field rather than a `TextCursor` replacing `cursor_col` because
+every edit in the file is arithmetic on a byte offset — 99 sites — and none of
+them has an opinion about direction; only drawing and hit-testing do.
+
+**The click path was already live, and this entry said otherwise.** The earlier
+note that `apps/editor` "has no live input loop" is true of `main()` and false
+of `input.rs`, which has `handle_mouse` with press, double-click and drag. All
+three went through `caret_position_at`; all three now go through
+`caret_cursor_at` and `set_cursor`, so a real click's affinity reaches the caret
+it draws. Worth recording as a correction: the belief that nothing called the
+hit test nearly led to it being left alone.
+
+**`measure_prefix` is deleted, and `-D dead_code` is what proved the job was
+complete.** It had exactly two callers, the caret and the hit test, and when
+both were converted the lint reported it unused — a stronger statement than "I
+looked and found no others": the prefix-width measurement is gone from the
+editor rather than merely unused by the two sites that were examined.
+
+**Seven tests**, in `caret_tests`, on the string `guitk::pathbar` uses — two
+Latin letters, two Hebrew, two Latin — the smallest text where a prefix width
+and a caret position are different numbers. The bidirectional caret is asserted
+to *differ* from the prefix width, because that disagreement is the entire
+content of the bug and asserting a specific x would pin the font's metrics
+instead. A left-to-right regression test pins the ordinary case, which is every
+line of every source file anyone will actually open. A click sweep asserts the
+caret is drawn back within one character of where it was clicked, at points
+across the whole run including inside the right-to-left stretch — a click that
+does not land where the caret appears is the most immediately visible bug an
+editor can have. And two affinities at one boundary are asserted to be two
+screen positions, which is what makes the new field load-bearing rather than
+noise.
+
+Mutation-checked: restoring the prefix measurement fails exactly the three
+bidirectional tests and leaves the left-to-right one green.
+
+**What is left.** Step (b), the per-line shaped cache, which is a *cost*
+concern and not a correctness one — `caret_x`, `cursor_at` and
+`selection_boxes` each shape internally, so they were never waiting on it.
+Worth doing when something measures the editor as slow, with a clock rather
+than a profiler. And the arrow keys still step logically, which is C-Q2 and
+remains the operator's call; this entry was never blocked on it, since where a
+caret is *drawn* is wrong under either answer.
+
+The original status line follows.
+
 **Status: OPEN — items 3 and 4 (steps (c) and (d)) done 2026-08-17; 1 and 2
 remain.**
 
@@ -56680,7 +56744,7 @@ each application being broken rather than the theme being unimplemented — the
 same misdiagnosis the shell entry describes, multiplied by ninety.
 ---
 
-### TD-C-WORKSPACES-CANNOT-SURVIVE-A-LOGOUT-AND-THE-MODULE-SAYS-THEY-CAN — 2026-08-24 — OPEN
+### TD-C-WORKSPACES-CANNOT-SURVIVE-A-LOGOUT-AND-THE-MODULE-SAYS-THEY-CAN — 2026-08-24 — OPEN (the module no longer says they can, and the format round-trips as of 2026-09-03; the caller is still missing)
 
 **In short.** A *workspace* here is a saved window layout — "Development" with
 an editor, a terminal and a browser at particular positions — that the user
@@ -56737,6 +56801,62 @@ shell just started". Until the shell can be driven
 to hang the save and load calls on. The honest interim step, which costs
 nothing and is not deferred, is the doc comment: it should say what the module
 does today rather than what it is intended to do.
+
+### Half done 2026-09-03 — the format exists and round-trips; the caller does not
+
+Both steps this entry named as doable were done. What is left is the shell event
+loop, which is another entry's problem.
+
+**The doc comment no longer claims persistence.** It says what the module does
+today, names what is missing, and points at the entry that owns the missing
+half. The old line ("Also handles session persistence across logouts/reboots")
+is removed rather than softened: a doc comment describing an intention in the
+present tense is how a missing feature stops being noticed, which is exactly
+what happened here for however long it stood.
+
+**The format is replaced, and it round-trips.** `export_workspaces` is gone;
+`SessionManager::to_yaml` and `load_yaml` are new. YAML through `yamldoc`,
+because `design.txt` says configuration is YAML and `yamldoc` preserves the
+comments and formatting of a file a user has edited.
+
+| the old format | now |
+|---|---|
+| 4 of `Workspace`'s 11 fields | all 11, plus every field of `SessionState` |
+| fields joined with `:`, nothing quoted | `yamldoc` quotes; a colon in a name is a non-event |
+| window mode via `{:?}` | `SavedWindowMode::as_yaml`, an explicit `match` |
+| no reader, and none writable | `load_yaml`, with round-trip tests |
+
+The `{:?}` point is worth keeping: it made the *Rust identifier* the file
+format, so renaming a variant would silently change what every saved file meant
+and the compiler would say nothing, because `Debug` is still implemented. The
+`match` in `as_yaml` turns that into a non-exhaustive-match error.
+
+Windows are an index-keyed map rather than a sequence because `yamldoc`'s
+sequences hold strings, not maps; keys are zero-padded so a plain sort keeps
+them in order, which `workspaces_and_windows_come_back_in_the_order_they_went_out`
+pins — the picker's list depends on it.
+
+**Six tests.** Field-by-field round-trip (asserted per field, because a
+serialiser that drops a field and a reader that ignores it agree with each other
+perfectly); the colon case this entry named, exercising a name, a description
+and a title hint at once; `None` versus `Some("")` for the three optional
+fields, which a format writing both as empty would have collapsed on the first
+save; ordering; every window mode by its explicit spelling, plus `"Maximized"`
+and an unknown spelling both reading as `None`; and colour including alpha.
+
+**Deliberately not defaulted:** a window whose mode this build does not
+recognise is *skipped*, not read as `Normal`. A file written by a newer build
+may hold a mode this one lacks, and un-maximising a window the user had
+maximised looks like the layout being restored wrong rather than not being
+restored. `an_unreadable_window_is_skipped_rather_than_defaulted` pins it.
+
+**Still open, and it is the whole remaining point:** nothing calls either
+function. There is no moment to hang a save on until the shell can notice a
+logout, and none to hang a load on until it can notice a start — see
+`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`. A user's workspaces
+still do not survive a logout. What changed is that the reason is now solely the
+missing caller, rather than the missing caller *and* a format that could not
+have been read back anyway.
 
 **Trigger:** the format and the reader can be done at any time; the save/load
 calls are sequenced after the shell event loop.
@@ -92623,6 +92743,47 @@ whoever picks this up:
   same request, since designing the read side alone would leave this needing a
   third API revision. Still not filed, for the reason above.
 
+**Update, 2026-09-03 — the cap now bounds the rewrite, and the request is filed.**
+
+Two things changed, and only the second needs lane A.
+
+*The bound.* `MAX_SAVE_BYTES` (3 × `MAX_ARCHIVE_BYTES`) and
+`projected_save_bytes` are new. The projection is arithmetic over the central
+directory — which carries both the compressed and the uncompressed size of
+every member — so a rewrite is costed *before* anything is allocated and
+before the old archive is touched, and refused with a message naming both
+numbers rather than being discovered by the allocator. The three-times factor is
+not a guess: a save holds the old archive, every reproduced member's plaintext,
+and the new archive at once, so it is three of the order an open costs.
+
+This does **not** make the program stream. It converts "exhausts memory during a
+save, having possibly already started writing" into "says it cannot, and the
+file on disk is untouched" — which is the same conversion
+`MAX_ARCHIVE_BYTES` already performed for opening, applied to the operation it
+did not cover. The bullet above is therefore resolved; the entry as a whole is
+not.
+
+Guarded by `a_rewrite_too_big_to_hold_is_refused_and_the_file_is_untouched`,
+which reaches the refusal through `save_within` — the body `save` runs, with
+the budget as a parameter. Tripping `MAX_SAVE_BYTES` honestly would need an
+archive claiming 1.5 GiB of plaintext, which costs 1.5 GiB to write; testing the
+projection alone would have left nothing covering "and `save` acts on it", which
+is precisely the shape of bug this crate keeps finding elsewhere. Mutation-
+checked: replacing the comparison with `if false` fails that test and only that
+test. Two more tests cover the other direction — that an ordinary archive is
+nowhere near the budget (a false refusal would hit everybody, unlike the bug it
+fixes) and that a directory member is charged nothing.
+
+*The request.* Now filed, as
+`requests/c-a-ziparchive-wants-a-ranged-reader-and-a-streaming-writer.md`. The
+reason given above for holding it back — "the crate is a week old; asking for
+a second API before the first has been used in anger is how APIs get designed
+twice" — has expired in the best way: it *has* been used in anger. Both a
+reader and a writer are implemented against the slice API, and the writer is
+what trebled the peak. That is the evidence a second API design wants, and
+withholding it now would just mean lane A designing the read side alone and
+needing a third revision for the write side.
+
 ### TD-C-NOTHING-CAN-ACTUALLY-COPY-AND-PASTE-BETWEEN-PROGRAMS — 2026-08-26 — LANE C, OPEN
 
 **In short:** Copy and Paste do not cross between programs. Every window that
@@ -93869,7 +94030,7 @@ test cannot be fooled by a renderer that mutates. The field is deleted;
 back. `the_detail_panel_cannot_be_scrolled_before_it_has_been_measured` now
 passes for the opposite reason it used to: there is no "before".
 
-### C-CREDMANAGER-TOOLBAR-FALLS-OFF-A-NARROW-WINDOW — 2026-08-26 — LANE C, OPEN
+### C-CREDMANAGER-TOOLBAR-FALLS-OFF-A-NARROW-WINDOW — 2026-08-26 — LANE C, OPEN (narrowed 2026-09-03: the search box now gives way first, and Ctrl+L is tested)
 
 **What happens.** credmanager's toolbar is a fixed row of six buttons laid out
 left to right from the sidebar's right edge: Add, the search box, Sort,
@@ -93906,6 +94067,64 @@ for it either.
 there, so this only bites a user who deliberately narrows the window. When the
 toolbar learns to overflow, the test named above should start failing — which
 is the intent.
+
+### Improved 2026-09-03 — the search box now gives way first, and one claim above was wrong
+
+**Correction first: recommendation 3 was already done, and "the keyboard has no
+accelerator for it either" was false when it was written.** `handle_key` has had
+a `Key::L if key.modifiers.ctrl => state.vault.lock()` arm all along
+(`apps/credmanager/src/main.rs`). What was missing was not the binding but any
+*test* of it: nothing drove that keystroke, and the arm sits after an early
+return for the lock screen, so "it is in the file" and "a keystroke reaches it"
+were different claims with only the first one checked.
+`ctrl_l_locks_the_vault_even_when_the_button_is_off_the_edge` now drives it —
+through `handle_event`, not `handle_key`, because the press/release guard is at
+the dispatch site and calling `handle_key` directly would pass just as loudly if
+that guard were wrong. It also asserts the *release* does nothing, which is the
+defect `check-key-release-wiring.py` exists to find.
+
+**Recommendation 2 is implemented.** `search_box_width(width)` makes the search
+box the one elastic control in the row: it is 200 px when there is room and
+shrinks to a floor of 80 px before any button is pushed off. The search box is
+the right thing to shrink because it is the only control that is still *itself*
+at half size — a button at half width is a button with its label cut in half.
+
+**What that buys, measured rather than estimated:**
+
+| window | before (search fixed at 200) | after |
+|---|---|---|
+| 1280 px | all six drawn | unchanged — the box is at its full 200 |
+| 820 px | `Settings` off the edge | all six drawn; box at 126 |
+| 700 px | `Lock Vault` **and** `Settings` off | `Lock Vault` fully drawn at 600..670; `Settings` straddles the edge |
+| 500 px | four off | `Lock Vault` and `Settings` off; the rest drawn |
+
+So the row now needs about 762 px rather than 882, and `Lock Vault` — the
+security control this entry was really about — survives down to ~682 px instead
+of ~802.
+
+**Two existing tests changed, and both changes are the fix working.** This entry
+predicted one of them: "When the toolbar learns to overflow, the test named
+above should start failing — which is the intent."
+
+- `a_toolbar_button_past_the_right_edge_records_no_hit_box` measured at 700 px,
+  where `Settings` used to sit at 802..882, entirely off. It is now at 682..762,
+  i.e. *partially* visible, and correctly records a hit box for the part you can
+  see. The test moved to 500 px, where the property it is about — a button drawn
+  **entirely** past the edge is not clickable — still applies unchanged. It also
+  gained an assertion for the new middle case: a button straddling the edge is
+  clickable only where it is visible, and its recorded rect stops at the window
+  edge.
+- The `Ctrl+L` test's own precondition had to move from 700 px to 500 px for the
+  same reason: at 700 the button is now reachable, so the test would have been
+  asserting nothing.
+
+**Recommendation 1 — a `»` overflow menu — is still the right end state and is
+still blocked** on the toolkit having a popup. This does not pretend to be one:
+below ~682 px the right-hand buttons still fall off with nothing on screen to
+say they exist. What has changed is that the window has to be a good deal
+narrower before that starts, and that `Ctrl+L` is now known to work rather than
+merely present.
+
 
 ### C-CREDMANAGER-ALLOWS-DEAD-CODE-CRATE-WIDE — 2026-08-26 — LANE C, OPEN, tech debt
 
@@ -101265,7 +101484,13 @@ and `rm` removes what it was asked to remove instead of silently stopping short.
 The only host that runs this today is the Windows development machine, where the
 unit tests run; the shipped target is SlateOS, which is unix.
 
-## TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL (lane B, 2026-08-30)
+## TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL (lane B, 2026-08-30) — FIXED 2026-09-03
+
+**Fixed.** `rm`'s walk is descriptor-relative as of 2026-09-03, through the new
+shared `userspace/coreutils/src/dirfd.rs`. The original entry is kept below
+unedited, because the *reason* it sat blocked for four days is worth reading
+and because the annotation at the end of it was correct when written and is now
+wrong — see "What changed" after it.
 
 **In short:** `rm -r dir` walks the tree by building up path *strings* —
 `dir`, then `dir/sub`, then `dir/sub/file` — and hands each whole string to the
@@ -101350,6 +101575,81 @@ See **`B-POSIX-THE-AT-FAMILY-IS-TEXTUAL`** below, which is the general defect;
 this `rm` race is one symptom of it. Unblocking needs kernel-side fd-relative
 resolution, which is lane A's tree — filed as
 `requests/b-a-the-at-family-resolves-by-path-so-no-toctou-fix-is-possible.md`.
+
+### What changed (2026-09-03)
+
+Lane A answered that request, member by member: `unlinkat` (662), `fstatat`
+(663), `getdents` (664), `fchmodat` (665), `mkdirat`/`symlinkat`/`linkat`/
+`utimensat` (666–669) and `renameat` (670) all resolve the *handle* now. So of
+the four syscalls this walk makes, three — listing, classifying, removing — are
+pinned on SlateOS and were already fd-relative on the certification target.
+
+**One was not, and the family's own summary comment does not say so:**
+`openat`. `posix/src/file.rs:3638` still joins the descriptor's remembered path
+to the child name and calls `open` on the string. `O_NOFOLLOW` guards only the
+*final* component of that join, so a swap of a component the walk had already
+descended through is still followed — the residual attack, at depth ≥ 2.
+
+The walk closes that itself rather than waiting: after opening a child
+directory it `fstat`s the descriptor and compares `(st_dev, st_ino)` with the
+`fstatat` that decided the child *was* a directory, refusing the descent with
+`ESTALE` on a mismatch. Redirecting the open past that check would require
+landing on the same inode, i.e. on the file the walk meant. It is identical on
+both targets, needs nothing from lane A, and is deletable when `openat` pins.
+The reasoning, including why forwarding libc's `openat` to `SYS_FS_OPENAT2` was
+rejected, is `design-decisions.md` §752; the gap is filed as
+`requests/b-a-openat-is-the-one-at-call-left-unpinned.md`.
+
+So the correction above stands as a *rule* — a fix real only where it is
+measured is worse than no fix — and the fix that landed obeys it. It is not
+"green on Linux, textual on SlateOS": on SlateOS three of the four calls are
+pinned in the kernel and the fourth is verified by the caller.
+
+### Where it is now
+
+`userspace/coreutils/src/dirfd.rs` — `Dir` (an owned directory descriptor;
+`open_root`, `open_child`, `stat`, `unlink`, `rmdir`, `writable`, `names`) and
+`Stat` (a `kind` plus the `(dev, ino)` identity). `rm.rs` reaches every entry
+below an operand through `Loc { dir, name, path }`, where `path` is only ever
+*printed*. The operand itself is still opened by path, because at the top there
+is no descriptor above it — GNU's position too.
+
+Two follow-ups, tracked separately:
+`TD-B-TAR-AND-RM-CARRY-TWO-DESCRIPTOR-WALKS` (convert `tar.rs` onto the shared
+module, deleting its private copy) and
+`TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS` (`rm`'s and `mv`'s).
+
+## TD-B-TAR-AND-RM-CARRY-TWO-DESCRIPTOR-WALKS (lane B, 2026-09-03)
+
+**In short:** two utilities now know how to walk a directory tree safely, and
+they know it in two places. `tar` learned it first, privately, when its own
+symlink hole was fixed; `rm` learned it second, in a shared module built for
+the purpose. Until `tar` is moved onto the shared one, a fix or a mistake in
+either copy does not reach the other — and the thing being duplicated is a
+security invariant, which is the worst kind of thing to have two versions of,
+because reading one file no longer tells you whether the other is safe.
+
+**Where.** `userspace/coreutils/src/bin/tar.rs` carries its own `Dir`, `CStat`,
+`oflag` module and `extern` block. `userspace/coreutils/src/dirfd.rs` is the
+shared layer, currently used only by `rm`.
+
+**The difference that matters.** The shared module's `open_child` verifies the
+descriptor it got — `fstat` and compare `(dev, ino)` against the `fstatat` that
+classified the entry — because `openat` is still textual on SlateOS
+(`requests/b-a-openat-is-the-one-at-call-left-unpinned.md`). `tar`'s private
+copy does not, so **`tar` is correct on Linux and exposed on SlateOS** for the
+ancestor-swap case. That is the concrete cost of the duplication, not a
+hypothetical one.
+
+**Proper fix.** Delete `tar.rs`'s `Dir`, `CStat`, `oflag` and externs; use
+`coreutils::dirfd`. The tar-specific parts around it — `locate`, `Located`,
+`components`, `MAX_SYMLINK_HOPS`, the `EXDEV` handling — stay where they are;
+they are about what `tar` does with a resolved location, not about how it
+resolves one. Certify with `scripts/tar-diff.sh`, which compares against GNU
+tar case by case and is what makes the swap provably a behavioural no-op.
+
+Filed the same day the shared module landed, and expected to be short-lived:
+it exists to name the window, not to justify it.
 
 ## `nice` reported a refused niceness with the wrong errno, because `nice.c`'s `nice(2)` branch is dead code (lane B, 2026-08-30)
 
@@ -107147,10 +107447,14 @@ the rename succeeds, nothing is recorded, and both lines really are `renamed`.
 
 **Still not covered, and deliberately.** Directories stay out of the table.
 Upstream's first arm handles them under `x->recursive` and produces `warning:
-source directory %s specified more than once`; this `mv` refuses a cross-device
-directory move outright, so the arm has nothing to protect yet. It belongs with
-`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`. So does the `--update` skip
-path (`copy.c:2380`), which records and links a skipped destination —
+source directory %s specified more than once`. This paragraph used to say the
+arm "has nothing to protect yet" because a cross-device directory move was
+refused outright; that refusal was lifted on 2026-09-03, so the gap is real now
+and is tracked as `B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY` —
+which also records how narrow the trigger turned out to be when measured.
+
+The `--update` skip path (`copy.c:2380`), which records and links a skipped
+destination —
 "we currently replace DST_NAME unconditionally, even if it was a newer separate
 file", in upstream's own words — and is tracked separately as
 `B-MVS-UPDATE-SKIP-DOES-NOT-LINK-A-REPEATED-INODE`.
@@ -107376,7 +107680,7 @@ programs share `copy::copy_bytes`; there is no funnelled sentence left here.
 
 ---
 
-## B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED — OPEN 2026-09-01
+## B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED — FIXED 2026-09-03
 
 **In short:** `mv dir /other/filesystem/` fails. Moving a directory between two
 filesystems means copying the whole subtree and then removing the original, and
@@ -107531,6 +107835,130 @@ compare against that.
 **How it is caught.** `scripts/mv-diff.sh` §22, one `xfail_case` naming this
 entry, whose fixture carries a setgid bit and a subdirectory so that the case
 keeps measuring something after the refusal is lifted.
+
+**FIXED 2026-09-03 — stage 5, which is what closes this.**
+`copy_across_devices` grew a directory arm of eleven lines, because the engine
+extracted by stages 1–4 already does all of it: `copy::stat_destination`
+followed by `copy::place_entity`, the same call `cp -r` makes for a directory
+operand. There is no second walk, which was the whole point of doing the
+extraction first.
+
+Three things had to join it, none of them the walk:
+
+- **`copy::Opts::move_mode`** — GNU's `x->move_mode` (`copy.h:169`). The *only*
+  thing it decides inside the engine is what `-v` prints, and the asymmetry is
+  upstream's rather than ours: a moved **file** is announced `copied 'FAR/d/f'
+  -> 'g/f'`, naming both ends (`copy.c:2887`), while a moved **directory** is
+  announced `created directory 'g'`, naming only the end that was made
+  (`copy.c:2988`). A copy says `'d' -> 'g'` for both.
+- **`clear_destination` learned `AT_REMOVEDIR`** — `rmdir` when the *source* is
+  a directory, `unlink` otherwise, which is GNU reading the source's kind to
+  decide what to do to the destination (`copy.c:2875`). Measured, the
+  consequence is that `mv -T FAR/d existing-empty-dir` succeeds and
+  `mv -T FAR/d existing-non-empty-dir` fails with
+  `unable to remove target: Directory not empty` — plain `rmdir` semantics, and
+  the sentence this `mv` already had.
+- **`remove_source` became `rm -r`** — depth-first, one `mv: cannot remove X`
+  per entry that will not go, and `-v`'s `removed X` / `removed directory X`
+  printed *by the walk* rather than by `move_one`, because a directory yields
+  one such line per entry and only the walk knows what it removed. A failed
+  child silently skips its ancestors, which is `mark_ancestor_dirs`
+  (`remove.c:431`) plus `prompt`'s `fts_number` check (`remove.c:206`): the
+  `ENOTEMPTY` they would earn says nothing the child's diagnostic did not.
+
+**`Failed` had to become an enum**, and that is the one design point worth
+reading twice. Every other step of the fallback fails with *one* sentence, which
+is why `Failed` carried it; a tree copy fails at as many entries as went wrong,
+and the engine has already reported each one where it happened. `Failed::Reported`
+is the variant that carries nothing on purpose — the caller's signal to stop and
+to put a `-b` backup back, and nothing else. GNU has the same silence:
+`copy_internal` reports and returns false, and `do_move` adds nothing on top of
+it (`mv.c:186`).
+
+**What the numbers did.** §22's `xfail_case` is a `run_case` now, taking
+`scripts/mv-diff.sh` from 360/0/11 to **361 passed, 0 differed, 10 differ on
+purpose**; `scripts/cp-diff.sh` stayed byte-identical at **581/0/30**, which is
+the certification that the engine change was confined to `move_mode`.
+
+**One gap the fix opened, logged rather than fixed**:
+`B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY`.
+
+---
+
+## B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY — OPEN 2026-09-03
+
+**In short:** naming the same directory twice on one `mv` command line can make
+GNU print `mv: warning: source directory 'd' specified more than once` and skip
+the repeat. This `mv` prints nothing and tries the move a second time. Nothing is
+destroyed either way — the second attempt copies the tree over the copy it
+already made — but the transcript differs, and the second attempt is work that
+GNU knows to skip.
+
+**Jargon, once.** *Operand* — one of the file names on the command line.
+*Cross-device* — source and destination on different filesystems, so `mv` has to
+copy and delete rather than rename.
+
+**How narrow this is — measured against GNU 9.4, not reasoned.** Three things
+must hold at once, and the third is what makes it rare:
+
+1. the same directory named as two operands, and
+2. the move must be cross-device (a same-device move renames, and GNU records
+   nothing for a rename that succeeded — `copy.c:2662`), and
+3. **the first attempt must have copied the tree and then failed to remove the
+   source.** A first attempt that *succeeded* takes the source away, so the
+   second operand gets `No such file or directory` from both `mv`s alike; a
+   first attempt that failed earlier calls `forget_created`, which takes the
+   entry back out of the table, so there is nothing for the second to find.
+
+The reproduction is therefore:
+
+```text
+$ mkdir -p FAR/d/sub; printf hello > FAR/d/f; mkdir dest; chmod 555 FAR
+$ mv -v FAR/d FAR/d dest
+created directory '.../dest/d'
+created directory '.../dest/d/sub'
+copied '.../FAR/d/f' -> '.../dest/d/f'
+removed '.../FAR/d/f'
+removed directory '.../FAR/d/sub'
+mv: cannot remove '.../FAR/d': Permission denied
+mv: warning: source directory '.../FAR/d' specified more than once
+$ echo $?
+1
+```
+
+Ours prints everything down to the `cannot remove`, then copies the tree a
+second time instead of printing the warning. The exit status is 1 either way.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `move_one`, the `src_id` block —
+`file_id` is asked only for a non-directory, so a directory never enters
+`Copied`. The comment there says the same thing.
+
+**What GNU does.** `copy.c:2664` records a directory operand too, under
+`x->recursive && S_ISDIR (src_mode) && command_line_arg`, into the same
+`src_to_dest` table the hard-link machinery uses. The `earlier_file` block below
+it then has a directory arm with two sentences, of which this is one. The other
+is `cannot copy a directory, X, into itself, Y`, which this `mv` cannot reach
+either — but that one needs source and destination nested, which is a same-device
+`rename` returning `EINVAL` and is already reported by the ordinary path with
+GNU's own wording.
+
+**The proper fix.** `Copied` starts holding directories, keyed the same way, and
+`move_one` asks for a `file_id` unconditionally. The reason it is not done here
+is that `Copied::forget` then means something new on every other path: today
+"this inode's destination was not created after all" is a claim about a *file*,
+and a directory whose subtree is half-copied is not the same claim. That wants
+its own stage with its own cases, not a rider on the one that made directories
+movable at all.
+
+**Cost of leaving it.** A duplicated directory operand does redundant work and
+prints a different transcript. It cannot lose data — the second pass writes the
+same tree over the same destination. Nothing else is blocked on it.
+
+**How it is caught.** Not yet. `scripts/mv-diff.sh` §22 cannot express it as it
+stands: the fixture needs the *far* directory made read-only after its contents
+are built, and the harness's `FAR` hook runs before the move rather than between
+the two operands. Teaching the harness that is part of the fix, not of this
+entry.
 
 ---
 
@@ -107950,6 +108378,17 @@ above are the prerequisites, because closing this one converts a silent,
 kernel-performed copy into `mv`'s copy, and `mv`'s copy currently refuses two
 shapes the kernel's accepts. Doing them in the other order is a regression that
 looks like a fix.
+
+**UNBLOCKED 2026-09-03 — request filed.** Both prerequisites are now closed:
+`B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS` on 2026-09-01 and
+`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED` on 2026-09-03. `mv` now
+handles every shape across a filesystem boundary that it handles within one,
+certified at 361/0/10 by `scripts/mv-diff.sh`, so the ordering hazard above no
+longer applies and the change is safe for lane A to make. Asked for in
+`requests/b-a-rename-across-a-mount-copies-instead-of-answering-exdev.md`.
+This entry stays **OPEN** until the kernel actually answers `CrossDevice`,
+because until then `mv`'s fallback remains unreachable on the target and the
+three-line `CrossDevice` deletion in `try_pinned_renameat` cannot be made.
 
 **How it would be caught.** `scripts/mv-diff.sh` runs against a real Linux and
 already has a second filesystem (`@FAR@`, `$XDG_RUNTIME_DIR`), so it measures
@@ -109847,9 +110286,9 @@ read the disk:
 | 3 raced-global | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 4 argv-utf8 | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 6 host-errmsg | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-03** |
+| 11 doc-links | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-03** |
 | 5 getopt-table | working tree | `--check`, checker walks the filesystem |
 | 8 quote-names | working tree | same |
-| 11 doc-links | working tree | same, over whole directories |
 
 Gate 7 is not on that list any more, and it is the proof the rest matter: it had
 exactly this defect and it published two unformatted commits (`861f4d80e`,
@@ -109945,7 +110384,14 @@ the regression test all exist. The work is:
    Gate 6's `host-errmsg.py` converted 2026-09-03 (step 9): both of its inputs
    — the `.rs` corpus and the ratchet baseline — go through the seam, `--check`
    on the real tree still exits 0, and `--selftest` reports 9/9.
-   Three to go: gates 5, 8, 11.
+   Gate 11's `check-doc-links.py` converted 2026-09-03 (step 10): all four of
+   its tree-derived inputs — the crate list, each crate's unit list, the
+   library's definition set, and the `Cargo.toml` dependency list — go through
+   the seam; `rust_files()` is gone rather than left as a second, unseamed way
+   to reach the disk. `--selftest` reports 57/57, `--check` on the working tree
+   and `--check --head HEAD` both exit 0 on the real tree, and an unopenable
+   revision exits 2.
+   Two to go: gates 5 and 8.
 3. Pass `--head` from the hook, and extend `test-pre-push-gates.py`'s existing
    assertion to all eight gates instead of just gate 9. **In progress.** The
    assertion is now a table (`HEAD_GATES`) rather than a gate-9 special case,
@@ -110218,7 +110664,11 @@ the regression test all exist. The work is:
    worth anything, and neither belongs in a commit about gate 6 — and **fixed
    the same day** in the commit after next, which also renamed gate 4's
    `_no_corpus` to `_inputs_missing` so the two gates spell one rule one way.
-   Gates 5, 8 and 11 get **both** halves when they are converted.
+   Gate 11 (step 10) gets the **corpus** half and not the baseline half,
+   because it has no baseline — it is a pure cross-reference checker with
+   nothing to ratchet. See step 10 for why "zero crates in scope" must stay a
+   *pass* there while "zero crates in the tree at all" is a no-verdict.
+   Gates 5 and 8 get **both** halves when they are converted.
 
    `needs_baseline` is false for two modes and both exclusions are load-bearing
    in opposite directions: `--write-baseline` *creates* the file and must run
@@ -110262,6 +110712,59 @@ the regression test all exist. The work is:
    guard removed (2), `--list` walking the disk (1), and `--head` accepted and
    ignored (21). The source was restored and re-checked afterwards rather than
    assumed — `--selftest` back to 9/9.
+
+10. **Gate 11 converted, 2026-09-03.** `check-doc-links.py` now takes `--head`
+    and reads **four** tree-derived inputs through the seam, more than any
+    previous conversion: the crate list (`crate_roots`), each crate's unit list
+    (`units`, the `src/bin/*.rs` set plus `src/lib.rs`), the definition set
+    parsed out of the library's own text (`definitions`), and the dependency
+    names in `Cargo.toml` (`dependencies`). Miss any one and the checker still
+    runs and still prints a verdict — it just judges a *blend* of two trees,
+    which is the failure mode with no symptom. `rust_files()` was deleted
+    rather than left converted-but-unused: an unseamed helper that still
+    reaches the disk is a loaded gun for the next edit.
+
+    **The hook side is where the real bug was, and a test caught it.** The
+    scope list is derived from `$pushed_shas`, and my first draft put that
+    expansion inside the pre-existing `IFS='\n'` block that the old
+    `[ -d ]`-filtering loop needed. A space-separated list of shas then arrived
+    at git as one unsplit word, git matched nothing, the list came out empty,
+    and **the gate skipped itself on every push** — the exact class of silent
+    self-disablement this whole entry is about, reintroduced by the fix for it.
+    `test-pre-push-doclinks-gate.py` failed 2 of 13 within a minute of the
+    edit. The loop is gone entirely now (it existed only for the `[ -d ]`
+    filter, which is itself a working-tree read and had to go), git's output is
+    piped straight into the scope file, and a comment records the trap.
+
+    **The `[ -d ]` filter was a working-tree read hiding inside the hook.** It
+    dropped any directory absent from the disk, so a directory added by the
+    push and then deleted from the worktree would silently leave the scope and
+    its crate would go unscanned. Removing it is safe because the *checker*
+    answers that question now: `crates_touching` maps a path to a crate using
+    the revision's own crate roots, so a path matching none of them simply
+    contributes nothing.
+
+    **Scope is the union across the whole push, not per-sha.** A crate named by
+    a later commit is worth scanning at an earlier one too, and a directory
+    that does not exist at the sha being scanned matches no crate root there
+    and costs nothing. The gate name is per-sha (`doc-links-$sha`) for gate 9's
+    reason: a shared name lets a later clean sha delete the kept log of an
+    earlier failing one.
+
+    **The `_inputs_missing` rule applies by half here.** Gate 11 has no
+    baseline — it is a pure cross-reference checker with nothing to ratchet —
+    so only the corpus half is meaningful, and it has to be spelled carefully:
+    `crate_roots(tree) == []` (no lane-B crates in the tree *at all*) is a
+    no-verdict and exits 2, but "zero crates **in scope**" must stay a **pass**,
+    because a push touching only `kernel/` legitimately maps to no lane-B crate
+    and refusing it would be a false fail on every lane-A and lane-C push.
+
+    Eleven behavioural cases in `test-checkers-honour-head.py` (three of them
+    end-to-end through the hook, including an off-branch push per step 6's
+    rule), plus the pre-existing 13-case `test-pre-push-doclinks-gate.py`,
+    which now copies `gittree.py` into its fixture repos alongside the checker.
+    The suite's floors moved with them — 61 cases overall, 11 for gate 11 — so
+    deleting a case is as loud as deleting the wiring it covers.
 
 ### Why it is not done yet
 
@@ -111858,3 +112361,200 @@ use the widget because of this bug — is now unblocked but not yet done. The
 start menu's Run box is likewise still waiting on a caller, not on the widget.
 `TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE`
 is untouched by this change and remains open.
+
+---
+
+## TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS (lane B, 2026-09-03)
+
+**In short:** deleting a directory and everything inside it is now written out
+twice in our coreutils — once in `rm`, and once in `mv`. `mv` grew its copy on
+2026-09-03, when a move across a disk boundary stopped being refused: such a
+move is a copy followed by a *recursive* delete of the original, and `mv` had
+no recursive delete to call. The two are not interchangeable today (see below),
+so this is duplicated behaviour rather than duplicated code that could simply
+have been shared — but two implementations of "delete a tree" will drift, and
+a fix or a security hardening applied to one will silently miss the other.
+
+**Where.**
+
+| | file | entry point |
+|---|---|---|
+| `rm`'s | `userspace/coreutils/src/bin/rm.rs` | `Rm::remove_tree` |
+| `mv`'s | `userspace/coreutils/src/bin/mv.rs` | `remove_tree` (called from `remove_source`) |
+
+**Why the second one was written rather than the first one reused.** Recorded
+in full as `design-decisions.md` §751; the short version is three facts:
+
+- GNU does share one implementation, but the thing it shares is `remove.c` — a
+  *library* module that both `rm.c` and `mv.c` link against, and that neither
+  of them owns. Our `rm.rs` is not that: it is a binary, and its walk is a
+  method on `Rm`, which is the parsed command line.
+- `Rm` carries eight knobs — `-i`/`-I`/`--interactive`, `-f`, `--one-file-system`,
+  `--preserve-root`, `-d`, `-v`, and the prompt state that `-I` needs — none of
+  which `mv` has an answer for. Reusing it means either inventing values for
+  all eight or splitting the walk away from the struct, which is the real fix.
+- The stage that introduced this was certified by "the two differential
+  harnesses do not move" (`cp-diff` 581/0/30, `mv-diff` 361/0/10). Refactoring
+  a third binary inside that stage would have destroyed the only check that the
+  stage was clean.
+
+**What actually differs today**, so nobody merges them by assuming they match:
+
+| | `rm` | `mv` |
+|---|---|---|
+| prompts before deleting | yes, under `-i`/`-I` | never — the copy already succeeded |
+| `--one-file-system` | honoured | not applicable; the source is one device by construction |
+| what `-v` prints | `removed 'f'` / `removed directory 'd'` | the same two sentences |
+| a child that cannot be removed | reports it, keeps going, and reports the parent too | reports it, keeps going, and stays **silent** about every ancestor |
+
+That last row is the interesting one and is not an accident on either side: it
+is GNU's `mark_ancestor_dirs` behaviour, which `mv.rs` reproduces by returning
+from `remove_tree` before the `rmdir` when any child failed. `rm.rs` predates
+that reasoning and has not been checked against it — which is exactly the kind
+of divergence this entry exists to flag.
+
+**Proper fix.** Lift the walk out of both binaries into a
+`userspace/coreutils/src/remove.rs`, shaped the way `copy.rs` already is after
+the five-stage copy-engine extraction — i.e. an `Opts` struct of the knobs, a
+`Run` carrying the output streams, and a free function taking both. `rm.rs`'s
+`Rm` becomes a producer of `remove::Opts` exactly as `cp.rs`'s `CpFlags`
+became a producer of `copy::Opts`; `mv.rs` passes an `Opts` with the prompting
+and the `--one-file-system` knobs off. The ancestor-silence rule then lives in
+one place and both binaries get it.
+
+**Sequencing.** Do this *after*, not before,
+`TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL` is understood,
+because that entry's fix changes the walk's *signature* — it threads a
+`(dirfd, path_for_messages)` pair through every level instead of a path. Doing
+the extraction first means doing it twice. Note that `mv.rs`'s new walk has the
+same weakness for the same reason: it calls `fs::read_dir`, `fs::remove_file`
+and `fs::remove_dir` on joined path strings, so a symlink swapped in mid-walk
+is followed. It is narrower there — the tree being removed is one the user just
+successfully copied, so the window is smaller — but it is the same bug, and the
+shared module is what makes fixing it once fix it everywhere.
+
+---
+
+## TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT (lane B, 2026-09-03)
+
+**In short:** the coreutils crates are built, linted and tested against the
+*Windows* host target, because that is the toolchain the machine has. Every
+piece of code marked "only on unix" is invisible to that build — the compiler
+never sees it, clippy never lints it, and the tests inside it never run. Since
+unix is the half that actually resembles SlateOS, the half that ships is the
+half nobody checks.
+
+**Found by accident, twice in one change.** The `rm`/`dirfd` work
+(`TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL`) passed
+`cargo test -p coreutils --target x86_64-pc-windows-gnu` (361 + 53 tests) and a
+full 89-minute `cargo clippy --all-targets` on the same target with **zero**
+warnings. Then `scripts/rm-diff.sh`, which builds for
+`x86_64-unknown-linux-gnu` inside WSL as a side effect of what it is really
+for, printed two warnings the host build could not have produced:
+
+  * `unused import: os_from_bytes` — used only in the `#[cfg(not(unix))]` half,
+    so it is genuinely unused on unix and genuinely used on the host;
+  * `unused doc comment` on the `#[cfg(unix)] unsafe extern "C"` block, which
+    the host build does not compile at all.
+
+And when the same suite was run for real on the Linux target, it reported
+**405** lib tests and **59** `rm` tests rather than 361 and 53. Forty-four lib
+tests and six `rm` tests exist that the host run silently skips — including all
+three of `dirfd`'s deliberate directory-swap refusals, which are the tests that
+certify the security property the module was written for. They pass; the point
+is that nothing in the normal workflow would have told anyone if they did not.
+
+**Why the host target is used at all.** It is fast, it needs no WSL round trip,
+and most of coreutils is portable. That is a real benefit and the answer is not
+to abandon it.
+
+**Proper fix**, roughly in order of value:
+
+1. A `scripts/coreutils-check.sh` that runs `cargo clippy` and `cargo test` for
+   **both** `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu` (the latter
+   through WSL, reusing `diff-wsl.sh`'s existing toolchain discovery and its
+   `~/.cache/slateos-diff-target` target dir, so it costs no extra disk).
+   Nothing today runs the Linux side except the `*-diff.sh` harnesses, and they
+   run it for a different reason and swallow the output.
+2. Wire the Linux side into the pre-push gates, or at least into the boot
+   test's pre-build tooling suite, so a `#[cfg(unix)]` regression cannot be
+   pushed. Note the cost before doing this: the host clippy run over
+   `-p coreutils --all-targets` took 89 minutes, so a second full pass is not
+   free and probably wants to be scoped to the crates a push touches, exactly
+   as gate 11 scopes itself.
+3. Until then, **run the Linux build by hand after touching any `#[cfg(unix)]`
+   code**:
+
+   ```sh
+   wsl -e sh -c 'cd "$(wslpath -u "D:\visual studio projects\os-lane-b")" && \
+     ~/.cargo/bin/cargo test -p coreutils --lib --bin <bin> \
+       --target x86_64-unknown-linux-gnu \
+       --target-dir ~/.cache/slateos-diff-target'
+   ```
+
+**If it is never fixed:** warnings and dead code accumulate in the unix half
+where nobody sees them, and — much worse — a unix-only test can rot into a
+permanent silent skip. A test that never runs is indistinguishable from a test
+that passes, which is the same failure shape as
+`TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH`: a green
+report produced by a check that was not performed.
+
+---
+
+## TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED (lane B, 2026-09-03)
+
+**In short:** four checkers that verify kshell's quoting rules against *real
+bash* are not run by anything. They are now pinned as deliberately-unwired so
+the build is honest about it, but pinned is not the destination — they should
+run wherever WSL exists. Two specific defects block wiring them.
+
+`scripts/check-ansic-quoting-vs-bash.py`, `check-kshell-pipeline-vs-bash.py`,
+`check-kshell-rungs-vs-bash.py`, `check-shellquote-vs-bash.py`, all via
+`scripts/bashprobe.py`.
+
+**How this surfaced.** They shipped unwired, and on 2026-09-03 lane B's own
+wiring ratchet (`check-gates-are-wired.py`) started reporting them — which
+turned `main` red for all three lanes, because that ratchet runs before the
+boot test builds anything. Lane C filed
+`requests/c-b-four-of-your-new-shell-gates-are-unwired-and-main-is-red.md`
+rather than pinning them itself, on the correct grounds that a pin whose reason
+is "nobody has looked at this" is precisely what the ratchet exists to prevent,
+and only lane B had the real reason. The pin landed with that reason; this
+entry is the other half of it.
+
+**Why they cannot simply be wired.** Three defects, in the order they bite:
+
+1. **An absent WSL is reported as a finding.** `bashprobe.assert_transport_is_faithful()`
+   leaves via `raise SystemExit(msg)`, which exits **1**. So "this host has no
+   WSL, I could not ask bash" arrives in the same channel as "bash disagrees
+   with kshell" — a machine with no WSL is told its shell quoting is wrong. This
+   is exactly the no-verdict-vs-finding confusion that gates 2, 3, 4, 6 and 11
+   were converted away from (`TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH`),
+   and it is the first thing to fix regardless of wiring, because it is wrong
+   even when the gate is run by hand. It must exit **2**.
+2. **`run_checker` aborts the build on any exit but 0 or 1.** Once (1) is fixed,
+   a WSL-less host aborts instead of skipping. The fix is the opt-in
+   `run_checker --may-skip <name>` channel that lane A asked for in
+   `requests/a-b-yes-to-the-self-test-rule-and-one-half-it-does-not-cover.md` §3,
+   which `check-libc-shape.py` is also waiting on — five pinned gates now turn
+   on that one change.
+3. **None of the four has a `--self-test`.** Lane C's request flags this from
+   direct experience: three of the five gates it wired the same day shipped an
+   unrun `--self-test`, and a scanner that has stopped scanning reports zero
+   findings exactly as a clean tree does. These four scan `kernel/src/kshell.rs`
+   and `kernel/src/shellquote.rs` by regex for literals, which is the shape most
+   prone to silently matching nothing.
+
+**Proper fix**, in that order: (1) bashprobe exits 2 with a "no verdict"
+message when WSL is absent or the transport is broken; (2) `--may-skip` in
+`run-checker.sh`, with cases in `test-pre-push-run-checker.py`; (3) a
+`--self-test` per gate, each with a true-positive fixture proving it can still
+refuse, plus a floor so a gate that inspected nothing says so; (4) wire all
+four into `boot-test.sh` and delete the four `PINNED` entries in the same
+commit, which is what that dict is for.
+
+**If it is never fixed:** kshell's quoting rules are verified against bash only
+when someone remembers to ask by hand, on a machine that happens to have WSL.
+The verdicts are carried forward into kshell's self-test rungs, so the evidence
+does survive — but only the evidence gathered on the day the rule was written.
+A later edit to `shellquote.rs` that changes behaviour is caught by nothing.

@@ -2988,6 +2988,73 @@ check_gates_can_refuse() {
 
 check_gates_can_refuse
 
+# The other half of the same question.  `check_gates_can_refuse` above asks
+# whether a gate *can* say no; this asks whether anything ever *asks* it.
+# A gate fails to enforce its rule if either answer is no, and the two are
+# indistinguishable from a green log, because in both cases the evidence is an
+# absence.
+#
+# This script does not glob `scripts/check-*.py` -- it names each checker in a
+# `run_checker` call, so a gate nobody adds a call for runs only in
+# `scripts/pre-boot.py`, a ~40-minute local pre-flight nobody is obliged to run.
+# Measured 2026-09-02: nine of thirty-one gates were in that state, eight of
+# them absent from the push hook as well.
+#
+# It is a RATCHET, not a gate: the eight known-unwired checkers are pinned in
+# the script with a reason each, and it fails only when that set changes --
+# a new unwired gate, a pinned entry that is now wired, or a pinned entry whose
+# file is gone.  Six of the eight are lane C's, and failing outright would block
+# all three lanes on work none of them scheduled.
+check_gates_are_wired() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== gate-wiring check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Its own cases first.  Reading shell well enough to answer this is fussier
+    # than it looks -- three obvious methods all gave confidently wrong answers,
+    # and one of them was broken by the very commit that motivated the check
+    # (an `echo` naming a gate it does not run).  A parser that has quietly
+    # stopped resolving calls reports every gate as unwired, or none.
+    if ! run_checker check-gates-are-wired-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-gates-are-wired.py" --selftest; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The gate-wiring analyser fails its" >&2
+        echo "own cases, so it is no longer reading this script correctly and" >&2
+        echo "its verdict cannot be trusted in either direction." >&2
+        return 1
+    fi
+
+    echo "=== Checking that every gate is actually run by something ==="
+    if run_checker check-gates-are-wired "$py" \
+            "$PROJECT_ROOT/scripts/check-gates-are-wired.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  The set of gates nothing runs has" >&2
+    echo "changed.  Each line above is one of:" >&2
+    echo "" >&2
+    echo "  * a checker under scripts/ that no run_checker call names, so" >&2
+    echo "    whatever rule it enforces is not enforced by this build;" >&2
+    echo "  * a pinned exemption that is now wired, or whose file is gone --" >&2
+    echo "    prune it, because an exemption list nobody prunes stops" >&2
+    echo "    describing the tree it exempts;" >&2
+    echo "  * a run_checker call whose script argument could not be resolved," >&2
+    echo "    which is reported rather than skipped on purpose." >&2
+    echo "" >&2
+    echo "Add a run_checker call for the gate, or pin it in PINNED in" >&2
+    echo "scripts/check-gates-are-wired.py with the reason it stays unwired." >&2
+    exit 1
+}
+
+check_gates_are_wired
+
 # A self-test that nothing calls is not a test.  It compiles, it reads as
 # coverage, it gets cited in a commit message as "tested" -- and it has never
 # executed.  `evdev::self_test` sat uncalled for exactly one commit, and the

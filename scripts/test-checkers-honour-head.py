@@ -636,6 +636,295 @@ def case_gate3_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# Gate 4 -- argv-utf8.py
+#
+# The defect it looks for: `std::env::args()`, whose iterator is a documented
+# `unwrap`, so the utility panics before its own first statement on a filename
+# holding a byte that is not UTF-8. One line makes one, and changing that line
+# to `args_os()` unmakes it, so a fixture can disagree with the disk about a
+# finding in a single edit.
+#
+# What it reads from a tree, and therefore what has to be made to differ: the
+# `.rs` sources under `userspace/coreutils`, *which* `.rs` files are there at
+# all, the baseline, and -- outside `--check` -- the survey of everything else
+# under `userspace/`. Four inputs, four cases; a checker converted for the
+# first three and left reading the disk for the fourth would pass a suite that
+# only tested contents.
+#
+# The checker loads `strip_comments_and_strings` out of `raced-globals.py`
+# through `srcload.py`, so both are installed alongside it. In the end-to-end
+# fixtures that also switches gate 3 on, which is harmless -- these fixtures
+# have no `static mut` and nothing raced -- and is why `_push` is told which
+# refusal it is looking for.
+# --------------------------------------------------------------------------
+
+_G4_CHECKERS = ("argv-utf8.py", "raced-globals.py", "srcload.py")
+
+_ARGV_PANIC = '''\
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let _ = args;
+}
+'''
+
+_ARGV_OK = '''\
+fn main() {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let _ = args;
+}
+'''
+
+_AU_BASELINE = "# nothing known-panicking yet\n"
+
+# The finding the fixtures below argue about, spelled the way the baseline
+# spells it: `<path>:<rule>`.
+_AU_KEY = "userspace/coreutils/src/bin/tool.rs:argv-as-string"
+
+
+def _argv_repo(tmp: str, name: str) -> str:
+    """A repository with the gated tree present and nothing panicking in it.
+
+    `userspace/coreutils/src/bin/clean.rs` is in every fixture, committed, in
+    both trees. It is not part of any case's argument -- it is there so that
+    "the checker found nothing" can never be reached by the checker finding no
+    *files*, which is the way this gate would fail silently if the enumeration
+    were ever pointed at the wrong tree or the wrong prefix.
+    """
+    root = new_repo(tmp, name, _G4_CHECKERS)
+    write(root, "scripts/argv-utf8-baseline.txt", _AU_BASELINE)
+    write(root, "userspace/coreutils/src/bin/clean.rs", _ARGV_OK)
+    return root
+
+
+def case_gate4_a_tidied_worktree_cannot_hide_a_committed_panic(tmp: str) -> None:
+    """The silent half: the commit panics on a legal filename, the disk does not."""
+    root = _argv_repo(tmp, "g4a")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _ARGV_PANIC)
+    sha = commit(root)
+    write(root, "userspace/coreutils/src/bin/tool.rs", _ARGV_OK)
+
+    disk = run_checker(root, "argv-utf8.py", "--check")
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: the disk sees nothing that panics", disk.returncode, 0)
+    check("gate 4: ...and the commit is refused anyway", rev.returncode, 1)
+    check("gate 4: ...naming the rule the commit breaks",
+          "argv-as-string" in rev.stdout + rev.stderr, True)
+
+
+def case_gate4_an_uncommitted_panic_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: a half-converted bin on the disk, nothing wrong in the commit."""
+    root = _argv_repo(tmp, "g4b")
+    sha = commit(root)
+    write(root, "userspace/coreutils/src/bin/tool.rs", _ARGV_PANIC)
+
+    disk = run_checker(root, "argv-utf8.py", "--check")
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: the disk refuses the uncommitted panic", disk.returncode, 1)
+    check("gate 4: ...but the commit being pushed is clean", rev.returncode, 0)
+
+
+def case_gate4_the_baseline_is_read_from_the_same_tree(tmp: str) -> None:
+    """The ratchet must not be loosened by a line nobody is publishing.
+
+    Sharper here than in gates 2 and 3, because this baseline is 49 entries of
+    real backlog that authors edit routinely: reading it off the disk means an
+    *uncommitted* waiver excuses a *committed* panic, the reviewer sees the
+    panicking bin added and the baseline untouched, and the gate is green. It
+    then stays green on every later push, because by then the waiver is
+    committed too -- so the one push where the two disagree is the only chance
+    anyone had to notice.
+    """
+    root = _argv_repo(tmp, "g4c")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _ARGV_PANIC)
+    sha = commit(root)
+    check("gate 4: the fixture starts refused",
+          run_checker(root, "argv-utf8.py", "--check",
+                      "--head", sha).returncode, 1)
+
+    # Forgive it in a *commit*, and un-forgive it on the *disk*.
+    write(root, "scripts/argv-utf8-baseline.txt", _AU_BASELINE + _AU_KEY + "\n")
+    sha = commit(root, "baseline it")
+    write(root, "scripts/argv-utf8-baseline.txt", _AU_BASELINE)
+
+    disk = run_checker(root, "argv-utf8.py", "--check")
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: the disk's baseline forgives nothing", disk.returncode, 1)
+    check("gate 4: the commit's baseline forgives it, and passes",
+          rev.returncode, 0)
+
+
+def case_gate4_a_file_absent_from_the_disk_is_still_judged(tmp: str) -> None:
+    """The third input: the enumeration, not only the contents.
+
+    The cases above all edit a file that exists on both sides, so a checker
+    listing `.rs` files from the disk and reading their text from the revision
+    passes every one of them. Here the panicking bin is gone from the working
+    tree entirely -- a branch since cleaned up, or a file that exists only in
+    what is being pushed.
+    """
+    root = _argv_repo(tmp, "g4d")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _ARGV_PANIC)
+    sha = commit(root)
+    remove(root, "userspace/coreutils/src/bin/tool.rs")
+
+    disk = run_checker(root, "argv-utf8.py", "--check")
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: the disk has no such file to judge", disk.returncode, 0)
+    check("gate 4: the commit still has it, and is refused", rev.returncode, 1)
+    check("gate 4: ...naming the file the disk lacks",
+          "tool.rs" in rev.stdout + rev.stderr, True)
+
+
+def case_gate4_the_stale_half_of_the_ratchet_describes_the_commit(tmp: str) -> None:
+    """A ratchet that does not shrink is a standing permission to regress.
+
+    `--check` fails on a baseline line naming a finding that is no longer
+    there, not only on a finding that is not in the baseline -- the sibling
+    ratchet accumulated 17 dead lines before that guard existed. It is the
+    *other* direction through the same two inputs, and it is the direction a
+    conversion is likeliest to leave behind, because every case above is
+    satisfied by getting `new` right and none of them touches `stale`.
+
+    Here the fix is committed and the disk still has the defect: the commit's
+    baseline line is dead and must be reported as such, while the disk's is
+    live and must not be.
+    """
+    root = _argv_repo(tmp, "g4i")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _ARGV_PANIC)
+    write(root, "scripts/argv-utf8-baseline.txt", _AU_BASELINE + _AU_KEY + "\n")
+    commit(root, "baselined backlog")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _ARGV_OK)
+    sha = commit(root, "fix the bin, leave the baseline")
+    write(root, "userspace/coreutils/src/bin/tool.rs", _ARGV_PANIC)
+
+    disk = run_checker(root, "argv-utf8.py", "--check")
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: the disk's baseline line is still earning its keep",
+          disk.returncode, 0)
+    check("gate 4: the commit's is dead, and the push is refused",
+          rev.returncode, 1)
+    # For the stated reason, and not because something else went wrong: a bare
+    # exit 1 here is also what an unreadable revision or a crash would produce.
+    check("gate 4: ...reported as fixed rather than as new",
+          "FIXED " + _AU_KEY in rev.stdout, True)
+    check("gate 4: ...and the disk reports nothing fixed",
+          "FIXED" in disk.stdout, False)
+
+
+def case_gate4_the_ungated_survey_reads_the_same_tree(tmp: str) -> None:
+    """The fourth input, and the one no exit code depends on.
+
+    A bare run also counts the findings under `userspace/` that the gate does
+    *not* cover, so that the excluded scope is a number someone can argue with
+    rather than a silence. Nothing fails on it, which is exactly why it needs
+    its own case: a survey walking the disk while the gate walks the revision
+    prints a number about a tree nobody is publishing, and both runs still exit
+    0. The bare run is what a human uses, so a wrong number here is a wrong
+    number in the only place anyone reads it.
+    """
+    root = _argv_repo(tmp, "g4j")
+    write(root, "userspace/stub/src/main.rs", _ARGV_PANIC)
+    sha = commit(root)
+    remove(root, "userspace/stub/src/main.rs")
+
+    disk = run_checker(root, "argv-utf8.py")
+    rev = run_checker(root, "argv-utf8.py", "--head", sha)
+    check("gate 4: neither tree is refused", (disk.returncode, rev.returncode),
+          (0, 0))
+    check("gate 4: the disk has nothing outside the gate to report",
+          "outside the gate" in disk.stdout, False)
+    check("gate 4: the commit does, and it is counted",
+          "1 finding(s) in 1 file(s) under userspace, outside the gate"
+          in disk.stdout + rev.stdout, True)
+
+
+def case_gate4_build_output_is_skipped_on_the_side_that_can_see_it(tmp: str) -> None:
+    """The rule that only the disk arm can break, so only it can pin.
+
+    A revision never lists `target/` -- it is not tracked -- so the skip is
+    unobservable there and this case is about the working-tree arm alone. That
+    arm used to hand-roll its own walk with its own copy of the skip rule; the
+    conversion deleted it and delegates to `gittree`. If that delegation is
+    ever dropped for a plain `os.walk`, the checker starts reporting generated
+    sources it did not write, in a directory of tens of gigabytes, and the gate
+    becomes something people switch off rather than something they fix.
+
+    The control matters as much as the case: identical content one directory
+    across must still be found, or "nothing reported" would be met by a
+    checker that had stopped looking at the disk altogether.
+    """
+    root = _argv_repo(tmp, "g4k")
+    sha = commit(root)
+    # After the commit, so it is on the disk and in no revision -- which is
+    # what build output is.
+    write(root, "userspace/coreutils/target/debug/build/gen.rs", _ARGV_PANIC)
+
+    disk = run_checker(root, "argv-utf8.py", "--check")
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: generated sources under target/ are not judged",
+          (disk.returncode, rev.returncode), (0, 0))
+
+    write(root, "userspace/coreutils/notes/gen.rs", _ARGV_PANIC)
+    disk2 = run_checker(root, "argv-utf8.py", "--check")
+    check("gate 4: ...while the same bytes elsewhere on the disk are",
+          disk2.returncode, 1)
+
+
+def case_gate4_a_tree_with_no_gated_sources_is_not_a_clean_tree(tmp: str) -> None:
+    """The failure this whole tool exists to prevent: a clean report by accident.
+
+    Every rule in `--selftest` proves the detector classifies a given file
+    correctly; none of them notices the gate being pointed at nothing. If
+    `userspace/coreutils` is renamed away, the listing comes back empty, no
+    finding is new, and the gate passes forever.
+
+    It is a per-tree question, which is why it belongs here: the commit is what
+    disarms the gate, and the working tree -- where the author is mid-rename,
+    or has simply not deleted the old directory yet -- still has the corpus and
+    would answer that all is well. Exit 2, not 1, because the gate has lost its
+    subject rather than found a defect.
+    """
+    root = _argv_repo(tmp, "g4l")
+    commit(root)
+    remove(root, "userspace/coreutils/src/bin/clean.rs")
+    sha = commit(root, "the gated tree goes somewhere else")
+    write(root, "userspace/coreutils/src/bin/clean.rs", _ARGV_OK)
+
+    disk = run_checker(root, "argv-utf8.py", "--check")
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: the disk still has a corpus and is judged normally",
+          disk.returncode, 0)
+    check("gate 4: the commit has none, which is no verdict rather than a pass",
+          rev.returncode, 2)
+    check("gate 4: ...saying so, rather than exiting quietly",
+          "nothing to judge" in rev.stderr, True)
+
+
+def case_gate4_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
+    """Exit 2, not 1 -- the same contract gates 2 and 3 have with run-checker.sh.
+
+    Exit 1 gets the gate's refusal printed over it, which here is nine
+    paragraphs telling the author their utility dies on a legal filename and
+    offering the bypass. A revision that cannot be read says nothing about
+    anybody's utility.
+
+    The status is checked *and* the message, because a status alone is not
+    actionable. run-checker.sh keeps the log of a no-verdict run and points the
+    author at it; if the text does not name the revision it could not open, the
+    author is left with "gate 4 did not run" and nowhere to start. Naming it is
+    also the only thing separating this from the other way to reach exit 2 --
+    the corpus guard reaches the same status for an entirely different reason,
+    and the two want opposite responses.
+    """
+    root = _argv_repo(tmp, "g4e")
+    commit(root)
+    proc = run_checker(root, "argv-utf8.py", "--check", "--head", "nosuchrev")
+    check("gate 4: an unreadable --head exits 2, not 1", proc.returncode, 2)
+    check("gate 4: ...naming the revision it could not read",
+          "nosuchrev" in proc.stderr, True)
+
+
+# --------------------------------------------------------------------------
 # The hook, not the checker.
 #
 # Everything above runs the checker directly, which leaves the seam between the
@@ -706,6 +995,7 @@ def _push_fixture(tmp: str, name: str,
 # hook uses, which do not survive a cp1252 console.
 _G2_REFUSAL = "command name exists that nothing can run"
 _G3_REFUSAL = "is raced by its own tests"
+_G4_REFUSAL = "dies on a legal filename"
 
 
 def _push(work: str, ref: str = "main",
@@ -963,6 +1253,86 @@ def case_gate3_the_hook_treats_a_deletion_as_nothing_to_judge(tmp: str) -> None:
           "raced-global" in _tally(blob)[1], True)
 
 
+def _g4_push_fixture(tmp: str, name: str) -> str:
+    """A push fixture for gate 4, with the gated tree already published.
+
+    The clean bin is committed and pushed by `_push_fixture` itself, so every
+    case below adds exactly one commit and the gate has a non-empty gated tree
+    to walk in both trees.
+    """
+    return _push_fixture(
+        tmp, name, checkers=_G4_CHECKERS,
+        seed={"scripts/argv-utf8-baseline.txt": _AU_BASELINE,
+              "userspace/coreutils/src/bin/clean.rs": _ARGV_OK},
+    )
+
+
+def case_gate4_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) -> None:
+    """End to end: gate 4's own wiring, not gate 2's or gate 3's.
+
+    Each gate is a separate block with its own guard, its own loop and its own
+    `--head "$sha"`. Dropping the flag from *this* invocation leaves every
+    gate-2 and gate-3 case in this file green, which is why the end-to-end
+    cases are per gate rather than one shared proof that the hook works.
+    """
+    work = _g4_push_fixture(tmp, "g4push-hide")
+    write(work, "userspace/coreutils/src/bin/tool.rs", _ARGV_PANIC)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a bin that reads argv as String")
+    # The tidy-up that makes the disk lie.
+    write(work, "userspace/coreutils/src/bin/tool.rs", _ARGV_OK)
+
+    verdict, blob = _push(work, marker=_G4_REFUSAL)
+    check("gate 4 end to end: the push is refused", verdict, "refused")
+    check("gate 4 end to end: ...naming the bin only the commit breaks",
+          "tool.rs" in blob, True)
+
+
+def case_gate4_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -> None:
+    """End to end, the other direction -- and the one that checks it ran.
+
+    A gate that had skipped itself would allow this, and would have allowed the
+    case above too if that refusal came from somewhere else. The hook's own
+    tally is the only thing that tells "passed" apart from "never asked" --
+    and here it also tells gate 4 apart from gate 3, which this fixture
+    installs as well because the checker loads its lexer out of it.
+    """
+    work = _g4_push_fixture(tmp, "g4push-wip")
+    write(work, "userspace/coreutils/src/bin/other.rs", _ARGV_OK)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a bin that carries the OsString")
+    write(work, "userspace/coreutils/src/bin/tool.rs", _ARGV_PANIC)
+
+    verdict, blob = _push(work, marker=_G4_REFUSAL)
+    check("gate 4 end to end: an uncommitted panic does not block", verdict,
+          "allowed")
+    check("gate 4 end to end: ...and the gate actually ran",
+          "argv-utf8" in _tally(blob)[0], True)
+
+
+def case_gate4_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` from `main`, for gate 4's loop.
+
+    Every other case in this file pushes the branch it is standing on, so in
+    all of them `HEAD` and the sha being pushed are the same commit and
+    `--head "$sha"` cannot be told apart from `git rev-parse HEAD`. That blind
+    spot is what hid the `touches` defect until 2026-09-02, and it is per gate:
+    gate 3's off-branch case says nothing about gate 4's loop.
+    """
+    work = _g4_push_fixture(tmp, "g4push-elsewhere")
+    git(work, "checkout", "--quiet", "-b", "feature")
+    write(work, "userspace/coreutils/src/bin/tool.rs", _ARGV_PANIC)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a panic on a branch we will leave")
+    git(work, "checkout", "--quiet", "main")
+
+    verdict, blob = _push(work, "feature", marker=_G4_REFUSAL)
+    check("gate 4 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    check("gate 4 end to end: ...naming the bin on that other branch",
+          "tool.rs" in blob, True)
+
+
 def case_gate2_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
     """Exit 2, not 1.
 
@@ -1001,15 +1371,27 @@ CASES = (
     case_gate3_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate3_the_hook_judges_a_branch_it_is_not_standing_on,
     case_gate3_the_hook_treats_a_deletion_as_nothing_to_judge,
+    case_gate4_a_tidied_worktree_cannot_hide_a_committed_panic,
+    case_gate4_an_uncommitted_panic_does_not_block_a_clean_push,
+    case_gate4_the_baseline_is_read_from_the_same_tree,
+    case_gate4_a_file_absent_from_the_disk_is_still_judged,
+    case_gate4_the_stale_half_of_the_ratchet_describes_the_commit,
+    case_gate4_the_ungated_survey_reads_the_same_tree,
+    case_gate4_build_output_is_skipped_on_the_side_that_can_see_it,
+    case_gate4_a_tree_with_no_gated_sources_is_not_a_clean_tree,
+    case_gate4_an_unopenable_revision_is_not_a_finding,
+    case_gate4_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate4_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate4_the_hook_judges_a_branch_it_is_not_standing_on,
 )
 
 
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 23:
+    if len(CASES) < 35:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 23. The list is broken, not the code.")
+              f"least 35. The list is broken, not the code.")
         return 1
     # ...and each converted gate must be represented, through the real hook as
     # well as directly. A floor on the count alone would be met by any number of
@@ -1017,7 +1399,8 @@ def main() -> int:
     # gate 3 was converted at all -- so both are counted per gate. Raise these
     # as each remaining checker is converted; they are the thing that notices a
     # gate's cases being deleted along with the gate's own wiring.
-    for gate, floor, e2e_floor in (("gate2", 10, 3), ("gate3", 13, 4)):
+    for gate, floor, e2e_floor in (("gate2", 10, 3), ("gate3", 13, 4),
+                                   ("gate4", 12, 3)):
         named = [c for c in CASES if c.__name__.startswith(f"case_{gate}_")]
         hooked = [c for c in named if "the_hook" in c.__name__]
         if len(named) < floor or len(hooked) < e2e_floor:

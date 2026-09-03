@@ -51,6 +51,20 @@ NOWHERE in the crate as any kind of definition. If a name exists at all, this
 stays quiet and leaves the judgement to rustdoc.
 
 Consequently every finding is actionable: the name is simply gone.
+
+WHAT IT READS: `--head`
+-----------------------
+By default it reads the working tree. With `--head <rev>` it reads that
+revision instead, through `gittree.open_tree`, and never touches the disk copy
+at all. The push hook passes the commit being published, which is what makes
+the gate's verdict a statement about the push rather than about whatever
+happens to be lying in the worktree at the time: a dead link introduced by a
+commit cannot be hidden by tidying the worktree afterwards, and an uncommitted
+one cannot block a push of unrelated, clean commits.
+
+`--paths-from` composes with it. The scope list is a list of *names*, resolved
+against the revision's own crate roots -- a directory that does not exist at
+that revision matches no crate and simply contributes nothing to the scope.
 """
 
 from __future__ import annotations
@@ -58,9 +72,15 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import os
 import re
 import sys
-from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gittree  # noqa: E402
+from gittree import Tree  # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Roots scanned. Lane B's trees; a crate outside these is another lane's to
 # gate, and a gate scoped wider than its owner can fix is a gate that blocks
@@ -208,28 +228,37 @@ DOC_LINE = re.compile(r"^\s*(?:///|//!)(.*)$")
 REF_DEF = re.compile(r"^\s*\[`?([^`\]]+?)`?\]:\s*\S")
 
 
-def crate_roots(repo: Path) -> list[Path]:
-    """Every crate directory (one holding a Cargo.toml) under the scanned roots."""
+def crate_roots(tree: Tree) -> list[str]:
+    """Every crate directory (one holding a Cargo.toml) under the scanned roots.
+
+    `files_under` already skips `target/`, so the manifests it yields are the
+    project's own -- the `"target" in parts` filter this used to carry is the
+    seam's job now, spelled once in `gittree.py` for both implementations
+    rather than once per checker.
+    """
     out = []
     for root in ROOTS:
-        base = repo / root
-        if not base.is_dir():
+        if not tree.is_dir(root):
             continue
-        for manifest in base.rglob("Cargo.toml"):
-            if "target" in manifest.parts:
-                continue
-            out.append(manifest.parent)
+        for manifest in tree.files_under(root):
+            if manifest.rsplit("/", 1)[-1] == "Cargo.toml":
+                out.append(parent_of(manifest))
     return sorted(out)
 
 
-def rust_files(crate: Path) -> list[Path]:
-    src = crate / "src"
-    if not src.is_dir():
-        return []
-    return sorted(p for p in src.rglob("*.rs") if "target" not in p.parts)
+def parent_of(rel: str) -> str:
+    """The directory holding `rel`, or `""` for a path at the repository root.
+
+    `PurePosixPath` is not used for this and the four other one-line path
+    manipulations here on purpose: a [`Tree`] path is a `/`-joined string on
+    both implementations, and a `PurePath` would tempt the next reader into
+    `.resolve()` or `.exists()`, neither of which a revision has.
+    """
+    head, sep, _ = rel.rpartition("/")
+    return head if sep else ""
 
 
-def units(crate: Path) -> list[tuple[str, list[Path], list[Path]]]:
+def units(tree: Tree, crate: str) -> list[tuple[str, list[str], list[str]]]:
     """The crate's compilation units: the library, and each `src/bin` target.
 
     A package is not a namespace. `coreutils` has about a hundred binaries under
@@ -243,25 +272,26 @@ def units(crate: Path) -> list[tuple[str, list[Path], list[Path]]]:
     the library's files, which every unit gets as *definitions* because a binary
     really can reach the library's public items and routinely links to them.
     """
-    src = crate / "src"
-    if not src.is_dir():
+    src = f"{crate}/src" if crate else "src"
+    if not tree.is_dir(src):
         return []
-    bindir = src / "bin"
-    lib = sorted(
-        p for p in src.rglob("*.rs")
-        if "target" not in p.parts and bindir not in p.parents and p.parent != bindir
-    )
-    out: list[tuple[str, list[Path], list[Path]]] = []
+    bindir = f"{src}/bin"
+    lib = [
+        p for p in tree.files_under(src)
+        if p.endswith(".rs") and not p.startswith(f"{bindir}/")
+    ]
+    out: list[tuple[str, list[str], list[str]]] = []
     if lib:
-        out.append((crate.name, lib, []))
-    if bindir.is_dir():
-        for entry in sorted(bindir.iterdir()):
-            if entry.is_file() and entry.suffix == ".rs":
-                out.append((entry.stem, [entry], lib))
-            elif entry.is_dir():
-                own = sorted(p for p in entry.rglob("*.rs") if "target" not in p.parts)
+        out.append((crate.rsplit("/", 1)[-1], lib, []))
+    if tree.is_dir(bindir):
+        for entry, is_dir in tree.entries(bindir):
+            name = entry.rsplit("/", 1)[-1]
+            if not is_dir and name.endswith(".rs"):
+                out.append((name[: -len(".rs")], [entry], lib))
+            elif is_dir:
+                own = [p for p in tree.files_under(entry) if p.endswith(".rs")]
                 if own:
-                    out.append((entry.name, own, lib))
+                    out.append((name, own, lib))
     return out
 
 
@@ -326,28 +356,31 @@ def defs_in_text(text: str, d: Defs) -> None:
         d.macro_args.append((m.group("mname"), m.group("marg")))
 
 
-def definitions(files: list[Path]) -> Defs:
-    """Everything `files` say about the names in them, left unresolved."""
+def definitions(tree: Tree, files: list[str]) -> Defs:
+    """Everything `files` say about the names in them, left unresolved.
+
+    A file that cannot be read is skipped rather than raising, which is
+    [`Tree`]'s contract everywhere: a missing file is an answer here, not an
+    error. It was a caught `OSError` before the seam and means the same thing.
+    """
     d = Defs()
     for f in files:
-        try:
-            text = f.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        text = tree.read_text(f)
+        if text is None:
             continue
         defs_in_text(text, d)
     return d
 
 
-def dependencies(crate: Path) -> set[str]:
+def dependencies(tree: Tree, crate: str) -> set[str]:
     """Names in the crate's `[dependencies]`, which link like crate roots.
 
     `modechange`'s docs point at [`ere`], the regex crate it depends on. That is
     a working link and reading only `src/` cannot tell.
     """
-    manifest = crate / "Cargo.toml"
-    try:
-        text = manifest.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    manifest = f"{crate}/Cargo.toml" if crate else "Cargo.toml"
+    text = tree.read_text(manifest)
+    if text is None:
         return set()
     names: set[str] = set()
     in_deps = False
@@ -417,12 +450,12 @@ def dead_link(path: str, types: set[str], scope: set[str]) -> bool:
     return last not in scope and last not in WELL_KNOWN
 
 
-def scan_file(f: Path, repo: Path, unit: str, types: set[str], scope: set[str]):
+def scan_file(tree: Tree, f: str, unit: str, types: set[str], scope: set[str]):
     """Every dead link in one file, judged in the unit that compiles it."""
-    try:
-        lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    text = tree.read_text(f)
+    if text is None:
         return
+    lines = text.splitlines()
     # Labels this file defines by hand. Collected up front because a definition
     # may sit below its use (markdown does not care, and the convention in this
     # tree is to park them at the end of the block).
@@ -441,15 +474,18 @@ def scan_file(f: Path, repo: Path, unit: str, types: set[str], scope: set[str]):
             if target in labels:
                 continue
             if dead_link(target, types, scope):
-                # `as_posix`, not the native separator: the finding is meant to
-                # be pasted into `git log -S ... -- <path>` or an editor, and on
-                # this project's Windows hosts a `Path` renders with backslashes
-                # that the shell then eats as escapes. Git reports paths with
-                # forward slashes everywhere, so this matches its neighbours.
-                yield (f.relative_to(repo).as_posix(), n, target, unit)
+                # `f` is already the repo-relative, `/`-separated spelling every
+                # [`Tree`] method takes and returns, so there is nothing to
+                # convert here. It used to be a `Path` put through `as_posix`,
+                # because on this project's Windows hosts a native `Path`
+                # renders with backslashes that a shell then eats as escapes,
+                # and a finding is meant to be pasted into
+                # `git log -S ... -- <path>` or an editor. The seam settles
+                # that question once for every checker.
+                yield (f, n, target, unit)
 
 
-def crates_touching(repo: Path, paths: list[str]) -> list[Path]:
+def crates_touching(all_crates: list[str], paths: list[str]) -> list[str]:
     """The crates that own `paths` -- the innermost Cargo.toml above each.
 
     Restricting a run to these is sound, not merely a shortcut. An intra-doc
@@ -457,40 +493,56 @@ def crates_touching(repo: Path, paths: list[str]) -> list[Path]:
     it can see in that crate's own text; a rename in crate X therefore cannot
     turn a link in crate Y dead. (If Y `use`s the renamed item, Y stops
     compiling, which is a louder gate than this one.)
+
+    A prefix comparison on `/`-joined strings replaces the old
+    `Path.relative_to`, and needs the trailing separator to be sound:
+    `userspace/coreutils-extra/x.rs` starts with `userspace/coreutils` as a
+    *string* and is not in that crate. The old code got this right by asking
+    `pathlib`; the new code has to say it, so it does, in one place.
+
+    The crate list is passed in rather than derived here. `main` needs it
+    anyway, to tell "this push touched no crate of ours" (a pass) from "this
+    tree has no crates of ours" (no verdict), and `crate_roots` walks all four
+    scanned roots -- doing it twice is a whole second enumeration of ~14k paths
+    to reach the same answer.
     """
-    all_crates = crate_roots(repo)
-    out: list[Path] = []
+    out: list[str] = []
     for raw in paths:
-        p = (repo / raw).resolve()
+        p = raw.replace("\\", "/").strip("/")
         best = None
         for c in all_crates:
-            try:
-                p.relative_to(c)
-            except ValueError:
+            if p != c and not p.startswith(f"{c}/"):
                 continue
-            if best is None or len(c.parts) > len(best.parts):
+            if best is None or len(c) > len(best):
                 best = c
         if best is not None and best not in out:
             out.append(best)
     return out
 
 
-def scan(repo: Path, only: list[Path] | None = None) -> list[tuple[str, int, str, str]]:
+def scan(tree: Tree, crates: list[str]) -> list[tuple[str, int, str, str]]:
+    """Every dead intra-doc link in `crates`, read from `tree`.
+
+    `crates` is required rather than defaulting to "all of them". The
+    `None`-means-everything sentinel it used to carry made an empty list and a
+    missing one look alike at the call site, and those are the two cases this
+    gate most has to keep apart -- see `main`.
+    """
     findings = []
-    for crate in (only if only is not None else crate_roots(repo)):
-        deps = dependencies(crate)
+    for crate in crates:
+        deps = dependencies(tree, crate)
         # The library's definitions are the same for all ~100 of `coreutils`'
         # binaries, and re-deriving them per binary makes the scan quadratic in
         # a package whose library is the big part. Compute once, union per unit.
-        all_units = units(crate)
+        all_units = units(tree, crate)
         lib_files = all_units[0][2] if all_units else []
         for _, _, shared in all_units:
             if shared:
                 lib_files = shared
                 break
-        lib_defs = definitions(lib_files)
+        lib_defs = definitions(tree, lib_files)
         for unit, own, shared in all_units:
-            d = definitions(own)
+            d = definitions(tree, own)
             if shared:
                 d = d.union(lib_defs)
             d.resolve()
@@ -501,8 +553,8 @@ def scan(repo: Path, only: list[Path] | None = None) -> list[tuple[str, int, str
             # file's own docs are resolved in the library's context, which is the
             # unit where it appears as `own`.
             for f in own:
-                findings.extend(scan_file(f, repo, unit, types, scope))
-    return sorted(findings, key=lambda x: (str(x[0]), x[1], x[2]))
+                findings.extend(scan_file(tree, f, unit, types, scope))
+    return sorted(findings, key=lambda x: (x[0], x[1], x[2]))
 
 
 SELFTESTS = (
@@ -757,6 +809,13 @@ def main() -> int:
         help="read the path list from FILE, one per line ('-' for stdin), "
         "instead of (or as well as) passing them as arguments",
     )
+    ap.add_argument(
+        "--head", default=None,
+        help="judge this commit instead of the working tree. The push hook "
+             "passes the commit being published, so a dead link introduced by "
+             "a commit cannot be hidden by a tidied worktree -- nor an "
+             "uncommitted one block a push of unrelated clean commits.",
+    )
     args = ap.parse_args()
 
     if args.selftest:
@@ -780,12 +839,49 @@ def main() -> int:
                   file=sys.stderr)
             return 2
 
-    repo = Path(__file__).resolve().parent.parent
-    only = crates_touching(repo, paths) if paths else None
-    if only is not None and not only:
-        print("ok -- no scanned crate was touched.")
-        return 0
-    findings = scan(repo, only)
+    try:
+        tree = gittree.open_tree(ROOT, args.head)
+    except gittree.GitTreeError as exc:
+        # Exit 2, not 1. `scripts/run-checker.sh` reads 1 as "the checker found
+        # something" and prints the gate's refusal over it; a revision that
+        # cannot be opened is not a finding against anyone's code.
+        print(f"check-doc-links: cannot read {args.head!r}: {exc}", file=sys.stderr)
+        return 2
+    with tree:
+        all_crates = crate_roots(tree)
+        if not all_crates:
+            # The corpus half of gate 6's `_inputs_missing` rule. Nothing under
+            # any of `ROOTS` holds a Cargo.toml, so there is no crate to resolve
+            # a link *inside* and the scan below would find nothing however
+            # broken the tree is -- a clean report by accident, which is the one
+            # outcome a gate must never produce. Exit 2 (no verdict), not 0.
+            #
+            # It is a per-tree question, which is why `--head` makes it worth
+            # asking: a commit that renames `userspace/` away disarms the gate
+            # while the author's working tree, mid-rename, still answers that
+            # all is well.
+            #
+            # There is no baseline half. This checker has nothing to ratchet --
+            # it resolves names against the same tree it read them from -- so
+            # the corpus is its only input, and the rule is complete here.
+            print(f"check-doc-links: no crate found under {'/, '.join(ROOTS)}/ "
+                  f"-- nothing to judge.", file=sys.stderr)
+            return 2
+
+        if paths:
+            crates = crates_touching(all_crates, paths)
+            if not crates:
+                # NOT the guard above, and the distinction is the whole reason
+                # the two are spelled separately: the tree has crates, this push
+                # just did not touch any of them. A push that only edits
+                # `kernel/` is lane A's, is entirely legitimate, and must pass.
+                # Folding this into "no crates" would refuse every lane-A and
+                # lane-C push.
+                print("ok -- no scanned crate was touched.")
+                return 0
+        else:
+            crates = all_crates
+        findings = scan(tree, crates)
 
     for f, n, target, crate in findings:
         print(f"{f}:{n}: [`{target}`] names nothing in crate `{crate}`")

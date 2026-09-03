@@ -119,6 +119,58 @@ def child_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith("CHECKER_")}
 
 
+class KeptLog:
+    """The log `run_checker` keeps, found by glob rather than by exact name.
+
+    The name carries the shell's pid (`<prog>-<label>.<pid>.log`) so that two
+    concurrent runs of one gate cannot share a path -- see the comment on
+    `_rc_log` in run-checker.sh. Each driver here is a fresh `sh`, so the pid
+    is not knowable from out here and every assertion has to go through a glob.
+
+    The glob is deliberately loose enough to match the *old* `<prog>-<label>.log`
+    too. That is not sloppiness, it is what makes group 8 a real regression
+    test: with a tight `.*.log` pattern, reverting the fix made this suite fail
+    back in group 2 -- on the filename, before the concurrency assertions ever
+    ran -- which would have "caught" the revert while proving nothing about the
+    race. Loose here, group 8 is the only thing that fails, and it fails for
+    the reason it exists. Asserting the exact filename is also what would make
+    the pid look like a test-breaking change and tempt someone to remove it.
+    """
+
+    def __init__(self, tmp: Path, prog: str, label: str) -> None:
+        self._tmp = tmp
+        self._pat = f"{prog}-{label}*.log"
+
+    def _all(self) -> list[Path]:
+        return sorted(self._tmp.glob(self._pat))
+
+    def exists(self) -> bool:
+        return bool(self._all())
+
+    def _one(self) -> Path:
+        found = self._all()
+        if len(found) != 1:
+            raise AssertionError(
+                f"expected exactly one {self._pat} in {self._tmp}, "
+                f"found {[p.name for p in found]}"
+            )
+        return found[0]
+
+    def read_text(self, **kw: object) -> str:
+        return self._one().read_text(**kw)  # type: ignore[arg-type]
+
+    @property
+    def name(self) -> str:
+        return self._one().name
+
+    def unlink(self, missing_ok: bool = False) -> None:
+        found = self._all()
+        if not found and not missing_ok:
+            raise FileNotFoundError(self._pat)
+        for p in found:
+            p.unlink()
+
+
 def fake_checker(tmp: Path, name: str, body: str) -> Path:
     p = tmp / f"{name}.py"
     p.write_text(body, encoding="utf-8")
@@ -143,6 +195,33 @@ def preamble(tmp: Path, configured: bool) -> str:
     )
 
 
+def write_driver(
+    tmp: Path,
+    func: str,
+    script: Path,
+    *args: str,
+    configured: bool = True,
+) -> Path:
+    """The one-shot shell script that calls `run_checker` as a caller would.
+
+    Named after the checker it drives rather than a fixed `driver.sh`, because
+    group 8 runs two drivers at once and a shared name would have the second
+    rewrite the first's script out from under a running `sh`.
+    """
+    driver = tmp / f"driver-{script.stem}.sh"
+    driver.write_text(
+        "set -u\n"
+        + preamble(tmp, configured)
+        + f"{func}\n"
+        + f'run_checker testgate "{sys.executable}" "{script.as_posix()}" '
+        + " ".join(args)
+        + "\n"
+        + 'echo "MARKER-RETURNED rc=$?"\n',
+        encoding="utf-8",
+    )
+    return driver
+
+
 def run(
     tmp: Path,
     func: str,
@@ -155,20 +234,30 @@ def run(
     `MARKER-RETURNED` is echoed only if the helper *returns*; the no-verdict
     path exits the caller, so its absence is the assertion that it did.
     """
-    driver = tmp / "driver.sh"
-    driver.write_text(
-        "set -u\n"
-        + preamble(tmp, configured)
-        + f"{func}\n"
-        + f'run_checker testgate "{sys.executable}" "{script.as_posix()}" '
-        + " ".join(args)
-        + "\n"
-        + 'echo "MARKER-RETURNED rc=$?"\n',
-        encoding="utf-8",
-    )
+    driver = write_driver(tmp, func, script, *args, configured=configured)
     return subprocess.run(
         ["sh", str(driver)],
         capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=child_env(),
+    )
+
+
+def start(
+    tmp: Path,
+    func: str,
+    script: Path,
+    *args: str,
+    configured: bool = True,
+) -> subprocess.Popen:
+    """`run`, but left running, so two drivers can genuinely overlap."""
+    driver = write_driver(tmp, func, script, *args, configured=configured)
+    return subprocess.Popen(
+        ["sh", str(driver)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -345,7 +434,7 @@ def main() -> int:
 
     tmp_root = Path(tempfile.mkdtemp(prefix="runchecker-"))
     try:
-        log = tmp_root / "pre-push-testgate.log"
+        log = KeptLog(tmp_root, "pre-push", "testgate")
 
         # ------------------------------------------------------------------
         print("group 1: a clean checker")
@@ -518,7 +607,7 @@ def main() -> int:
         check("still aborts", r.returncode == 1, f"rc={r.returncode}")
         check("falls back to a generic verb", "REFUSING to continue" in flat)
         check("falls back to a generic prefix", "checker: REFUSING" in flat)
-        (tmp_root / "checker-testgate.log").unlink(missing_ok=True)
+        KeptLog(tmp_root, "checker", "testgate").unlink(missing_ok=True)
 
         # The same three assertions again, with this process's own environment
         # carrying the settings -- which is not a hypothetical environment but
@@ -556,7 +645,7 @@ def main() -> int:
               "checker: REFUSING" in flat and "leaked" not in flat, flat[:200])
         check("an ambient CHECKER_REFUSING does not either",
               "REFUSING to continue" in flat, flat[:200])
-        (tmp_root / "checker-testgate.log").unlink(missing_ok=True)
+        KeptLog(tmp_root, "checker", "testgate").unlink(missing_ok=True)
 
         # ------------------------------------------------------------------
         # Tests the callers, not the function: the next gate added is the one
@@ -646,6 +735,50 @@ def main() -> int:
               not stale,
               f"{', '.join(stale)} is pinned but no longer duplicated -- "
               "drop it from HOOK_DUPES_OK")
+        # ------------------------------------------------------------------
+        # The distinct-label rule group 7 checks is about one invocation
+        # overwriting itself. This is the other axis, which no assertion
+        # covered until 2026-09-03: two invocations running at once compute the
+        # *same* label for the same gate, so before the pid went into the name
+        # they shared a path -- and the first to finish clean `rm -f`'d it out
+        # from under the other, which had a real refusal to keep. Observed for
+        # real from three overlapping pushes of one sha.
+        print("group 8: concurrent runs of one gate keep separate logs")
+        found = fake_checker(
+            tmp_root,
+            "slowfound",
+            # Long enough that the two overlap for certain rather than by luck.
+            "import sys, time\ntime.sleep(1.5)\n"
+            "print('src/a.rs: 3 sites')\nsys.exit(1)\n",
+        )
+        clean_slow = fake_checker(
+            tmp_root,
+            "slowclean",
+            "import time\ntime.sleep(1.5)\nprint('ok -- 0 sites')\n",
+        )
+        # The failing one starts first so that, under the old naming, the
+        # passing one's `rm -f` is what destroys the evidence.
+        procs = [
+            start(tmp_root, func, found),
+            start(tmp_root, func, clean_slow),
+        ]
+        outs = [p.communicate() for p in procs]
+        joined = "".join(o[0] + o[1] for o in outs)
+        check("the failing run still returns 1",
+              "MARKER-RETURNED rc=1" in joined, joined[-300:])
+        check("the passing run still returns 0",
+              "MARKER-RETURNED rc=0" in joined, joined[-300:])
+        check("neither run lost its log to the other",
+              "No such file or directory" not in joined, joined[-300:])
+        kept = sorted(tmp_root.glob("pre-push-testgate*.log"))
+        check("the failing run's evidence survived", len(kept) == 1,
+              f"found {[p.name for p in kept]}")
+        if kept:
+            check("and it holds that run's findings",
+                  "src/a.rs: 3 sites" in kept[0].read_text(encoding="utf-8"))
+        for p in kept:
+            p.unlink()
+
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 

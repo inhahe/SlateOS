@@ -97,7 +97,9 @@
 #   CHECKER_LOGDIR    where a failing checker's output is kept. Default
 #                     `${TMPDIR:-/tmp}`. The pre-push hook points this at the
 #                     worktree's own git dir so three lanes pushing at once do
-#                     not overwrite each other's evidence.
+#                     not overwrite each other's evidence. That separates the
+#                     *lanes*; `$$` in the filename below separates concurrent
+#                     runs within one lane, which the directory cannot.
 #   CHECKER_REFUSING  the word after "REFUSING to" — `push`, `build`. Default
 #                     `continue`.
 #   CHECKER_NOTE      one extra paragraph for the no-verdict message, or empty.
@@ -110,7 +112,21 @@ run_checker() {
     shift
     _rc_prog=${CHECKER_PROG:-checker}
     _rc_dir=${CHECKER_LOGDIR:-${TMPDIR:-/tmp}}
-    _rc_log="$_rc_dir/$_rc_prog-$_rc_label.log"
+    # `$$` disambiguates concurrent runs, and it is not belt-and-braces on top
+    # of the distinct-label rule the callers already follow — it covers a case
+    # that rule cannot reach. Distinct labels stop one *invocation* from
+    # overwriting its own earlier gate's log; they do nothing when two
+    # invocations run at once, because both compute the same label for the same
+    # gate. Two pushes from one worktree then share a path, and the first to
+    # finish clean does `rm -f` on it — deleting, in the worst case, the kept
+    # evidence of the other's genuine refusal while its "full output kept at"
+    # line still names it. Observed 2026-09-03: three overlapping pushes of one
+    # sha, and `cat: …pre-push-raced-global-<sha>.log: No such file` from the
+    # loser.
+    #
+    # `$$` is the shell's pid and does not change in a subshell, so every gate
+    # of one hook run still shares a prefix and stays greppable together.
+    _rc_log="$_rc_dir/$_rc_prog-$_rc_label.$$.log"
     # `$*` joins on IFS's first character, and one caller (the hook's doc-links
     # gate) sets IFS to a newline to split a path list — which would render the
     # "re-run it" line one argument per line. Build the string under a known IFS.

@@ -57,6 +57,12 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO_ROOT, "scripts", "hooks", "pre-push")
 LIB = os.path.join(REPO_ROOT, "scripts", "run-checker.sh")
 CHECKER = os.path.join(REPO_ROOT, "scripts", "check-doc-links.py")
+# The checker imports this by name from its own directory, so the fixture has
+# to install it too. Copied rather than left to be found in the real checkout:
+# the fixture's point is that the repository under test is the throwaway one,
+# and a `gittree` resolved from outside it would be reading a `ROOT` that is
+# not the tree the gate is judging.
+GITTREE = os.path.join(REPO_ROOT, "scripts", "gittree.py")
 
 # Windows' CreateProcess command line cannot exceed 32,767 characters. The
 # fixture aims comfortably past it rather than at it: the point is to be over
@@ -147,6 +153,7 @@ def build_fixture(tmp: str) -> str:
         (HOOK, os.path.join(hooks, "pre-push")),
         (LIB, os.path.join(work, "scripts", "run-checker.sh")),
         (CHECKER, os.path.join(work, "scripts", "check-doc-links.py")),
+        (GITTREE, os.path.join(work, "scripts", "gittree.py")),
     ):
         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
         with open(src_path, "r", encoding="utf-8", newline="") as src:

@@ -1833,6 +1833,345 @@ def case_gate2_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
     check("gate 2: an unreadable --head exits 2, not 1", proc.returncode, 2)
 
 
+# --------------------------------------------------------------------------
+# Gate 11 -- check-doc-links.py
+#
+# The defect it looks for: `/// See [`old_name`]` left behind by a rename, so
+# the link's final segment names nothing anywhere in the crate that compiles
+# the file. One identifier decides it, which makes a commit and a worktree easy
+# to make disagree.
+#
+# What it reads from a tree, and therefore what has to be made to differ:
+#
+#   the crate list      `crate_roots` -- which `Cargo.toml`s exist. Also the
+#                       scope resolver: `--paths-from` names *paths*, and a
+#                       path is turned into a crate against this list, so a
+#                       crate the disk has never heard of silently reduces the
+#                       scope to nothing and prints a pass.
+#   the unit list       `units` -- which `.rs` files are under `src`, and which
+#                       of them are `src/bin` targets. A package is not a
+#                       namespace here: each bin is judged against its own
+#                       definitions plus the library's, so *which* file is a
+#                       bin changes the answer.
+#   the library's text  the shared definition set, read once per crate and
+#                       unioned into every bin. It is a separate read from the
+#                       scanned file's own, and converting only the latter
+#                       leaves every contents-only case below green.
+#   the manifest        `[dependencies]` names resolve as links. That makes
+#                       `Cargo.toml` a *suppression* input, with gate 6's
+#                       baseline problem: leaving it on the disk is a false
+#                       pass whose symptoms are identical to a clean tree.
+# --------------------------------------------------------------------------
+
+_DL_OK = '''\
+/// See [`real`] for the rule this follows.
+pub fn real() {}
+'''
+
+_DL_DEAD = '''\
+/// See [`ghost_link_target`] for the rule this follows.
+pub fn real() {}
+'''
+
+# A link to a name only the manifest can supply, for the suppression case.
+_DL_DEP_LINK = '''\
+/// Wraps [`ghostdep`], which does the actual work.
+pub fn real() {}
+'''
+
+# A link to a name only the *library* can supply, for the shared-definitions
+# case. Lives in a bin, so it is judged against `own | lib` rather than `own`.
+_DL_SHARED_LINK = '''\
+/// Delegates to [`shared_helper`] once the arguments are parsed.
+pub fn go() {}
+'''
+
+_DL_MANIFEST = '[package]\nname = "real"\n'
+_DL_MANIFEST_DEP = '[package]\nname = "real"\n\n[dependencies]\nghostdep = "1"\n'
+
+
+def _doclinks_repo(tmp: str, name: str) -> str:
+    """A crate under a scanned root with one clean, linked library file.
+
+    `lib.rs` carries a *live* link rather than no link at all, for `_argv_repo`'s
+    reason one step further in: "the checker found nothing" must not be
+    reachable by the checker finding no files, and here it must also not be
+    reachable by it finding no *links*. A fixture whose only doc comment is the
+    one under test cannot tell a working scan from a scan that stopped reading
+    doc comments entirely.
+    """
+    root = new_repo(tmp, name, ("check-doc-links.py",))
+    write(root, "userspace/real/Cargo.toml", _DL_MANIFEST)
+    write(root, "userspace/real/src/lib.rs", _DL_OK)
+    return root
+
+
+def case_gate11_a_tidied_worktree_cannot_hide_a_committed_dead_link(tmp: str) -> None:
+    """The silent half: the commit points at a name that is gone, the disk does not."""
+    root = _doclinks_repo(tmp, "g11a")
+    write(root, "userspace/real/src/bin/tool.rs", _DL_DEAD)
+    sha = commit(root)
+    write(root, "userspace/real/src/bin/tool.rs", _DL_OK)
+
+    disk = run_checker(root, "check-doc-links.py", "--check")
+    rev = run_checker(root, "check-doc-links.py", "--check", "--head", sha)
+    check("gate 11: the disk's links all resolve", disk.returncode, 0)
+    check("gate 11: ...and the commit is refused anyway", rev.returncode, 1)
+    check("gate 11: ...naming the target the commit cannot resolve",
+          "ghost_link_target" in rev.stdout + rev.stderr, True)
+
+
+def case_gate11_an_uncommitted_dead_link_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: a half-finished rename on the disk, nothing wrong in the commit."""
+    root = _doclinks_repo(tmp, "g11b")
+    write(root, "userspace/real/src/bin/tool.rs", _DL_OK)
+    sha = commit(root)
+    write(root, "userspace/real/src/bin/tool.rs", _DL_DEAD)
+
+    disk = run_checker(root, "check-doc-links.py", "--check")
+    rev = run_checker(root, "check-doc-links.py", "--check", "--head", sha)
+    check("gate 11: the disk refuses the uncommitted dead link", disk.returncode, 1)
+    check("gate 11: ...but the commit being pushed is clean", rev.returncode, 0)
+
+
+def case_gate11_the_manifest_is_read_from_the_same_tree(tmp: str) -> None:
+    """The suppression input a sources-only conversion leaves behind.
+
+    A `[dependencies]` name links like a crate root -- `modechange`'s docs point
+    at `ere`, and that is a working link no amount of reading `src/` can
+    confirm. So the manifest silences findings, and reading it from the disk is
+    gate 6's baseline problem exactly: a dependency present only on the disk
+    forgives a commit that has no such dependency, and the push publishes a link
+    that renders as literal text.
+    """
+    root = _doclinks_repo(tmp, "g11c")
+    write(root, "userspace/real/src/bin/tool.rs", _DL_DEP_LINK)
+    sha = commit(root)
+    check("gate 11: the fixture starts refused",
+          run_checker(root, "check-doc-links.py", "--check",
+                      "--head", sha).returncode, 1)
+
+    # Declare the dependency in a *commit*, and undeclare it on the *disk*.
+    write(root, "userspace/real/Cargo.toml", _DL_MANIFEST_DEP)
+    sha = commit(root, "depend on it")
+    write(root, "userspace/real/Cargo.toml", _DL_MANIFEST)
+
+    disk = run_checker(root, "check-doc-links.py", "--check")
+    rev = run_checker(root, "check-doc-links.py", "--check", "--head", sha)
+    check("gate 11: the disk's manifest declares nothing, so the link is dead",
+          disk.returncode, 1)
+    check("gate 11: the commit's manifest declares it, and it resolves",
+          rev.returncode, 0)
+
+
+def case_gate11_a_bin_absent_from_the_disk_is_still_judged(tmp: str) -> None:
+    """The enumeration, not only the contents.
+
+    Both halves above edit a file present in both trees, so a checker listing
+    `src/bin` from the disk and reading each entry's text from the revision
+    passes them. Here the offending bin is not on the disk at all -- which is
+    the ordinary state of a commit that adds a file and a worktree that has
+    since had it deleted or moved.
+    """
+    root = _doclinks_repo(tmp, "g11d")
+    write(root, "userspace/real/src/bin/tool.rs", _DL_DEAD)
+    sha = commit(root)
+    remove(root, "userspace/real/src/bin/tool.rs")
+
+    disk = run_checker(root, "check-doc-links.py", "--check")
+    rev = run_checker(root, "check-doc-links.py", "--check", "--head", sha)
+    check("gate 11: the disk has no such bin and nothing to report",
+          disk.returncode, 0)
+    check("gate 11: ...and the commit's bin is judged regardless",
+          rev.returncode, 1)
+
+
+def case_gate11_the_librarys_definitions_are_read_from_the_same_tree(tmp: str) -> None:
+    """The *other* read: the shared definition set, not the scanned file.
+
+    Every case above is decided by the text of the file carrying the link. This
+    one is decided by a file that carries no link at all: a bin is judged
+    against its own definitions unioned with the library's, and `scan` reads
+    those library files once per crate through a separate call. Converting
+    `scan_file` and leaving `definitions` on the disk leaves all four cases
+    above green while the library -- the half of the definition set that a
+    rename most often moves -- is still read from whatever is lying around.
+    """
+    root = _doclinks_repo(tmp, "g11e")
+    write(root, "userspace/real/src/lib.rs", "pub fn unrelated() {}\n")
+    write(root, "userspace/real/src/bin/tool.rs", _DL_SHARED_LINK)
+    sha = commit(root)
+    # The helper the bin links to exists on the disk, and only there.
+    write(root, "userspace/real/src/lib.rs", "pub fn shared_helper() {}\n")
+
+    disk = run_checker(root, "check-doc-links.py", "--check")
+    rev = run_checker(root, "check-doc-links.py", "--check", "--head", sha)
+    check("gate 11: the disk's library defines the helper, so the link resolves",
+          disk.returncode, 0)
+    check("gate 11: the commit's library does not, and the link is dead",
+          rev.returncode, 1)
+    check("gate 11: ...naming the helper the commit's library lacks",
+          "shared_helper" in rev.stdout + rev.stderr, True)
+
+
+def case_gate11_a_crate_absent_from_the_disk_is_still_scanned(tmp: str) -> None:
+    """The scope resolver, which fails *quietly* and in the passing direction.
+
+    The hook does not ask for a whole-tree scan; it names the directories the
+    push touched and lets `crates_touching` map them to crates. That mapping is
+    done against the tree's own `Cargo.toml` list -- so if the list comes from
+    the disk and the crate exists only in the commit, the scope reduces to zero
+    crates and the checker prints "no scanned crate was touched" and exits 0.
+
+    That is the worst failure mode in this file: not a wrong verdict but a
+    *cheerful* one, on the exact push that adds a crate.
+    """
+    root = _doclinks_repo(tmp, "g11f")
+    write(root, "userspace/extra/Cargo.toml", '[package]\nname = "extra"\n')
+    write(root, "userspace/extra/src/lib.rs", _DL_DEAD)
+    sha = commit(root)
+    remove(root, "userspace/extra/Cargo.toml")
+    remove(root, "userspace/extra/src/lib.rs")
+
+    scope = "userspace/extra/src/lib.rs"
+    disk = run_checker(root, "check-doc-links.py", "--check", scope)
+    rev = run_checker(root, "check-doc-links.py", "--check", "--head", sha, scope)
+    check("gate 11: the disk knows no such crate", disk.returncode, 0)
+    # ...and says so in the words that make the false pass recognisable, rather
+    # than in the words of a scan that ran and found nothing.
+    check("gate 11: ...and it is the empty-scope pass, not a clean scan",
+          "no scanned crate was touched" in disk.stdout, True)
+    check("gate 11: the commit's crate is resolved and scanned", rev.returncode, 1)
+
+
+def case_gate11_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
+    """Exit 2, not 1 -- see gate 2's twin for why the distinction matters."""
+    root = _doclinks_repo(tmp, "g11g")
+    commit(root)
+    proc = run_checker(root, "check-doc-links.py", "--check", "--head", "nosuchrev")
+    check("gate 11: an unreadable --head exits 2, not 1", proc.returncode, 2)
+    check("gate 11: ...naming the revision it could not read",
+          "nosuchrev" in proc.stderr, True)
+
+
+def case_gate11_a_tree_with_no_crates_is_not_a_tree_with_no_dead_links(tmp: str) -> None:
+    """Gate 6's `_inputs_missing` rule, corpus half, for gate 11.
+
+    A link is resolved *inside* a crate, so a tree holding no crate under any of
+    the scanned roots gives this checker nothing to resolve against: the scan
+    walks zero crates, finds zero findings, and reports a clean tree however
+    broken the code in it is. That is a pass by accident, which is the one
+    verdict a gate must not be able to reach.
+
+    Per-tree, hence here: the *commit* is what disarms the gate -- an author
+    part-way through moving `userspace/` still has it on disk, so the
+    working-tree run answers that all is well while the thing being published
+    has nothing in it at all.
+
+    Note what is deliberately *not* asserted: this case removes the crate
+    outright. A run merely *scoped* to nothing -- a push touching only
+    `kernel/` -- keeps its pass, and
+    `case_gate11_a_crate_absent_from_the_disk_is_still_scanned` pins that half.
+    The two reach `scan` looking alike and must not be folded together.
+    """
+    root = _doclinks_repo(tmp, "g11h")
+    commit(root)
+    remove(root, "userspace/real/Cargo.toml")
+    remove(root, "userspace/real/src/lib.rs")
+    sha = commit(root, "the scanned roots hold no crate any more")
+    write(root, "userspace/real/Cargo.toml", _DL_MANIFEST)
+    write(root, "userspace/real/src/lib.rs", _DL_OK)
+
+    disk = run_checker(root, "check-doc-links.py", "--check")
+    rev = run_checker(root, "check-doc-links.py", "--check", "--head", sha)
+    check("gate 11: the disk still has a crate and is judged normally",
+          disk.returncode, 0)
+    check("gate 11: the commit has none, which is no verdict rather than a pass",
+          rev.returncode, 2)
+    check("gate 11: ...saying so, rather than exiting quietly",
+          "nothing to judge" in rev.stderr, True)
+
+
+# Gate 11's refusal sentence. Deliberately not the checker's own finding line
+# (`... names nothing in crate ...`), which is printed by a `--check` run the
+# hook may then go on to allow -- gate 6's note records why that distinction is
+# load-bearing.
+_G11_REFUSAL = "links to a name that does not"
+
+_G11_SEED = {
+    "userspace/real/Cargo.toml": _DL_MANIFEST,
+    "userspace/real/src/lib.rs": _DL_OK,
+}
+
+
+def _doclinks_push_fixture(tmp: str, name: str) -> str:
+    return _push_fixture(tmp, name, ("check-doc-links.py",), dict(_G11_SEED))
+
+
+def case_gate11_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) -> None:
+    """End to end: gate 11's own wiring, not some other gate's.
+
+    Gate 11 is the only converted gate that scopes itself with `--paths-from`
+    rather than by scanning everything, so its loop has a second thing to get
+    right: the file list and the `--head` must describe the *same* commit.
+    Nothing in gates 2, 3, 4 or 6 exercises that pairing.
+    """
+    work = _doclinks_push_fixture(tmp, "g11push-hide")
+    write(work, "userspace/real/src/bin/tool.rs", _DL_DEAD)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "link a name that is not there")
+    write(work, "userspace/real/src/bin/tool.rs", _DL_OK)
+
+    verdict, blob = _push(work, marker=_G11_REFUSAL)
+    check("gate 11 end to end: the push is refused", verdict, "refused")
+    check("gate 11 end to end: ...naming the target only the commit has",
+          "ghost_link_target" in blob, True)
+
+
+def case_gate11_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -> None:
+    """End to end: the false fail, and the proof the gate was actually asked.
+
+    The `[ -d "$repo_root/$dl_file" ]` filter this gate used to carry is what
+    makes the tally check more than a formality here: it dropped any pushed
+    directory the worktree did not have, and a scope reduced to nothing is a
+    gate that runs and cannot fail.
+    """
+    work = _doclinks_push_fixture(tmp, "g11push-wip")
+    write(work, "userspace/real/src/bin/tool.rs", _DL_OK)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a bin whose links all resolve")
+    write(work, "userspace/real/src/bin/tool.rs", _DL_DEAD)
+
+    verdict, blob = _push(work, marker=_G11_REFUSAL)
+    check("gate 11 end to end: an uncommitted dead link does not block",
+          verdict, "allowed")
+    check("gate 11 end to end: ...and the gate actually ran",
+          "doc-links" in _tally(blob)[0], True)
+
+
+def case_gate11_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` while checked out on `main`.
+
+    This gate derived its scope from `HEAD` rather than from `$pushed_shas`,
+    which is a sharper version of the `touches` defect gate 2's twin describes:
+    the list would come out empty, `[ -s ]` would set `skip_doclinks=1`, and the
+    hook would report the gate as *skipped* -- a visible outcome nobody reads as
+    a bug, on a push carrying exactly what the gate exists to catch.
+    """
+    work = _doclinks_push_fixture(tmp, "g11push-offbranch")
+    git(work, "checkout", "--quiet", "-b", "feature")
+    write(work, "userspace/real/src/bin/tool.rs", _DL_DEAD)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a dead link on a branch we will leave")
+    git(work, "checkout", "--quiet", "main")
+
+    verdict, blob = _push(work, "feature", marker=_G11_REFUSAL)
+    check("gate 11 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    check("gate 11 end to end: ...naming the target on that other branch",
+          "ghost_link_target" in blob, True)
+
+
 CASES = (
     case_gate2_a_tidied_worktree_cannot_hide_a_committed_alias,
     case_gate2_an_uncommitted_alias_does_not_block_a_clean_push,
@@ -1884,15 +2223,26 @@ CASES = (
     case_gate6_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate6_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate6_the_hook_judges_a_branch_it_is_not_standing_on,
+    case_gate11_a_tidied_worktree_cannot_hide_a_committed_dead_link,
+    case_gate11_an_uncommitted_dead_link_does_not_block_a_clean_push,
+    case_gate11_the_manifest_is_read_from_the_same_tree,
+    case_gate11_a_bin_absent_from_the_disk_is_still_judged,
+    case_gate11_the_librarys_definitions_are_read_from_the_same_tree,
+    case_gate11_a_crate_absent_from_the_disk_is_still_scanned,
+    case_gate11_an_unopenable_revision_is_not_a_finding,
+    case_gate11_a_tree_with_no_crates_is_not_a_tree_with_no_dead_links,
+    case_gate11_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate11_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate11_the_hook_judges_a_branch_it_is_not_standing_on,
 )
 
 
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 50:
+    if len(CASES) < 61:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 50. The list is broken, not the code.")
+              f"least 61. The list is broken, not the code.")
         return 1
     # ...and each converted gate must be represented, through the real hook as
     # well as directly. A floor on the count alone would be met by any number of
@@ -1901,7 +2251,8 @@ def main() -> int:
     # as each remaining checker is converted; they are the thing that notices a
     # gate's cases being deleted along with the gate's own wiring.
     for gate, floor, e2e_floor in (("gate2", 10, 3), ("gate3", 13, 4),
-                                   ("gate4", 13, 3), ("gate6", 14, 3)):
+                                   ("gate4", 13, 3), ("gate6", 14, 3),
+                                   ("gate11", 11, 3)):
         named = [c for c in CASES if c.__name__.startswith(f"case_{gate}_")]
         hooked = [c for c in named if "the_hook" in c.__name__]
         if len(named) < floor or len(hooked) < e2e_floor:

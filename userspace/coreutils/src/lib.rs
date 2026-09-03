@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are twenty-seven so far. Three are about the interface these programs share
+//! There are twenty-eight so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -434,6 +434,26 @@
 //!   store*, and no interface reports that precision, so it has to be deduced
 //!   and then measured by experiment.
 //!
+//! The twenty-eighth is not about two utilities agreeing on what a user sees.
+//! It is about two utilities having independently written the same *security*
+//! bug, which is a stronger reason to share code than any of the above:
+//!
+//! - [`dirfd`] — how a recursive walk descends. A utility that builds path
+//!   strings and hands each whole string to the kernel asks the kernel to
+//!   re-walk the path from the top on every call, and each of those walks is a
+//!   fresh chance for a second process to have swapped a directory for a
+//!   symlink underneath it. `tar` had that hole and it was found
+//!   (`B-tar-WALKS-THROUGH-A-PRE-EXISTING-SYMLINK-AND-WRITES-OUTSIDE-THE-DESTINATION`);
+//!   `rm` had it and it was found
+//!   (`TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL`); the
+//!   next recursive utility would have had it too. The module expresses every
+//!   step below a walk's starting point as `(open directory, one component)`,
+//!   so there is no second component left for anyone to swap, and it carries
+//!   the one defence that cannot be left to a caller's judgement: a descent
+//!   verifies that the descriptor it just opened *is* the entry it looked up,
+//!   which is what makes the walk safe on a kernel whose `openat` still
+//!   resolves textually.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -444,6 +464,7 @@ pub mod canon;
 pub mod cfmt;
 pub mod copy;
 pub mod digest;
+pub mod dirfd;
 pub mod errmsg;
 pub mod extfloat;
 pub mod fileid;

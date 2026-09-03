@@ -2247,6 +2247,13 @@ These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
   resolved 2026-08-07 (§106): **option A**, scoped to *process* exclusions for
   `bash.exe` and `osh.exe` rather than blanket path exclusions. The command
   itself still needs an elevated shell and is written out in §106.
+  (Note, as on `Q45` above: `Q38` was issued twice, on the same day, for two
+  unrelated questions — the same append-only collision. Both were answered
+  before it could matter, and the numbers are left as they were rather than
+  edited, because this list records what the operator answered and the number
+  is part of what was answered. `scripts/check-open-questions.py` reports the
+  pair as a warning for that reason, and fails only on a collision involving a
+  question that is still open.)
 
 - Q37 How far osh's bash parity goes when the behaviour is an upstream bash
   *defect* — resolved 2026-08-07 (§105): **option A — waive it.** A divergence

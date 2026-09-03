@@ -109294,6 +109294,30 @@ is misfiled as unquoted.
     `'…` mid-typing, which the scanner deliberately treats as running to
     end-of-input for tab completion's sake. The two readings will have to
     coexist.
+- *The token model cannot express it as it stands, 2026-09-03.* This is the
+  part that decides how big the change is, and it is not visible from the
+  bash rules — it comes from reading `shellquote.rs`:
+  - `strip_quotes` is `scan(bytes).filter(Tok::is_literal).map(|t| t.byte)`,
+    and `Tok::is_literal` is just `!structural`. So the whole model is a
+    **keep/drop filter over input bytes**: every output byte is an input byte,
+    and the only decision per byte is whether it survives.
+  - `$'…'` does not merely delete bytes, it **produces** them. `$'a\tb'` must
+    yield a `0x09` that appears nowhere in the input (which holds `\` and
+    `t`); `$'\u00e9'` must turn six input bytes into two output bytes;
+    `$'\U0001F600'` ten into four. No assignment of `structural` to the input
+    bytes can express any of those.
+  - Therefore the fourth variant is **not** a drop-in. Either `strip_quotes`
+    grows a decode path it dispatches to when it enters the region, or `Tok`
+    grows a way to carry an emission distinct from `byte`. That is a change to
+    the shared type or the shared function, and should be decided deliberately
+    rather than discovered halfway through.
+  - **Adding the variant silently breaks `Tok::expands()`.** It reads
+    `!matches!(self.ctx, Ctx::Single) && !self.escaped`, so a new `Ctx::AnsiC`
+    would report *true* — but nothing expands inside `$'…'` (measured: `$` and
+    backticks are inert). It must become `matches!(… Ctx::Single | Ctx::AnsiC)`.
+    `Tok::is_bare()` is already correct by construction, since it tests
+    `matches!(self.ctx, Ctx::Unquoted)` positively — which is the argument for
+    writing such tests positively in the first place.
 
 **Site #10, `awk_split_print_args`, is deliberately excluded from the
 conversion.** It splits an *awk* `print` argument list, and awk is a different

@@ -1489,7 +1489,7 @@ different offsets and the merge is automatic. Newest first within each lane.
 
 ---
 
-## Q57 — Should the kernel run its own test suite on a user's boot? (lane A, 2026-08-22)
+## A-Q3 — [A] Should the kernel run its own test suite on a user's boot, and stop the machine when one fails? — Status: OPEN (raised 2026-08-22)
 
 **In short:** Right now, every time this OS starts, the kernel runs several
 hundred of its own built-in tests before handing the machine to the user —
@@ -1661,7 +1661,7 @@ interface shape.
 
 ---
 
-## Should `oci run` refuse to start when an option cannot be applied? (lane A)
+## A-Q4 — [A] Should `oci run` refuse to start when an option cannot be applied? — Status: OPEN
 
 **In short:** `oci run` starts a container. If you ask it for something extra —
 a shared folder (`-v`), a published port (`-p`), a file of labels or
@@ -1739,7 +1739,7 @@ is a place that would need revisiting if the contract later changes.
 
 ---
 
-## The shell's `grep` ignores case and numbers lines by default, unlike every other Unix (lane A, 2026-08-24)
+## A-Q5 — [A] The shell's `grep` ignores case and numbers lines by default, unlike every other Unix — Status: OPEN (raised 2026-08-24)
 
 **In short:** In our shell, typing `grep Error mylog.txt` also finds `error`
 and `ERROR`, and prints each result with a line number in front of it, like
@@ -1950,7 +1950,7 @@ work; I am carrying on down the roadmap.
 
 ---
 
-## Two commits that appear to delete the whole OS, and 33 commits signed by a fake name, are permanently in the published history. Leave them, or rewrite? (lane A, 2026-08-29)
+## A-Q6 — [A] Two commits that appear to delete the whole OS, and 33 commits signed by a fake name, are permanently in the published history. Leave them, or rewrite? — Status: OPEN (raised 2026-08-29)
 
 **In short:** on 2026-08-29 a safety check that runs just before uploading code
 accidentally committed to the real project instead of to the scratch copy it

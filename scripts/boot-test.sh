@@ -4381,7 +4381,9 @@ check_python_suites() {
     fi
 
     local failed=()
-    local out rc
+    local skipping=()
+    local skipped_groups=0
+    local out rc skips nskips skipline
     for f in "${suites[@]}"; do
         # `&& rc=0 || rc=$?` rather than a bare `rc=$?`: this file runs under
         # `set -e`, where a failing command in an assignment would abort the
@@ -4416,6 +4418,45 @@ check_python_suites() {
         out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
         if [ "$rc" -eq 0 ]; then
             printf '    %-32s %s\n' "$(basename "$f")" "$(printf '%s\n' "$out" | tail -1)"
+            # A passing suite is reported by its LAST LINE ONLY, so a suite that
+            # drops a group and still ends with "all N passed" reports a skip
+            # that nothing above this line can see.  That is not hypothetical:
+            # `test-bench-history.py` has seven skips that fire when the runs
+            # they name age out of `bench/history.jsonl`, and
+            # `test-rustemit.py`'s most valuable group vanishes if capstone is
+            # not installed.  Each is correct to skip; none of them was visible.
+            #
+            # The per-suite convention -- fold the skip into the summary line --
+            # works, and `test-rustemit.py` does exactly that.  It is not enough
+            # on its own: it is a rule every future suite has to remember, and
+            # the two suites above are the proof that it is not remembered.  So
+            # the harness that created the last-line-only display is also the
+            # thing that repairs it, and a new suite gets the behaviour without
+            # having to know the rule exists.
+            #
+            # Matched on the FIRST token, not by searching for "skip" anywhere.
+            # This project's tooling is largely *about* skips, so a substring
+            # match flags `PASS  a boot that skipped nothing yields an empty
+            # tuple` and every line the tools-under-test print about skipping a
+            # malformed record -- surveyed 2026-09-03, and those false hits are
+            # all of today's matches and none of them is a suite skip.  An
+            # annotation that is usually noise gets skimmed, which would leave
+            # the real skip exactly as hidden as it is now.
+            skips="$(printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP(PED)?\b' || true)"
+            if [ -n "$skips" ]; then
+                nskips=$(printf '%s\n' "$skips" | wc -l)
+                skipped_groups=$((skipped_groups + nskips))
+                skipping+=("$(basename "$f")")
+                # Indented under the suite's own line, so it reads as part of
+                # that suite's report rather than as a separate finding.  Line
+                # by line rather than one `printf '  ^ %s\n' "$skips"`: that
+                # passes every skip as a *single* argument containing newlines,
+                # so only the first would be marked and the rest would come out
+                # flush left, reading as output from the harness itself.
+                while IFS= read -r skipline; do
+                    printf '        ^ %s\n' "$skipline"
+                done <<< "$skips"
+            fi
             continue
         fi
         failed+=("$(basename "$f")")
@@ -4427,7 +4468,19 @@ check_python_suites() {
     done
 
     if [ "${#failed[@]}" -eq 0 ]; then
-        echo "=== Tooling test suites: ${#suites[@]} suites, all passed ==="
+        # The skip count rides on the section's closing line for the same reason
+        # it rides on each suite's: this line is what a reader scanning a
+        # 30,000-line boot log actually sees, and "all passed" with a silently
+        # reduced N is the exact claim this gate exists to refuse.  It is a
+        # count, not a failure -- every skip observed so far is legitimate (a
+        # tool genuinely absent, a run genuinely aged out), and failing on one
+        # would only teach the next author to phrase the skip differently.
+        if [ "$skipped_groups" -gt 0 ]; then
+            echo "=== Tooling test suites: ${#suites[@]} suites, all passed" \
+                 "(${skipped_groups} group(s) SKIPPED in ${#skipping[@]}: ${skipping[*]}) ==="
+            return 0
+        fi
+        echo "=== Tooling test suites: ${#suites[@]} suites, all passed, none skipped ==="
         return 0
     fi
 

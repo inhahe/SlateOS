@@ -805,6 +805,178 @@ def test_a_failed_cache_prune_cannot_turn_a_green_boot_red():
     check("the harness itself is green", rc, 0)
 
 
+def _dump_on_failure(ok, out):
+    """Print the gate's whole output when an assertion about it failed.
+
+    These assertions are substring tests, so `check`'s own `got: False` says
+    only that something was absent and never what was there instead. The
+    transcript is the diagnosis, and it is a few dozen lines -- cheap to print
+    on failure, and it is not printed at all on the passing path.
+    """
+    if ok:
+        return
+    print("        --- check_python_suites output ---")
+    for line in out.splitlines():
+        print(f"        | {line}")
+
+
+#: Enough fake suites to clear `check_python_suites`' own discovery floor of 10.
+#: They are padding: each prints one summary line and exits 0, which is the
+#: shape of every real passing suite.
+_QUIET_SUITE = "print('all 3 nothing tests passed')\n"
+
+
+def _run_python_suites(suites):
+    """Drive the real `check_python_suites` over a fixture `scripts/` directory.
+
+    `suites` maps a filename under `scripts/` to its Python source. Padding is
+    added until the gate's discovery floor is cleared, because a fixture that
+    trips the floor would exit 1 before reaching anything this test is about --
+    and would do so with a message about discovery, which reads like the thing
+    under test having failed.
+
+    Returns `(returncode, combined output)`.
+    """
+    fixture_root = os.path.join(REPO_ROOT, "build")
+    os.makedirs(fixture_root, exist_ok=True)
+    tmp = tempfile.mkdtemp(dir=fixture_root)
+    try:
+        scripts_dir = os.path.join(tmp, "scripts")
+        os.makedirs(scripts_dir)
+        for name, body in suites.items():
+            with open(os.path.join(scripts_dir, name), "w",
+                      encoding="utf-8", newline="\n") as handle:
+                handle.write(body)
+        for n in range(12):
+            pad = os.path.join(scripts_dir, f"test-pad{n}.py")
+            if os.path.exists(pad):
+                continue
+            with open(pad, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(_QUIET_SUITE)
+
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -u\n"
+                "PROJECT_ROOT=.\n"
+                + extract_shell_function("check_python_suites") + "\n\n"
+                "check_python_suites\n"
+                f"echo \"GATE_RETURNED rc=$?\"\n"
+            )
+
+        proc = subprocess.run(
+            ["bash", "harness.sh"], cwd=tmp, timeout=180,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        return proc.returncode, proc.stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_a_suite_that_skips_a_group_cannot_report_only_that_it_passed():
+    """The defect this gate's own display created.
+
+    A passing suite is reported by its last line and nothing else, so a suite
+    that drops a group and still ends "all N passed" reports a skip that never
+    reaches the log. Real instances: `test-bench-history.py` skips seven groups
+    once the runs they name age out of `bench/history.jsonl`, and
+    `test-rustemit.py`'s end-to-end group needs capstone. Both are correct to
+    skip; neither was visible.
+    """
+    rc, out = _run_python_suites({
+        "test-fake-skipper.py": (
+            "print('SKIP  the end-to-end group: capstone is not installed')\n"
+            "print('all 9 fake tests passed')\n"
+        ),
+    })
+    ok = check("the gate still passes -- a skip is not a failure",
+               "GATE_RETURNED rc=0" in out, True)
+    ok &= check("the summary line is still shown",
+                "all 9 fake tests passed" in out, True)
+    ok &= check("and the skip is shown with it",
+                "capstone is not installed" in out, True)
+    ok &= check("the section's closing line carries the count",
+                "1 group(s) SKIPPED in 1: test-fake-skipper.py" in out, True)
+    ok &= check("the harness is green", rc, 0)
+    _dump_on_failure(ok, out)
+
+
+def test_every_skip_a_suite_reports_is_marked_not_just_the_first():
+    """A regression, from the first draft of the annotation.
+
+    `printf '  ^ %s\\n' "$skips"` passes all of a suite's skips as one argument
+    containing newlines, so only the first came out marked and indented; the
+    rest arrived flush left, where they read as output from the harness rather
+    than from the suite that skipped. `test-bench-history.py` has seven skips
+    that can fire together, so this is the shape the feature would first be used
+    in -- and a mis-attributed skip is barely better than a hidden one.
+    """
+    rc, out = _run_python_suites({
+        "test-fake-multiskipper.py": (
+            "print('SKIP  ipc_channel control (history no longer holds those runs)')\n"
+            "print('SKIP  baselines.toml parse (tomllib needs Python 3.11+)')\n"
+            "print('SKIP  docs-commit grouping (git unavailable)')\n"
+            "print('all 40 fake tests passed')\n"
+        ),
+    })
+    marked = [ln for ln in out.splitlines() if ln.strip().startswith("^ SKIP")]
+    ok = check("the gate passes", "GATE_RETURNED rc=0" in out, True)
+    ok &= check("all three skips are marked", len(marked), 3)
+    ok &= check("...each indented under its suite",
+                sorted({len(ln) - len(ln.lstrip()) for ln in marked}), [8])
+    ok &= check("...and all three are counted",
+                "3 group(s) SKIPPED in 1: test-fake-multiskipper.py" in out, True)
+    _dump_on_failure(ok, out)
+
+
+def test_a_suite_that_merely_talks_about_skipping_is_not_flagged():
+    """The discriminator, which is the whole reason the match is on token one.
+
+    This project's tooling is largely *about* skips, so a substring search for
+    "skip" flags a suite's PASS lines and every line the tool under test prints
+    while skipping a malformed record. Surveyed 2026-09-03: those are all of
+    today's matches across the real suites and not one of them is a suite skip.
+    An annotation that is usually noise gets skimmed, which leaves the real skip
+    exactly as hidden as it was -- so this case is not a nicety, it is what
+    keeps the other test's output worth reading.
+    """
+    rc, out = _run_python_suites({
+        "test-fake-talker.py": (
+            "print('PASS  a boot that skipped nothing yields an empty tuple')\n"
+            "print('check-boot-skips: skipping malformed record at bad.jsonl:1')\n"
+            "print('all 32 fake tests passed')\n"
+        ),
+    })
+    ok = check("the gate passes", "GATE_RETURNED rc=0" in out, True)
+    ok &= check("nothing was reported as skipped", "SKIPPED in" in out, False)
+    ok &= check("the closing line says so positively",
+                "all passed, none skipped" in out, True)
+    ok &= check("the harness is green", rc, 0)
+    _dump_on_failure(ok, out)
+
+
+def test_a_suite_that_exits_nonzero_to_report_a_skip_is_a_failure():
+    """`test-bootstrap-worktree.py` exits 2 when there is no bash to drive.
+
+    That is the right call by the suite -- "did not run" must not be reported as
+    "passed" -- and it must stay a hard failure here rather than being absorbed
+    into the skip count added above. The skip annotation is for a suite that ran
+    and dropped a *group*; a suite that could not run at all has no verdict to
+    contribute, and the boot proceeding on one would be the silent pass this
+    whole gate exists to refuse.
+    """
+    rc, out = _run_python_suites({
+        "test-fake-unrunnable.py": (
+            "import sys\n"
+            "print('SKIPPED: no bash interpreter on PATH')\n"
+            "sys.exit(2)\n"
+        ),
+    })
+    ok = check("the gate refuses to build", "GATE_RETURNED rc=0" in out, False)
+    ok &= check("...naming the suite", "test-fake-unrunnable.py" in out, True)
+    ok &= check("...and showing why", "no bash interpreter" in out, True)
+    _dump_on_failure(ok, out)
+
+
 def _sq(text):
     """Single-quote for POSIX sh."""
     return "'" + text.replace("'", "'\\''") + "'"

@@ -1960,6 +1960,24 @@ fn matches_any_pattern(filename: &OsStr, patterns: &[&str]) -> bool {
     false
 }
 
+/// The directory containing `path`, by SlateOS's path rules.
+///
+/// Public because the code that *opens* a chooser needs this as much as the
+/// chooser's own `^` button does. A Browse button raised on behalf of a path
+/// the user already has — the desktop shell's Run box opens its chooser in the
+/// directory of whatever is currently typed — has to name that path's
+/// directory, and a second hand-rolled "cut at the last slash" is a second
+/// place for the rules in [`parent_path`] to be got wrong.
+///
+/// See [`parent_path`] for why this is a byte split on `/` and not
+/// [`Path::parent`]. Nothing is decoded, so a directory whose name has no UTF-8
+/// spelling comes back as the bytes that name it. A path with no `/` in it at
+/// all, and the root itself, both yield `/`.
+#[must_use]
+pub fn parent_of(path: impl AsRef<Path>) -> PathBuf {
+    PathBuf::from(parent_path(path.as_ref().as_os_str()))
+}
+
 /// List `path` for a [`FileDialog`], in the shape [`FileDialog::set_entries`]
 /// wants.
 ///
@@ -2731,6 +2749,27 @@ mod tests {
         assert_eq!(parent_path(OsStr::new("/home/user")), "/home");
         assert_eq!(parent_path(OsStr::new("/home/user/docs")), "/home/user");
         assert_eq!(parent_path(OsStr::new("/a/b/c/d")), "/a/b/c");
+    }
+
+    /// The public wrapper answers the same as the private splitter, and answers
+    /// it for a name that has no UTF-8 spelling. `parent_of` exists so that
+    /// callers who *open* a chooser — the desktop shell's Run box — do not
+    /// hand-roll the split; a wrapper that decoded on the way through would
+    /// defeat the point of sharing it.
+    #[test]
+    fn parent_of_splits_a_name_it_cannot_decode() {
+        assert_eq!(parent_of("/home/user/docs"), PathBuf::from("/home/user"));
+        assert_eq!(parent_of("/"), PathBuf::from("/"));
+        assert_eq!(parent_of("terminal"), PathBuf::from("/"));
+
+        let mut odd = OsString::from("/usr/bin/");
+        odd.push(unmappable_name());
+        assert_eq!(parent_of(&odd), PathBuf::from("/usr/bin"));
+
+        // A `\` is an ordinary character in a SlateOS filename, which is the
+        // case `Path::parent` would get wrong on a Windows host: it would
+        // answer `/usr` where the filesystem says the file is in `/usr/b\ck`.
+        assert_eq!(parent_of("/usr/b\\ck/thing"), PathBuf::from("/usr/b\\ck"));
     }
 
     #[test]

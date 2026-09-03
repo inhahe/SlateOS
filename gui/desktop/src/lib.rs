@@ -194,6 +194,7 @@ use launcher::{AppEntry, Category};
 use tzrules::Tz;
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -358,6 +359,19 @@ const POWER_MENU_PADDING: f32 = 6.0;
 const POWER_MENU_GAP: f32 = 6.0;
 /// Distance from a popup row's left edge to the start of its label.
 const POWER_MENU_TEXT_INSET: f32 = 14.0;
+
+// --- The Run box's file chooser --------------------------------------------
+
+/// How wide the chooser the Browse button raises is drawn.
+///
+/// Wider than the Run box it covers, and deliberately so: the box is a single
+/// line and the chooser is a list with a sidebar, a path bar and four columns.
+/// Sized so that the name column still has room after the sidebar takes its
+/// fixed share, rather than by matching anything else on the desktop.
+const RUN_BROWSER_WIDTH: f32 = 640.0;
+/// How tall the chooser is drawn. Enough rows to scan a `/bin` without
+/// scrolling being the only way to see anything.
+const RUN_BROWSER_HEIGHT: f32 = 440.0;
 
 // --- Drop shadows ----------------------------------------------------------
 
@@ -624,7 +638,13 @@ pub enum ShellAction {
     /// The shell handled the event; no window should see it.
     Consumed,
     /// Start the program at this path. Implies [`Consumed`](Self::Consumed).
-    Launch(String),
+    ///
+    /// A `PathBuf`, not a `String`, because it names a file: our filenames
+    /// admit every byte but `/` and NUL, so a program the user *pointed at*
+    /// in the Run box's file chooser may have no UTF-8 spelling, and a lossy
+    /// one would name a different program or none at all. Rows whose path
+    /// came from a text config are simply converted at the edge.
+    Launch(PathBuf),
     /// Ask the compositor to act on a window the shell does not own. Implies
     /// [`Consumed`](Self::Consumed).
     ///
@@ -759,7 +779,7 @@ pub struct HotkeyOutcome {
     /// A `Vec` rather than an `Option` to match `requests` above: both are
     /// unordered, independent asks, and a caller that can already loop over one
     /// should not need a second shape for the other.
-    pub launches: Vec<String>,
+    pub launches: Vec<PathBuf>,
 }
 
 impl HotkeyOutcome {
@@ -795,7 +815,7 @@ impl HotkeyOutcome {
     }
 
     /// The shell claimed the key and wants these programs started.
-    fn start(launches: Vec<String>) -> Self {
+    fn start(launches: Vec<PathBuf>) -> Self {
         Self {
             consumed: true,
             launches,
@@ -1045,6 +1065,37 @@ pub struct DesktopShell {
     /// report one until this surface existed, which is what
     /// [`HotkeyOutcome::launches`] is for.
     pub run_dialog: run_dialog::RunDialog,
+    /// The file chooser the Run box's Browse button puts up, while it is up.
+    ///
+    /// Modal over the Run box in exactly the way the Run box is modal over the
+    /// desktop, and by the same two mechanisms: it is offered every press
+    /// before the box is ([`handle_hotkey_inner`](Self::handle_hotkey_inner))
+    /// and every pointer event before the box is
+    /// ([`handle_mouse_inner`](Self::handle_mouse_inner)), and it is drawn last
+    /// of all. Its answer goes back into the box's command field rather than
+    /// starting anything, which is what distinguishes browsing from launching —
+    /// the user asked *which* program, not for a file manager.
+    ///
+    /// `Option` rather than a `visible` flag on a permanent one, unlike the Run
+    /// box itself: a chooser holds a directory listing, and a shell that kept
+    /// one for the lifetime of the session would keep a listing of a directory
+    /// nobody is looking at, going staler by the hour.
+    run_browser: Option<guitk::dialog::FileDialog>,
+    /// The directory the chooser has actually been given a listing for.
+    ///
+    /// The shell reads no files — that is what keeps every test in this module
+    /// runnable with no filesystem, and it is the same split
+    /// [`wallpaper::WallpaperManager`] uses, where the shell names a picture
+    /// and the session reads it. So the chooser's listing arrives from outside:
+    /// [`run_browser_wants`](Self::run_browser_wants) reports a directory whose
+    /// listing has not been delivered yet, and
+    /// [`set_run_browser_entries`](Self::set_run_browser_entries) delivers it.
+    ///
+    /// Held as "what was last delivered" and compared against the chooser's
+    /// current directory, rather than as a "needs listing" flag that navigation
+    /// would have to remember to set. A flag can be forgotten by a new
+    /// navigation path; a comparison cannot go stale.
+    run_browser_listed: Option<PathBuf>,
     /// The window rules, and the state of the ones that have fired.
     ///
     /// Consulted from exactly one place —
@@ -1299,6 +1350,8 @@ impl DesktopShell {
             // centred on the screen it is opened on instead, in
             // `toggle_run_dialog`.
             run_dialog: run_dialog::RunDialog::new(),
+            run_browser: None,
+            run_browser_listed: None,
             rules: window_rules::WindowRulesManager::new(),
             hotkeys: hotkeys::HotkeyRegistry::defaults(),
         };
@@ -1837,12 +1890,41 @@ impl DesktopShell {
             // A click on a notification card that names a program. The pane
             // consumed the press and marked the card read; starting the
             // program is the part only the caller can do.
-            (ShellAction::Consumed, Some(path)) => ShellAction::Launch(path),
+            // `PathBuf::from` at the edge: a notification's path comes from
+            // its sender as text, so this is where text becomes a path.
+            (ShellAction::Consumed, Some(path)) => ShellAction::Launch(PathBuf::from(path)),
             (action, _) => action,
         }
     }
 
     fn handle_mouse_inner(&mut self, event: &MouseEvent) -> ShellAction {
+        // The chooser ahead of the Run box that raised it, for the same reason
+        // the Run box comes ahead of everything else: it is drawn last, so a
+        // press anywhere landed on it or on the space around it.
+        //
+        // A press outside its rectangle does *nothing* rather than dismissing,
+        // which is where this differs from the Run box below. The two are not
+        // inconsistent: dismissing the Run box costs the user a line they can
+        // retype, while dismissing the chooser costs them the navigation that
+        // got them to the directory they are looking at. Escape is the way out,
+        // and the Cancel button is the visible one.
+        if self.run_browser.is_some() {
+            let (x, y, width, height) = self.run_browser_rect();
+            // The chooser lays itself out from its own origin — see
+            // `FileDialog::frame` — so the event has to arrive in its space or
+            // the clicks land somewhere other than the ink.
+            let local = MouseEvent {
+                x: event.x - x,
+                y: event.y - y,
+                kind: event.kind.clone(),
+            };
+            if let Some(dialog) = self.run_browser.as_mut() {
+                let action = dialog.handle_mouse(&local, width, height);
+                self.apply_run_browser_action(action);
+            }
+            return ShellAction::Consumed;
+        }
+
         // The Run box first, ahead of even the pane's scrim: it is painted over
         // everything, so a press anywhere landed on it or on the space around
         // it, and the dialog answers both — inside, a button; outside, dismiss.
@@ -2040,11 +2122,16 @@ impl DesktopShell {
                 self.toggle_start_menu();
                 ShellAction::Consumed
             }
+            // `PathBuf::from` is the edge conversion: a menu entry's path comes
+            // from a YAML config file, which the parser has already decoded as
+            // UTF-8, so nothing is lost turning it back into a path here. It is
+            // the *browsed* paths — see `RunDialog` — that cannot survive a
+            // round trip through `String`, and those never pass through here.
             Hit::StartMenuEntry(index) => {
                 let path = self
                     .start_menu_entries()
                     .get(index)
-                    .map(|entry| entry.executable_path.clone());
+                    .map(|entry| PathBuf::from(&entry.executable_path));
                 match path {
                     Some(path) => {
                         self.close_start_menu();
@@ -2065,7 +2152,7 @@ impl DesktopShell {
                 let path = self
                     .power_menu_entries()
                     .get(index)
-                    .map(|entry| entry.executable_path.clone());
+                    .map(|entry| PathBuf::from(&entry.executable_path));
                 match path {
                     Some(path) => {
                         self.close_start_menu();
@@ -2771,6 +2858,18 @@ impl DesktopShell {
         // outside the box closes the box — but the ordering here has to agree
         // with the paint order regardless of whether the case arises, or the
         // day it does arise is the day keys go to a window the user cannot see.
+        // And the chooser ahead of the Run box that raised it, for exactly the
+        // same reason: it is drawn over the box, so it owns the keyboard while
+        // it is up. Without this, the arrow keys that walk the file list would
+        // be walking the box's history at the same time, and Escape would close
+        // the box out from under the chooser rather than closing the chooser.
+        // Note that Super+R is *not* special-cased through here the way it is in
+        // `key_on_run_dialog`: while a chooser is up, the box the chord toggles
+        // is not the surface the user is looking at.
+        if self.run_browser.is_some() {
+            return self.key_on_run_browser(key);
+        }
+
         if self.run_dialog.is_visible() {
             return self.key_on_run_dialog(key);
         }
@@ -3061,7 +3160,7 @@ impl DesktopShell {
             | HotkeyAction::ScreenLock
             | HotkeyAction::Screenshot
             | HotkeyAction::ScreenshotRegion => {
-                HotkeyOutcome::start(action.command().map(str::to_owned).into_iter().collect())
+                HotkeyOutcome::start(action.command().map(PathBuf::from).into_iter().collect())
             }
             // Nothing can carry these out: there is no backlight channel out of
             // the shell, and inventing one would mean a request the compositor
@@ -3132,26 +3231,160 @@ impl DesktopShell {
     /// is called on *every* press rather than only on the ones that could have
     /// executed something.
     ///
-    /// [`Browse`](run_dialog::RunDialogEvent::Browse) is dropped, deliberately
-    /// and visibly. It asks for a file *picker* — a chooser whose answer goes
-    /// back into the command box — not for a file manager to be started, and the
-    /// shell cannot yet put one up: `guitk::dialog::FileDialog` exists and would
-    /// serve, but it has to be fed directory entries, and this crate performs no
-    /// filesystem reads at all. Starting the file explorer instead would be the
-    /// tempting substitute and is the wrong one: the user would get a window
-    /// they did not ask for and an empty command box. See `known-issues.md`
-    /// `TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`.
-    fn drain_run_dialog(&mut self) -> Vec<String> {
-        self.run_dialog
-            .drain_events()
-            .into_iter()
-            .filter_map(|event| match event {
-                run_dialog::RunDialogEvent::Execute(command) => Some(command),
-                run_dialog::RunDialogEvent::Browse
-                | run_dialog::RunDialogEvent::Cancel
-                | run_dialog::RunDialogEvent::Closed => None,
-            })
-            .collect()
+    /// [`Browse`](run_dialog::RunDialogEvent::Browse) puts the file chooser up
+    /// — see [`run_browser`](Self::run_browser). It asks for a *picker*, whose
+    /// answer goes back into the command box; starting the file explorer
+    /// instead would be the tempting substitute and is the wrong one, because
+    /// the user would get a window they did not ask for and an empty command
+    /// box.
+    ///
+    /// A `for` loop rather than the `filter_map` this used to be, because
+    /// opening the chooser needs `&mut self` and a closure passed to `filter_map`
+    /// would be holding a borrow of it. The drained `Vec` is owned, so the loop
+    /// borrows nothing.
+    fn drain_run_dialog(&mut self) -> Vec<PathBuf> {
+        let mut launches = Vec::new();
+        for event in self.run_dialog.drain_events() {
+            match event {
+                run_dialog::RunDialogEvent::Execute(command) => launches.push(command),
+                run_dialog::RunDialogEvent::Browse => self.open_run_browser(),
+                // No answer needed — the dialog has already hidden itself by the
+                // time it reports these — but they must still be drained, or the
+                // buffer grows by one on every dismissal. That is the whole
+                // reason this is called on *every* press rather than only on the
+                // ones that could have executed something.
+                run_dialog::RunDialogEvent::Cancel | run_dialog::RunDialogEvent::Closed => {}
+            }
+        }
+        launches
+    }
+
+    /// Put up the file chooser the Run box's Browse button asks for.
+    ///
+    /// Opened where the box's current text points, which is what makes a second
+    /// Browse a correction of the first rather than a fresh start from the root
+    /// — see [`RunDialog::browse_start`](run_dialog::RunDialog::browse_start).
+    ///
+    /// The chooser arrives with no entries in it. It cannot arrive with any:
+    /// listing a directory is a filesystem read and this module performs none.
+    /// The first [`run_browser_wants`](Self::run_browser_wants) after this
+    /// reports the directory, and the host answers. A host that never answers
+    /// gets an empty chooser rather than a wrong one, which is the right way
+    /// round for a shell whose tests all run with no filesystem at all.
+    fn open_run_browser(&mut self) {
+        let start = self.run_dialog.browse_start();
+        self.run_browser = Some(guitk::dialog::FileDialog::open().with_initial_path(&start));
+        self.run_browser_listed = None;
+    }
+
+    /// Take the chooser down, whether it was cancelled or answered.
+    fn close_run_browser(&mut self) {
+        self.run_browser = None;
+        self.run_browser_listed = None;
+    }
+
+    /// Whether the Run box's file chooser is on screen.
+    #[must_use]
+    pub fn run_browser_open(&self) -> bool {
+        self.run_browser.is_some()
+    }
+
+    /// The directory the chooser is showing and has not been given a listing
+    /// for, if there is one.
+    ///
+    /// The read half of the split described on
+    /// [`run_browser_listed`](Self::run_browser_listed): a host that draws this
+    /// shell should call this before each paint and answer any `Some` with
+    /// [`set_run_browser_entries`](Self::set_run_browser_entries), the way it
+    /// already answers [`WallpaperManager::current_image_path`] with pixels.
+    ///
+    /// [`WallpaperManager::current_image_path`]: wallpaper::WallpaperManager::current_image_path
+    #[must_use]
+    pub fn run_browser_wants(&self) -> Option<&Path> {
+        let path = self.run_browser.as_ref()?.current_path();
+        (self.run_browser_listed.as_deref() != Some(path)).then_some(path)
+    }
+
+    /// Answer [`run_browser_wants`](Self::run_browser_wants) with a listing.
+    ///
+    /// The entries are recorded as belonging to whatever directory the chooser
+    /// is showing *now*, not to whatever it was showing when they were read.
+    /// The two are the same in every real sequence — the host lists and answers
+    /// between events — and if they ever were not, the mismatch resolves itself
+    /// on the next call rather than leaving the chooser permanently showing one
+    /// directory's contents under another's name.
+    ///
+    /// Silently ignored when no chooser is up. A listing that arrives after the
+    /// user cancelled is not an error; it is a read that was already in flight.
+    pub fn set_run_browser_entries(&mut self, entries: Vec<guitk::dialog::DirEntry>) {
+        let Some(dialog) = self.run_browser.as_mut() else {
+            return;
+        };
+        self.run_browser_listed = Some(dialog.current_path().to_path_buf());
+        dialog.set_entries(entries);
+    }
+
+    /// Where the chooser is drawn, as `(x, y, width, height)`.
+    ///
+    /// Computed on demand from the screen size rather than stored, for the
+    /// reason [`toggle_run_dialog`](Self::toggle_run_dialog) gives: the display
+    /// can change size under a running shell, and a position worked out when
+    /// the chooser opened would put it off the edge of the new screen. It is
+    /// also what keeps the drawing and the hit-testing in step — both call
+    /// this, so neither can be laying the chooser out at a size the other is
+    /// not.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "screen dimensions are far inside f32's exact-integer range"
+    )]
+    fn run_browser_rect(&self) -> (f32, f32, f32, f32) {
+        let screen_w = self.screen_width as f32;
+        let screen_h = self.screen_height as f32;
+        // Clamped down to the screen, then the origin clamped up to zero: a
+        // chooser wider than the display would otherwise be centred by placing
+        // its left edge off the left side, where the sidebar and the `^` button
+        // are the half that gets cut.
+        let width = RUN_BROWSER_WIDTH.min(screen_w);
+        let height = RUN_BROWSER_HEIGHT.min(screen_h);
+        let x = ((screen_w - width) / 2.0).max(0.0);
+        let y = ((screen_h - height) / 2.0).max(0.0);
+        (x, y, width, height)
+    }
+
+    /// One press while the chooser is up.
+    fn key_on_run_browser(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        let (_, _, _, height) = self.run_browser_rect();
+        let action = match self.run_browser.as_mut() {
+            Some(dialog) => dialog.handle_event(key, height),
+            None => return HotkeyOutcome::default(),
+        };
+        self.apply_run_browser_action(action);
+        // Consumed unconditionally. The chooser is modal, so a press it had no
+        // meaning for is still not the desktop's — and certainly not the Run
+        // box's, which is directly underneath and would otherwise be typed into
+        // through the chooser covering it.
+        HotkeyOutcome::consumed()
+    }
+
+    /// What the chooser did in answer to an event.
+    fn apply_run_browser_action(&mut self, action: guitk::dialog::DialogAction) {
+        match action {
+            // A navigation needs nothing done here: `run_browser_wants`
+            // compares the chooser's directory against the last one delivered,
+            // so the new directory is already reported as wanting a listing.
+            guitk::dialog::DialogAction::None | guitk::dialog::DialogAction::NavigatedTo(_) => {}
+            // The whole point of the round trip. The path goes into the command
+            // field as bytes, not as text, so a program whose name has no UTF-8
+            // spelling is the program that starts — see
+            // `RunDialog::set_command_path`.
+            guitk::dialog::DialogAction::Selected(path) => {
+                self.run_dialog.set_command_path(&path);
+                self.close_run_browser();
+            }
+            // The box is left exactly as it was, text and all. A Browse that
+            // cleared what the user had typed is a Browse nobody uses twice.
+            guitk::dialog::DialogAction::Cancelled => self.close_run_browser(),
+        }
     }
 
     /// `action` aimed at whatever is focused, or `None` if nothing is.
@@ -4148,6 +4381,11 @@ impl DesktopShell {
             // returned, and this function keeps its `bool`.
             drop(self.drain_run_dialog());
         }
+        // After the drain, not before it. The drain is what acts on a pending
+        // `Browse`, so draining first and closing second is what guarantees a
+        // Browse the user asked for a moment before the box was dismissed does
+        // not leave a chooser standing over a box that is no longer there.
+        self.close_run_browser();
         any
     }
 
@@ -4261,6 +4499,31 @@ impl DesktopShell {
             self.run_dialog
                 .render(&Palette::from_settings(&self.appearance)),
         );
+        Some(tree)
+    }
+
+    /// Render the Run box's file chooser, if it is up.
+    ///
+    /// Separate from [`render_run_dialog`](Self::render_run_dialog) rather than
+    /// appended to it, so that the host's paint order says out loud that the
+    /// chooser is over the box — the same thing the input routing in
+    /// [`handle_mouse_inner`](Self::handle_mouse_inner) says. A chooser folded
+    /// into the box's tree would be over it by accident of ordering inside one
+    /// `Vec`, which is a fact nothing outside this file could see.
+    ///
+    /// Translated rather than laid out in place: [`FileDialog::frame`] draws
+    /// from its own origin, and `run_browser_rect` is the one place that says
+    /// where that origin is on screen.
+    ///
+    /// [`FileDialog::frame`]: guitk::dialog::FileDialog::frame
+    #[must_use]
+    pub fn render_run_browser(&self) -> Option<RenderTree> {
+        let dialog = self.run_browser.as_ref()?;
+        let (x, y, width, height) = self.run_browser_rect();
+        let mut tree = RenderTree::new();
+        tree.translate(x, y);
+        tree.commands.extend(dialog.render(width, height));
+        tree.untranslate();
         Some(tree)
     }
 
@@ -6449,7 +6712,7 @@ mod window_manager_tests {
 )]
 mod overview_wiring_tests {
     use super::{
-        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, PathBuf,
         RenderTree, ShellAction, ShellControlAction, ShellRequest, WindowId, WindowInfo,
         WindowList, focus_assist, notif_pane, overview,
     };
@@ -7429,7 +7692,7 @@ mod overview_wiring_tests {
         let (x, y) = pane_label_at(&s, "Three new messages");
         assert_eq!(
             press(&mut s, x, y),
-            ShellAction::Launch("/apps/mail".to_owned())
+            ShellAction::Launch(PathBuf::from("/apps/mail"))
         );
     }
 
@@ -7470,8 +7733,8 @@ mod overview_wiring_tests {
 )]
 mod run_box_wiring_tests {
     use super::{
-        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
-        ShellAction, notif_pane,
+        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, Path,
+        PathBuf, ShellAction, notif_pane,
     };
     use guitk::render::RenderCommand;
 
@@ -7557,7 +7820,7 @@ mod run_box_wiring_tests {
     /// directly: the claim under test is that the shell *routes* a printable
     /// key to the box, and a test that reached past the shell would still pass
     /// on a shell that routed it to the binding table instead.
-    fn type_command(s: &mut DesktopShell, command: &str) -> Vec<String> {
+    fn type_command(s: &mut DesktopShell, command: &str) -> Vec<PathBuf> {
         let mut launches = Vec::new();
         for ch in command.chars() {
             launches.extend(s.handle_hotkey(&typed(ch)).launches);
@@ -7815,7 +8078,7 @@ mod run_box_wiring_tests {
         );
 
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
-        assert_eq!(outcome.launches, ["terminal"]);
+        assert_eq!(outcome.launches, [PathBuf::from("terminal")]);
         assert!(
             !s.run_dialog.is_visible(),
             "the box stayed up after starting the command"
@@ -7850,7 +8113,7 @@ mod run_box_wiring_tests {
         let (x, y) = button_centre(&s, "OK");
         assert_eq!(
             press(&mut s, x, y),
-            ShellAction::Launch("terminal".to_owned())
+            ShellAction::Launch(PathBuf::from("terminal"))
         );
     }
 
@@ -7864,21 +8127,220 @@ mod run_box_wiring_tests {
         assert!(!s.run_dialog.is_visible());
     }
 
-    /// Browse asks for a file *picker*, and the shell has none — it does no
-    /// filesystem reads at all. What it must not do is answer with something
-    /// else: starting a file manager would give the user a window they did not
-    /// ask for and a command box still empty. See known-issues.md →
-    /// `TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`.
+    // ---- Browse ----
+
+    /// A name the filesystem accepts and UTF-8 cannot spell.
+    ///
+    /// Built through the platform's own safe constructor rather than by
+    /// asserting bytes into an `OsStr`: a lone high surrogate is a perfectly
+    /// legal Windows filename with no UTF-8 spelling, and byte `0xFF` is the
+    /// same thing everywhere else. SlateOS filenames admit every byte but `/`
+    /// and NUL, so this is an ordinary name on the target, not a pathological
+    /// one.
+    fn unmappable_name() -> std::ffi::OsString {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            std::ffi::OsString::from_wide(&[u16::from(b'z'), 0xD800])
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            std::ffi::OsString::from_vec(vec![b'z', 0xFF])
+        }
+    }
+
+    /// One ordinary file, named `name`, as a listing.
+    fn listing(name: std::ffi::OsString) -> Vec<guitk::dialog::DirEntry> {
+        vec![guitk::dialog::DirEntry {
+            name,
+            is_dir: false,
+            size: 1,
+            modified_timestamp: 0,
+            extension: std::ffi::OsString::new(),
+        }]
+    }
+
+    /// Press Browse and answer the listing it asks for, leaving the chooser up
+    /// showing one file called `name`.
+    fn browse_showing(s: &mut DesktopShell, name: std::ffi::OsString) {
+        let (x, y) = button_centre(s, "Browse...");
+        assert_eq!(press(s, x, y), ShellAction::Consumed);
+        assert!(s.run_browser_open(), "Browse put no chooser up");
+        let wanted = s
+            .run_browser_wants()
+            .expect("the chooser asked for no listing")
+            .to_path_buf();
+        assert_eq!(wanted, PathBuf::from("/"), "an empty box browses the root");
+        s.set_run_browser_entries(listing(name));
+        assert!(
+            s.run_browser_wants().is_none(),
+            "the chooser asked again for a listing it had just been given"
+        );
+    }
+
+    /// The button used to do nothing at all: it reported an intent the shell
+    /// dropped on the floor, because a chooser needs directory entries and this
+    /// module reads no files. It still reads no files — the listing arrives
+    /// through `set_run_browser_entries` — but the chooser is now real. See
+    /// known-issues.md → `TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`.
     #[test]
-    fn the_browse_button_starts_nothing_and_leaves_the_box_up() {
+    fn the_browse_button_puts_a_chooser_up_and_leaves_the_box_under_it() {
         let mut s = shell();
         s.toggle_run_dialog();
-        let (x, y) = button_centre(&s, "Browse...");
-        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        let _ = type_command(&mut s, "term");
+        browse_showing(&mut s, std::ffi::OsString::from("hello"));
         assert!(
             s.run_dialog.is_visible(),
-            "a button that does nothing yet also threw the typed command away"
+            "raising a chooser threw the typed command away"
         );
+        assert!(
+            s.render_run_browser().is_some(),
+            "a chooser that is up draws nothing"
+        );
+    }
+
+    /// A press outside the chooser is swallowed, not obeyed — deliberately
+    /// unlike the Run box underneath it, which a press outside *does* dismiss.
+    /// Dismissing the box costs a line of typing; dismissing the chooser costs
+    /// however deep the user had navigated, and there is no way back but to do
+    /// it again. See `design-decisions.md` §809 Decision 2.
+    #[test]
+    fn a_press_outside_the_chooser_neither_closes_it_nor_reaches_the_desktop() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "terminal");
+        browse_showing(&mut s, std::ffi::OsString::from("hello"));
+
+        // The chooser is centred, so the screen's top-left corner is outside it
+        // under any layout it could plausibly have.
+        assert_eq!(
+            press(&mut s, 1.0, 1.0),
+            ShellAction::Consumed,
+            "a press past the chooser fell through to whatever is underneath"
+        );
+        assert!(
+            s.run_browser_open(),
+            "a press past the chooser took it down"
+        );
+        assert!(
+            s.run_dialog.is_visible(),
+            "a press past the chooser took the box down with it"
+        );
+    }
+
+    /// The whole reason the Browse path carries a `PathBuf` and not a `String`.
+    /// A user who *points at* a program is pointing at a specific file, and the
+    /// lossy rendering the command field can show names a different file — or,
+    /// far more often, none at all.
+    #[test]
+    fn choosing_a_name_that_is_not_utf8_starts_that_exact_file() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let name = unmappable_name();
+        browse_showing(&mut s, name.clone());
+
+        // Down then Enter: the keyboard route, which is also what proves the
+        // chooser is getting the keys rather than the box underneath it.
+        assert!(s.handle_hotkey(&chord(Key::Down, Modifiers::NONE)).consumed);
+        assert!(
+            s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
+                .launches
+                .is_empty(),
+            "choosing a file in the chooser started it, instead of naming it"
+        );
+        assert!(
+            !s.run_browser_open(),
+            "the chooser stayed up after choosing"
+        );
+
+        let mut expected = std::ffi::OsString::from("/");
+        expected.push(&name);
+        let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
+        assert_eq!(
+            outcome.launches,
+            [PathBuf::from(&expected)],
+            "the launch named a lossy rendering rather than the file that was picked"
+        );
+    }
+
+    /// Cancelling has to be free. A Browse that cost the user the line they had
+    /// typed is a Browse nobody presses twice.
+    #[test]
+    fn cancelling_the_chooser_leaves_the_typed_command_alone() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "terminal");
+        browse_showing(&mut s, std::ffi::OsString::from("hello"));
+        assert!(
+            s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE))
+                .consumed
+        );
+        assert!(!s.run_browser_open(), "Escape left the chooser up");
+        assert!(
+            s.run_dialog.is_visible(),
+            "Escape closed the box as well as the chooser"
+        );
+
+        let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
+        assert_eq!(
+            outcome.launches,
+            [PathBuf::from("terminal")],
+            "cancelling the chooser edited the command that was already typed"
+        );
+    }
+
+    /// The chooser is modal over the box the way the box is modal over the
+    /// desktop. Without that, the arrows walking the file list would walk the
+    /// box's history at the same time, and a letter would be typed into a field
+    /// the user cannot see.
+    #[test]
+    fn keys_reach_the_chooser_and_not_the_box_underneath_it() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "term");
+        browse_showing(&mut s, std::ffi::OsString::from("hello"));
+
+        assert!(s.handle_hotkey(&typed('x')).consumed);
+        assert!(s.run_browser_open(), "a letter dismissed the chooser");
+        let _ = s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE));
+
+        let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
+        assert_eq!(
+            outcome.launches,
+            [PathBuf::from("term")],
+            "a key aimed at the chooser was typed into the box behind it"
+        );
+    }
+
+    /// Browsing from a path already in the box opens where that path lives,
+    /// not at the root. A chooser that always started from `/` would make
+    /// correcting a typo in a long path a fresh walk down the tree.
+    #[test]
+    fn the_chooser_opens_in_the_directory_of_what_is_typed() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "/usr/bin/term");
+        let (x, y) = button_centre(&s, "Browse...");
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert_eq!(
+            s.run_browser_wants(),
+            Some(Path::new("/usr/bin")),
+            "the chooser opened somewhere other than where the command points"
+        );
+    }
+
+    /// Dismissing the box takes the chooser with it. A chooser standing over a
+    /// box that is no longer there would own the keyboard with nothing to
+    /// return its answer to.
+    #[test]
+    fn dismissing_the_box_takes_the_chooser_down_too() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        browse_showing(&mut s, std::ffi::OsString::from("hello"));
+        s.dismiss_popups();
+        assert!(!s.run_browser_open(), "the chooser outlived the box");
+        assert!(!s.run_dialog.is_visible());
     }
 
     // ---- the mouse ----

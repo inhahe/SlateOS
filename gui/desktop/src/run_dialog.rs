@@ -42,6 +42,8 @@ use guitk::text::TextCursor;
 // mechanism behind it.
 use guitk::textfind::fuzzy_score;
 
+use std::path::{Path, PathBuf};
+
 // ============================================================================
 // Colour
 // ============================================================================
@@ -97,8 +99,15 @@ const MAX_HISTORY: usize = 50;
 /// Events produced by the Run dialog for the shell to act on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunDialogEvent {
-    /// User pressed OK or Enter — execute this command.
-    Execute(String),
+    /// User pressed OK or Enter — start the program at this path.
+    ///
+    /// A `PathBuf`, not a `String`. Most of the time it is simply the typed
+    /// text turned into a path, but a command the user chose through
+    /// **Browse** may name a file with no UTF-8 spelling — our filenames
+    /// admit every byte but `/` and NUL — and the text field can only *show*
+    /// a lossy rendering of such a name. Carrying the path keeps the program
+    /// that starts the one the user pointed at.
+    Execute(PathBuf),
     /// User clicked Browse — open a file picker.
     Browse,
     /// User pressed Cancel or Escape.
@@ -415,6 +424,15 @@ pub struct RunDialog {
     dialog_x: f32,
     /// Dialog Y position.
     dialog_y: f32,
+    /// The exact path Browse put in the field, if the field still shows it.
+    ///
+    /// The text field has to be a `String` — the user types into it a
+    /// character at a time — so a chosen path with no UTF-8 spelling can only
+    /// be *displayed* lossily. This holds the real bytes beside the text.
+    /// [`execute_current`](Self::execute_current) uses them only while the
+    /// text still matches their rendering, which is what makes an edit
+    /// discard them without every text-mutating site having to remember to.
+    command_exact: Option<PathBuf>,
 }
 
 impl RunDialog {
@@ -438,7 +456,58 @@ impl RunDialog {
             // Default to centered-ish position; caller should reposition.
             dialog_x: 200.0,
             dialog_y: 150.0,
+            command_exact: None,
         }
+    }
+
+    /// Put a path the user *chose* — rather than typed — in the command field.
+    ///
+    /// The field shows what a `String` can show of it; the exact bytes are
+    /// kept beside the text so that pressing Enter starts the file that was
+    /// pointed at, even when that file's name has no UTF-8 spelling.
+    pub fn set_command_path(&mut self, path: &Path) {
+        self.input.set_text(&path.as_os_str().to_string_lossy());
+        self.command_exact = Some(path.to_path_buf());
+        // The field's contents changed under the autocomplete list, and a
+        // stale dropdown over a name the user did not type is worse than none.
+        self.suggestions.clear();
+        self.suggestion_index = None;
+        self.show_autocomplete = false;
+        self.error_message = None;
+        self.history_index = None;
+    }
+
+    /// The directory a file chooser opened from this box should start in.
+    ///
+    /// Asked of the dialog rather than computed by whoever puts the chooser up,
+    /// because the useful answer depends on `command_exact` — which is private,
+    /// and has to stay private for the reason
+    /// [`set_command_path`](Self::set_command_path) exists at all. A second
+    /// Browse should re-open where the first one left off, and "where it left
+    /// off" is only spelled exactly by the bytes Browse itself chose; deriving
+    /// it from the field's text would send the chooser to a directory whose
+    /// name merely *looks* like the one the user picked.
+    ///
+    /// The field is validated against the text on the same terms
+    /// `execute_current` validates it, so a user who has since typed over the
+    /// chosen path gets the directory of what they typed.
+    ///
+    /// Falls back to the root, which is the only directory that certainly
+    /// exists: a bare command name like `terminal` is not a path and has no
+    /// directory to open, and starting the chooser in "the directory named
+    /// `terminal`" would show an empty list.
+    #[must_use]
+    pub fn browse_start(&self) -> PathBuf {
+        let text = self.input.text.trim();
+        if !text.starts_with('/') {
+            return PathBuf::from("/");
+        }
+        let shown = self
+            .command_exact
+            .as_ref()
+            .filter(|p| p.as_os_str().to_string_lossy().trim() == text)
+            .map_or_else(|| PathBuf::from(text), Clone::clone);
+        guitk::dialog::parent_of(&shown)
     }
 
     /// Create a Run dialog with custom known apps and PATH dirs.
@@ -1072,10 +1141,27 @@ impl RunDialog {
             return;
         }
 
+        // The bytes Browse chose, but only while the field still *shows* them.
+        //
+        // Checking the rendering rather than clearing the field on every edit
+        // is deliberate: this dialog mutates its text from a dozen places —
+        // insert, backspace, delete, cut, paste, history recall, autocomplete
+        // accept — and an invalidation that has to be remembered in each of
+        // them is one that will eventually be forgotten in a new one. Deriving
+        // the answer from the text cannot go stale. A user who types back the
+        // exact glyphs on screen gets the file those glyphs came from, which
+        // is the only file they could have meant.
+        let exact = self
+            .command_exact
+            .take()
+            .filter(|p| p.as_os_str().to_string_lossy().trim() == command);
+
         // Resolve the command.
         if self.resolve_command(&command) {
             self.add_to_history(&command);
-            self.events.push(RunDialogEvent::Execute(command));
+            self.events.push(RunDialogEvent::Execute(
+                exact.unwrap_or_else(|| PathBuf::from(&command)),
+            ));
             self.hide();
         } else {
             self.error_message = Some(format!(
@@ -1842,7 +1928,7 @@ mod tests {
         dialog.handle_key_event(&event);
 
         let events = dialog.drain_events();
-        assert!(events.contains(&RunDialogEvent::Execute("terminal".to_string())));
+        assert!(events.contains(&RunDialogEvent::Execute(PathBuf::from("terminal"))));
         assert!(events.contains(&RunDialogEvent::Closed));
     }
 
@@ -1900,7 +1986,9 @@ mod tests {
         dialog.handle_key_event(&event);
 
         let events = dialog.drain_events();
-        assert!(events.contains(&RunDialogEvent::Execute("/usr/bin/something".to_string())));
+        assert!(events.contains(&RunDialogEvent::Execute(PathBuf::from(
+            "/usr/bin/something"
+        ))));
     }
 
     #[test]

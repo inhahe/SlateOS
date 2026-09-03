@@ -74252,7 +74252,7 @@ constant chosen beside the fill) is the one worth keeping.
 
 ---
 
-### TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR — 2026-08-24 — OPEN
+### TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR — 2026-08-24 — OPEN, **surveyed 2026-09-03: wider than this heading says**
 
 **In short.** The desktop's light theme has six background shades a card or
 panel can be painted. On the two palest of them, ordinary text is below the
@@ -74300,6 +74300,112 @@ than a live defect. Do not assume either way from this entry.
 `surface2` card get slightly-too-low contrast. It does not get worse over time,
 but it gets *wider* every time a panel picks one of those two surfaces for a
 card, since nothing today stops it.
+
+### Surveyed 2026-09-03 — the survey this entry asked for, and it is worse than stated
+
+The entry above says the survey "has not been done", that it is "the first step
+of any fix", and that it "may show the answer is 'nothing does'". It has now
+been done. The answer is not "nothing does", and the defect is **wider than the
+`text`-on-`surface1`/`surface2` pair this entry describes**.
+
+**How it was measured.** `gui/desktop/src/palette_check.rs` gained
+`text_on_background(cmds, root)`, which walks a command list in paint order,
+tracks the translate and font stacks, composites every earlier `FillRect`
+covering the sample point with `Color::over`, and returns each text command's
+ink, the colour actually behind it, and their WCAG ratio. `assert_drawn_from`
+was then *temporarily* instrumented to report every finding under 4.5:1, which
+made all 49 modules' existing sweeps report at once without editing 49 call
+sites. The instrumentation was removed before commit; `text_on_background` and
+its six tests stayed.
+
+**The table this entry gives is one row of the real table.** It measured only
+`text`. Every ink the shell draws body copy in, against every card:
+
+| light mode | base | mantle | crust | surface0 | surface1 | surface2 |
+|---|---|---|---|---|---|---|
+| `text` | 7.06 | 6.57 | 6.04 | 5.17 | **4.39** | **3.69** |
+| `subtext1` | 5.53 | 5.14 | **4.73** | **4.05** | **3.44** | **2.89** |
+| `subtext0` | **4.64** | **4.31** | **3.96** | **3.40** | **2.89** | **2.42** |
+| `accent` (blue) | **4.63** | **4.31** | **3.96** | **3.39** | **2.88** | **2.42** |
+| `overlay0` | 2.30 | 2.14 | 1.97 | 1.69 | 1.43 | 1.20 |
+
+(Bold = under the 4.5:1 body-text floor. `overlay0` is not bold because the
+palette documents it as deliberately not carrying body text — placeholder and
+disabled text, which SC 1.4.3 exempts.)
+
+**The finding in one sentence: the light palette's secondary and accent inks
+clear the floor on `base` and nowhere else.** `subtext0` is 4.64:1 on the base
+it was tuned against — design-decisions §525 darkened it to exactly that — and
+that tuning was done against `base` alone. Raise the ink onto any card and it
+fails: 3.40:1 on `surface0`, which is the ordinary case of a caption on a card,
+and *worse* than the 3.69:1 this entry flagged as the worst case.
+
+**And the shell does draw there, in quantity.** Distinct (module, ink, card)
+findings from one full pass, light mode:
+
+| pair | sites | some of the modules |
+|---|---|---|
+| `subtext0` on `surface0` | 533 | AppsList, accessibility_settings, datetime tabs, sound, power, storage, update, bluetooth |
+| `overlay0` on `surface0` | 140 | (exempt — placeholder/disabled) |
+| `accent` on `surface0` | 126 | launcher, network, backup |
+| `text` on `surface1` | 96 | launcher results, device_settings, clipboard viewer, language_settings |
+| `subtext0` on `surface1` | 92 | network flyout/panel, device_settings, clipboard viewer |
+
+So this is a **live defect, not a latent hazard**, and the two surfaces named in
+the heading are not the main event: `surface0` is.
+
+**Dark mode is clean**, as the entry says. Every real finding in the dark pass
+was one of the two artefact classes below.
+
+#### Two artefact classes the survey turned up, neither a defect
+
+Both are recorded because a later reader running the same sweep will see them
+and must not "fix" them.
+
+1. **Text on the wallpaper is not text on `p.base`.** The sweep takes a `root`
+   colour for what lies beneath the module's own drawing, and `p.base` is right
+   for a panel that fills its window. It is wrong for `icons`, whose labels sit
+   on an arbitrary photograph under a black shadow and are therefore pale in
+   *both* modes on purpose (`Palette::on_wallpaper`; see the note at the top of
+   `icons.rs` and `an_icon_label_does_not_change_colour_with_the_mode`). With
+   `root = p.base` in light mode the ink and the root are the same value and the
+   sweep reports 1.00:1 — the loudest finding in the whole run, and entirely an
+   artefact of the assumption. The same applies to the login screen's clock over
+   its wallpaper (1.17:1 reported). **Any per-module assertion built on this
+   helper must pass the right `root`, or exempt the modules that draw on the
+   wallpaper.**
+
+2. **Tests that build a light palette with a dark accent.** Several sweeps
+   iterate `AccentColor::presets()` and set `p.accent` to `accent.color()` — the
+   *Mocha* value — rather than `p.hue(accent)`. That yields e.g. Mocha pink
+   `#F5C2E7` as ink on a light `surface0` at 1.01:1. It cannot happen to a user:
+   `AppearanceSettings::effective_accent` picks `color_light()` in light mode.
+   Checked, not assumed — `gui/appearance/src/lib.rs:699`. The tests are
+   overstating their coverage rather than the shell being wrong, and that is its
+   own small defect, close kin to
+   `TD-C-THREE-TEST-MODULES-HAND-ROLL-THE-ACCENT-LIST-THAT-A-HELPER-ALREADY-RETURNS`.
+
+   One real hazard does sit next to it: `effective_accent` returns
+   `custom_accent` **unmodified** for `AccentColor::Custom`, with no mode
+   adjustment and no legibility check. A user who picks a pale custom accent in
+   light mode gets exactly the 1.01:1 result the artefact simulates. That is a
+   separate question and is filed in `open-questions.md`.
+
+#### Why the fix is not applied here
+
+The entry's two candidate fixes are still the right two, but the survey changes
+which is cheap. Darkening `text` alone — what the entry proposes — fixes two
+cells of a table with fourteen failing ones, and leaves the 533-site case
+untouched. The real choice is a palette-wide one, it changes what every light
+render looks like, and it is a user-visible policy rather than a bug with one
+correct answer. It is therefore in `open-questions.md` as **C-Q10** with the
+options costed, rather than decided here.
+
+**What did land** is the measuring instrument and its tests, so that whichever
+option is chosen can be checked rather than asserted, and so the numbers above
+can be reproduced by anyone.
+
+
 
 ---
 

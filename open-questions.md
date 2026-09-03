@@ -2502,3 +2502,85 @@ affected, and the shared config that caused the misattribution is repaired, so
 the count cannot grow.
 
 **Status:** OPEN
+
+---
+
+## C-Q10 — [C] In the light theme, small grey text on a shaded card is too faint to meet the readability standard, in about 850 places. Fixing it changes how the whole light theme looks. Which way? — Status: OPEN
+
+**In short:** The desktop has a light theme and a dark theme. In the light one,
+the smaller grey text — the second line of a list row, a caption under a
+heading, a hint — is *too faint* wherever it sits on a shaded box rather than
+directly on the page. There is a published standard for how far apart text and
+its background have to be to count as readable (4.5, on a scale where 1 is
+invisible and 21 is black-on-white). This text measures 3.4. It happens in
+roughly 850 places across the settings screens, the launcher, the network and
+sound panels, and more. The dark theme is fine. Fixing it means changing
+colours that every screen and every application uses, so it will visibly change
+what the light theme looks like — which is why I am asking rather than picking.
+
+**Glossary, because the options below need three terms:**
+- **Contrast ratio** — how far apart two colours are in lightness. 1 = identical
+  (invisible), 21 = black on white. The standard asks 4.5 for normal-sized text.
+- **Card** — any box drawn slightly shaded against the page, to group things:
+  a settings row, a search result, a panel section. The theme has four shades
+  of card, from barely-there to noticeably grey.
+- **Secondary text** — the smaller, greyer text: captions, second lines, hints.
+  Deliberately quieter than the main text, and that is the point of it.
+
+**How this was found.** The problem was already logged, but only half of it: the
+old note measured the *main* text colour and found two of the four card shades
+slightly under the line. A measuring tool built on 2026-09-03 checked every
+piece of text the desktop actually draws, against whatever is actually behind
+it. The real table (light theme only; bold = below the 4.5 standard):
+
+| ink | on the page | palest card | … | greyest card |
+|---|---|---|---|---|
+| main text | 7.06 | 5.17 | | **3.69** |
+| secondary text | **4.64** | **3.40** | | **2.42** |
+| accent (the themed blue) | **4.63** | **3.39** | | **2.42** |
+
+Main text is mostly fine. Secondary text passes *only* on the bare page, at
+4.64 — because that is the one place it was ever checked when it was chosen.
+Put it on any card and it fails.
+
+### The options
+
+| | *What changes* | Cost |
+|---|---|---|
+| **A. Darken the greys** (recommended) | Captions and hints in the light theme look a bit darker and less delicate. Nothing moves; only three colours change. | The light theme reads slightly heavier. Contrast between "main" and "secondary" text shrinks, so the visual hierarchy is a little flatter. |
+| **B. Lighten the cards** | Cards in the light theme become fainter — the shading that separates a settings row from the page gets subtler. | At the pale end the cards may stop being visible as cards at all, which is its own legibility problem (a different one, about structure rather than text). |
+| **C. Forbid text on the darker cards** | Nothing changes colour. Panels would have to stop using the two greyest card shades behind text, and about 190 places would be re-laid-out. | The most work by far, and it constrains every future panel. But it is the only option that changes nothing a user has already got used to. |
+| **D. Do nothing** | Nothing. | The text stays measurably below the standard, and it gets *wider* every time a new panel puts a caption on a card, because nothing stops it. |
+
+**Why A is my recommendation.** It is three colour values, it fixes all four
+card shades at once, and it is the same move already made once for this exact
+palette: the secondary grey was *already* darkened, in June, to get it from 4.37
+to 4.64 — but only ever checked against the bare page, which is why it fails on
+cards now. Option A is finishing that job properly rather than starting a new
+one. B fights the purpose of the cards, and C is real work that also permanently
+narrows what a designer may do.
+
+**If you would rather not decide:** say so and I will take A, since D is the
+only option that leaves a known accessibility defect shipped, and A is the
+cheapest of the three that fix it. It is fully reversible — three constants.
+
+**What happens if this is never answered:** nothing breaks and nothing gets
+worse on its own, but the light theme keeps shipping text below the readability
+standard, and the count grows slowly as panels are added. The measuring tool is
+in place either way, so whatever is decided can be verified rather than assumed.
+
+**Where it bites:** `gui/appearance/src/lib.rs` — the light role table
+(`LIGHT_SUBTEXT0`, `LIGHT_SUBTEXT1`, the `LIGHT_*` accents, and the
+`LIGHT_SURFACE*` ladder). Full measurements and the module-by-module counts are
+in known-issues.md under
+`TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR`.
+
+**A smaller, separate question found alongside it, same file:** if a user picks
+a *custom* accent colour rather than one of the fourteen presets, it is used
+exactly as given — the presets get a light-mode variant, a custom colour does
+not, and nothing checks it is legible. So a user who picks a pale pink in the
+light theme gets accent text at about 1:1, i.e. invisible. Should a custom
+accent be (i) adjusted for the mode like the presets are, (ii) accepted but
+warned about in the picker, or (iii) left exactly as chosen on the grounds that
+the user asked for it? I lean (i), matching what the presets already do.
+

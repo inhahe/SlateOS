@@ -34148,6 +34148,40 @@ were clippy-dirty under `-D warnings` *before* being touched, and the debt is
 not visible until the crate is looked at. It is worth fixing — these are real
 overflow and panic sites — but it is most of the work, not a footnote to it.
 
+**`apps/musicplayer` is number 90, and it is why that note is there.** Its
+conversion was small; its lint tail was **71 findings, every one in production
+code**, and the bulk of them were in `parse_wav_header`, `parse_flac_header`,
+`parse_id3v2` and `decode_id3_text` — three audio-format parsers reading
+untrusted file bytes with unchecked arithmetic on offsets taken *from those
+bytes*.
+
+**One of them was a hang, not a lint.** The WAV chunk loop advanced with
+`offset += 8 + chunk_size as usize`, and `chunk_size` is four bytes out of the
+file. A crafted size wraps `offset` back to a small number, a small offset
+passes the loop guard, and the parser reads the same chunks forever. The ID3
+extended-header advance (`pos += 4 + ext_size`, a full 32-bit field) has the
+identical shape. A media player that hangs on a malformed file is the cheapest
+denial of service there is and it arrives as an email attachment.
+`a_wav_with_an_absurd_chunk_size_does_not_loop_forever` pins it, and the
+mutation check is unusual: restoring the wrapping advance does not fail the
+test, it **times out at 120 s**, which is the finding.
+
+Four tests, including a sweep that feeds every truncation of a plausible WAV,
+ID3 and FLAC header to all three parsers — a missed bound shows up only at the
+length that reaches it, so sampling would not do.
+
+The conversion's own defect was the visualiser: `advance_visualizer` eased the
+bars by a flat per-*call* blend, ignoring the `elapsed_secs` it was handed. That
+is `apps/mixer`'s peak-meter defect one call site over, and it only becomes
+reachable when the app is given a real clock — `tick_interval` is a floor, so
+ticks arrive irregularly and a busy frame would ease twice as far as a quiet
+one. It is now an exponential rate whose time constant is solved to reproduce
+the old look at the rate the player asks for. `tick_interval` is gated on
+`playing`, so a paused player lets the desktop park.
+
+Baseline 47 → 46. Running total: three conversions today, three live defects,
+and 102 clippy findings cleared across them.
+
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY

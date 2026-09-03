@@ -109268,6 +109268,32 @@ is misfiled as unquoted.
   quoting are affected, and the expander — the one that actually handles the
   construct — is not among them, because it skips the body rather than scanning
   it. Tracked as **TD-SHELLQUOTE-NO-ANSI-C-QUOTING**.
+- *The rules are now measured, 2026-09-03.* `scripts/check-ansic-quoting-vs-bash.py`
+  pins them against real bash — 30 cases, all green — so the implementation can
+  be written against evidence rather than recollection. The parts that decide
+  the shape of the Rust:
+  - The alphabet is **C's, not the shell's**: `\n \t \r \a \b \f \v \e \\ \' \"`,
+    plus `\nnn` octal, `\xHH` hex, `\cX` control, and `\uHHHH`/`\UHHHHHHHH`
+    which emit **UTF-8** (so `\u00e9` is two bytes, `\U0001F600` is four).
+  - **`\'` works inside the quotes.** `'…'` cannot express an apostrophe at
+    all, which is the whole reason the construct exists — and it means the new
+    variant cannot reuse `Ctx::Single`'s "no escapes whatsoever" rule.
+  - **An unrecognised escape keeps both bytes** (`\z` → `\z`). The *unquoted*
+    context does the opposite (`\z` → `z`), so this cannot share that path
+    either. The new variant is genuinely a fourth, not a blend of two.
+  - `\0` truncates the word.
+  - **Nothing expands.** `$`, backticks, `~`, `{a,b}` and blanks are as inert
+    as inside `'…'`; only escapes are special. So `Tok::expands()` and
+    `Tok::is_bare()` must both answer *false* inside it.
+  - It is a **word** construct: `x$'a\tb'y` is one word, and `$''` is an empty
+    word rather than no word.
+  - The `$` must be **bare**. Inside `"…"`, escaped, or quoted off, the
+    construct does not exist and the `$` is literal — so entering the context
+    is itself a question for the scanner, not a lexical prefix match.
+  - An unterminated `$'…` is a **syntax error** in bash, unlike an unterminated
+    `'…` mid-typing, which the scanner deliberately treats as running to
+    end-of-input for tab completion's sake. The two readings will have to
+    coexist.
 
 **Site #10, `awk_split_print_args`, is deliberately excluded from the
 conversion.** It splits an *awk* `print` argument list, and awk is a different

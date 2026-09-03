@@ -100995,7 +100995,13 @@ and `rm` removes what it was asked to remove instead of silently stopping short.
 The only host that runs this today is the Windows development machine, where the
 unit tests run; the shipped target is SlateOS, which is unix.
 
-## TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL (lane B, 2026-08-30)
+## TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL (lane B, 2026-08-30) — FIXED 2026-09-03
+
+**Fixed.** `rm`'s walk is descriptor-relative as of 2026-09-03, through the new
+shared `userspace/coreutils/src/dirfd.rs`. The original entry is kept below
+unedited, because the *reason* it sat blocked for four days is worth reading
+and because the annotation at the end of it was correct when written and is now
+wrong — see "What changed" after it.
 
 **In short:** `rm -r dir` walks the tree by building up path *strings* —
 `dir`, then `dir/sub`, then `dir/sub/file` — and hands each whole string to the
@@ -101080,6 +101086,81 @@ See **`B-POSIX-THE-AT-FAMILY-IS-TEXTUAL`** below, which is the general defect;
 this `rm` race is one symptom of it. Unblocking needs kernel-side fd-relative
 resolution, which is lane A's tree — filed as
 `requests/b-a-the-at-family-resolves-by-path-so-no-toctou-fix-is-possible.md`.
+
+### What changed (2026-09-03)
+
+Lane A answered that request, member by member: `unlinkat` (662), `fstatat`
+(663), `getdents` (664), `fchmodat` (665), `mkdirat`/`symlinkat`/`linkat`/
+`utimensat` (666–669) and `renameat` (670) all resolve the *handle* now. So of
+the four syscalls this walk makes, three — listing, classifying, removing — are
+pinned on SlateOS and were already fd-relative on the certification target.
+
+**One was not, and the family's own summary comment does not say so:**
+`openat`. `posix/src/file.rs:3638` still joins the descriptor's remembered path
+to the child name and calls `open` on the string. `O_NOFOLLOW` guards only the
+*final* component of that join, so a swap of a component the walk had already
+descended through is still followed — the residual attack, at depth ≥ 2.
+
+The walk closes that itself rather than waiting: after opening a child
+directory it `fstat`s the descriptor and compares `(st_dev, st_ino)` with the
+`fstatat` that decided the child *was* a directory, refusing the descent with
+`ESTALE` on a mismatch. Redirecting the open past that check would require
+landing on the same inode, i.e. on the file the walk meant. It is identical on
+both targets, needs nothing from lane A, and is deletable when `openat` pins.
+The reasoning, including why forwarding libc's `openat` to `SYS_FS_OPENAT2` was
+rejected, is `design-decisions.md` §752; the gap is filed as
+`requests/b-a-openat-is-the-one-at-call-left-unpinned.md`.
+
+So the correction above stands as a *rule* — a fix real only where it is
+measured is worse than no fix — and the fix that landed obeys it. It is not
+"green on Linux, textual on SlateOS": on SlateOS three of the four calls are
+pinned in the kernel and the fourth is verified by the caller.
+
+### Where it is now
+
+`userspace/coreutils/src/dirfd.rs` — `Dir` (an owned directory descriptor;
+`open_root`, `open_child`, `stat`, `unlink`, `rmdir`, `writable`, `names`) and
+`Stat` (a `kind` plus the `(dev, ino)` identity). `rm.rs` reaches every entry
+below an operand through `Loc { dir, name, path }`, where `path` is only ever
+*printed*. The operand itself is still opened by path, because at the top there
+is no descriptor above it — GNU's position too.
+
+Two follow-ups, tracked separately:
+`TD-B-TAR-AND-RM-CARRY-TWO-DESCRIPTOR-WALKS` (convert `tar.rs` onto the shared
+module, deleting its private copy) and
+`TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS` (`rm`'s and `mv`'s).
+
+## TD-B-TAR-AND-RM-CARRY-TWO-DESCRIPTOR-WALKS (lane B, 2026-09-03)
+
+**In short:** two utilities now know how to walk a directory tree safely, and
+they know it in two places. `tar` learned it first, privately, when its own
+symlink hole was fixed; `rm` learned it second, in a shared module built for
+the purpose. Until `tar` is moved onto the shared one, a fix or a mistake in
+either copy does not reach the other — and the thing being duplicated is a
+security invariant, which is the worst kind of thing to have two versions of,
+because reading one file no longer tells you whether the other is safe.
+
+**Where.** `userspace/coreutils/src/bin/tar.rs` carries its own `Dir`, `CStat`,
+`oflag` module and `extern` block. `userspace/coreutils/src/dirfd.rs` is the
+shared layer, currently used only by `rm`.
+
+**The difference that matters.** The shared module's `open_child` verifies the
+descriptor it got — `fstat` and compare `(dev, ino)` against the `fstatat` that
+classified the entry — because `openat` is still textual on SlateOS
+(`requests/b-a-openat-is-the-one-at-call-left-unpinned.md`). `tar`'s private
+copy does not, so **`tar` is correct on Linux and exposed on SlateOS** for the
+ancestor-swap case. That is the concrete cost of the duplication, not a
+hypothetical one.
+
+**Proper fix.** Delete `tar.rs`'s `Dir`, `CStat`, `oflag` and externs; use
+`coreutils::dirfd`. The tar-specific parts around it — `locate`, `Located`,
+`components`, `MAX_SYMLINK_HOPS`, the `EXDEV` handling — stay where they are;
+they are about what `tar` does with a resolved location, not about how it
+resolves one. Certify with `scripts/tar-diff.sh`, which compares against GNU
+tar case by case and is what makes the swap provably a behavioural no-op.
+
+Filed the same day the shared module landed, and expected to be short-lived:
+it exists to name the window, not to justify it.
 
 ## `nice` reported a refused niceness with the wrong errno, because `nice.c`'s `nice(2)` branch is dead code (lane B, 2026-08-30)
 

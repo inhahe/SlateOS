@@ -69,15 +69,33 @@
 //! `st_dev`, so the write-protected prompt never fires and `--one-file-system`
 //! never skips. Both degrade towards *more* prompting being skipped rather
 //! than towards deleting something unasked.
+//!
+//! # The walk resolves descriptors, not paths
+//!
+//! Every syscall below a command-line operand goes through
+//! [`coreutils::dirfd`]: an open descriptor on the directory being walked, plus
+//! one component. Nothing here hands the kernel `dir/sub/file` and asks it to
+//! re-walk that from the top, which is what let a second process swap `sub` for
+//! a symlink mid-removal and send the deletions somewhere else entirely. The
+//! path strings survive untouched — they are what gets *printed*, and
+//! `scripts/rm-diff.sh` certifies their spelling case by case — but they are no
+//! longer what gets *resolved*. See [`Loc`], and `known-issues.md` →
+//! `TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL`.
+//!
+//! The operand itself is still reached by path, because at the top there is no
+//! descriptor above it yet to reach it through. That is GNU's position too: an
+//! `fts` root is opened by the name it was given. What changes is everything
+//! after the first step.
 
 use coreutils::diag;
+use coreutils::dirfd::{Dir, Kind, Stat};
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, os_from_bytes, quoteaf};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers, yesno};
 use std::ffi::OsString;
-use std::fs::{self, Metadata};
+use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
@@ -515,44 +533,122 @@ enum FileId {
     Canonical(std::path::PathBuf),
 }
 
-/// The identity of a file whose metadata is already in hand.
+/// The identity of a file whose lookup is already in hand.
 ///
 /// `None` means "no identity could be established", which every caller must
 /// read as "not known to be the same file" — never as a match. Off unix the
-/// metadata is unusable and the path is canonicalised instead, which is why
-/// this takes both.
-fn id_of(path: &Path, md: &Metadata) -> Option<FileId> {
+/// lookup is unusable and the path is canonicalised instead, which is why this
+/// takes both.
+fn id_of(path: &Path, st: &Stat) -> Option<FileId> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         let _ = path;
-        Some(FileId::DevIno(md.dev(), md.ino()))
+        st.identity().map(|(dev, ino)| FileId::DevIno(dev, ino))
     }
     #[cfg(not(unix))]
     {
-        let _ = md;
+        let _ = st;
         fs::canonicalize(path).ok().map(FileId::Canonical)
     }
 }
 
-#[cfg(unix)]
-fn device_of(md: &Metadata) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    Some(md.dev())
-}
-
-/// Off unix there is no `st_dev`, so nothing can be on "a different device"
-/// and `--one-file-system` never skips anything. That is the safe direction:
-/// it removes what it was asked to remove rather than silently stopping.
-#[cfg(not(unix))]
-fn device_of(_md: &Metadata) -> Option<u64> {
-    None
-}
-
 /// The identity of a file named by path, looked up now. Used once, for `/`.
 fn file_id(path: &Path) -> Option<FileId> {
-    let md = fs::symlink_metadata(path).ok()?;
-    id_of(path, &md)
+    let st = Stat::of_path(path).ok()?;
+    id_of(path, &st)
+}
+
+/// Where an entry is — both for the kernel and for the reader of a message.
+///
+/// The two are deliberately different things, and keeping them apart is the
+/// whole of the fix recorded in this file's "The walk resolves descriptors, not
+/// paths". `path` is the string GNU prints and `scripts/rm-diff.sh` certifies;
+/// `dir` and `name` are what actually reach a syscall.
+///
+/// `dir` is `None` for exactly one entry per operand — the operand itself,
+/// which has no descriptor above it because nothing has been opened yet. Every
+/// other entry in the walk has one, and reaching an entry through its parent's
+/// descriptor is what a swapped component cannot redirect.
+struct Loc<'a> {
+    /// The open parent directory, or `None` at a command-line operand.
+    dir: Option<&'a Dir>,
+    /// The single component naming this entry inside `dir`. Not read when
+    /// `dir` is `None`, where the operand may be any number of components.
+    name: &'a [u8],
+    /// The spelling to print, and — at an operand only — the path to resolve.
+    path: &'a [u8],
+}
+
+impl<'a> Loc<'a> {
+    /// A command-line operand: reached by the name the user typed.
+    fn top(path: &'a [u8]) -> Self {
+        Self {
+            dir: None,
+            name: path,
+            path,
+        }
+    }
+
+    /// An entry inside an open directory.
+    fn in_dir(dir: &'a Dir, name: &'a [u8], path: &'a [u8]) -> Self {
+        Self {
+            dir: Some(dir),
+            name,
+            path,
+        }
+    }
+
+    /// What this entry is, without following it if it is a link.
+    fn stat(&self) -> io::Result<Stat> {
+        match self.dir {
+            Some(dir) => dir.stat(self.name),
+            None => Stat::of_path(&as_path(self.path)),
+        }
+    }
+
+    /// Remove a non-directory.
+    fn unlink(&self) -> io::Result<()> {
+        match self.dir {
+            Some(dir) => dir.unlink(self.name),
+            None => fs::remove_file(as_path(self.path)),
+        }
+    }
+
+    /// Remove an empty directory.
+    fn rmdir(&self) -> io::Result<()> {
+        match self.dir {
+            Some(dir) => dir.rmdir(self.name),
+            None => fs::remove_dir(as_path(self.path)),
+        }
+    }
+
+    /// Open this entry as a directory, so the walk can go on below it.
+    ///
+    /// `st` is the lookup that decided it *was* a directory, and the descriptor
+    /// is checked against it — a name that resolved somewhere else since is
+    /// refused rather than descended into. See [`coreutils::dirfd`].
+    fn open_dir(&self, st: &Stat) -> io::Result<Dir> {
+        match self.dir {
+            Some(dir) => dir.open_child(self.name, st),
+            None => Dir::open_root(&as_path(self.path), st),
+        }
+    }
+
+    /// Whether the prompt should say `write-protected`.
+    ///
+    /// GNU distinguishes `EACCES` (write-protected) from any other failure (an
+    /// error in its own right, reported and the entry skipped). This treats
+    /// everything that is not a plain success as "not write-protected"
+    /// instead: the removal itself is about to run and will report the real
+    /// problem with the real errno, and inventing a second diagnostic here
+    /// could only turn a removable file into a refused one.
+    fn write_protected(&self) -> bool {
+        let writable = match self.dir {
+            Some(dir) => dir.writable(self.name),
+            None => path_writable(self.path),
+        };
+        writable == Some(false)
+    }
 }
 
 /// One `rm` run: the options, the two output streams, the answer source, and
@@ -622,9 +718,10 @@ impl Rm<'_> {
         // to the syscalls; collapsing a run of trailing slashes cannot change
         // which file a path names.
         let path = normalize_operand(&os_bytes(operand));
+        let loc = Loc::top(&path);
 
-        let md = match fs::symlink_metadata(as_path(&path)) {
-            Ok(md) => md,
+        let st = match loc.stat() {
+            Ok(st) => st,
             Err(e) if e.kind() == io::ErrorKind::NotFound && self.options.ignore_missing_files => {
                 return;
             }
@@ -638,7 +735,7 @@ impl Rm<'_> {
         // directory being removed recursively — which is why `rm -d .` is
         // `Directory not empty` and `rm .` is `Is a directory`, neither of
         // them a refusal.
-        if md.is_dir() && self.options.recursive {
+        if st.is_dir() && self.options.recursive {
             if is_dot_or_dotdot(&path) {
                 // POSIX: diagnose it and do nothing more with that argument.
                 self.diagnose(&format!(
@@ -652,7 +749,7 @@ impl Rm<'_> {
             // recursive operand on a host where `/` cannot be looked up.
             if self.options.preserve_root
                 && self.root.is_some()
-                && self.root == id_of(&as_path(&path), &md)
+                && self.root == id_of(&as_path(&path), &st)
             {
                 let name = quoteaf(&path);
                 let same = if *path == *b"/" {
@@ -666,13 +763,13 @@ impl Rm<'_> {
                 self.diagnose("use --no-preserve-root to override this failsafe");
                 return;
             }
-            if self.options.preserve_all_root && self.crosses_into_its_parent(&path, &md) {
+            if self.options.preserve_all_root && self.crosses_into_its_parent(&path, &st) {
                 return;
             }
         }
 
-        let top = device_of(&md);
-        self.entry(&path, &md, 0, top);
+        let top = st.dev();
+        self.entry(&loc, &st, 0, top);
     }
 
     /// `--preserve-root=all`: an operand that is a mount point — on a
@@ -680,10 +777,10 @@ impl Rm<'_> {
     ///
     /// Returns whether it was refused. Not certified against GNU: making a
     /// mount point needs root, which the differential harness has not got.
-    fn crosses_into_its_parent(&mut self, path: &[u8], md: &Metadata) -> bool {
+    fn crosses_into_its_parent(&mut self, path: &[u8], st: &Stat) -> bool {
         let mut parent = strip_trailing_slashes(path).to_vec();
         parent.extend_from_slice(b"/..");
-        let parent_md = match fs::symlink_metadata(as_path(&parent)) {
+        let parent_st = match Stat::of_path(&as_path(&parent)) {
             Ok(m) => m,
             Err(_) => {
                 self.diagnose(&format!(
@@ -694,7 +791,7 @@ impl Rm<'_> {
                 return true;
             }
         };
-        if device_of(md) != device_of(&parent_md) {
+        if st.dev() != parent_st.dev() {
             self.diagnose(&format!(
                 "skipping {}, since it's on a different device",
                 quoteaf(path)
@@ -708,42 +805,42 @@ impl Rm<'_> {
     /// One entry, at `level` below its command-line operand.
     ///
     /// `top` is the device the operand itself is on, for `--one-file-system`.
-    fn entry(&mut self, path: &[u8], md: &Metadata, level: u32, top: Option<u64>) -> Verdict {
-        if !md.is_dir() {
-            return self.remove_nondirectory(path, md);
+    fn entry(&mut self, loc: &Loc<'_>, st: &Stat, level: u32, top: Option<u64>) -> Verdict {
+        if !st.is_dir() {
+            return self.remove_nondirectory(loc, st);
         }
 
         // `--one-file-system` skips a directory below the operand that is on
         // another filesystem. The operand itself is never skipped: it is what
         // defines the filesystem to stay on.
-        if level > 0 && self.options.one_file_system && top.is_some() && device_of(md) != top {
+        if level > 0 && self.options.one_file_system && top.is_some() && st.dev() != top {
             self.diagnose(&format!(
                 "skipping {}, since it's on a different device",
-                quoteaf(path)
+                quoteaf(loc.path)
             ));
             return Verdict::Abandoned;
         }
 
         if self.options.recursive {
-            self.remove_tree(path, md, level, top)
+            self.remove_tree(loc, st, level, top)
         } else if self.options.dir {
-            self.remove_empty_directory(path, md)
+            self.remove_empty_directory(loc, st)
         } else {
             // Not `-r` and not `-d`: the directory is not read at all, which
             // is why an unreadable one still answers `Is a directory`.
-            self.cannot_remove(path, &io::Error::from(io::ErrorKind::IsADirectory));
+            self.cannot_remove(loc.path, &io::Error::from(io::ErrorKind::IsADirectory));
             Verdict::Abandoned
         }
     }
 
     /// A file, symlink, fifo, socket or device node: prompt, then unlink.
-    fn remove_nondirectory(&mut self, path: &[u8], md: &Metadata) -> Verdict {
-        if !self.prompt(path, md, Question::Remove) {
+    fn remove_nondirectory(&mut self, loc: &Loc<'_>, st: &Stat) -> Verdict {
+        if !self.prompt(loc, st, Question::Remove) {
             return Verdict::Declined;
         }
-        match fs::remove_file(as_path(path)) {
+        match loc.unlink() {
             Ok(()) => {
-                self.verbose("removed", path);
+                self.verbose("removed", loc.path);
                 Verdict::Removed
             }
             // Vanished between the stat and the unlink. Under `-f` that is the
@@ -752,55 +849,56 @@ impl Rm<'_> {
                 Verdict::Removed
             }
             Err(e) => {
-                self.cannot_remove(path, &e);
+                self.cannot_remove(loc.path, &e);
                 Verdict::Abandoned
             }
         }
     }
 
     /// `-d` without `-r`: only an empty directory may go.
-    fn remove_empty_directory(&mut self, path: &[u8], md: &Metadata) -> Verdict {
-        let children = match read_names(path) {
-            Ok(names) => names,
+    fn remove_empty_directory(&mut self, loc: &Loc<'_>, st: &Stat) -> Verdict {
+        let children = match list(loc, st) {
+            Ok((_, names)) => names,
             Err(e) => {
-                self.cannot_remove(path, &e);
+                self.cannot_remove(loc.path, &e);
                 return Verdict::Abandoned;
             }
         };
         if !children.is_empty() {
             // No prompt: measured, `rm -i -d nonempty` asks nothing and goes
             // straight to the error, because the `rmdir` cannot succeed.
-            self.cannot_remove(path, &io::Error::from(io::ErrorKind::DirectoryNotEmpty));
+            self.cannot_remove(loc.path, &io::Error::from(io::ErrorKind::DirectoryNotEmpty));
             return Verdict::Abandoned;
         }
-        if !self.prompt(path, md, Question::Remove) {
+        if !self.prompt(loc, st, Question::Remove) {
             return Verdict::Declined;
         }
-        self.rmdir(path)
+        self.rmdir(loc)
     }
 
     /// `-r`: the directory, its contents, and the two prompts around them.
-    fn remove_tree(&mut self, path: &[u8], md: &Metadata, level: u32, top: Option<u64>) -> Verdict {
-        // Read first. A directory that cannot be read is reported without ever
-        // being prompted about — measured, and the natural order anyway, since
-        // whether it is empty decides which question gets asked.
-        let children = match read_names(path) {
-            Ok(names) => names,
+    fn remove_tree(&mut self, loc: &Loc<'_>, st: &Stat, level: u32, top: Option<u64>) -> Verdict {
+        // Open and read first. A directory that cannot be read is reported
+        // without ever being prompted about — measured, and the natural order
+        // anyway, since whether it is empty decides which question gets asked.
+        let (dir, children) = match list(loc, st) {
+            Ok(pair) => pair,
             Err(e) => {
-                self.cannot_remove(path, &e);
+                self.cannot_remove(loc.path, &e);
                 return Verdict::Abandoned;
             }
         };
 
         if children.is_empty() {
             // One question, not two: there is nothing to descend into.
-            if !self.prompt(path, md, Question::Remove) {
+            if !self.prompt(loc, st, Question::Remove) {
                 return Verdict::Declined;
             }
-            return self.rmdir(path);
+            drop(dir);
+            return self.rmdir(loc);
         }
 
-        if !self.prompt(path, md, Question::Descend) {
+        if !self.prompt(loc, st, Question::Descend) {
             // A declined *descend* abandons the enclosing directories in
             // silence, and is not an error.
             return Verdict::Abandoned;
@@ -808,16 +906,20 @@ impl Rm<'_> {
 
         let mut worst = Verdict::Removed;
         for name in children {
-            let child = join(path, &name);
-            let verdict = match fs::symlink_metadata(as_path(&child)) {
-                Ok(child_md) => self.entry(&child, &child_md, level.saturating_add(1), top),
+            // `join` builds the string that gets *printed*; `Loc::in_dir` is
+            // what the syscalls see, and it carries the open parent rather than
+            // the string. That split is the fix — see this file's header.
+            let child_path = join(loc.path, &name);
+            let child = Loc::in_dir(&dir, &name, &child_path);
+            let verdict = match child.stat() {
+                Ok(child_st) => self.entry(&child, &child_st, level.saturating_add(1), top),
                 Err(e)
                     if e.kind() == io::ErrorKind::NotFound && self.options.ignore_missing_files =>
                 {
                     Verdict::Removed
                 }
                 Err(e) => {
-                    self.cannot_remove(&child, &e);
+                    self.cannot_remove(&child_path, &e);
                     Verdict::Abandoned
                 }
             };
@@ -830,26 +932,31 @@ impl Rm<'_> {
             return Verdict::Abandoned;
         }
 
-        if !self.prompt(path, md, Question::Remove) {
+        if !self.prompt(loc, st, Question::Remove) {
             return Verdict::Declined;
         }
+        // Closed before the `rmdir`, not left to fall out of scope after it.
+        // Unix does not mind removing a directory somebody still has open, but
+        // the host build does, and a descriptor whose only remaining purpose is
+        // to be dropped is worth dropping where the reason is visible.
+        drop(dir);
         // With a declined child still in it this fails with `Directory not
         // empty`, which is exactly what GNU prints. The failure is not
         // special-cased into silence.
-        self.rmdir(path)
+        self.rmdir(loc)
     }
 
-    fn rmdir(&mut self, path: &[u8]) -> Verdict {
-        match fs::remove_dir(as_path(path)) {
+    fn rmdir(&mut self, loc: &Loc<'_>) -> Verdict {
+        match loc.rmdir() {
             Ok(()) => {
-                self.verbose("removed directory", path);
+                self.verbose("removed directory", loc.path);
                 Verdict::Removed
             }
             Err(e) if self.options.ignore_missing_files && e.kind() == io::ErrorKind::NotFound => {
                 Verdict::Removed
             }
             Err(e) => {
-                self.cannot_remove(path, &e);
+                self.cannot_remove(loc.path, &e);
                 Verdict::Abandoned
             }
         }
@@ -858,7 +965,7 @@ impl Rm<'_> {
     // ------------------------------------------------------------ prompts --
 
     /// GNU's `prompt()`. Returns whether to go ahead.
-    fn prompt(&mut self, path: &[u8], md: &Metadata, question: Question) -> bool {
+    fn prompt(&mut self, loc: &Loc<'_>, st: &Stat, question: Question) -> bool {
         if self.options.interactive == Interactive::Never {
             return true;
         }
@@ -869,23 +976,23 @@ impl Rm<'_> {
         // the target's.
         let write_protected = !self.options.ignore_missing_files
             && (self.options.interactive == Interactive::Always || self.stdin_tty)
-            && !md.is_symlink()
-            && is_write_protected(path);
+            && !st.is_symlink()
+            && loc.write_protected();
 
         if !(write_protected || self.options.interactive == Interactive::Always) {
             return true;
         }
 
-        let name = quoteaf(path);
+        let name = quoteaf(loc.path);
         let sentence = match (question, write_protected) {
             (Question::Descend, true) => {
                 format!("rm: descend into write-protected directory {name}? ")
             }
             (Question::Descend, false) => format!("rm: descend into directory {name}? "),
             (Question::Remove, true) => {
-                format!("rm: remove write-protected {} {name}? ", file_type(md))
+                format!("rm: remove write-protected {} {name}? ", file_type(st))
             }
-            (Question::Remove, false) => format!("rm: remove {} {name}? ", file_type(md)),
+            (Question::Remove, false) => format!("rm: remove {} {name}? ", file_type(st)),
         };
         self.ask(&sentence)
     }
@@ -922,6 +1029,21 @@ impl Rm<'_> {
     }
 }
 
+/// Open a directory the walk is about to act on, and read its names.
+///
+/// The two are returned together because they must not be separated: the names
+/// are only meaningful as names *inside that descriptor*, and a caller that
+/// kept the list but dropped the handle would be back to resolving them by
+/// path — which is the bug this file's header is about.
+///
+/// The whole listing is read before anything is removed, as `fts` does, so the
+/// order is `readdir`'s — which is observable through `-v`.
+fn list(loc: &Loc<'_>, st: &Stat) -> io::Result<(Dir, Vec<Vec<u8>>)> {
+    let dir = loc.open_dir(st)?;
+    let names = dir.names()?;
+    Ok((dir, names))
+}
+
 /// The more serious of two verdicts, for a directory summarising its children.
 fn worse(a: Verdict, b: Verdict) -> Verdict {
     match (a, b) {
@@ -932,39 +1054,24 @@ fn worse(a: Verdict, b: Verdict) -> Verdict {
 }
 
 /// gnulib's `file_type()`, whose words appear in the prompts verbatim.
-fn file_type(md: &Metadata) -> &'static str {
-    if md.is_symlink() {
-        return "symbolic link";
-    }
-    if md.is_dir() {
-        return "directory";
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        let t = md.file_type();
-        if t.is_block_device() {
-            return "block special file";
-        }
-        if t.is_char_device() {
-            return "character special file";
-        }
-        if t.is_fifo() {
-            return "fifo";
-        }
-        if t.is_socket() {
-            return "socket";
-        }
-    }
-    if md.is_file() {
+///
+/// It reads the [`Stat`] the walk already took rather than taking one of its
+/// own — the prompt has to describe the same file the removal is about to act
+/// on, and a second lookup by path could describe a different one.
+fn file_type(st: &Stat) -> &'static str {
+    match st.kind() {
+        Kind::SymbolicLink => "symbolic link",
+        Kind::Directory => "directory",
+        Kind::BlockDevice => "block special file",
+        Kind::CharDevice => "character special file",
+        Kind::Fifo => "fifo",
+        Kind::Socket => "socket",
         // The empty/non-empty split is upstream's, and visible: `rm -i` on a
         // zero-length file says `regular empty file`.
-        if md.len() == 0 {
-            return "regular empty file";
-        }
-        return "regular file";
+        Kind::Regular if st.size() == 0 => "regular empty file",
+        Kind::Regular => "regular file",
+        Kind::Other => "weird file",
     }
-    "weird file"
 }
 
 /// gnulib `fts`'s rule for a root operand's spelling, reproduced exactly:
@@ -1028,18 +1135,6 @@ fn is_dot_or_dotdot(path: &[u8]) -> bool {
     last == b"." || last == b".."
 }
 
-/// The names in a directory, in `readdir` order — which is the order `rm`
-/// removes them in, and so is observable through `-v`.
-///
-/// The whole listing is read before anything is removed, as `fts` does.
-fn read_names(path: &[u8]) -> io::Result<Vec<Vec<u8>>> {
-    let mut names: Vec<Vec<u8>> = Vec::new();
-    for entry in fs::read_dir(as_path(path))? {
-        names.push(os_bytes(&entry?.file_name()).into_owned());
-    }
-    Ok(names)
-}
-
 /// A byte path as something a syscall will take. See `quote::os_from_bytes`
 /// for why the round trip is the only correct one on this OS.
 fn as_path(path: &[u8]) -> std::path::PathBuf {
@@ -1054,35 +1149,33 @@ unsafe extern "C" {
     fn euidaccess(path: *const u8, mode: i32) -> i32;
 }
 
-/// Whether the prompt should say `write-protected`.
+/// Whether a command-line operand may be written by the effective user, or
+/// `None` if the question could not be answered.
 ///
-/// GNU distinguishes `EACCES` (write-protected) from any other failure (an
-/// error in its own right, reported and the entry skipped). This treats
-/// everything that is not a plain success as "not write-protected" instead:
-/// the removal itself is about to run and will report the real problem with
-/// the real errno, and inventing a second diagnostic here could only turn a
-/// removable file into a refused one.
+/// The by-path twin of [`coreutils::dirfd::Dir::writable`], and used only where
+/// that one cannot be: at an operand, which has no descriptor above it. Below
+/// one, the probe goes through the parent's handle like everything else.
 #[cfg(unix)]
-fn is_write_protected(path: &[u8]) -> bool {
+fn path_writable(path: &[u8]) -> Option<bool> {
     let mut c_path = path.to_vec();
     if c_path.contains(&0) {
-        return false;
+        return None;
     }
     c_path.push(0);
     // SAFETY: `c_path` is NUL-terminated, has no interior NUL, and outlives
     // the call. `euidaccess` reads it and does not retain it.
-    let writable = unsafe { euidaccess(c_path.as_ptr(), 2) == 0 };
-    !writable
+    let rc = unsafe { euidaccess(c_path.as_ptr(), 2) };
+    Some(rc == 0)
 }
 
-/// Off unix there is no `euidaccess`, so nothing is ever reported as
-/// write-protected and the default interactivity never prompts. That is the
-/// conservative direction only in the sense that it matches
-/// `--interactive=never`; the host build is a test vehicle, not a shipping
-/// one.
+/// Off unix there is no `euidaccess`, so the question is unanswerable, nothing
+/// is ever reported as write-protected, and the default interactivity never
+/// prompts. That is the conservative direction only in the sense that it
+/// matches `--interactive=never`; the host build is a test vehicle, not a
+/// shipping one.
 #[cfg(not(unix))]
-fn is_write_protected(_path: &[u8]) -> bool {
-    false
+fn path_writable(_path: &[u8]) -> Option<bool> {
+    None
 }
 
 #[cfg(test)]

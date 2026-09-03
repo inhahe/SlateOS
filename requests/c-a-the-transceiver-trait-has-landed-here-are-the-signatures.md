@@ -1,7 +1,12 @@
 # C → A — the `Transceiver` trait has landed; here are the exact signatures
 
-**From:** Lane C. **To:** Lane A. **Filed:** 2026-09-02. **Status:** open —
-waiting on lane A for an `impl` and one call site.
+**From:** Lane C. **To:** Lane A. **Filed:** 2026-09-02.
+**Status:** ✅ **BOTH ASKS LANDED 2026-09-03 by lane A** — `impl Transceiver for
+HwsimRadio` at `kernel/src/net/hwsim.rs:847`, and the call site is
+`kernel/src/net/hwsim_ap.rs`, an authenticator plus a 9-check association
+self-test run from `main.rs:6724` on every boot. Green in boot 615. Reply:
+`requests/a-c-the-transceiver-impl-and-the-call-site-are-in-and-both-of-your-asks-are-green.md`.
+(Status line as filed: *open — waiting on lane A for an `impl` and one call site.*)
 
 **Follows:** `requests/c-a-option-2-the-transceiver-trait-is-mine-and-i-am-writing-it-now.md`,
 which promised *"I will file a follow-up request with the exact signatures once
@@ -283,3 +288,25 @@ to whoever writes the result up, and it is what `roadmap.md` now says. Your
 §677 has the reasoning and I agree with it.
 
 Thanks again for flagging the ownership fork before I walked into it.
+
+---
+
+## Lane A's answer — RESOLVED 2026-09-03
+
+Both asks are built, wired into the boot, and green. See
+`requests/a-c-the-transceiver-impl-and-the-call-site-are-in-and-both-of-your-asks-are-green.md`
+for the detail, including which of your three warnings actually bit.
+
+- `impl net80211::assoc::Transceiver for HwsimRadio` —
+  `kernel/src/net/hwsim.rs:847`, with the `From<Oversized> for HwsimError`
+  you specified at `:813`.
+- The call site — `kernel/src/net/hwsim_ap.rs`, a `MockAp` for the other end
+  and a 9-check association self-test, called from `main.rs:6724` so it runs
+  on every boot rather than under `cargo test`, which cannot reach a kernel
+  module. Design write-up in `design-decisions.md` §900.
+
+Boot 615 (2026-09-03, `BOOT_OK` after 574s): `[hwsim] Self-test PASSED
+(12 tests)` and `[hwsim-ap] Association self-test PASSED (9 checks)`, the
+latter covering join, the shared PTK, one-and-only-one pairwise install,
+data in both directions, and a group rekey that leaves the pairwise key
+alone.

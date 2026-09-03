@@ -632,7 +632,9 @@ up all of a resource. Reserve a configurable slice of each contended resource
 that background/best-effort work can never fully consume, so critical work always
 has capacity available. This is a QoS/reservation model, distinct from mere
 priority: high priority still competes for the resource, whereas a reservation
-carves out capacity that lower classes cannot touch._
+carves out capacity that lower classes cannot touch. This is the **prevention**
+half; §6.12 is the **diagnosis** half, for when the desktop stalls anyway — and
+is also how we find out whether these reservations are actually holding._
 - [ ] **CPU-bandwidth reservation.** Keep a configurable fraction of CPU time
   (per-CPU and/or system-wide) always available to a designated *critical* class
   (compositor, WM, input, audio, the focused foreground app). Implement as a
@@ -1067,6 +1069,8 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
 #### Crash Dumps & Postmortem Debugging
 
 _When a program hits an **unhandled language-level exception** (our SEH-style model — hardware faults surface as exceptions, not Unix signals), the OS can capture a **crash dump file** for later postmortem analysis. Dump generation is policy-driven and capability-gated; the dump itself is a structured memory image (not a text log, so the "no binary logs" rule does not apply to it)._
+
+_Note the boundary: this covers programs that **crash**. A program that **hangs** raises no exception, exits with no code and is never torn down, so it produces no dump and nothing here fires. That case needs evidence recorded before anyone knew there was a problem, and is §6.12._
 
 - [ ] **Crash dump generation** — on an unhandled exception, the OS writes a dump file before tearing down the process. Captured contents:
   - [ ] Exception record (fault type, faulting address, the exception that went unhandled) and the full register state of every thread
@@ -3441,9 +3445,9 @@ _Debugging suite — `debug.*` (developer tools, never granted to normal apps):_
 - [ ] Archive support: zip, 7z, tar.gz, rar
 - [ ] ISO file support (navigable, not just extractable)
 - [ ] Speech input / speech output (exception to "no AI")
-- [ ] Cellphone camera integration (like Windows)
-- [ ] Cellphone microphone integration
-- [ ] Cellphone-computer integration app
+- [ ] Cellphone camera integration (like Windows) — **expanded into §6.11.5**
+- [ ] Cellphone microphone integration — **expanded into §6.11.5**
+- [ ] Cellphone-computer integration app — **expanded into §6.11**; note that "app" here is two applications, one of which is an Android app we ship on Google's platform (§6.11.6)
 - [ ] Scripting language registration API (ActiveScript-style — see decision below)
 - [ ] Network drive support
 - [ ] POP3/IMAP email program (or port Thunderbird)
@@ -3476,6 +3480,130 @@ _Don't put green threads in the kernel. Provide efficient primitives instead:_
 - [ ] io_uring (async I/O without kernel threads)
 - [ ] Futexes (synchronization without syscall in uncontended case)
 - [ ] These enable Go-style goroutines, Rust async, Python asyncio at userspace level
+
+### 6.11 Phone Integration (Samsung DeX / Windows Phone Link equivalent)
+
+_Operator request (2026-09-03). Expands the three one-line "Cellphone …" bullets in §6.7 into the actual feature. The goal is the pair of things Windows Phone Link and Samsung DeX do between them: the phone's **content** (notifications, messages, calls, photos, files, clipboard) appears and is actionable **on the SlateOS desktop**, and the phone's **apps** appear as ordinary resizable SlateOS windows rather than as one mirrored phone-shaped rectangle._
+
+_**The load-bearing fact: half of this ships on someone else's operating system.** The phone side is a real, separate deliverable — a native Android application, in Kotlin, built with the Android SDK/Gradle toolchain, distributed through the Play Store or as a sideloaded APK, versioned and released on its own schedule, and subject to Google's permission model, background-execution limits, and review policy. It is the first thing in this project that we do not control end to end, and it is the part most likely to set the ceiling on what the feature can do. Scope every item below against what Android actually permits a third-party app to do, not against what our side could consume. Android is the target; the wire protocol is specified independently of it (§6.11.7) so an iOS client remains possible later, but no iOS work is in scope here._
+
+#### 6.11.1 Transport, discovery and pairing
+
+- [ ] **Local-only by default. No vendor cloud, no relay server, no account.** Phone and desktop talk directly. This is a hard requirement, not a preference: a cloud relay would put the user's messages and screen through a third party, and there is no third party here to put them through. It also means the feature must work with no internet connection at all.
+- [ ] Transports, in preference order, with automatic selection and live failover: **USB** (highest bandwidth and lowest latency, and it charges the phone — the right transport for app streaming), **Wi-Fi on the same LAN**, **Wi-Fi Direct / peer-to-peer** when there is no common LAN, **Bluetooth LE** for presence detection and wake-up only (too slow for content, fast enough to notice the phone entered the room)
+- [ ] Discovery by mDNS/DNS-SD on the LAN; BLE advertisement off-LAN. A phone must never be discoverable to machines it has not been paired with.
+- [ ] **Pairing:** QR code shown on the desktop and scanned by the phone (no typing, and the camera is already the phone's strong suit), or a numeric comparison for the no-camera case. Pairing exchanges long-term identity keys; every later session is authenticated against them and uses forward-secret session keys. Show the peer's name and a fingerprint on both ends at pair time.
+- [ ] **Unpair/revoke from either end**, effective immediately and without needing the other device present. A desktop that revokes a phone must stop accepting its keys even if the phone never hears about it.
+- [ ] Multiple phones per desktop and multiple desktops per phone, each pairing independent.
+- [ ] All of it capability-gated on our side (`phone.*`, defined alongside the other capability families in §1.5): a program that wants the phone's notifications asks for that and gets only that. No ambient access to a paired phone.
+
+#### 6.11.2 Notifications, messages and calls
+
+- [ ] Phone notifications mirrored into the SlateOS notification centre, with the app icon and name resolved to something human-meaningful (same standard as §1.5's "installed application name, not the executable")
+- [ ] **Actionable, not just visible** — inline reply, and the notification's own action buttons, forwarded back to the phone. A read-only mirror is the part of this feature people stop using.
+- [ ] Dismissing on one device dismisses on the other, in both directions
+- [ ] SMS/MMS/RCS: full conversation history, send and receive, attachments. RCS is the one to check feasibility on first — third-party access is the most restricted of the three and may be limited to the default-SMS-app role.
+- [ ] Incoming call notification with accept/reject; on accept, route call audio to the desktop's speakers and microphone (this is a real audio-routing task on our side — a new sink/source in the mixer of §3, not just a UI)
+- [ ] Outgoing calls initiated from the desktop, including from a phone number clicked anywhere in the UI
+- [ ] Contacts and recent-call list, read-only, cached locally with an explicit "forget everything from this phone" control
+
+#### 6.11.3 Files, photos and clipboard
+
+- [ ] Phone storage browsable in File Explorer (§4.1) as a mounted location, reusing the network-drive plumbing in §6.7 rather than growing a second remote-filesystem path
+- [ ] Recent photos/screenshots surfaced immediately — the common case is "I just took a photo and I want it on the computer," and it should not require navigating a directory tree
+- [ ] Drag-and-drop in both directions, files and images, into and out of ordinary applications
+- [ ] **Shared clipboard**, both directions, opt-in and per-direction. Off by default: a clipboard that silently follows you between devices will eventually carry a password across a room. Text first; images and files behind an explicit toggle.
+- [ ] Handoff: open the page/document you are looking at on one device on the other
+
+#### 6.11.4 App streaming — Android apps as SlateOS windows (the DeX-shaped half)
+
+_This is the hardest item in §6.11 and the one whose feasibility is set entirely by the Android side. Do the Android-side capability investigation before designing our half: what a **third-party, non-system, non-OEM** app may capture and inject on a stock unrooted device is a much smaller set than what Samsung's own DeX or Microsoft's OEM-privileged Link to Windows may do, and the answer decides whether this ships as real per-app windows, as a single mirrored display, or as a developer-mode-only feature._
+
+- [ ] Investigate and record the mechanism: `MediaProjection` (per-app or whole-screen capture, with its recurring consent prompt), a secondary `VirtualDisplay` per app (the DeX-like path — an app launched onto its own virtual display can be captured as its own surface), the ADB/`shell` route, and whatever OEM-privileged path exists that we will *not* have. Write the finding up as a design decision before building.
+- [ ] Each streamed app becomes a **real SlateOS window** — resizable, tileable, alt-tabbable, with our own title bar and window controls, composited by our compositor (§3) like any native window. Not a phone-shaped rectangle the user drags around.
+- [ ] Input injection back to the phone: mouse (as touch, with hover and right-click mapped sensibly), physical keyboard including IME and modifiers, scroll wheel, and multi-touch from a touchscreen or trackpad
+- [ ] Per-window scaling and DPI so an app on a 4K monitor is not a postage stamp; tell the app it is on a large display so it lays out in its tablet/desktop configuration where it has one
+- [ ] Audio from the streamed app routed to the desktop mixer, per-window, so it appears in the volume mixer as its own stream
+- [ ] Video codec path: hardware encode on the phone, hardware decode on our side through the GPU stack (§3), with a latency budget stated and measured — see the benchmarking rule; a streaming feature with no latency target is a streaming feature that will be slow
+- [ ] Graceful degradation: an app that refuses capture (Android's `FLAG_SECURE` — banking apps, DRM video) must fail with a clear explanation naming the app, never a black window with no reason given
+
+#### 6.11.5 Phone camera and microphone as local devices
+
+_Absorbs the "Cellphone camera integration" and "Cellphone microphone integration" bullets in §6.7._
+
+- [ ] Phone camera presented to SlateOS applications as an **ordinary camera device**, so any app that can use a webcam gets it with no per-app integration work
+- [ ] Phone microphone presented as an ordinary audio input in the mixer, same principle
+- [ ] Both front and rear cameras selectable; resolution/frame-rate negotiated; latency stated and measured
+- [ ] "Scan a document / take a photo directly into this application" — the phone camera used as a scanner, with the result landing in the requesting app rather than in the phone's gallery
+- [ ] Camera and microphone are capability-gated per application on our side *and* consented on the phone, and both ends show an unmistakable in-use indicator. Two operating systems' worth of privacy indicators is the minimum here, not belt-and-braces.
+
+#### 6.11.6 The Android application (a separate deliverable, on a foreign platform)
+
+- [ ] Kotlin, Android SDK, Gradle. Decide and record the minimum supported API level, and check every feature above against it — the answer moves what §6.11.2 and §6.11.4 can offer.
+- [ ] **Survives Android's background-execution rules.** A foreground service with a persistent notification, correct handling of Doze, App Standby buckets, battery optimisation exemptions, and per-OEM background-killing behaviour (which is worse than stock Android and varies by manufacturer). An integration that silently stops working after twenty minutes in a pocket is the default outcome if this is not designed for deliberately.
+- [ ] Battery and data cost treated as a first-class requirement with a measured budget — this runs all day on a device whose battery is not ours to spend.
+- [ ] The permission set is large and alarming when granted at once (notification access, SMS, contacts, call log, camera, microphone, storage, screen capture): request each **at the point of use**, explain each in plain language, and let the user run the app usefully having granted only some of them.
+- [ ] **No ads, no telemetry, no analytics SDK, no account** — the project's rules apply to our code on someone else's platform too. Nothing leaves the phone except to a paired desktop.
+- [ ] Reconnect logic that is invisible when it works: network changes, Wi-Fi↔mobile handover, USB unplug, phone reboot, desktop sleep/wake
+- [ ] Its own build, test, signing and release pipeline, separate from the OS build; and a documented compatibility matrix of app version × protocol version, since the two halves update independently and a user will run mismatched versions.
+- [ ] Ships as open source alongside the OS; sideloadable without the Play Store, because a user who has installed SlateOS is a user who will want that.
+
+#### 6.11.7 Protocol and security
+
+- [ ] The wire protocol is **specified and documented as its own artefact**, versioned, with capability negotiation so old and new ends interoperate predictably. It is not "whatever our app happens to send."
+- [ ] Independent of Android, so an iOS or a second-party client can implement it later without our re-deriving it (no iOS work in scope now)
+- [ ] End-to-end encrypted and authenticated on every transport, including USB — a cable is not a trust boundary when the machine at the other end may not be the one the user thinks
+- [ ] **The phone is untrusted input.** Everything it sends crosses a trust boundary and gets parsed defensively: notification text, filenames, clipboard contents, video frames. A paired phone is an authenticated peer, not a trusted one.
+- [ ] Fuzz the parsers on our side, and treat a malformed frame as a session error rather than a desktop fault
+
+### 6.12 Hang, Stall and Crash Diagnosis — always-on watches with a flight recorder
+
+_Operator request (2026-09-03): "add watches so that if the desktop pauses for a while, hangs or crashes we can trace what caused it."_
+
+_**Why this needs its own subsystem rather than better logging: a hang produces no evidence.** A crash leaves an exception, a dump and an exit code (see "Crash Dumps & Postmortem Debugging" in Phase 1.5). A pause leaves nothing at all — nothing faults, nothing exits, no error is returned, and by the time the user has noticed, waited, decided it is not coming back and gone looking, the moment that caused it is minutes gone and unrecoverable. So the design constraint is fixed by the failure mode: **the evidence must already have been recorded before anyone knew there was a problem.** That means always-on, continuous, bounded-cost recording plus automatic capture at the instant a watch trips — never a "reproduce it with tracing enabled" workflow, because the whole class of bug this targets is the kind nobody can reproduce on demand._
+
+_Relationship to the rest of the roadmap: "Guaranteed Resource Headroom for Interactive / Critical Processes" (Phase 1) is the **prevention** side — it stops a greedy workload from starving the desktop. This section is the **diagnosis** side, for when the desktop stalls anyway, and it is also how we find out whether the reservations are working. It consumes the tracing primitives of §6.5 and the profiling counters of §1.5 rather than growing a parallel set._
+
+#### 6.12.1 The watches (detection)
+
+_Several independent watchdogs, each with its own deadline, each able to trip alone. One global "is the system OK" check cannot distinguish the cases below, and the cases have completely different causes._
+
+- [ ] **Compositor frame watchdog** — no frame presented within N refresh intervals when frames were due. This is the one that matches the user's experience of "the desktop froze."
+- [ ] **Input-to-photon watchdog** — an input event was delivered and nothing was drawn within the deadline. Catches the case where the compositor is fine and the *application* is wedged.
+- [ ] **Per-application UI-loop watchdog** — an app's event loop has not pumped within N ms → mark it "not responding" (with the Windows-style offer to wait or terminate), and record *why*: which lock, which IPC call, which syscall it is sitting in. Feeds the "who's holding it?" mandatory-attribution requirement already in §2.8.
+- [ ] **Service / IPC deadline watchdog** — a request to a system service outstanding past its deadline. Reports the whole chain, not just the near end.
+- [ ] **Kernel soft-lockup detector** — a task has held a CPU without yielding or being preempted beyond a threshold
+- [ ] **Kernel hard-lockup detector** — a CPU has stopped taking timer interrupts entirely (interrupts disabled, spinning in a non-preemptible section, or wedged in a driver). Detected from another CPU, via an NMI-based check where the hardware provides one, since a CPU in this state cannot report on itself.
+- [ ] **I/O stall watchdog** — an I/O outstanding well past the device's expected service time. A dying disk with multi-second retries is one of the most common real causes of whole-desktop hitching and is invisible to every CPU-oriented tool.
+- [ ] **Memory-pressure / thrash watchdog** — reclaim or swap activity above the level at which the machine is spending its time on paging rather than on work
+- [ ] **Deadlock and lock-ordering detection** — a cycle in the wait-for graph is reported as a cycle, naming every participant, rather than as N separate "not responding" apps
+- [ ] Every threshold is tunable and every watch is individually disableable; defaults ship tuned for the Desktop workload profile
+
+#### 6.12.2 The flight recorder (the evidence, recorded before the fact)
+
+- [ ] **Continuous fixed-size per-CPU ring buffers, lock-free, overwritten in place.** Always on. Costs a bounded amount of RAM and no disk I/O while nothing is wrong, because nothing is written out until a watch trips.
+- [ ] Recorded continuously: scheduling decisions (what ran, what blocked, and **what it blocked on**), context switches, lock acquisitions that exceeded a threshold with holder identity, IPC send/receive with peer, syscall entry/exit for calls that ran long, page faults and reclaim/swap events, I/O submission and completion with device and latency, interrupt latency outliers, and the compositor's frame timeline
+- [ ] **On a trip, the ring is snapshotted to disk instead of being discarded** — this is the entire point of the design. The incident report contains the seconds *leading up to* the stall, which is where the cause is; the moment of detection is only where the symptom is.
+- [ ] Also captured at trip time: stack traces of every thread in the blocked chain, the full wait-for graph, per-process resource state, and the state of the reservations from Phase 1
+- [ ] **Overhead is a hard requirement with a measured budget, not an aspiration.** It is on during normal desktop use and during every benchmark, so it must be benchmarked like any other hot-path subsystem (per the benchmarking rule), have a stated ceiling, and degrade cleanly to fully off. A diagnostic that makes the machine slower is a diagnostic that gets turned off and is therefore not running on the day it was needed.
+- [ ] **Where this sits against the "no binary logs" rule:** the snapshot is a structured trace artefact, the same standing as a crash dump — a compact binary record written at machine speed on a stalled system, not a log. The rule is not weakened, because the artefact is never the user-facing surface: the report in §6.12.4 is text, and the trace is always convertible to text by the tooling. Recording millions of events per second into JSON-lines would itself be the stall.
+
+#### 6.12.3 Surviving the cases where the machine does not come back
+
+- [ ] **Persistent buffer across reboot** — a reserved memory region (and/or a reserved disk area) that survives a warm reset, so a hard hang the user ends by holding the power button still yields the recorder's contents on the next boot. Study Linux's pstore/ramoops and Windows' Live Kernel Reports.
+- [ ] **Unexpected-shutdown detection** at boot: distinguish clean shutdown, panic, hard hang ended by the user, watchdog reset, and power loss — and say which one it was, because they have different causes and the user usually cannot tell them apart
+- [ ] **Kernel panic path** writes a panic report through the same mechanism (and to serial when a developer is attached), consistent with the no-binary-logs rule for the text portion
+- [ ] **Hardware watchdog timer** support: optionally let a wedged machine reset itself rather than sit dead, off by default, with the reset recorded as such so the next boot can explain it
+- [ ] **A way in when the desktop is wedged.** A reserved input path (Ctrl-Alt-Del-equivalent, handled below the compositor) that reaches a minimal recovery console scheduled in the reserved *critical* class of Phase 1 — so it is responsive precisely when nothing else is. From there: see what is stuck, capture an incident, kill the offender, restart the compositor.
+
+#### 6.12.4 What the user actually sees
+
+- [ ] **A plain-language "what just happened?" report** after an incident, surfaced in Event Viewer (§4.4) and as a notification. It must name a cause in ordinary words — "the desktop stopped drawing for 6 seconds because Backup was waiting on disk 2, which took 5.9 s to answer a read" — not present a trace for the user to interpret. Producing that sentence from the wait-for chain is the real work of this section; a report that only says "a stall was detected" restates what the user already knew.
+- [ ] Full detail available underneath for whoever wants it, opening in the profiler/debugger tooling of §4.8
+- [ ] **A "capture now" hotkey** — the user presses it while the machine feels wrong. Not every pause trips a threshold, and the person at the keyboard is a better detector than any deadline; this gives them a way to say so at the moment it matters, instead of filing a report from memory afterwards.
+- [ ] Per-incident history with retention/size caps, in the same shape as the crash-dump lifecycle in Phase 1.5
+- [ ] Process Explorer (§4.3) shows live watch state — which processes are not responding, and what each is blocked on
+- [ ] **Reports stay on the machine.** They contain window titles, file paths and process names. Capability-gated to read another user's incidents; never uploaded anywhere, consistent with the project's no-telemetry rule. Explicit, reviewable export for a user who chooses to send one to a developer.
 
 ---
 

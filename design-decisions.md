@@ -63280,6 +63280,310 @@ plain `path` and restoring the `fs::` calls; the `rm-diff.sh` cases are written
 against printed output and are unchanged by either direction, which is what
 makes them a usable check that the rewrite was a behavioural no-op.
 
+---
+
+## §901 — the build cache is pruned by asking cargo what it last used, and the housekeeping runs where it cannot delay or fail anything
+
+**Date:** 2026-09-02. **Decided by:** Operator (operator asked for a surgical
+prune rather than a blunt one; the mechanism, the thresholds and the placement
+below are Claude's). **Lane:** A.
+
+**In short:** Rust build output (`target/`) had grown to over 100 GB in two of
+the four checkouts of this repo and just under 50 in a third, filling the
+drive, even though the standing instructions have told every lane to clean up
+after itself since August. The obvious remedy — delete the whole cache — makes
+the next build take twenty minutes instead of thirty seconds, so nobody does
+it until the disk is already full. This decision is about a way to delete only
+the *dead* part, which costs nothing, plus where to run it so that it happens
+on its own.
+
+**The growth is structural, not negligence.** Cargo does not garbage-collect.
+Every time a unit's inputs change it writes a *new* file named with a fresh
+`-<hash>`, and it keeps the old one forever. So no individual build ever looks
+wasteful, and the accumulation only becomes visible weeks later as a volume
+that is mysteriously full. No amount of diligence catches that by hand, which
+is why "the lanes were told to tidy up" did not work and was never going to.
+
+### What counts as dead: `invoked.timestamp`, not mtime and not atime
+
+Each unit has a `target/<profile>/.fingerprint/<name>-<hash>/` directory
+holding a file named `invoked.timestamp`. Cargo touches it whenever a build
+*involves* that unit — including builds where it found the unit already fresh
+and compiled nothing. So "not invoked in fourteen days" means exactly "no
+build in a fortnight needed this unit", which is the question being asked.
+
+Two more obvious discriminators were tried and rejected as unsound:
+
+| Discriminator | Why it is wrong |
+|---|---|
+| **mtime** (what `cargo-sweep` uses) | Dates the last *compile*. A stable dependency compiled once in July and linked by every build since looks two months idle. Deleting it is a rebuild of something in constant use. |
+| **atime** | Would be right in principle, and this volume does have it enabled. But a *current* artifact that cargo only `stat`s — the overwhelmingly common case for a fresh unit — shows `atime == mtime`, so it degrades to the row above without saying so. |
+
+A tempting third signal, "this crate has several hashes, so the extra ones are
+garbage", is also wrong: `a2ps-cli-154eb5188e622895/` and
+`a2ps-cli-fc15d6b797050592/` are the binary and the test binary. Two units of
+one package, both current.
+
+`incremental/` is a separate lever with a different failure mode, so it gets
+its own (shorter, 7-day) threshold. It is never needed in order to *link* —
+it is rustc's per-crate memoisation, read only when that crate is actually
+recompiled — so a cold entry has no way at all to earn its space.
+
+### Deleting in the order that survives an interruption
+
+Fingerprint first, artifacts second. Of the two half-done states, only one is
+unrecoverable: **fingerprint present, artifact gone** makes cargo read the
+fingerprint, conclude the unit is fresh, and fail at link time. The reverse —
+artifact present, fingerprint gone — is just a rebuild. Doing it in this order
+means a run killed at any instant leaves the recoverable state.
+
+"In use" is established as a fact rather than guessed from a timestamp: each
+candidate is *renamed* first, Windows refuses to rename a directory holding
+any open file, and the rename is atomic, so success proves nothing held it at
+that instant. Renaming into one staging directory also turns twenty thousand
+recursive deletes into a single `rd /s /q`, which on this volume is the
+difference between a minute and hours.
+
+### Where it runs, and why not somewhere more obvious
+
+Two placements, answering two different problems:
+
+**`reclaim-space.py` step 1.5** — before the existing step that deletes whole
+`target/` trees. That step is safe but not cheap: it charges some lane a full
+cold rebuild, picked by which directory sorted first. Pruning dead units
+first frequently meets the target with nobody paying anything, and when it
+does not, every GB it freed is a GB the destructive step no longer has to
+take from a live tree.
+
+**`boot-test.sh`, after a green run, when free space is under 100 GiB** — this
+is the part that makes it happen without anyone deciding to. Three placements
+were considered:
+
+| Where | Why not |
+|---|---|
+| Head of every run | The scan is minutes of metadata I/O. It would sit in front of every build's feedback, every time, and would promptly be disabled in every invocation. |
+| At the 20 GiB floor | Too late to be the gentle option — that is where the destructive remedy already lives. |
+| **After a green finish, below a watermark** | The run is over, nobody is waiting on the next line, the tree is in a known state, and 100 GiB (≈ under two full builds of headroom, at ~40 GiB each across four worktrees) is late enough to be rare and early enough that the cheap remedy still has room to work. |
+
+**On by default, unlike `--reclaim-space`,** and the asymmetry is the point:
+`--reclaim-space` can only help by deleting *another* tree's output, so a run
+should not do that merely because it happened to notice. This prunes only the
+tree it just built, and cannot cost anybody a rebuild, because a unit that no
+lane's builds have asked for in fourteen days is not one cargo is about to
+want.
+
+**It cannot author a verdict.** Its exit status is ignored and the `PASSED`
+banner is printed regardless. A boot test reporting FAILED because a disk
+cleanup hit a locked file would be read as the *kernel* having failed, which
+is a far worse outcome than the space not being reclaimed.
+
+### The report prints an age histogram, and that is not decoration
+
+A pruner that reports "nothing to prune" is indistinguishable, from outside,
+from one whose staleness test silently returns nothing. That is not a
+hypothetical failure mode — earlier the same night, a mangled regex in a
+measurement script reported `incremental 0.0 GB` for a directory holding
+31.6 GB, and the wrong number was believed and published. So every profile
+prints its age distribution (`<1d:14 <3d:15 …`) alongside the verdict: a
+broken discriminator produces an empty or degenerate histogram, and a genuinely
+hot cache produces a full one clustered at the near end. The claim is
+falsifiable from the log rather than merely asserted.
+
+The first real scan is a case in point: lane A came back **0 stale units and
+0 of 12,301 cold incremental caches** across all five profiles, with every age
+under three days. That inverted the expectation this work started from — lane
+A was assumed to be the offender at 48 GB — and the histogram is what makes
+"0 stale" readable as *the cache is entirely hot* rather than as *the scan
+found nothing*.
+
+### What reversing this looks like
+
+The discriminator is one field: raise or lower `--age-days`, or pass
+`--no-incremental` to leave rustc's memoisation alone. Disabling the automatic
+run is `--no-prune-cache` or `BOOT_TEST_PRUNE_CACHE_BELOW_GB=0`, per run or
+per environment. Removing the idea entirely is deleting `prune-build-cache.py`,
+its suite, the step 1.5 block in `reclaim-space.py` and the hook in
+`boot-test.sh` — after which the volume goes back to filling silently, which
+is the state this replaced.
+
+## §902 — a checked hand transcription is kept rather than deleted, because a reader that rebuilds from source has nothing to be wrong against
+
+**Date:** 2026-09-03. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** `scripts/check-evdev-elf-asm.py` contains a hand-typed Python
+copy of machine code that the kernel builds byte by byte, so the encodings can
+be disassembled and read before the kernel ever runs them. Nothing checked
+that the copy still matched the kernel, so a byte changed in one and not the
+other left the script cheerfully disassembling a program that no longer
+existed. The fix was to rebuild the same bytes *from the Rust source itself*
+and compare. That makes the hand copy redundant as a source of bytes, and the
+obvious follow-up is to delete it — one source of truth, less to maintain.
+This decision is to keep it anyway, and to keep it deliberately *unshared*
+with the values it is checked against.
+
+### The decision
+
+`scripts/rustemit.py` reads `kernel/src/proc/elf.rs` and replays its emission:
+the byte literals, the constants (from `evdev.rs`), the `_IOC` bit layout (from
+`evdev::ioc`'s body), and the encodings of the `sentinel` / `jcc` /
+`ioctl_call` helpers (from those functions' bodies, with arguments bound). The
+hand mirror in `check-evdev-elf-asm.py` stays, and the two are compared byte
+for byte before anything is disassembled.
+
+The mirror also keeps its own hardcoded `EV_VERSION`, `KEY_BYTES` and
+`EVIOC_NR_*` rather than importing the ones read from `evdev.rs`.
+
+### The alternative, which is what "don't repeat yourself" would say
+
+Delete the mirror; disassemble whatever `rustemit` rebuilds. One construction,
+one place to edit, and no possibility of the two disagreeing.
+
+**For it:** a duplicated 200-line transcription of machine code is exactly the
+kind of thing that rots, and this one *had* rotted in the sense that nobody
+could have told. Keeping it means every future edit to the Rust must be made
+twice — which is the maintenance cost that motivated the original defect.
+
+**Against it, and why it lost:** the rebuilt buffer would then be the only
+statement of what the program is, and there would be nothing to check it
+against. `rustemit` is a parser; parsers are wrong in quiet ways. If it
+mis-parsed a statement — dropped a `for` block's successor, say — the
+disassembly would be of a program neither the kernel nor anyone else builds,
+and it would look exactly as clean as a correct one. That is the *same* defect
+one level up: a single unchecked construction presented as evidence.
+
+That is not hypothetical. It happened during this change: a block with no
+trailing semicolon swallowed the statement after it, three bytes of
+`mov rdi, r8` vanished from the rebuild, and the only reason it was caught is
+that the mirror disagreed. Under the deleted-mirror design that run would have
+printed a clean disassembly of a 600-byte program missing an instruction.
+
+Two independent constructions that agree is a check. Either one alone is an
+assertion. The duplicated maintenance is the price of the check, and it is now
+a *loud* price — editing one and not the other fails immediately and points at
+the offset, where before it was silent.
+
+### Why the constants are deliberately not shared
+
+Having decided to keep two constructions, the tempting half-measure is to let
+them share the constants: import `EV_VERSION` and the `EVIOC_NR_*` from the
+values read out of `evdev.rs`, so at least those cannot drift.
+
+That is backwards. Shared constants make the two constructions agree *by
+definition* about the values most likely to change — a renumbered ioctl, a
+changed `KEY_MAX` — while leaving them independent only about the byte
+encodings, which change far less often. It converts the highest-value part of
+the comparison into a tautology. Hardcoded separately, a renumbered ioctl now
+fails the comparison and names the offset; before this change it altered
+nothing observable at all.
+
+The general form: **redundancy is only worth its cost where the two copies can
+actually disagree.** Sharing the volatile half and duplicating the stable half
+is the worst of both.
+
+### What reversing this looks like
+
+Delete the `build_mirror` function from `check-evdev-elf-asm.py` and
+disassemble `rebuild_from_rust`'s output directly; delete the end-to-end group
+in `scripts/test-rustemit.py`, which exists to prove the comparison fires. The
+signal that this is worth reconsidering is `rustemit.py` acquiring its own
+substantial test suite against fixtures rather than against this one subject —
+at which point the parser has an independent witness of its own and the mirror
+is genuinely a third copy rather than the second.
+
+## §903 — the open-questions gate fails on a live collision and only warns on a historic one, and never fails on another lane's heading text
+
+**Date:** 2026-09-03. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** `open-questions.md` is the list of decisions waiting on the
+operator. It had eight questions filed *below* the `# Resolved` heading — the
+archive — even though the sentence directly under that heading says the
+questions live above it; two different questions both called `Q57`; and one
+question filed twice on the same day by the same lane with opposite
+recommendations. All three were committed by lanes that had read the header
+stating the rules, so a fourth sentence of prose was not going to hold. The
+file now has a checker. This entry records the two places where the checker
+deliberately does *not* fail: a duplicate number where both copies are already
+answered, and an entry with no number at all.
+
+### Why a checker rather than a clearer header
+
+The header already says what the rules are. Every violation above was
+introduced by an agent that had the header in its context at the time. That is
+the argument for mechanising it and the only argument needed — a rule stated
+once more, in slightly firmer language, has an observed 0-for-3 record here.
+
+The checker (`scripts/check-open-questions.py`) hard-fails on three things: an
+open `## ` entry below `# Resolved`; an identifier used twice where at least
+one use is a live question; and a body entry whose own `Status:` is not
+`OPEN`. It carries discovery floors — a document that yields fewer than five
+body entries or fewer than ten index entries exits **2**, not 0 — because a
+gate that parses nothing reports no failures, which on a terminal is
+indistinguishable from a pass. Every hard rule has a fixture in `--self-test`
+that makes it fire, and a clean fixture that proves the checker is not one that
+simply fails on everything.
+
+### Decision 1: a duplicate number fails only if one of the copies is still open
+
+`Q38` and `Q45` were each issued to two different questions in the
+single-agent, append-only era. Both pairs are long answered, and the surviving
+`Q45` entry says so in its own text. The rule could have been "a number is
+unique, full stop", which would have meant renumbering four archived entries.
+
+| | Fail on any duplicate | Fail only when a live entry is involved |
+|---|---|---|
+| Archive | four entries renumbered to satisfy a script | left as filed, with a note saying why |
+| What breaks | an operator reply citing `Q45` no longer matches the file that was answered under that name | nothing — nothing archived can be mis-answered |
+| Cost | a permanently clean report | a permanent two-line warning in every run |
+
+The deciding argument is that the harm being prevented is *ambiguity in an
+answer*: the operator's replies take the form "do B on Q47", and a number that
+names two open questions makes that sentence unactionable. An archived pair
+cannot be answered at all, so there is no ambiguity left to prevent — only a
+record to preserve. As the checker's own comment puts it: *editing an archive
+to satisfy a checker would be falsifying the record of what the numbers meant
+when they were answered, and nothing can be mis-answered now, so it is
+reported and not enforced.*
+
+The counter-case is real: a warning that is expected to appear forever is a
+warning readers learn to skip, and it costs the run its "0 warnings" line. The
+mitigation is that both historic collisions now carry a parenthetical in the
+archive text itself explaining that the number is deliberately left as it was,
+so a reader who chases the warning finds an answer rather than a puzzle.
+
+### Decision 2: a missing identifier is a counted warning, never a failure
+
+Two entries in the file are lane C's and have no number. The checker could
+require one.
+
+| | Fail on a missing identifier | Count it as a warning |
+|---|---|---|
+| *What changes:* | lane A's gate can turn lane C's boot test red over a heading | the number stays at zero only if lane C acts; nothing is blocked |
+| Fix path | lane A edits lane C's heading, or lane C is blocked | lane A files a request; lane C edits its own heading |
+
+`roadmap.md` rule 3 exists to stop exactly this: a hard failure on another
+lane's heading text is cross-lane breakage, and the boot test is shared, so the
+failure would land on whichever lane ran it next rather than on whoever wrote
+the heading. Renaming the headings myself is the other tempting option and is
+worse — it is a merge conflict in lane C's tree and a citation in my own reply
+that no longer matches what lane C wrote. So the gate reports and
+`requests/a-c-two-of-your-open-questions-have-no-number-so-the-operator-cannot-cite-them.md`
+asks. If lane C numbers them `C-Q10`/`C-Q11`, the count goes to zero on its
+own.
+
+### What reversing this looks like
+
+Both splits are one condition each. Decision 1 is the `if any("(body)" in w
+...)` branch in the collision loop — delete the branch and every duplicate
+fails; the cost is renumbering four archived entries and losing the match
+between an old operator reply and the entry it answered. Decision 2 is the
+`f.warnings.append` for a heading with no identifier — move it to
+`f.failures` and the rule becomes enforced. The signal that Decision 2 is
+worth revisiting is the warning count staying above zero after lane C has had
+the request for a while, which would mean the polite route does not work and
+the choice is between an enforced rule and no rule.
+
+---
+
 ## 806. The file chooser stores no size of its own, and lets an explicit scroll leave the selection off screen
 
 **Date:** 2026-09-03

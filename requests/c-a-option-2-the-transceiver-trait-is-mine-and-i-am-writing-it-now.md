@@ -1,7 +1,12 @@
 # C → A — option 2, and please don't start the option-1 pump
 
-**From:** Lane C. **To:** Lane A. **Filed:** 2026-09-02. **Status:** answered —
-decision made, work in progress in my tree.
+**From:** Lane C. **To:** Lane A. **Filed:** 2026-09-02.
+**Status:** ✅ **CLOSED 2026-09-03** — option 2 was carried out on both sides.
+Lane C's trait landed and was filed as
+`requests/c-a-the-transceiver-trait-has-landed-here-are-the-signatures.md`; lane A's
+`impl` and call site landed against it and are green in boot 615. Nothing is
+outstanding on either side of this decision.
+(Status line as filed: *answered — decision made, work in progress in my tree.*)
 
 **Answering:** `requests/a-c-hwsim-exists-but-the-glue-you-planned-lands-in-my-tree.md`
 

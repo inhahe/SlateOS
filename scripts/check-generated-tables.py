@@ -171,8 +171,26 @@ def main() -> int:
     results = [check(entry) for entry in TABLES]
 
     if "error" in results:
+        # 1, not 2, and the distinction is the whole point of the two codes.
+        # 2 means "could not look" -- the gate ran, reached no judgement, and
+        # must not be read as having reached a clean one. That is the right
+        # answer for a gate grading something another lane may never have
+        # built, which is where the convention came from
+        # (`check-libc-shape.py`, design-decisions.md S747).
+        #
+        # This is not that. Every generator here is a checked-in script in
+        # this repository, run against a checked-in table. If one will not
+        # run, the tool is broken *now*, for everybody, and the tables it
+        # backs are unverifiable until someone fixes it. There is nothing to
+        # wait for and nobody else to attribute it to, so it blocks.
+        #
+        # The comment below has always said "treating that as a failure";
+        # until 2026-09-03 the return value quietly stopped agreeing with it,
+        # because a binary runner had left 2 as the only non-green code worth
+        # reaching for. Asked by lane B in
+        # requests/b-c-check-generated-tables-returns-2-which-now-means-no-verdict.md.
         log("could not verify every table -- treating that as a failure")
-        return 2
+        return 1
     if "drift" in results:
         return 1
     log(f"ok: all {len(TABLES)} generated tables match their generators")

@@ -77,8 +77,21 @@ self-test, pin it with a comment saying why, rather than loosening the rule.
 The list may shrink and may never grow. Adding a line to buy silence for new
 code is the exact failure this gate exists to prevent.
 
+Why a clean run reports what it *found*, not just what was wrong
+----------------------------------------------------------------
+This gate's healthy state is zero violations, which means its success message
+is the same sentence whether the rule holds everywhere or the scan collapsed
+and read nothing. So the message leads with the discovery count -- "273 clears
+inside a self_test across 805 files" -- and two floors (`MIN_FILES`,
+`MIN_CLEARS`) turn an implausibly thin scan into a refusal to answer rather
+than a pass. A `--self-test` cannot cover this: fixtures are handed to
+`scan_lines` directly, so they exercise the analyser and say nothing about the
+tree walk that decides what the analyser sees.
+
 Exit codes: 0 clean; 1 an unpinned violation (or a pinned entry that no longer
-violates, which means the baseline needs a deletion); 2 could not run.
+violates, which means the baseline needs a deletion); 2 no verdict -- not a
+worktree, an unreadable file, or a scan below a discovery floor. `--self-test`
+runs the fixtures instead and returns 0 or 1.
 """
 
 import pathlib
@@ -120,35 +133,185 @@ def enclosing_fn(lines, i):
     return None
 
 
-def violations():
-    """Every unfixed site, as (relpath, line_no, var, fn)."""
+def scan_lines(lines):
+    """Every `*X.lock() = None;` inside a `self_test` fn, fixed or not.
+
+    Returns `(line_no, var, fn, reopened)`.  Both halves are returned on
+    purpose: the *fixed* ones are what tells a caller the scan actually
+    reached the code it was written against.  A run that reports zero
+    violations because it found zero clears is indistinguishable, in its own
+    output, from a run that found 117 and every one was correct -- and those
+    are the two states this gate has to tell apart.  See `floor()`.
+    """
     out = []
-    for path in sorted((ROOT / "kernel" / "src").rglob("*.rs")):
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
+    for i, line in enumerate(lines):
+        m = RESET.match(line)
+        if not m:
             continue
-        for i, line in enumerate(lines):
-            m = RESET.match(line)
-            if not m:
-                continue
-            fn = enclosing_fn(lines, i)
-            if not fn or "self_test" not in fn:
-                continue
-            j = i + 1
-            while j < len(lines) and (
-                not lines[j].strip() or lines[j].strip().startswith("//")
-            ):
-                j += 1
-            nxt = lines[j].strip() if j < len(lines) else ""
-            if nxt.startswith("init_defaults("):
-                continue
-            rel = path.relative_to(ROOT).as_posix()
-            out.append((rel, i + 1, m.group(2), fn))
+        fn = enclosing_fn(lines, i)
+        if not fn or "self_test" not in fn:
+            continue
+        j = i + 1
+        while j < len(lines) and (
+            not lines[j].strip() or lines[j].strip().startswith("//")
+        ):
+            j += 1
+        nxt = lines[j].strip() if j < len(lines) else ""
+        out.append((i + 1, m.group(2), fn, nxt.startswith("init_defaults(")))
     return out
 
 
+def scan_tree():
+    """`(relpath, line_no, var, fn, reopened)` for the whole kernel tree.
+
+    An unreadable file raises rather than being skipped.  A `continue` here
+    would silently shrink the scan, which is the one thing this gate must not
+    do quietly: fewer files scanned means fewer findings, and fewer findings
+    is spelled the same as a clean tree.
+    """
+    out = []
+    files = 0
+    for path in sorted((ROOT / "kernel" / "src").rglob("*.rs")):
+        files += 1
+        lines = path.read_text(encoding="utf-8").splitlines()
+        rel = path.relative_to(ROOT).as_posix()
+        for line_no, var, fn, reopened in scan_lines(lines):
+            out.append((rel, line_no, var, fn, reopened))
+    return files, out
+
+
+def violations():
+    """Every unfixed site, as (relpath, line_no, var, fn)."""
+    return [(rel, ln, var, fn) for rel, ln, var, fn, ok in scan_tree()[1] if not ok]
+
+
+#: Discovery floors.  Measured 2026-09-03: 805 `.rs` files under `kernel/src`,
+#: 277 `*X.lock() = None;` statements, 273 of them inside a `self_test`, and 0
+#: of those unfixed.  The floors sit far below both counts so that ordinary
+#: churn never trips them and a *collapsed scan* always does.  What they assert
+#: is not "the code is right" -- the rest of the file does that -- but "I am
+#: still reading the code at all".
+MIN_FILES = 200
+MIN_CLEARS = 40
+
+
+def floor(files, sites):
+    """Refuse a verdict if the scan came back implausibly empty.
+
+    Returns a complaint string, or None.  This is the check a `--self-test`
+    structurally cannot make for us: a fixture is handed to `scan_lines`
+    directly, so it exercises the analyser and says nothing at all about the
+    step that decides what the analyser is handed.
+    """
+    if files < MIN_FILES:
+        return (f"found only {files} .rs file(s) under kernel/src, below the "
+                f"floor of {MIN_FILES}; the tree walk is not reaching the "
+                "kernel, so 'no violations' would mean 'no code read'")
+    if len(sites) < MIN_CLEARS:
+        return (f"found only {len(sites)} `*X.lock() = None;` statement(s) "
+                f"inside a self_test, below the floor of {MIN_CLEARS}. Either "
+                "the modules stopped using `Mutex<Option<_>>` -- in which case "
+                "this gate needs rewriting, not passing -- or RESET/FN stopped "
+                "matching the code they were written against")
+    return None
+
+
+def self_test() -> int:
+    """Fixtures for both directions of every rule the analyser applies.
+
+    A suite of true positives passes for a checker that reports everything; a
+    suite of true negatives passes for one that reports nothing.  Each rule
+    below therefore gets one of each, and each case states what it would mean
+    if it were the one to fail.
+    """
+    failures = []
+    n = 0
+
+    def check(label, condition):
+        nonlocal n
+        n += 1
+        if not condition:
+            failures.append(label)
+            print(f"FAIL {label}")
+
+    def sites(src):
+        return scan_lines(src.strip("\n").split("\n"))
+
+    bad = sites("""
+fn self_test() -> bool {
+    *CPUSTAT.lock() = None;
+    true
+}
+""")
+    check("a bare clear in a self_test is found", len(bad) == 1)
+    check("...and is reported as not re-opened", bad and bad[0][3] is False)
+    check("...and names the static", bad and bad[0][1] == "CPUSTAT")
+
+    good = sites("""
+fn self_test() -> bool {
+    *CPUSTAT.lock() = None;
+    init_defaults();
+    true
+}
+""")
+    check("a clear followed by init_defaults is not a violation",
+          len(good) == 1 and good[0][3] is True)
+
+    # The skip-blanks-and-comments walk: if it stopped working, every fixed
+    # site in the tree would come back as a fresh violation at once.
+    spaced = sites("""
+fn self_test() -> bool {
+    *CPUSTAT.lock() = None;
+
+    // Re-open: `None` is a switched-off module, not an empty table.
+    init_defaults();
+    true
+}
+""")
+    check("blank lines and comments do not hide the re-open",
+          len(spaced) == 1 and spaced[0][3] is True)
+
+    # The `self_test` scoping.  This is the clause that keeps the gate off
+    # `net/dhcp.rs`, where clearing to `None` is the correct state machine
+    # transition; lose it and the gate fires on correct production code.
+    check("the same clear in production code is not scanned",
+          sites("""
+fn clear_global_defaults() {
+    *GLOBAL_DEFAULTS.lock() = None;
+}
+""") == [])
+    check("...and a helper named for it still is",
+          len(sites("""
+fn run_self_test_inner() -> bool {
+    *CPUSTAT.lock() = None;
+    true
+}
+""")) == 1)
+
+    # `enclosing_fn` walks up to a *less indented* `fn`.  A nested item would
+    # otherwise attribute the statement to the wrong function.
+    check("an unindented statement has no enclosing fn",
+          sites("*CPUSTAT.lock() = None;") == [])
+
+    # The floors, in both directions.
+    check("a plausible scan passes the floor",
+          floor(MIN_FILES, [None] * MIN_CLEARS) is None)
+    check("an empty tree walk refuses a verdict",
+          "no code read" in (floor(0, [None] * MIN_CLEARS) or ""))
+    check("a collapsed pattern match refuses a verdict",
+          "stopped matching" in (floor(MIN_FILES, []) or ""))
+
+    if failures:
+        print(f"\n{len(failures)} of {n} self-test(s) FAILED")
+        return 1
+    print(f"[selftest-reinit] self-test passed ({n} checks)")
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv:
+        return self_test()
+
     src = ROOT / "kernel" / "src"
     if not src.is_dir():
         print(f"[selftest-reinit] not a SlateOS worktree: {ROOT}", file=sys.stderr)
@@ -169,7 +332,17 @@ def main() -> int:
         return 0
 
     pinned = load_baseline()
-    found = violations()
+    try:
+        files, sites = scan_tree()
+    except OSError as exc:
+        print(f"[selftest-reinit] cannot read the kernel tree: {exc}", file=sys.stderr)
+        return 2
+    complaint = floor(files, sites)
+    if complaint is not None:
+        print(f"[selftest-reinit] refusing a verdict: {complaint}", file=sys.stderr)
+        return 2
+
+    found = [(rel, ln, var, fn) for rel, ln, var, fn, ok in sites if not ok]
     by_file = {}
     for rel, ln, var, fn in found:
         by_file.setdefault(rel, []).append((ln, var, fn))
@@ -210,10 +383,14 @@ def main() -> int:
             print(f"  {rel}", file=sys.stderr)
         return 1
 
-    carried = len(pinned)
+    # The count that is reported first is the one that was *inspected*, not the
+    # one that was wrong.  "0 violations" is the same sentence whether the rule
+    # holds across 273 sites or the scan found none at all, and only the second
+    # number tells them apart.
     print(
-        f"Self-test tables OK ({len(found)} clear-without-reopen site(s) carried "
-        f"as known debt across {carried} file(s); none new)"
+        f"Self-test tables OK ({len(sites)} clear(s) inside a self_test across "
+        f"{files} file(s); {len(sites) - len(found)} re-open, {len(found)} do "
+        f"not, {len(pinned)} pinned as known debt; none new)"
     )
     return 0
 

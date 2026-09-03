@@ -3112,6 +3112,40 @@ const TOOLBAR_BUTTON_HEIGHT: f32 = 32.0;
 /// again below them is what makes the strip [`TOOLBAR_HEIGHT`] tall.
 const TOOLBAR_BUTTON_INSET: f32 = 8.0;
 
+/// The search box's width when there is room for it.
+const SEARCH_WIDTH: f32 = 200.0;
+/// The narrowest the search box is allowed to get before the buttons after it
+/// start falling off the right edge instead.
+///
+/// It still shows a few characters of the query at this width, which is what
+/// separates "cramped" from "useless". Below it there is nothing left to give
+/// and the toolbar is genuinely too wide for the window.
+const SEARCH_MIN_WIDTH: f32 = 80.0;
+
+/// Every fixed-width control in the toolbar, plus the gaps around them.
+///
+/// Add 60, Sort 80, Generator 100, Lock Vault 70, Settings 80, and six gaps --
+/// one before each of the six controls. The search box is the only elastic
+/// thing in the row and is deliberately not counted here.
+const TOOLBAR_FIXED_WIDTH: f32 = 60.0 + 80.0 + 100.0 + 70.0 + 80.0 + 6.0 * TOOLBAR_GAP;
+
+/// How wide the search box may be in a window `width` wide.
+///
+/// The row is laid out left to right from the sidebar's edge and neither wraps
+/// nor scrolls, so something has to give when the window is narrower than the
+/// row wants. The search box gives first, because it is the only control whose
+/// job survives being smaller: a button at half width is a button with its
+/// label cut in half, whereas a search box at half width is a search box.
+///
+/// This is *not* an overflow menu, and does not pretend to be. Below about
+/// 762 px the buttons at the right-hand end still fall off the edge --
+/// `Lock Vault` among them, which is why `Ctrl+L` exists and is tested. See
+/// known-issues.md -> `C-CREDMANAGER-TOOLBAR-FALLS-OFF-A-NARROW-WINDOW`.
+fn search_box_width(width: f32) -> f32 {
+    let available = width - (SIDEBAR_WIDTH + TOOLBAR_GAP) - TOOLBAR_FIXED_WIDTH;
+    available.clamp(SEARCH_MIN_WIDTH, SEARCH_WIDTH)
+}
+
 /// Take the next `w`-wide control off the toolbar's left-to-right run.
 ///
 /// The cursor advances by the control's own width plus one gap, so a control
@@ -3144,8 +3178,9 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
     );
     frame.hit(Target::Add, add);
 
-    // Search box
-    let search = take_toolbar(&mut x, 200.0);
+    // Search box -- the one elastic control in the row; see
+    // `search_box_width` for why it is the one that gives.
+    let search = take_toolbar(&mut x, search_box_width(width));
     draw_rect(
         frame,
         search.x,
@@ -7590,13 +7625,147 @@ mod tests {
             "the fixture must be narrower than the toolbar needs"
         );
 
+        // 500, not the 700 this used until 2026-09-03. The search box now
+        // gives up its width before the buttons do (`search_box_width`), which
+        // moved `Settings` from 802..882 to 682..762 at a 700px window -- so at
+        // 700 it is *partially* on screen and correctly records a hit box for
+        // the part you can see. That is the fix working, exactly as this
+        // entry's known-issue predicted ("this test should start failing"), not
+        // a regression in the clipping. The property being asserted is
+        // unchanged: a button drawn *entirely* past the edge is not clickable.
         assert!(
-            probe::rect_of_sized(&state, Target::Settings, (700.0, 500.0)).is_none(),
+            probe::rect_of_sized(&state, Target::Settings, (500.0, 500.0)).is_none(),
             "a button drawn past the edge must not be clickable there"
         );
         // Everything left of the fold is untouched.
-        assert!(probe::rect_of_sized(&state, Target::Add, (700.0, 500.0)).is_some());
-        assert!(probe::rect_of_sized(&state, Target::Sort, (700.0, 500.0)).is_some());
+        assert!(probe::rect_of_sized(&state, Target::Add, (500.0, 500.0)).is_some());
+        assert!(probe::rect_of_sized(&state, Target::Sort, (500.0, 500.0)).is_some());
+
+        // And a button straddling the edge is clickable only where it is
+        // visible -- the half-truth between "drawn" and "gone", which is worth
+        // pinning because it is the case the elastic search box created.
+        let straddling = probe::rect_of_sized(&state, Target::Settings, (700.0, 500.0))
+            .expect("Settings straddles the right edge at 700px");
+        assert!(
+            straddling.right() <= 700.0 + 0.01,
+            "the visible part of a straddling button must stop at the window              edge, not run past it to {}",
+            straddling.right()
+        );
+    }
+
+    /// `Ctrl+L` locks the vault, at a window size where the button cannot.
+    ///
+    /// This is the accelerator that makes `C-CREDMANAGER-TOOLBAR-FALLS-OFF-A-
+    /// NARROW-WINDOW` an annoyance rather than a security defect: narrow the
+    /// window far enough and the `Lock Vault` button is clipped away, and the
+    /// keyboard is then the only way to lock the vault and walk away.
+    ///
+    /// It was **untested until 2026-09-03**, and the known-issue entry asserted
+    /// the opposite -- "the keyboard has no accelerator for it either" -- which
+    /// was already false when it was written. A handler nothing drives is a
+    /// handler nobody knows is reachable: `handle_key`'s `Key::L` arm sits
+    /// after an early return for the lock screen, so "it is in the file" and
+    /// "a keystroke gets to it" are different claims. This drives the keystroke.
+    #[test]
+    fn ctrl_l_locks_the_vault_even_when_the_button_is_off_the_edge() {
+        let mut state = unlocked_with_entries(3);
+        assert!(state.vault.is_unlocked(), "the fixture starts unlocked");
+
+        // Narrow enough that the button is genuinely gone, so this cannot pass
+        // by accidentally exercising the same path a click would. 500, not 700:
+        // since `search_box_width` landed, 700px keeps Lock Vault on screen at
+        // 600..670 -- which is the point of that change, and would have made
+        // this test assert nothing.
+        let narrow = (500.0, 500.0);
+        assert!(
+            probe::rect_of_sized(&state, Target::LockVault, narrow).is_none(),
+            "this test is about the case where the button is not reachable; \
+             if it is drawn here, the fixture no longer sets that case up"
+        );
+
+        let ctrl_l = |pressed: bool| {
+            Event::Key(KeyEvent {
+                key: Key::L,
+                pressed,
+                modifiers: guitk::event::Modifiers::ctrl(),
+                text: String::new(),
+            })
+        };
+
+        // Through `handle_event`, not `handle_key`: the press/release guard is
+        // at the dispatch site, so calling `handle_key` directly would prove
+        // the arm runs while saying nothing about whether a real keystroke
+        // reaches it -- and would pass just as loudly if the guard were wrong.
+        assert_eq!(
+            handle_event(&mut state, &ctrl_l(false)),
+            EventResult::Ignored,
+            "a key coming *up* must not act; it is not a second press"
+        );
+        assert!(
+            state.vault.is_unlocked(),
+            "the release alone locked the vault"
+        );
+
+        assert_eq!(
+            handle_event(&mut state, &ctrl_l(true)),
+            EventResult::Consumed
+        );
+        assert!(
+            !state.vault.is_unlocked(),
+            "Ctrl+L did not lock the vault, and at this width nothing else can"
+        );
+    }
+
+    /// The search box gives up its width before any button falls off.
+    ///
+    /// The row is fixed-width and neither wraps nor scrolls, so in a narrow
+    /// window something has to go. The search box is the only control that is
+    /// still itself at half size, so it shrinks first -- which buys 120 px, and
+    /// 120 px is two more buttons.
+    #[test]
+    fn the_search_box_shrinks_before_the_buttons_are_pushed_off() {
+        // Wide: the search box is at its full width and nothing is cramped.
+        assert_eq!(search_box_width(1280.0), SEARCH_WIDTH);
+
+        // Narrow: it has given up width, but not below the floor.
+        let cramped = search_box_width(800.0);
+        assert!(
+            cramped < SEARCH_WIDTH,
+            "at 800px the box should have given up width, not held 200"
+        );
+        assert!(
+            cramped >= SEARCH_MIN_WIDTH,
+            "the box shrank past the floor to {cramped}"
+        );
+
+        // Absurd: it stops at the floor rather than going to zero or negative,
+        // which a bare subtraction would do and `Rect` would happily accept.
+        for w in [400.0_f32, 100.0, 1.0, 0.0] {
+            assert_eq!(
+                search_box_width(w),
+                SEARCH_MIN_WIDTH,
+                "a {w}px window should pin the search box at the floor"
+            );
+        }
+    }
+
+    /// Shrinking the search box actually keeps a button on screen that would
+    /// otherwise be gone.
+    ///
+    /// The point of the previous test is arithmetic; this one is the thing the
+    /// user gets. At 820 px the fixed layout put `Lock Vault` past the right
+    /// edge -- 882 px is what the row wanted -- and with the elastic box it is
+    /// drawn and clickable.
+    #[test]
+    fn a_narrower_window_still_reaches_lock_vault() {
+        let state = unlocked_with_entries(3);
+        let rect = probe::rect_of_sized(&state, Target::LockVault, (820.0, 500.0))
+            .expect("Lock Vault should survive at 820px now the search box gives way");
+        assert!(
+            rect.right() <= 820.0 + 0.01,
+            "the button is recorded but hangs off the edge at {}",
+            rect.right()
+        );
     }
 
     /// A window too small for its own layout must not record a hit box outside

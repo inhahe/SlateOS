@@ -113,20 +113,33 @@ fn ada_build(manifest: &Path) {
         Err(e) => {
             // Missing entirely is only tolerable if we are not building the
             // kernel image; otherwise there is nothing to link.
-            if for_kernel {
-                panic!(
-                    "kernel/ada/prebuilt/stamp.txt is missing or unreadable ({e}).\n\
-                     Regenerate it with: python kernel/ada/regen-prebuilt.py"
-                );
-            }
+            //
+            // `assert!` rather than `if … { panic!() }`: a build script's `main`
+            // returns `()`, so there is no error channel to propagate into and
+            // nothing downstream that could act on a failure — failing the build
+            // loudly is the correct behaviour here, not a lint to suppress. The
+            // assert spelling is what `clippy::manual_assert` asks for, matches
+            // the one at the bottom of this function, and keeps the crate's
+            // `panic = "warn"` lint free to catch a panic that is *not*
+            // deliberate. Always-on, not `debug_assert!`: a release build must
+            // refuse just as loudly.
+            assert!(
+                !for_kernel,
+                "kernel/ada/prebuilt/stamp.txt is missing or unreadable ({e}).\n\
+                 Regenerate it with: python kernel/ada/regen-prebuilt.py"
+            );
             return;
         }
     };
 
     let expected = ada_stamp(&ada);
-    if recorded.trim() != expected.trim() {
-        panic!(
-            "\n\
+    // `assert!` for the reason given above the previous one. Not `assert_eq!`:
+    // that would print the two digests a second time, as `left`/`right`, under
+    // labels that say nothing about which is the source and which is the object
+    // — the message below already names them, and naming them is the point.
+    assert!(
+        recorded.trim() == expected.trim(),
+        "\n\
              The Ada/SPARK sources in kernel/ada/ have changed, but the compiled\n\
              object in kernel/ada/prebuilt/ was not regenerated.\n\
              \n\
@@ -140,10 +153,9 @@ fn ada_build(manifest: &Path) {
              \n\
              expected: {expected}\n\
              recorded: {recorded}\n",
-            expected = expected.trim(),
-            recorded = recorded.trim(),
-        );
-    }
+        expected = expected.trim(),
+        recorded = recorded.trim(),
+    );
 
     if !for_kernel {
         return;
@@ -197,6 +209,15 @@ fn ada_stamp(ada: &Path) -> String {
     }
 
     for p in &inputs {
+        // `panic!` and not `?`: this is reached only from a build script, whose
+        // `main` returns `()`, so there is no error channel to propagate into.
+        // It cannot become an `assert!` like the two above — the value is needed
+        // on the success path, and the failure carries both the path and the io
+        // error, neither of which an assert condition can name. A silent skip
+        // would be the one genuinely wrong answer: the digest would then be
+        // computed over fewer inputs than it claims to cover, and a changed Ada
+        // source would hash to the recorded stamp and link a stale object.
+        #[allow(clippy::panic)]
         let bytes = std::fs::read(p)
             .unwrap_or_else(|e| panic!("cannot read Ada input {}: {e}", p.display()));
         // Normalise line endings before hashing. The repo is checked out with

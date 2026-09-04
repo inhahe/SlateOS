@@ -157,8 +157,8 @@ def test_every_gate_has_its_own_bypass(text):
 def test_every_bypass_is_named_in_a_failure_message(text):
     """A blocked author must be told the way out, or they reach for --no-verify.
 
-    `--no-verify` turns off all nine at once, so a gate that fails without
-    naming its own escape hatch endangers the other eight.
+    `--no-verify` turns off all twelve at once, so a gate that fails without
+    naming its own escape hatch endangers the other eleven.
     """
     missing = []
     for var in sorted(set(BYPASS_IMPL_RE.findall(text))):
@@ -196,7 +196,7 @@ def test_the_request_deletion_gate_judges_the_commit(text):
     # Matching that helper rather than a bare `"$py"` is deliberate: reverting a
     # gate to the direct call is the regression this line should catch, and
     # `test-pre-push-run-checker.py` group 7 asserts the same rule for all
-    # eleven gates at once.
+    # twelve gates at once.
     #
     # `"$py"` is matched between the label and the script because the helper
     # moved to `scripts/run-checker.sh`, shared with `boot-test.sh`, and takes

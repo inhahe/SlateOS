@@ -2,7 +2,7 @@
 """Tests for `run_checker`, the shared checker-invocation helper.
 
 `scripts/run-checker.sh` is sourced by both gate boundaries in this project --
-`scripts/hooks/pre-push` (eleven gates) and `scripts/boot-test.sh` (twenty-nine
+`scripts/hooks/pre-push` (twelve gates) and `scripts/boot-test.sh` (twenty-nine
 checker invocations). Until 2026-09-01 every one of them asked with a bare
 ``if ! "$py" "$script" --check``, which cannot distinguish the two things a
 Python script says by exiting 1: *I found violations* and *I raised an

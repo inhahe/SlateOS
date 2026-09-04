@@ -65107,6 +65107,7 @@ elsewhere, because a gate locates the tree relative to its own path.
 
 **Date:** 2026-09-03
 **Decided by:** Claude (autonomous)
+**Lane:** B
 
 **In short:** `coreutils` has one small type that says what a file is — its
 kind, its identity, its size — filled in by one system call that a directory
@@ -65187,7 +65188,9 @@ to the epoch, and there is a test at the boundary in each direction.
 
 ## 757. The shared remover takes a projection of `rm`'s options, not `rm`'s options — and the three fields it cannot see are exactly the three that mean "operand"
 
+**Date:** 2026-09-04
 **Decided by:** Claude (autonomous)
+**Lane:** B
 
 **In short:** deleting a folder and everything in it was written out twice in
 our command-line tools — once in `rm`, once in `mv` (a move to another disk is a

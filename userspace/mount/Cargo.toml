@@ -1,6 +1,0 @@
-[package]
-name = "mount"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS mount/umount — manage filesystem mount points"
-[dependencies]

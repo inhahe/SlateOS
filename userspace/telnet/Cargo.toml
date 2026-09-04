@@ -1,9 +1,0 @@
-[package]
-name = "telnet"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS telnet client"
-[dependencies]
-
-[lints]
-workspace = true

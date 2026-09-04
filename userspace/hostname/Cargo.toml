@@ -1,6 +1,0 @@
-[package]
-name = "hostname"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS hostname display and set utility"
-[dependencies]

@@ -1,9 +1,0 @@
-[package]
-name = "openssl"
-version = "0.1.0"
-edition = "2024"
-[dependencies]
-notimpl = { path = "../notimpl" }
-# The unrecognized command name is the argv word itself, and the key path it
-# reports writing comes from -out.
-quoting = { path = "../quoting" }

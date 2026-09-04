@@ -1,6 +1,0 @@
-[package]
-name = "taskset"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS taskset - CPU affinity tools (taskset/chrt/ionice/renice)"
-[dependencies]

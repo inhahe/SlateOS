@@ -1,5 +1,0 @@
-[package]
-name = "shell"
-version = "0.1.0"
-edition = "2024"
-description = "Userspace POSIX-compatible shell — default interactive shell for the OS"

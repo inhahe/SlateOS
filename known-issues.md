@@ -16105,6 +16105,72 @@ The 0xFF case (line 6027, which drops any candidate whose name is not UTF-8)
 is unchanged and still waits on (c) for the byte-clean word path — but it is
 now clearly the *second* reason completion is wrong, not the first.
 
+**[A] Correction 7 (2026-09-04) — (c) is named after the wrong function, and
+the name has been making it look ~10× bigger than it is. Read this before
+planning (c).**
+
+**In short:** the entry says stage (c) is "convert `execute_single` to bytes",
+and describes `execute_single` as a full bash-like parser — which it is, and
+which is why nobody has started. But converting *that function* would not fix
+anything, because it is not where the byte dies. Measured against the file
+today, the byte dies one call further down, at a function that is 20 lines
+long and already has a proven conversion mechanism sitting next to it.
+
+*Where the byte actually dies.* `execute_single` (6408) does no text work of
+its own — it is the ERR-trap wrapper around `execute_single_inner` (6438).
+The line reaches `dispatch` (7271), whose whole relevant body is:
+
+```rust
+let mut parts = line.splitn(2, ' ');
+let cmd = parts.next().unwrap_or("");
+let raw_args = parts.next().unwrap_or("").trim();
+let dequoted = if command_parses_own_quotes(cmd) { None }
+               else { Some(remove_quotes(raw_args)) };
+let args = dequoted.as_deref().unwrap_or(raw_args);
+```
+
+`remove_quotes` returns a `String`, and `args: &str` is then handed to **651**
+`cmd_*(args: &str)` functions. So if `execute_single`'s parameter became
+`&[u8]` and nothing else changed, `dispatch` would simply `from_utf8` at its
+top: the narrowing seam moves from site 6051 to line 7271, the diff is large,
+and **no user-visible behaviour changes at all.** That is the same failure
+shape this file documents everywhere else — work that runs, passes, and is
+about the wrong thing.
+
+*Why the real seam is much cheaper than the entry implies.* Three facts, each
+checked against the file rather than inferred:
+
+| fact | consequence |
+|---|---|
+| `resolve_path` is `<P: AsRef<Path>>` (699) and `fs/path.rs:287` has `impl AsRef<Path> for [u8]` | the 15 commands written `resolve_path(args)` accept `&[u8]` with **no edit** |
+| `shell_bytes_as_str` (7084) already exists, with 6 call sites | the per-arm refusal chokepoint `dispatch_with_input` uses is directly reusable for `dispatch` |
+| `command_parses_own_quotes` already exists as an opt-in list | commands migrate one at a time, exactly as `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV` describes |
+
+So the shape of (c) is: give `dispatch` a `&[u8]` line and `&[u8]` args; let
+the path-consuming arms take them unchanged; put `shell_bytes_as_str` on the
+arms that are genuine text interpreters (`sed`, `awk`, `tr`, `cut`, `fold`,
+`grep`, `column`, `xargs` — the same set already behind the chokepoint on the
+*input* side, which is not a coincidence). `execute_single` and its sibling
+statement executors keep taking `&str` for as long as they like: a shell's
+*source line* being text is what §261 chose, and only the *expanded word* has
+to carry bytes.
+
+*What this does not change.* The ordering constraint from Correction 5 still
+binds — the `$'…'` parser and completion's re-spelling must agree, and the
+round-trip assertion is still the test that pins it. And the quote-state
+desynchronisation bug Correction 6 found in `expand_vars_bytes` (`echo $'\x41'
+$HOME` stops expanding for the rest of the line) is still live, still
+independent of all of this, and is still the cheapest thing here to fix.
+
+*Why the misnaming happened, since it is the reusable lesson.* Correction 6
+traced the decode's dependency to "site 6051 feeds `execute_single`" and
+stopped at the first function it reached that looked expensive. It named the
+*caller* rather than following the value to where it is actually narrowed. A
+dependency argument has to be walked to the point of loss, not to the first
+alarming name on the path — otherwise the write-up inherits the cost of a
+function that was never on the critical path, and the task sits untouched for
+the reason the write-up invented.
+
 ### B-KSHELL-APPEND-TRUNCATES-BINARY-FILES. `cmd >> file` silently discarded the entire existing contents of any file that was not valid UTF-8, and reported success — 2026-08-24 — ✅ FIXED 2026-08-24 by lane A (`kernel/src/kshell.rs`, `redirect_write`)
 
 **Where:** `kernel/src/kshell.rs`. Four duplicated copies of the append path,

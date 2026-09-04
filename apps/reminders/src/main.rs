@@ -38,6 +38,11 @@
 
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::RenderTree;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // The shared civil-date arithmetic. This app used to carry its own copy of
 // all of it: a Zeller's congruence for the weekday, a *separate* Julian day
 // number for differences, its own leap rule, and month-stepping `while` loops
@@ -246,7 +251,9 @@ impl Time {
     }
 
     pub fn to_minutes(self) -> u32 {
-        self.hour * 60 + self.minute
+        // Saturating rather than wrapping: an hour past 23 is bad data, and
+        // a wrapped minute-of-day sorts a task to the wrong end of the list.
+        self.hour.saturating_mul(60).saturating_add(self.minute)
     }
 
     pub fn from_minutes(total: u32) -> Self {
@@ -268,7 +275,7 @@ impl Time {
         } else if self.hour == 12 {
             (12, "PM")
         } else {
-            (self.hour - 12, "PM")
+            (self.hour.saturating_sub(12), "PM")
         };
         format!("{h}:{:02} {ampm}", self.minute)
     }
@@ -301,8 +308,9 @@ impl DateTime {
     /// Difference in minutes (approximate, same-month only for simplicity).
     pub fn minutes_since(self, other: Self) -> i64 {
         let day_diff = self.date.days_since(other.date);
-        let minute_diff = i64::from(self.time.to_minutes()) - i64::from(other.time.to_minutes());
-        day_diff * 1440 + minute_diff
+        let minute_diff =
+            i64::from(self.time.to_minutes()).saturating_sub(i64::from(other.time.to_minutes()));
+        day_diff.saturating_mul(1440).saturating_add(minute_diff)
     }
 }
 
@@ -548,7 +556,10 @@ impl RecurrenceRule {
                     return origin == check;
                 }
                 let diff = check.days_since(origin);
-                diff >= 0 && diff % i64::from(*interval_days) == 0
+                // `checked_rem` although the zero case is handled above:
+                // the guard and the division are three lines apart, and this
+                // is what keeps them from drifting.
+                diff >= 0 && diff.checked_rem(i64::from(*interval_days)) == Some(0)
             }
         }
     }
@@ -712,7 +723,7 @@ impl Task {
         }
         let done = self.subtasks.iter().filter(|s| s.completed).count() as u32;
         let total = self.subtasks.len() as u32;
-        (done * 100).checked_div(total).unwrap_or(0)
+        done.saturating_mul(100).checked_div(total).unwrap_or(0)
     }
 
     /// Check if this task is overdue relative to `now`.
@@ -763,10 +774,14 @@ impl Task {
 
     /// Apply snooze from `now`.
     pub fn snooze(&mut self, now: DateTime, duration: SnoozeDuration) {
-        let total_minutes = now.time.to_minutes() + duration.as_minutes();
+        let total_minutes = now.time.to_minutes().saturating_add(duration.as_minutes());
         let extra_days = total_minutes / 1440;
         let remaining = total_minutes % 1440;
-        let new_date = now.date.add_days(extra_days as i32);
+        // A snooze that would push the date past `i32` days is not a snooze;
+        // clamping keeps it in the far future rather than wrapping to the past.
+        let new_date = now
+            .date
+            .add_days(i32::try_from(extra_days).unwrap_or(i32::MAX));
         let new_time = Time::from_minutes(remaining);
         self.snoozed_until = Some(DateTime::new(new_date, new_time));
     }
@@ -793,7 +808,7 @@ impl Task {
             } else if diff == -1 {
                 format!("Yesterday at {}", due.time.format_12h())
             } else if diff < -1 {
-                format!("{} days ago", -diff)
+                format!("{} days ago", diff.saturating_neg())
             } else if diff <= 7 {
                 format!(
                     "{} at {}",
@@ -1050,7 +1065,9 @@ impl TaskStore {
 
     pub fn add(&mut self, mut task: Task) -> u64 {
         let id = self.next_id;
-        self.next_id += 1;
+        // Saturating: a wrapped counter hands out an id that already exists,
+        // and both selection and completion are by id.
+        self.next_id = self.next_id.saturating_add(1);
         task.id = id;
         self.tasks.push(task);
         id
@@ -1191,9 +1208,17 @@ impl TaskStore {
                 let obj = &remaining[..=end];
                 if let Some(task) = parse_task_json(obj, now) {
                     self.add(task);
-                    count += 1;
+                    count = count.saturating_add(1);
                 }
-                remaining = &remaining[end + 1..];
+                // Past the object just consumed. `get` and `checked_add`
+                // because `end` comes from scanning a document the user
+                // supplied: a brace at the very last byte makes `end + 1`
+                // the length, which is a valid empty slice, and anything
+                // beyond it is a malformed file rather than a panic.
+                let Some(rest) = end.checked_add(1).and_then(|n| remaining.get(n..)) else {
+                    break;
+                };
+                remaining = rest;
             } else {
                 break;
             }
@@ -1281,9 +1306,12 @@ fn find_matching_brace(s: &str) -> Option<usize> {
             continue;
         }
         if ch == '{' {
-            depth += 1;
+            depth = depth.saturating_add(1);
         } else if ch == '}' {
-            depth -= 1;
+            // `checked_sub`, not `-`: a JSON document with more closing braces
+            // than opening ones is malformed input, and `?` reports it as the
+            // `None` this function already returns for an unbalanced document.
+            depth = depth.checked_sub(1)?;
             if depth == 0 {
                 return Some(i);
             }
@@ -1493,16 +1521,16 @@ fn parse_datetime_short(s: &str) -> Option<DateTime> {
     if parts.len() < 2 {
         return None;
     }
-    let date_parts: Vec<&str> = parts[0].split('-').collect();
-    if date_parts.len() < 3 {
-        return None;
-    }
-    let year = date_parts[0].parse::<i32>().ok()?;
-    let month = date_parts[1].parse::<u32>().ok()?;
-    let day = date_parts[2].parse::<u32>().ok()?;
+    // Every index here is reachable from an imported file, so each one is a
+    // `get`: this parses `import_json`'s input, which is a document the user
+    // supplies and may well be truncated or hand-edited.
+    let date_parts: Vec<&str> = parts.first()?.split('-').collect();
+    let year = date_parts.first()?.parse::<i32>().ok()?;
+    let month = date_parts.get(1)?.parse::<u32>().ok()?;
+    let day = date_parts.get(2)?.parse::<u32>().ok()?;
     let date = Date::new(year, month, day)?;
 
-    let time_str = parts[1].trim();
+    let time_str = parts.get(1)?.trim();
     let time = parse_time_12h(time_str)?;
 
     Some(DateTime::new(date, time))
@@ -1516,17 +1544,25 @@ fn parse_time_12h(s: &str) -> Option<Time> {
     if !is_pm && !is_am {
         return None;
     }
-    let time_part = s[..s.len() - 2].trim();
+    // `"PM"` is two bytes and `ends_with` proved they are there, but the
+    // subtraction and the slice are separate statements that a later edit can
+    // separate further.
+    let time_part = s.get(..s.len().saturating_sub(2))?.trim();
     let colon = time_part.find(':')?;
-    let hour_raw = time_part[..colon].parse::<u32>().ok()?;
-    let minute = time_part[colon + 1..].parse::<u32>().ok()?;
+    let hour_raw = time_part.get(..colon)?.parse::<u32>().ok()?;
+    let minute = time_part
+        .get(colon.checked_add(1)?..)?
+        .parse::<u32>()
+        .ok()?;
 
     let hour = if is_am {
         if hour_raw == 12 { 0 } else { hour_raw }
     } else if hour_raw == 12 {
         12
     } else {
-        hour_raw + 12
+        // `Time::new` rejects anything past 23, so an hour like `19 PM` in an
+        // imported file is refused rather than wrapped into the small hours.
+        hour_raw.saturating_add(12)
     };
 
     Time::new(hour, minute)
@@ -1691,8 +1727,195 @@ impl RemindersApp {
     // Render methods
     // ====================================================================
 
-    /// Render the full application UI into a list of render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    // ------------------------------------------------------------------
+    // Events
+    // ------------------------------------------------------------------
+
+    /// Take the system clock's reading, and fire anything it made due.
+    ///
+    /// Leaves the previous reading standing if the clock cannot be read, for
+    /// the reason given at [`system_now`].
+    pub fn refresh_now(&mut self) -> EventResult {
+        let Some(now) = system_now() else {
+            return EventResult::Ignored;
+        };
+        if now == self.now {
+            // The clock has not moved past the resolution this app works in,
+            // so there is nothing new to be due and nothing to redraw.
+            return EventResult::Ignored;
+        }
+        self.now = now;
+        self.today = now.date;
+        let before = self.active_notifications().len();
+        self.check_notifications();
+        // A minute passing changes the "in 5 minutes" and "overdue by" text on
+        // every card, so the frame is stale whether or not anything fired.
+        let _ = before;
+        EventResult::Consumed
+    }
+
+    /// Route a compositor event into the app.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Tick { .. } => self.refresh_now(),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.width = *width as f32;
+                    self.height = *height as f32;
+                }
+                // Not `Consumed`: a resize is not by itself a reason to redraw.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a key press.
+    ///
+    /// The app had no input handling before it was wired to the compositor:
+    /// every view, sort order and selection it can show was reachable only by a
+    /// caller setting the field directly.
+    pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        match key.key {
+            Key::Num1 => self.set_view(ViewFilter::Today),
+            Key::Num2 => self.set_view(ViewFilter::Upcoming),
+            Key::Num3 => self.set_view(ViewFilter::All),
+            Key::Num4 => self.set_view(ViewFilter::Overdue),
+            Key::Num5 => self.set_view(ViewFilter::Completed),
+            Key::S => {
+                self.cycle_sort();
+                EventResult::Consumed
+            }
+            Key::Up => self.step_selection(-1),
+            Key::Down => self.step_selection(1),
+            // Space is the near-universal "toggle the selected thing", and
+            // completing a task is what this app is for.
+            Key::Space | Key::Enter => self.toggle_selected_complete(),
+            // Escape clears the banners rather than closing the window: a
+            // reminder app that quits when you dismiss a reminder is a trap.
+            Key::Escape => {
+                if self.active_notifications().is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.dismiss_all_notifications();
+                EventResult::Consumed
+            }
+            Key::B => {
+                self.sidebar_visible = !self.sidebar_visible;
+                EventResult::Consumed
+            }
+            Key::D => {
+                self.detail_visible = !self.detail_visible;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Switch views, reporting whether anything changed.
+    fn set_view(&mut self, view: ViewFilter) -> EventResult {
+        if self.view == view {
+            return EventResult::Ignored;
+        }
+        self.view = view;
+        // The selection is an id, so it survives the view change — but it can
+        // survive into a view that does not show it, where the highlight simply
+        // vanishes. Re-anchor to something on screen.
+        let visible: Vec<u64> = self.current_tasks().iter().map(|t| t.id).collect();
+        if !self
+            .selected_task_id
+            .is_some_and(|id| visible.contains(&id))
+        {
+            self.selected_task_id = visible.first().copied();
+        }
+        EventResult::Consumed
+    }
+
+    /// Move the selection through the tasks currently listed.
+    ///
+    /// Over `current_tasks` and not the whole store, so the selection cannot
+    /// step onto a task the current view is hiding.
+    fn step_selection(&mut self, delta: isize) -> EventResult {
+        let visible: Vec<u64> = self.current_tasks().iter().map(|t| t.id).collect();
+        if visible.is_empty() {
+            if self.selected_task_id.is_none() {
+                return EventResult::Ignored;
+            }
+            self.selected_task_id = None;
+            return EventResult::Consumed;
+        }
+        let current = self
+            .selected_task_id
+            .and_then(|id| visible.iter().position(|&v| v == id));
+        let next = match current {
+            // Not on screen: the first listed task is where the selection
+            // belongs, whichever way the user pressed.
+            None => 0,
+            Some(pos) => {
+                let Ok(pos) = isize::try_from(pos) else {
+                    return EventResult::Ignored;
+                };
+                let Some(moved) = pos.checked_add(delta) else {
+                    return EventResult::Ignored;
+                };
+                let Ok(moved) = usize::try_from(moved) else {
+                    return EventResult::Ignored; // off the top; stay put
+                };
+                if moved >= visible.len() {
+                    return EventResult::Ignored; // off the bottom; stay put
+                }
+                moved
+            }
+        };
+        let Some(&id) = visible.get(next) else {
+            return EventResult::Ignored;
+        };
+        if Some(id) == self.selected_task_id {
+            return EventResult::Ignored;
+        }
+        self.selected_task_id = Some(id);
+        EventResult::Consumed
+    }
+
+    /// Complete or un-complete whatever is selected.
+    fn toggle_selected_complete(&mut self) -> EventResult {
+        let Some(id) = self.selected_task_id else {
+            return EventResult::Ignored;
+        };
+        let Some(done) = self.store.get(id).map(|t| t.completed) else {
+            return EventResult::Ignored;
+        };
+        let changed = if done {
+            self.store.uncomplete_task(id)
+        } else {
+            self.store.complete_task(id, self.now)
+        };
+        if !changed {
+            return EventResult::Ignored;
+        }
+        // Completing the selected task can remove it from the view it was
+        // listed in, which would leave the highlight nowhere.
+        let visible: Vec<u64> = self.current_tasks().iter().map(|t| t.id).collect();
+        if !visible.contains(&id) {
+            self.selected_task_id = visible.first().copied();
+        }
+        EventResult::Consumed
+    }
+
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`, so
+    /// an app that keeps the name draws nothing and reports no error.
+    ///
+    /// Renders the full application UI into a list of render commands.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
@@ -3089,49 +3312,135 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
     store.add(t);
 }
 
-fn main() {
-    let now = DateTime::new(
-        Date {
-            year: 2026,
-            month: 5,
-            day: 18,
-        },
-        Time {
-            hour: 10,
-            minute: 30,
-        },
-    );
+impl App for RemindersApp {
+    fn title(&self) -> String {
+        let overdue = self.store.count_overdue(self.now);
+        if overdue == 0 {
+            "Reminders".to_owned()
+        } else {
+            // The count belongs in the title because a taskbar entry is all
+            // that is visible of a minimised reminder app.
+            format!("Reminders ({overdue} overdue)")
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.width as u32, self.height as u32)
+        }
+    }
+
+    /// Every thirty seconds, and **not** an interval computed from the next due
+    /// time.
+    ///
+    /// Due times are minute-granular, so the worst case for a reminder is the
+    /// tick period; thirty seconds keeps that under half a minute, and two
+    /// wake-ups a minute is a cost a reminder app has earned.
+    ///
+    /// The tempting optimisation — return the time until the next due task, so
+    /// an idle machine sleeps — is **wrong here**, and quietly. `sync_clock` in
+    /// `gui/window/src/app.rs` will not re-arm a wake-up that is already
+    /// pending; it re-reads this only once the previous one fires. Return six
+    /// hours because that is when the next task is due, and a task the user
+    /// adds a minute later fires six hours late. The interval has to be short
+    /// enough to be wrong by an acceptable amount.
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(Duration::from_secs(30))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.width = width;
+        self.height = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    // The fallback only applies if the system clock cannot be read at all, and
+    // it is a real instant rather than the epoch so that the sample tasks below
+    // — which are all relative to it — still make sense.
+    let now = system_now().unwrap_or_else(|| {
+        DateTime::new(
+            Date {
+                year: 2026,
+                month: 5,
+                day: 18,
+            },
+            Time {
+                hour: 10,
+                minute: 30,
+            },
+        )
+    });
     let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, now);
 
+    // Until there is a store on disk this is what there is to show, and the
+    // dates are all relative to `now`, so "overdue" and "due today" are true
+    // statements about the clock rather than about May 2026.
     sample_tasks(&mut app.store, now);
-
-    // Verify all views render
-    for view in ViewFilter::standard_views() {
-        app.view = *view;
-        let cmds = app.render();
-        let _ = cmds.len();
-    }
-    // Verify category views
-    for cat in TaskCategory::all() {
-        app.view = ViewFilter::ByCategory(*cat);
-        let cmds = app.render();
-        let _ = cmds.len();
-    }
-
-    // Test with selected task
-    app.view = ViewFilter::All;
-    if let Some(first) = app.store.all().first() {
-        app.select_task(first.id);
-    }
-    let cmds = app.render();
-    let _ = cmds.len();
-
-    // Test notifications
+    app.selected_task_id = app.current_tasks().first().map(|t| t.id);
     app.check_notifications();
 
-    // Test export
-    let json = app.store.export_json();
-    let _ = json.len();
+    app::launch("reminders", &mut app)
+}
+
+// ============================================================================
+// The clock
+// ============================================================================
+
+/// Read the system clock as one of this app's `DateTime`s.
+///
+/// Returns `None` if the clock cannot be read, so the caller can leave the
+/// previous reading standing: a reminder app that silently decides it is
+/// midnight on 1 January 1970 marks every task overdue.
+///
+/// The zone comes from `tzrules` in the same way `apps/alarmclock` gets it, so
+/// this picks up a real local zone on the day
+/// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ` is fixed, rather than needing to be
+/// found and changed again.
+fn system_now() -> Option<DateTime> {
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    let utc = i64::try_from(since_epoch.as_secs()).ok()?;
+    let zone = tzrules::Tz::utc();
+    let local = utc.saturating_add(i64::from(zone.lookup(utc).gmtoff));
+
+    // `rem_euclid`, not `%`: a pre-1970 instant with `%` gives a negative
+    // remainder, which is not a time of day at all.
+    let secs_into_day = local.rem_euclid(86_400);
+    // Both divisions are bounded by the line above: 0..86_400 / 3600 is 0..24,
+    // and the remainder of a minute is 0..60.
+    let hour = u32::try_from(secs_into_day / 3600).ok()?;
+    let minute = u32::try_from((secs_into_day / 60) % 60).ok()?;
+
+    // The civil date comes from `guitk::date`, the toolkit's one calendar,
+    // rather than a private day-number formula in this file.
+    let (year, month, day) = guitk::date::Date::from_unix_utc(local).ymd();
+    //  already returns exactly the widths Fri Sep  4 02:10:08 EDT 2026 holds, so there is
+    // nothing left to convert here.
+    Some(DateTime::new(
+        Date { year, month, day },
+        Time { hour, minute },
+    ))
 }
 
 // ============================================================================
@@ -3140,6 +3449,302 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that overflows, indexes out of range or unwraps a `None` should
+    // fail loudly and point at the line that did it — that is the diagnosis.
+    // The defensive lints exist to keep panics out of code that runs on a
+    // user'"'"'s data, which this is not.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
+    // ------------------------------------------------------------------
+    // Events and the clock
+    //
+    // The app had no input handling at all until it was wired to the
+    // compositor, so every one of these covers a path with no prior coverage.
+    // ------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn populated() -> RemindersApp {
+        let now = make_now();
+        let mut app = RemindersApp::new(1200.0, 800.0, now);
+        sample_tasks(&mut app.store, now);
+        app.view = ViewFilter::All;
+        app.selected_task_id = app.current_tasks().first().map(|t| t.id);
+        app
+    }
+
+    #[test]
+    fn the_number_row_reaches_every_standard_view() {
+        let mut app = populated();
+        for (k, view) in [
+            (Key::Num1, ViewFilter::Today),
+            (Key::Num2, ViewFilter::Upcoming),
+            (Key::Num4, ViewFilter::Overdue),
+            (Key::Num5, ViewFilter::Completed),
+            (Key::Num3, ViewFilter::All),
+        ] {
+            assert_eq!(app.handle_event(&press(k)), EventResult::Consumed);
+            assert_eq!(app.view, view, "{k:?} went to the wrong view");
+        }
+    }
+
+    #[test]
+    fn asking_for_the_view_already_shown_is_not_a_redraw() {
+        let mut app = populated();
+        assert_eq!(app.view, ViewFilter::All);
+        assert_eq!(app.handle_event(&press(Key::Num3)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn changing_view_leaves_the_selection_on_a_listed_task() {
+        // The selection is an id, so it survives a view change — into a view
+        // that may not list it, where the highlight simply disappears.
+        let mut app = populated();
+        for k in [Key::Num1, Key::Num2, Key::Num4, Key::Num5, Key::Num3] {
+            app.handle_event(&press(k));
+            let listed: Vec<u64> = app.current_tasks().iter().map(|t| t.id).collect();
+            match app.selected_task_id {
+                Some(id) => assert!(
+                    listed.contains(&id),
+                    "{:?} left the selection on a task it does not list",
+                    app.view
+                ),
+                None => assert!(listed.is_empty(), "nothing selected while tasks are listed"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_arrows_walk_the_listed_tasks_and_stop_at_the_ends() {
+        let mut app = populated();
+        let listed: Vec<u64> = app.current_tasks().iter().map(|t| t.id).collect();
+        assert!(listed.len() >= 3, "the sample data should fill the list");
+        assert_eq!(app.selected_task_id, listed.first().copied());
+        // Up at the top stays put rather than wrapping to the last task.
+        assert_eq!(app.handle_event(&press(Key::Up)), EventResult::Ignored);
+        assert_eq!(app.selected_task_id, listed.first().copied());
+        for id in listed.iter().skip(1) {
+            assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Consumed);
+            assert_eq!(app.selected_task_id, Some(*id));
+        }
+        assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Ignored);
+        assert_eq!(app.selected_task_id, listed.last().copied());
+    }
+
+    #[test]
+    fn the_arrows_never_select_a_task_the_view_is_hiding() {
+        let mut app = populated();
+        app.handle_event(&press(Key::Num4)); // Overdue
+        let listed: Vec<u64> = app.current_tasks().iter().map(|t| t.id).collect();
+        assert!(
+            listed.len() < app.store.len(),
+            "the overdue view should hide some tasks"
+        );
+        for _ in 0..app.store.len() {
+            app.handle_event(&press(Key::Down));
+            if let Some(id) = app.selected_task_id {
+                assert!(listed.contains(&id), "selection left the overdue view");
+            }
+        }
+    }
+
+    #[test]
+    fn space_completes_the_selected_task_and_enter_does_the_same() {
+        for key in [Key::Space, Key::Enter] {
+            let mut app = populated();
+            let id = app.selected_task_id.expect("something is selected");
+            assert!(!app.store.get(id).expect("the task exists").completed);
+            assert_eq!(app.handle_event(&press(key)), EventResult::Consumed);
+            assert!(
+                app.store.get(id).expect("the task still exists").completed,
+                "{key:?} did not complete the task"
+            );
+        }
+    }
+
+    #[test]
+    fn completing_a_task_out_of_its_view_moves_the_selection_somewhere_real() {
+        let mut app = populated();
+        app.handle_event(&press(Key::Num4)); // Overdue: completing leaves it
+        let id = app.selected_task_id.expect("something is selected");
+        app.handle_event(&press(Key::Space));
+        let listed: Vec<u64> = app.current_tasks().iter().map(|t| t.id).collect();
+        assert!(!listed.contains(&id), "a completed task is not overdue");
+        if let Some(sel) = app.selected_task_id {
+            assert!(listed.contains(&sel), "selection points off the list");
+        } else {
+            assert!(listed.is_empty());
+        }
+    }
+
+    #[test]
+    fn space_with_nothing_selected_does_nothing() {
+        let mut app = populated();
+        app.selected_task_id = None;
+        let done = app.store.all().iter().filter(|t| t.completed).count();
+        assert_eq!(app.handle_event(&press(Key::Space)), EventResult::Ignored);
+        assert_eq!(app.store.all().iter().filter(|t| t.completed).count(), done);
+    }
+
+    #[test]
+    fn escape_dismisses_the_banners_rather_than_closing_the_window() {
+        // A reminder app that quits when you dismiss a reminder is a trap.
+        let mut app = populated();
+        app.check_notifications();
+        if app.active_notifications().is_empty() {
+            // Nothing was due; then Escape has nothing to do and must say so.
+            assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Ignored);
+            return;
+        }
+        assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Consumed);
+        assert!(app.active_notifications().is_empty());
+        assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_key_the_app_has_no_use_for_is_not_consumed() {
+        let mut app = populated();
+        assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = populated();
+        let release = Event::Key(KeyEvent {
+            key: Key::Num5,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert_eq!(app.view, ViewFilter::All);
+    }
+
+    #[test]
+    fn a_tick_moves_the_clock_and_a_second_one_in_the_same_minute_does_not() {
+        // The whole point of the tick: `now` must advance, or nothing is ever
+        // due and the notification banners never appear — lesson 47 exactly.
+        let mut app = populated();
+        let stale = app.now;
+        let first = app.handle_event(&Event::Tick { elapsed_ms: 30_000 });
+        assert_eq!(
+            first,
+            EventResult::Consumed,
+            "the first tick should adopt the real clock"
+        );
+        assert_ne!(app.now, stale, "the clock did not move");
+        assert_eq!(app.today, app.now.date, "today drifted from now");
+        // Two ticks inside one minute are the same minute, and redrawing for
+        // that is a wake-up spent on an identical frame.
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 30_000 }),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn the_system_clock_reads_as_a_plausible_date() {
+        let now = system_now().expect("the host has a readable clock");
+        assert!(
+            (2020..2200).contains(&now.date.year),
+            "implausible year {}",
+            now.date.year
+        );
+        assert!(
+            (1..=12).contains(&now.date.month),
+            "month {}",
+            now.date.month
+        );
+        assert!((1..=31).contains(&now.date.day), "day {}", now.date.day);
+        assert!(now.time.hour < 24, "hour {}", now.time.hour);
+        assert!(now.time.minute < 60, "minute {}", now.time.minute);
+    }
+
+    #[test]
+    fn the_system_clock_reading_converts_back_to_the_instant_it_came_from() {
+        // Ranges alone do not test the conversion: adding a month to the
+        // result in September still yields a plausible-looking date and every
+        // range assertion above passes. This takes the reading apart and puts
+        // it back together through `guitk::date`, which catches a field
+        // assigned to the wrong field, an off-by-one, and a month or hour that
+        // has drifted -- the transcription errors this function can have.
+        let now = system_now().expect("the host has a readable clock");
+        let utc = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("the host clock is after 1970")
+                .as_secs(),
+        )
+        .expect("seconds since 1970 fit in i64");
+        let zone = tzrules::Tz::utc();
+        let local = utc.saturating_add(i64::from(zone.lookup(utc).gmtoff));
+
+        let rebuilt = guitk::date::Date::from_ymd(now.date.year, now.date.month, now.date.day)
+            .unix_secs_utc()
+            + i64::from(now.time.hour) * 3600
+            + i64::from(now.time.minute) * 60;
+
+        // `system_now` drops seconds, so the rebuilt instant is up to 59 s
+        // behind; a further minute of slack covers the clock advancing between
+        // the two readings taken above.
+        let skew = local - rebuilt;
+        assert!(
+            (0..120).contains(&skew),
+            "the reading does not convert back to the instant it came from:              off by {skew} s (local {local}, rebuilt {rebuilt}, read {now:?})"
+        );
+    }
+
+    #[test]
+    fn the_title_counts_the_overdue_tasks() {
+        // A minimised reminder app is a taskbar entry and nothing else, so the
+        // count has to be in the title or it is not visible at all.
+        let mut app = populated();
+        let overdue = app.store.count_overdue(app.now);
+        assert!(
+            overdue > 0,
+            "the sample data should include an overdue task"
+        );
+        assert!(
+            app.title().contains(&overdue.to_string()),
+            "title {:?} does not name the {overdue} overdue tasks",
+            app.title()
+        );
+        for t in app.store.all().iter().map(|t| t.id).collect::<Vec<_>>() {
+            app.store.complete_task(t, app.now);
+        }
+        assert_eq!(app.store.count_overdue(app.now), 0);
+        assert_eq!(app.title(), "Reminders", "a clear list should read plainly");
+    }
+
+    #[test]
+    fn a_resize_is_taken_but_is_not_itself_a_redraw() {
+        let mut app = populated();
+        assert_eq!(
+            app.handle_event(&Event::Resize {
+                width: 1280,
+                height: 1024
+            }),
+            EventResult::Ignored
+        );
+        assert!((app.width - 1280.0).abs() < f32::EPSILON);
+        assert!((app.height - 1024.0).abs() < f32::EPSILON);
+    }
     use super::*;
 
     fn make_now() -> DateTime {
@@ -4495,7 +5100,7 @@ mod tests {
 
         for view in ViewFilter::standard_views() {
             app.view = *view;
-            let cmds = app.render();
+            let cmds = app.render_commands();
             assert!(!cmds.is_empty(), "View {view:?} produced no commands");
         }
     }
@@ -4508,7 +5113,7 @@ mod tests {
 
         for cat in TaskCategory::all() {
             app.view = ViewFilter::ByCategory(*cat);
-            let cmds = app.render();
+            let cmds = app.render_commands();
             assert!(!cmds.is_empty());
         }
     }
@@ -4520,7 +5125,7 @@ mod tests {
         sample_tasks(&mut app.store, now);
         let first_id = app.store.all()[0].id;
         app.select_task(first_id);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4542,7 +5147,7 @@ mod tests {
 
     /// The `(y, text)` of every prose line drawn in the detail panel.
     fn prose_lines(app: &RemindersApp) -> Vec<(f32, String)> {
-        app.render()
+        app.render_commands()
             .into_iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
@@ -4605,7 +5210,7 @@ mod tests {
         let now = make_now();
         let mut app = RemindersApp::new(1100.0, 720.0, now);
         app.sidebar_visible = false;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4617,7 +5222,7 @@ mod tests {
         t.due = Some(now);
         app.store.add(t);
         app.check_notifications();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4625,7 +5230,7 @@ mod tests {
     fn test_render_empty_state() {
         let now = make_now();
         let app = RemindersApp::new(1100.0, 720.0, now);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 

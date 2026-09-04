@@ -116179,3 +116179,64 @@ implementor that computes it from mutable state has written a latent bug, and no
 test of that implementor can find it, because the fault is in the *frequency of
 the call* and the implementor does not make the call. Look for these by grepping
 the harness for the call site, not the implementors for correctness.
+
+
+### Lesson 113: when the feature *is* the timer, "no clock" is not a stale display but a missing program (lane C, 2026-09-04)
+
+`apps/systemrestore` is a snapshot manager. Its headline feature, named in the
+first line of its own module doc, is "scheduled automatic snapshots with
+retention policies". It has a `ScheduleConfig` with a frequency and an enabled
+flag, a `RetentionPolicy` with count, age and size limits, a `check_schedule`
+that takes a snapshot when one is due, an `apply_retention` that prunes by the
+policy, and a Schedule view that draws a countdown to the next one.
+
+`check_schedule` and `apply_retention` had no caller. Neither did thirteen other
+methods. The program had no key handler, no mouse handler, and no `handle_event`
+of any kind: `main` built the UI, rendered one frame, and returned.
+
+This is *not* the same defect as lesson 47 (`an app that keeps time but never
+receives the clock`), though it looks like it and shares a cure. In lesson 47
+the app does something and displays a stale number while doing it. Here the
+number **is** the product. A snapshot manager that never takes a snapshot on a
+schedule is not a snapshot manager with a cosmetic fault; it is a viewer of
+sample data with a countdown drawn on it.
+
+The distinction matters when triaging a fleet of unwired apps, because it
+changes the priority. "The clock is frozen" reads like polish. "The scheduler
+never runs" reads like the program. They were the same line of code.
+
+**How to spot it without reading everything:** list the crate's functions with
+no caller outside `#[cfg(test)]` and read the *names*. Here the list was
+`check_schedule`, `apply_retention`, `delete_snapshot`, `simulate_restore`,
+`simulate_create`, `import_snapshots`, `unlock_snapshot` — take, prune, delete,
+restore, create, import, unlock. Seven verbs, and they are the seven things the
+program is for. A dead-code list that reads like a feature list is not dead
+code; it is a missing caller at the top.
+
+### Lesson 114: a constant used as a size is a window that ignores its window (lane C, 2026-09-04)
+
+Every layout in `apps/systemrestore` -- 46 lines of it -- read the `WINDOW_WIDTH`
+and `WINDOW_HEIGHT` constants directly. The status bar spanned `WINDOW_WIDTH`,
+the dialogs centred themselves in `WINDOW_WIDTH / 2.0`, the action buttons were
+right-aligned to `WINDOW_WIDTH - ...`.
+
+That is correct exactly once: in a window the compositor happens to grant at
+1050x700. Everywhere else the picture is the wrong size in a way that is
+*self-consistent* -- every element agrees with every other element, and all of
+them disagree with the frame. Widen the window and the status bar stops short of
+the edge with the background showing through; narrow it and the action buttons
+hang off the side, still perfectly spaced relative to one another.
+
+It survives review because it looks like a layout that has been thought about.
+Nothing in the file is inconsistent; the file simply has the wrong idea of how
+big it is, once, in a constant, and repeats that idea faithfully in 46 places.
+
+The cure is two fields set from `App::render`'s arguments and a mechanical
+substitution, and the reason to do it as a *substitution* rather than by
+reasoning about each site is that all 46 are the same mistake -- picking through
+them one at a time invites deciding that some of them "are fine as constants",
+which is how a layout ends up half-relative and genuinely inconsistent.
+
+The gate for this shape already exists in spirit: `App::render` is *handed* the
+width and height rather than being expected to ask, precisely so that an app
+which ignores them has to ignore an argument in front of it. This one did.

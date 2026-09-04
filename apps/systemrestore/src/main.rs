@@ -22,17 +22,19 @@
 
 #![allow(dead_code)]
 
-#[allow(unused_imports)]
 use guitk::color::Color;
-#[allow(unused_imports)]
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-#[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -57,6 +59,23 @@ const COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
 // ============================================================================
 // Layout constants
 // ============================================================================
+
+/// How long one step of a create or restore is shown for.
+///
+/// The operation is simulated -- see `OperationProgress::simulate_restore` --
+/// so this is the speed of the animation and not of any real work. Slow enough
+/// to read the step name, fast enough that a restore of eight components does
+/// not outlast the user's patience.
+///
+/// A `Duration` rather than a count of milliseconds, because the only thing it
+/// is ever used as is a `Duration`.
+const PROGRESS_STEP: Duration = Duration::from_millis(400);
+
+/// How often the clock is re-read when nothing is running.
+///
+/// A minute, because `age_display` rounds to minutes: anything shorter redraws
+/// an identical frame, anything longer leaves a countdown visibly stale.
+const CLOCK_STEP: Duration = Duration::from_mins(1);
 
 const WINDOW_WIDTH: f32 = 1050.0;
 const WINDOW_HEIGHT: f32 = 700.0;
@@ -530,11 +549,12 @@ impl SnapshotTree {
         }
 
         self.children.remove(&id);
-        // The snapshot is guaranteed to exist since we checked above.
-        Ok(self
-            .snapshots
+        // The removal *is* the existence check. It was written as a check
+        // earlier in the function followed by an `expect` here, which is two
+        // lookups that have to agree -- and a panic if they ever stop agreeing.
+        self.snapshots
             .remove(&id)
-            .expect("snapshot was verified to exist"))
+            .ok_or(SnapshotError::NotFound(id))
     }
 
     /// Get a snapshot by ID.
@@ -568,7 +588,9 @@ impl SnapshotTree {
             .values()
             .map(|s| (s.timestamp, s.id))
             .collect();
-        ids.sort();
+        // Unstable: the key is `(timestamp, id)` and ids are unique, so no
+        // two elements compare equal and there is no order to preserve.
+        ids.sort_unstable();
         ids.into_iter().map(|(_, id)| id).collect()
     }
 
@@ -595,12 +617,15 @@ impl SnapshotTree {
     /// unbounded walk over a corrupt tree is not a wrong answer, it is a frozen
     /// application the user has to kill.
     pub fn depth_of(&self, id: u64) -> usize {
-        let mut depth = 0;
+        let mut depth = 0usize;
         let mut current = id;
         for _ in 0..self.snapshots.len() {
             match self.snapshots.get(&current).and_then(|s| s.parent_id) {
                 Some(pid) => {
-                    depth += 1;
+                    // Bounded by the loop, which runs at most once per
+                    // snapshot; saturating anyway, because the bound is a
+                    // property of the caller rather than of this line.
+                    depth = depth.saturating_add(1);
                     current = pid;
                 }
                 None => break,
@@ -641,7 +666,7 @@ impl SnapshotTree {
         result.push((id, depth));
         if let Some(kids) = self.children.get(&id) {
             for &kid_id in kids {
-                self.flatten_subtree(kid_id, depth + 1, result);
+                self.flatten_subtree(kid_id, depth.saturating_add(1), result);
             }
         }
     }
@@ -1033,7 +1058,9 @@ impl RetentionPolicy {
                 .filter(|(id, _, _, locked)| !locked && !to_delete.contains(id))
                 .collect();
             if non_deleted.len() > self.max_count {
-                let excess = non_deleted.len() - self.max_count;
+                // The `>` above is the guard; `saturating_sub` states it in the
+                // arithmetic rather than one line away from it.
+                let excess = non_deleted.len().saturating_sub(self.max_count);
                 // Delete the oldest excess snapshots.
                 for &(id, _, _, _) in non_deleted.iter().take(excess) {
                     if !to_delete.contains(id) {
@@ -1212,7 +1239,7 @@ impl StorageStats {
         Self {
             total_bytes: total,
             snapshot_count: count,
-            avg_bytes_per_snapshot: if count > 0 { total / count as u64 } else { 0 },
+            avg_bytes_per_snapshot: total.checked_div(count as u64).unwrap_or(0),
             largest_snapshot_bytes: largest,
             smallest_snapshot_bytes: if smallest == u64::MAX { 0 } else { smallest },
             manual_bytes: manual,
@@ -1670,7 +1697,7 @@ impl SnapshotManager {
                 && !snap.locked
                 && now.saturating_sub(snap.timestamp) > 30 * 86_400
             {
-                old_auto_count += 1;
+                old_auto_count = old_auto_count.saturating_add(1);
             }
         }
         if old_auto_count > 0 {
@@ -1915,6 +1942,46 @@ pub enum DialogKind {
 // SystemRestoreUI
 // ============================================================================
 
+/// A control in the toolbar, and what pressing it does.
+///
+/// One law, two callers: [`SystemRestoreUI::toolbar_controls`] is what the
+/// renderer draws and what the pointer hit-tests. Until it existed the renderer
+/// walked private `tab_x` and `btn_x` accumulators, so nothing outside it knew
+/// where the five view tabs or the four action buttons were -- and this program
+/// had no pointer handling of any kind to want to know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolbarControl {
+    /// Switch to a view.
+    Tab(ViewMode),
+    /// Open the new-snapshot form.
+    Create,
+    /// Ask to restore the selected snapshot.
+    Restore,
+    /// Ask to delete the selected snapshot.
+    Delete,
+    /// Open the export dialog.
+    Export,
+}
+
+/// Which text field of the new-snapshot form has the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FormField {
+    /// The snapshot's name.
+    #[default]
+    Name,
+    /// Its description.
+    Description,
+}
+
+/// A button along the bottom of a dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogButton {
+    /// Go through with whatever the dialog is asking about.
+    Confirm,
+    /// Close the dialog and do nothing.
+    Cancel,
+}
+
 /// Main application UI state for the system restore manager.
 pub struct SystemRestoreUI {
     /// The snapshot manager.
@@ -1947,8 +2014,25 @@ pub struct SystemRestoreUI {
     pub form_parent_id: Option<u64>,
     /// Current simulated timestamp for demo purposes.
     pub current_timestamp: u64,
-    /// Hovered button index for highlighting.
-    pub hovered_button: Option<usize>,
+    /// Which form field the keyboard is typing into.
+    pub form_field: FormField,
+    /// The remaining frames of a running operation.
+    ///
+    /// `OperationProgress::simulate_create` and `simulate_restore` each return
+    /// the whole filmstrip at once; the tick shows one frame per step. Neither
+    /// had a caller, so the progress overlay -- which the renderer draws in
+    /// full, with a bar and a step name -- could never appear.
+    pub pending_steps: std::collections::VecDeque<OperationProgress>,
+    /// How wide the window is, in pixels.
+    ///
+    /// Every layout in this file used the `WINDOW_WIDTH` constant directly, so
+    /// the program drew a 1050x700 picture whatever size window it was given:
+    /// widen it and the status bar stopped short of the edge, narrow it and the
+    /// action buttons hung off the side. The constants are the size the window
+    /// asks for; these two are the size it got.
+    pub window_width: f32,
+    /// How tall the window is, in pixels.
+    pub window_height: f32,
 }
 
 impl SystemRestoreUI {
@@ -2049,48 +2133,16 @@ impl SystemRestoreUI {
             form_type: SnapshotType::Manual,
             form_parent_id: None,
             current_timestamp: base_ts + 86_400 * 25,
-            hovered_button: None,
+            form_field: FormField::Name,
+            pending_steps: std::collections::VecDeque::new(),
+            window_width: WINDOW_WIDTH,
+            window_height: WINDOW_HEIGHT,
         }
     }
 
     /// Get the list of visible snapshot IDs based on current filters.
     pub fn visible_ids(&self) -> Vec<u64> {
-        let all_ids = if self.view_mode == ViewMode::Timeline {
-            self.manager.tree.all_ids_by_timestamp()
-        } else {
-            self.manager
-                .tree
-                .flatten_for_display()
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect()
-        };
-
-        all_ids
-            .into_iter()
-            .filter(|&id| {
-                if let Some(snap) = self.manager.tree.get_snapshot(id) {
-                    // Apply type filter.
-                    if let Some(filter_type) = self.type_filter
-                        && snap.snapshot_type != filter_type
-                    {
-                        return false;
-                    }
-                    // Apply search query.
-                    if !self.search_query.is_empty() {
-                        let q = self.search_query.to_ascii_lowercase();
-                        if !snap.name.to_ascii_lowercase().contains(&q)
-                            && !snap.description.to_ascii_lowercase().contains(&q)
-                        {
-                            return false;
-                        }
-                    }
-                    true
-                } else {
-                    false
-                }
-            })
-            .collect()
+        self.visible_rows().into_iter().map(|(id, _)| id).collect()
     }
 
     /// Estimated size for the new snapshot form based on selected components.
@@ -2117,15 +2169,19 @@ impl SystemRestoreUI {
     }
 
     /// Render the complete UI to a render tree.
-    pub fn render(&self) -> RenderTree {
+    /// Draw the whole window.
+    ///
+    /// Not `render`: [`App::render`] is the one the window calls, and an
+    /// inherent method of the same name shadows a trait method at equal arity.
+    pub fn render_tree(&self) -> RenderTree {
         let mut rt = RenderTree::new();
 
         // Background.
         rt.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
+            width: self.window_width,
+            height: self.window_height,
             color: COLOR_BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -2147,13 +2203,806 @@ impl SystemRestoreUI {
         rt
     }
 
+    /// Every snapshot the current view shows, with its depth in the tree.
+    ///
+    /// The filter -- the type filter and the search box -- is stated here and
+    /// nowhere else. The tree view carried a second copy of it inline, which is
+    /// the arrangement where one view starts disagreeing with the other about
+    /// what the search box means; and the keyboard needs the same list to know
+    /// what "the next snapshot" is.
+    ///
+    /// Depth is zero in the timeline view, which is a flat chronology and has
+    /// no parent-child indentation to express.
+    pub fn visible_rows(&self) -> Vec<(u64, usize)> {
+        let all: Vec<(u64, usize)> = if self.view_mode == ViewMode::Timeline {
+            self.manager
+                .tree
+                .all_ids_by_timestamp()
+                .into_iter()
+                .map(|id| (id, 0))
+                .collect()
+        } else {
+            self.manager.tree.flatten_for_display()
+        };
+
+        all.into_iter()
+            .filter(|&(id, _)| self.passes_filters(id))
+            .collect()
+    }
+
+    /// Whether a snapshot survives the type filter and the search box.
+    fn passes_filters(&self, id: u64) -> bool {
+        let Some(snap) = self.manager.tree.get_snapshot(id) else {
+            return false;
+        };
+        if let Some(filter_type) = self.type_filter
+            && snap.snapshot_type != filter_type
+        {
+            return false;
+        }
+        if self.search_query.is_empty() {
+            return true;
+        }
+        let q = self.search_query.to_ascii_lowercase();
+        snap.name.to_ascii_lowercase().contains(&q)
+            || snap.description.to_ascii_lowercase().contains(&q)
+    }
+
+    /// The top of the content area, below the header and the toolbar.
+    fn content_top(&self) -> f32 {
+        HEADER_HEIGHT + TOOLBAR_HEIGHT
+    }
+
+    /// How tall one row of the list is in the current view.
+    fn row_height(&self) -> f32 {
+        if self.view_mode == ViewMode::Timeline {
+            TIMELINE_ENTRY_HEIGHT
+        } else {
+            TREE_ROW_HEIGHT
+        }
+    }
+
+    /// Where each visible snapshot's row is drawn, and which snapshot it is.
+    ///
+    /// Rows scrolled out of the content area are left out rather than returned
+    /// with an off-screen rectangle: a click cannot land on them, and returning
+    /// them would make the hit test's answer depend on a clip it cannot see.
+    pub fn row_rects(&self) -> Vec<(Rect, u64)> {
+        let top = self.content_top();
+        let bottom = self.window_height - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
+        let height = self.row_height();
+        let first_y = if self.view_mode == ViewMode::Timeline {
+            top + PADDING
+        } else {
+            top + SMALL_PADDING
+        };
+
+        let mut out = Vec::new();
+        for (index, (id, _)) in self.visible_rows().into_iter().enumerate() {
+            let y = first_y + index as f32 * height - self.scroll_offset;
+            if y + height <= top || y >= bottom {
+                continue;
+            }
+            out.push((
+                Rect::new(PADDING, y, self.window_width - 2.0 * PADDING, height),
+                id,
+            ));
+        }
+        out
+    }
+
+    /// Where every toolbar control is drawn, and what it does.
+    pub fn toolbar_controls(&self) -> Vec<(Rect, ToolbarControl)> {
+        let toolbar_y = HEADER_HEIGHT;
+        let mut out = Vec::with_capacity(9);
+
+        let mut tab_x = PADDING;
+        for mode in ViewMode::all() {
+            out.push((
+                Rect::new(tab_x, toolbar_y + 5.0, 80.0, TOOLBAR_HEIGHT - 10.0),
+                ToolbarControl::Tab(*mode),
+            ));
+            tab_x += 84.0;
+        }
+
+        let actions = [
+            ToolbarControl::Create,
+            ToolbarControl::Restore,
+            ToolbarControl::Delete,
+            ToolbarControl::Export,
+        ];
+        let mut btn_x = self.window_width - (actions.len() as f32 * (BUTTON_WIDTH + 8.0)) - PADDING;
+        for action in actions {
+            out.push((
+                Rect::new(btn_x, toolbar_y + 5.0, BUTTON_WIDTH, BUTTON_HEIGHT),
+                action,
+            ));
+            btn_x += BUTTON_WIDTH + 8.0;
+        }
+
+        out
+    }
+
+    /// Where the open dialog's frame is, if one is open.
+    ///
+    /// Every dialog is centred and 480x320 apart from the create form, which is
+    /// taller because it lists the components. The renderer computed those
+    /// numbers five times over; this is the same arithmetic, once, so that a
+    /// click can be told whether it landed on the dialog or on the window
+    /// behind it.
+    pub fn dialog_frame(&self) -> Option<Rect> {
+        let (w, h) = match self.dialog {
+            DialogKind::None => return None,
+            DialogKind::CreateSnapshot => (500.0, 440.0),
+            DialogKind::ConfirmRestore(_) => (420.0, 240.0),
+            DialogKind::ConfirmDelete(_) => (380.0, 180.0),
+            DialogKind::ExportDialog | DialogKind::ImportDialog => (400.0, 200.0),
+        };
+        Some(Rect::new(
+            (self.window_width - w) / 2.0,
+            (self.window_height - h) / 2.0,
+            w,
+            h,
+        ))
+    }
+
+    /// Where the open dialog's buttons are.
+    pub fn dialog_buttons(&self) -> Vec<(Rect, DialogButton)> {
+        let Some(frame) = self.dialog_frame() else {
+            return Vec::new();
+        };
+        // The offsets the five dialogs all draw with: `btn_y = dy + dialog_h -
+        // 40`, cancel at `dialog_w - 220`, confirm at `dialog_w - 112`. Written
+        // out here rather than derived from `PADDING`, because the numbers a
+        // click has to match are the numbers the renderer used.
+        let y = frame.y + frame.h - 40.0;
+        let cancel_x = frame.x + frame.w - 220.0;
+        let confirm_x = frame.x + frame.w - 112.0;
+        vec![
+            (
+                Rect::new(cancel_x, y, BUTTON_WIDTH, BUTTON_HEIGHT),
+                DialogButton::Cancel,
+            ),
+            (
+                Rect::new(confirm_x, y, BUTTON_WIDTH, BUTTON_HEIGHT),
+                DialogButton::Confirm,
+            ),
+        ]
+    }
+
+    // ====================================================================
+    // Input
+    //
+    // This program had none. It drew five view tabs, four action buttons and
+    // five dialogs, and there was no way to press any of them: no key handler,
+    // no mouse handler, no `handle_event`. Fifteen of its methods -- including
+    // `delete_snapshot`, `simulate_restore`, `check_schedule`,
+    // `apply_retention` and `import_snapshots`, which is most of what it is
+    // for -- had no caller outside the tests.
+    // ====================================================================
+
+    /// Handle one event from the window.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window wider than 16 million pixels does not exist"
+                )]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                EventResult::Consumed
+            }
+            Event::Tick { .. } => self.handle_tick(),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// One step of whatever is running, or one minute of the clock.
+    ///
+    /// The two are separate because they happen at different rates: a running
+    /// operation steps every `PROGRESS_STEP_MS`, and the clock only needs
+    /// re-reading once a minute. `tick_interval` returns whichever is current,
+    /// so this arrives at the right rate for whichever is happening.
+    fn handle_tick(&mut self) -> EventResult {
+        if self.progress.is_some() {
+            return self.advance_operation();
+        }
+        // Re-read rather than added to, so the clock survives a suspend and
+        // does not drift: `Event::Tick` says how long the harness *intended* to
+        // wait, and a laptop that was shut for an hour would otherwise wake up
+        // an hour behind and take an hour to catch up, taking every scheduled
+        // snapshot it had missed one minute apart.
+        let Some(now) = system_now_secs() else {
+            return EventResult::Ignored;
+        };
+        self.tick_to(now)
+    }
+
+    /// What a tick does, given the time. Separate from [`Self::handle_tick`]
+    /// only because a function that reads the wall clock is a function no test
+    /// can pin down.
+    pub fn tick_to(&mut self, now: u64) -> EventResult {
+        if now == self.current_timestamp {
+            return EventResult::Ignored;
+        }
+        self.set_now(now);
+        self.run_schedule(now);
+        EventResult::Consumed
+    }
+
+    /// Take a scheduled snapshot if one is due, and prune by the retention
+    /// policy.
+    ///
+    /// This is the program's whole purpose and nothing called it. A snapshot
+    /// manager with automatic snapshots configured, a retention policy, a
+    /// countdown to the next one on screen, and no clock to run any of it.
+    fn run_schedule(&mut self, now: u64) {
+        // A failure to take a scheduled snapshot is the schedule being
+        // misconfigured -- no components selected -- which the Schedule view
+        // already shows. Retrying every minute and reporting nothing is what
+        // any scheduler does with a job it cannot run.
+        if let Ok(Some(id)) = self.manager.check_schedule(now) {
+            self.selected_id = Some(id);
+        }
+        // After, not before: a snapshot taken this minute must be in the tree
+        // when the retention policy counts how many there are, or a policy of
+        // "keep 5" would keep 5 and then admit a 6th.
+        let pruned = self.manager.apply_retention(now);
+        if self.selected_id.is_some_and(|id| pruned.contains(&id)) {
+            self.selected_id = None;
+        }
+    }
+
+    /// Show the next state of the running operation, or finish it.
+    fn advance_operation(&mut self) -> EventResult {
+        if self.progress.is_none() {
+            return EventResult::Ignored;
+        }
+        // Running out of frames is the end, and it is the *only* end. A test
+        // for `progress.complete` used to stand in front of this, on the theory
+        // that a finished operation should close on the frame that says so --
+        // but the finished frame is the last one in the filmstrip, so the queue
+        // is empty on exactly the tick that check would have fired, and a
+        // mutation that deleted the check changed nothing anyone could see. Two
+        // conditions for one event is one condition that is never the reason.
+        let Some(next) = self.pending_steps.pop_front() else {
+            self.progress = None;
+            return EventResult::Consumed;
+        };
+        self.progress = Some(next);
+        EventResult::Consumed
+    }
+
+    /// Handle a key press.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if self.progress.is_some() {
+            // An operation is running and the window is showing a progress
+            // overlay over everything. Escape abandons it; nothing else reaches
+            // through.
+            if key.key == Key::Escape {
+                self.progress = None;
+                self.pending_steps.clear();
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
+
+        if self.dialog != DialogKind::None {
+            return self.handle_dialog_key(key);
+        }
+
+        if key.modifiers.ctrl {
+            return match key.key {
+                Key::N => {
+                    self.open_create_dialog();
+                    EventResult::Consumed
+                }
+                Key::E => {
+                    self.dialog = DialogKind::ExportDialog;
+                    EventResult::Consumed
+                }
+                Key::I => {
+                    self.dialog = DialogKind::ImportDialog;
+                    EventResult::Consumed
+                }
+                Key::L => {
+                    self.toggle_lock();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+
+        match key.key {
+            Key::Tab => {
+                self.cycle_view(if key.modifiers.shift { -1 } else { 1 });
+                EventResult::Consumed
+            }
+            Key::Up => {
+                self.move_selection(-1);
+                EventResult::Consumed
+            }
+            Key::Down => {
+                self.move_selection(1);
+                EventResult::Consumed
+            }
+            Key::Home => {
+                self.select_at(0);
+                EventResult::Consumed
+            }
+            Key::End => {
+                let rows = self.visible_rows();
+                self.select_at(rows.len().saturating_sub(1));
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                if let Some(id) = self.selected_id {
+                    self.dialog = DialogKind::ConfirmRestore(id);
+                }
+                EventResult::Consumed
+            }
+            Key::Delete => {
+                if let Some(id) = self.selected_id {
+                    self.dialog = DialogKind::ConfirmDelete(id);
+                }
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                self.search_query.pop();
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                // The search box is the only thing Escape can clear here, and
+                // clearing it is the only way to get back to the whole list
+                // once a query has hidden most of it.
+                if self.search_query.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.search_query.clear();
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            _ => {
+                let typed: String = key.typed().collect();
+                if typed.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.search_query.push_str(&typed);
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Keys while a dialog is open.
+    fn handle_dialog_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.dialog = DialogKind::None;
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.confirm_dialog();
+                EventResult::Consumed
+            }
+            Key::Tab if self.dialog == DialogKind::CreateSnapshot => {
+                self.form_field = match self.form_field {
+                    FormField::Name => FormField::Description,
+                    FormField::Description => FormField::Name,
+                };
+                EventResult::Consumed
+            }
+            Key::Backspace if self.dialog == DialogKind::CreateSnapshot => {
+                self.form_text_mut().pop();
+                EventResult::Consumed
+            }
+            _ if self.dialog == DialogKind::CreateSnapshot && !key.modifiers.ctrl => {
+                let typed: String = key.typed().collect();
+                if typed.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.form_text_mut().push_str(&typed);
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Handle a mouse event.
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        match mouse.kind {
+            MouseEventKind::Press(MouseButton::Left) => self.handle_click(mouse.x, mouse.y),
+            MouseEventKind::Scroll { dy, .. } => {
+                // The toolkit's own notch-to-pixel conversion, scaled by the
+                // row height of whichever view is showing, so the wheel travels
+                // the same three rows here as it does over any other list --
+                // and the same distance on the timeline, whose rows are taller.
+                self.scroll_by(guitk::wheel::pixels(dy, self.row_height()));
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Handle a left click.
+    fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
+        // A progress overlay covers the window: nothing behind it can be
+        // clicked, and it has no buttons of its own.
+        if self.progress.is_some() {
+            return EventResult::Consumed;
+        }
+
+        if let Some(frame) = self.dialog_frame() {
+            if frame.contains(x, y) {
+                if let Some(button) = self
+                    .dialog_buttons()
+                    .into_iter()
+                    .find(|(rect, _)| rect.contains(x, y))
+                    .map(|(_, button)| button)
+                {
+                    match button {
+                        DialogButton::Confirm => self.confirm_dialog(),
+                        DialogButton::Cancel => self.dialog = DialogKind::None,
+                    }
+                }
+                return EventResult::Consumed;
+            }
+            // A click outside a modal dialog dismisses it, and does not also
+            // reach the window behind: the whole point of the dimmed backdrop
+            // the renderer draws is that it is in the way.
+            self.dialog = DialogKind::None;
+            return EventResult::Consumed;
+        }
+
+        if let Some(control) = self
+            .toolbar_controls()
+            .into_iter()
+            .find(|(rect, _)| rect.contains(x, y))
+            .map(|(_, control)| control)
+        {
+            self.apply_toolbar_control(control);
+            return EventResult::Consumed;
+        }
+        // The toolbar band is claimed even between controls, so a click on the
+        // strip does not fall through to the list underneath it.
+        if y >= HEADER_HEIGHT && y < HEADER_HEIGHT + TOOLBAR_HEIGHT {
+            return EventResult::Consumed;
+        }
+
+        if let Some(id) = self
+            .row_rects()
+            .into_iter()
+            .find(|(rect, _)| rect.contains(x, y))
+            .map(|(_, id)| id)
+        {
+            // A second click on the already-selected snapshot picks it as the
+            // other side of a comparison, which is the only way to fill
+            // `compare_id` -- the Compare view had no way to be given two
+            // snapshots and drew an empty frame for ever.
+            if self.selected_id == Some(id) {
+                self.compare_id = if self.compare_id == Some(id) {
+                    None
+                } else {
+                    Some(id)
+                };
+            } else {
+                self.selected_id = Some(id);
+            }
+            return EventResult::Consumed;
+        }
+
+        EventResult::Ignored
+    }
+
+    /// Do what a toolbar control says.
+    fn apply_toolbar_control(&mut self, control: ToolbarControl) {
+        match control {
+            ToolbarControl::Tab(mode) => {
+                self.view_mode = mode;
+                // The two views measure their rows differently, so an offset
+                // carried across is a different number of rows down.
+                self.scroll_offset = 0.0;
+            }
+            ToolbarControl::Create => self.open_create_dialog(),
+            ToolbarControl::Restore => {
+                if let Some(id) = self.selected_id {
+                    self.dialog = DialogKind::ConfirmRestore(id);
+                }
+            }
+            ToolbarControl::Delete => {
+                if let Some(id) = self.selected_id {
+                    self.dialog = DialogKind::ConfirmDelete(id);
+                }
+            }
+            ToolbarControl::Export => self.dialog = DialogKind::ExportDialog,
+        }
+    }
+
+    /// Go through with whatever the open dialog is asking about.
+    fn confirm_dialog(&mut self) {
+        match self.dialog {
+            DialogKind::None => return,
+            DialogKind::CreateSnapshot => self.begin_create(),
+            DialogKind::ConfirmRestore(id) => self.begin_restore(id),
+            DialogKind::ConfirmDelete(id) => self.delete(id),
+            DialogKind::ExportDialog | DialogKind::ImportDialog => {
+                // Both need a file, and this program has no file dialog. See
+                // `known-issues.md` ->
+                // `TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`:
+                // `export_snapshots` and `import_snapshots` work on a string
+                // and there is nowhere for one to come from or go. Closing the
+                // dialog is honest; pretending to write a file would not be.
+            }
+        }
+        self.dialog = DialogKind::None;
+    }
+
+    /// Start creating a snapshot from the form.
+    fn begin_create(&mut self) {
+        let components = self.form_selected_components();
+        if components.is_empty() {
+            // Nothing to snapshot. The form shows the estimated size as zero,
+            // which is the same statement.
+            return;
+        }
+        let mut states = OperationProgress::simulate_create(&components).into_iter();
+        let Some(first) = states.next() else {
+            return;
+        };
+        self.progress = Some(first);
+        self.pending_steps = states.collect();
+
+        let name = if self.form_name.trim().is_empty() {
+            format!("Snapshot {}", self.manager.tree.count().saturating_add(1))
+        } else {
+            self.form_name.clone()
+        };
+        if let Ok(id) = self.manager.create_snapshot(
+            &name,
+            &self.form_description,
+            self.current_timestamp,
+            self.form_type,
+            components,
+            self.form_parent_id,
+        ) {
+            self.selected_id = Some(id);
+        }
+    }
+
+    /// Start restoring a snapshot.
+    fn begin_restore(&mut self, id: u64) {
+        let Some(snap) = self.manager.tree.get_snapshot(id) else {
+            return;
+        };
+        let mut states = OperationProgress::simulate_restore(snap).into_iter();
+        let Some(first) = states.next() else {
+            return;
+        };
+        self.progress = Some(first);
+        self.pending_steps = states.collect();
+        self.selected_id = Some(id);
+    }
+
+    /// Delete a snapshot, and leave the selection somewhere real.
+    fn delete(&mut self, id: u64) {
+        if self.manager.delete_snapshot(id).is_err() {
+            // Locked, or the root of a tree with children. The lock is shown on
+            // the row and the error is what the lock is for.
+            return;
+        }
+        if self.selected_id == Some(id) {
+            self.selected_id = None;
+        }
+        if self.compare_id == Some(id) {
+            self.compare_id = None;
+        }
+        self.reanchor_selection();
+    }
+
+    /// Lock or unlock the selected snapshot.
+    ///
+    /// A locked snapshot cannot be deleted or pruned by the retention policy,
+    /// which is what the padlock on the row means. `unlock_snapshot` had no
+    /// caller, so a snapshot locked by anything was locked for ever.
+    fn toggle_lock(&mut self) {
+        let Some(id) = self.selected_id else {
+            return;
+        };
+        let locked = self
+            .manager
+            .tree
+            .get_snapshot(id)
+            .is_some_and(|snap| snap.locked);
+        let result = if locked {
+            self.manager.tree.unlock_snapshot(id)
+        } else {
+            self.manager.tree.lock_snapshot(id)
+        };
+        // Both fail only for an id that is not in the tree, which the line
+        // above has just established is not the case.
+        debug_assert!(result.is_ok(), "the id came from the tree");
+        drop(result);
+    }
+
+    /// Open the new-snapshot form, aimed at the selected snapshot.
+    fn open_create_dialog(&mut self) {
+        self.dialog = DialogKind::CreateSnapshot;
+        self.form_field = FormField::Name;
+        self.form_name.clear();
+        self.form_description.clear();
+        // Branching from what is selected, which is what makes the tree a tree.
+        // Left at `None` the form always added another root, and the branching
+        // this program is built around could not be reached.
+        self.form_parent_id = self.selected_id;
+    }
+
+    /// Move through the views. `delta` is in tabs, and it wraps.
+    fn cycle_view(&mut self, delta: isize) {
+        let modes = ViewMode::all();
+        let count = modes.len();
+        let current = modes.iter().position(|m| *m == self.view_mode).unwrap_or(0);
+        // `rem_euclid` so that going back from the first view lands on the
+        // last rather than on a negative index.
+        // Every one of these is bounded by `modes.len()`, which is 5, so the
+        // arithmetic cannot overflow -- but saying so in the operators is
+        // cheaper than a comment nobody re-checks.
+        let next = (current as isize)
+            .saturating_add(delta)
+            .rem_euclid(count as isize);
+        if let Some(mode) = modes.get(next.unsigned_abs()) {
+            self.view_mode = *mode;
+            self.scroll_offset = 0.0;
+        }
+    }
+
+    /// Move the selection by `delta` rows through what is on screen.
+    fn move_selection(&mut self, delta: isize) {
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            self.selected_id = None;
+            return;
+        }
+        // `rows` is non-empty -- the branch above returned -- so there is a
+        // last index and it is not negative.
+        let last = (rows.len() as isize).saturating_sub(1);
+        let current = self
+            .selected_id
+            .and_then(|id| rows.iter().position(|(row_id, _)| *row_id == id));
+        let next = match current {
+            // Stopping at the ends rather than wrapping: a list that jumps from
+            // the last snapshot to the first is one the user has to notice.
+            Some(index) => (index as isize).saturating_add(delta).clamp(0, last),
+            // Nothing selected: the first row for a downward move, the last for
+            // an upward one, so both keys reach the list from outside it.
+            None if delta < 0 => last,
+            None => 0,
+        };
+        self.select_at(next.unsigned_abs());
+    }
+
+    /// Select the `index`th visible row, and scroll it into view.
+    fn select_at(&mut self, index: usize) {
+        let rows = self.visible_rows();
+        let Some((id, _)) = rows.get(index) else {
+            return;
+        };
+        self.selected_id = Some(*id);
+        self.scroll_row_into_view(index);
+    }
+
+    /// Keep the selection on a snapshot that is still on screen.
+    ///
+    /// Called after anything that changes what is visible -- a search, a
+    /// deletion, a retention sweep. Selection is held as an id rather than an
+    /// index for exactly this reason: an index into a list that has just been
+    /// re-filtered names a different snapshot than it did a moment ago.
+    fn reanchor_selection(&mut self) {
+        let rows = self.visible_rows();
+        if self
+            .selected_id
+            .is_some_and(|id| rows.iter().any(|(row_id, _)| *row_id == id))
+        {
+            return;
+        }
+        self.selected_id = rows.first().map(|(id, _)| *id);
+        self.scroll_offset = 0.0;
+    }
+
+    /// Scroll so that the `index`th row is inside the content area.
+    fn scroll_row_into_view(&mut self, index: usize) {
+        let height = self.row_height();
+        let viewport =
+            self.window_height - self.content_top() - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
+        let row_top = index as f32 * height;
+        let row_bottom = row_top + height;
+        if row_top < self.scroll_offset {
+            self.scroll_offset = row_top;
+        } else if row_bottom > self.scroll_offset + viewport {
+            self.scroll_offset = row_bottom - viewport;
+        }
+        self.clamp_scroll();
+    }
+
+    /// Scroll the list, keeping the offset inside its range.
+    fn scroll_by(&mut self, delta: f32) {
+        self.scroll_offset += delta;
+        self.clamp_scroll();
+    }
+
+    /// Keep the scroll offset between zero and the last screenful.
+    fn clamp_scroll(&mut self) {
+        let viewport =
+            self.window_height - self.content_top() - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
+        let content = self.visible_rows().len() as f32 * self.row_height();
+        // `max(0.0)` before the clamp: a list shorter than the viewport has a
+        // negative maximum, and clamping to a negative upper bound is the one
+        // shape `clamp` panics on.
+        let max = (content - viewport).max(0.0);
+        self.scroll_offset = self.scroll_offset.clamp(0.0, max);
+    }
+
+    /// The form field the keyboard is typing into.
+    fn form_text_mut(&mut self) -> &mut String {
+        match self.form_field {
+            FormField::Name => &mut self.form_name,
+            FormField::Description => &mut self.form_description,
+        }
+    }
+
+    /// Move the sample timeline so that it ends where it was designed to, just
+    /// before `now`.
+    ///
+    /// The samples are laid out against a fixed origin -- November 2023 -- so
+    /// that tests can name exact instants, and `current_timestamp` was that
+    /// origin plus 25 days. Nothing ever moved it. Every age on screen ("3 days
+    /// ago"), every countdown in the schedule view ("next in 4h"), and every
+    /// cleanup suggestion was measured against a constant, so none of them
+    /// could change and all of them were fiction.
+    ///
+    /// Anchoring shifts every snapshot by the same amount, which preserves the
+    /// intervals *between* them -- the tree's shape, the ages relative to one
+    /// another, the schedule's spacing -- while putting the newest one 25 days
+    /// behind today rather than 25 days behind a date three years past. The
+    /// alternative, leaving the samples in 2023 and setting only the clock,
+    /// would be equally truthful and would open on a screen where everything is
+    /// years old and every scheduled snapshot is years overdue.
+    ///
+    /// Kept out of `new` so that `new` stays deterministic: a constructor that
+    /// reads the wall clock is a constructor no test can assert against.
+    pub fn anchor_to(&mut self, now: u64) {
+        let origin = self.current_timestamp;
+        for id in self.manager.tree.all_ids_by_timestamp() {
+            if let Some(snap) = self.manager.tree.get_snapshot_mut(id) {
+                snap.timestamp = shift(snap.timestamp, origin, now);
+            }
+        }
+        // The schedule's clock moves with the snapshots it made, or the next
+        // automatic snapshot would be three years overdue the moment the
+        // window opened.
+        self.manager.schedule.last_snapshot_timestamp =
+            shift(self.manager.schedule.last_snapshot_timestamp, origin, now);
+        self.current_timestamp = now;
+    }
+
+    /// Advance the clock. Called from the tick, and it is the whole of what the
+    /// tick does when no operation is running.
+    pub fn set_now(&mut self, now: u64) {
+        self.current_timestamp = now;
+    }
+
     /// Render the header bar.
     fn render_header(&self, rt: &mut RenderTree) {
         // Header background.
         rt.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: HEADER_HEIGHT,
             color: COLOR_MANTLE,
             corner_radii: CornerRadii::ZERO,
@@ -2193,7 +3042,7 @@ impl SystemRestoreUI {
         });
 
         // Search box.
-        let search_x = WINDOW_WIDTH - 260.0;
+        let search_x = self.window_width - 260.0;
         rt.push(RenderCommand::FillRect {
             x: search_x,
             y: HEADER_HEIGHT / 2.0 - 14.0,
@@ -2227,7 +3076,7 @@ impl SystemRestoreUI {
         rt.push(RenderCommand::Line {
             x1: 0.0,
             y1: HEADER_HEIGHT,
-            x2: WINDOW_WIDTH,
+            x2: self.window_width,
             y2: HEADER_HEIGHT,
             color: COLOR_SURFACE0,
             width: 1.0,
@@ -2242,7 +3091,7 @@ impl SystemRestoreUI {
         rt.push(RenderCommand::FillRect {
             x: 0.0,
             y: toolbar_y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: TOOLBAR_HEIGHT,
             color: COLOR_MANTLE,
             corner_radii: CornerRadii::ZERO,
@@ -2305,7 +3154,7 @@ impl SystemRestoreUI {
             ("Delete", COLOR_RED),
             ("Export", COLOR_PEACH),
         ];
-        let mut btn_x = WINDOW_WIDTH - (actions.len() as f32 * (BUTTON_WIDTH + 8.0)) - PADDING;
+        let mut btn_x = self.window_width - (actions.len() as f32 * (BUTTON_WIDTH + 8.0)) - PADDING;
         for (label, color) in &actions {
             rt.push(RenderCommand::FillRect {
                 x: btn_x,
@@ -2337,7 +3186,7 @@ impl SystemRestoreUI {
         rt.push(RenderCommand::Line {
             x1: 0.0,
             y1: toolbar_y + TOOLBAR_HEIGHT,
-            x2: WINDOW_WIDTH,
+            x2: self.window_width,
             y2: toolbar_y + TOOLBAR_HEIGHT,
             color: COLOR_SURFACE0,
             width: 1.0,
@@ -2347,13 +3196,14 @@ impl SystemRestoreUI {
     /// Render the main content area based on current view mode.
     fn render_main_area(&self, rt: &mut RenderTree) {
         let content_y = HEADER_HEIGHT + TOOLBAR_HEIGHT;
-        let content_height = WINDOW_HEIGHT - content_y - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
+        let content_height =
+            self.window_height - content_y - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
 
         // Clip to content area.
         rt.push(RenderCommand::PushClip {
             x: 0.0,
             y: content_y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: content_height,
         });
 
@@ -2370,26 +3220,17 @@ impl SystemRestoreUI {
 
     /// Render the tree view with connection lines and indentation.
     fn render_tree_view(&self, rt: &mut RenderTree, y: f32, _height: f32) {
-        let flattened = self.manager.tree.flatten_for_display();
+        // `visible_rows`, not a second copy of the filter. This function used to
+        // flatten the tree itself and re-implement the type filter and the
+        // search inline, which is the arrangement where the tree view and the
+        // timeline start disagreeing about what the search box means -- and
+        // where a click cannot be told which row it landed on, because the list
+        // of rows existed only inside this loop.
+        let flattened = self.visible_rows();
         let mut row_y = y + SMALL_PADDING - self.scroll_offset;
 
         for (id, depth) in &flattened {
             if let Some(snap) = self.manager.tree.get_snapshot(*id) {
-                // Apply filters.
-                if let Some(ft) = self.type_filter
-                    && snap.snapshot_type != ft
-                {
-                    continue;
-                }
-                if !self.search_query.is_empty() {
-                    let q = self.search_query.to_ascii_lowercase();
-                    if !snap.name.to_ascii_lowercase().contains(&q)
-                        && !snap.description.to_ascii_lowercase().contains(&q)
-                    {
-                        continue;
-                    }
-                }
-
                 let indent = *depth as f32 * TREE_INDENT;
                 let is_selected = self.selected_id == Some(*id);
 
@@ -2398,7 +3239,7 @@ impl SystemRestoreUI {
                     rt.push(RenderCommand::FillRect {
                         x: PADDING,
                         y: row_y,
-                        width: WINDOW_WIDTH - 2.0 * PADDING,
+                        width: self.window_width - 2.0 * PADDING,
                         height: TREE_ROW_HEIGHT,
                         color: COLOR_SURFACE0,
                         corner_radii: CornerRadii::all(4.0),
@@ -2481,7 +3322,7 @@ impl SystemRestoreUI {
 
                 // Lock indicator.
                 if snap.locked {
-                    let lock_x = WINDOW_WIDTH - 60.0;
+                    let lock_x = self.window_width - 60.0;
                     rt.push(RenderCommand::Text {
                         x: lock_x,
                         y: row_y + TREE_ROW_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
@@ -2497,7 +3338,7 @@ impl SystemRestoreUI {
                 // Children count indicator.
                 let kids = self.manager.tree.children_of(*id);
                 if !kids.is_empty() {
-                    let branch_x = WINDOW_WIDTH - 120.0;
+                    let branch_x = self.window_width - 120.0;
                     rt.push(RenderCommand::Text {
                         x: branch_x,
                         y: row_y + TREE_ROW_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
@@ -2517,7 +3358,7 @@ impl SystemRestoreUI {
 
     /// Render the timeline view with chronological entries and type dots.
     fn render_timeline_view(&self, rt: &mut RenderTree, y: f32, _height: f32) {
-        let ids = self.visible_ids();
+        let ids: Vec<u64> = self.visible_rows().into_iter().map(|(id, _)| id).collect();
         // The gutter left of the timeline line holds each snapshot's date. It
         // was 60px wide because the date it held was `D20683` — a day count
         // from the epoch. A real `2026-08-18` needs about 66px at
@@ -2549,7 +3390,7 @@ impl SystemRestoreUI {
                     rt.push(RenderCommand::FillRect {
                         x: timeline_x + 20.0,
                         y: entry_y,
-                        width: WINDOW_WIDTH - timeline_x - 40.0,
+                        width: self.window_width - timeline_x - 40.0,
                         height: TIMELINE_ENTRY_HEIGHT - 4.0,
                         color: COLOR_SURFACE0,
                         corner_radii: CornerRadii::all(4.0),
@@ -2626,7 +3467,7 @@ impl SystemRestoreUI {
     /// Render the compare view showing differences between two snapshots.
     fn render_compare_view(&self, rt: &mut RenderTree, y: f32, height: f32) {
         let panel_x = PADDING;
-        let panel_width = WINDOW_WIDTH - 2.0 * PADDING;
+        let panel_width = self.window_width - 2.0 * PADDING;
 
         rt.push(RenderCommand::Text {
             x: panel_x,
@@ -2703,7 +3544,7 @@ impl SystemRestoreUI {
     /// Render the schedule configuration view.
     fn render_schedule_view(&self, rt: &mut RenderTree, y: f32, _height: f32) {
         let panel_x = PADDING;
-        let panel_width = WINDOW_WIDTH - 2.0 * PADDING;
+        let panel_width = self.window_width - 2.0 * PADDING;
         let schedule = &self.manager.schedule;
 
         rt.push(RenderCommand::Text {
@@ -2821,7 +3662,7 @@ impl SystemRestoreUI {
     /// Render the storage management view.
     fn render_storage_view(&self, rt: &mut RenderTree, y: f32, _height: f32) {
         let panel_x = PADDING;
-        let panel_width = WINDOW_WIDTH - 2.0 * PADDING;
+        let panel_width = self.window_width - 2.0 * PADDING;
         let stats = self.manager.storage_stats();
 
         rt.push(RenderCommand::Text {
@@ -2984,13 +3825,13 @@ impl SystemRestoreUI {
 
     /// Render the details panel at the bottom.
     fn render_details_panel(&self, rt: &mut RenderTree) {
-        let panel_y = WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
+        let panel_y = self.window_height - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
 
         // Separator line.
         rt.push(RenderCommand::Line {
             x1: 0.0,
             y1: panel_y,
-            x2: WINDOW_WIDTH,
+            x2: self.window_width,
             y2: panel_y,
             color: COLOR_SURFACE0,
             width: 1.0,
@@ -3000,7 +3841,7 @@ impl SystemRestoreUI {
         rt.push(RenderCommand::FillRect {
             x: 0.0,
             y: panel_y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: DETAILS_PANEL_HEIGHT,
             color: COLOR_MANTLE,
             corner_radii: CornerRadii::ZERO,
@@ -3020,7 +3861,7 @@ impl SystemRestoreUI {
     /// Render snapshot detail info in the details panel.
     fn render_snapshot_details(&self, rt: &mut RenderTree, snap: &Snapshot, panel_y: f32) {
         let col1_x = PADDING;
-        let col2_x = WINDOW_WIDTH / 2.0;
+        let col2_x = self.window_width / 2.0;
         let mut y = panel_y + PADDING;
 
         // Name and type.
@@ -3031,7 +3872,7 @@ impl SystemRestoreUI {
             color: COLOR_TEXT,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(WINDOW_WIDTH / 2.0 - PADDING),
+            max_width: Some(self.window_width / 2.0 - PADDING),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -3063,7 +3904,7 @@ impl SystemRestoreUI {
         // bottom, so the wrap is capped (see DESCRIPTION_MAX_LINES) and the
         // cursor advances by the height actually drawn.
         let description_used = text::Paragraph::new(&snap.description, COLOR_SUBTEXT0)
-            .at(col1_x, y, WINDOW_WIDTH - 2.0 * PADDING)
+            .at(col1_x, y, self.window_width - 2.0 * PADDING)
             .font(FONT_SIZE, FontWeightHint::Regular)
             .max_lines(DESCRIPTION_MAX_LINES)
             .draw(rt);
@@ -3130,7 +3971,7 @@ impl SystemRestoreUI {
             color: COLOR_SUBTEXT1,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(WINDOW_WIDTH - col1_x - 90.0),
+            max_width: Some(self.window_width - col1_x - 90.0),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -3207,7 +4048,7 @@ impl SystemRestoreUI {
             // edge, so a deep history ran off the side of the window. Keep the
             // links nearest the selected snapshot and mark the dropped head.
             let widths: Vec<f32> = links.iter().map(|&(_, _, w)| w).collect();
-            let budget = WINDOW_WIDTH - PADDING - cx;
+            let budget = self.window_width - PADDING - cx;
             let first = ancestry_first_visible(&widths, budget);
 
             if first > 0 {
@@ -3276,7 +4117,7 @@ impl SystemRestoreUI {
         rt.push(RenderCommand::Text {
             x: text::center_x(
                 "Select a snapshot to view details",
-                WINDOW_WIDTH / 2.0,
+                self.window_width / 2.0,
                 FONT_SIZE,
                 FontWeightHint::Regular,
             ),
@@ -3292,12 +4133,12 @@ impl SystemRestoreUI {
 
     /// Render the status bar at the bottom.
     fn render_status_bar(&self, rt: &mut RenderTree) {
-        let bar_y = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
+        let bar_y = self.window_height - STATUS_BAR_HEIGHT;
 
         rt.push(RenderCommand::FillRect {
             x: 0.0,
             y: bar_y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: STATUS_BAR_HEIGHT,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii::ZERO,
@@ -3330,7 +4171,7 @@ impl SystemRestoreUI {
         rt.push(RenderCommand::Text {
             x: text::center_x(
                 &storage_text,
-                WINDOW_WIDTH / 2.0,
+                self.window_width / 2.0,
                 FONT_SIZE_SMALL,
                 FontWeightHint::Regular,
             ),
@@ -3353,7 +4194,7 @@ impl SystemRestoreUI {
             "Schedule: Off".to_string()
         };
         rt.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 200.0,
+            x: self.window_width - 200.0,
             y: bar_y + STATUS_BAR_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
             text: schedule_text,
             color: if self.manager.schedule.enabled {
@@ -3374,8 +4215,8 @@ impl SystemRestoreUI {
         rt.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
+            width: self.window_width,
+            height: self.window_height,
             color: Color::rgba(0, 0, 0, 160),
             corner_radii: CornerRadii::ZERO,
         });
@@ -3394,8 +4235,8 @@ impl SystemRestoreUI {
     fn render_create_dialog(&self, rt: &mut RenderTree) {
         let dialog_w = 500.0;
         let dialog_h = 440.0;
-        let dx = (WINDOW_WIDTH - dialog_w) / 2.0;
-        let dy = (WINDOW_HEIGHT - dialog_h) / 2.0;
+        let dx = (self.window_width - dialog_w) / 2.0;
+        let dy = (self.window_height - dialog_h) / 2.0;
 
         // Shadow.
         rt.push(RenderCommand::BoxShadow {
@@ -3623,8 +4464,8 @@ impl SystemRestoreUI {
     fn render_restore_dialog(&self, rt: &mut RenderTree, id: u64) {
         let dialog_w = 420.0;
         let dialog_h = 240.0;
-        let dx = (WINDOW_WIDTH - dialog_w) / 2.0;
-        let dy = (WINDOW_HEIGHT - dialog_h) / 2.0;
+        let dx = (self.window_width - dialog_w) / 2.0;
+        let dy = (self.window_height - dialog_h) / 2.0;
 
         // Background.
         rt.push(RenderCommand::FillRect {
@@ -3768,8 +4609,8 @@ impl SystemRestoreUI {
     fn render_delete_dialog(&self, rt: &mut RenderTree, id: u64) {
         let dialog_w = 380.0;
         let dialog_h = 180.0;
-        let dx = (WINDOW_WIDTH - dialog_w) / 2.0;
-        let dy = (WINDOW_HEIGHT - dialog_h) / 2.0;
+        let dx = (self.window_width - dialog_w) / 2.0;
+        let dy = (self.window_height - dialog_h) / 2.0;
 
         rt.push(RenderCommand::FillRect {
             x: dx,
@@ -3866,8 +4707,8 @@ impl SystemRestoreUI {
     fn render_export_dialog(&self, rt: &mut RenderTree) {
         let dialog_w = 400.0;
         let dialog_h = 200.0;
-        let dx = (WINDOW_WIDTH - dialog_w) / 2.0;
-        let dy = (WINDOW_HEIGHT - dialog_h) / 2.0;
+        let dx = (self.window_width - dialog_w) / 2.0;
+        let dy = (self.window_height - dialog_h) / 2.0;
 
         rt.push(RenderCommand::FillRect {
             x: dx,
@@ -3971,8 +4812,8 @@ impl SystemRestoreUI {
     fn render_import_dialog(&self, rt: &mut RenderTree) {
         let dialog_w = 400.0;
         let dialog_h = 200.0;
-        let dx = (WINDOW_WIDTH - dialog_w) / 2.0;
-        let dy = (WINDOW_HEIGHT - dialog_h) / 2.0;
+        let dx = (self.window_width - dialog_w) / 2.0;
+        let dy = (self.window_height - dialog_h) / 2.0;
 
         rt.push(RenderCommand::FillRect {
             x: dx,
@@ -4077,15 +4918,15 @@ impl SystemRestoreUI {
         if let Some(progress) = &self.progress {
             let overlay_w = 400.0;
             let overlay_h = 140.0;
-            let ox = (WINDOW_WIDTH - overlay_w) / 2.0;
-            let oy = (WINDOW_HEIGHT - overlay_h) / 2.0;
+            let ox = (self.window_width - overlay_w) / 2.0;
+            let oy = (self.window_height - overlay_h) / 2.0;
 
             // Dim background.
             rt.push(RenderCommand::FillRect {
                 x: 0.0,
                 y: 0.0,
-                width: WINDOW_WIDTH,
-                height: WINDOW_HEIGHT,
+                width: self.window_width,
+                height: self.window_height,
                 color: Color::rgba(0, 0, 0, 180),
                 corner_radii: CornerRadii::ZERO,
             });
@@ -4336,12 +5177,111 @@ fn ancestry_first_visible(name_widths: &[f32], budget: f32) -> usize {
 // main
 // ============================================================================
 
-fn main() {
-    let ui = SystemRestoreUI::new();
-    let rt = ui.render();
-    // In the real OS, the render tree would be sent to the compositor.
-    // For now just confirm it produced output.
-    let _ = rt.len();
+/// `t`, moved by the same amount that carries `origin` to `now`.
+///
+/// Saturating in both directions: the shift is normally forwards by about three
+/// years, but a machine whose clock is behind the sample origin shifts
+/// backwards, and a timestamp that would go below zero is clamped rather than
+/// wrapping to the far future -- which would put a snapshot after the ones that
+/// come after it and invert the tree's order on screen.
+fn shift(t: u64, origin: u64, now: u64) -> u64 {
+    // Both differences are guarded by the branch they are in; written
+    // saturating so the guard is in the operator rather than beside it.
+    if now >= origin {
+        t.saturating_add(now.saturating_sub(origin))
+    } else {
+        t.saturating_sub(origin.saturating_sub(now))
+    }
+}
+
+/// The wall clock, in seconds since the epoch.
+///
+/// `None` if the system clock is before 1970 or cannot be read, in which case
+/// the caller keeps the sample timeline's own origin. Refusing to answer is
+/// better than answering zero: an age measured against 1970 reads "56 years
+/// ago" for every snapshot, which looks like data rather than a missing clock.
+fn system_now_secs() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+impl App for SystemRestoreUI {
+    fn title(&self) -> String {
+        // Which snapshot is selected, because that is what every action in the
+        // toolbar acts on and the one thing a user switching windows needs to
+        // see. The harness re-reads this as the program runs.
+        match self
+            .selected_id
+            .and_then(|id| self.manager.tree.get_snapshot(id))
+        {
+            Some(snap) => format!("{} - System Restore", snap.name),
+            None => "System Restore".to_string(),
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        }
+    }
+
+    /// A minute, and this is one of the few applications that genuinely needs
+    /// one.
+    ///
+    /// Three things on screen age without anyone touching the keyboard: every
+    /// snapshot's "3 days ago", the schedule view's countdown to the next
+    /// automatic snapshot, and the storage view's cleanup suggestions, which
+    /// are chosen by age. A minute is the resolution of the coarsest of them --
+    /// `age_display` rounds to minutes -- so a shorter interval would redraw an
+    /// identical frame and a longer one would let a countdown sit visibly
+    /// stale.
+    ///
+    /// The tick also *runs* the schedule. Until it did, `check_schedule` and
+    /// `apply_retention` had no caller anywhere in the program: an application
+    /// whose entire purpose is taking snapshots on a timer, with no timer.
+    fn tick_interval(&self) -> Option<Duration> {
+        // A running operation steps a frame at a time, which is what makes the
+        // progress bar move rather than jump from empty to full.
+        if self.progress.is_some() {
+            Some(PROGRESS_STEP)
+        } else {
+            Some(CLOCK_STEP)
+        }
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // From the frame being drawn rather than the last `Resize`: the
+        // compositor may grant a size nobody asked for, and every hit test in
+        // this file is derived from these two numbers.
+        self.window_width = width;
+        self.window_height = height;
+        self.render_tree()
+    }
+}
+
+fn main() -> ExitCode {
+    let mut ui = SystemRestoreUI::new();
+    if let Some(now) = system_now_secs() {
+        ui.anchor_to(now);
+    }
+    app::launch("systemrestore", &mut ui)
 }
 
 // ============================================================================
@@ -4350,7 +5290,621 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis, not a hazard. The defensive lints
+    // exist to keep panics out of code that runs on a user's data, which this
+    // is not.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Input
+    //
+    // This program had no key handler, no mouse handler and no `handle_event`
+    // at all. Everything below is new ground.
+    // ------------------------------------------------------------------
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn press_ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    fn types(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    fn click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn centre(rect: Rect) -> (f32, f32) {
+        (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
+    }
+
+    // -- the clock --
+
+    /// Every age, every countdown and every cleanup suggestion was measured
+    /// against `current_timestamp`, and nothing ever moved it: it was a
+    /// constant 25 days after a fixed November 2023 origin.
+    #[test]
+    fn anchoring_moves_the_whole_timeline_and_keeps_its_shape() {
+        let mut ui = SystemRestoreUI::new();
+        let before: Vec<(u64, u64)> = ui
+            .manager
+            .tree
+            .all_ids_by_timestamp()
+            .into_iter()
+            .filter_map(|id| ui.manager.tree.get_snapshot(id).map(|s| (id, s.timestamp)))
+            .collect();
+        let origin = ui.current_timestamp;
+
+        let now = origin + 90 * 86_400;
+        ui.anchor_to(now);
+
+        assert_eq!(
+            ui.current_timestamp, now,
+            "the clock should be the one given"
+        );
+        for (id, was) in before {
+            let is = ui
+                .manager
+                .tree
+                .get_snapshot(id)
+                .expect("still there")
+                .timestamp;
+            assert_eq!(
+                is,
+                was + 90 * 86_400,
+                "every snapshot moves by the same amount, so the intervals \
+                 between them -- which is what every age on screen is about -- \
+                 are unchanged"
+            );
+        }
+    }
+
+    /// The schedule's own clock moves with the snapshots it took, or the next
+    /// automatic snapshot is years overdue the moment the window opens.
+    #[test]
+    fn anchoring_moves_the_schedule_with_it() {
+        let mut ui = SystemRestoreUI::new();
+        let origin = ui.current_timestamp;
+        let before = ui.manager.schedule.last_snapshot_timestamp;
+
+        // The property that matters is not whether it is due -- the sample
+        // schedule is weekly and last ran 11 days before the origin, so it is
+        // already overdue, and the first tick after the window opens takes one.
+        // It is that anchoring does not *change* whether it is due, because the
+        // schedule's clock and the program's move together.
+        let due_before = ui.manager.schedule.is_due(origin);
+        ui.anchor_to(origin + 1000);
+        assert_eq!(ui.manager.schedule.last_snapshot_timestamp, before + 1000);
+        assert_eq!(
+            ui.manager.schedule.is_due(ui.current_timestamp),
+            due_before,
+            "anchoring moved the schedule relative to the clock"
+        );
+    }
+
+    /// The sample schedule is weekly and last ran 11 days ago, so it is due --
+    /// which means the window demonstrates its own headline feature within a
+    /// minute of opening, rather than showing a countdown that never fires.
+    #[test]
+    fn the_sample_schedule_is_due_so_the_first_tick_shows_what_the_program_does() {
+        let mut ui = SystemRestoreUI::new();
+        let before = ui.manager.tree.count();
+        assert!(ui.manager.schedule.is_due(ui.current_timestamp));
+
+        ui.tick_to(ui.current_timestamp + 60);
+        assert_eq!(ui.manager.tree.count(), before + 1);
+    }
+
+    /// A machine whose clock is behind the sample origin shifts backwards, and
+    /// nothing wraps round to the far future.
+    #[test]
+    fn anchoring_backwards_clamps_at_the_epoch_rather_than_wrapping() {
+        let mut ui = SystemRestoreUI::new();
+        ui.anchor_to(0);
+        for id in ui.manager.tree.all_ids_by_timestamp() {
+            let t = ui
+                .manager
+                .tree
+                .get_snapshot(id)
+                .expect("still there")
+                .timestamp;
+            assert_eq!(t, 0, "clamped, not wrapped to u64::MAX");
+        }
+    }
+
+    /// The whole point of the program, and nothing called it: an automatic
+    /// snapshot manager whose scheduler never ran.
+    #[test]
+    fn a_tick_takes_the_scheduled_snapshot_that_is_due() {
+        let mut ui = SystemRestoreUI::new();
+        let before = ui.manager.tree.count();
+        let due_at = ui.manager.schedule.last_snapshot_timestamp
+            + ui.manager.schedule.frequency.interval_secs();
+
+        assert_eq!(
+            ui.tick_to(due_at - 1),
+            EventResult::Consumed,
+            "the clock moved, so the frame is stale"
+        );
+        assert_eq!(
+            ui.manager.tree.count(),
+            before,
+            "one second early is not yet due"
+        );
+
+        ui.tick_to(due_at);
+        assert_eq!(
+            ui.manager.tree.count(),
+            before + 1,
+            "the scheduled snapshot should have been taken"
+        );
+    }
+
+    /// A tick that finds the clock where it left it has nothing to redraw.
+    #[test]
+    fn a_tick_at_the_same_second_asks_for_nothing() {
+        let mut ui = SystemRestoreUI::new();
+        let now = ui.current_timestamp;
+        assert_eq!(ui.tick_to(now), EventResult::Ignored);
+    }
+
+    // -- the toolbar --
+
+    #[test]
+    fn the_view_tabs_switch_views() {
+        let mut ui = SystemRestoreUI::new();
+        for mode in ViewMode::all() {
+            let rect = ui
+                .toolbar_controls()
+                .into_iter()
+                .find(|(_, c)| *c == ToolbarControl::Tab(*mode))
+                .expect("every view has a tab")
+                .0;
+            let (x, y) = centre(rect);
+            assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
+            assert_eq!(ui.view_mode, *mode, "the {:?} tab did nothing", mode);
+        }
+    }
+
+    #[test]
+    fn the_action_buttons_open_their_dialogs() {
+        for (control, expected) in [
+            (ToolbarControl::Create, DialogKind::CreateSnapshot),
+            (ToolbarControl::Export, DialogKind::ExportDialog),
+        ] {
+            let mut ui = SystemRestoreUI::new();
+            let rect = ui
+                .toolbar_controls()
+                .into_iter()
+                .find(|(_, c)| *c == control)
+                .expect("drawn")
+                .0;
+            let (x, y) = centre(rect);
+            ui.handle_event(&click(x, y));
+            assert_eq!(ui.dialog, expected, "{:?} did nothing", control);
+        }
+    }
+
+    /// Restore and Delete act on the selection, so what they open names it.
+    #[test]
+    fn restore_and_delete_ask_about_the_selected_snapshot() {
+        let mut ui = SystemRestoreUI::new();
+        let selected = ui.selected_id.expect("the sample opens with a selection");
+
+        for (control, expected) in [
+            (
+                ToolbarControl::Restore,
+                DialogKind::ConfirmRestore(selected),
+            ),
+            (ToolbarControl::Delete, DialogKind::ConfirmDelete(selected)),
+        ] {
+            let rect = ui
+                .toolbar_controls()
+                .into_iter()
+                .find(|(_, c)| *c == control)
+                .expect("drawn")
+                .0;
+            let (x, y) = centre(rect);
+            ui.handle_event(&click(x, y));
+            assert_eq!(ui.dialog, expected);
+            ui.dialog = DialogKind::None;
+        }
+    }
+
+    /// The toolbar band is the toolbar's, even between controls.
+    #[test]
+    fn a_click_on_the_empty_toolbar_does_not_reach_the_list() {
+        let mut ui = SystemRestoreUI::new();
+        let before = ui.selected_id;
+        // Between the last tab and the first action button.
+        assert_eq!(
+            ui.handle_event(&click(500.0, HEADER_HEIGHT + TOOLBAR_HEIGHT / 2.0)),
+            EventResult::Consumed
+        );
+        assert_eq!(ui.selected_id, before);
+    }
+
+    // -- the list --
+
+    #[test]
+    fn clicking_a_row_selects_that_snapshot() {
+        let mut ui = SystemRestoreUI::new();
+        let rows = ui.row_rects();
+        assert!(rows.len() > 1, "the sample has several snapshots");
+        let (rect, id) = rows[1];
+        let (x, y) = centre(rect);
+
+        ui.handle_event(&click(x, y));
+        assert_eq!(ui.selected_id, Some(id));
+    }
+
+    /// The Compare view needs two snapshots and there was no way to give it a
+    /// second one: `compare_id` was set at construction to `None` and never
+    /// written again, so the view drew an empty frame for ever.
+    #[test]
+    fn clicking_the_selected_row_again_marks_it_for_comparison() {
+        let mut ui = SystemRestoreUI::new();
+        let (rect, id) = ui.row_rects()[1];
+        let (x, y) = centre(rect);
+
+        ui.handle_event(&click(x, y));
+        assert_eq!(ui.compare_id, None);
+        ui.handle_event(&click(x, y));
+        assert_eq!(
+            ui.compare_id,
+            Some(id),
+            "the second click picks the other side"
+        );
+        ui.handle_event(&click(x, y));
+        assert_eq!(ui.compare_id, None, "and a third takes it back off");
+    }
+
+    #[test]
+    fn the_arrows_walk_the_list_and_stop_at_the_ends() {
+        let mut ui = SystemRestoreUI::new();
+        let rows = ui.visible_rows();
+        assert!(rows.len() >= 3);
+
+        ui.handle_event(&press(Key::Home));
+        assert_eq!(ui.selected_id, Some(rows[0].0));
+        ui.handle_event(&press(Key::Up));
+        assert_eq!(
+            ui.selected_id,
+            Some(rows[0].0),
+            "stopping rather than wrapping to the bottom"
+        );
+
+        ui.handle_event(&press(Key::Down));
+        assert_eq!(ui.selected_id, Some(rows[1].0));
+
+        ui.handle_event(&press(Key::End));
+        let last = rows.last().expect("non-empty").0;
+        assert_eq!(ui.selected_id, Some(last));
+        ui.handle_event(&press(Key::Down));
+        assert_eq!(
+            ui.selected_id,
+            Some(last),
+            "and stopping at the far end too"
+        );
+    }
+
+    /// Typing searches, and the selection follows what is left on screen --
+    /// which is why the selection is an id and not a row number.
+    #[test]
+    fn typing_filters_the_list_and_the_selection_stays_on_something_visible() {
+        let mut ui = SystemRestoreUI::new();
+        for c in "Network".chars() {
+            ui.handle_event(&types(c));
+        }
+        assert_eq!(ui.search_query, "Network");
+        let rows = ui.visible_rows();
+        assert_eq!(rows.len(), 1, "one snapshot mentions the network");
+        assert_eq!(
+            ui.selected_id,
+            Some(rows[0].0),
+            "the selection was on a snapshot the search hid"
+        );
+
+        ui.handle_event(&press(Key::Escape));
+        assert_eq!(ui.search_query, "", "Escape clears the query");
+        assert!(ui.visible_rows().len() > 1);
+    }
+
+    #[test]
+    fn a_key_that_carries_no_text_is_not_typed_into_the_search_box() {
+        let mut ui = SystemRestoreUI::new();
+        assert_eq!(ui.handle_event(&press(Key::F5)), EventResult::Ignored);
+        assert_eq!(ui.search_query, "");
+    }
+
+    // -- dialogs --
+
+    #[test]
+    fn enter_confirms_a_delete_and_the_snapshot_is_gone() {
+        let mut ui = SystemRestoreUI::new();
+        // A leaf, so the tree has no orphans to worry about.
+        let id = *ui
+            .visible_rows()
+            .iter()
+            .map(|(id, _)| id)
+            .find(|id| ui.manager.tree.children_of(**id).is_empty())
+            .expect("some snapshot is a leaf");
+        ui.selected_id = Some(id);
+
+        ui.handle_event(&press(Key::Delete));
+        assert_eq!(ui.dialog, DialogKind::ConfirmDelete(id));
+        ui.handle_event(&press(Key::Enter));
+
+        assert_eq!(ui.dialog, DialogKind::None);
+        assert!(
+            ui.manager.tree.get_snapshot(id).is_none(),
+            "the snapshot should have been deleted"
+        );
+        assert_ne!(ui.selected_id, Some(id), "and the selection moved off it");
+    }
+
+    #[test]
+    fn escape_closes_a_dialog_without_doing_it() {
+        let mut ui = SystemRestoreUI::new();
+        let before = ui.manager.tree.count();
+        ui.handle_event(&press(Key::Delete));
+        ui.handle_event(&press(Key::Escape));
+        assert_eq!(ui.dialog, DialogKind::None);
+        assert_eq!(ui.manager.tree.count(), before);
+    }
+
+    /// A click outside a modal dialog closes it and does not also reach the
+    /// window behind, which is what the dimmed backdrop the renderer draws is
+    /// promising.
+    #[test]
+    fn a_click_outside_a_dialog_closes_it_and_goes_no_further() {
+        let mut ui = SystemRestoreUI::new();
+        let before = ui.selected_id;
+        ui.handle_event(&press(Key::Delete));
+        assert_ne!(ui.dialog, DialogKind::None);
+
+        assert_eq!(ui.handle_event(&click(4.0, 4.0)), EventResult::Consumed);
+        assert_eq!(ui.dialog, DialogKind::None);
+        assert_eq!(ui.selected_id, before, "the click did not reach the list");
+    }
+
+    #[test]
+    fn the_dialog_buttons_can_be_clicked() {
+        let mut ui = SystemRestoreUI::new();
+        let before = ui.manager.tree.count();
+        ui.handle_event(&press(Key::Delete));
+
+        let cancel = ui
+            .dialog_buttons()
+            .into_iter()
+            .find(|(_, b)| *b == DialogButton::Cancel)
+            .expect("drawn")
+            .0;
+        let (x, y) = centre(cancel);
+        ui.handle_event(&click(x, y));
+        assert_eq!(ui.dialog, DialogKind::None);
+        assert_eq!(ui.manager.tree.count(), before, "Cancel does nothing else");
+    }
+
+    /// A locked snapshot cannot be deleted, which is what the padlock means.
+    #[test]
+    fn a_locked_snapshot_survives_a_confirmed_delete() {
+        let mut ui = SystemRestoreUI::new();
+        let id = ui.selected_id.expect("selected");
+        ui.handle_event(&press_ctrl(Key::L));
+        assert!(
+            ui.manager.tree.get_snapshot(id).expect("there").locked,
+            "Ctrl+L should have locked it"
+        );
+
+        ui.handle_event(&press(Key::Delete));
+        ui.handle_event(&press(Key::Enter));
+        assert!(ui.manager.tree.get_snapshot(id).is_some(), "still there");
+
+        // And it can be unlocked again: `unlock_snapshot` had no caller, so
+        // anything locked was locked for the life of the process.
+        ui.handle_event(&press_ctrl(Key::L));
+        assert!(!ui.manager.tree.get_snapshot(id).expect("there").locked);
+    }
+
+    /// The form branches from what is selected, which is what makes the tree a
+    /// tree. Left at `None` it always added another root.
+    #[test]
+    fn the_create_form_branches_from_the_selection() {
+        let mut ui = SystemRestoreUI::new();
+        let selected = ui.selected_id.expect("selected");
+        ui.handle_event(&press_ctrl(Key::N));
+
+        assert_eq!(ui.dialog, DialogKind::CreateSnapshot);
+        assert_eq!(ui.form_parent_id, Some(selected));
+
+        for c in "Before upgrade".chars() {
+            ui.handle_event(&types(c));
+        }
+        assert_eq!(ui.form_name, "Before upgrade");
+        ui.handle_event(&press(Key::Tab));
+        for c in "notes".chars() {
+            ui.handle_event(&types(c));
+        }
+        assert_eq!(ui.form_description, "notes");
+        assert_eq!(
+            ui.form_name, "Before upgrade",
+            "Tab moved to the other field"
+        );
+
+        let before = ui.manager.tree.count();
+        ui.handle_event(&press(Key::Enter));
+        assert_eq!(ui.manager.tree.count(), before + 1);
+        let made = ui.selected_id.expect("the new one is selected");
+        assert_eq!(
+            ui.manager.tree.get_snapshot(made).expect("there").parent_id,
+            Some(selected),
+            "the new snapshot should hang off the one that was selected"
+        );
+    }
+
+    // -- operations --
+
+    /// `simulate_restore` returns the whole filmstrip and had no caller, so the
+    /// progress overlay the renderer draws in full could never appear.
+    #[test]
+    fn a_restore_steps_through_its_progress_and_then_finishes() {
+        let mut ui = SystemRestoreUI::new();
+        ui.handle_event(&press(Key::Enter));
+        assert!(matches!(ui.dialog, DialogKind::ConfirmRestore(_)));
+        ui.handle_event(&press(Key::Enter));
+
+        assert!(ui.progress.is_some(), "the overlay should be up");
+        assert_eq!(
+            ui.tick_interval(),
+            Some(PROGRESS_STEP),
+            "and the clock should be running at the operation's rate"
+        );
+
+        let mut steps = 0;
+        while ui.progress.is_some() {
+            ui.handle_event(&Event::Tick { elapsed_ms: 400 });
+            steps += 1;
+            assert!(steps < 100, "the operation never ended");
+        }
+        assert!(steps > 2, "a restore is more than one frame");
+        assert_eq!(
+            ui.tick_interval(),
+            Some(CLOCK_STEP),
+            "and the clock goes back to once a minute"
+        );
+    }
+
+    /// Escape abandons a running operation; nothing else reaches through the
+    /// overlay.
+    #[test]
+    fn a_running_operation_swallows_everything_but_escape() {
+        let mut ui = SystemRestoreUI::new();
+        ui.handle_event(&press(Key::Enter));
+        ui.handle_event(&press(Key::Enter));
+        assert!(ui.progress.is_some());
+
+        let before = ui.view_mode;
+        assert_eq!(ui.handle_event(&press(Key::Tab)), EventResult::Ignored);
+        assert_eq!(
+            ui.view_mode, before,
+            "the view must not change under an overlay"
+        );
+
+        ui.handle_event(&press(Key::Escape));
+        assert!(ui.progress.is_none());
+        assert!(
+            ui.pending_steps.is_empty(),
+            "and the rest of the filmstrip is dropped"
+        );
+    }
+
+    // -- geometry --
+
+    /// One law, two callers. Every row a click can land on is a row the
+    /// renderer drew.
+    #[test]
+    fn the_rows_are_laid_out_without_overlapping_and_inside_the_content_area() {
+        let ui = SystemRestoreUI::new();
+        let rects = ui.row_rects();
+        assert!(!rects.is_empty());
+        let top = HEADER_HEIGHT + TOOLBAR_HEIGHT;
+        let bottom = WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
+        for (rect, _) in &rects {
+            assert!(
+                rect.y + rect.h > top && rect.y < bottom,
+                "row drawn outside the list"
+            );
+        }
+        for pair in rects.windows(2) {
+            assert!(
+                pair[0].0.y + pair[0].0.h <= pair[1].0.y + 0.01,
+                "two rows overlap"
+            );
+        }
+    }
+
+    /// The whole file drew at the `WINDOW_WIDTH` constant, so the picture was
+    /// the same size whatever window it was given.
+    #[test]
+    fn the_layout_follows_the_window_it_is_given() {
+        let mut ui = SystemRestoreUI::new();
+        let wide = ui
+            .toolbar_controls()
+            .into_iter()
+            .find(|(_, c)| *c == ToolbarControl::Export)
+            .expect("drawn")
+            .0;
+
+        let _ = App::render(&mut ui, 1400.0, 900.0);
+        let narrow = ui
+            .toolbar_controls()
+            .into_iter()
+            .find(|(_, c)| *c == ToolbarControl::Export)
+            .expect("drawn")
+            .0;
+        assert!(
+            narrow.x > wide.x,
+            "the right-aligned buttons should have moved right with the edge"
+        );
+    }
+
+    /// A list shorter than the window has nowhere to scroll, and clamping to a
+    /// negative maximum is the one shape `clamp` panics on.
+    #[test]
+    fn a_list_shorter_than_the_window_does_not_scroll() {
+        let mut ui = SystemRestoreUI::new();
+        ui.handle_event(&Event::Mouse(MouseEvent {
+            x: 200.0,
+            y: 400.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -10.0 },
+        }));
+        assert_eq!(ui.scroll_offset, 0.0);
+    }
+
+    /// The title names the selected snapshot, and follows it.
+    #[test]
+    fn the_title_names_the_selected_snapshot() {
+        let mut ui = SystemRestoreUI::new();
+        let first = ui.title();
+        assert!(first.ends_with("- System Restore"), "got {first:?}");
+
+        ui.handle_event(&press(Key::End));
+        assert_ne!(ui.title(), first, "the title should follow the selection");
+    }
 
     // --- text measurement ---
 
@@ -5664,7 +7218,7 @@ mod tests {
     #[test]
     fn test_ui_render_produces_commands() {
         let ui = SystemRestoreUI::new();
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
         // Should have a good number of render commands for the full UI.
         assert!(rt.len() > 30);
@@ -5674,7 +7228,7 @@ mod tests {
     fn test_ui_render_with_dialog() {
         let mut ui = SystemRestoreUI::new();
         ui.dialog = DialogKind::CreateSnapshot;
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
@@ -5684,7 +7238,7 @@ mod tests {
         ui.progress = Some(OperationProgress::new_create(&[
             SnapshotComponent::BootConfig,
         ]));
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
@@ -5692,7 +7246,7 @@ mod tests {
     fn test_ui_render_timeline_view() {
         let mut ui = SystemRestoreUI::new();
         ui.view_mode = ViewMode::Timeline;
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
@@ -5701,7 +7255,7 @@ mod tests {
         let mut ui = SystemRestoreUI::new();
         ui.view_mode = ViewMode::Compare;
         ui.compare_id = None;
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
@@ -5714,7 +7268,7 @@ mod tests {
             ui.selected_id = Some(ids[0]);
             ui.compare_id = Some(ids[1]);
         }
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
@@ -5722,7 +7276,7 @@ mod tests {
     fn test_ui_render_schedule_view() {
         let mut ui = SystemRestoreUI::new();
         ui.view_mode = ViewMode::Schedule;
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
@@ -5730,7 +7284,7 @@ mod tests {
     fn test_ui_render_storage_view() {
         let mut ui = SystemRestoreUI::new();
         ui.view_mode = ViewMode::Storage;
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
@@ -5740,7 +7294,7 @@ mod tests {
         if let Some(id) = ui.selected_id {
             ui.dialog = DialogKind::ConfirmDelete(id);
         }
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
@@ -5750,7 +7304,7 @@ mod tests {
         if let Some(id) = ui.selected_id {
             ui.dialog = DialogKind::ConfirmRestore(id);
         }
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
@@ -5758,7 +7312,7 @@ mod tests {
     fn test_ui_render_export_dialog() {
         let mut ui = SystemRestoreUI::new();
         ui.dialog = DialogKind::ExportDialog;
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
@@ -5766,7 +7320,7 @@ mod tests {
     fn test_ui_render_import_dialog() {
         let mut ui = SystemRestoreUI::new();
         ui.dialog = DialogKind::ImportDialog;
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
@@ -6025,7 +7579,7 @@ mod tests {
     fn test_ui_render_no_selection_details() {
         let mut ui = SystemRestoreUI::new();
         ui.selected_id = None;
-        let rt = ui.render();
+        let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 

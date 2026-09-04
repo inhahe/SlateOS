@@ -113500,6 +113500,13 @@ longer exists.
 
 ## TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT (lane B, 2026-09-03)
 
+**STATUS 2026-09-04: steps 1 and 2 of the proper fix have landed** — the checker
+exists and pre-push gate 12 runs it. Left open rather than marked RESOLVED
+because the automation covers exactly one crate: `-p coreutils`, on a push that
+touches `userspace/coreutils`. Every other crate in this lane — `posix`,
+`userspace/shell`, the ~30 support crates — still has the whole defect below,
+unmeasured, and step 4 is what would close it.
+
 **In short:** the coreutils crates are built, linted and tested against the
 *Windows* host target, because that is the toolchain the machine has. Every
 piece of code marked "only on unix" is invisible to that build — the compiler
@@ -113556,14 +113563,41 @@ to abandon it.
      `~/.cargo/env` is sourced from `.bashrc` and a non-interactive login shell
      does not read it. Name `$HOME/.cargo/bin/cargo` explicitly, as the
      harnesses and this script do, rather than concluding there is no cargo.
-2. Wire the Linux side into the pre-push gates, or at least into the boot
+2. ~~Wire the Linux side into the pre-push gates, or at least into the boot
    test's pre-build tooling suite, so a `#[cfg(unix)]` regression cannot be
-   pushed. Note the cost before doing this: the host clippy run over
-   `-p coreutils --all-targets` took 89 minutes, so a second full pass is not
-   free and probably wants to be scoped to the crates a push touches, exactly
-   as gate 11 scopes itself.
-3. Until step 2 lands, **run step 1's script by hand after touching any
-   `#[cfg(unix)]` arm**:
+   pushed.~~ **LANDED 2026-09-04** as pre-push **gate 12**, scoped to pushes
+   that touch `userspace/coreutils` or the checker itself.
+
+   **The cost this step warned about was wrong, and the correction is the
+   reason it could land at all.** The "89 minutes" above is real but is a
+   *host* `clippy --all-targets` figure, which builds the zone's integration
+   tests and dev-dependencies. `coreutils-check.sh` scopes itself to
+   `--lib --bins`, and `--only linux` measured **2m16s** against a warm shared
+   target directory (clippy 1m12s, test 1m04s) — nearer 6 minutes against a
+   cold or contended one. A guessed cost had blocked a gate for a day; measure
+   before deferring on price.
+
+   Two things about gate 12 that are not obvious from the others:
+
+   * **It reads the working tree, and every other gate reads the commits being
+     pushed.** It has no choice — cargo compiles files, not a revision, so
+     there is no `--head` to pass. What makes that honest is that it first
+     *establishes* that the working tree is the push (one ref, its sha equal to
+     `HEAD`, no modified tracked file, no untracked file) and declines by name
+     if it is not. Answering about the wrong tree is exactly the defect gate 7
+     shipped; declining is the answer gate 7 should have given.
+   * **It is `--may-skip`**, so a host without WSL declines loudly rather than
+     refusing every push. That is why `coreutils-check.sh` moved its usage
+     errors to exit **64**: sharing exit 2 with a genuine decline would let a
+     future renamed flag read as "no WSL on this host" and skip forever.
+
+   Behavioural coverage is `scripts/test-pre-push-unixhalf-gate.py`, which
+   drives real pushes through the real hook against a stub checker and asserts
+   on whether the checker was *invoked* — because a declined gate and a passing
+   gate both allow the push, and only the invocation count tells them apart.
+3. Step 2 has landed, but the gate is scoped to `userspace/coreutils` and only
+   fires on a push. **Run step 1's script by hand after touching any
+   `#[cfg(unix)]` arm** in a crate it does not cover, and while iterating:
 
    ```sh
    scripts/coreutils-check.sh --only linux            # both halves by default
@@ -113573,6 +113607,13 @@ to abandon it.
    First measured run, 2026-09-03: the whole `coreutils` lib reports **416**
    passing tests on the Linux target, `dirfd` alone **24** — against 0 of
    either on the host, since `dirfd`'s unix arm does not compile there at all.
+4. **Widen it past `coreutils`.** Gate 12 compiles one crate because that is
+   where the defect was found and because the price is per-crate; the argument
+   for it applies unchanged to `posix`, `userspace/shell` and the support
+   crates, which are equally host-only-checked today. What is missing is a
+   measurement per crate rather than a design: the gate already takes `-p`, and
+   widening it is a matter of deciding how many minutes a push may cost. Do
+   that with numbers, not with the instinct that blocked step 2 for a day.
 
 **If it is never fixed:** warnings and dead code accumulate in the unix half
 where nobody sees them, and — much worse — a unix-only test can rot into a

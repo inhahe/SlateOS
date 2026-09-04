@@ -73,6 +73,7 @@ unit of review is a file; a crate-level count would hide a new violation in
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -515,6 +516,88 @@ def fix_file(path: Path) -> tuple[int, list[str]]:
     return fixed, skipped
 
 
+def _git(args: list[str], root: Path, stdin: bytes | None = None) -> bytes:
+    """Run git in `root` and return stdout, raising on a non-zero exit.
+
+    Deliberately not `text=True`: a path in this tree may hold any byte but
+    `/` and NUL, and a blob is not required to be UTF-8 at all. Decoding is
+    done per-value by the caller, which knows what it is looking at.
+    """
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        input=stdin, capture_output=True, check=True,
+    ).stdout
+
+
+def _tree_files(sha: str, root: Path = ROOT) -> list[str]:
+    """The `.rs` files under ROOTS in the tree at `sha`, repo-relative."""
+    out = _git(["ls-tree", "-r", "-z", "--name-only", sha, "--", *ROOTS], root)
+    return [
+        p for p in out.decode("utf-8", "surrogateescape").split("\0")
+        if p.endswith(".rs") and "target" not in p.split("/")
+    ]
+
+
+def _read_blobs(sha: str, paths: list[str], root: Path = ROOT) -> dict[str, str]:
+    """`path -> text` for `paths` at `sha`, in ONE git process.
+
+    `git show <sha>:<path>` per file would be correct and is what the obvious
+    version does, but the survey covers ~780 files and this runs once per
+    pushed commit. On Windows a process launch is the dominant cost, so the
+    obvious version turns a sub-second gate into a minute-long one per sha --
+    slow enough that someone eventually reaches for the bypass, which is how a
+    gate stops being a gate. `cat-file --batch` asks for all of them at once.
+    """
+    if not paths:
+        return {}
+    stdin = "".join(f"{sha}:{p}\n" for p in paths).encode("utf-8", "surrogateescape")
+    out = _git(["cat-file", "--batch"], root, stdin=stdin)
+
+    found: dict[str, str] = {}
+    pos = 0
+    for path in paths:
+        nl = out.find(b"\n", pos)
+        if nl < 0:
+            break
+        header = out[pos:nl].decode("utf-8", "replace").split()
+        pos = nl + 1
+        # `<oid> missing` has no body, so `pos` is already past it. A path can
+        # be absent here even though ls-tree just listed it, if the two ran
+        # against different shas -- treat it as absent rather than crashing.
+        if len(header) < 3 or header[1] != "blob":
+            continue
+        size = int(header[2])
+        blob = out[pos:pos + size]
+        pos += size + 1  # git writes a newline after each body
+        try:
+            found[path] = blob.decode("utf-8")
+        except UnicodeDecodeError:
+            # Matches survey()'s worktree behaviour: a non-UTF-8 .rs file is
+            # not something this lexer can speak about, so it is skipped
+            # rather than guessed at.
+            continue
+    return found
+
+
+def survey_at(sha: str, root: Path = ROOT) -> dict[str, list[tuple[int, str, str]]]:
+    """`survey()`, but reading the tree at `sha` instead of the working tree.
+
+    This is what makes the pre-push gate judge *what is being published*. The
+    worktree survey answers a different question, and wrong in the dangerous
+    direction: a commit that adds an unquoted name passes if the worktree has
+    since fixed it, and the commit is published anyway. It also has the
+    mirror-image false positive, where an unrelated uncommitted edit blocks a
+    push of clean commits.
+    """
+    paths = [p for p in _tree_files(sha, root) if p not in IGNORE]
+    found: dict[str, list[tuple[int, str, str]]] = {}
+    for rel, text in _read_blobs(sha, paths, root).items():
+        hits = violations(text)
+        if hits:
+            found[rel] = hits
+    return found
+
+
 def survey(root: Path = ROOT) -> dict[str, list[tuple[int, str, str]]]:
     """Every flagged line in lane B's tree, keyed by repo-relative path."""
     found: dict[str, list[tuple[int, str, str]]] = {}
@@ -538,12 +621,35 @@ def survey(root: Path = ROOT) -> dict[str, list[tuple[int, str, str]]]:
     return found
 
 
+def read_baseline_at(sha: str, root: Path = ROOT) -> dict[str, int]:
+    """The baseline as it stands at `sha`, not as it stands on disk.
+
+    It has to move with the tree. The baseline is the ratchet, so judging a
+    commit's files against a *different* commit's baseline reports the
+    difference between the two revisions rather than anything about the commit
+    -- which is loudest exactly when it is least useful: a push whose first
+    commit fixes sites and whose second records them in the baseline would have
+    the first commit judged against the not-yet-updated numbers.
+    """
+    rel = BASELINE.relative_to(root).as_posix()
+    blobs = _read_blobs(sha, [rel], root)
+    if rel not in blobs:
+        # No baseline at that commit means no allowance at that commit: every
+        # site is new. That is the safe direction -- it can only over-report.
+        return {}
+    return _parse_baseline(blobs[rel])
+
+
 def read_baseline() -> dict[str, int]:
     """`path -> count` from the baseline file, `#` comments stripped."""
     if not BASELINE.is_file():
         return {}
+    return _parse_baseline(BASELINE.read_text(encoding="utf-8"))
+
+
+def _parse_baseline(text: str) -> dict[str, int]:
     out: dict[str, int] = {}
-    for line in BASELINE.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
@@ -889,6 +995,75 @@ def selftest() -> int:
                 f"round-trip: fixed={n} left={left} still={violations(after)}\n    {after!r}"
             )
 
+    # 11. `--head` must read the COMMIT, not the worktree.
+    #
+    #     This is the one case that cannot be written as a string-in/count-out
+    #     assertion, and it is also the only one that measures the reason
+    #     `--head` exists. The shape is the staged-restore: a commit introduces
+    #     a violation, the worktree then repairs it without committing, and the
+    #     commit is pushed anyway. A worktree survey calls that clean. If this
+    #     case ever passes with `survey_at` delegating to `survey`, the gate has
+    #     silently gone back to answering the wrong question.
+    bad = 'fn f() {\n    eprintln!("cut: \'{p}\': no such file");\n}\n'
+    good = 'fn f() {\n    eprintln!("cut: {}: no such file", quotef_os(&p));\n}\n'
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        src = repo / "userspace" / "probe" / "src"
+        src.mkdir(parents=True)
+        rs = src / "main.rs"
+
+        def git(*a: str) -> None:
+            # Identity and signing are forced off for this throwaway repo only:
+            # the host's real config may have `commit.gpgsign=true`, and a
+            # signing prompt inside a pre-push hook is an unkillable hang.
+            subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.email=selftest@invalid",
+                 "-c", "user.name=selftest", "-c", "commit.gpgsign=false", *a],
+                check=True, capture_output=True,
+            )
+
+        try:
+            git("init", "-q")
+            rs.write_text(bad, encoding="utf-8", newline="")
+            git("add", "-A")
+            git("commit", "-qm", "introduce the violation")
+            sha = _git(["rev-parse", "HEAD"], repo).decode().strip()
+
+            # The repair that never gets committed.
+            rs.write_text(good, encoding="utf-8", newline="")
+
+            checked += 1
+            worktree_hits = sum(len(v) for v in survey(repo).values())
+            commit_hits = sum(len(v) for v in survey_at(sha, repo).values())
+            if worktree_hits != 0 or commit_hits != 1:
+                failures.append(
+                    "head-reads-the-commit: worktree should see 0 and the commit 1, "
+                    f"got worktree={worktree_hits} commit={commit_hits}"
+                )
+
+            # The mirror image: an uncommitted violation must be invisible to
+            # `--head`, so unrelated dirty work cannot block a clean push.
+            # (`good` is already on disk from the case above, so this commit
+            # is the repair; committing `bad` again would be a no-op and git
+            # would exit 1 on the empty commit.)
+            git("add", "-A")
+            git("commit", "-qm", "the repair, committed this time")
+            clean_sha = _git(["rev-parse", "HEAD"], repo).decode().strip()
+            rs.write_text(bad, encoding="utf-8", newline="")  # dirty, uncommitted
+
+            checked += 1
+            dirty_hits = sum(len(v) for v in survey(repo).values())
+            clean_hits = sum(len(v) for v in survey_at(clean_sha, repo).values())
+            if dirty_hits != 1 or clean_hits != 0:
+                failures.append(
+                    "head-ignores-the-worktree: the commit should see 0 and the "
+                    f"dirty worktree 1, got worktree={dirty_hits} commit={clean_hits}"
+                )
+        except (subprocess.CalledProcessError, OSError) as e:
+            checked += 1
+            failures.append(f"head-selftest could not drive git: {e}")
+
     for f in failures:
         print(f"selftest FAIL {f}")
     print(f"selftest: {checked - len(failures)}/{checked} cases pass")
@@ -913,8 +1088,11 @@ def report(found: dict[str, list[tuple[int, str, str]]], show_lines: bool) -> in
     return 0
 
 
-def check(found: dict[str, list[tuple[int, str, str]]]) -> int:
-    baseline = read_baseline()
+def check(
+    found: dict[str, list[tuple[int, str, str]]],
+    baseline: dict[str, int] | None = None,
+) -> int:
+    baseline = read_baseline() if baseline is None else baseline
     now = {path: len(hits) for path, hits in found.items()}
 
     grew = sorted(p for p, n in now.items() if n > baseline.get(p, 0))
@@ -1025,6 +1203,34 @@ def main() -> int:
         return selftest()
     if "--fix" in args:
         return fix([a for a in args if not a.startswith("--")])
+
+    head: str | None = None
+    if "--head" in args:
+        i = args.index("--head")
+        if i + 1 >= len(args) or args[i + 1].startswith("--"):
+            print("--head needs a commit-ish argument", file=sys.stderr)
+            return 2
+        head = args[i + 1]
+
+    if head is not None and ("--write-baseline" in args or "--update-baseline" in args):
+        # Refused rather than ignored. Recording a past commit's counts as the
+        # current allowance would silently un-fix everything repaired since.
+        print("--head cannot be combined with --write-baseline", file=sys.stderr)
+        return 2
+
+    if head is not None:
+        try:
+            found = survey_at(head)
+            baseline = read_baseline_at(head)
+        except (subprocess.CalledProcessError, OSError) as e:
+            # Loud, and non-zero. A checker that cannot read the tree it was
+            # asked about must not report the clean answer -- "no violations
+            # found" is byte-identical to a healthy repository, so a silent
+            # degradation here would look exactly like success.
+            print(f"quote-names: cannot read the tree at {head}: {e}", file=sys.stderr)
+            return 2
+        return check(found, baseline) if "--check" in args else report(found, "--list" in args)
+
     found = survey()
     if "--write-baseline" in args or "--update-baseline" in args:
         write_baseline(found)

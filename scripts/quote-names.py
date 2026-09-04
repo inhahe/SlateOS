@@ -77,6 +77,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -565,7 +566,23 @@ def _decode(raw: bytes | None) -> str | None:
         return None
 
 
-def survey_tree(tree: gittree.Tree) -> dict[str, list[tuple[int, str, str]]]:
+class Survey(NamedTuple):
+    """What one pass over a tree saw.
+
+    `found` alone cannot answer the question `main` has to ask before believing
+    a clean result, because an empty `found` has two causes that look identical
+    from the outside: a tree with no defects, and a tree with no *sources*. So
+    the count of files actually read comes back with it, from the same walk
+    that produced the findings -- deriving it from a second walk would be a
+    second answer to the same question, which is the drift `survey_tree`'s
+    docstring below is about.
+    """
+
+    found: dict[str, list[tuple[int, str, str]]]
+    scanned: int
+
+
+def survey_tree(tree: gittree.Tree) -> Survey:
     """Every flagged line in lane B's zone of `tree`, keyed by relative path.
 
     One function for both the disk and a revision, because the seam it reads
@@ -578,28 +595,75 @@ def survey_tree(tree: gittree.Tree) -> dict[str, list[tuple[int, str, str]]]:
     `files_under` already prunes build directories by path component, so the
     `"target" not in parts` test both halves used to carry separately is now
     the seam's business and is asserted by `test-gittree.py` on both sides.
+
+    A file that is not UTF-8 counts as scanned even though it is not lexed. The
+    count exists to answer "did this tree have a subject", and a `.rs` file this
+    lexer declines to speak about is still a subject -- counting it as absent
+    would let a corpus of undecodable sources read as no corpus at all.
     """
     found: dict[str, list[tuple[int, str, str]]] = {}
+    scanned = 0
     for top in ROOTS:
         for rel in tree.files_under(top):
             if not rel.endswith(".rs") or rel in IGNORE:
                 continue
+            scanned += 1
             text = _decode(tree.read_bytes(rel))
             if text is None:
                 continue
             hits = violations(text)
             if hits:
                 found[rel] = hits
-    return found
+    return Survey(found, scanned)
 
 
-def survey(root: Path = ROOT) -> dict[str, list[tuple[int, str, str]]]:
+def _no_corpus(seen: Survey, head: str | None) -> bool:
+    """Whether the tree under judgement had no subject at all -- and say so.
+
+    A gate that finds nothing reports the same thing whether the tree is clean
+    or the tree is *empty*, and the second is not a verdict about anybody's
+    code. It was measured, not imagined: a commit renaming `userspace/` away
+    was checked against a baseline that still listed a file in it, and the gate
+    printed
+
+        fixed: userspace/coreutils/src/bin/cut.rs 1 -> 0
+        ok -- 0 known sites in 0 files (1 improved)
+
+    and exited 0. The disappearance of its own subject read as *progress*, and
+    the wording invited someone to run `--write-baseline` and delete the whole
+    ratchet on the strength of it. That is the worst available failure for a
+    ratchet: it does not merely pass a bad push, it offers to forget every site
+    it was ever guarding.
+
+    Exit 2 rather than 1, for `run-checker.sh`'s reason: 1 means "this checker
+    found something in your code", and printing gate 8's refusal here would
+    tell an author their diagnostics leak file names when nothing of the sort
+    was observed. Nothing was observed at all.
+
+    Not a heuristic threshold. Gate 4's equivalent originally asserted
+    `> 50` files and could therefore only ever be run in *this* checkout; this
+    asks for one, which is a claim about the gate having a subject rather than
+    about the size of this repository, and holds in a three-file fixture.
+    """
+    if seen.scanned:
+        return False
+    where = f"the tree at {head}" if head else "the working tree"
+    print(
+        f"quote-names: no Rust source under {'/, '.join(ROOTS)}/ in {where}.\n"
+        "This gate has lost its subject, not found it clean -- refusing to\n"
+        "report a pass (or to rewrite the baseline) from a tree it cannot see.",
+        file=sys.stderr,
+    )
+    return True
+
+
+def survey(root: Path = ROOT) -> Survey:
     """Every flagged line in lane B's working tree."""
     with gittree.WorkTree(str(root)) as tree:
         return survey_tree(tree)
 
 
-def survey_at(sha: str, root: Path = ROOT) -> dict[str, list[tuple[int, str, str]]]:
+def survey_at(sha: str, root: Path = ROOT) -> Survey:
     """`survey()`, but reading the tree at `sha` instead of the working tree.
 
     This is what makes the pre-push gate judge *what is being published*. The
@@ -975,6 +1039,8 @@ def selftest() -> int:
     # 10. End to end: a wrapped violation must survive the round trip through
     #     `fix_file`'s span replacement and come back clean, since that is the
     #     path every one of the ~1700 sites will actually take.
+    import contextlib
+    import io
     import tempfile
 
     with tempfile.TemporaryDirectory() as td:
@@ -1034,6 +1100,18 @@ def selftest() -> int:
                 check=True, capture_output=True, env=gitenv.clean_env(),
             ).stdout
 
+        def guard(seen: Survey, at: str | None) -> tuple[bool, str]:
+            """`_no_corpus`, with its diagnostic captured rather than printed.
+
+            Returned rather than swallowed: the refusal's *wording* is half of
+            what this guard does. A gate that stops the push but says only
+            "0 known sites" has moved the failure from the ratchet to whoever
+            has to work out why the push died.
+            """
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                return _no_corpus(seen, at), err.getvalue()
+
         # What the ambient repository looked like before the fixture ran. Any
         # difference afterwards means these commands went somewhere they were
         # not pointed -- which is the failure that has now happened twice, in
@@ -1053,8 +1131,8 @@ def selftest() -> int:
             rs.write_text(good, encoding="utf-8", newline="")
 
             checked += 1
-            worktree_hits = sum(len(v) for v in survey(repo).values())
-            commit_hits = sum(len(v) for v in survey_at(sha, repo).values())
+            worktree_hits = sum(len(v) for v in survey(repo).found.values())
+            commit_hits = sum(len(v) for v in survey_at(sha, repo).found.values())
             if worktree_hits != 0 or commit_hits != 1:
                 failures.append(
                     "head-reads-the-commit: worktree should see 0 and the commit 1, "
@@ -1072,12 +1150,83 @@ def selftest() -> int:
             rs.write_text(bad, encoding="utf-8", newline="")  # dirty, uncommitted
 
             checked += 1
-            dirty_hits = sum(len(v) for v in survey(repo).values())
-            clean_hits = sum(len(v) for v in survey_at(clean_sha, repo).values())
+            dirty_hits = sum(len(v) for v in survey(repo).found.values())
+            clean_hits = sum(len(v) for v in survey_at(clean_sha, repo).found.values())
             if dirty_hits != 1 or clean_hits != 0:
                 failures.append(
                     "head-ignores-the-worktree: the commit should see 0 and the "
                     f"dirty worktree 1, got worktree={dirty_hits} commit={clean_hits}"
+                )
+
+            # 12. A tree with no sources is not a clean tree.
+            #
+            #     `clean_sha` is the control, and it carries as much weight as
+            #     the experiment below: its tree *has* a source and no
+            #     violations, which is exactly the state a healthy repository
+            #     is in. A guard that fired here would be the failure the
+            #     other one is not -- a gate that refuses on every host, which
+            #     gets switched off within a day and then protects nothing.
+            checked += 1
+            clean_seen = survey_at(clean_sha, repo)
+            if clean_seen.found or clean_seen.scanned != 1:
+                failures.append(
+                    "corpus-control: a clean one-file tree should scan 1 file and "
+                    f"flag none, got scanned={clean_seen.scanned} "
+                    f"found={sorted(clean_seen.found)}"
+                )
+
+            checked += 1
+            fired, _ = guard(clean_seen, clean_sha)
+            if fired:
+                failures.append(
+                    "corpus-control: the guard fired on a tree that has a subject "
+                    "and is merely clean"
+                )
+
+            # The experiment: the same repository with its corpus removed. This
+            # is the shape of the real event -- a commit that renames or moves
+            # lane B's zone -- reduced to the one property that matters, which
+            # is that nothing is left for this gate to read.
+            git("rm", "-r", "-q", "-f", "userspace")
+            git("commit", "-qm", "the corpus goes away")
+            gone_sha = git("rev-parse", "HEAD").decode().strip()
+
+            checked += 1
+            gone = survey_at(gone_sha, repo)
+            if gone.scanned or gone.found:
+                failures.append(
+                    "corpus-gone: the fixture did not actually remove the corpus, "
+                    f"scanned={gone.scanned} found={sorted(gone.found)}"
+                )
+
+            checked += 1
+            fired, said = guard(gone, gone_sha)
+            if not fired or "lost its subject" not in said or gone_sha not in said:
+                failures.append(
+                    "corpus-guard: an empty corpus must be refused, and the "
+                    "refusal must name the tree it read and say the subject is "
+                    f"missing rather than clean. fired={fired} said={said!r}"
+                )
+
+            # Why the guard has to run *before* `check` rather than inside it:
+            # on its own, `check` reads the loss of its own subject as a
+            # burn-down and exits 0, inviting a `--write-baseline` that would
+            # discard the entire ratchet. That is asserted here, deliberately,
+            # as the current behaviour of `check` -- not as behaviour anyone
+            # should preserve. If a later change teaches `check` this rule
+            # itself, this case fails: delete it *and* `_no_corpus` together,
+            # rather than keeping two answers to one question.
+            checked += 1
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = check(gone.found, {"userspace/probe/src/main.rs": 1})
+            said = out.getvalue()
+            if rc != 0 or "1 improved" not in said or "fixed:" not in said:
+                failures.append(
+                    "corpus-guard-is-load-bearing: `check` alone no longer reads "
+                    f"an emptied corpus as progress (rc={rc} said={said!r}). If "
+                    "that is now handled inside `check`, remove `_no_corpus` and "
+                    "this case together."
                 )
         except (subprocess.CalledProcessError, OSError, gittree.GitTreeError) as e:
             # `GitTreeError` belongs here for a reason worth stating: it is what
@@ -1262,7 +1411,7 @@ def main() -> int:
             # baseline lookup is a single blob read that has no business
             # paying for a second index.
             with gittree.RevTree(head, str(ROOT)) as tree:
-                found = survey_tree(tree)
+                seen = survey_tree(tree)
                 baseline = read_baseline_from(tree)
         except (gittree.GitTreeError, OSError) as e:
             # Loud, and non-zero. A checker that cannot read the tree it was
@@ -1271,15 +1420,20 @@ def main() -> int:
             # degradation here would look exactly like success.
             print(f"quote-names: cannot read the tree at {head}: {e}", file=sys.stderr)
             return 2
-        return check(found, baseline) if "--check" in args else report(found, "--list" in args)
+        if _no_corpus(seen, head):
+            return 2
+        return (check(seen.found, baseline) if "--check" in args
+                else report(seen.found, "--list" in args))
 
-    found = survey()
+    seen = survey()
+    if _no_corpus(seen, None):
+        return 2
     if "--write-baseline" in args or "--update-baseline" in args:
-        write_baseline(found)
+        write_baseline(seen.found)
         return 0
     if "--check" in args:
-        return check(found)
-    return report(found, "--list" in args)
+        return check(seen.found)
+    return report(seen.found, "--list" in args)
 
 
 if __name__ == "__main__":

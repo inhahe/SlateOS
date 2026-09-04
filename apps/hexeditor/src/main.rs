@@ -36,6 +36,9 @@ use guitk::text;
 use guitk::wheel;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::collections::VecDeque;
 
@@ -1295,8 +1298,13 @@ impl HexDocument {
     pub fn byte_frequency(&self) -> [usize; 256] {
         let mut freq = [0usize; 256];
         for &b in &self.data {
-            let idx = b as usize;
-            freq[idx] = freq[idx].saturating_add(1);
+            // `get_mut` although a `u8` cannot leave a 256-entry array: the
+            // guarantee is in the types rather than in this expression, and
+            // this is the form that stays correct if the array is ever sized
+            // from something else.
+            if let Some(slot) = freq.get_mut(b as usize) {
+                *slot = slot.saturating_add(1);
+            }
         }
         freq
     }
@@ -1567,21 +1575,34 @@ impl HexEditor {
     }
 
     /// Get a reference to the active document.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: `documents` starts with one entry, `close_tab`
+    /// refuses to remove the last, and `active_tab` is only ever set to an
+    /// index that exists — all three are enforced in this module. The previous
+    /// spelling fell back to `self.documents[0]`, which is not a fallback at
+    /// all: the only state in which the `get` fails is an empty `documents`,
+    /// and indexing an empty `Vec` panics exactly as the `get` would have.
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "the invariant is stated above and enforced by this module"
+    )]
     pub fn active_doc(&self) -> &HexDocument {
-        self.documents.get(self.active_tab).unwrap_or_else(|| {
-            // This should never happen if we maintain invariants, but return
-            // first doc as fallback.
-            &self.documents[0]
-        })
+        &self.documents[self.active_tab.min(self.documents.len().saturating_sub(1))]
     }
 
     /// Get a mutable reference to the active document.
+    ///
+    /// # Panics
+    ///
+    /// Never, for the reason given on [`HexEditor::active_doc`].
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "the invariant is stated on `active_doc`"
+    )]
     pub fn active_doc_mut(&mut self) -> &mut HexDocument {
-        let idx = if self.active_tab < self.documents.len() {
-            self.active_tab
-        } else {
-            0
-        };
+        let idx = self.active_tab.min(self.documents.len().saturating_sub(1));
         &mut self.documents[idx]
     }
 
@@ -1621,7 +1642,14 @@ impl HexEditor {
     /// Switch to the next tab.
     pub fn next_tab(&mut self) {
         if !self.documents.is_empty() {
-            self.active_tab = (self.active_tab.saturating_add(1)) % self.documents.len();
+            // `checked_rem` although the emptiness test is a line up: the
+            // guard and the modulo are separate statements that an edit can
+            // separate further.
+            self.active_tab = self
+                .active_tab
+                .saturating_add(1)
+                .checked_rem(self.documents.len())
+                .unwrap_or(0);
         }
     }
 
@@ -2345,8 +2373,66 @@ impl HexEditor {
     // Rendering
     // ========================================================================
 
-    /// Render the entire hex editor UI.
-    pub fn render(&self) -> RenderTree {
+    /// Route a compositor event into the editor.
+    ///
+    /// The three handlers below it — keys, clicks and the wheel — already
+    /// existed and were already tested; nothing dispatched to them, because
+    /// nothing delivered an event. This is that dispatch.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                // Not `Consumed`: a resize is not by itself a reason to redraw.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a mouse event.
+    fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        match ev.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                // The compositor's mouse event carries no modifier state, so
+                // a click here can only start a selection; shift-extending is
+                // done from the keyboard, which does carry modifiers.
+                self.handle_mouse_click(ev.x, ev.y, false);
+                EventResult::Consumed
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                // No `dy == 0.0` short-circuit: the comparison below already
+                // answers `Ignored` for a wheel event that moved nothing, and a
+                // guard whose removal changes no behaviour is a branch that
+                // only looks like it is doing something. A mutation run is what
+                // said so.
+                let before = self.active_doc().view.scroll_offset;
+                self.handle_scroll(dy);
+                if self.active_doc().view.scroll_offset == before {
+                    // Already at the end the wheel was pushing towards.
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Named `render_tree` and not `render`: at equal arity an inherent method
+    /// silently wins method lookup over `oswindow::app::App::render`, so an app
+    /// that keeps the name draws nothing and reports no error.
+    ///
+    /// Renders the entire hex editor UI.
+    pub fn render_tree(&self) -> RenderTree {
         let mut tree = RenderTree::new();
 
         // Background.
@@ -3211,20 +3297,76 @@ pub fn format_hex_line(data: &[u8], offset: usize, bytes_per_line: usize) -> Str
 // Application entry point
 // ============================================================================
 
-fn main() {
-    // Create the hex editor with a sample document.
-    let mut editor = HexEditor::new(1200.0, 800.0);
+impl App for HexEditor {
+    fn title(&self) -> String {
+        let doc = self.active_doc();
+        let name = doc
+            .file_path
+            .as_deref()
+            .and_then(|p| p.rsplit('/').next())
+            .unwrap_or("untitled");
+        if doc.modified {
+            // The marker goes in the title because a minimised window is a
+            // taskbar entry and nothing else, and this program edits bytes in
+            // place.
+            format!("Hex Editor — {name} *")
+        } else {
+            format!("Hex Editor — {name}")
+        }
+    }
 
-    // Open with sample data for demonstration.
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.window_width as u32, self.window_height as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// Nothing here advances on its own: bytes change when they are typed over
+    /// and the view moves when it is scrolled. There is no animation and no
+    /// data that ages, so a tick would redraw an identical frame.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.window_width = width;
+        self.window_height = height;
+        self.render_tree()
+    }
+}
+
+fn main() -> ExitCode {
+    let mut editor = HexEditor::new(1200.0, 800.0);
+    // Until a file can be opened this is what there is to edit: every byte
+    // value once, which is also the most useful thing to look at while the
+    // rendering is being worked on.
     let sample: Vec<u8> = (0..=255).collect();
     let mut doc = HexDocument::from_data(sample);
     doc.file_path = Some(String::from("/demo/sample.bin"));
-    editor.documents[0] = doc;
-
-    // Render one frame.
-    let _render_tree = editor.render();
-
-    // Event loop placeholder (actual event loop is provided by the compositor).
+    if let Some(first) = editor.documents.first_mut() {
+        *first = doc;
+    }
+    app::launch("hexeditor", &mut editor)
 }
 
 // ============================================================================
@@ -3252,6 +3394,167 @@ fn main() {
     clippy::float_cmp
 )]
 mod tests {
+
+    // ------------------------------------------------------------------
+    // Compositor routing
+    //
+    // `handle_key`, `handle_mouse_click` and `handle_scroll` already existed
+    // and were already tested. What was missing was anything that *called*
+    // them, so these cover the dispatch rather than the handlers.
+    // ------------------------------------------------------------------
+
+    fn loaded() -> HexEditor {
+        let mut editor = HexEditor::new(1200.0, 800.0);
+        let sample: Vec<u8> = (0..=255).collect();
+        let mut doc = HexDocument::from_data(sample);
+        doc.file_path = Some(String::from("/demo/sample.bin"));
+        if let Some(first) = editor.documents.first_mut() {
+            *first = doc;
+        }
+        editor
+    }
+
+    fn key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn wheel(dy: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x: 400.0,
+            y: 400.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    #[test]
+    fn a_key_event_reaches_the_key_handler() {
+        // The handler moves the cursor; the dispatch is what was missing.
+        let mut editor = loaded();
+        let before = editor.active_doc().cursor;
+        assert_eq!(editor.handle_event(&key(Key::Right)), EventResult::Consumed);
+        assert_ne!(
+            editor.active_doc().cursor,
+            before,
+            "the arrow did not reach handle_key"
+        );
+    }
+
+    #[test]
+    fn the_wheel_scrolls_and_stops_at_the_top() {
+        let mut editor = loaded();
+        assert_eq!(
+            editor.active_doc().view.scroll_offset,
+            0,
+            "it opens at the top"
+        );
+        // Towards the user scrolls down through the file.
+        assert_eq!(editor.handle_event(&wheel(-1.0)), EventResult::Consumed);
+        assert!(editor.active_doc().view.scroll_offset > 0);
+        assert_eq!(editor.handle_event(&wheel(1.0)), EventResult::Consumed);
+        assert_eq!(editor.active_doc().view.scroll_offset, 0);
+        // At the top, another notch upwards changes nothing and must not
+        // redraw: this is an editor, and a wheel resting against the end of a
+        // file should not spin the compositor.
+        assert_eq!(editor.handle_event(&wheel(1.0)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_zero_delta_wheel_event_is_ignored() {
+        let mut editor = loaded();
+        assert_eq!(editor.handle_event(&wheel(0.0)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_click_reaches_the_click_handler() {
+        let mut editor = loaded();
+        let before = editor.active_doc().cursor;
+        // Somewhere inside the hex pane, below the header rows.
+        let click = Event::Mouse(MouseEvent {
+            x: 300.0,
+            y: 300.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(editor.handle_event(&click), EventResult::Consumed);
+        assert_ne!(
+            editor.active_doc().cursor,
+            before,
+            "the click did not move the cursor"
+        );
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut editor = loaded();
+        let before = editor.active_doc().cursor;
+        let release = Event::Key(KeyEvent {
+            key: Key::Right,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(editor.handle_event(&release), EventResult::Ignored);
+        assert_eq!(editor.active_doc().cursor, before);
+    }
+
+    #[test]
+    fn a_resize_is_taken_but_is_not_itself_a_redraw() {
+        let mut editor = loaded();
+        assert_eq!(
+            editor.handle_event(&Event::Resize {
+                width: 1600,
+                height: 900
+            }),
+            EventResult::Ignored
+        );
+        assert!((editor.window_width - 1600.0).abs() < f32::EPSILON);
+        assert!((editor.window_height - 900.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_title_names_the_file_and_marks_it_when_modified() {
+        // A minimised window is a taskbar entry and nothing else, and this
+        // program edits bytes in place.
+        let mut editor = loaded();
+        let title = editor.title();
+        assert!(
+            title.contains("sample.bin"),
+            "title {title:?} omits the file"
+        );
+        assert!(
+            !title.contains('*'),
+            "an unmodified file should not be marked"
+        );
+        editor.active_doc_mut().modified = true;
+        assert!(
+            editor.title().contains('*'),
+            "a modified file should be marked, got {:?}",
+            editor.title()
+        );
+    }
+
+    #[test]
+    fn a_close_request_exits() {
+        let mut editor = loaded();
+        assert!(matches!(
+            editor.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+    }
+
+    #[test]
+    fn rendering_at_a_new_size_adopts_it_and_draws_something() {
+        let mut editor = loaded();
+        for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+            let tree = editor.render(w, h);
+            assert!((editor.window_width - w).abs() < f32::EPSILON);
+            assert!(!tree.commands.is_empty(), "drew nothing at {w}x{h}");
+        }
+    }
     use super::*;
 
     // ====================================================================
@@ -3549,7 +3852,7 @@ mod tests {
         let mut app = HexEditor::new(1200.0, 800.0);
         app.documents[0] = HexDocument::from_data((0u8..=255).collect());
 
-        let tree = app.render();
+        let tree = app.render_tree();
 
         let mut depth = 0_i32;
         let mut deepest = 0_i32;
@@ -3618,7 +3921,7 @@ mod tests {
 
     /// The rectangle the renderer clips the dump to: `(x, y, width, height)`.
     fn dump_clip(app: &HexEditor) -> (f32, f32, f32, f32) {
-        app.render()
+        app.render_tree()
             .commands
             .iter()
             .find_map(|cmd| match cmd {
@@ -3637,7 +3940,7 @@ mod tests {
     /// recovered from the offset column it prints at the left edge.
     fn painted_lines(app: &HexEditor) -> Vec<(f32, usize)> {
         let bpl = app.active_doc().view.bytes_per_line.value();
-        app.render()
+        app.render_tree()
             .commands
             .iter()
             .filter_map(|cmd| match cmd {
@@ -5110,14 +5413,14 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let editor = make_test_editor(vec![0; 256]);
-        let tree = editor.render();
+        let tree = editor.render_tree();
         assert!(!tree.is_empty());
     }
 
     #[test]
     fn test_render_empty_document() {
         let editor = HexEditor::new(800.0, 600.0);
-        let tree = editor.render();
+        let tree = editor.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5125,7 +5428,7 @@ mod tests {
     fn test_render_with_search_bar() {
         let mut editor = make_test_editor(vec![0; 16]);
         editor.search.visible = true;
-        let tree = editor.render();
+        let tree = editor.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5133,7 +5436,7 @@ mod tests {
     fn test_render_with_goto_dialog() {
         let mut editor = make_test_editor(vec![0; 16]);
         editor.goto_visible = true;
-        let tree = editor.render();
+        let tree = editor.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5141,7 +5444,7 @@ mod tests {
     fn test_render_with_inspector() {
         let mut editor = make_test_editor(vec![0; 16]);
         editor.show_inspector = true;
-        let tree = editor.render();
+        let tree = editor.render_tree();
         assert!(!tree.is_empty());
     }
 

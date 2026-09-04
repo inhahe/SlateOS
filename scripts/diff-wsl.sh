@@ -333,6 +333,10 @@ if ! command -v wslpath >/dev/null 2>&1; then
   for diff_v in OURS VERBOSE DIFF_GNU_DIR DIFF_GNU_CACHE $DIFF_FORWARD; do
     eval "set -- \"\$@\" \"$diff_v=\${$diff_v:-}\""
   done
+  # Tells the far side that it is the far side. It cannot work this out for
+  # itself: `wslpath` exists for a harness run natively under Linux too, and
+  # the two cases want different things from step 2 below.
+  set -- "$@" DIFF_VIA_WSL=1
   set -- "$@" bash "$diff_inside/$(basename "$0")"
   while [ "$diff_argc" -gt 0 ]; do
     set -- "$@" "$1"
@@ -341,6 +345,29 @@ if ! command -v wslpath >/dev/null 2>&1; then
   done
   exec wsl -e env "$@"
 fi
+
+# --- 2. one stream back across the boundary -----------------------------------
+# `wsl.exe` shares a file offset with no other writer -- not the shell that
+# launched it, not a `cat` relaying its pipe, and not between its own two
+# streams. So when a caller merges the streams into one file, which is what
+# `harness > log 2>&1` does and what every backgrounded run in this tree is
+# recorded as, whichever WSL stream writes more starts at offset zero and
+# overwrites the other. No error is reported; the bytes are gone.
+#
+# What that costs here is the harness's verdict. The report -- `197 passed, 0
+# differed` -- is on stdout, and a build that goes wrong puts megabytes on
+# stderr, so the run whose output you most need to read is exactly the run
+# that loses it. A warm run survives only because cargo is quiet.
+#
+# Redirecting on the near side does not help: `2>&1` there makes fd2 a dup of
+# fd1, and `wsl.exe` still writes the two with offsets of its own. The collapse
+# has to happen on this side, where both streams are ordinary pipes back to
+# `wsl.exe`. Merging into *stdout* rather than stderr keeps the report where
+# every caller and every harness already expects to find it.
+#
+# Only when we actually crossed. A harness run natively under Linux has no
+# boundary to survive and keeps its two streams distinct.
+if [ -n "${DIFF_VIA_WSL:-}" ]; then exec 2>&1; fi
 
 root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
 

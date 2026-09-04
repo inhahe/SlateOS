@@ -3102,6 +3102,84 @@ check_requests_not_deleted() {
 
 check_requests_not_deleted
 
+# A file declared `text eol=lf` that holds CRLF on disk, which no git command
+# you would think to run will tell you about.
+#
+# On 2026-09-03 this sweep went red at `check_shellcheck`, ~45 minutes in, on
+# thirteen files a tool in this tree had rewritten in text mode.  The whole
+# working tree said clean the entire time: `git status`, `git diff`, `git diff
+# --quiet` and `git add` all compare *through* the clean filter, which converts
+# CRLF to LF before any comparison happens, so a wholly-CRLF file is identical
+# to the index as far as every command anyone actually runs is concerned.
+# Staging the repair of all thirteen produced a zero-byte diff.  Only
+# `git diff-files` and `git ls-files --eol` see the raw bytes, and nobody runs
+# those.  `text eol=lf` is a promise kept at checkout, not an invariant checked
+# afterwards -- so nothing was checking it.
+#
+# It runs HERE, second, for the reason the cost was 45 minutes rather than 30
+# seconds.  It cannot claim the first slot: the gate above it is about
+# information that is already destroyed, and this one is only about wasting a
+# cycle.  Everything else in the sweep can wait behind it.
+#
+# Scope is every declared file, not just `*.sh`, deliberately.  `check_shellcheck`
+# is what caught this, and it covers `.sh` -- so it saw one of the thirteen and
+# was silent about the other twelve, which is exactly the shape that makes a
+# whole-tree corruption read like a one-file typo.  The thing worth learning
+# from a finding here is that some tool wrote text in the wrong mode; a
+# `.sh`-only gate hides the size of that.  Costs ~32 seconds reading 37 MB
+# across 1438 files, pooled 16 ways -- the cost is per-file antivirus
+# interception, not bandwidth (see open-questions.md A-Q7).
+check_eol() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== eol check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Graded against the real tree first.  Every way this checker can break --
+    # a `git check-attr` stream walked out of alignment, an attribute filter
+    # that matches nothing, a CR test that only counts CRLF -- makes the
+    # declared set or the finding set go *empty*, and an empty finding set is
+    # reported in the same words as a clean tree.  Its self-test drives the
+    # whole pipeline end to end for that reason: a fixture aimed at the parts
+    # cannot see a gate that finds a defect, prints it, and returns 0 anyway.
+    echo "=== Checking the eol gate against the tree it grades ==="
+    if ! run_checker check-eol-selftest "$py" "$PROJECT_ROOT/scripts/check-eol.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The eol gate no longer agrees with the" >&2
+        echo "tree it grades, so its verdict means nothing -- every failure mode" >&2
+        echo "it has empties its own finding set, which it reports exactly the" >&2
+        echo "way it reports a clean tree." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that no file declared eol=lf holds a carriage return ==="
+    if run_checker check-eol "$py" "$PROJECT_ROOT/scripts/check-eol.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each file above is declared \`text eol=lf\`" >&2
+    echo "in .gitattributes and has CRLF line endings on disk." >&2
+    echo "" >&2
+    echo "Do not trust git about this.  \`git status\` and \`git diff\` will call" >&2
+    echo "the tree clean, because they compare through the clean filter, which" >&2
+    echo "normalises the CRLF away before the comparison.  Staging the repair" >&2
+    echo "produces an empty diff.  Use \`git ls-files --eol\` to see it." >&2
+    echo "" >&2
+    echo "Repair by rewriting the bytes -- read the file, replace CRLF with LF," >&2
+    echo "write it back in binary mode.  Then find what wrote it that way: this" >&2
+    echo "is almost always a script opening a file in text mode on Windows, and" >&2
+    echo "fixing the file without fixing the writer just schedules the next one." >&2
+    exit 1
+}
+
+check_eol
+
 # Every gate in this script trusts that a checker which finds a problem will
 # *say so* by exiting non-zero.  `check-doc-links.py` did not.  A bare run of it
 # fell through to `ap.print_help(); return 0` while every refusal sat behind

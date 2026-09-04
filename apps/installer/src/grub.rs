@@ -523,14 +523,18 @@ pub fn is_valid_uuid(s: &str) -> bool {
 pub fn extract_uuid(text: &str) -> Option<&str> {
     // Try to find a long-form UUID.
     for (i, _) in text.match_indices(|c: char| c.is_ascii_hexdigit()) {
-        if i + 36 <= text.len() && is_valid_uuid(&text[i..i + 36]) {
-            return Some(&text[i..i + 36]);
+        if let Some(cand) = i.checked_add(36).and_then(|e| text.get(i..e))
+            && is_valid_uuid(cand)
+        {
+            return Some(cand);
         }
     }
     // Try short-form.
     for (i, _) in text.match_indices(|c: char| c.is_ascii_hexdigit()) {
-        if i + 9 <= text.len() && is_valid_uuid(&text[i..i + 9]) {
-            return Some(&text[i..i + 9]);
+        if let Some(cand) = i.checked_add(9).and_then(|e| text.get(i..e))
+            && is_valid_uuid(cand)
+        {
+            return Some(cand);
         }
     }
     None
@@ -682,7 +686,12 @@ impl GrubUpdateRunner {
     /// no known command could be found.
     pub fn update_grub(&self) -> Result<(), GrubError> {
         for cmd_args in UPDATE_COMMANDS {
-            let program = cmd_args[0];
+            // An entry in the table with no program is a table bug, not a
+            // system state — skip it rather than reporting a GRUB failure the
+            // user could act on.
+            let Some(program) = cmd_args.first().copied() else {
+                continue;
+            };
 
             // Check whether the command exists on PATH.
             let which = Command::new("which").arg(program).output();
@@ -701,7 +710,7 @@ impl GrubUpdateRunner {
                     // default baked into the candidate list.
                     cmd.arg("-o").arg(out_path);
                 } else {
-                    for arg in &cmd_args[1..] {
+                    for arg in cmd_args.get(1..).unwrap_or_default() {
                         cmd.arg(arg);
                     }
                 }
@@ -728,7 +737,12 @@ impl GrubUpdateRunner {
     /// Detect which update command is available without running it.
     pub fn detect_command() -> Option<&'static str> {
         for cmd_args in UPDATE_COMMANDS {
-            let program = cmd_args[0];
+            // An entry in the table with no program is a table bug, not a
+            // system state — skip it rather than reporting a GRUB failure the
+            // user could act on.
+            let Some(program) = cmd_args.first().copied() else {
+                continue;
+            };
             let which = Command::new("which").arg(program).output();
             if let Ok(out) = which
                 && out.status.success()
@@ -759,7 +773,8 @@ mod tests {
         clippy::indexing_slicing,
         clippy::unwrap_used,
         clippy::expect_used,
-        clippy::panic
+        clippy::panic,
+        clippy::arithmetic_side_effects
     )]
 
     use super::*;

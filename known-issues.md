@@ -56845,14 +56845,27 @@ Production findings by lint:
 | `indexing_slicing` (slicing) | 15 |
 | everything else | 30 |
 
-**`paint`, `soundrecorder`, `habits` and `markdowneditor` are done**
-(2026-09-03), taking 375 production findings out of the 588 — 64% — and all six off the
-list below (`regextester` and `explorer` too). Both were
-converted to `oswindow::app` in the same pass, since the trigger below says to
-take a crate's debt when converting it.
+**Seven crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
+`habits`, `markdowneditor`, `regextester`, `explorer` and `installer` — taking
+**408 production findings out of the 588 (69%)**. The first six were converted
+to `oswindow::app` in the same pass, since the trigger below says to take a
+crate's debt when converting it; `installer` is a CLI tool with no window, so
+it got the lint half alone.
 
 Worst crates by *production* findings: ~~`paint` 135~~, ~~`soundrecorder` 55~~,
-~~`habits` 43~~, ~~`markdowneditor` 40~~, ~~`regextester` 39~~, `installer` 33, ~~`explorer` 33~~, `finance` 23, `metronome` 21, `weather` 21, `reminders` 21.
+~~`habits` 43~~, ~~`markdowneditor` 40~~, ~~`regextester` 39~~, ~~`installer`
+33~~, ~~`explorer` 33~~, `finance` 23, `metronome` 21, `weather` 21,
+`reminders` 21.
+
+**`installer` had been reporting a count that was not its count.** Its
+`build.rs` embeds a Windows manifest and did so with an `expect`. Under
+`-D warnings` clippy stops at the *build script*, before it compiles the crate
+at all — so `cargo clippy -p installer -- -D warnings` failed on one line in
+`build.rs` and never analysed `lib.rs` or `grub.rs`. The 33 above came from the
+survey's `--all-targets` run; a bare per-crate check made the crate look like it
+had a single trivial finding. **Worth checking elsewhere:** any crate with a
+`build.rs` that trips a lint is hiding its whole body behind that one line.
+
 
 **Note that `metronome` is on that list**, and it is one of the three apps that
 were *already* converted before today. Wiring an app to the compositor does not

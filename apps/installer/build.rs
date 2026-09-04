@@ -33,6 +33,18 @@ fn main() {
         return;
     }
 
+    // `expect` and not `?`: a build script's `main` returns `()`, so there is
+    // no error channel to propagate into and nothing downstream that could act
+    // on a failure. Failing the build loudly is the correct behaviour — a
+    // manifest that silently did not embed produces test binaries Windows
+    // refuses to launch without elevation, which surfaces as "os error 740"
+    // from an unrelated-looking place.
+    //
+    // Worth knowing: until this line carried the allow, `cargo clippy -p
+    // installer -- -D warnings` stopped *here*, on the build script, and never
+    // analysed the crate at all — so the crate looked clean while carrying its
+    // real findings.
+    #[allow(clippy::expect_used)]
     embed_manifest::embed_manifest(embed_manifest::new_manifest("SlateOS.installer"))
         .expect("failed to embed Windows manifest");
 

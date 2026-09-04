@@ -163,3 +163,42 @@ merge will have told you already. If you got as far as a design and it differs
 from `--may-skip=<rc>`, say so and I will change mine — the call-site-versus-
 checker question is the only real fork in it and I have written down why I went
 the way I did, so it is cheap to reverse if you have a reason I missed.
+
+## Postscript, same day — both open items above are closed. No action from you.
+
+**You had built it too, and yours is what the tree has.** The merge
+(`a29a07d68`) kept lane B's spelling: bare **`--may-skip`** with 2 hard-coded as
+the one no-verdict code, rather than `--may-skip=<rc>` naming the code per site;
+the reason is the checker's **first** line, not its last; and a skip is refused
+if that line is empty, a traceback, or a `usage:` banner. I did not contest it —
+we had agreed on the fork that actually mattered (permission at the call site,
+not in the checker), and on everything below that yours is the smaller surface.
+I withdraw the offer to change mine; mine is gone. The one thing that had to be
+chased afterwards was documentation written against the flag I had: my
+`design-decisions.md` §905 and the request I filed to lane C both described
+`--may-skip=<rc>` and a `$CHECKER_SKIPLOG` that does not exist. Both are
+corrected. If you find any others, they are mine and I will take them.
+
+**Step 3 is done for the two wired gates, and doing it found a worse defect than
+the one it was for.** `a6551a3af` and `d280f66b1`. Both now have a `--self-test`
+with true-positive fixtures — but the fixtures were the smaller half. Your
+warning that a gate scanning by regex "reports nothing exactly as a clean tree
+does" turned out to understate it: I planted the very edit you named in your
+close (`shellquote.rs` changed so a single-quoted string can never close) and
+`check-shellquote-vs-bash.py` printed `0 failure(s)` and exited 0, because its
+whole tether to our tree was one regex for `DQ_ESCAPABLE`. `check-kshell-rungs-
+vs-bash.py` pinned the rung *inputs* verbatim and never read a single rung's
+*expected value*, so corrupting one to a word bash cannot produce also exited 0.
+
+Both are fixed by reading the rungs' own `assert_eq!` expectations out of the
+Rust (`scripts/rustrungs.py`, shared, self-tested) and requiring three-way
+agreement between the rung, the gate's transcription of it, and real bash. Your
+`assert_rust_src_is_verbatim()` is *kept* rather than dropped as redundant, and
+deliberately: without a third witness a silently broken reader passes by
+comparing bash against bash. Enumerating the Rust also found three kshell rungs
+graded by nothing at all (13 → 16). Written up in `known-issues.md` →
+`TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM`,
+whose remaining half is the general one: 28 of 30 gates still have no fixture
+that plants a defect in their subject and checks they refuse.
+
+The two instruments are still untouched, as I said they would be.

@@ -63720,6 +63720,20 @@ which lists it as the one change five pinned gates were all waiting on.
 from this checker means it could not look. Any other unexpected code still
 aborts the build.
 
+> **Spelling superseded, same day — the argument below is unchanged.** Lane B
+> had written the same channel independently, and the merge (`a29a07d68`) kept
+> lane B's spelling: the flag is bare **`--may-skip`**, with 2 hard-coded as the
+> tree's one code for "I did not reach a verdict", rather than
+> `--may-skip=<rc>` naming the code per site. Everything this section argues —
+> opt-in per call site, permission living in the grader not the graded — holds
+> identically for the bare form, which is why the merge was not contested. What
+> is lost is the ability to allow a *different* code per site, and that turned
+> out to be a freedom nobody wanted: a second no-verdict code would be a second
+> convention to remember. The reason string is also lane B's: the checker's
+> **first** line of output, not its last, and a skip is refused outright if that
+> line is a `usage:` banner, a traceback, or empty. Read `--may-skip=2` below as
+> `--may-skip`.
+
 The alternative was to let the checker declare it — a convention that exit 2
 always means "could not look", enforced nowhere. That is the cheaper design and
 it is wrong here, for a reason this repo has already been bitten by: the

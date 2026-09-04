@@ -44,23 +44,43 @@ is untouched and I have not touched the wiring.
 
 But the pin also said the gate "could not be wired anyway while `run_checker`
 aborts on 2". **That stopped being true today**: `run_checker` now takes
-`--may-skip=<rc>`, so a gate whose *tool* is missing can skip loudly and let
-the build continue. I replaced that clause with a note saying the gate now
-*could* be wired as a skipping gate and that your decision to keep it out
-stands until you revisit it.
+`--may-skip`, so a gate whose *tool* is missing can skip loudly and let the
+build continue. I replaced that clause with a note saying the gate now *could*
+be wired as a skipping gate and that your decision to keep it out stands until
+you revisit it.
 
 I edited it rather than leaving it because a pin whose stated reason has
 expired is precisely the stale exemption that list exists to catch — the same
 argument you made to lane B about not inventing a reason you did not have. If
 you would rather it read differently, it is your pin; rewrite it.
 
-Worth knowing for your own gates: `--may-skip=<rc>` is opt-in per call site
-(`run_checker --may-skip=2 <label> <cmd>`), it prints the checker's last line
-as the reason and records `label<TAB>rc<TAB>reason` in `$CHECKER_SKIPLOG`, and
-it refuses at wiring time to accept `0`, `1`, `126`, `127` or a non-number. It
-is the channel for any check that is right to decline when a build artifact or
-a tool is absent — lane B's `check-libc-shape.py` is now wired through it, and
-it skips on this worktree because the sysroot archive is older than its inputs.
+Worth knowing for your own gates — **corrected 2026-09-03, later the same day.**
+I described this flag to you from the version I had written, and the merge with
+lane B (`a29a07d68`) kept lane B's, which is spelled differently and reports
+differently. If you wired anything against the paragraph that used to be here,
+it does not exist. What is actually in the tree:
+
+- **`run_checker --may-skip <label> <cmd>`** — bare, before the label, still
+  opt-in per call site. There is no `=<rc>`: **2** is the tree's single code for
+  "I did not reach a verdict", hard-coded, so there is nothing to choose and
+  nothing to get wrong. (The rejected-code list I mentioned — `0`, `1`, `126`,
+  `127`, non-numbers — was validation for an argument that no longer exists.)
+- The reason printed is the checker's **first** line of output, not its last.
+  This matters when you write the checker: put the decline message *before* any
+  other output, and put success lines *after* whatever transport check might
+  decline.
+- There is **no `$CHECKER_SKIPLOG`**. A skip sets `RUN_CHECKER_SKIPPED=1` and
+  `RUN_CHECKER_SKIP_REASON=<first line>` for the caller to read, and prints
+  three lines to stderr, the last of which is
+  `nothing was checked here. This is not a pass.`
+- A skip is **refused** — and the build aborts — if the exit-2 output is empty,
+  begins `Traceback (most recent call last):`, or begins `usage: `. The last is
+  the important one: argparse also exits 2, so a typo in a wired gate would
+  otherwise silence it on every host forever.
+
+It is the channel for any check that is right to decline when a build artifact
+or a tool is absent — lane B's `check-libc-shape.py` is wired through it, and it
+skips on this worktree because the sysroot archive is older than its inputs.
 
 ## The four bash oracles were filed to the wrong lane, and you were half-right about it
 

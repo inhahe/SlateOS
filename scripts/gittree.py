@@ -52,6 +52,11 @@ gate 7 is the reason the `--stub-rust-mods` option exists (see below).
 
 Nothing here writes to the repository or runs a git command that can mutate
 it: `cat-file` and `ls-tree` are reads.
+
+That is a statement about damage, not about correctness, and for a while it
+was doing duty as both. Reading the *wrong* repository breaks nothing and
+reports nothing -- so both git calls below select their repository through
+`gitenv.clean_env()`, not by `cwd` alone. See the comment on that import.
 """
 
 from __future__ import annotations
@@ -62,6 +67,30 @@ import re
 import subprocess
 import sys
 from typing import Iterable, Iterator, Optional, Sequence
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Load-bearing on both git calls below, not hygiene.
+#
+# `cwd=` names a repository only until something in the environment has already
+# named one, and `GIT_DIR` outranks it. Git exports `GIT_DIR` into every hook,
+# into `git bisect run` and into `git rebase --exec` -- so a `RevTree(rev, tmp)`
+# built over a fixture reads whatever repository the *caller* is inside, and
+# reads it without complaint.
+#
+# The docstring above used to answer this with "cat-file and ls-tree are reads",
+# which is true and is not a defence. Reading the wrong repository corrupts
+# nothing; it silently answers a different question, so a self-test that builds
+# a fixture and then reads past it *passes*, and passing for the wrong reason is
+# worse than failing. `quote-names.py --selftest` did exactly that on
+# 2026-09-04, asserting against a repository it had never built.
+#
+# Called at each site rather than snapshotted at import: a module-level copy is
+# right only if nothing sets `GIT_DIR` after this module loads, and that holds
+# in a hook -- where git sets it before Python starts -- exactly when it does
+# not matter. It is a dict copy per git *process*, not per blob; `read` writes
+# to a pipe that is already open and never consults it.
+import gitenv  # noqa: E402
 
 # `mod name;` and `pub mod name;`, and nothing cleverer.
 #
@@ -108,6 +137,7 @@ class GitTree:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 cwd=repo,
+                env=gitenv.clean_env(),
             )
         except OSError as exc:
             raise GitTreeError(f"cannot start git cat-file: {exc}") from exc
@@ -210,7 +240,8 @@ class GitTree:
             cmd.extend(pathspec)
         try:
             out = subprocess.run(
-                cmd, cwd=self._repo, stdout=subprocess.PIPE, check=True
+                cmd, cwd=self._repo, stdout=subprocess.PIPE, check=True,
+                env=gitenv.clean_env(),
             ).stdout
         except (OSError, subprocess.CalledProcessError) as exc:
             raise GitTreeError(f"git ls-tree failed: {exc}") from exc

@@ -121,19 +121,29 @@ pub enum Kind {
     Other,
 }
 
-/// An entry's type, identity and size — the whole of what a walk reads from a
-/// lookup.
+/// An entry's type, identity, size and modification time — the whole of what a
+/// walk reads from a lookup.
 ///
 /// Deliberately not [`std::fs::Metadata`]. `Metadata` cannot be produced from
 /// an `fstatat` without going back through a path, and its `st_dev`/`st_ino`
 /// live behind a unix-only extension trait, so a caller wanting both ends up
 /// writing the `cfg` this type exists to hold once.
+///
+/// The mtime is here for the same reason the rest is: one `fstatat` already
+/// returns it. A caller that needs "is this a directory, and is it older than
+/// the member I am about to unpack over it?" — `tar --keep-newer-files` and
+/// `--newer` ask exactly that — would otherwise have to declare its own
+/// `struct stat`, its own `extern fn fstatat`, and its own size assertion, to
+/// read a field the call this module already makes has written into a buffer
+/// two lines away. That is the duplication this module exists to end, so the
+/// field is read rather than dropped.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Stat {
     kind: Kind,
     dev: u64,
     ino: u64,
     size: u64,
+    mtime: i64,
 }
 
 impl Stat {
@@ -189,6 +199,22 @@ impl Stat {
         self.size
     }
 
+    /// Whole seconds since the epoch, as `st_mtim.tv_sec` reports them.
+    ///
+    /// Seconds and not nanoseconds because the only questions asked of this are
+    /// comparisons against a `tar` header's `mtime` field, which is itself a
+    /// whole number of seconds — comparing at a finer resolution than the
+    /// archive records would make "same time" answer false for a file that was
+    /// extracted from that very archive.
+    ///
+    /// Negative for an entry stamped before 1970. That is representable rather
+    /// than clamped: `tar` archives created from pre-epoch trees exist, and a
+    /// clamp would silently make every one of them look like 1970-01-01.
+    #[must_use]
+    pub fn mtime(&self) -> i64 {
+        self.mtime
+    }
+
     /// The entry a path names, without following a final symlink.
     ///
     /// This is the one lookup a walk does by path — its starting point, which
@@ -206,6 +232,7 @@ impl Stat {
             dev: metadata_dev(md),
             ino: metadata_ino(md),
             size: md.len(),
+            mtime: metadata_mtime(md),
         }
     }
 }
@@ -265,6 +292,34 @@ fn metadata_ino(_md: &std::fs::Metadata) -> u64 {
     0
 }
 
+#[cfg(unix)]
+fn metadata_mtime(md: &std::fs::Metadata) -> i64 {
+    use std::os::unix::fs::MetadataExt;
+    md.mtime()
+}
+
+/// The epoch seconds of a `Metadata`, off unix, where there is no `st_mtim` to
+/// read and `modified()` is the only route.
+///
+/// `modified()` can fail — a filesystem is permitted not to record the time at
+/// all — and a pre-epoch stamp makes `duration_since(UNIX_EPOCH)` fail too, so
+/// both are handled rather than unwrapped. The pre-epoch case is *recovered*
+/// (the error carries the interval, negated) instead of collapsed to 0: a 1960
+/// file reported as 1970 would compare newer than it is, which is the one
+/// direction that loses data — `tar --keep-newer-files` would skip a member it
+/// should have extracted.
+#[cfg(not(unix))]
+fn metadata_mtime(md: &std::fs::Metadata) -> i64 {
+    use std::time::UNIX_EPOCH;
+    let Ok(t) = md.modified() else { return 0 };
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        Err(e) => i64::try_from(e.duration().as_secs())
+            .unwrap_or(i64::MAX)
+            .saturating_neg(),
+    }
+}
+
 /// The error a call gets when the name it was handed cannot be expressed as a
 /// C string.
 ///
@@ -303,6 +358,59 @@ fn c_name(component: &[u8]) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// A symlink *target* as a NUL-terminated byte string, refusing only the NUL.
+///
+/// The deliberate counterpart to [`c_name`], and the difference is the whole
+/// reason there are two functions rather than one with a flag. A name is a
+/// lookup this module performs, so `/` in one is a walk it has promised not to
+/// do. A target is not looked up here at all: it is *data* written into an
+/// inode, and something else resolves it later, possibly never. It may hold
+/// `/`, may be `..`, may name nothing that exists. Refusing those would not
+/// make the module safer — it would make it unable to reproduce the archives
+/// and trees it is meant to reproduce, and would do it by corrupting them
+/// silently at extraction time rather than failing.
+///
+/// The NUL is still refused, and for [`c_name`]'s reason: a C call handed one
+/// stores the *prefix*, so the link would resolve somewhere the caller never
+/// named. That is the only refusal.
+///
+/// The empty target is *not* refused, and the first version of this function
+/// refusing it is the one defect the `tar` conversion introduced. The comment
+/// justifying the refusal said `symlinkat` would answer `EINVAL` anyway, so
+/// answering early only improved the message. It does not: Linux resolves the
+/// target through `getname()`, which answers **`ENOENT`** for an empty string,
+/// and `scripts/tar-diff.sh`'s `emptysym` case measured exactly that — GNU
+/// reported "No such file or directory" where ours reported "Invalid
+/// argument". A refusal defended by a guess about an errno is a refusal that
+/// invents one; the kernel is the thing that knows, so it is the thing asked.
+/// See `a_target_of_nothing_is_the_kernels_enoent_not_ours`.
+#[cfg(unix)]
+fn c_target(target: &[u8]) -> io::Result<Vec<u8>> {
+    if target.contains(&0) {
+        return Err(embedded_nul());
+    }
+    let mut buf = Vec::with_capacity(target.len().saturating_add(1));
+    buf.extend_from_slice(target);
+    buf.push(0);
+    Ok(buf)
+}
+
+/// The result of an `*at` call that answers `0` or `-1`.
+///
+/// The `errno` is read immediately, in the same expression that produced it.
+/// That is not style: `errno` is thread-local but not call-local, and any
+/// intervening libc call — an allocation that happens to `mmap`, a `Vec` drop
+/// that happens to `free` — may overwrite it. Taking it here means the error
+/// reported is the one the syscall raised.
+#[cfg(unix)]
+fn checked(rc: i32) -> io::Result<()> {
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 // ---------------------------------------------------------------- unix --
 
 // The syscalls `std` does not wrap, declared beside their callers rather than
@@ -324,6 +432,20 @@ unsafe extern "C" {
     fn fstatat(dirfd: i32, path: *const u8, buf: *mut CStat, flags: i32) -> i32;
     fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32;
     fn faccessat(dirfd: i32, path: *const u8, mode: i32, flags: i32) -> i32;
+    fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, len: usize) -> isize;
+    fn mkdirat(dirfd: i32, path: *const u8, mode: u32) -> i32;
+    fn symlinkat(target: *const u8, dirfd: i32, path: *const u8) -> i32;
+    fn linkat(
+        olddirfd: i32,
+        oldpath: *const u8,
+        newdirfd: i32,
+        newpath: *const u8,
+        flags: i32,
+    ) -> i32;
+    fn mkfifoat(dirfd: i32, path: *const u8, mode: u32) -> i32;
+    fn mknodat(dirfd: i32, path: *const u8, mode: u32, dev: u64) -> i32;
+    fn fchmodat(dirfd: i32, path: *const u8, mode: u32, flags: i32) -> i32;
+    fn utimensat(dirfd: i32, path: *const u8, times: *const CTimespec, flags: i32) -> i32;
     fn fdopendir(fd: i32) -> *mut CDir;
     fn readdir(dirp: *mut CDir) -> *mut CDirent;
     fn closedir(dirp: *mut CDir) -> i32;
@@ -355,7 +477,7 @@ struct CDirent {
 /// documented as matching Linux x86-64's, so the one declaration serves both
 /// the host build and the SlateOS one.
 ///
-/// Only `st_dev`, `st_ino`, `st_mode` and `st_size` are read. The rest is
+/// Only `st_dev`, `st_ino`, `st_mode`, `st_size` and `st_mtim` are read. The rest is
 /// present so the struct is the right *size*: `fstat` writes all of it, and a
 /// short buffer would be a stack overwrite rather than a wrong answer.
 #[cfg(unix)]
@@ -399,6 +521,18 @@ const _: () = assert!(core::mem::size_of::<CStat>() == 144);
 #[cfg(unix)]
 mod oflag {
     pub const RDONLY: i32 = 0;
+    pub const WRONLY: i32 = 1;
+    pub const CREAT: i32 = 0o100;
+    pub const EXCL: i32 = 0o200;
+    pub const TRUNC: i32 = 0o1000;
+    /// Return rather than block when the thing opened is a fifo with no reader.
+    ///
+    /// Set on every create here, and the reason is a hang rather than a
+    /// slowdown: opening a named pipe waits for the other end, so a caller
+    /// that creates one and then opens it to write its contents sits there for
+    /// ever with no output and nothing to distinguish it from slow I/O. This
+    /// is what `tar` hit the first time an archive held a fifo.
+    pub const NONBLOCK: i32 = 0o4000;
     pub const DIRECTORY: i32 = 0o200_000;
     pub const NOFOLLOW: i32 = 0o400_000;
     pub const CLOEXEC: i32 = 0o2_000_000;
@@ -460,6 +594,7 @@ impl Stat {
             ino: st.st_ino,
             #[allow(clippy::cast_sign_loss)]
             size: st.st_size.max(0) as u64,
+            mtime: st.st_mtim.tv_sec,
         }
     }
 }
@@ -584,6 +719,24 @@ impl Dir {
         Ok(Stat::from_cstat(&st))
     }
 
+    /// A second, independent descriptor on this same directory.
+    ///
+    /// For a caller that must walk from here repeatedly without spending its
+    /// only handle: a walk consumes the [`Dir`] it descends from, so a root that
+    /// several lookups start at has to be duplicated rather than moved.
+    ///
+    /// Not `dup`. `dup` copies the number and shares the *file description*
+    /// underneath it, so the two handles share a directory read offset and one
+    /// [`Dir::names`] would silently change what the other returns next. This
+    /// opens `.` afresh, which gets a description of its own — and, because it
+    /// goes through [`Dir::open_child`] against this directory's own identity,
+    /// it also *proves* the new descriptor names the same directory. It cannot
+    /// fail that check under any ordinary condition, and that is the point: if
+    /// it ever does, something has happened that the caller must not walk over.
+    pub fn reopen(&self) -> io::Result<Self> {
+        self.open_child(b".", &self.stat_self()?)
+    }
+
     /// Look `name` up in this directory, without following it if it is a link.
     pub fn stat(&self, name: &[u8]) -> io::Result<Stat> {
         let cname = c_name(name)?;
@@ -636,6 +789,190 @@ impl Dir {
         // it and does not retain it.
         let rc = unsafe { faccessat(self.0, cname.as_ptr(), W_OK, AT_EACCESS) };
         Some(rc == 0)
+    }
+
+    // ------------------------------------------------------ creating half --
+    //
+    // Everything above reads or removes. What follows creates, and it exists
+    // here rather than in a caller for the reason the module docs give: `tar`
+    // had grown its own descriptor walk with the same shape and none of the
+    // identity checking, and two copies of a security-relevant walk is one
+    // copy that will be fixed and one that will not.
+    //
+    // Every one of these acts on a *single component* in this directory, so
+    // "beneath the root" is a property of the `Dir` the caller holds and not
+    // something re-argued per call.
+
+    /// Where the symlink at `name` points, as the bytes it was made with.
+    ///
+    /// Not resolved, not validated, and not required to be a component: a
+    /// symlink target is an opaque string that the *kernel* interprets later,
+    /// and a caller that wants to know whether it escapes must walk it itself.
+    pub fn read_link(&self, name: &[u8]) -> io::Result<Vec<u8>> {
+        let cname = c_name(name)?;
+        // `PATH_MAX`, which is the ceiling `readlinkat` itself enforces, so a
+        // full buffer means the target was truncated rather than merely long.
+        let mut buf = vec![0u8; 4096];
+        // SAFETY: `cname` is NUL-terminated and outlives the call; `buf` is
+        // `buf.len()` writable bytes. The call fills at most that many and
+        // retains neither pointer.
+        let n = unsafe { readlinkat(self.0, cname.as_ptr(), buf.as_mut_ptr(), buf.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let n = usize::try_from(n).unwrap_or(0);
+        if n >= buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "symlink target is longer than PATH_MAX",
+            ));
+        }
+        buf.truncate(n);
+        Ok(buf)
+    }
+
+    /// Create a directory called `name`. `EEXIST` comes straight back out.
+    ///
+    /// `mode` is masked by the umask exactly as `fs::create_dir`'s `0o777` is.
+    /// Deciding that an existing *directory* is success is not done here,
+    /// because it is a policy and callers differ: `mkdir -p` says yes, `mkdir`
+    /// says no, and `tar` says yes only when the obstacle is a real directory
+    /// and not a symlink to one.
+    pub fn mkdir(&self, name: &[u8], mode: u32) -> io::Result<()> {
+        let cname = c_name(name)?;
+        // SAFETY: `cname` is NUL-terminated and outlives the call, which reads
+        // it and does not retain it.
+        checked(unsafe { mkdirat(self.0, cname.as_ptr(), mode) })
+    }
+
+    /// Create a symlink called `name` holding `target`.
+    ///
+    /// `target` is written verbatim — it may hold `/`, may climb, may name
+    /// nothing at all. That is a symlink: the bytes are data until something
+    /// resolves them. `name`, being a lookup in this directory, is a single
+    /// component like every other name here.
+    pub fn symlink(&self, target: &[u8], name: &[u8]) -> io::Result<()> {
+        let cname = c_name(name)?;
+        let ctarget = c_target(target)?;
+        // SAFETY: both strings are NUL-terminated and outlive the call, which
+        // reads them and retains neither.
+        checked(unsafe { symlinkat(ctarget.as_ptr(), self.0, cname.as_ptr()) })
+    }
+
+    /// Hard-link `name` in this directory to `old_name` in `old_dir`.
+    ///
+    /// Both ends are named relative to a held descriptor, which is what lets a
+    /// caller confine the *target* as well as the link — GNU `tar` does, and
+    /// refuses a target reached through an escaping symlink rather than
+    /// linking to it.
+    ///
+    /// No `AT_SYMLINK_FOLLOW`: a hard link to a symlink stores the link, which
+    /// is what an archive that recorded one asked for.
+    pub fn hard_link(&self, old_dir: &Self, old_name: &[u8], name: &[u8]) -> io::Result<()> {
+        let cold = c_name(old_name)?;
+        let cnew = c_name(name)?;
+        // SAFETY: both strings are NUL-terminated and outlive the call; both
+        // descriptors are live for its duration because `self` and `old_dir`
+        // are borrowed. The call retains nothing.
+        checked(unsafe { linkat(old_dir.0, cold.as_ptr(), self.0, cnew.as_ptr(), 0) })
+    }
+
+    /// Create a named pipe called `name`.
+    ///
+    /// The permission bits only: `mkfifoat` supplies `S_IFIFO` itself, and a
+    /// caller that passed a whole `st_mode` through would be passing a second
+    /// file-type bit.
+    pub fn mkfifo(&self, name: &[u8], mode: u32) -> io::Result<()> {
+        let cname = c_name(name)?;
+        // SAFETY: `cname` is NUL-terminated and outlives the call.
+        checked(unsafe { mkfifoat(self.0, cname.as_ptr(), mode & 0o7777) })
+    }
+
+    /// Create a device node called `name`.
+    ///
+    /// Unlike [`Dir::mkfifo`], `mode` carries the `S_IFCHR`/`S_IFBLK` bit: the
+    /// call cannot supply it, because which one is the whole question.
+    pub fn mknod(&self, name: &[u8], mode: u32, dev: u64) -> io::Result<()> {
+        let cname = c_name(name)?;
+        // SAFETY: `cname` is NUL-terminated and outlives the call.
+        checked(unsafe { mknodat(self.0, cname.as_ptr(), mode, dev) })
+    }
+
+    /// Set the permission bits of `name`.
+    ///
+    /// Follows a final symlink, as `chmod(2)` does and as there is no useful
+    /// alternative to: Linux has no `fchmodat` that does not, and the mode of
+    /// a symlink is not consulted by anything.
+    pub fn chmod(&self, name: &[u8], mode: u32) -> io::Result<()> {
+        let cname = c_name(name)?;
+        // SAFETY: `cname` is NUL-terminated and outlives the call.
+        checked(unsafe { fchmodat(self.0, cname.as_ptr(), mode, 0) })
+    }
+
+    /// Stamp `name`'s access and modification times to the same second.
+    ///
+    /// `follow` says whether a final symlink is stamped or followed.
+    ///
+    /// Named after the syscall rather than after `File::set_times`, for a
+    /// reason that only appears once a caller can create a **fifo**: stamping
+    /// by opening and calling `futimens` means opening a fifo, and opening a
+    /// fifo waits for the other end. An archive holding one named pipe was
+    /// therefore a hang. `utimensat` acts on the name and opens nothing, which
+    /// is also why GNU uses it.
+    pub fn stamp(&self, name: &[u8], secs: i64, follow: bool) -> io::Result<()> {
+        let cname = c_name(name)?;
+        let t = CTimespec {
+            tv_sec: secs,
+            tv_nsec: 0,
+        };
+        let times = [t, t];
+        let flags = if follow { 0 } else { AT_SYMLINK_NOFOLLOW };
+        // SAFETY: `cname` is NUL-terminated and `times` is exactly the
+        // two-element array `utimensat` reads; both outlive the call, which
+        // retains neither.
+        checked(unsafe { utimensat(self.0, cname.as_ptr(), times.as_ptr(), flags) })
+    }
+
+    /// Create `name` and fail if anything is already there.
+    ///
+    /// No `O_NOFOLLOW`, and that is not an omission: `O_CREAT|O_EXCL` already
+    /// refuses a final symlink outright — it is the one combination the kernel
+    /// guarantees will not follow — so adding the flag would change nothing
+    /// except which errno a caller sees.
+    pub fn create_new(&self, name: &[u8], mode: u32) -> io::Result<std::fs::File> {
+        self.open_for_write(
+            name,
+            oflag::WRONLY | oflag::CREAT | oflag::EXCL | oflag::NONBLOCK,
+            mode,
+        )
+    }
+
+    /// Create `name`, or empty what is already there.
+    ///
+    /// `O_NOFOLLOW` here, where [`Dir::create_new`] does not need it: without
+    /// `O_EXCL` the kernel *would* follow a final symlink, and truncating
+    /// through one writes wherever it points.
+    pub fn create_truncating(&self, name: &[u8], mode: u32) -> io::Result<std::fs::File> {
+        self.open_for_write(
+            name,
+            oflag::WRONLY | oflag::CREAT | oflag::TRUNC | oflag::NOFOLLOW | oflag::NONBLOCK,
+            mode,
+        )
+    }
+
+    fn open_for_write(&self, name: &[u8], flags: i32, mode: u32) -> io::Result<std::fs::File> {
+        use std::os::unix::io::FromRawFd;
+        let cname = c_name(name)?;
+        // SAFETY: `cname` is NUL-terminated and outlives the call, which reads
+        // it and does not retain it.
+        let fd = unsafe { openat(self.0, cname.as_ptr(), flags | oflag::CLOEXEC, mode) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` was just returned by `openat`, is not negative, and is
+        // owned here — nothing else holds it — so handing it to `File`
+        // transfers the sole responsibility for closing it.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
     }
 
     /// The names in this directory, in `readdir` order, with `.` and `..`
@@ -789,6 +1126,18 @@ impl Dir {
         Stat::of_path(&self.0)
     }
 
+    /// A second handle on this same directory.
+    ///
+    /// Cloning a path rather than opening a descriptor, so the unix twin's
+    /// guarantee that the two handles do not share a read offset is free here —
+    /// there is no descriptor to share. The directory is still looked up, so
+    /// that a root which has been removed since it was opened fails here as it
+    /// does there rather than at the first listing.
+    pub fn reopen(&self) -> io::Result<Self> {
+        let _ = self.stat_self()?;
+        Ok(Self(self.0.clone()))
+    }
+
     /// Look `name` up in this directory, without following it if it is a link.
     pub fn stat(&self, name: &[u8]) -> io::Result<Stat> {
         let _ = c_name(name)?;
@@ -827,6 +1176,31 @@ impl Dir {
     fn child_path(&self, name: &[u8]) -> std::path::PathBuf {
         self.0.join(os_from_bytes(name))
     }
+
+    // THE CREATING HALF IS ABSENT HERE, DELIBERATELY.
+    //
+    // The unix `Dir` grew `mkdir`, `symlink`, `hard_link`, `mkfifo`, `mknod`,
+    // `chmod`, `stamp`, `read_link` and the two `create_*` calls when `tar`'s
+    // private copy of this walk was folded in. None of them is mirrored here,
+    // and the omission is the design rather than a gap someone should fill:
+    //
+    //   * `tar`'s extraction — the only caller — is itself `#[cfg(unix)]`, so
+    //     a Windows twin would have no caller to serve and no test to fail.
+    //   * Four of them have no honest Windows meaning at all. There is no
+    //     fifo, no device node, no `st_mode` to set, and a symlink needs a
+    //     privilege the process usually lacks and a kind (file vs directory)
+    //     the caller has not been asked for.
+    //   * The rest could be written with `std::fs`, and that is exactly what
+    //     makes writing them a mistake. Each would join a path, which is the
+    //     one thing this module exists to avoid, and it would do so under a
+    //     name that promises otherwise — a caller reading `dir.mkdir(name)`
+    //     would reasonably believe the confinement held. The reading half
+    //     accepts that trade because `rm` needs to run in host tests; the
+    //     creating half has nothing to buy with it.
+    //
+    // If a Windows caller ever does need to create, the honest shape is a
+    // separate type whose name says it joins paths — not these methods with
+    // their guarantees quietly removed.
 }
 
 #[cfg(test)]
@@ -1041,5 +1415,352 @@ mod tests {
         let child = dir.open_child(b"d", &by_name).unwrap();
         assert!(child.stat_self().unwrap().is_dir());
         assert_eq!(child.stat_self().unwrap().identity(), by_name.identity());
+    }
+
+    /// A freshly written file's mtime is a plausible recent second, on every
+    /// platform.
+    ///
+    /// The portable half of the mtime coverage, and the only test that reaches
+    /// the `cfg(not(unix))` [`Stat`] constructor at all — the stamping tests
+    /// below cannot, because the creating half they use is unix-only. Bounded
+    /// rather than exact because nothing here can set a time off unix, and the
+    /// bounds are chosen to fail the two ways the field goes wrong: a field
+    /// never filled reads 0, and a field wired to `tv_nsec` reads under 10^9,
+    /// both of which are below the floor.
+    #[test]
+    fn a_new_files_mtime_is_a_recent_second() {
+        let t = temp("statmtimenow");
+        std::fs::write(t.0.join("f"), b"x").unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mtime = Stat::of_path(&t.0.join("f")).unwrap().mtime();
+        assert!(
+            mtime > 1_600_000_000,
+            "mtime {mtime} is not a recent second"
+        );
+        assert!(
+            mtime <= i64::try_from(now).unwrap() + 86_400,
+            "mtime {mtime} is in the future"
+        );
+    }
+
+    /// The mtime is the one a stamp put there, not the one the create did.
+    ///
+    /// Asserting against a *chosen* value rather than against "changed" or
+    /// "recent": a field that were wired to `st_atim`, or to `st_ctim`, or left
+    /// at its `Default`, would all still look plausible next to a freshly
+    /// created file. Only a number nobody could have arrived at by accident
+    /// distinguishes the field being read from the field being guessed.
+    #[cfg(unix)]
+    #[test]
+    fn stat_reports_the_modification_time() {
+        let t = temp("statmtime");
+        let dir = open_root(&t.0);
+        drop(dir.create_new(b"f", 0o644).unwrap());
+        dir.stamp(b"f", 1_000_000_000, true).unwrap();
+        assert_eq!(dir.stat(b"f").unwrap().mtime(), 1_000_000_000);
+        assert_eq!(
+            Stat::of_path(&t.0.join("f")).unwrap().mtime(),
+            1_000_000_000
+        );
+    }
+
+    /// A pre-epoch stamp comes back negative rather than clamped to zero.
+    ///
+    /// The direction matters and only one of them loses data: a 1960 file
+    /// reported as 1970 compares *newer* than it is, so `tar --keep-newer-files`
+    /// would skip a member it was supposed to extract.
+    #[cfg(unix)]
+    #[test]
+    fn a_time_before_the_epoch_stays_negative() {
+        let t = temp("statpreepoch");
+        let dir = open_root(&t.0);
+        drop(dir.create_new(b"old", 0o644).unwrap());
+        dir.stamp(b"old", -315_619_200, true).unwrap();
+        assert_eq!(dir.stat(b"old").unwrap().mtime(), -315_619_200);
+    }
+
+    /// `reopen` yields a handle on the same directory — and a *separate* one.
+    ///
+    /// The second assertion is the one with content. `dup` would also pass the
+    /// first: it would name the same directory. It would fail this one, because
+    /// the two handles would share a read offset and the second listing would
+    /// come back empty after the first had consumed it.
+    #[test]
+    fn reopen_names_the_same_directory_but_reads_independently() {
+        let t = temp("reopen");
+        std::fs::create_dir(t.0.join("a")).unwrap();
+        std::fs::create_dir(t.0.join("b")).unwrap();
+        let dir = open_root(&t.0);
+        let again = dir.reopen().unwrap();
+        assert_eq!(
+            again.stat_self().unwrap().identity(),
+            dir.stat_self().unwrap().identity()
+        );
+        let mut first = dir.names().unwrap();
+        let mut second = again.names().unwrap();
+        first.sort_unstable();
+        second.sort_unstable();
+        assert_eq!(first, vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(first, second);
+    }
+
+    /// A reopened handle sees the directory as it is now, not as it was.
+    ///
+    /// It shares no state with the handle it came from beyond the directory
+    /// itself, which is what lets a caller hold one across a walk that consumes
+    /// the other.
+    #[test]
+    fn reopen_survives_the_original_being_dropped() {
+        let t = temp("reopendrop");
+        std::fs::create_dir(t.0.join("kid")).unwrap();
+        let dir = open_root(&t.0);
+        let again = dir.reopen().unwrap();
+        drop(dir);
+        assert!(again.stat(b"kid").unwrap().is_dir());
+    }
+
+    // ------------------------------------------------ the creating half --
+    //
+    // Unix only, because the methods are. See the note at the end of the
+    // `cfg(not(unix))` impl for why there is no twin to test.
+
+    /// A file's mtime, read back through `std` rather than through [`Stat`].
+    ///
+    /// [`Stat::mtime`] now exists — `tar`'s `--keep-newer-files` asked for it,
+    /// on its own evidence, which is the condition this comment used to set for
+    /// adding it — but it answers only the `follow == false` question, because
+    /// every lookup in this module is `AT_SYMLINK_NOFOLLOW`. The `follow == true`
+    /// half is what proves [`Dir::stamp`]'s flag actually reached the call, so
+    /// it has to come from outside the type under test regardless.
+    ///
+    /// Mode is still absent from `Stat`, and still for the original reason:
+    /// nothing but a test has asked.
+    #[cfg(unix)]
+    fn mtime_of(path: &std::path::Path, follow: bool) -> i64 {
+        use std::os::unix::fs::MetadataExt as _;
+        let md = if follow {
+            std::fs::metadata(path)
+        } else {
+            std::fs::symlink_metadata(path)
+        };
+        md.unwrap().mtime()
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(path).unwrap().mode() & 0o7777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mkdir_creates_and_then_refuses_the_second_time() {
+        let t = temp("mkdir");
+        let dir = open_root(&t.0);
+        dir.mkdir(b"d", 0o777).unwrap();
+        assert!(dir.stat(b"d").unwrap().is_dir());
+        // EEXIST comes straight back out: deciding an existing directory is
+        // success is a policy, and the callers disagree about it.
+        let e = dir.mkdir(b"d", 0o777).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    /// A target is data, not a lookup. This is the whole reason `c_target`
+    /// exists next to `c_name` instead of one function serving both.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_target_may_hold_slashes_and_name_nothing() {
+        let t = temp("symtarget");
+        let dir = open_root(&t.0);
+        dir.symlink(b"../nowhere/at/all", b"link").unwrap();
+        assert!(dir.stat(b"link").unwrap().is_symlink());
+        assert_eq!(dir.read_link(b"link").unwrap(), b"../nowhere/at/all");
+        // ...while the *name* is still one component.
+        assert!(dir.symlink(b"target", b"a/b").is_err());
+    }
+
+    /// An empty target is the kernel's question to answer, not this module's.
+    ///
+    /// `c_target` used to refuse it here, on the stated grounds that
+    /// `symlinkat` "would answer `EINVAL` anyway". It answers `ENOENT` —
+    /// Linux runs the target through `getname()`, which rejects the empty
+    /// string with that — and the difference was visible: `tar`'s `emptysym`
+    /// case in `scripts/tar-diff.sh` extracts a forged header whose linkname
+    /// is empty, and GNU printed "No such file or directory" where ours
+    /// printed "Invalid argument".
+    ///
+    /// So this test does not assert that empty is rejected, which was never in
+    /// doubt. It asserts *who* rejected it, because that is the part that was
+    /// wrong: a `NotFound` can only have come from the syscall, whereas the
+    /// `InvalidInput` this module raises for a NUL could not.
+    #[cfg(unix)]
+    #[test]
+    fn a_target_of_nothing_is_the_kernels_enoent_not_ours() {
+        let t = temp("emptytarget");
+        let dir = open_root(&t.0);
+        let e = dir.symlink(b"", b"link").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+        assert!(
+            dir.stat(b"link").is_err(),
+            "nothing should have been created"
+        );
+        // The NUL is still ours, and still a different error, which is what
+        // makes the assertion above discriminating rather than incidental.
+        let e = dir.symlink(b"a\0b", b"link").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_link_returns_bytes_that_are_not_utf8() {
+        let t = temp("symbytes");
+        let dir = open_root(&t.0);
+        // A path is bytes. Round-tripping through `String` would be the silent
+        // corruption this crate refuses everywhere else.
+        let target = b"\xff\xfe/not-utf8";
+        dir.symlink(target, b"link").unwrap();
+        assert_eq!(dir.read_link(b"link").unwrap(), target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_link_reaches_across_two_held_directories() {
+        let t = temp("hardlink");
+        std::fs::create_dir(t.0.join("a")).unwrap();
+        std::fs::create_dir(t.0.join("b")).unwrap();
+        std::fs::write(t.0.join("a/f"), b"contents").unwrap();
+        let root = open_root(&t.0);
+        let a = root.open_child(b"a", &root.stat(b"a").unwrap()).unwrap();
+        let b = root.open_child(b"b", &root.stat(b"b").unwrap()).unwrap();
+        b.hard_link(&a, b"f", b"g").unwrap();
+        // The same inode under two names, which is what a hard link is and
+        // what a same-size, same-contents check would not have proved.
+        assert_eq!(
+            a.stat(b"f").unwrap().identity(),
+            b.stat(b"g").unwrap().identity()
+        );
+    }
+
+    /// `O_CREAT|O_EXCL` is the combination the kernel guarantees will not
+    /// follow a final symlink, which is why [`Dir::create_new`] needs no
+    /// `O_NOFOLLOW` and [`Dir::create_truncating`] does.
+    #[cfg(unix)]
+    #[test]
+    fn creating_over_a_symlink_never_writes_through_it() {
+        let t = temp("createlink");
+        std::fs::write(t.0.join("victim"), b"original").unwrap();
+        let dir = open_root(&t.0);
+        dir.symlink(b"victim", b"link").unwrap();
+
+        assert!(
+            dir.create_new(b"link", 0o644).is_err(),
+            "O_EXCL must refuse the existing link"
+        );
+        assert!(
+            dir.create_truncating(b"link", 0o644).is_err(),
+            "O_NOFOLLOW must refuse to truncate through the link"
+        );
+        assert_eq!(std::fs::read(t.0.join("victim")).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_truncating_empties_a_real_file_it_finds() {
+        use std::io::Write as _;
+        let t = temp("trunc");
+        std::fs::write(t.0.join("f"), b"old contents").unwrap();
+        let dir = open_root(&t.0);
+        let mut fh = dir.create_truncating(b"f", 0o644).unwrap();
+        fh.write_all(b"new").unwrap();
+        drop(fh);
+        assert_eq!(std::fs::read(t.0.join("f")).unwrap(), b"new");
+    }
+
+    /// The case that made `stamp` a name-based call rather than an open-and-
+    /// `futimens` one: opening a fifo waits for the other end, so an archive
+    /// holding a single named pipe used to hang the whole extraction.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_can_be_made_and_stamped_without_opening_it() {
+        let t = temp("fifo");
+        let dir = open_root(&t.0);
+        dir.mkfifo(b"pipe", 0o644).unwrap();
+        assert_eq!(dir.stat(b"pipe").unwrap().kind(), Kind::Fifo);
+        dir.stamp(b"pipe", 1_000_000_000, true).unwrap();
+        assert_eq!(mtime_of(&t.0.join("pipe"), true), 1_000_000_000);
+    }
+
+    /// `follow: false` stamps the link; `true` stamps what it names. A caller
+    /// restoring an archive needs the first and would silently corrupt the
+    /// target's time with the second.
+    #[cfg(unix)]
+    #[test]
+    fn stamp_distinguishes_a_link_from_its_target() {
+        let t = temp("stamplink");
+        std::fs::write(t.0.join("f"), b"x").unwrap();
+        let dir = open_root(&t.0);
+        dir.symlink(b"f", b"link").unwrap();
+
+        dir.stamp(b"link", 1_000_000_000, false).unwrap();
+        assert_eq!(
+            mtime_of(&t.0.join("link"), false),
+            1_000_000_000,
+            "the link itself must be stamped"
+        );
+        assert_ne!(
+            mtime_of(&t.0.join("f"), true),
+            1_000_000_000,
+            "stamping the link must leave the target alone"
+        );
+
+        dir.stamp(b"link", 2_000_000_000, true).unwrap();
+        assert_eq!(mtime_of(&t.0.join("f"), true), 2_000_000_000);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chmod_sets_the_permission_bits() {
+        let t = temp("chmod");
+        std::fs::write(t.0.join("f"), b"x").unwrap();
+        let dir = open_root(&t.0);
+        dir.chmod(b"f", 0o750).unwrap();
+        assert_eq!(mode_of(&t.0.join("f")), 0o750);
+    }
+
+    /// Every creating call takes a single component, for the reading half's
+    /// reason: a name with a separator is a walk, and a walk here would put
+    /// back the multi-component resolution the module removes.
+    #[cfg(unix)]
+    #[test]
+    fn the_creating_half_refuses_a_name_that_is_a_path() {
+        let t = temp("createslash");
+        std::fs::create_dir(t.0.join("d")).unwrap();
+        let dir = open_root(&t.0);
+        assert!(dir.mkdir(b"d/e", 0o777).is_err());
+        assert!(dir.mkfifo(b"d/p", 0o644).is_err());
+        assert!(dir.chmod(b"d/e", 0o755).is_err());
+        assert!(dir.create_new(b"d/f", 0o644).is_err());
+        assert!(dir.create_truncating(b"d/f", 0o644).is_err());
+        assert!(dir.stamp(b"d/e", 0, true).is_err());
+        assert!(dir.read_link(b"d/e").is_err());
+        // ...and nothing was created under the path it refused to walk.
+        assert!(dir.names().unwrap().len() == 1);
+    }
+
+    /// A NUL is refused in a target as firmly as in a name, because a C call
+    /// handed one would store the prefix — a link resolving somewhere the
+    /// caller never named.
+    #[cfg(unix)]
+    #[test]
+    fn a_nul_is_refused_in_a_target_as_well_as_in_a_name() {
+        let t = temp("nul");
+        let dir = open_root(&t.0);
+        assert!(dir.symlink(b"tar\0get", b"link").is_err());
+        assert!(dir.symlink(b"target", b"li\0nk").is_err());
+        assert!(dir.symlink(b"", b"link").is_err());
+        assert!(dir.names().unwrap().is_empty());
     }
 }

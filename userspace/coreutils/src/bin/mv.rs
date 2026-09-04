@@ -207,6 +207,7 @@
 use coreutils::backup::{self, BackupType};
 use coreutils::copy::{self, Made, ModeDebt, Verdict, chown_to_source, preserve_attributes};
 use coreutils::diag;
+use coreutils::dirfd::Stat;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{
     self, Copied, FileId, file_id, nlink, same_entry, same_inode, split_entry,
@@ -217,6 +218,7 @@ use coreutils::hardlink;
 use coreutils::overwrite::{self, Interactive};
 use coreutils::pathname::strip_trailing_slashes;
 use coreutils::quote::{os_bytes, os_from_bytes, quoteaf_os, quotef_os};
+use coreutils::remove;
 use coreutils::stdfd::{self, Stream};
 use coreutils::utimecmp;
 use coreutils::yesno::{Answers, StdinAnswers};
@@ -1697,28 +1699,6 @@ fn announce<O: Write, E: Write>(
     let _ = writeln!(job.out);
 }
 
-/// `rm -v`'s line, printed by `mv` for the source it removes after a
-/// cross-device copy (`remove.c:400`, reached through `mv.c:238`).
-///
-/// Separate from [`announce`] because it is a different sentence with a
-/// different shape — one name, no arrow — and because the wording turns on what
-/// was removed: `removed directory 'd'` for a directory, `removed 'f'` for
-/// everything else. Upstream picks between them with the same `is_dir` that
-/// picked `AT_REMOVEDIR` a line earlier (`remove.c:399`), so the two cannot
-/// disagree; here [`remove_tree`] passes the one it just used, for the same
-/// reason.
-fn announce_removed<O: Write, E: Write>(job: &mut Job<'_, O, E>, src: &Path, is_dir: bool) {
-    if !job.flags.verbose {
-        return;
-    }
-    let what = if is_dir {
-        "removed directory"
-    } else {
-        "removed"
-    };
-    let _ = writeln!(job.out, "{what} {}", quoteaf_os(src));
-}
-
 /// GNU's `forget_created`: drop this source's entry from the table because the
 /// destination it would have named was not created after all.
 ///
@@ -2814,11 +2794,38 @@ fn copy_across_devices<E: Write>(
 /// Take the source away once the copy is complete, with GNU's `rm` sentences.
 ///
 /// `mv` does this through `rm()` (`mv.c:238`) rather than in `copy.c`, which is
-/// why the wording is `rm`'s throughout: `remove.c:430` reports a failed unlink
-/// as `cannot remove %s`, and `remove.c:399` prints the `-v` line. The options
-/// `mv` hands it are fixed (`mv.c:87`) — recursive, never interactive, not `-f`
-/// — so the only one that varies is `verbose`, which is why this takes the whole
-/// [`Job`] and not a flag.
+/// why every sentence below belongs to `rm`: `remove.c:430` reports a failed
+/// unlink as `cannot remove %s`, and `remove.c:399` prints the `-v` line. The
+/// same file, linked into both programs, prints both — so here it is the same
+/// module, [`coreutils::remove`], called by both. `mv` had its own copy for one
+/// day and the two had already disagreed about an unreadable directory;
+/// `known-issues.md` → `TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS` is
+/// the account of it.
+///
+/// # The `Opts` are `mv.c:87`'s, verbatim, and only one of them varies
+///
+/// `rm_option_init` fixes the whole struct: `recursive` on, `interactive`
+/// `RMI_NEVER`, `ignore_missing_files` off, `one_file_system` off. `verbose` is
+/// the exception, assigned from `x.verbose` at `mv.c:238`, which is why this
+/// takes the whole [`Job`] and not a flag.
+///
+/// [`remove::Remover::answers`] is `None` rather than `job.answers`, and that is
+/// deliberate: with `Interactive::Never` the walk never asks, so naming an
+/// answer source would be naming one that must never be consulted. `mv`'s
+/// answer source is `-i`'s, which is about *overwriting a destination* — a
+/// question already settled by the time the source is being removed. Handing it
+/// over would put a live channel behind an invariant instead of a `None` that
+/// cannot be misread.
+///
+/// # What changed when this stopped being its own walk
+///
+/// The old one resolved by path — `fs::read_dir`, `fs::remove_file` and
+/// `fs::remove_dir` on joined strings — so a directory swapped for a symlink
+/// part-way through was followed, and the deletions went wherever it pointed.
+/// The shared walk resolves through an open parent descriptor
+/// ([`coreutils::dirfd`]), which a swapped component cannot redirect. `rm` had
+/// been fixed already; this is `mv` inheriting the fix rather than needing its
+/// own.
 ///
 /// Returns whether the source is gone. **Every failure has already been
 /// reported**, one sentence per entry, which is why there is no error value to
@@ -2829,154 +2836,49 @@ fn remove_source<O: Write, E: Write>(
     src: &Path,
     metadata: &fs::Metadata,
 ) -> bool {
-    // `metadata` is the `lstat` from the top of [`move_one`], so a symlink to a
-    // directory is a *file* here and gets unlinked rather than descended. That
-    // is the same distinction `AT_REMOVEDIR` draws in [`clear_destination`], and
-    // getting it wrong the other way would delete the pointed-at tree.
-    remove_tree(job, src, metadata.is_dir())
-}
+    let path = os_bytes(src.as_os_str());
+    let loc = remove::Loc::top(&path);
+    // Handed the `lstat` [`move_one`] already took, not a fresh one. Every
+    // caller's `metadata` is a `symlink_metadata`, which is what [`Loc::stat`]
+    // would take anyway — so the second lookup would buy nothing but a window
+    // in which the answer could change, and the field it decides is whether the
+    // source is a directory. Get *that* wrong for a symlink to a directory and
+    // the walk descends and deletes the pointed-at tree; it is the same
+    // distinction `AT_REMOVEDIR` draws in [`clear_destination`]. Reusing the
+    // stat that decided this was a move at all closes the window in the only
+    // direction that is safe: if the source has since been swapped for a
+    // directory, this unlinks rather than descends, and a directory the user
+    // never named survives.
+    //
+    // A source that vanished in the meantime needs no arm here either — the
+    // walk's `unlink` fails `ENOENT` and prints `mv: cannot remove …` through
+    // [`remove::Remover::cannot_remove`], the same sentence a pre-flight stat
+    // would have produced, from the syscall that actually failed.
+    let st = Stat::from_metadata(metadata);
 
-/// `rm -r` over one path, depth-first, reporting each failure where it happens.
-///
-/// # Why the children are removed first, and what happens when one cannot be
-///
-/// `rmdir` refuses a directory that still has entries, so the walk is
-/// post-order: contents, then the directory. When a child cannot be removed, its
-/// parent therefore cannot be either — and the `ENOTEMPTY` that would come back
-/// says nothing the already-printed child diagnostic did not. GNU suppresses it:
-/// a failed `excise` calls `mark_ancestor_dirs` (`remove.c:431`), and `prompt`
-/// answers `RM_USER_DECLINED` for a marked directory before `excise` is reached
-/// (`remove.c:206`), so the ancestors are skipped **silently**. Here the same
-/// thing falls out of not attempting the `remove_dir` when the walk below it
-/// failed. One unremovable file deep in a tree therefore yields exactly one
-/// sentence, not one per level up to the root.
-///
-/// # An unreadable directory still gets one attempt
-///
-/// Failing to read a directory does not skip it: `fts` hands the entry over as
-/// `FTS_DNR` and `remove.c:571` still calls `excise` on it, because an
-/// unreadable directory may well be empty and `rmdir` does not need to read it.
-/// If that `rmdir` then fails with `ENOTEMPTY`, upstream reports the *earlier*
-/// error instead — "they would be meaningless in a diagnostic" (`remove.c:420`)
-/// — so `mv` says `cannot remove 'd': Permission denied` and not
-/// `Directory not empty`. That substitution is reproduced below.
-///
-/// # Depth
-///
-/// Recursive, like [`copy::place_entity`]'s own descent, so the two arms of a
-/// cross-device directory move fail at the same depth rather than the copy
-/// succeeding and the removal overflowing.
-fn remove_tree<O: Write, E: Write>(job: &mut Job<'_, O, E>, path: &Path, is_dir: bool) -> bool {
-    if !is_dir {
-        return match fs::remove_file(path) {
-            Ok(()) => {
-                announce_removed(job, path, false);
-                true
-            }
-            Err(e) => {
-                report_unremovable(job, path, &e);
-                false
-            }
-        };
-    }
-
-    let mut ok = true;
-    // Held rather than reported: it is only printed if the `remove_dir` below
-    // comes back with an errno that would be less informative. See the header.
-    let mut unreadable = None;
-    match fs::read_dir(path) {
-        Ok(entries) => {
-            for entry in entries {
-                match entry {
-                    Ok(entry) => {
-                        // `DirEntry::file_type` does not follow symlinks, which
-                        // is the difference between unlinking a link to a
-                        // directory and deleting what it points at.
-                        let child_is_dir = match entry.file_type() {
-                            Ok(kind) => kind.is_dir(),
-                            Err(e) => {
-                                report_unremovable(job, &entry.path(), &e);
-                                ok = false;
-                                continue;
-                            }
-                        };
-                        if !remove_tree(job, &entry.path(), child_is_dir) {
-                            ok = false;
-                        }
-                    }
-                    Err(e) => {
-                        report_unremovable(job, path, &e);
-                        ok = false;
-                    }
-                }
-            }
-        }
-        Err(e) => unreadable = Some(e),
-    }
-
-    if !ok {
-        // Silently. See the header: the `ENOTEMPTY` this would earn adds a
-        // second sentence about a failure already reported one level down.
-        return false;
-    }
-
-    match fs::remove_dir(path) {
-        Ok(()) => {
-            announce_removed(job, path, true);
-            true
-        }
-        Err(e) => {
-            report_unremovable(
-                job,
-                path,
-                unreadable
-                    .filter(|_| is_uninformative(&e))
-                    .as_ref()
-                    .unwrap_or(&e),
-            );
-            false
-        }
-    }
-}
-
-/// GNU's `cannot remove %s` (`remove.c:430`), which is the same sentence for a
-/// file and for a directory — only the `-v` line distinguishes them.
-fn report_unremovable<O: Write, E: Write>(job: &mut Job<'_, O, E>, path: &Path, err: &io::Error) {
-    let why = strerror(err);
-    let _ = writeln!(job.err, "mv: cannot remove {}: {why}", quoteaf_os(path));
-}
-
-/// Whether a failed `rmdir`'s errno is one of the ones upstream throws away in
-/// favour of the earlier `opendir` failure (`remove.c:424`).
-///
-/// The list is upstream's verbatim, oddities included: `EISDIR` and `ENOTDIR`
-/// are there because kernels have been observed to return them from `rmdir` on
-/// an unreadable directory, and `EEXIST` because Solaris 10 spells `ENOTEMPTY`
-/// that way.
-fn is_uninformative(err: &io::Error) -> bool {
-    /// `ENOTEMPTY`, `EISDIR`, `ENOTDIR`, `EEXIST` — Linux's numbers, in the
-    /// order `remove.c` lists them. See [`blames_the_destination`] for why the
-    /// values are open-coded and why the host takes the `ErrorKind` arm below.
-    const UNINFORMATIVE_CODES: &[i32] = &[
-        39, // ENOTEMPTY
-        21, // EISDIR
-        20, // ENOTDIR
-        17, // EEXIST
-    ];
-    if cfg!(unix)
-        && err
-            .raw_os_error()
-            .is_some_and(|n| UNINFORMATIVE_CODES.contains(&n))
-    {
-        return true;
-    }
-    matches!(
-        err.kind(),
-        io::ErrorKind::DirectoryNotEmpty
-            | io::ErrorKind::IsADirectory
-            | io::ErrorKind::NotADirectory
-            | io::ErrorKind::AlreadyExists
-    )
+    let mut remover = remove::Remover {
+        opts: remove::Opts {
+            recursive: true,
+            dir: false,
+            one_file_system: false,
+            verbose: job.flags.verbose,
+            interactive: remove::Interactive::Never,
+            ignore_missing_files: false,
+        },
+        program: "mv",
+        out: &mut *job.out,
+        err: &mut *job.err,
+        answers: None,
+        // Never read: `Interactive::Never` returns before the tty question is
+        // put. `false` is the value that says so.
+        stdin_tty: false,
+        failed: false,
+    };
+    // `do_move` compares against `RM_OK` (`mv.c:240`), not against the error
+    // flag, and [`remove::Verdict::Removed`] is that value. Here the two agree —
+    // `RM_USER_DECLINED` is unreachable with `Interactive::Never` — but reading
+    // the verdict says which question is being asked.
+    remover.entry(&loc, &st, 0, st.dev()) == remove::Verdict::Removed
 }
 
 #[cfg(unix)]
@@ -3941,18 +3843,41 @@ mod tests {
             Path::new("/other/g"),
             None,
         );
-        announce_removed(&mut job, Path::new("g"), false);
-        announce_removed(&mut job, Path::new("d"), true);
-        assert_eq!(
-            String::from_utf8_lossy(&out),
-            "copied 'g' -> '/other/g'\nremoved 'g'\nremoved directory 'd'\n"
-        );
+        drop(job);
+        assert_eq!(String::from_utf8_lossy(&out), "copied 'g' -> '/other/g'\n");
         assert!(err.is_empty());
+
+        // The other half of the pair comes out of the shared walk, so it is
+        // driven through the walk rather than through a helper that formats the
+        // same words a second time. A file and a directory, because the two
+        // sentences differ and picking the wrong one is the whole risk.
+        let dir = scratch("cross_device_pair");
+        let g = dir.path("g");
+        let d = dir.path("d");
+        fs::write(&g, b"x").unwrap();
+        fs::create_dir(&d).unwrap();
+        let (ok, out, err) = on_a_job(true, |job| {
+            let gm = fs::symlink_metadata(&g).unwrap();
+            let dm = fs::symlink_metadata(&d).unwrap();
+            remove_source(job, &g, &gm) && remove_source(job, &d, &dm)
+        });
+        assert!(ok, "{err}");
+        assert!(err.is_empty(), "{err}");
+        assert_eq!(
+            out,
+            format!(
+                "removed {}\nremoved directory {}\n",
+                quoteaf_os(&g),
+                quoteaf_os(&d)
+            )
+        );
     }
 
-    /// Both halves obey the flag. [`announce_removed`] having its own early
-    /// return is easy to forget, and forgetting it makes a plain `mv` across a
-    /// filesystem boundary print `removed 'g'` at a user who asked for nothing.
+    /// Both halves obey the flag. The removal half is the one that is easy to
+    /// get wrong, because its `-v` line is printed by a *different module* from
+    /// a `verbose` field this file has to remember to hand on; forgetting to
+    /// hand it on makes a plain `mv` across a filesystem boundary print
+    /// `removed 'a'` at a user who asked for nothing.
     #[test]
     fn neither_verbose_sentence_is_printed_unasked() {
         let mut out: Vec<u8> = Vec::new();
@@ -3960,19 +3885,32 @@ mod tests {
         let mut answers = Canned::new(&[]);
         let flags = MvFlags::default();
         let mut copied = Copied::default();
-        let mut job = Job {
-            flags: &flags,
-            out: &mut out,
-            err: &mut err,
-            answers: &mut answers,
-            copied: &mut copied,
-            umask: coreutils::umask::current(),
-        };
-        announce(&mut job, "renamed", Path::new("a"), Path::new("b"), None);
-        announce(&mut job, "copied", Path::new("a"), Path::new("b"), None);
-        announce_removed(&mut job, Path::new("a"), false);
-        announce_removed(&mut job, Path::new("a"), true);
+        {
+            let mut job = Job {
+                flags: &flags,
+                out: &mut out,
+                err: &mut err,
+                answers: &mut answers,
+                copied: &mut copied,
+                umask: coreutils::umask::current(),
+            };
+            announce(&mut job, "renamed", Path::new("a"), Path::new("b"), None);
+            announce(&mut job, "copied", Path::new("a"), Path::new("b"), None);
+        }
         assert!(out.is_empty());
+
+        let dir = scratch("quiet_removal");
+        let a = dir.path("a");
+        let d = dir.path("d");
+        fs::write(&a, b"x").unwrap();
+        fs::create_dir(&d).unwrap();
+        let (ok, out, err) = on_a_job(false, |job| {
+            let am = fs::symlink_metadata(&a).unwrap();
+            let dm = fs::symlink_metadata(&d).unwrap();
+            remove_source(job, &a, &am) && remove_source(job, &d, &dm)
+        });
+        assert!(ok, "{err}");
+        assert!(out.is_empty(), "{out}");
     }
 
     // ----------------------------------------------------- -i / -f / -n --

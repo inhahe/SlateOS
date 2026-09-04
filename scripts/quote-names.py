@@ -72,12 +72,24 @@ unit of review is a file; a crate-level count would hide a new violation in
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# The seam that makes `--head` a one-line choice rather than a second
+# implementation of this checker. It also carries the `gitenv` handling that
+# keeps a fixture's reads inside the fixture; both matter here, and the second
+# one matters because this script's own self-test builds one.
+import gitenv  # noqa: E402
+import gittree  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = Path(__file__).resolve().parent / "quote-names-baseline.txt"
+BASELINE_REL = BASELINE.relative_to(ROOT).as_posix()
 
 # The trees lane B owns. `apps/` and `gui/` are lane C's and are deliberately
 # outside: a gate that fails another lane's commit for another lane's code is
@@ -515,22 +527,65 @@ def fix_file(path: Path) -> tuple[int, list[str]]:
     return fixed, skipped
 
 
-def survey(root: Path = ROOT) -> dict[str, list[tuple[int, str, str]]]:
-    """Every flagged line in lane B's tree, keyed by repo-relative path."""
+def _ambient_head() -> str:
+    """`HEAD` of the repository this *script* lives in, or `""` if unreadable.
+
+    Read with the environment deliberately left alone -- the one place in this
+    file that wants the ambient repository rather than the one it was handed,
+    because the question is precisely "did something write here?".
+
+    Not raised on failure: this is a witness for an assertion, and a witness
+    that cannot answer must not turn into a finding of its own. `""` compares
+    equal to `""`, so an unreadable repository makes the check silently
+    inconclusive rather than falsely red -- and the case it guards is still
+    asserting everything else it always did.
+    """
+    try:
+        return subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            check=True, capture_output=True,
+        ).stdout.decode("utf-8", "replace").strip()
+    except (subprocess.CalledProcessError, OSError):
+        return ""
+
+
+def _decode(raw: bytes | None) -> str | None:
+    """Blob bytes as UTF-8 text, or `None` if they are not UTF-8 at all.
+
+    Strict, and not `Tree.read_text` -- which replaces bad bytes -- because a
+    non-UTF-8 `.rs` file is not something this lexer can speak about. Lexing
+    the replacement characters would invent findings at positions that do not
+    exist in the file; skipping says nothing, which is the honest answer.
+    """
+    if raw is None:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def survey_tree(tree: gittree.Tree) -> dict[str, list[tuple[int, str, str]]]:
+    """Every flagged line in lane B's zone of `tree`, keyed by relative path.
+
+    One function for both the disk and a revision, because the seam it reads
+    through cannot tell a checker which it is holding. That is the point: the
+    previous shape had a `survey()` walking `rglob` and a `survey_at()` driving
+    `cat-file`, alike only by the care of whoever edited them last. Two
+    implementations of one question drift, and the drift is invisible -- each
+    half keeps returning a well-formed answer to a slightly different question.
+
+    `files_under` already prunes build directories by path component, so the
+    `"target" not in parts` test both halves used to carry separately is now
+    the seam's business and is asserted by `test-gittree.py` on both sides.
+    """
     found: dict[str, list[tuple[int, str, str]]] = {}
     for top in ROOTS:
-        base = root / top
-        if not base.is_dir():
-            continue
-        for path in base.rglob("*.rs"):
-            if "target" in path.parts:
+        for rel in tree.files_under(top):
+            if not rel.endswith(".rs") or rel in IGNORE:
                 continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            rel = path.relative_to(root).as_posix()
-            if rel in IGNORE:
+            text = _decode(tree.read_bytes(rel))
+            if text is None:
                 continue
             hits = violations(text)
             if hits:
@@ -538,12 +593,60 @@ def survey(root: Path = ROOT) -> dict[str, list[tuple[int, str, str]]]:
     return found
 
 
+def survey(root: Path = ROOT) -> dict[str, list[tuple[int, str, str]]]:
+    """Every flagged line in lane B's working tree."""
+    with gittree.WorkTree(str(root)) as tree:
+        return survey_tree(tree)
+
+
+def survey_at(sha: str, root: Path = ROOT) -> dict[str, list[tuple[int, str, str]]]:
+    """`survey()`, but reading the tree at `sha` instead of the working tree.
+
+    This is what makes the pre-push gate judge *what is being published*. The
+    worktree survey answers a different question, and wrong in the dangerous
+    direction: a commit that adds an unquoted name passes if the worktree has
+    since fixed it, and the commit is published anyway. It also has the
+    mirror-image false positive, where an unrelated uncommitted edit blocks a
+    push of clean commits.
+    """
+    with gittree.RevTree(sha, str(root)) as tree:
+        return survey_tree(tree)
+
+
+def read_baseline_from(tree: gittree.Tree) -> dict[str, int]:
+    """The baseline as it stands in `tree`, whichever tree that is.
+
+    It has to move with the tree. The baseline is the ratchet, so judging a
+    commit's files against a *different* commit's baseline reports the
+    difference between the two revisions rather than anything about the commit
+    -- which is loudest exactly when it is least useful: a push whose first
+    commit fixes sites and whose second records them in the baseline would have
+    the first commit judged against the not-yet-updated numbers.
+    """
+    text = _decode(tree.read_bytes(BASELINE_REL))
+    if text is None:
+        # No baseline in that tree means no allowance in that tree: every site
+        # is new. That is the safe direction -- it can only over-report.
+        return {}
+    return _parse_baseline(text)
+
+
+def read_baseline_at(sha: str, root: Path = ROOT) -> dict[str, int]:
+    """The baseline recorded at `sha`."""
+    with gittree.RevTree(sha, str(root)) as tree:
+        return read_baseline_from(tree)
+
+
 def read_baseline() -> dict[str, int]:
     """`path -> count` from the baseline file, `#` comments stripped."""
     if not BASELINE.is_file():
         return {}
+    return _parse_baseline(BASELINE.read_text(encoding="utf-8"))
+
+
+def _parse_baseline(text: str) -> dict[str, int]:
     out: dict[str, int] = {}
-    for line in BASELINE.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
@@ -889,6 +992,115 @@ def selftest() -> int:
                 f"round-trip: fixed={n} left={left} still={violations(after)}\n    {after!r}"
             )
 
+    # 11. `--head` must read the COMMIT, not the worktree.
+    #
+    #     This is the one case that cannot be written as a string-in/count-out
+    #     assertion, and it is also the only one that measures the reason
+    #     `--head` exists. The shape is the staged-restore: a commit introduces
+    #     a violation, the worktree then repairs it without committing, and the
+    #     commit is pushed anyway. A worktree survey calls that clean. If this
+    #     case ever passes with `survey_at` delegating to `survey`, the gate has
+    #     silently gone back to answering the wrong question.
+    bad = 'fn f() {\n    eprintln!("cut: \'{p}\': no such file");\n}\n'
+    good = 'fn f() {\n    eprintln!("cut: {}: no such file", quotef_os(&p));\n}\n'
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        src = repo / "userspace" / "probe" / "src"
+        src.mkdir(parents=True)
+        rs = src / "main.rs"
+
+        def git(*a: str) -> bytes:
+            # Identity and signing are forced off for this throwaway repo only:
+            # the host's real config may have `commit.gpgsign=true`, and a
+            # signing prompt inside a pre-push hook is an unkillable hang.
+            #
+            # `env=gitenv.clean_env()` is the load-bearing argument, not the
+            # `-C`. Git exports `GIT_DIR` into every hook, and this self-test is
+            # run from `pre-push`; an inherited one outranks `-C` outright, so
+            # without the scrub every command below operates on the repository
+            # being pushed. On 2026-09-04 they did: `git init` re-initialised
+            # lane B, `git add -A` replaced its index with this one file, and
+            # two commits landed on the branch whose tree was then a single
+            # `userspace/probe/src/main.rs`. The assertions still passed --
+            # `survey_at(sha, repo)` was reading that same real repository, so
+            # the fixture agreed with itself about the wrong tree. Recovered
+            # with a mixed reset to `f129bd5e0`; nothing reached the remote.
+            # `scripts/gitenv.py` records the identical 2026-08-29 incident,
+            # which is the one this should have been written from.
+            return subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.email=selftest@invalid",
+                 "-c", "user.name=selftest", "-c", "commit.gpgsign=false", *a],
+                check=True, capture_output=True, env=gitenv.clean_env(),
+            ).stdout
+
+        # What the ambient repository looked like before the fixture ran. Any
+        # difference afterwards means these commands went somewhere they were
+        # not pointed -- which is the failure that has now happened twice, in
+        # two different scripts, and which no assertion about the fixture's
+        # *contents* can detect, because a redirected fixture is perfectly
+        # self-consistent.
+        before = _ambient_head()
+
+        try:
+            git("init", "-q")
+            rs.write_text(bad, encoding="utf-8", newline="")
+            git("add", "-A")
+            git("commit", "-qm", "introduce the violation")
+            sha = git("rev-parse", "HEAD").decode().strip()
+
+            # The repair that never gets committed.
+            rs.write_text(good, encoding="utf-8", newline="")
+
+            checked += 1
+            worktree_hits = sum(len(v) for v in survey(repo).values())
+            commit_hits = sum(len(v) for v in survey_at(sha, repo).values())
+            if worktree_hits != 0 or commit_hits != 1:
+                failures.append(
+                    "head-reads-the-commit: worktree should see 0 and the commit 1, "
+                    f"got worktree={worktree_hits} commit={commit_hits}"
+                )
+
+            # The mirror image: an uncommitted violation must be invisible to
+            # `--head`, so unrelated dirty work cannot block a clean push.
+            # (`good` is already on disk from the case above, so this commit
+            # is the repair; committing `bad` again would be a no-op and git
+            # would exit 1 on the empty commit.)
+            git("add", "-A")
+            git("commit", "-qm", "the repair, committed this time")
+            clean_sha = git("rev-parse", "HEAD").decode().strip()
+            rs.write_text(bad, encoding="utf-8", newline="")  # dirty, uncommitted
+
+            checked += 1
+            dirty_hits = sum(len(v) for v in survey(repo).values())
+            clean_hits = sum(len(v) for v in survey_at(clean_sha, repo).values())
+            if dirty_hits != 1 or clean_hits != 0:
+                failures.append(
+                    "head-ignores-the-worktree: the commit should see 0 and the "
+                    f"dirty worktree 1, got worktree={dirty_hits} commit={clean_hits}"
+                )
+        except (subprocess.CalledProcessError, OSError, gittree.GitTreeError) as e:
+            # `GitTreeError` belongs here for a reason worth stating: it is what
+            # a *half*-repaired version of this bug raises. If the fixture's
+            # commits go to the ambient repository while `gittree` correctly
+            # reads the temp directory, the sha exists in neither place either
+            # side is looking, and `ls-tree` exits 128. Uncaught, that kills the
+            # whole self-test with a traceback -- taking the other 58 cases with
+            # it and, worse, skipping the ambient-HEAD check below, which is the
+            # one line that would have named the actual cause. Caught, the case
+            # fails and the diagnosis still prints.
+            checked += 1
+            failures.append(f"head-selftest could not drive git: {e}")
+
+        checked += 1
+        after = _ambient_head()
+        if before != after:
+            failures.append(
+                "the fixture wrote to the repository this script lives in: its "
+                f"HEAD was {before!r} before the case and is {after!r} after. "
+                "The git commands above are not reaching the temp directory."
+            )
+
     for f in failures:
         print(f"selftest FAIL {f}")
     print(f"selftest: {checked - len(failures)}/{checked} cases pass")
@@ -913,8 +1125,11 @@ def report(found: dict[str, list[tuple[int, str, str]]], show_lines: bool) -> in
     return 0
 
 
-def check(found: dict[str, list[tuple[int, str, str]]]) -> int:
-    baseline = read_baseline()
+def check(
+    found: dict[str, list[tuple[int, str, str]]],
+    baseline: dict[str, int] | None = None,
+) -> int:
+    baseline = read_baseline() if baseline is None else baseline
     now = {path: len(hits) for path, hits in found.items()}
 
     grew = sorted(p for p, n in now.items() if n > baseline.get(p, 0))
@@ -1025,6 +1240,39 @@ def main() -> int:
         return selftest()
     if "--fix" in args:
         return fix([a for a in args if not a.startswith("--")])
+
+    head: str | None = None
+    if "--head" in args:
+        i = args.index("--head")
+        if i + 1 >= len(args) or args[i + 1].startswith("--"):
+            print("--head needs a commit-ish argument", file=sys.stderr)
+            return 2
+        head = args[i + 1]
+
+    if head is not None and ("--write-baseline" in args or "--update-baseline" in args):
+        # Refused rather than ignored. Recording a past commit's counts as the
+        # current allowance would silently un-fix everything repaired since.
+        print("--head cannot be combined with --write-baseline", file=sys.stderr)
+        return 2
+
+    if head is not None:
+        try:
+            # One `RevTree`, not two: each builds its own `ls-tree` index of
+            # the whole tree (~4 s) and its own `cat-file` process, and the
+            # baseline lookup is a single blob read that has no business
+            # paying for a second index.
+            with gittree.RevTree(head, str(ROOT)) as tree:
+                found = survey_tree(tree)
+                baseline = read_baseline_from(tree)
+        except (gittree.GitTreeError, OSError) as e:
+            # Loud, and non-zero. A checker that cannot read the tree it was
+            # asked about must not report the clean answer -- "no violations
+            # found" is byte-identical to a healthy repository, so a silent
+            # degradation here would look exactly like success.
+            print(f"quote-names: cannot read the tree at {head}: {e}", file=sys.stderr)
+            return 2
+        return check(found, baseline) if "--check" in args else report(found, "--list" in args)
+
     found = survey()
     if "--write-baseline" in args or "--update-baseline" in args:
         write_baseline(found)

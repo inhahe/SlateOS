@@ -63060,6 +63060,11 @@ circularity outright rather than trading it for a second unverified encoder.
 **Date:** 2026-09-03
 **Decided by:** Claude (autonomous)
 **Lane:** B
+**Superseded in part, the same day, by §757:** the "keeps its own `rm -r`" half
+lasted one day. `mv` now calls `coreutils::remove`, which `rm` calls too. The
+part of this entry that still stands is section 2 (the message-less error case)
+and the *reasoning* in section 1, which correctly named splitting the walk off
+`Rm` as the real fix — §757 is that fix, not a reversal of this.
 
 **In short:** `mv dir /other/filesystem/` has to copy the tree and then delete
 the original. The *copy* half is now one call into the engine that `cp -r`
@@ -65006,6 +65011,265 @@ run prints. A report that announces "self-test not run" with nothing under it is
 the same noise this checker refuses to produce elsewhere. There is a case for it
 now, in both directions.
 
+## 755. A gate's mutation table is checked on every build; the mutation sweep that fills it is not — because the sweep costs nine minutes and the check costs one second
+
+**Date:** 2026-09-03
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** Some of the small yes/no programs under `scripts/` contain guards
+that do nothing at all — a limit that no code ever reads, a test whose fixtures
+are computed from the very number they are supposed to be testing. A guard like
+that is spelled exactly like one that works, and the whole test suite stays
+green either way. The only way to tell them apart is to *break the guard on
+purpose* and check that something complains; each gate now carries a list of
+breakages to try. The decision is about who runs that list. Breaking things and
+re-running the suite takes about nine and a half minutes, so it stays a thing a
+person starts deliberately. What runs on every build is the one-second check
+that the list still refers to lines that exist — because the list is written as
+quotations of the gate's own source, and a rename turns a quotation into a line
+that matches nothing, gets silently skipped, and leaves a row that reads as
+coverage.
+
+### The defect this is all in aid of, three times over
+
+| Gate | The decoration | How it was found |
+|---|---|---|
+| `check-libc-shape.py` | `MIN_MEMBERS`/`MIN_SYMBOLS` were pinned against a measured archive and `main()` never read them; the only assertion about them was `MIN_MEMBERS > 0`, which a gutted constant passes | gutting them by hand |
+| `check-doc-links.py` | a five-part coverage floor whose fixtures were derived from the constants under test, so zeroing three of them shrank the fixtures to match | gutting them by hand |
+| `check-doc-links.py` | a subset-vs-whole-tree branch that no case ever drove, and a counter nothing ever asked for a real number | the first sweep: nine of seventeen mutants survived a 74/74 green suite |
+
+The third row is the argument in miniature. Seventy-four passing cases, and
+nine separate assertions that could be deleted without any of them noticing.
+
+### Why the sweep cannot be the thing that runs every time
+
+Not safety — that was solved separately (§ below). Cost. The sweep is one
+subprocess per row and each subprocess runs the target gate's entire suite.
+Measured 2026-09-03 on a host busy with a boot test: **9m38s** for three
+tables, against **24s** for the static check on the same host. Worse, it is the
+wrong shape of cost: it grows linearly with the number of rows, so the price of
+the gate that catches a survivor rises exactly in proportion to how thoroughly
+anyone tests. A boot test that already spends forty minutes on gates cannot
+take another ten, and a gate people are tempted to skip is worse than no gate,
+because it turns "green" into "green, probably, mostly".
+
+### What is lost, stated plainly
+
+The wired check cannot tell you a mutant *survived*. It can only tell you the
+question stopped being asked. That is the weaker of the two facts — but it is
+the one whose failure is silent, and a stale needle is not merely a missed
+detection: it is a row that goes on reading as coverage after it has stopped
+being any. A survivor, by contrast, is discovered the moment anyone runs the
+sweep, which the tooling now makes cheap to do.
+
+### The alternatives, and why not
+
+**Wire the sweep and accept ten minutes.** Rejected on the measurement above,
+and on the shape of the growth rather than today's figure.
+
+**Sweep on a schedule (nightly, or on merge to `main`).** There is no scheduler
+in this project; the boot test *is* the schedule. A cron job nobody has written
+is not a plan.
+
+**Sweep only the gates whose files changed in the commit.** Attractive, and
+genuinely cheaper — but wrong for the failure it targets. A needle goes stale
+because the gate was reworded, so a changed-file sweep would cover exactly that
+case; but a *survivor* appears when a test stops covering code that did not
+change, and that is the case it would miss. Half the value at most of the
+complexity, and the half it keeps is the half the static check already has.
+
+**Keep the throwaway scripts.** This is what happened the first two times: one
+ad-hoc mutation script per gate, deleted after use. `known-issues.md` lesson 63
+— a rule kept only by copying is a rule that will be dropped — and it was
+dropped, twice, which is why the same defect class recurred.
+
+### Two supporting calls, made the same day
+
+**The table lives inside the gate it breaks, not beside it.** A needle is a
+quotation, and a quotation kept in another file goes stale the moment the line
+it quotes is reworded, with no diff connecting the two. Co-located, the rename
+that breaks the needle is in the same diff as the needle. The cost is that
+every needle then matches twice — once in the code, once in its own row — which
+is cut out exactly by parsing the assignment's extent with `ast` rather than by
+asking authors to remember an invisible anchoring convention.
+
+**Mutants are written beside the gate, never over it.** The first version
+mutated in place and restored in a `finally`, which is correct until something
+skips the `finally`: a SIGKILL leaves a broken checker on disk and the next
+sweep judges mutants against it, all of which look normal. Two sweeps at once
+is the same failure by another route, and it actually happened during
+development. Writing `.mutant-<pid>-<gate>` next to the gate removes the
+failure mode instead of detecting it. It must be a *sibling*, not a temp file
+elsewhere, because a gate locates the tree relative to its own path.
+
+## 756. A shared `Stat` gained an `mtime` field for one caller, because the alternative was that caller re-declaring `struct stat` to read a field the shared call had already fetched
+
+**Date:** 2026-09-03
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `coreutils` has one small type that says what a file is — its
+kind, its identity, its size — filled in by one system call that a directory
+walk makes anyway. `tar` needs one more thing out of that same call: when the
+file was last changed, so that `--keep-newer-files` can decline to overwrite
+something newer than the archive's copy. The choice was to add that field to
+the shared type, or to let `tar` keep its own hand-written copy of the operating
+system's file-information structure purely to read a field the shared call had
+already fetched and thrown away. The field was added.
+
+### What was actually at stake
+
+`dirfd::Stat` is built from a `struct stat` that `fstatat` has just filled in.
+The buffer already contains `st_mtim`; the constructor simply did not copy it
+out. So "tar keeps its own" did not mean tar making an extra call — it meant tar
+declaring a **second** `#[repr(C)] struct CStat`, a second `extern fn fstatat`,
+and a second `const _: () = assert!(size_of::<CStat>() == 144)`, to make the
+same call against the same descriptor with the same flags, two lines away from
+the one that had the answer.
+
+That is precisely the duplication the extraction was undertaken to end. Keeping
+it for one field would have meant finishing a refactor that deleted eleven
+`extern` declarations by leaving the twelfth, and leaving with it the two
+declarations most likely to rot — a `struct stat` layout and its size assertion
+are correct until a libc changes underneath them, and then they are a stack
+overwrite rather than a compile error.
+
+### Why this is not the widening that was refused earlier
+
+`dirfd.rs` already carries a written refusal to add `mode` and `mtime`, from
+when `rm`'s tests wanted to read them: *"Widening it so that a test could read
+them would be letting the test drive the shared API; when `tar`'s
+archive-writing side needs those fields it can ask for them then, on its own
+evidence."*
+
+The distinction is the one that comment drew in advance, and it held:
+
+| | `mode`/`mtime` for the tests | `mtime` for `tar` |
+|---|---|---|
+| Who wants it | a `#[cfg(test)]` helper | production code on the main extraction path |
+| What it costs to refuse | the test reads it through `std` — three lines | a duplicate `struct stat`, `extern`, and size assertion |
+| What refusing protects | the type stays the size of its purpose | nothing; the field is already in the buffer |
+
+A test that wants a field can go and get it; that is what a test is for. A
+caller on the hot path cannot, without rebuilding the very thing the module
+exists to be the only copy of. `mode` is still absent for exactly this reason —
+nothing but a test has ever asked.
+
+### The alternative that was rejected, and why
+
+**Keep a narrow tar-local `fstatat` for this one question.** Considered
+seriously, because it confines the widening to zero. Rejected because "one
+question" is not a stable quantity: the same call answers `is_dir` for
+`--keep-newer-files`, and the identity for the delayed-symlink placeholder, and
+would then be answering three questions through a private copy while the shared
+one answered the other forty. The end state is two `struct stat`s again with a
+line drawn between them that nobody can remember, which is the state this whole
+piece of work was undoing.
+
+### What was given up
+
+`Stat` is 8 bytes larger and its doc comment is one clause longer, on every
+caller including the ones that never read the field. That is the entire cost;
+it is copied by value in a walk that is already making a syscall per entry, so
+it is not measurable. The type's stated purpose — "the whole of what a walk
+reads from a lookup" — is unchanged in kind: an mtime is something a walk reads
+from a lookup.
+
+### One detail worth recording
+
+The field is **seconds, signed**, and a pre-epoch time stays negative rather
+than clamping to zero. The direction is not symmetric: a 1960 file reported as
+1970 compares *newer* than it truly is, so `--keep-newer-files` would skip a
+member it was supposed to extract — a silent data loss, where the opposite error
+is a harmless redundant write. The non-unix constructor has to recover this from
+`SystemTime::duration_since`'s *error* payload, which carries the interval back
+to the epoch, and there is a test at the boundary in each direction.
+
+## 757. The shared remover takes a projection of `rm`'s options, not `rm`'s options — and the three fields it cannot see are exactly the three that mean "operand"
+
+**Date:** 2026-09-04
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** deleting a folder and everything in it was written out twice in
+our command-line tools — once in `rm`, once in `mv` (a move to another disk is a
+copy followed by deleting the original). Two copies of the same thing drift, and
+these two had already disagreed within a day of the second one being written.
+The two are now one shared piece of code. The decision recorded here is the
+narrow one about *how* the shared piece is told what to do: `rm` hands it a
+smaller struct containing six of its nine settings, rather than handing over the
+whole command line and trusting the shared code never to look at the other three.
+
+**Date:** 2026-09-03. Closes
+`known-issues.md` → `TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS`, and
+supersedes the "keep two walks for now" half of §751.
+
+### The three options
+
+| | what the walk receives | what stops it reading a field it must not |
+|---|---|---|
+| **A. the parsed command line** (`&Rm` / `&Options`) | all nine options | a comment |
+| **B. a projection** (`remove::Opts`, six fields) | only the six | the type |
+| **C. a policy trait** (`dyn RemovePolicy`) | callbacks | the type, plus a vtable |
+
+**B was taken.** The argument is not "smaller is nicer"; it is that the three
+fields left behind are not an arbitrary six-of-nine cut. `preserve_root`,
+`preserve_all_root` and `presume_tty` are each decided **per command-line
+operand**: `--preserve-root` refuses `/` *as typed*, `--preserve-root=all`
+compares an operand against its own parent, and `-I` asks one question about the
+*batch* the user named. An entry discovered by walking is not an operand and
+never can be, so those three have no meaning below the top level. The other six
+— `-r`, `-d`, `--one-file-system`, `-v`, the interactive mode and `-f` — are
+tested at every level.
+
+So the projection is not a filter applied to a struct; it is the seam the
+options already had. That it comes out as exactly the fields `Rm` retains is the
+check: between `Rm` and `remove::Opts` every parsed option appears once and once
+only, and a future option lands on one side or the other by answering a single
+question — is it about the thing the user typed, or about a thing found by
+walking?
+
+### Why not A, which is what the two-walks state effectively was
+
+A is one comment away from correct, and the comment does not hold. §751 recorded
+the reason the second walk was written rather than the first one reused: `Rm`
+carries eight knobs `mv` has no answer for, so reuse means either inventing
+eight values or splitting the walk off the struct. Passing `&Rm` is the
+"inventing values" branch wearing the other branch's clothes — `mv` would
+construct an `Rm` with three fields set to whatever is inert and a comment
+saying the walk does not read them. The entire cost of the duplication being
+paid off here was that a rule lived in one copy and not the other; a comment
+asserting a struct field is unread is the same class of guarantee that failed.
+
+### Why not C, which is the shape §750 chose for the copy engine
+
+C is genuinely better where the *policy differs*. `copy.rs` took a trait object
+for its run's stdout because `mv` really does need a different sink from `cp`'s.
+Here the policies do not differ: `mv`'s options are `mv.c:87`'s
+`rm_option_init`, a fixed struct, with `verbose` copied from `x.verbose` at
+`mv.c:238` — one varying bit out of six. A vtable to express one bit is an
+indirection charged on every entry of every tree for a difference a `bool`
+already states, and it moves the six knobs from a place where they can be read
+in one glance into six methods that must be traced to their implementations.
+Upstream agrees by construction: `remove.c` takes a `struct rm_options *`, not
+a callback table.
+
+### What the decision costs
+
+`rm::Options` and `remove::Opts` name six fields each, so an option added to the
+walk is added in two files and forwarded in a third place (`walk_opts`). That is
+real, and it is the price of the guarantee: the forwarding is where the compiler
+gets its chance to notice. The alternative pays nothing at the definition and
+everything at the next divergence.
+
+One knock-on: `rm.rs`'s private `Interactive` enum was deleted rather than kept
+alongside `remove::Interactive`. Keeping both would have meant a conversion
+function between two enums with identical variants — a second place for the
+`WhenTty`/`Once`/`Always`/`Never` rules to disagree, in a change whose whole
+purpose was to delete such places. The rename it forced (`Default` → `WhenTty`)
+touched a dozen lines and no behaviour.
+
 ---
 
 ## §909 — The shell-callee gate reads command substitutions only, and buys its precision by narrowing the question
@@ -65183,3 +65447,482 @@ Not settled here: `cut`, `fold` and `base64` still pass an empty *filename*
 through to `resolve_path`, which turns it into `/`. That is a different defect
 with a much wider blast radius — see
 `TD-A-AN-ABSENT-OPERAND-AND-AN-EMPTY-ONE-ARE-THE-SAME-STRING-IN-KSHELL`.
+---
+
+## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
+
+**Lane:** B
+**Date:** 2026-09-04
+**Decided by:** Claude (autonomous)
+
+**In short:** Two programs in this tree call themselves `sysinfo`. The
+command-line one read the kernel's `/proc` files; the graphical one showed made-up
+numbers typed into the source. Lane C asked whether the reading half could become
+a shared crate so both show the same machine. It now is — `procinfo` — and while
+moving the code we found that it had been answering several questions wrongly for
+as long as it had existed. The visible change for a user: a mount point with a
+space in it prints correctly, a directory listing no longer gets cut off in the
+middle, and `sysinfo` now exits with an error code when it could not read
+something, instead of always claiming success.
+
+### The decision
+
+Three separate calls, taken together because each depends on the one before.
+
+**1. The readers move to a crate rather than being copied.** `procinfo/` sits at
+the workspace root beside `textfmt` and `yamldoc`, dependency-free, and
+`userspace/sysinfo` is now formatting only. Filed as
+`requests/c-b-the-proc-readers-in-userspace-sysinfo-should-be-a-crate-both-sysinfos-can-use.md`.
+
+*Alternative:* lane C writes its own forty lines. Cheaper today, and the request
+itself named why not: two parsers of `/proc/meminfo` in one repository is the
+arrangement where a format change fixes one program and not the other, and nobody
+notices because both still produce numbers. The extraction proved the point
+harder than the argument did — see below.
+
+*Cost paid:* a crate boundary, and a `std` crate in a workspace whose root target
+(`x86_64-unknown-none`) has no `std`. It is in `members` — so it inherits
+`[lints] workspace = true` and shares one `target/` — and out of
+`default-members`, so a bare `cargo build` at the root does not try to build it
+for a target with no standard library. That split is the same one the other host
+crates use.
+
+**2. Every reader returns `io::Result<Option<T>>`, not `Option<T>`.** `Ok(None)`
+means *this kernel does not export that file*. `Err` means it does and we could
+not read it. Only `io::ErrorKind::NotFound` is allowed to become `Ok(None)`.
+
+*Alternative:* keep `fs::read_to_string(path).ok()`, which is one line and reads
+nicely. It conflates a file that is absent with a file we were denied, and the
+program printed `(cpuinfo not available)` for both. The stronger form of the
+objection is that the old shape made the *caller's* correct behaviour
+unexpressible: `sysinfo` exited 0 whether it had described the machine or printed
+six "not available" lines, because it had no way to know the difference. It now
+exits 1 on a real read error. A system-information tool that cannot tell you it
+failed is worse than one that fails.
+
+*Cost paid:* every call site gains a `?` or an explicit match, and the CLI grew a
+`Status` type to thread the distinction to its exit code. That is the honest
+price of the distinction existing at all.
+
+**3. Every path- and name-shaped field is `Vec<u8>`, never `String`.** SlateOS
+paths are any bytes except `/` and NUL (`design.txt`), so `Mount::mount_point`,
+`Mount::device` and `NetDevice::name` are bytes end to end, and the CLI formats
+through a byte-buffer `Row` rather than `println!`.
+
+*Alternative:* `String` with `from_utf8_lossy`, which is what the old code did
+implicitly. It is not merely lossy in the abstract: it replaces a run of bytes
+with a single U+FFFD, so a mount at a non-UTF-8 path came out unusable, and two
+different mounts could print identically.
+
+*Cost paid:* the formatting half cannot use `println!` for values, and column
+widths must be computed (characters when the bytes are UTF-8, bytes when they are
+not) rather than taken from `str::len`. Both are contained in about thirty lines
+of `Row`/`column_width`, and both are tested.
+
+### Why the extraction was worth more than the sharing
+
+The request asked for a crate. Reading the code closely enough to move it found
+eight defects, none of which a run on a working machine would reveal, because each
+needs an input a healthy laptop does not produce:
+
+| defect | showed as | truth |
+|---|---|---|
+| `read_to_string(p).ok()` | "not available" | the file exists; the read failed |
+| `String` for paths | a mount silently mangled | the path is not UTF-8 |
+| `\040` printed literally | `/mnt/my\040backup` | `/proc/mounts` is whitespace-separated, so the kernel escapes space, tab, newline and backslash as octal (Linux `fs/proc_namespace.c`) |
+| `&parts[3][..20]` | a panic, or cut options | byte 20 can land inside a character |
+| device padded to a constant 20 | the table's columns walked off | one long device name shifted every later column |
+| `cores == 0` → `1` | "1 core" | `/proc/cpuinfo` was empty or unreadable |
+| `options.contains("ro")` | a read-write mount shown read-only | `ro` is a substring of `rootcontext=…`; options must match whole |
+| two `Running:` labels | one number overwriting another | one counts every task, one is `procs_running` |
+| exit 0 always | success | it may have read nothing |
+
+The general lesson, which is the reason this is a design decision and not a
+changelog entry: **code that only ever runs against a healthy system is untested
+code, however often it runs.** The fix that makes it testable is the one API
+choice not listed above — `ProcFs::at(root)` takes a directory, so every collector
+runs against a fixture of files we wrote, on a host with no `/proc` at all. That
+is how `procinfo`'s 52 tests run on the Windows dev machine, and it is what let
+the eight defects be pinned by tests rather than by argument.
+
+### What stayed out
+
+`/etc/resolv.conf` is read by the CLI and not by `procinfo`. It is a
+configuration file the resolver reads, not a kernel interface, and a type called
+`ProcFs` that reads `/etc` is a type whose name has stopped being true.
+
+## 759. A directory walk holds one open stream per level instead of copying each level's listing, because the copy was a cap and a cap is a file quietly not visited
+
+**Lane:** B
+**Date:** 2026-09-04
+**Decided by:** Claude (autonomous)
+
+**In short:** `fts` is the machinery underneath `find`, `rm -rf`, `du` and
+`chmod -R` — the thing that walks a directory tree. It used to copy out the
+names in each directory into a fixed slot of 64 before going deeper, and a
+directory with 65 files simply lost the 65th: no error, no message, the walk
+reported success. A `rm -rf` on such a directory would say it had finished
+while files were still there. It now keeps the directory open while it walks
+it and asks for the next name when it needs one, so there is no number of
+files that is too many. The cost is that the walk holds one open directory per
+level of depth (at most 16 at once) instead of one at a time.
+
+### What was actually decided
+
+Three things, of which only the first is a genuine tradeoff.
+
+**1. Hold a stream per level, rather than raising the cap.** The obvious
+smaller fix is `MAX_FTS_CHILDREN: 64 -> 4096`. It was rejected because it does
+not remove the failure, it moves it: the walk still loses files silently, just
+in rarer directories, which is strictly worse for diagnosis — a bug that fires
+on 1% of trees is a bug nobody reproduces. It also costs memory in proportion
+to the new cap, in a `static` pool, whether or not any directory is that large.
+
+*What we pay instead:* the traversal now occupies `MAX_FTS_INSTANCES *
+MAX_FTS_DEPTH` = 16 of `dirent`'s 64 `Dir` slots at full depth, where before it
+occupied one. That is a real coupling between two modules' capacity constants,
+and it is why a `const _: () = assert!(...)` now sits beside `MAX_FTS_DEPTH`
+asserting the product fits the pool: if either constant moves the wrong way,
+the build fails rather than a deep walk starting to report `FTS_DNR` partway
+down, which reads like a permissions problem and is not one.
+
+**2. Match `FTS_NAME_MAX` to `dirent`'s `d_name` capacity rather than picking a
+bigger number.** The component buffer was 64 bytes and a longer name was
+skipped — again with no entry and no error, despite the module docs claiming an
+`FTS_ERR` entry was produced. Setting it to exactly the capacity of the field
+`readdir` fills makes the skip *unreachable* rather than merely unlikely, which
+is a different kind of claim and the only one worth asserting. `dirent` grew a
+`pub(crate) const DIRENT_NAME_MAX` for this: the number was a literal `256` in
+a struct definition, and a relationship between two modules cannot be asserted
+against a literal.
+
+**3. Ownership is discharged at two call sites and nowhere else.** `DirFrame`
+is `Copy` and lives in a `static` pool, so it has no `Drop` and the compiler
+will not help. The pop path (`pop_and_yield_dp`) closes the frame it is
+leaving, and `close_open_frames` closes whatever is left — called by
+`release_instance` *before* it resets the slot, because resetting first would
+null the pointers and leak every stream. `close_frame` is idempotent, which is
+not tidiness: `fts_close` on a partly-walked tree runs `close_open_frames` over
+frames the pop path may already have closed, and a second `closedir` on the
+same pointer frees a pool slot another traversal has since been given.
+
+### The reason the copy existed had already expired
+
+This is the part worth remembering, because the shape recurs. The eager copy
+was correct when it was written: `dirent`'s pool held 8 streams, each slot
+carrying a 68 KiB inline buffer, so a walk that held a stream per level would
+have exhausted it. `dirent.rs`'s own docs say so (lines 1011-1013): the small
+pool "is what forced `crate::fts` to buffer children eagerly."
+
+Then the pool went to 64 slots and nobody revisited `fts`. Worse, `fts.rs`
+acquired a *second* justification for the copy in the meantime — that it "makes
+a frame independent of a stream that could be invalidated underneath it" —
+which is simply false: a `Dir` slurps its whole listing at `opendir` time via
+`SYS_FS_GETDENTS_PINNED` and never re-reads, so holding one open is exactly as
+independent of later mutation as copying its entries was.
+
+So the workaround outlived the constraint that forced it, and then grew a
+plausible-sounding reason that was never true. The general lesson: when a
+constraint is lifted, the code that worked around it does not announce itself;
+it sits there looking deliberate, and the comment above it drifts into fiction.
+The tell here was available the whole time — two modules' docs contradicting
+each other about why the same code existed.
+
+### What is pinned by tests
+
+Nothing about this can be exercised against a real directory from a host test:
+`opendir` goes through SlateOS syscalls. So the seven tests added pin the
+*facts that made the change safe*, each of which a later edit could silently
+take back — the pool budget, the name-capacity relationship, that a fresh frame
+owns no stream, that closing twice is safe, that a frame with no stream yields
+no children, that closing empties the stack, and that `size_of::<DirFrame>()`
+stays under 1 KiB. The last is a tripwire, not a budget: a frame that large is
+a per-directory listing buffer wearing a frame's name, and such a buffer is a
+cap.
+
+See known-issues.md `B-FTS-DROPS-THE-65TH-CHILD-OF-ANY-DIRECTORY`.
+
+## 760. A descent that cannot happen is reported by re-yielding the same entry, re-typed — because the module has exactly one entry record and stepping past a mark erases it
+
+**Lane:** B
+**Date:** 2026-09-04
+**Decided by:** Claude (autonomous)
+
+**In short:** When `find` or `rm -r` walks a tree and hits a directory it
+cannot open — no permission, say — it should print "Permission denied" and
+carry on. Ours printed nothing: the walk noted the failure and then
+immediately overwrote the note with the next file it found, so nobody ever saw
+it. The same was true of a directory too deep for our fixed traversal stack:
+everything below the eighth level simply did not exist as far as the caller
+was concerned. Both now hand the caller back the *same* directory a second
+time, relabelled "could not read this", with a reason attached.
+
+### Why the shape is forced, not chosen
+
+`fts` allocates nothing. There is one `FtsEnt` per open traversal, living in
+the instance, and `fts_path` points into the one path buffer that is mutated in
+place as the walk descends and ascends. That is a deliberate design (it is why
+`fts_children` returns `ENOSYS` — see its doc comment), and it has a
+consequence that was not noticed until it bit: **a failure cannot be recorded
+and reported later, because there is nowhere to record it.** The old code did
+exactly that —
+
+```rust
+inst.current.fts_info = FTS_DNR;   // mark it
+inst.current.fts_errno = e;
+// ... falls through ...
+step(inst)                          // writes the next child into `current`
+```
+
+— and the mark was gone one function call later. The code that set it is
+locally correct and reads as if it works, which is why it survived review: the
+bug is not in the statement, it is in what the next statement does.
+
+So the only way to report is to `return` the entry. That means the caller of
+`descend_into_current` must be the one that reports, and
+`descend_into_current` must not touch `current` at all — it returns
+`Result<(), i32>` and says nothing about presentation. This is a general rule
+worth carrying: **in a module with a single shared output slot, the function
+that discovers a fault cannot also be the function that reports it, unless it
+is also the one that returns.**
+
+### The alternatives
+
+| Option | Why not |
+|---|---|
+| Yield a *separate* `FTS_ERR` entry after the `FTS_D` | Needs a second entry record — or the same path buffer at two levels at once, which is precisely what this module does not have. |
+| Set a sticky error on the stream, checked by `fts_close` | Callers learn at the end which files they missed, which is useless for `find` (wrong place in the output) and dangerous for `rm -r` (the exit code is right but the damage is done). |
+| Leave the depth case silent, as it was | This is the one the old comment claimed was BSD behaviour. It is not: glibc's `fts` has no depth limit. The claim was invented to justify what the code happened to do. |
+
+Re-yielding the same entry re-typed is also **what glibc does** — `fts_read`
+returns `p` again after `fts_build` fails, with `p->fts_info` now `FTS_DNR` —
+so callers written against glibc already handle it. The cost is that a caller
+which ignores `FTS_DNR` sees the same path twice, once as `FTS_D` and once as
+`FTS_DNR`. That is the price of the single-record design, it is what portable
+callers expect, and it is strictly better than the path being silently absent.
+
+### Why `ENOMEM` for the depth limit
+
+Extracted into `descent_refusal(depth) -> Option<i32>` rather than left inline,
+because the errno *is* the decision and it is the part a reader will want to
+argue with. Running out of traversal stack says nothing about the directory, so
+`EACCES` would send someone to check permissions that are fine, and `ELOOP`
+would claim a symlink cycle we did not detect. `ENOMEM` is what BSD's
+`fts_build` reports when it cannot get what it needs, which is the same shape
+of answer: the walker ran out of something, not the filesystem.
+
+The depth cap itself (8) remains, and remains too shallow — tracked as
+`TD-B-FTS-DEPTH-IS-CAPPED-AT-EIGHT` in known-issues.md, along with the
+`telldir`/`seekdir` route that would remove the coupling to `dirent`'s pool.
+Making the limit honest and raising the limit are two changes, and only the
+first is unambiguously right.
+
+See known-issues.md `B-FTS-SWALLOWS-EVERY-DESCENT-IT-CANNOT-MAKE`.
+
+## 761. `nftw` refuses `FTW_MOUNT` and `FTW_CHDIR` rather than accepting and ignoring them, because an ignored flag is a wrong answer wearing a success code
+
+**Lane:** B
+**Date:** 2026-09-04
+**Decided by:** Claude (autonomous)
+
+**In short:** `nftw` is the C library's "walk a directory tree" call. A caller
+passes flags saying how to walk: *don't follow shortcuts*, *don't leave this
+disk*, *do it bottom-up*. Ours accepted all of them and acted on exactly one —
+so a program that asked not to follow symbolic links followed every one of
+them, and a program that asked to stay on one disk wandered onto a network
+drive, both while being told they had succeeded. The two flags we cannot
+implement
+yet now make the call fail with "invalid argument" instead of quietly doing
+the wrong thing; the two we can (`FTW_PHYS`, `FTW_DEPTH`) are now actually
+obeyed.
+
+### The three ways to handle a flag you have not implemented
+
+| Option | What the caller sees | Why not / why |
+|---|---|---|
+| Accept and ignore | Success, and a walk that did something else | This was the old behaviour. A ported `rm -rf --one-file-system` deletes across a mount point and reports success. There is no recovery from this because nothing indicates it happened. |
+| Accept and approximate | Success, and a walk that is *nearly* right | Requires knowing the real semantics. `FTW_MOUNT` needs `st_dev` comparison against the root — implementable — but `FTW_CHDIR` changes what the callback's `ftwbuf->base` *means* (it becomes a filename relative to the current directory, not an offset into an absolute path). An approximation there hands the callback a name that opens a different file. |
+| Refuse with `EINVAL` | An immediate, loud failure at the call site | Chosen. It cannot corrupt anything, the caller finds out at the first call rather than after the damage, and it is trivially reversible: implementing the flag is deleting a bit from one constant. |
+
+`FTW_MOUNT` is the closer call of the two — it is a `st_dev` check away, and
+refusing it makes us less useful than glibc for a real workload. It is
+refused anyway, on the grounds that shipping a device-comparison written from
+memory of the semantics, with no filesystem to test it against (every raw
+syscall returns `ENOSYS` on the host — see `posix/src/syscall.rs`), is how a
+plausible-but-wrong implementation gets into the tree wearing a passing test
+suite. `UNSUPPORTED_NFTW_FLAGS` is one constant precisely so that lifting
+either restriction is a one-line change with a test to write.
+
+### Why `FTW_PHYS` being ignored was the serious one
+
+`nftw` destructured its `flags` argument for `FTW_DEPTH` and for nothing else,
+and the word `lstat` did not appear anywhere in the file. So the walker always
+called `stat` (follow the link) where the caller had asked for `lstat`
+(describe the link). Two consequences, and the second is a security bug:
+
+- A symlink to a directory was descended into. A tree with a link to `/` walks
+  the whole filesystem, and without cycle detection it does so until it hits
+  the depth cap.
+- A caller doing a recursive delete under `FTW_PHYS` — which is the *only*
+  correct way to write one — was handed `FTW_D` for a symlink and would
+  recurse into and empty the target directory rather than unlinking the link.
+
+The defect is invisible at the call site (the flag is accepted), invisible in
+the flag-handling code (there is none to be wrong), and *contradicted* by the
+module header, which said "symbolic link detection depends on `lstat`" about a
+file that never called it. A reader checking whether symlinks were handled
+found an answer without reading the code, which is how this survived. The
+lesson is narrower than "comments rot": **a doc comment describing a
+capability is a claim, and the test for a claim is a test.** `FTW_SL` and
+`FTW_SLN` had constants, had their numeric values asserted, and had no
+producer — which a coverage-shaped reading of the test file would not reveal,
+because the constants *were* tested.
+
+That is also the argument for the structural half of this change. `ftw` and
+`nftw` were four functions implementing one loop twice; a walk option honoured
+in one copy and dropped in the other is invisible at every call site. They are
+now one `Walker` differing only in how an entry is delivered, so an option
+cannot be obeyed by one entry point and ignored by the other.
+
+### What else the merge fixed, and what it cost
+
+Three silent losses became reports (see known-issues.md
+`B-NFTW-IGNORES-FTW-PHYS-AND-SKIPS-WHAT-IT-CANNOT-WALK`): an unopenable
+directory now yields `FTW_DNR` — a flag this module defined, asserted the
+numeric value of in a test, and had never once produced — the depth limit
+yields `FTW_DNR` with `ENOMEM`, and an over-long child path fails the walk
+with `ENAMETOOLONG` rather than being skipped. The `FTW_DNR` case forced
+opening the directory *before* announcing it, since `FTW_DNR` replaces `FTW_D`
+rather than following it.
+
+The cost is one behaviour change a caller could notice: a walk that used to
+return 0 having quietly omitted a subtree may now return -1, or deliver a type
+flag the caller has no case for. That is the intended direction — a traversal
+that omits files without saying so is worse than one that fails, because the
+caller believes it saw everything — but it is a change, and it is why this is
+an entry rather than a commit message.
+
+Per-level stack went from ~4 KiB to a few words: the path was a
+`[u8; PATH_MAX]` local in the recursive function, so the depth cap of 32 cost
+128 KiB of stack while the module's own header cited stack overflow as the
+*reason* for the cap. One buffer now lives in the `Walker` and is mutated in
+place, the same discipline `crate::fts` uses.
+
+## 762. Both WSL crossings collapse to one output stream, but in opposite directions — toward the verdict in one, toward the report in the other
+
+**Lane:** B
+**Date:** 2026-09-04
+**Decided by:** Claude (autonomous)
+
+**In short:** Programs write two output streams — "results" (stdout) and
+"progress and complaints" (stderr) — and a caller can point both at one log
+file. Anything we run inside WSL, the Linux environment on this Windows box,
+loses one of those two streams entirely when that happens: the bytes are
+overwritten with no error (known-issues.md Lesson 113). The fix is to make the
+WSL side emit *one* stream instead of two. That works either way round, and the
+choice of which stream to keep is not free, so the two places that needed it
+chose differently and this records why.
+
+**The constraint.** The collapse has to happen on the far side of the boundary,
+inside WSL, because that is the last point at which the two streams are still
+ordinary pipes rather than file handles `wsl.exe` has reopened. So it is a
+one-line `exec` redirect either way; there is no arrangement in which both
+streams survive across the boundary into one file, and none in which the near
+side can fix it. What is genuinely being chosen is which stream the merged
+output rides on, and therefore what is left alone on the other one.
+
+| | `scripts/coreutils-check.sh` | `scripts/diff-wsl.sh` (50 harnesses) |
+|---|---|---|
+| Collapses | `exec 1>&2` — everything to stderr | `exec 2>&1` — everything to stdout |
+| *What changes:* | stdout carries the five-line summary and nothing else | stdout carries the report plus cargo's build chatter |
+| Leaves free | stdout, for the verdict | stderr, which ends up empty |
+| Why | The script's product is a *verdict* about whether a half ran. Isolating it makes `>verdict 2>log` split cleanly, and puts the verdict somewhere no WSL handle can reach. | The harnesses' product is the report `197 passed, 0 differed`, which has always been on stdout. Moving it to stderr would change the observable behaviour of 50 scripts to fix a bug in none of them. |
+
+**The rejected uniform answer.** Doing the same thing in both places would be
+tidier and was the first instinct. Collapsing both to stderr would move every
+harness's report off stdout — a user-visible change to 50 scripts, and one that
+breaks the reasonable expectation that a passing harness prints its result on
+stdout. Collapsing both to stdout would leave `coreutils-check.sh`'s verdict
+sharing a file with up to 1.2 MB of cargo manifest warnings, which is how the
+whole problem was found in the first place. Uniformity here would buy a
+sentence of documentation at the cost of the property each file actually needs.
+
+**What the asymmetry costs.** Someone reading the two scripts side by side sees
+opposite redirects and has to read a comment to learn why; that is the price,
+and both comments state it. It also means neither file preserves the
+stdout/stderr *distinction* across the boundary — that is not recoverable, and
+pretending otherwise is what the two failed attempts in Lesson 113 did.
+
+**A note on the general rule this implies.** A new WSL-invoking script should
+decide, before it is written, which of its two streams carries the thing a
+caller must be able to read when everything else has gone wrong, and put only
+that on it. The default should be `coreutils-check.sh`'s shape — verdict alone
+on stdout — because it is the one that keeps working when the tool underneath
+gets loud. `diff-wsl.sh` is the exception, and it is an exception only because
+it has 50 existing callers.
+
+---
+
+## 763. Pre-push gate 12 compiles the working tree, and refuses to pretend that is the push
+
+**Lane:** B
+**Date:** 2026-09-04
+**Decided by:** Claude (autonomous)
+
+**In short:** A "gate" here is a check that runs when you `git push` and can
+stop the push. Eleven of them read the *commits being sent*. The twelfth has to
+run the Rust compiler, and a compiler reads files sitting in a directory — it
+cannot be pointed at a commit. So the directory and the commits could disagree,
+and then the gate would be certifying something nobody is publishing. The
+decision is what to do about that gap: this gate checks whether the directory
+and the push are the same thing, and if they are not it *checks nothing and
+says so*, rather than checking the wrong thing quietly.
+
+**Why the gap exists at all.** The gate exists because coreutils' `#[cfg(unix)]`
+code — the half that actually ships on SlateOS — is never compiled by any
+ordinary build on this Windows machine, so a type error in it can survive
+indefinitely with every build green (see
+`TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT`).
+Closing that means running `cargo` at the push boundary. Every other gate here
+takes a `--head <sha>` argument and reads that revision out of git; `cargo` has
+no such flag, and never will, because its input is a directory tree.
+
+**The options.**
+
+| | *What changes:* |
+|---|---|
+| **A. Build the working tree and call it the verdict** | Nothing visible — until the day you push a branch you are not standing on, or push with an edit still uncommitted, and the gate reports a pass for a tree the remote will never receive. |
+| **B. Refuse the push whenever the tree is not the push** | `git push` starts failing on ordinary days: a half-finished edit in another file blocks publishing a finished one. |
+| **C. Check the sha out into a scratch directory and build that** | The gate becomes always-correct, and always slow: a fresh directory means a cold compile every push (minutes, not the warm 2m16s), plus a second multi-gigabyte `target/` that has to be deleted afterwards. |
+| **D (chosen). Build the working tree, but only after establishing it *is* the push; otherwise decline by name** | On a normal push (commit, then push) nothing changes. On an abnormal one the gate prints which condition failed and checks nothing, and the hook's tally lists it as skipped. |
+
+**Why D.** Option A is not a hypothetical failure, it is *this file's own
+history*: gate 7 read the working tree instead of the commit being pushed, kept
+its shape perfectly while doing so, and put two unformatted commits on
+`origin/lane-b`. A gate that answers a question about the wrong tree is worse
+than no gate, because the tally then reports it as having run. B trades that for
+a gate people would learn to bypass by reflex, which is the failure mode the
+hook's header warns about in its own words ("a gate that fails on someone else's
+file gets bypassed by habit"). C is the only strictly-correct option and is
+rejected on price and on the standing rule against leaving a second `target/`
+behind — not on effort.
+
+D's four conditions are: exactly one ref being pushed; its sha equal to `HEAD`;
+no modified tracked file; no untracked file. Each names itself when it fails,
+because "gate 12 skipped" with no reason is precisely the unreadable silence
+the tally was added to end — and unlike a path-scope skip, these are conditions
+the author can clear with one command.
+
+**What it costs.** The gate is defeatable by leaving a file uncommitted. That is
+real and is not mitigated away: it is bounded by being loud (a decline prints
+three lines naming the condition), by being visible afterwards (the tally lists
+the gate as skipped on that push), and by the boot test remaining the required
+check before any merge to `main`. The alternative reading — that a defeatable
+gate is worthless — would apply equally to every `ALLOW_*` bypass in the file,
+and the file's design is explicitly that a bypass you have to type is better
+than a check people route around.
+
+**The generalisable rule.** When a checker cannot be pointed at the revision
+being published, do not silently substitute the nearest available tree. Either
+make the substitution provably identical first, or decline. The one thing not
+available is answering a different question in the same words.

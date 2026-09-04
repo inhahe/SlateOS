@@ -7190,6 +7190,7 @@ name = "hexeditor"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -8178,6 +8179,7 @@ name = "jsonviewer"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -8322,6 +8324,7 @@ name = "kanban"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -12862,6 +12865,7 @@ name = "passwordgen"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -13821,6 +13825,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "procinfo"
+version = "0.1.0"
+
+[[package]]
 name = "procreate-cli"
 version = "0.1.0"
 dependencies = [
@@ -14214,6 +14222,7 @@ name = "qrcode"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -14666,6 +14675,7 @@ name = "renamer"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -17350,6 +17360,9 @@ dependencies = [
 [[package]]
 name = "sysinfo"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "sysinfo-app"
@@ -18480,6 +18493,7 @@ name = "unitconverter"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

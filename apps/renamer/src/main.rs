@@ -32,14 +32,17 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cognitive_complexity)]
-#![allow(dead_code)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use oswindow::app::{self, App, Response};
 use std::collections::{BTreeMap, BTreeSet};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -75,12 +78,20 @@ const SIDEBAR_WIDTH: f32 = 280.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const PADDING: f32 = 8.0;
 const LINE_HEIGHT: f32 = 22.0;
+// A measurement constant nothing measures with: the renderer asks
+// `text::` for widths rather than assuming a monospace cell.
+// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
+#[allow(dead_code, reason = "superseded by text measurement")]
 const CHAR_WIDTH: f32 = 7.5;
 const SMALL_TEXT: f32 = 11.0;
 const NORMAL_TEXT: f32 = 13.0;
 const HEADER_TEXT: f32 = 15.0;
 const TITLE_TEXT: f32 = 17.0;
 const BUTTON_HEIGHT: f32 = 28.0;
+// A measurement constant nothing measures with: the renderer asks
+// `text::` for widths rather than assuming a monospace cell.
+// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
+#[allow(dead_code, reason = "superseded by text measurement")]
 const INPUT_HEIGHT: f32 = 26.0;
 
 /// Columns of the rename-preview file list.
@@ -167,6 +178,12 @@ const MAX_HISTORY: usize = 50;
 // Rename operation types
 // ============================================================================
 
+// Rename rules that need a string typed in — find/replace, insert,
+// remove-at, regex. Each is implemented and tested; none can be added,
+// because the app has no text field. The rules that need nothing typed
+// are on keys.
+// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
+#[allow(dead_code, reason = "these rules need a text field")]
 /// A single rename operation that transforms a filename.
 #[derive(Debug, Clone)]
 enum RenameOp {
@@ -245,6 +262,10 @@ impl RenameOp {
     }
 }
 
+// Insert positions other than the end: reachable only from the rules
+// that need a text field.
+// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
+#[allow(dead_code, reason = "these rules need a text field")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InsertPosition {
     /// Insert at the beginning of the name (before extension).
@@ -255,6 +276,10 @@ enum InsertPosition {
     At(usize),
 }
 
+// Case modes with no key. Five of the eight are bound; these three are
+// the ones a keyboard runs out of room for, and want a menu.
+// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
+#[allow(dead_code, reason = "no menu to choose the rest")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CaseMode {
     Upper,
@@ -282,6 +307,10 @@ impl CaseMode {
     }
 }
 
+// Date stamp formats: the date-stamp rule needs a format chosen and a
+// separator typed, so none is reachable.
+// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
+#[allow(dead_code, reason = "date-stamp rule needs a chooser")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DateFormat {
     YmdHyphen,  // 2024-01-15
@@ -292,6 +321,10 @@ enum DateFormat {
 }
 
 impl DateFormat {
+    // Date stamp formats: the date-stamp rule needs a format chosen and a
+    // separator typed, so none is reachable.
+    // See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
+    #[allow(dead_code, reason = "date-stamp rule needs a chooser")]
     fn label(self) -> &'static str {
         match self {
             Self::YmdHyphen => "YYYY-MM-DD",
@@ -313,6 +346,9 @@ impl DateFormat {
     }
 }
 
+// Trim modes other than both ends: the bound key trims both.
+// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
+#[allow(dead_code, reason = "only both-ends trimming is bound")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrimMode {
     Both,
@@ -320,6 +356,12 @@ enum TrimMode {
     End,
 }
 
+// Extension rules that need a string typed in — replacing an extension or
+// adding one. Lowercasing and removing need nothing typed and are on keys;
+// uppercasing is the third and the keyboard ran out of letters that read
+// naturally, so it wants the same menu the other unbound rules do.
+// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
+#[allow(dead_code, reason = "these rules need a text field or a menu")]
 #[derive(Debug, Clone)]
 enum ExtensionOp {
     /// Replace extension with a new one.
@@ -356,6 +398,11 @@ struct FileEntry {
     /// File type/extension.
     extension: String,
     /// Last modified timestamp (mock).
+    // A file's modification time: read from nowhere, because there is no file
+    // chooser to read one from. It exists so a date-stamp rule can use it when
+    // there is.
+    // See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
+    #[allow(dead_code, reason = "no file chooser supplies it")]
     modified_ms: u64,
 }
 
@@ -814,6 +861,10 @@ struct RenameRecord {
     /// The operations that were applied.
     operations: Vec<String>,
     /// When the rename was performed (mock timestamp).
+    // A rename record's timestamp: written when a rename is recorded and never
+    // shown. The history panel lists what changed, not when.
+    // See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
+    #[allow(dead_code, reason = "history does not show times")]
     timestamp_ms: u64,
 }
 
@@ -851,6 +902,11 @@ struct RenamerApp {
     history: Vec<RenameRecord>,
     /// Search/filter text for the file list.
     search_text: String,
+    /// Whether typing goes to the search box rather than to the shortcuts.
+    ///
+    /// Without it, typing "c" to search would toggle the conflicts filter. The
+    /// app had no input at all, so nothing had needed the distinction.
+    searching: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -877,6 +933,7 @@ impl RenamerApp {
             filter_conflicts: false,
             history: Vec::new(),
             search_text: String::new(),
+            searching: false,
         }
     }
 
@@ -887,6 +944,37 @@ impl RenamerApp {
         }
         self.files.push(FileEntry::new(path, name, size, modified));
         self.apply_operations();
+    }
+
+    /// Fill the list with the files a first run shows.
+    ///
+    /// One method, so that when a file chooser exists this is the call that
+    /// changes. The names are deliberately the awkward ones a bulk renamer is
+    /// for: inconsistent separators, mixed case, a duplicate that will collide
+    /// under a lowercasing operation, and a space-padded name.
+    fn seed_sample_files(&mut self) {
+        for (path, name, size) in [
+            (
+                "/home/user/photos/IMG_0001.JPG",
+                "IMG_0001.JPG",
+                2_400_000_u64,
+            ),
+            ("/home/user/photos/IMG_0002.JPG", "IMG_0002.JPG", 2_310_000),
+            ("/home/user/photos/img_0002.jpg", "img_0002.jpg", 2_290_000),
+            (
+                "/home/user/photos/Holiday Snap .png",
+                "Holiday Snap .png",
+                850_000,
+            ),
+            (
+                "/home/user/docs/report-final-FINAL.docx",
+                "report-final-FINAL.docx",
+                44_000,
+            ),
+            ("/home/user/docs/notes.txt", "notes.txt", 1_200),
+        ] {
+            self.add_file(path, name, size, 0);
+        }
     }
 
     /// Add a rename operation and recompute previews.
@@ -1156,7 +1244,261 @@ impl RenamerApp {
     // Rendering
     // ========================================================================
 
-    fn render(&self) -> Vec<RenderCommand> {
+    // ------------------------------------------------------------------
+    // Events
+    // ------------------------------------------------------------------
+
+    /// Route a compositor event into the app.
+    fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Resize { .. } => {
+                // The layout is computed from the size handed to `render`, so
+                // there is nothing to store and nothing to redraw for.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a key press.
+    ///
+    /// The app had no input handling at all: the file list, the operation
+    /// pipeline, undo, redo and the actual rename were reachable only by a
+    /// caller invoking the method directly. **`Enter` performs the rename**,
+    /// which is the one irreversible-looking action here — it is on a key of
+    /// its own rather than sharing one, and undo covers it.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        if self.searching {
+            return self.handle_key_search(key);
+        }
+        let ctrl = key.modifiers.ctrl;
+        match key.key {
+            // Panels.
+            Key::Tab => {
+                self.sidebar_panel = match self.sidebar_panel {
+                    SidebarPanel::Operations => SidebarPanel::Preview,
+                    SidebarPanel::Preview => SidebarPanel::History,
+                    SidebarPanel::History => SidebarPanel::Operations,
+                };
+                EventResult::Consumed
+            }
+            // The file list.
+            Key::Up => self.step_file(-1),
+            Key::Down => self.step_file(1),
+            Key::Space => self.toggle_selected_file(),
+            Key::A if ctrl => {
+                // Select-all, and its opposite when everything already is.
+                let all = !self.files.is_empty() && self.files.iter().all(|f| f.selected);
+                self.select_all(!all);
+                EventResult::Consumed
+            }
+            // The operation pipeline.
+            // Before the plain `Key::Delete` below: a guard narrows only the
+            // arm it is on, so an unguarded arm listed first swallows the
+            // guarded case entirely — Ctrl+Delete would have removed an
+            // operation rather than clearing the file list.
+            Key::Delete if ctrl => {
+                if self.files.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.clear_files();
+                EventResult::Consumed
+            }
+            Key::Delete => {
+                if self.operations.is_empty() {
+                    return EventResult::Ignored;
+                }
+                let idx = self.selected_op;
+                self.remove_operation(idx);
+                self.selected_op = self
+                    .selected_op
+                    .min(self.operations.len().saturating_sub(1));
+                self.apply_operations();
+                EventResult::Consumed
+            }
+            Key::PageUp => self.move_op(-1),
+            Key::PageDown => self.move_op(1),
+            // Doing it, and undoing it.
+            Key::Enter => {
+                if self.files.iter().all(|f| !f.selected) {
+                    self.status_message = String::from("Nothing selected to rename");
+                    return EventResult::Consumed;
+                }
+                self.execute_rename();
+                EventResult::Consumed
+            }
+            Key::Z if ctrl => {
+                if self.undo_stack.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.undo();
+                EventResult::Consumed
+            }
+            Key::Y if ctrl => {
+                if self.redo_stack.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.redo();
+                EventResult::Consumed
+            }
+            Key::Slash => {
+                self.searching = true;
+                EventResult::Consumed
+            }
+            Key::C => {
+                self.filter_conflicts = !self.filter_conflicts;
+                EventResult::Consumed
+            }
+            // The operations that need nothing typed. `add_operation` and
+            // every one of these variants were written, tested, and had no
+            // caller: the pipeline could not be given a single rule, so the
+            // preview column showed each name unchanged and the program's whole
+            // purpose did nothing. The ones that need a string — find/replace,
+            // insert, regex — still have nowhere to type it.
+            Key::L => self.add_op(RenameOp::ChangeCase(CaseMode::Lower)),
+            Key::U => self.add_op(RenameOp::ChangeCase(CaseMode::Upper)),
+            Key::T => self.add_op(RenameOp::ChangeCase(CaseMode::Title)),
+            Key::S => self.add_op(RenameOp::ChangeCase(CaseMode::SnakeCase)),
+            Key::K => self.add_op(RenameOp::ChangeCase(CaseMode::KebabCase)),
+            Key::W => self.add_op(RenameOp::Trim {
+                chars: String::from(" "),
+                mode: TrimMode::Both,
+            }),
+            // Extension rules that need nothing typed either.
+            Key::E => self.add_op(RenameOp::Extension(ExtensionOp::Lower)),
+            Key::X => self.add_op(RenameOp::Extension(ExtensionOp::Remove)),
+            // Start again: the pipeline, or the whole list.
+            Key::Backspace if ctrl => {
+                if self.operations.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.clear_operations();
+                self.selected_op = 0;
+                EventResult::Consumed
+            }
+            Key::N => self.add_op(RenameOp::Number {
+                start: 1,
+                step: 1,
+                padding: 3,
+                position: InsertPosition::End,
+                separator: String::from("_"),
+            }),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Keys while the search box has focus.
+    ///
+    /// It comes first in `handle_key` because otherwise typing "c" to search
+    /// would toggle the conflicts filter under the box.
+    fn handle_key_search(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape | Key::Enter => {
+                self.searching = false;
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                if self.search_text.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+                EventResult::Consumed
+            }
+            _ => {
+                if key.text.is_empty() || key.modifiers.ctrl {
+                    return EventResult::Ignored;
+                }
+                self.search_text.push_str(&key.text);
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Append an operation to the pipeline and re-run the preview.
+    ///
+    /// Reports `Ignored` when the pipeline is full, so the key does not redraw
+    /// an unchanged frame — `add_operation` returns nothing, and silently
+    /// doing nothing is the one thing a preview must not do.
+    fn add_op(&mut self, op: RenameOp) -> EventResult {
+        let before = self.operations.len();
+        self.add_operation(op);
+        if self.operations.len() == before {
+            EventResult::Ignored
+        } else {
+            self.selected_op = self.operations.len().saturating_sub(1);
+            EventResult::Consumed
+        }
+    }
+
+    /// Move the file-list selection, stopping at the ends.
+    fn step_file(&mut self, delta: isize) -> EventResult {
+        if self.files.is_empty() {
+            return EventResult::Ignored;
+        }
+        let Ok(current) = isize::try_from(self.selected_file) else {
+            return EventResult::Ignored;
+        };
+        let Some(moved) = current.checked_add(delta) else {
+            return EventResult::Ignored;
+        };
+        let Ok(moved) = usize::try_from(moved) else {
+            return EventResult::Ignored; // off the top; stay put
+        };
+        if moved >= self.files.len() || moved == self.selected_file {
+            return EventResult::Ignored;
+        }
+        self.selected_file = moved;
+        EventResult::Consumed
+    }
+
+    /// Tick or untick the file under the cursor.
+    fn toggle_selected_file(&mut self) -> EventResult {
+        let Some(file) = self.files.get_mut(self.selected_file) else {
+            return EventResult::Ignored;
+        };
+        file.selected = !file.selected;
+        EventResult::Consumed
+    }
+
+    /// Move the selected operation up or down the pipeline.
+    ///
+    /// The order matters: operations are applied in sequence, so moving one is
+    /// a different result rather than a cosmetic change, which is why this
+    /// re-runs the preview.
+    fn move_op(&mut self, delta: isize) -> EventResult {
+        if self.operations.len() < 2 {
+            return EventResult::Ignored;
+        }
+        let idx = self.selected_op;
+        let Ok(current) = isize::try_from(idx) else {
+            return EventResult::Ignored;
+        };
+        let Some(moved) = current.checked_add(delta) else {
+            return EventResult::Ignored;
+        };
+        let Ok(moved) = usize::try_from(moved) else {
+            return EventResult::Ignored;
+        };
+        if moved >= self.operations.len() {
+            return EventResult::Ignored;
+        }
+        if delta < 0 {
+            self.move_operation_up(idx);
+        } else {
+            self.move_operation_down(idx);
+        }
+        self.selected_op = moved;
+        self.apply_operations();
+        EventResult::Consumed
+    }
+
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`, so
+    /// an app that keeps the name draws nothing and reports no error.
+    fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(256);
 
         // Background
@@ -1844,8 +2186,57 @@ fn format_size(bytes: u64) -> String {
 // Main
 // ============================================================================
 
-fn main() {
-    let _app = RenamerApp::new();
+impl App for RenamerApp {
+    fn title(&self) -> String {
+        let selected = self.files.iter().filter(|f| f.selected).count();
+        if selected == 0 {
+            "Bulk Rename".to_owned()
+        } else {
+            format!("Bulk Rename — {selected} selected")
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH_PX, WINDOW_HEIGHT_PX)
+    }
+
+    /// No clock.
+    ///
+    /// `current_time_ms` is a counter this app advances itself when it records
+    /// a rename, not a reading of any clock, and nothing else here ages. A tick
+    /// would redraw an identical frame.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+/// The size the window asks to open at.
+const WINDOW_WIDTH_PX: u32 = 1100;
+const WINDOW_HEIGHT_PX: u32 = 750;
+
+fn main() -> ExitCode {
+    let mut app = RenamerApp::new();
+    // Until a file chooser exists this is what there is to rename. Without it
+    // the window opens completely empty, with no key that could put anything
+    // in it — `add_file` has no caller outside the tests.
+    app.seed_sample_files();
+    app::launch("renamer", &mut app)
 }
 
 // ============================================================================
@@ -1860,6 +2251,272 @@ fn main() {
     clippy::indexing_slicing
 )]
 mod tests {
+
+    // ------------------------------------------------------------------
+    // Events, and the rules that are now addable
+    // ------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+    use oswindow::app::App as _;
+
+    fn seeded() -> RenamerApp {
+        let mut app = RenamerApp::new();
+        app.seed_sample_files();
+        app
+    }
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn press_ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    fn typed(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    #[test]
+    fn the_window_opens_with_something_to_rename() {
+        // `add_file` had no caller outside the tests, so the window would have
+        // opened empty with no key that could put anything in it.
+        let app = seeded();
+        assert!(app.files.len() >= 4, "files: {}", app.files.len());
+    }
+
+    #[test]
+    fn a_rule_can_be_added_and_it_changes_the_preview() {
+        // `add_operation` and every rule variant were written and tested, and
+        // the pipeline could not be given a single rule — so every preview
+        // showed the name unchanged and the program did nothing.
+        let mut app = seeded();
+        assert!(app.operations.is_empty());
+        let before: Vec<String> = app.files.iter().map(|f| f.new_name.clone()).collect();
+        assert_eq!(app.handle_event(&press(Key::L)), EventResult::Consumed);
+        assert_eq!(app.operations.len(), 1, "L should add a lowercase rule");
+        let after: Vec<String> = app.files.iter().map(|f| f.new_name.clone()).collect();
+        assert_ne!(before, after, "adding a rule changed no preview");
+        // A case rule works on the *stem* and leaves the extension alone —
+        // which is why lowercasing an extension is a rule of its own. Adding
+        // both is what makes a whole name lower case.
+        let stem = |n: &str| {
+            n.rsplit_once('.')
+                .map_or(n.to_owned(), |(s, _)| s.to_owned())
+        };
+        assert!(
+            after.iter().all(|n| stem(n) == stem(n).to_lowercase()),
+            "a lowercase rule left an upper-case stem: {after:?}"
+        );
+        assert!(
+            after.iter().any(|n| n.ends_with(".JPG")),
+            "the extension should have been left alone: {after:?}"
+        );
+        app.handle_event(&press(Key::E));
+        let both: Vec<String> = app.files.iter().map(|f| f.new_name.clone()).collect();
+        assert!(
+            both.iter().all(|n| n == &n.to_lowercase()),
+            "stem and extension rules together should lower the whole name: {both:?}"
+        );
+    }
+
+    #[test]
+    fn each_rule_key_adds_its_own_rule() {
+        let mut app = seeded();
+        for (k, n) in [
+            (Key::L, 1),
+            (Key::U, 2),
+            (Key::T, 3),
+            (Key::S, 4),
+            (Key::K, 5),
+            (Key::W, 6),
+            (Key::N, 7),
+            (Key::E, 8),
+            (Key::X, 9),
+        ] {
+            assert_eq!(app.handle_event(&press(k)), EventResult::Consumed);
+            assert_eq!(app.operations.len(), n, "{k:?} did not add a rule");
+        }
+    }
+
+    #[test]
+    fn ctrl_delete_clears_the_files_rather_than_removing_a_rule() {
+        // A guard narrows only the arm it is on, so the unguarded `Key::Delete`
+        // listed first swallowed this case entirely: Ctrl+Delete removed an
+        // operation instead. The compiler said so, as an unreachable pattern.
+        let mut app = seeded();
+        app.handle_event(&press(Key::L));
+        assert_eq!(app.operations.len(), 1);
+        assert_eq!(
+            app.handle_event(&press_ctrl(Key::Delete)),
+            EventResult::Consumed
+        );
+        assert!(app.files.is_empty(), "Ctrl+Delete should clear the files");
+        assert_eq!(app.operations.len(), 1, "and leave the rules alone");
+    }
+
+    #[test]
+    fn ctrl_backspace_clears_the_rules_and_restores_the_original_names() {
+        let mut app = seeded();
+        let original: Vec<String> = app.files.iter().map(|f| f.new_name.clone()).collect();
+        app.handle_event(&press(Key::U));
+        assert_ne!(
+            app.files
+                .iter()
+                .map(|f| f.new_name.clone())
+                .collect::<Vec<_>>(),
+            original
+        );
+        assert_eq!(
+            app.handle_event(&press_ctrl(Key::Backspace)),
+            EventResult::Consumed
+        );
+        assert!(app.operations.is_empty());
+        assert_eq!(
+            app.files
+                .iter()
+                .map(|f| f.new_name.clone())
+                .collect::<Vec<_>>(),
+            original,
+            "clearing the rules should restore the previews"
+        );
+    }
+
+    #[test]
+    fn clearing_an_empty_pipeline_is_not_a_redraw() {
+        let mut app = seeded();
+        assert_eq!(
+            app.handle_event(&press_ctrl(Key::Backspace)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn typing_a_search_does_not_add_rules() {
+        // "l", "u", "t", "s", "k", "w", "n", "e" and "x" are all rule keys
+        // outside the search box.
+        let mut app = seeded();
+        assert_eq!(app.handle_event(&press(Key::Slash)), EventResult::Consumed);
+        assert!(app.searching);
+        for c in "lux".chars() {
+            app.handle_event(&typed(c));
+        }
+        assert_eq!(app.search_text, "lux");
+        assert!(
+            app.operations.is_empty(),
+            "typing a search added {} rule(s)",
+            app.operations.len()
+        );
+    }
+
+    #[test]
+    fn space_ticks_the_file_under_the_cursor() {
+        let mut app = seeded();
+        app.select_all(false);
+        app.selected_file = 1;
+        assert_eq!(app.handle_event(&press(Key::Space)), EventResult::Consumed);
+        assert!(
+            app.files.get(1).is_some_and(|f| f.selected),
+            "Space did not tick the file"
+        );
+        assert_eq!(
+            app.files.iter().filter(|f| f.selected).count(),
+            1,
+            "Space ticked more than one"
+        );
+    }
+
+    #[test]
+    fn renaming_with_nothing_ticked_says_so_rather_than_doing_it() {
+        let mut app = seeded();
+        app.select_all(false);
+        app.handle_event(&press(Key::L));
+        let before: Vec<String> = app.files.iter().map(|f| f.original_name.clone()).collect();
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(
+            app.files
+                .iter()
+                .map(|f| f.original_name.clone())
+                .collect::<Vec<_>>(),
+            before,
+            "a rename ran with nothing selected"
+        );
+        assert!(
+            app.status_message.to_lowercase().contains("nothing"),
+            "the status bar should say why: {:?}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn undo_with_nothing_to_undo_is_not_a_redraw() {
+        let mut app = seeded();
+        assert_eq!(app.handle_event(&press_ctrl(Key::Z)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn the_arrows_walk_the_file_list_and_stop_at_the_ends() {
+        let mut app = seeded();
+        app.selected_file = 0;
+        assert_eq!(app.handle_event(&press(Key::Up)), EventResult::Ignored);
+        for i in 1..app.files.len() {
+            assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Consumed);
+            assert_eq!(app.selected_file, i);
+        }
+        assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = seeded();
+        let release = Event::Key(KeyEvent {
+            key: Key::L,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert!(app.operations.is_empty());
+    }
+
+    #[test]
+    fn the_title_counts_the_ticked_files() {
+        let mut app = seeded();
+        app.select_all(false);
+        assert_eq!(app.title(), "Bulk Rename");
+        app.select_all(true);
+        let title = app.title();
+        assert!(
+            title.contains(&app.files.len().to_string()),
+            "title {title:?} omits the count"
+        );
+    }
+
+    #[test]
+    fn rendering_draws_something_at_an_awkward_size() {
+        let mut app = seeded();
+        for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+            assert!(
+                !app.render(w, h).commands.is_empty(),
+                "drew nothing at {w}x{h}"
+            );
+        }
+    }
     use super::*;
 
     // --- Find & Replace ---
@@ -2270,7 +2927,7 @@ mod tests {
     #[test]
     fn test_app_render_nonempty() {
         let app = RenamerApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2280,7 +2937,7 @@ mod tests {
     fn op_detail_lines(ops: Vec<RenameOp>) -> Vec<String> {
         let mut app = RenamerApp::new();
         app.operations = ops;
-        app.render()
+        app.render_commands()
             .into_iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {

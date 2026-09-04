@@ -337,6 +337,51 @@ AR_MAGIC = b"!<arch>\n"
 MIN_MEMBERS = 100
 MIN_SYMBOLS = 500
 
+#: What `scripts/mutate-gate.py` breaks to check that the floor above, and the
+#: shape checks below it, are load-bearing rather than decorative. Each row is
+#: (label, exact source text, replacement); the sweep applies one at a time and
+#: requires `--self-test` to go red.
+#:
+#: The table is here rather than in the sweeper because every needle is a
+#: quotation of this file, and a quotation kept elsewhere goes stale silently --
+#: it stops matching, gets skipped, and the hole reads as coverage.
+#:
+#: This floor is the reason the harness exists. When it was added on 2026-09-03
+#: the constants above were pinned against a measured archive and `main()` never
+#: read them: the only assertion was the vacuous `MIN_MEMBERS > 0 and
+#: MIN_SYMBOLS > 0`. Three more survivors followed -- the two halves of the
+#: `or` could not be told apart, because every fixture sat below both floors or
+#: above both. Hence rows 2 and 3, which break exactly one half each.
+SELFTEST_MUTANTS = [
+    # The floor: is each half read, and is it read as `or` rather than `and`?
+    ("the floor is never consulted at all",
+     "    if len(members) < MIN_MEMBERS or n_symbols < MIN_SYMBOLS:",
+     "    if False:"),
+    ("only the symbol half of the floor is checked",
+     "    if len(members) < MIN_MEMBERS or n_symbols < MIN_SYMBOLS:",
+     "    if n_symbols < MIN_SYMBOLS:"),
+    ("only the member half of the floor is checked",
+     "    if len(members) < MIN_MEMBERS or n_symbols < MIN_SYMBOLS:",
+     "    if len(members) < MIN_MEMBERS:"),
+    ("MIN_MEMBERS gutted to 1", "MIN_MEMBERS = 100", "MIN_MEMBERS = 1"),
+    ("MIN_SYMBOLS gutted to 1", "MIN_SYMBOLS = 500", "MIN_SYMBOLS = 1"),
+
+    # A breach must be a refusal, not a finding. `run-checker.sh` reads 1 as
+    # "the checker found something" and prints a refusal naming code that is
+    # fine; 2 is "could not check", which is what an unparsed archive is.
+    ("a breached floor is reported as a finding instead of a refusal",
+     "              f\"{MIN_MEMBERS}/{MIN_SYMBOLS}.\", file=sys.stderr)\n"
+     "        print(\"       A real libc.a has hundreds of both (615 and 3251 when \"\n"
+     "              \"this floor was set), so this is a\", file=sys.stderr)\n"
+     "        print(\"       misparse or a truncated archive rather than a clean bill \"\n"
+     "              \"of health.\", file=sys.stderr)\n"
+     "        print(\"       (This is exit 2, 'could not check', not a pass.)\",\n"
+     "              file=sys.stderr)\n"
+     "        return 2\n",
+     "              f\"{MIN_MEMBERS}/{MIN_SYMBOLS}.\", file=sys.stderr)\n"
+     "        return 1\n"),
+]
+
 
 def is_collidable(symbol: str) -> bool:
     """Could a third-party program plausibly define this same name?

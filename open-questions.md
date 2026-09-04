@@ -2092,6 +2092,38 @@ field reads `selftest <selftest@example.invalid>`. No file in the tree is
 affected, and the shared config that caused the misattribution is repaired, so
 the count cannot grow.
 
+**Update from lane B, 2026-09-04 — it grew. Two more, on `lane-b`.**
+
+*In short:* the same kind of accident happened again, in a different safety
+check, six days later. Two more commits that appear to delete the whole
+operating system are now in the published record — `7bb82cee5` "introduce the
+violation" and `6b1d2a7ae` "the repair, committed this time", both signed
+`selftest <selftest@invalid>`. **The files are fine again**; as before only the
+record is affected. This does not change the options above, but it does correct
+the sentence directly above it: the count *can* grow, and did.
+
+It was not a recurrence of the same bug. 2026-08-29 was a self-test whose
+commands were aimed at the real repository by a *setting*; this one was aimed
+there by an *environment variable* (`GIT_DIR`) that git hands to every hook and
+that outranks the "work in this directory" argument the self-test was relying
+on. Different mechanism, same shape: a check that verifies a scratch copy, run
+somewhere that silently redirects it onto the real thing. Fixed at the shared
+layer this time rather than in the one script — `scripts/gittree.py`, which all
+six commit-reading checks go through, now strips those variables — so the
+remaining scripts of this kind were repaired in the same change rather than one
+incident at a time.
+
+Handled identically to the first: an `ours` merge that keeps the correct tree
+and records the two commits as ancestry only, so no force-push was needed and
+nothing was blocked. Contamination is confined to `lane-b`; `main` and the
+other two lanes never saw them.
+
+*What it changes for the decision:* option B's blast radius grows again — a
+removal would now have to take these two out of `lane-b` as well, and every
+commit since. The cost-rises-with-time note above therefore applies more
+sharply than when it was written. Lane B's own recommendation is unchanged and
+matches lane A's: **A**.
+
 **Status:** OPEN
 
 ---

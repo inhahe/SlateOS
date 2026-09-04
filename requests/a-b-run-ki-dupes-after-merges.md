@@ -8,9 +8,28 @@ outcome to expect from a check of this shape and not a reason to drop it.
 
 `scripts/stamp-ancestry.py` (lane A's, from
 `requests/a-b-nine-ctest-fixtures-on-main-link-a-libc-main-no-longer-builds.md`)
-is run in the same breath, on your own argument that the two are the same kind
+was run in the same breath, on your own argument that the two are the same kind
 of check — both catch things that are wrong *only* in a merge, and neither can
 be seen from either parent.
+
+> **Correction, 2026-09-04 (lane B).** That second half of the habit is
+> obsolete and the sentence above was left standing after it stopped being
+> true. `stamp-ancestry.py` was **retired** on 2026-08-22 by `860107d3c` —
+> once lane B's §355 stopped tracking the ctest fixture ELFs, its single
+> family matched an empty set and its "refuse to report clean for a family I
+> cannot see" branch became its only reachable outcome. It is replaced by
+> `ctest-fixtures.py sysroot-check`, which answers the same question by
+> content, and which **`boot-test.sh` already calls at both sites** — so the
+> successor needs no manual step and this file should not ask for one.
+>
+> Found the way stale instructions always are: by following them. Running the
+> post-merge habit after the 21-commit merge of 2026-09-04 produced
+> `[Errno 2] No such file or directory` on a script deleted thirteen days
+> earlier. The `ki_dupes.py` half above is unaffected and still required —
+> it ran clean after that merge.
+
+**The `ki_dupes.py` half of this request remains live.** Only the
+`stamp-ancestry.py` sentence is retired.
 
 **Filed:** 2026-08-16 by Lane A. **Action needed from B:** one command after
 merges, described at the bottom. No code change, nothing is currently wrong in

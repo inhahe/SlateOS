@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Kanban Board / Project Management Application
 //!
 //! A feature-rich Kanban board for Slate OS with multiple boards, customizable
@@ -6,13 +5,14 @@
 //! filtering, sorting, WIP limits, swimlanes, archiving, and JSON export/import.
 
 use guitk::color::Color;
-use guitk::event::{Key, KeyEvent};
-use guitk::layout::FlexDirection;
+use guitk::event::{Event, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::widget::{Widget, WidgetTree};
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::collections::HashMap;
 
@@ -85,6 +85,10 @@ impl Priority {
         }
     }
 
+    // Every priority in order, for a picker that does not exist: priority is
+    // cycled with P rather than chosen from a list.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "no priority picker")]
     fn all() -> &'static [Priority] {
         &[Self::Low, Self::Medium, Self::High, Self::Critical]
     }
@@ -120,6 +124,11 @@ impl Label {
 /// A checklist item on a card.
 #[derive(Clone, Debug)]
 struct ChecklistItem {
+    // A stable identifier assigned and never read: this app addresses
+    // boards, columns and cards by position. Kept because it is what to
+    // switch to when that is fixed.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "identity not used for addressing yet")]
     id: Id,
     text: String,
     done: bool,
@@ -138,9 +147,19 @@ impl ChecklistItem {
 /// A comment on a card.
 #[derive(Clone, Debug)]
 struct Comment {
+    // A stable identifier assigned and never read: this app addresses
+    // boards, columns and cards by position. Kept because it is what to
+    // switch to when that is fixed.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "identity not used for addressing yet")]
     id: Id,
     author: String,
     text: String,
+    // A stable identifier assigned and never read: this app addresses
+    // boards, columns and cards by position. Kept because it is what to
+    // switch to when that is fixed.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "identity not used for addressing yet")]
     timestamp: u64,
 }
 
@@ -189,6 +208,11 @@ struct Card {
     comments: Vec<Comment>,
     created_at: u64,
     archived: bool,
+    // Swimlanes: a second axis for the board, modelled end to end and
+    // never drawn. The board renderer lays out columns only, so there is
+    // nowhere for a lane to appear.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "swimlanes have no layout mode")]
     swimlane: String,
 }
 
@@ -237,6 +261,11 @@ impl Card {
         self
     }
 
+    // Swimlanes: a second axis for the board, modelled end to end and
+    // never drawn. The board renderer lays out columns only, so there is
+    // nowhere for a lane to appear.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "swimlanes have no layout mode")]
     fn with_swimlane(mut self, lane: &str) -> Self {
         self.swimlane = lane.to_string();
         self
@@ -265,6 +294,10 @@ impl Card {
         self.comments.push(Comment::new(author, text, timestamp));
     }
 
+    // A card's checklist is drawn but cannot be ticked: the detail modal
+    // has no per-item selection to hang the toggle on.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "checklist items are not selectable")]
     fn toggle_checklist_item(&mut self, item_id: Id) {
         for item in &mut self.checklist {
             if item.id == item_id {
@@ -279,12 +312,28 @@ impl Card {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortBy {
     Priority,
+    // Sort orders the user cannot choose: the board always draws cards in
+    // column order, and no key selects a different one.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "no sort-order control")]
     DueDate,
+    // Sort orders the user cannot choose: the board always draws cards in
+    // column order, and no key selects a different one.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "no sort-order control")]
     CreatedAt,
+    // A sort order the user cannot choose: the board always draws cards in
+    // column order, and no key selects a different one.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "no sort-order control")]
     Title,
 }
 
 impl SortBy {
+    // Sort orders the user cannot choose: the board always draws cards in
+    // column order, and no key selects a different one.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "no sort-order control")]
     fn label(self) -> &'static str {
         match self {
             Self::Priority => "Priority",
@@ -294,6 +343,10 @@ impl SortBy {
         }
     }
 
+    // Sort orders the user cannot choose: the board always draws cards in
+    // column order, and no key selects a different one.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "no sort-order control")]
     fn all() -> &'static [SortBy] {
         &[Self::Priority, Self::DueDate, Self::CreatedAt, Self::Title]
     }
@@ -302,11 +355,20 @@ impl SortBy {
 /// A Kanban column holding an ordered list of cards.
 #[derive(Clone, Debug)]
 struct Column {
+    // A stable identifier assigned and never read: this app addresses
+    // boards, columns and cards by position. Kept because it is what to
+    // switch to when that is fixed.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "identity not used for addressing yet")]
     id: Id,
     name: String,
     card_ids: Vec<Id>,
     wip_limit: Option<usize>,
     sort_by: SortBy,
+    // A collapsed column is modelled and never drawn collapsed: the board
+    // renderer lays out every column at full width.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "no collapse control")]
     collapsed: bool,
 }
 
@@ -346,13 +408,28 @@ impl Column {
 /// A Kanban board containing columns and cards.
 #[derive(Clone, Debug)]
 struct Board {
+    // A stable identifier assigned and never read: this app addresses boards,
+    // columns and cards by position. Kept because it is what to switch to
+    // when that is fixed.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "identity not used for addressing yet")]
     id: Id,
     name: String,
     columns: Vec<Column>,
     cards: HashMap<Id, Card>,
     labels: Vec<Label>,
     archived_card_ids: Vec<Id>,
+    // Swimlanes: a second axis for the board, modelled end to end and
+    // never drawn. The board renderer lays out columns only, so there is
+    // nowhere for a lane to appear.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "swimlanes have no layout mode")]
     swimlanes_enabled: bool,
+    // Swimlanes: a second axis for the board, modelled end to end and
+    // never drawn. The board renderer lays out columns only, so there is
+    // nowhere for a lane to appear.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "swimlanes have no layout mode")]
     swimlane_names: Vec<String>,
 }
 
@@ -443,6 +520,10 @@ impl Board {
         }
     }
 
+    // Archiving works one way. Un-archiving is the reverse operation, tested
+    // and without a key.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "the reverse operation has no key")]
     fn unarchive_card(&mut self, card_id: Id, column_idx: usize) -> bool {
         if let Some(card) = self.cards.get_mut(&card_id) {
             card.archived = false;
@@ -467,6 +548,10 @@ impl Board {
         self.columns.push(Column::new(name));
     }
 
+    // Removing a column is tested and has no key: columns are added and never
+    // taken away.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "no remove-column control")]
     fn remove_column(&mut self, col_idx: usize) -> Option<Column> {
         if col_idx < self.columns.len() {
             Some(self.columns.remove(col_idx))
@@ -538,6 +623,11 @@ impl Board {
         self.labels.iter().find(|l| l.id == id)
     }
 
+    // Swimlanes: a second axis for the board, modelled end to end and
+    // never drawn. The board renderer lays out columns only, so there is
+    // nowhere for a lane to appear.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "swimlanes have no layout mode")]
     fn swimlane_cards(&self, col_idx: usize, swimlane: &str) -> Vec<Id> {
         if let Some(col) = self.columns.get(col_idx) {
             col.card_ids
@@ -628,9 +718,17 @@ impl FilterState {
 // =============================================================================
 
 /// Simple JSON serialization for boards (no external dependency).
+// The board serialiser. Complete, ten tests, and no caller: exporting needs
+// somewhere to put the result, and this program cannot write a file yet.
+// `KanbanApp::export_json` below is the one call that would use it.
+// See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+#[allow(dead_code, reason = "export has nowhere to write yet")]
 struct JsonExporter;
 
 impl JsonExporter {
+    // The serialiser's body. Ten tests, no caller — see the struct above.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "export has nowhere to write yet")]
     fn escape_json(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for ch in s.chars() {
@@ -748,6 +846,11 @@ impl JsonExporter {
 }
 
 /// Minimal JSON parser for board import (handles the structure exported above).
+// The reader for what the exporter writes. Same position, plus a file
+// chooser it would also need. Kept with its ten tests so that wiring both
+// halves later is a small job rather than a rewrite.
+// See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+#[allow(dead_code, reason = "import needs a file chooser")]
 struct JsonImporter;
 
 impl JsonImporter {
@@ -758,6 +861,9 @@ impl JsonImporter {
     /// byte as the Unicode scalar of that value — a Latin-1 reading that turns
     /// every non-ASCII character into mojibake (`日` = E6 97 A5 becomes three
     /// chars `æ\u{97}¥`) and then persists the damage on the next save.
+    // The parser's body. Ten tests, no caller — see the struct above.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "import needs a file chooser")]
     fn parse_string(data: &str, start: usize) -> Option<(String, usize)> {
         let bytes = data.as_bytes();
         if bytes.get(start).copied() != Some(b'"') {
@@ -855,6 +961,10 @@ impl JsonImporter {
     }
 
     /// Parse a JSON number (integer), returning value and next offset.
+    // More of the parser's body: the same ten tests cover these, and the same
+    // missing file chooser keeps them unreachable.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "import needs a file chooser")]
     fn parse_number(data: &str, start: usize) -> Option<(i64, usize)> {
         let rest = data.get(start..)?;
         let end = rest
@@ -866,6 +976,9 @@ impl JsonImporter {
     }
 
     /// Skip whitespace.
+    // Part of the importer, which has no file chooser to read from.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "import needs a file chooser")]
     fn skip_ws(data: &str, start: usize) -> usize {
         let bytes = data.as_bytes();
         let mut i = start;
@@ -879,6 +992,9 @@ impl JsonImporter {
     }
 
     /// Validate that we can round-trip a board through export.
+    // Part of the importer, which has no file chooser to read from.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "import needs a file chooser")]
     fn validate_export(board: &Board) -> bool {
         let json = JsonExporter::export_board(board);
         !json.is_empty()
@@ -933,7 +1049,15 @@ struct KanbanApp {
 }
 
 /// What the user is currently typing into.
+///
+/// Most of these are never entered. Each names a field the user would type
+/// into — a board name, a card description, a comment, a checklist item — and
+/// the only one reached is the card title. They are the model of an editor
+/// whose UI is not built, and they keep their place here because that is where
+/// it will be built.
+/// See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "no UI enters these input modes")]
 enum InputMode {
     None,
     NewCardTitle,
@@ -1106,6 +1230,10 @@ impl KanbanApp {
         }
     }
 
+    // The one call that would use the serialiser above, and it has nowhere to
+    // put its result: this program cannot write a file yet.
+    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+    #[allow(dead_code, reason = "export has nowhere to write yet")]
     fn export_json(&self) -> String {
         JsonExporter::export_board(self.active_board())
     }
@@ -2805,6 +2933,39 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         return handle_input_key(app, key);
     }
 
+    // The board list is a *chooser*, and until this arm existed it was only a
+    // list: `switch_board` had a test and no caller, so Alt+4 showed every
+    // board and no key picked one.
+    if app.view == View::BoardList {
+        match key.key {
+            Key::Up => {
+                // `saturating_sub` alone would answer "handled" at the top of
+                // the list and redraw the same frame on every press.
+                let Some(next) = app.selected_column.checked_sub(1) else {
+                    return false;
+                };
+                app.selected_column = next;
+                return true;
+            }
+            Key::Down => {
+                let last = app.boards.len().saturating_sub(1);
+                if app.selected_column >= last {
+                    return false;
+                }
+                app.selected_column = app.selected_column.saturating_add(1);
+                return true;
+            }
+            Key::Enter => {
+                // `selected_column` doubles as the highlighted row here; the
+                // board view resets it on the way in, which `switch_board`
+                // does.
+                app.switch_board(app.selected_column);
+                return true;
+            }
+            _ => {}
+        }
+    }
+
     match key.key {
         // ESC to go back from sub-views
         Key::Escape => {
@@ -3120,26 +3281,67 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
 // Main
 // =============================================================================
 
-fn main() {
+impl App for KanbanApp {
+    fn title(&self) -> String {
+        self.boards
+            .get(self.active_board_idx)
+            .map_or_else(|| "Kanban".to_owned(), |b| format!("Kanban — {}", b.name))
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (INITIAL_WIDTH, INITIAL_HEIGHT)
+    }
+
+    /// No clock.
+    ///
+    /// Nothing here advances on its own: a card moves when it is moved and the
+    /// board scrolls when it is scrolled. There is no animation and no data
+    /// that ages, so a tick would redraw an identical frame.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            Event::CloseRequested => Response::Exit,
+            Event::Key(key_ev) => {
+                if !key_ev.pressed {
+                    return Response::Idle;
+                }
+                // `handle_key_event` already reports whether it did anything —
+                // it is one of the few in this tree that does — so there is no
+                // fingerprint to compare here.
+                if handle_key_event(self, key_ev) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            _ => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The renderer is a free function taking the size, so there is no
+        // stored dimension to reconcile: whatever the compositor grants is what
+        // gets drawn, including on the first frame before any `Resize`.
+        render_app(self, width, height)
+    }
+}
+
+/// The size the window asks to open at.
+///
+/// Only an opening request: `render_app` lays out from the size it is handed,
+/// so nothing depends on getting these.
+const INITIAL_WIDTH: u32 = 1200;
+const INITIAL_HEIGHT: u32 = 800;
+
+fn main() -> ExitCode {
     let mut app = KanbanApp::new();
+    // Until a store on disk exists this is what there is to show. One call, so
+    // that when a store arrives this is the line that changes.
     app.create_sample_data();
-
-    let width: f32 = 1200.0;
-    let height: f32 = 800.0;
-
-    // Build widget tree for the window
-    let root = Widget::container()
-        .with_background(palette::CRUST)
-        .with_flex_direction(FlexDirection::Column);
-    let mut widget_tree = WidgetTree::new(root, width, height);
-    widget_tree.layout();
-
-    // Render the application
-    let render_tree = render_app(&app, width, height);
-
-    // In a real windowing environment, the render tree would be submitted
-    // to the compositor. Here we just verify it's non-empty.
-    let _cmd_count = render_tree.len();
+    app::launch("kanban", &mut app)
 }
 
 // =============================================================================
@@ -3148,9 +3350,6 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    // A test module's job is to fail loudly the instant the code under test is
-    // wrong, so the defensive lints that forbid exactly that in production code
-    // are off here — as `CLAUDE.md` prescribes.
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,
@@ -3159,6 +3358,118 @@ mod tests {
         clippy::arithmetic_side_effects,
         clippy::float_cmp
     )]
+
+    // ------------------------------------------------------------------
+    // The board chooser, and the compositor wiring
+    // ------------------------------------------------------------------
+
+    fn key_press(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_board_list_can_actually_choose_a_board() {
+        // `switch_board` had a test and no caller: Alt+4 showed every board and
+        // no key picked one, so the list was a list rather than a chooser.
+        let mut app = KanbanApp::new();
+        app.create_sample_data();
+        while app.boards.len() < 2 {
+            app.boards.push(Board::new("Second"));
+        }
+        app.view = View::BoardList;
+        app.selected_column = 0;
+        assert!(handle_key_event(&mut app, &key_press(Key::Down)));
+        assert_eq!(app.selected_column, 1);
+        assert!(handle_key_event(&mut app, &key_press(Key::Enter)));
+        assert_eq!(app.active_board_idx, 1, "Enter did not switch the board");
+        assert_eq!(app.view, View::Board, "choosing a board should show it");
+    }
+
+    #[test]
+    fn the_board_list_stops_at_its_ends() {
+        let mut app = KanbanApp::new();
+        app.create_sample_data();
+        app.view = View::BoardList;
+        app.selected_column = 0;
+        assert!(
+            !handle_key_event(&mut app, &key_press(Key::Up)),
+            "Up at the top should report that it did nothing"
+        );
+        let last = app.boards.len().saturating_sub(1);
+        app.selected_column = last;
+        assert!(
+            !handle_key_event(&mut app, &key_press(Key::Down)),
+            "Down at the bottom should report that it did nothing"
+        );
+        assert_eq!(app.selected_column, last);
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = KanbanApp::new();
+        app.create_sample_data();
+        let before = app.view;
+        let release = KeyEvent {
+            key: Key::Escape,
+            pressed: false,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        };
+        assert!(!handle_key_event(&mut app, &release));
+        assert_eq!(app.view, before);
+    }
+
+    #[test]
+    fn the_title_names_the_active_board() {
+        let mut app = KanbanApp::new();
+        app.create_sample_data();
+        let name = app
+            .boards
+            .get(app.active_board_idx)
+            .map(|b| b.name.clone())
+            .expect("a board exists");
+        assert!(
+            app.title().contains(&name),
+            "the window title {:?} does not name the board {name:?}",
+            app.title()
+        );
+    }
+
+    #[test]
+    fn rendering_draws_something_in_every_view_at_an_awkward_size() {
+        let mut app = KanbanApp::new();
+        app.create_sample_data();
+        for view in [
+            View::Board,
+            View::CardDetail,
+            View::Archive,
+            View::Statistics,
+            View::BoardList,
+        ] {
+            app.view = view;
+            for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+                assert!(
+                    !app.render(w, h).is_empty(),
+                    "{view:?} drew nothing at {w}x{h}"
+                );
+            }
+        }
+    }
+    // Used by the layout tests below and nowhere else: `main` used to build a
+    // widget container it then never drew, and that scaffolding is gone.
+    use oswindow::app::App as _;
+
+    use guitk::layout::FlexDirection;
+    use guitk::widget::{Widget, WidgetTree};
+
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
 
     use super::*;
     use guitk::event::Modifiers;

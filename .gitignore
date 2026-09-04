@@ -172,6 +172,15 @@ __pycache__/
 /services/fastpy-*/*.elf
 /services/ctest-*/*.stamp
 
+# `scripts/mutate-gate.py` writes each mutant to `.mutant-<pid>-<gate>` beside
+# the gate rather than mutating the gate in place, so a sweep killed by a
+# SIGKILL cannot leave a broken checker on disk (it used to be able to, and a
+# second sweep then judged mutants against the first one's leftovers). What a
+# killed sweep can leave is one stray copy, which is what this ignores. Do not
+# widen it to `scripts/.*`: a dotfile under scripts/ that nobody notices is a
+# worse problem than a stray mutant that somebody does.
+/scripts/.mutant-*.py
+
 # One-shot patch scripts written by an agent mid-task. They are named
 # `scratch_*` precisely so a stray one is obvious, and `git add -A` has swept
 # two of them into commits already.

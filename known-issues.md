@@ -113708,6 +113708,27 @@ that names no file of yours, check the machine before you check the code: the
 first hypothesis should not be "my program is wrong" when the evidence is
 equally consistent with "there is no room to run it."
 
+**Postscript, 2026-09-04 — I then made the inverse error, twice in one hour,
+and the remedy above is what caught it.** Checking whether a `git push` was
+still alive, I ran the process query through `| head -14`. The `python.exe`
+rows filled all fourteen lines, the `git.exe` rows were cut off below them, and
+I read the truncated output as "no git process" and concluded the push had died
+silently. It had not. On that reading I started a **second** `git push` to the
+same ref, and for several minutes two pushes were racing to run the same eleven
+pre-push gates. Re-querying without `head` — and with `CreationDate`, which
+distinguished the 04:36 original from my 04:44 duplicate — showed both, and the
+duplicate was killed by PID with `taskkill //PID … //T //F`.
+
+So the sharper rule, which this entry did not previously state: **never pipe a
+process query through `head`, `tail`, or any other truncation, because the
+thing you are inferring from is the *absence* of a row.** Truncation and
+absence are indistinguishable in the output, and the reading you will reach for
+is the one that says the process is gone — which is also the reading that makes
+you take action. Every other kind of command can be sampled; this one cannot.
+It is the same defect as Lesson 111's fixture, in a different costume: an
+observation whose two possible causes produce identical output, mistaken for
+evidence of one of them.
+
 ## TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM (lane A, 2026-09-03)
 
 **In short:** the two checkers wired by the entry above were switched on because

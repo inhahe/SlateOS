@@ -10346,6 +10346,81 @@ resolved.** Two follow-ons to the shadow work above, both boot-green:
   compiler-instrumented KASAN kernel is the fallback if they don't localize it.
   Flagged as a design fork for the operator — see `open-questions.md` (Q34).
 
+**SIGHTING 2026-09-04 (lane A, commit be4600d6a) — the code-fetch variant landed
+on a MAPPED page, so it raised `#UD` and took a handler with none of the
+hardening. Handler gap FIXED this session; corruption still open.**
+
+Caught by an ordinary boot test (not a soak): `PANIC` at 115s, recorded in
+`bench/boot-history.jsonl`. Serial preserved at
+`build/hang-catches/knulljump-20260904-be4600d6a.serial.txt`.
+
+```
+[mmap] Unmapped 1 frames at 0x600003c000..0x6000040000
+[thread] Process 218 has no threads left — now zombie
+[sched] Task 180 exiting
+[mmap] Committed mapped 0x600008c000..0x6000090000 (1 frames)
+[mmap] Committed mapped 0x6000090000..0x6000094000 (1 frames)
+EXCEPTION: Invalid Opcode (#UD) at 0xffffffff82a8f5b0
+  CS=0x8 RFLAGS=0x10282 RSP=0xffffc100005630b8
+  Instruction bytes: ff ff 00 00 01 00 00 00 d8 5b 83 82 ff ff ff ff
+  Task: 181 ("fastpy-countin."), cpu 0
+  Backtrace (2 frames):
+    # 0: 0xffffffff80a5d6c2      <- handle_invalid_opcode+0x3a2
+    # 1: 0xffffffff80a4f252      <- isr_invalid_opcode+0x2c
+FATAL: Unrecoverable kernel #UD. Halting.
+```
+
+**Same bug, same boundary.** The trigger signature matches this entry exactly:
+the fault fires immediately after the previous test's task exited
+(`Process 218 … now zombie` / `Task 180 exiting`), at the
+zombie-cleanup→next-spawn boundary, in the *next* task — here task 181 running
+the freshly-`exec`'d fastpy `countin`, two demand-page commits into its new
+image. It is a Path-Z fastpy spawn, consistent with "not tcc-signal-specific …
+it strikes at *any* Path-Z spawn/teardown boundary".
+
+**What is new: the landing address was not null, and that is informative.**
+`scripts/symbolize.py` resolves `0xffffffff82a8f5b0` to
+`kernel::ktrace::CATEGORY_MASK [d]` — a live `AtomicU32` in `.data`, not a
+freed or zeroed cell. The dumped bytes confirm the symbolization independently:
+`CATEGORY_MASK` is declared `AtomicU32::new(0xFFFF)` (ktrace.rs:281) and the
+first four bytes read `ff ff 00 00`. So the hijacked pointer held a **plausible,
+correctly-formed kernel address that simply was not a function** — the following
+qword `d8 5b 83 82 ff ff ff ff` is itself another kernel pointer, i.e. RIP had
+branched into a *table of pointers*.
+
+That distinguishes this capture from the 2026-07-15 one (`RIP=0x0`). A null RIP
+is consistent with "the object was freed and zeroed"; a valid-looking `.data`
+address is not. Whatever scribbles the victim is writing **real pointer values**,
+which points at a type-confused or off-by-N read of a live structure — reading a
+code pointer from the wrong offset — rather than at reading cleared memory.
+
+**Why this capture is nearly useless for root-causing, and why that is now
+fixed.** Whether a wild jump reports `#PF` or `#UD` is decided by nothing more
+interesting than whether the garbage address happens to be mapped. `RIP=0x0` is
+unmapped → `#PF`, which is the handler that received three rounds of hardening
+(re-entrancy guard, early `cli()`, stack-scan-before-`panic_diagnostics`).
+`&CATEGORY_MASK` is mapped → `#UD`, and `handle_invalid_opcode` had **none** of
+it: no `cli()`, no `FATAL_FAULT_IN_PROGRESS`, no `dump_stack_scan` at all, and
+`sched::panic_diagnostics()` (a locked deref of the scheduler `BTreeMap` — this
+bug's own pinned victim) running *before* any scan. The prediction recorded
+above, that "the **next** B-KNULLJUMP occurrence should finally emit the
+stack-scan naming the null pointer's caller," did not hold: the occurrence came
+through the sibling handler, and all we got was a two-frame RBP walk of the
+fault handler's own frames.
+
+**Fix (this session, `kernel/src/idt.rs` `handle_invalid_opcode`):** mirrored the
+fatal-`#PF` branch into the kernel-`#UD` branch — `cpu::cli()` first, then
+`FATAL_FAULT_IN_PROGRESS.swap` with a `NESTED #UD` one-liner, then
+`dump_stack_scan(frame.rsp, 64)` *before* the instruction-byte dump,
+`panic_diagnostics()` and `print_current()`. Placed after the ring-3 early
+return, since a userspace `#UD` is routine (CFI traps, the deliberate
+compiler-trap self-test) and must not arm a fatal guard or disable interrupts.
+The next occurrence on either path should now name the caller.
+
+**Not a regression from this batch.** The tree under test contained no scheduler,
+mm, proc or exec change from lane A; the batch was boot-test instrumentation,
+script gates, and lane C application work. The bug predates it by seven weeks.
+
 ### B-PTHREAD-TEARDOWN-PF. Intermittent kernel `#PF` (read @ 0x97) in a `cloned-thread` task during glibc-pthread thread teardown — WATCH (non-fatal, rare) 2026-07-15
 
 **Symptom (1 occurrence in ~5 boots, 2026-07-15):** During the

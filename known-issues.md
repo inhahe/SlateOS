@@ -56845,13 +56845,13 @@ Production findings by lint:
 | `indexing_slicing` (slicing) | 15 |
 | everything else | 30 |
 
-**`paint` and `soundrecorder` are done** (2026-09-03), taking 220 findings out
-of the 1,812 and both production piles out of the list below. Both were
+**`paint`, `soundrecorder` and `habits` are done** (2026-09-03), taking 263
+production findings out of the 588 and all three off the list below. Both were
 converted to `oswindow::app` in the same pass, since the trigger below says to
 take a crate's debt when converting it.
 
 Worst crates by *production* findings: ~~`paint` 135~~, ~~`soundrecorder` 55~~,
-`habits` 43, `markdowneditor` 40, `regextester` 39, `installer` 33,
+~~`habits` 43~~, `markdowneditor` 40, `regextester` 39, `installer` 33,
 `explorer` 33, `finance` 23, `metronome` 21, `weather` 21, `reminders` 21.
 
 **Note that `metronome` is on that list**, and it is one of the three apps that

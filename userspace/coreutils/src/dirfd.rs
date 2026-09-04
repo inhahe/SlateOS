@@ -1436,7 +1436,10 @@ mod tests {
             .unwrap()
             .as_secs();
         let mtime = Stat::of_path(&t.0.join("f")).unwrap().mtime();
-        assert!(mtime > 1_600_000_000, "mtime {mtime} is not a recent second");
+        assert!(
+            mtime > 1_600_000_000,
+            "mtime {mtime} is not a recent second"
+        );
         assert!(
             mtime <= i64::try_from(now).unwrap() + 86_400,
             "mtime {mtime} is in the future"
@@ -1458,7 +1461,10 @@ mod tests {
         drop(dir.create_new(b"f", 0o644).unwrap());
         dir.stamp(b"f", 1_000_000_000, true).unwrap();
         assert_eq!(dir.stat(b"f").unwrap().mtime(), 1_000_000_000);
-        assert_eq!(Stat::of_path(&t.0.join("f")).unwrap().mtime(), 1_000_000_000);
+        assert_eq!(
+            Stat::of_path(&t.0.join("f")).unwrap().mtime(),
+            1_000_000_000
+        );
     }
 
     /// A pre-epoch stamp comes back negative rather than clamped to zero.
@@ -1597,7 +1603,10 @@ mod tests {
         let dir = open_root(&t.0);
         let e = dir.symlink(b"", b"link").unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
-        assert!(dir.stat(b"link").is_err(), "nothing should have been created");
+        assert!(
+            dir.stat(b"link").is_err(),
+            "nothing should have been created"
+        );
         // The NUL is still ours, and still a different error, which is what
         // makes the assertion above discriminating rather than incidental.
         let e = dir.symlink(b"a\0b", b"link").unwrap_err();

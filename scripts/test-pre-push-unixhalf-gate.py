@@ -57,6 +57,7 @@ outranking `cwd=<tmp>`. See `design-decisions.md` §637 and gate 10.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -122,6 +123,87 @@ echo "result:   clean (linux half checked)"
 exit 0
 """
 
+# The crates the fixture builds, and whether each carries a platform-conditional
+# arm.
+#
+# These are not decoration. Gate 12's scope is *computed* from what a push
+# changed, and the filter it applies is "is this directory a crate, and does it
+# contain a `cfg(unix)`/`cfg(windows)` arm at all" -- so a fixture whose
+# `userspace/coreutils` held nothing but a `note.txt`, as this one's did until
+# the scope became computed, is filtered out of every case. The gate would then
+# skip in all of them and this suite would go green having compiled nothing and
+# tested nothing. Three shapes, because the filter has exactly three answers.
+CRATES = {
+    # Has an arm, and is the crate the gate was named for.
+    "userspace/coreutils": True,
+    # A second one with an arm. Without it, "the two crates a push changed are
+    # both passed to the checker" cannot be told apart from "coreutils is
+    # always passed", which is what the `--dir` for a checker edit does.
+    "userspace/stat": True,
+    # A crate with no platform-conditional line anywhere in it. Compiling this
+    # one for Linux would compile the identical source the host build already
+    # compiled, which is the cost the filter exists to refuse.
+    "userspace/plain": False,
+}
+
+# `__NAME__` and not `str.format`: these are Rust sources, whose every block is
+# a brace, and a format string would need each one doubled -- turning the one
+# part of this fixture that is meant to read as ordinary crate source into
+# something no reader would recognise as such.
+CARGO_TOML = """[package]
+name = "__NAME__"
+version = "0.1.0"
+edition = "2024"
+"""
+
+MAIN_WITH_CFG = """fn main() {
+    println!("__NAME__");
+}
+
+#[cfg(unix)]
+fn only_on_unix() -> u32 {
+    0
+}
+"""
+
+MAIN_WITHOUT_CFG = """fn main() {
+    println!("__NAME__");
+}
+"""
+
+# What the cases below write when a push touches a crate. It has to be real,
+# rustfmt-clean Rust: gate 11 checks the formatting of every `.rs` file a push
+# adds, so a placeholder `x` is rejected before gate 12 is ever consulted -- by
+# a refusal that names formatting and says nothing about scope. The suite would
+# then be reporting gate 11's opinion of this fixture rather than gate 12's
+# behaviour, and the two are not distinguishable from a push's exit code alone.
+TOUCH_RS = """pub fn touched() -> u32 {
+    1
+}
+"""
+
+
+def write_crate(work: str, cdir: str, with_cfg: bool) -> list[str]:
+    """Write a minimal crate at `cdir`; return the paths written.
+
+    The manifests are never fed to cargo -- the checker is a stub -- but they
+    are written valid anyway. A fixture that is only as real as the current
+    implementation happens to inspect is one that silently stops covering the
+    thing it names the moment that implementation looks one field further.
+    """
+    name = cdir.rsplit("/", 1)[-1]
+    body = (MAIN_WITH_CFG if with_cfg else MAIN_WITHOUT_CFG)
+    files = {
+        f"{cdir}/Cargo.toml": CARGO_TOML.replace("__NAME__", name),
+        f"{cdir}/src/main.rs": body.replace("__NAME__", name),
+    }
+    for path, text in files.items():
+        full = os.path.join(work, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+    return list(files)
+
 
 def build_fixture(tmp: str) -> tuple[str, str]:
     """A repo with the real hook installed, a stub checker, and a clean push.
@@ -170,7 +252,9 @@ def build_fixture(tmp: str) -> tuple[str, str]:
     # suite would pass without ever running the checker.
     with open(os.path.join(work, "a.txt"), "w", encoding="utf-8") as fh:
         fh.write("one\n")
-    git(work, "add", "a.txt", "scripts")
+    for cdir, with_cfg in CRATES.items():
+        write_crate(work, cdir, with_cfg)
+    git(work, "add", "a.txt", "scripts", "userspace")
     git(work, "commit", "--quiet", "-m", "clean commit")
     # The seed push needs the stub's environment like every other push here:
     # this commit adds `scripts/coreutils-check.sh`, so it is in the gate's own
@@ -189,13 +273,28 @@ def build_fixture(tmp: str) -> tuple[str, str]:
     return work, stub_log
 
 
+def commit_files(work: str, files: dict[str, str]) -> None:
+    """Write and commit several paths as one commit.
+
+    `newline="\\n"` on every write, not just the ones that need it. One of these
+    paths is `scripts/coreutils-check.sh` -- the case where a checker edit
+    re-includes coreutils rewrites the stub -- and Python's default translation
+    would hand bash a script with CRLF line endings, which fails at the shebang
+    with a message about `bash\\r` that names nothing under test. Applying it
+    everywhere is cheaper than remembering which caller is the shell script.
+    """
+    for path, body in files.items():
+        full = os.path.join(work, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(body)
+    git(work, "add", *files)
+    git(work, "commit", "--quiet", "-m",
+        "commit adding " + ", ".join(files))
+
+
 def commit_file(work: str, path: str, body: str = "x\n") -> None:
-    full = os.path.join(work, path)
-    os.makedirs(os.path.dirname(full), exist_ok=True)
-    with open(full, "w", encoding="utf-8") as fh:
-        fh.write(body)
-    git(work, "add", path)
-    git(work, "commit", "--quiet", "-m", f"commit adding {path}")
+    commit_files(work, {path: body})
 
 
 def push(work: str, stub_log: str, *, rc: str = "0", refspec: str = "main",
@@ -325,6 +424,84 @@ def main() -> int:
         check("the bypass allows a push the checker would have refused",
               verdict, "allowed")
         check("...and does not compile anything", runs, 0)
+
+        # --- 9. a touched crate with no platform-conditional arm ------------
+        # The filter that makes a computed scope affordable. `userspace/plain`
+        # is inside the gate's path scope and is a real crate, so the old
+        # listed scope would have compiled it -- for minutes, to type-check
+        # the identical source the host build had just type-checked, because
+        # there is no arm in it that `cfg(unix)` turns on.
+        commit_file(work, "userspace/plain/src/extra.rs", TOUCH_RS)
+        verdict, blob, runs = push(work, log, refspec="side:side")
+        check("a crate with no cfg(unix) arm is not compiled for linux", runs, 0)
+        check("...and the push is allowed", verdict, "allowed")
+        check("...and the gate is not tallied as having run",
+              "coreutils-unix-half" in blob.split("ran:")[-1].split("skipped:")[0],
+              False)
+
+        # --- 10. a touched crate that is not coreutils ----------------------
+        # The point of computing the scope rather than listing it: 32 crates in
+        # this zone have platform arms and were on nobody's list. `stat` is one
+        # of them (18 arms in the real tree).
+        commit_file(work, "userspace/stat/src/extra.rs", TOUCH_RS)
+        verdict, blob, runs = push(work, log, refspec="side:side")
+        check("a touched crate with a cfg(unix) arm is compiled", runs, 1)
+        args = open(log, encoding="utf-8").read()
+        check("...and is the crate named to the checker",
+              "--dir userspace/stat" in args, True)
+        check("...which is not asked for coreutils, unchanged by this push",
+              "--dir userspace/coreutils" in args, False)
+        # Matched around the em dashes rather than through them: this transcript
+        # comes back through `subprocess(text=True)`, which decodes with the
+        # console's locale encoding, and a suite that failed on cp1252 would be
+        # reporting the codec and not the gate.
+        banner = re.search(r"compiling for linux through WSL(.*?)takes minutes",
+                           blob, re.S)
+        check("...and the crate is named to the author, who pays the minutes",
+              bool(banner) and "stat" in banner.group(1), True)
+
+        # --- 11. two such crates in one push --------------------------------
+        # `--dir` is repeatable and the gate must pass every crate, not the
+        # first: a scope that stopped at one would report a clean unix half
+        # having compiled half of what the push changed.
+        commit_files(work, {
+            "userspace/stat/src/more.rs": TOUCH_RS,
+            "userspace/coreutils/src/more.rs": TOUCH_RS,
+        })
+        verdict, blob, runs = push(work, log, refspec="side:side")
+        check("two touched crates with arms are compiled in one invocation",
+              runs, 1)
+        args = open(log, encoding="utf-8").read()
+        check("...and both are named to the checker",
+              "--dir userspace/stat" in args
+              and "--dir userspace/coreutils" in args, True)
+
+        # --- 12. a touched directory that is not a crate --------------------
+        # `userspace/notes` matches the path pattern the scope is derived from
+        # and has no manifest. Passing it to `--dir` would be a usage error --
+        # exit 64 -- and this gate calls the checker with `--may-skip`, which
+        # would tolerate that as a decline on every push, forever, silently.
+        commit_file(work, "userspace/notes/readme.txt")
+        verdict, blob, runs = push(work, log, refspec="side:side")
+        check("a touched directory with no Cargo.toml is not passed as a crate",
+              runs, 0)
+        check("...and the push is allowed", verdict, "allowed")
+
+        # --- 13. the checker itself changing --------------------------------
+        # A change to `coreutils-check.sh` changes every check it performs, so
+        # it is re-run whatever crates the push holds -- including, as here,
+        # none. This is the one entry in the scope that is not derived from a
+        # changed crate, and the one the path filter alone used to provide.
+        commit_files(work, {
+            "scripts/coreutils-check.sh":
+                STUB.replace("set -eu", "set -eu\n# edited by case 13", 1),
+        })
+        verdict, blob, runs = push(work, log, refspec="side:side")
+        check("editing the checker re-runs it even with no crate touched",
+              runs, 1)
+        check("...against the crate it was written for",
+              "--dir userspace/coreutils"
+              in open(log, encoding="utf-8").read(), True)
 
     if failures:
         print(f"\n{len(failures)} check(s) failed:", file=sys.stderr)

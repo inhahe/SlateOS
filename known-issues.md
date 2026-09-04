@@ -101908,6 +101908,53 @@ module, deleting its private copy) and
 
 ## TD-B-TAR-AND-RM-CARRY-TWO-DESCRIPTOR-WALKS (lane B, 2026-09-03)
 
+**Status: FIXED, 2026-09-03**, the day after it was filed — which is what it
+said it expected. `tar.rs` now holds no syscalls of its own: its `Dir` is a
+newtype over `coreutils::dirfd::Dir`, its `Located` holds one, and the private
+`CStat`, `CTimespec`, `oflag`, `c_path`, `c_name`, `embedded_nul`, `AT_*` and
+the eleven-entry `extern "C"` block are gone. What stayed is what the entry
+said would stay: `locate`, `Located`'s wording layer, `components`,
+`MAX_SYMLINK_HOPS`, `EXDEV`/`ELOOP`.
+
+**Certified.** `scripts/tar-diff.sh` — the case-by-case comparison against GNU
+tar 1.35 that this entry named as the thing making the swap "provably a
+behavioural no-op" — reports **245 passed, 0 differed, 2 differ on purpose**.
+`scripts/coreutils-check.sh` is green on both halves: host clippy and a host
+`check --bin tar` (the only build in the tree that compiles this file's
+`cfg(not(unix))` arm), and on Linux 3755 tests across 87 binaries with the
+`coreutils` lib at 421 and `tar` at 53.
+
+Three things came out of the conversion that were not in the plan, plus one
+defect it introduced and the harness caught:
+
+- **The `locate` loop is now stat-first**, where it used to try the descent and
+  read the failure. That is what lets it call `dirfd::Dir::open_child`, which
+  is where the identity check lives — so the exposure this entry was filed
+  *for* (`tar` correct on Linux, exposed on SlateOS for an ancestor swapped
+  between the lookup and the open) is closed rather than merely relocated. It
+  also stops `readlinkat` being asked of every component that failed to open,
+  which the old code's own comment admitted was a guess at an errno that "is
+  not promised to be anywhere else".
+- **`ENOTDIR` is now raised by hand**, because it used to arrive from
+  `O_DIRECTORY` and nothing opens with that flag on this path any more.
+- **`Located::is_real_dir` stopped being an open** and became a stat, which
+  fixes a case nobody had noticed: a directory that cannot be *opened* is still
+  a directory, and answering "no" for it made a directory member over an
+  existing unreadable directory report `EEXIST` instead of being accepted.
+- **The conversion introduced exactly one behaviour change, and it was a bug.**
+  `dirfd::c_target` refused an empty symlink target with `InvalidInput`, on the
+  written grounds that `symlinkat` "would answer `EINVAL` anyway"; it answers
+  `ENOENT`, and `tar.rs`'s deleted code had passed the empty target straight
+  through. `tar-diff.sh`'s `emptysym` case is what found it — ours said
+  "Invalid argument" where GNU said "No such file or directory". `c_target` now
+  refuses only the NUL, and `dirfd`'s new test asserts *which layer* rejected
+  the empty target rather than that it was rejected. Written up as Lesson 110.
+
+`dirfd::Stat` gained an `mtime` for this — see `design-decisions.md` §756 for
+why a shared type was widened for one caller — and `dirfd::Dir` gained
+`reopen()`, which `locate` needs to keep its root while a walk consumes a
+handle.
+
 **In short:** two utilities now know how to walk a directory tree safely, and
 they know it in two places. `tar` learned it first, privately, when its own
 symlink hole was fixed; `rm` learned it second, in a shared module built for
@@ -113124,3 +113171,83 @@ an unwritten premise, and that premise has to be written down and checked.**
 The calibration comment named the tree, the date and the counts; what it did
 not do was make the code ask whether it was still looking at that tree. Any
 constant justified by "measured here" has the same hole.
+
+---
+
+### Lesson 110: a refusal justified by a guess about a syscall's errno invents the errno (lane B, 2026-09-03)
+
+**In short:** `coreutils`'s shared `dirfd` module refused to create a symlink
+whose target was the empty string, and the comment defending that refusal said
+the kernel "would answer `EINVAL` anyway", so answering early only improved the
+message. The kernel answers `ENOENT`. Nobody had asked it. The refusal did not
+save a syscall — it replaced the syscall's answer with a different one, and the
+only reason that surfaced is that `tar` has a harness which compares its errors
+against GNU's case by case.
+
+**What happened.** Converting `tar` to the shared `dirfd` module routed its
+symlink creation through `dirfd::c_target`, which had this:
+
+```rust
+if target.is_empty() || target.contains(&0) {
+    return Err(embedded_nul());          // io::ErrorKind::InvalidInput
+}
+```
+
+`tar`'s own code, which the conversion deleted, had passed the empty target
+straight to `symlinkat`. So the conversion was a behavioural no-op everywhere
+except one forged-header case, where:
+
+```
+ours (rc=2): tar: sl: Cannot create symlink to '': Invalid argument
+gnu  (rc=2): tar: sl: Cannot create symlink to '': No such file or directory
+```
+
+Linux resolves a symlink target through `getname()`, which rejects the empty
+string with `ENOENT`, not `EINVAL`. The comment had reasoned from the shape of
+the argument ("empty is invalid") rather than from the kernel, and reasoning
+from shape is how you arrive at a plausible errno that is not the real one.
+
+**Why the guess was invisible until a differential harness ran.** Every other
+check on that code agrees with the guess by construction. Clippy cannot know an
+errno. A unit test written by the same author asserts the same `InvalidInput`
+the code raises — this is Lesson 65 (a check that reuses the assumption it is
+checking will agree with itself), in its errno form. The only thing in the tree
+that holds an independent opinion about what `symlinkat("")` does is the kernel,
+and the only thing that consults it is a test that *calls* it, or a harness that
+compares against a program that calls it. `scripts/tar-diff.sh` was the latter,
+and its `emptysym` case is the entire reason this is a fixed defect rather than
+a shipped one.
+
+**The fix, and the shape of the test that keeps it.** `c_target` now refuses
+only the NUL — which is a real refusal, because a C call handed a NUL stores the
+prefix and the link would resolve somewhere the caller never named — and the
+empty target goes to the kernel. The test that pins it does *not* assert that
+empty is rejected; that was never in doubt and asserting it would have passed
+against the bug too. It asserts **who** rejected it:
+
+```rust
+let e = dir.symlink(b"", b"link").unwrap_err();
+assert_eq!(e.kind(), io::ErrorKind::NotFound);   // only the syscall says this
+let e = dir.symlink(b"a\0b", b"link").unwrap_err();
+assert_eq!(e.kind(), io::ErrorKind::InvalidInput); // only this module says this
+```
+
+The second assertion is what makes the first discriminating: the two errors are
+distinguishable, so `NotFound` cannot have come from the early return.
+
+**Where else to look.** Any validation that rejects an argument *before* the
+syscall, on the grounds that the syscall would reject it too. The grep is for an
+early `return Err(...)` in a thin wrapper over an `extern "C"` call, and the
+question to ask at each one is: has anyone run the syscall to find out, or is
+the errno in the comment a plausible-sounding one? Within `dirfd` the audit is
+now clean — `c_name`'s refusals (empty, `/`, NUL) are not errno-equivalence
+claims at all; they are the module's own contract that a name is one lookup, and
+the comment says so rather than appealing to what `openat` would have done.
+
+**And the wider point about the conversion that found it.** A shared module
+absorbing a caller inherits every one of that caller's edge cases, including the
+ones the caller handled by *not* handling them. `tar` passed the empty target
+through because it had no opinion; the shared module had an opinion, and the
+opinion was wrong. Extraction is not only a diff about call sites — it is a diff
+about which layer is allowed to have opinions, and every opinion the new layer
+adds is a behaviour change that has to be certified, not assumed.

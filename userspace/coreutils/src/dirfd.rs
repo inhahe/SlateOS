@@ -121,19 +121,29 @@ pub enum Kind {
     Other,
 }
 
-/// An entry's type, identity and size — the whole of what a walk reads from a
-/// lookup.
+/// An entry's type, identity, size and modification time — the whole of what a
+/// walk reads from a lookup.
 ///
 /// Deliberately not [`std::fs::Metadata`]. `Metadata` cannot be produced from
 /// an `fstatat` without going back through a path, and its `st_dev`/`st_ino`
 /// live behind a unix-only extension trait, so a caller wanting both ends up
 /// writing the `cfg` this type exists to hold once.
+///
+/// The mtime is here for the same reason the rest is: one `fstatat` already
+/// returns it. A caller that needs "is this a directory, and is it older than
+/// the member I am about to unpack over it?" — `tar --keep-newer-files` and
+/// `--newer` ask exactly that — would otherwise have to declare its own
+/// `struct stat`, its own `extern fn fstatat`, and its own size assertion, to
+/// read a field the call this module already makes has written into a buffer
+/// two lines away. That is the duplication this module exists to end, so the
+/// field is read rather than dropped.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Stat {
     kind: Kind,
     dev: u64,
     ino: u64,
     size: u64,
+    mtime: i64,
 }
 
 impl Stat {
@@ -189,6 +199,22 @@ impl Stat {
         self.size
     }
 
+    /// Whole seconds since the epoch, as `st_mtim.tv_sec` reports them.
+    ///
+    /// Seconds and not nanoseconds because the only questions asked of this are
+    /// comparisons against a `tar` header's `mtime` field, which is itself a
+    /// whole number of seconds — comparing at a finer resolution than the
+    /// archive records would make "same time" answer false for a file that was
+    /// extracted from that very archive.
+    ///
+    /// Negative for an entry stamped before 1970. That is representable rather
+    /// than clamped: `tar` archives created from pre-epoch trees exist, and a
+    /// clamp would silently make every one of them look like 1970-01-01.
+    #[must_use]
+    pub fn mtime(&self) -> i64 {
+        self.mtime
+    }
+
     /// The entry a path names, without following a final symlink.
     ///
     /// This is the one lookup a walk does by path — its starting point, which
@@ -206,6 +232,7 @@ impl Stat {
             dev: metadata_dev(md),
             ino: metadata_ino(md),
             size: md.len(),
+            mtime: metadata_mtime(md),
         }
     }
 }
@@ -265,6 +292,34 @@ fn metadata_ino(_md: &std::fs::Metadata) -> u64 {
     0
 }
 
+#[cfg(unix)]
+fn metadata_mtime(md: &std::fs::Metadata) -> i64 {
+    use std::os::unix::fs::MetadataExt;
+    md.mtime()
+}
+
+/// The epoch seconds of a `Metadata`, off unix, where there is no `st_mtim` to
+/// read and `modified()` is the only route.
+///
+/// `modified()` can fail — a filesystem is permitted not to record the time at
+/// all — and a pre-epoch stamp makes `duration_since(UNIX_EPOCH)` fail too, so
+/// both are handled rather than unwrapped. The pre-epoch case is *recovered*
+/// (the error carries the interval, negated) instead of collapsed to 0: a 1960
+/// file reported as 1970 would compare newer than it is, which is the one
+/// direction that loses data — `tar --keep-newer-files` would skip a member it
+/// should have extracted.
+#[cfg(not(unix))]
+fn metadata_mtime(md: &std::fs::Metadata) -> i64 {
+    use std::time::UNIX_EPOCH;
+    let Ok(t) = md.modified() else { return 0 };
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        Err(e) => i64::try_from(e.duration().as_secs())
+            .unwrap_or(i64::MAX)
+            .saturating_neg(),
+    }
+}
+
 /// The error a call gets when the name it was handed cannot be expressed as a
 /// C string.
 ///
@@ -317,11 +372,21 @@ fn c_name(component: &[u8]) -> io::Result<Vec<u8>> {
 ///
 /// The NUL is still refused, and for [`c_name`]'s reason: a C call handed one
 /// stores the *prefix*, so the link would resolve somewhere the caller never
-/// named. Empty is refused too — `symlinkat` would answer `EINVAL` anyway, and
-/// a caller finding out here gets a message that says which argument was bad.
+/// named. That is the only refusal.
+///
+/// The empty target is *not* refused, and the first version of this function
+/// refusing it is the one defect the `tar` conversion introduced. The comment
+/// justifying the refusal said `symlinkat` would answer `EINVAL` anyway, so
+/// answering early only improved the message. It does not: Linux resolves the
+/// target through `getname()`, which answers **`ENOENT`** for an empty string,
+/// and `scripts/tar-diff.sh`'s `emptysym` case measured exactly that — GNU
+/// reported "No such file or directory" where ours reported "Invalid
+/// argument". A refusal defended by a guess about an errno is a refusal that
+/// invents one; the kernel is the thing that knows, so it is the thing asked.
+/// See `a_target_of_nothing_is_the_kernels_enoent_not_ours`.
 #[cfg(unix)]
 fn c_target(target: &[u8]) -> io::Result<Vec<u8>> {
-    if target.is_empty() || target.contains(&0) {
+    if target.contains(&0) {
         return Err(embedded_nul());
     }
     let mut buf = Vec::with_capacity(target.len().saturating_add(1));
@@ -412,7 +477,7 @@ struct CDirent {
 /// documented as matching Linux x86-64's, so the one declaration serves both
 /// the host build and the SlateOS one.
 ///
-/// Only `st_dev`, `st_ino`, `st_mode` and `st_size` are read. The rest is
+/// Only `st_dev`, `st_ino`, `st_mode`, `st_size` and `st_mtim` are read. The rest is
 /// present so the struct is the right *size*: `fstat` writes all of it, and a
 /// short buffer would be a stack overwrite rather than a wrong answer.
 #[cfg(unix)]
@@ -529,6 +594,7 @@ impl Stat {
             ino: st.st_ino,
             #[allow(clippy::cast_sign_loss)]
             size: st.st_size.max(0) as u64,
+            mtime: st.st_mtim.tv_sec,
         }
     }
 }
@@ -651,6 +717,24 @@ impl Dir {
             return Err(io::Error::last_os_error());
         }
         Ok(Stat::from_cstat(&st))
+    }
+
+    /// A second, independent descriptor on this same directory.
+    ///
+    /// For a caller that must walk from here repeatedly without spending its
+    /// only handle: a walk consumes the [`Dir`] it descends from, so a root that
+    /// several lookups start at has to be duplicated rather than moved.
+    ///
+    /// Not `dup`. `dup` copies the number and shares the *file description*
+    /// underneath it, so the two handles share a directory read offset and one
+    /// [`Dir::names`] would silently change what the other returns next. This
+    /// opens `.` afresh, which gets a description of its own — and, because it
+    /// goes through [`Dir::open_child`] against this directory's own identity,
+    /// it also *proves* the new descriptor names the same directory. It cannot
+    /// fail that check under any ordinary condition, and that is the point: if
+    /// it ever does, something has happened that the caller must not walk over.
+    pub fn reopen(&self) -> io::Result<Self> {
+        self.open_child(b".", &self.stat_self()?)
     }
 
     /// Look `name` up in this directory, without following it if it is a link.
@@ -1042,6 +1126,18 @@ impl Dir {
         Stat::of_path(&self.0)
     }
 
+    /// A second handle on this same directory.
+    ///
+    /// Cloning a path rather than opening a descriptor, so the unix twin's
+    /// guarantee that the two handles do not share a read offset is free here —
+    /// there is no descriptor to share. The directory is still looked up, so
+    /// that a root which has been removed since it was opened fails here as it
+    /// does there rather than at the first listing.
+    pub fn reopen(&self) -> io::Result<Self> {
+        let _ = self.stat_self()?;
+        Ok(Self(self.0.clone()))
+    }
+
     /// Look `name` up in this directory, without following it if it is a link.
     pub fn stat(&self, name: &[u8]) -> io::Result<Stat> {
         let _ = c_name(name)?;
@@ -1321,6 +1417,105 @@ mod tests {
         assert_eq!(child.stat_self().unwrap().identity(), by_name.identity());
     }
 
+    /// A freshly written file's mtime is a plausible recent second, on every
+    /// platform.
+    ///
+    /// The portable half of the mtime coverage, and the only test that reaches
+    /// the `cfg(not(unix))` [`Stat`] constructor at all — the stamping tests
+    /// below cannot, because the creating half they use is unix-only. Bounded
+    /// rather than exact because nothing here can set a time off unix, and the
+    /// bounds are chosen to fail the two ways the field goes wrong: a field
+    /// never filled reads 0, and a field wired to `tv_nsec` reads under 10^9,
+    /// both of which are below the floor.
+    #[test]
+    fn a_new_files_mtime_is_a_recent_second() {
+        let t = temp("statmtimenow");
+        std::fs::write(t.0.join("f"), b"x").unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mtime = Stat::of_path(&t.0.join("f")).unwrap().mtime();
+        assert!(mtime > 1_600_000_000, "mtime {mtime} is not a recent second");
+        assert!(
+            mtime <= i64::try_from(now).unwrap() + 86_400,
+            "mtime {mtime} is in the future"
+        );
+    }
+
+    /// The mtime is the one a stamp put there, not the one the create did.
+    ///
+    /// Asserting against a *chosen* value rather than against "changed" or
+    /// "recent": a field that were wired to `st_atim`, or to `st_ctim`, or left
+    /// at its `Default`, would all still look plausible next to a freshly
+    /// created file. Only a number nobody could have arrived at by accident
+    /// distinguishes the field being read from the field being guessed.
+    #[cfg(unix)]
+    #[test]
+    fn stat_reports_the_modification_time() {
+        let t = temp("statmtime");
+        let dir = open_root(&t.0);
+        drop(dir.create_new(b"f", 0o644).unwrap());
+        dir.stamp(b"f", 1_000_000_000, true).unwrap();
+        assert_eq!(dir.stat(b"f").unwrap().mtime(), 1_000_000_000);
+        assert_eq!(Stat::of_path(&t.0.join("f")).unwrap().mtime(), 1_000_000_000);
+    }
+
+    /// A pre-epoch stamp comes back negative rather than clamped to zero.
+    ///
+    /// The direction matters and only one of them loses data: a 1960 file
+    /// reported as 1970 compares *newer* than it is, so `tar --keep-newer-files`
+    /// would skip a member it was supposed to extract.
+    #[cfg(unix)]
+    #[test]
+    fn a_time_before_the_epoch_stays_negative() {
+        let t = temp("statpreepoch");
+        let dir = open_root(&t.0);
+        drop(dir.create_new(b"old", 0o644).unwrap());
+        dir.stamp(b"old", -315_619_200, true).unwrap();
+        assert_eq!(dir.stat(b"old").unwrap().mtime(), -315_619_200);
+    }
+
+    /// `reopen` yields a handle on the same directory — and a *separate* one.
+    ///
+    /// The second assertion is the one with content. `dup` would also pass the
+    /// first: it would name the same directory. It would fail this one, because
+    /// the two handles would share a read offset and the second listing would
+    /// come back empty after the first had consumed it.
+    #[test]
+    fn reopen_names_the_same_directory_but_reads_independently() {
+        let t = temp("reopen");
+        std::fs::create_dir(t.0.join("a")).unwrap();
+        std::fs::create_dir(t.0.join("b")).unwrap();
+        let dir = open_root(&t.0);
+        let again = dir.reopen().unwrap();
+        assert_eq!(
+            again.stat_self().unwrap().identity(),
+            dir.stat_self().unwrap().identity()
+        );
+        let mut first = dir.names().unwrap();
+        let mut second = again.names().unwrap();
+        first.sort_unstable();
+        second.sort_unstable();
+        assert_eq!(first, vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(first, second);
+    }
+
+    /// A reopened handle sees the directory as it is now, not as it was.
+    ///
+    /// It shares no state with the handle it came from beyond the directory
+    /// itself, which is what lets a caller hold one across a walk that consumes
+    /// the other.
+    #[test]
+    fn reopen_survives_the_original_being_dropped() {
+        let t = temp("reopendrop");
+        std::fs::create_dir(t.0.join("kid")).unwrap();
+        let dir = open_root(&t.0);
+        let again = dir.reopen().unwrap();
+        drop(dir);
+        assert!(again.stat(b"kid").unwrap().is_dir());
+    }
+
     // ------------------------------------------------ the creating half --
     //
     // Unix only, because the methods are. See the note at the end of the
@@ -1328,11 +1523,15 @@ mod tests {
 
     /// A file's mtime, read back through `std` rather than through [`Stat`].
     ///
-    /// `Stat` exposes kind, size and identity — what the removal walk needs —
-    /// and deliberately not mode or times. Widening it so that a test could
-    /// read them would be letting the test drive the shared API; when `tar`'s
-    /// archive-*writing* side needs those fields it can ask for them then, on
-    /// its own evidence.
+    /// [`Stat::mtime`] now exists — `tar`'s `--keep-newer-files` asked for it,
+    /// on its own evidence, which is the condition this comment used to set for
+    /// adding it — but it answers only the `follow == false` question, because
+    /// every lookup in this module is `AT_SYMLINK_NOFOLLOW`. The `follow == true`
+    /// half is what proves [`Dir::stamp`]'s flag actually reached the call, so
+    /// it has to come from outside the type under test regardless.
+    ///
+    /// Mode is still absent from `Stat`, and still for the original reason:
+    /// nothing but a test has asked.
     #[cfg(unix)]
     fn mtime_of(path: &std::path::Path, follow: bool) -> i64 {
         use std::os::unix::fs::MetadataExt as _;
@@ -1375,6 +1574,34 @@ mod tests {
         assert_eq!(dir.read_link(b"link").unwrap(), b"../nowhere/at/all");
         // ...while the *name* is still one component.
         assert!(dir.symlink(b"target", b"a/b").is_err());
+    }
+
+    /// An empty target is the kernel's question to answer, not this module's.
+    ///
+    /// `c_target` used to refuse it here, on the stated grounds that
+    /// `symlinkat` "would answer `EINVAL` anyway". It answers `ENOENT` —
+    /// Linux runs the target through `getname()`, which rejects the empty
+    /// string with that — and the difference was visible: `tar`'s `emptysym`
+    /// case in `scripts/tar-diff.sh` extracts a forged header whose linkname
+    /// is empty, and GNU printed "No such file or directory" where ours
+    /// printed "Invalid argument".
+    ///
+    /// So this test does not assert that empty is rejected, which was never in
+    /// doubt. It asserts *who* rejected it, because that is the part that was
+    /// wrong: a `NotFound` can only have come from the syscall, whereas the
+    /// `InvalidInput` this module raises for a NUL could not.
+    #[cfg(unix)]
+    #[test]
+    fn a_target_of_nothing_is_the_kernels_enoent_not_ours() {
+        let t = temp("emptytarget");
+        let dir = open_root(&t.0);
+        let e = dir.symlink(b"", b"link").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+        assert!(dir.stat(b"link").is_err(), "nothing should have been created");
+        // The NUL is still ours, and still a different error, which is what
+        // makes the assertion above discriminating rather than incidental.
+        let e = dir.symlink(b"a\0b", b"link").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[cfg(unix)]

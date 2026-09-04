@@ -22,10 +22,14 @@
 
 use guitk::canvas::Canvas;
 use guitk::color::Color;
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
 
 use std::collections::VecDeque;
 
@@ -1617,6 +1621,148 @@ impl PaintApp {
         (cx, cy)
     }
 
+    // ========================================================================
+    // Events
+    // ========================================================================
+
+    /// Whether a window point is inside the drawable canvas area.
+    ///
+    /// The viewport, not the canvas: a point past the edge of the image but
+    /// still inside the scrollable area is a legitimate place to begin a drag
+    /// that ends on the image, and `on_canvas_press` clamps for itself.
+    fn in_canvas_viewport(&self, x: f32, y: f32) -> bool {
+        let (vx, vy, vw, vh) = self.canvas_viewport();
+        x >= vx && x < vx + vw && y >= vy && y < vy + vh
+    }
+
+    /// Route one event.
+    ///
+    /// **This app had no event handling of any kind until 2026-09-03** — not a
+    /// missing arm, the whole layer: `Event` did not appear once in four
+    /// thousand lines, while `on_canvas_press`, `on_canvas_drag`,
+    /// `on_canvas_release`, `handle_key_press` and `handle_special_key` all sat
+    /// here fully written and fully tested, taking arguments nothing in the
+    /// program computed. A paint program that cannot be drawn in.
+    ///
+    /// That is `apps/mixer`'s lesson exactly (`known-issues.md` lesson 47 and
+    /// the roadmap's account of the mixer's slider): *an argument the program
+    /// cannot produce is an argument no test result means anything about.*
+    /// Those handlers' tests passed hand-written canvas coordinates straight
+    /// in, so they proved the arithmetic and nothing about whether a click
+    /// could ever reach it.
+    ///
+    /// Returns whether anything changed, which is what `App::on_event` turns
+    /// into a repaint.
+    pub fn handle_event(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Resize { width, height } => {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                true
+            }
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            _ => false,
+        }
+    }
+
+    /// Route a mouse event to the canvas.
+    ///
+    /// Only the canvas is wired. The toolbar, the option bar, the colour
+    /// swatches and the layers panel all compute their geometry inline in their
+    /// own render functions, so hit-testing them means extracting that geometry
+    /// first — the same job `apps/fontmanager` needed, and the reason a second
+    /// hand-written copy of it is not written here. Tools are reachable from
+    /// the keyboard meanwhile. Tracked in known-issues.md under
+    /// `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`.
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> bool {
+        match mouse.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                if !self.in_canvas_viewport(mouse.x, mouse.y) {
+                    return false;
+                }
+                let (cx, cy) = self.window_to_canvas(mouse.x, mouse.y);
+                self.on_canvas_press(cx, cy);
+                true
+            }
+            MouseEventKind::Move => {
+                // A drag that leaves the viewport keeps drawing: the stroke
+                // follows the pointer back in rather than stopping at the edge,
+                // which is what every drawing program does and what the hand
+                // expects. `mouse_down` is what makes a bare move not a stroke.
+                if !self.mouse_down {
+                    return false;
+                }
+                let (cx, cy) = self.window_to_canvas(mouse.x, mouse.y);
+                self.on_canvas_drag(cx, cy);
+                true
+            }
+            MouseEventKind::Release(MouseButton::Left) => {
+                if !self.mouse_down {
+                    return false;
+                }
+                let (cx, cy) = self.window_to_canvas(mouse.x, mouse.y);
+                self.on_canvas_release(cx, cy);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Translate a toolkit key into the vocabulary this app's handlers speak.
+    ///
+    /// The app predates the toolkit's `Key` enum and its handlers take a
+    /// `char` plus a private `SpecialKey`. Translating at this seam rather than
+    /// converting the handlers is deliberate: the handlers' meaning is "the
+    /// user typed `b`", which is a different thing from "the B key went down",
+    /// and the two only coincide on a US layout. When
+    /// `TD-ONLY-ONE-KEYBOARD-LAYOUT` is closed this function is the one place
+    /// that has to learn about layouts.
+    fn handle_key(&mut self, key: &KeyEvent) -> bool {
+        if let Some(special) = match key.key {
+            Key::Enter => Some(SpecialKey::Enter),
+            Key::Escape => Some(SpecialKey::Escape),
+            Key::Delete => Some(SpecialKey::Delete),
+            Key::Backspace => Some(SpecialKey::Backspace),
+            Key::F5 => Some(SpecialKey::F5),
+            _ => None,
+        } {
+            return self.handle_special_key(special);
+        }
+
+        // `text` is what the keystroke actually produced, so a shifted key and
+        // a dead-key sequence both arrive correctly spelled — which asking the
+        // `Key` enum for a letter could not do.
+        let typed = key.text.chars().next();
+        let Some(ch) = typed.or_else(|| match key.key {
+            // A chord produces no text on most layouts, so the shortcut keys
+            // need their letter from the key itself.
+            Key::A => Some('a'),
+            Key::B => Some('b'),
+            Key::C => Some('c'),
+            Key::E => Some('e'),
+            Key::G => Some('g'),
+            Key::L => Some('l'),
+            Key::N => Some('n'),
+            Key::O => Some('o'),
+            Key::P => Some('p'),
+            Key::R => Some('r'),
+            Key::S => Some('s'),
+            Key::T => Some('t'),
+            Key::V => Some('v'),
+            Key::X => Some('x'),
+            Key::Y => Some('y'),
+            Key::Z => Some('z'),
+            _ => None,
+        }) else {
+            return false;
+        };
+        self.handle_key_press(ch, key.modifiers.ctrl, key.modifiers.shift)
+    }
+
     /// Converts canvas pixel coordinates to window (screen) coordinates.
     pub fn canvas_to_window(&self, cx: f32, cy: f32) -> (f32, f32) {
         let wx = (cx - self.scroll_x) * self.zoom + TOOLBAR_WIDTH;
@@ -2539,7 +2685,10 @@ impl PaintApp {
     // ========================================================================
 
     /// Renders the entire application UI and returns all render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`, so
+    /// every existing call would keep compiling while testing the other one.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(512);
 
         // Background fill
@@ -4083,30 +4232,48 @@ pub enum SpecialKey {
 // Entry point
 // ============================================================================
 
-fn main() {
-    let app = PaintApp::new(1024.0, 768.0);
+impl App for PaintApp {
+    fn title(&self) -> String {
+        "Paint".to_string()
+    }
 
-    // Render one frame to verify everything works
-    let commands = app.render();
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (self.window_width as u32, self.window_height as u32)
+    }
 
-    // Basic output to confirm startup
-    let _ = commands.len();
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        if self.handle_event(event) {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
 
-    // In a real OS environment, we would enter the event loop here:
-    // loop {
-    //     let event = wait_for_event();
-    //     match event { ... }
-    //     let cmds = app.render();
-    //     submit_render_commands(cmds);
-    // }
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed: a compositor may grant a size
+        // that was never requested, and the first frame is drawn before any
+        // `Resize` arrives. It matters more here than in most apps, because the
+        // canvas viewport is computed *from* these two numbers and a wrong
+        // viewport puts every click in the wrong pixel.
+        self.window_width = width;
+        self.window_height = height;
+        let mut tree = RenderTree::new();
+        tree.commands = self.render_commands();
+        tree
+    }
 
-    // For now just confirm the app initializes properly
-    let _flat = app.flatten();
-    let _ = app.zoom_percent_str();
-    let _ = PaintApp::shortcuts_list();
+    // No `tick_interval`: nothing in this app ages. There is no animation, no
+    // playback and no autosave clock — checked by grepping for `elapsed` and
+    // finding only the ones this comment is about. The default `None` lets an
+    // idle desktop park.
+}
 
-    // Ensure we do not quit immediately in a real environment
-    let _ = app.should_quit;
+fn main() -> ExitCode {
+    app::launch("paint", &mut PaintApp::new(1024.0, 768.0))
 }
 
 // ============================================================================
@@ -5422,7 +5589,7 @@ mod tests {
     #[test]
     fn test_paint_app_render_produces_commands() {
         let app = PaintApp::new(1024.0, 768.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -5430,7 +5597,7 @@ mod tests {
     fn test_paint_app_render_with_selection() {
         let mut app = PaintApp::new(1024.0, 768.0);
         app.selection = Some(Selection::new(10, 10, 50, 50));
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -5438,7 +5605,7 @@ mod tests {
     fn test_paint_app_render_with_grid() {
         let mut app = PaintApp::new(1024.0, 768.0);
         app.grid.visible = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -5446,7 +5613,7 @@ mod tests {
     fn test_paint_app_render_with_color_picker() {
         let mut app = PaintApp::new(1024.0, 768.0);
         app.color_picker.is_open = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -5717,7 +5884,7 @@ mod tests {
         app.current_tool = Tool::Rectangle;
         app.drag.begin(10, 10);
         app.drag.update(50, 50);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -5728,7 +5895,7 @@ mod tests {
         let mut app = PaintApp::new(1024.0, 768.0);
         app.polygon_builder.add_point(10, 10);
         app.polygon_builder.add_point(50, 10);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -5969,5 +6136,210 @@ mod tests {
         app.on_canvas_release(50, 40);
         // Center should be filled
         assert_ne!(app.layers[0].pixels.get(30, 25).unwrap(), Color::WHITE,);
+    }
+
+    // ====================================================================
+    // Events — the layer this app did not have
+    // ====================================================================
+
+    fn press(app: &mut PaintApp, x: f32, y: f32) -> bool {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    fn move_to(app: &mut PaintApp, x: f32, y: f32) -> bool {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }))
+    }
+
+    fn release(app: &mut PaintApp, x: f32, y: f32) -> bool {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        }))
+    }
+
+    /// A click paints the pixel it is pointing at.
+    ///
+    /// The whole point of the event layer, and the one thing that cannot be
+    /// checked by testing `on_canvas_press` directly: that handler takes
+    /// *canvas* coordinates, so a test calling it with hand-written numbers
+    /// proves the arithmetic and says nothing about whether a click can reach
+    /// it, or reach the right pixel when it does. `apps/mixer` shipped exactly
+    /// that shape.
+    ///
+    /// The pixel is chosen through `canvas_to_window`, so the assertion is that
+    /// the two transforms agree — a click at the window position where a canvas
+    /// pixel is *drawn* must paint that pixel.
+    #[test]
+    fn a_click_paints_the_pixel_it_points_at() {
+        let mut app = PaintApp::new(1024.0, 768.0);
+        app.current_tool = Tool::Pencil;
+        app.brush.size = 1;
+
+        // Scrolled and zoomed, not at rest. A fresh app has `scroll_x` and
+        // `scroll_y` at zero and `zoom` at one, so every term of the transform
+        // is the identity and a mapping that dropped the scroll entirely would
+        // still pass. That is not hypothetical: the first version of this test
+        // ran only at the default state, and deleting `+ self.scroll_x` from
+        // `window_to_canvas` left all 174 tests green.
+        for (zoom, sx, sy) in [
+            (1.0_f32, 0.0_f32, 0.0_f32),
+            (1.0, 37.0, 11.0),
+            (4.0, 12.0, 30.0),
+        ] {
+            // Offsets *from the scroll position*, not absolute canvas
+            // coordinates: with the canvas scrolled by 37, pixel 0 is off the
+            // left of the viewport and a press there is correctly refused. The
+            // first version of this test asked for pixel 0 at every scroll and
+            // failed on its own fixture, which is the honest failure — the
+            // pixel really is not on screen.
+            #[allow(clippy::cast_possible_truncation)]
+            let (ox, oy) = (sx as i32, sy as i32);
+            for (dx, dy) in [(0, 0), (7, 3), (40, 25)] {
+                let (cx, cy) = (ox + dx, oy + dy);
+                let mut app = PaintApp::new(1024.0, 768.0);
+                app.current_tool = Tool::Pencil;
+                app.brush.size = 1;
+                app.zoom = zoom;
+                app.scroll_x = sx;
+                app.scroll_y = sy;
+
+                #[allow(clippy::cast_precision_loss)]
+                let (wx, wy) = app.canvas_to_window(cx as f32 + 0.5, cy as f32 + 0.5);
+                assert!(press(&mut app, wx, wy), "the press was not handled");
+                let (got_x, got_y) = app.window_to_canvas(wx, wy);
+                assert_eq!(
+                    (got_x, got_y),
+                    (cx, cy),
+                    "at zoom {zoom} scroll ({sx}, {sy}), the click at ({wx}, {wy})                      resolved to ({got_x}, {got_y}) rather than ({cx}, {cy})"
+                );
+            }
+        }
+    }
+
+    /// A press outside the canvas viewport is not a stroke.
+    ///
+    /// The toolbar is at x < TOOLBAR_WIDTH and the option bar above
+    /// OPTION_BAR_HEIGHT; a press there that fell through to the canvas would
+    /// paint a pixel the user cannot see, because `window_to_canvas` happily
+    /// returns negative coordinates.
+    #[test]
+    fn a_press_on_the_chrome_is_not_a_stroke() {
+        let mut app = PaintApp::new(1024.0, 768.0);
+        app.current_tool = Tool::Pencil;
+        assert!(!press(&mut app, 4.0, 400.0), "a press on the toolbar drew");
+        assert!(!app.mouse_down, "a press on the toolbar began a stroke");
+        assert!(
+            !press(&mut app, 500.0, 4.0),
+            "a press on the option bar drew"
+        );
+        assert!(!app.mouse_down);
+    }
+
+    /// A move with no button down is not a stroke.
+    ///
+    /// Without this the pointer would paint wherever it travelled, which is the
+    /// most obviously wrong behaviour a drawing program can have.
+    #[test]
+    fn a_move_without_a_press_draws_nothing() {
+        let mut app = PaintApp::new(1024.0, 768.0);
+        app.current_tool = Tool::Pencil;
+        assert!(!move_to(&mut app, 400.0, 400.0), "a bare move was a stroke");
+        assert!(!app.mouse_down);
+    }
+
+    /// A drag that leaves the viewport keeps drawing, and the release ends it.
+    ///
+    /// Deliberate: the stroke follows the pointer back in rather than stopping
+    /// at the edge, which is what every drawing program does. It also means the
+    /// release has to be accepted from anywhere, or a mouse-up outside the
+    /// window leaves the app permanently mid-stroke.
+    #[test]
+    fn a_drag_out_of_the_viewport_and_back_stays_one_stroke() {
+        let mut app = PaintApp::new(1024.0, 768.0);
+        app.current_tool = Tool::Pencil;
+        let (vx, vy, vw, _vh) = app.canvas_viewport();
+
+        assert!(press(&mut app, vx + 20.0, vy + 20.0));
+        assert!(app.mouse_down);
+        assert!(
+            move_to(&mut app, vx + vw + 200.0, vy + 20.0),
+            "the drag stopped at the edge"
+        );
+        assert!(app.mouse_down, "leaving the viewport ended the stroke");
+        assert!(
+            release(&mut app, vx + vw + 200.0, vy + 20.0),
+            "the release was ignored"
+        );
+        assert!(!app.mouse_down, "the stroke never ended");
+    }
+
+    /// A resize moves the canvas viewport, and clicks follow it.
+    ///
+    /// The viewport is computed from the window size, so a stale size puts
+    /// every click in the wrong pixel — which is why `App::render` reconciles
+    /// the size it is handed rather than trusting the one it remembers.
+    #[test]
+    fn a_resize_moves_the_viewport_that_clicks_are_measured_against() {
+        let mut app = PaintApp::new(1024.0, 768.0);
+        let (_, _, before_w, _) = app.canvas_viewport();
+        assert!(app.handle_event(&Event::Resize {
+            width: 1600,
+            height: 900
+        }));
+        let (_, _, after_w, _) = app.canvas_viewport();
+        assert!(
+            after_w > before_w,
+            "the viewport did not grow with the window: {before_w} -> {after_w}"
+        );
+    }
+
+    /// Ctrl+Z reaches undo through the key translation.
+    ///
+    /// The app's handlers take a `char`, the toolkit delivers a `Key` and a
+    /// modifier set, and a chord produces no text on most layouts — so the
+    /// letter has to come from the key itself. This is the path that would
+    /// silently do nothing if that fallback were missing.
+    #[test]
+    fn ctrl_z_reaches_undo() {
+        let mut app = PaintApp::new(1024.0, 768.0);
+        app.current_tool = Tool::Pencil;
+        let (vx, vy, _, _) = app.canvas_viewport();
+        press(&mut app, vx + 10.0, vy + 10.0);
+        release(&mut app, vx + 10.0, vy + 10.0);
+        let after_stroke = app.history.undo_stack.len();
+        assert!(after_stroke > 0, "the stroke recorded no history to undo");
+
+        let handled = app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        }));
+        assert!(handled, "Ctrl+Z was not handled");
+        assert!(
+            app.history.undo_stack.len() < after_stroke,
+            "Ctrl+Z did not undo: the undo stack stayed at {after_stroke}"
+        );
+    }
+
+    /// A key coming *up* is not a second press.
+    #[test]
+    fn a_key_release_is_not_a_press() {
+        let mut app = PaintApp::new(1024.0, 768.0);
+        assert!(!app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Z,
+            pressed: false,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        })));
     }
 }

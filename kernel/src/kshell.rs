@@ -1508,7 +1508,16 @@ fn remove_quotes(s: &str) -> String {
 fn command_parses_own_quotes(cmd: &str) -> bool {
     matches!(
         cmd,
-        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed" | "column" | "touch"
+        "trap"
+            | "awk"
+            | "fold"
+            | "base64"
+            | "cut"
+            | "tr"
+            | "sed"
+            | "column"
+            | "touch"
+            | "printf"
     )
 }
 
@@ -20675,10 +20684,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // An operand that is present and empty is a different thing again, and
         // the difference is positional: it fills its own conversion rather than
-        // letting the next operand slide into it. Before TD-KSHELL (b') the
-        // `''` was discarded by `split_words`, so this printed `zzb||` -- `b`
+        // letting the next operand slide into it. This printed `zzb||` -- `b`
         // in the slot the empty string should have had, and a spurious extra
         // pass to consume it. GNU prints `|zzb|`.
+        //
+        // This rung was written with TD-KSHELL (b'), which taught
+        // `split_words` to keep an explicitly quoted empty word, and it still
+        // failed -- because for `printf` the word never reached `split_words`.
+        // (b')'s audit lists nine commands that take operands that way and
+        // `printf` is the ninth, but only the other eight were added to
+        // `command_parses_own_quotes`, so `dispatch` went on handing `printf`
+        // a dequoted string in which the `''` had already ceased to exist.
+        // Fixing the splitter cannot help a word that was destroyed upstream
+        // of it; that is why the rung asserts a *round trip through
+        // `capture_command`* rather than calling `split_words` directly.
         let out = capture_command("printf '%s|%s|' '' zzb");
         assert_eq!(
             out.as_slice(),
@@ -22872,35 +22891,34 @@ fn cmd_printf(args: &str) {
         return;
     }
 
-    // Split format string from arguments.
-    // The format string may be quoted.
-    let (format, rest) = if args.starts_with('"') {
-        // Find closing quote.
-        if let Some(end) = args.get(1..).and_then(|s| s.find('"')) {
-            let fmt = args.get(1..end.saturating_add(1)).unwrap_or("");
-            let rest = args.get(end.saturating_add(2)..).unwrap_or("").trim_start();
-            (fmt, rest)
-        } else {
-            (args.get(1..).unwrap_or(""), "")
-        }
-    } else if args.starts_with('\'') {
-        if let Some(end) = args.get(1..).and_then(|s| s.find('\'')) {
-            let fmt = args.get(1..end.saturating_add(1)).unwrap_or("");
-            let rest = args.get(end.saturating_add(2)..).unwrap_or("").trim_start();
-            (fmt, rest)
-        } else {
-            (args.get(1..).unwrap_or(""), "")
-        }
-    } else {
-        // Unquoted: first word is the format string.
-        let end = args.find(' ').unwrap_or(args.len());
-        let fmt = args.get(..end).unwrap_or("");
-        let rest = args.get(end..).unwrap_or("").trim_start();
-        (fmt, rest)
-    };
-
-    // Parse arguments (space-separated, quote-aware).
-    let arg_list = split_words(rest);
+    // The format and the operands come off one traversal -- the same
+    // [`shellquote`] scan the rest of the shell uses -- rather than a private
+    // one for the format and `split_words` for the remainder.
+    //
+    // This function used to find the format's closing quote with `find('"')`
+    // (or `find('\'')`), which knew nothing of backslashes and nothing of the
+    // *other* quote character: exactly the shape of the eleven disagreeing
+    // scanners `shellquote` was written to retire. It survived because
+    // `printf` was not on [`command_parses_own_quotes`], so `dispatch` had
+    // already stripped the quotes and those branches were unreachable. Adding
+    // `printf` to that list -- which is what makes `printf '%s|%s|' '' zzb`
+    // able to see its empty operand at all -- would have made them reachable
+    // again, and `printf "a b" x` would have run with the format `a` while
+    // `b` became an operand.
+    //
+    // Splitting here also *is* the fix: `split_words` keeps an explicitly
+    // quoted empty word, so `''` fills its own conversion instead of letting
+    // the next operand slide into it.
+    let mut words = split_words(args);
+    if words.is_empty() {
+        // Reachable when `args` is all blanks: `dispatch` trims, but a quoted
+        // run of spaces is not trimmed and strips to no words at all.
+        shell_println!("Usage: printf FORMAT [ARGS...]");
+        set_exit(1);
+        return;
+    }
+    let arg_list = words.split_off(1);
+    let format = words.first().map_or("", String::as_str);
     let mut idx = 0usize;
     let mut faults: Vec<(PrintfNumFault, String)> = Vec::new();
 

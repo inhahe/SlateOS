@@ -114713,3 +114713,80 @@ Step 1 is worth doing on its own and does not depend on step 2.
 
 In the kernel shell: `fold ''`. Expect `fold: '': No such file or directory`;
 observe a message naming `/`. Same for `cut -d, -f1 ''` and `base64 ''`.
+
+**[A] 2026-09-04 — the list of nine above had one member the fix never reached:
+`printf`. Found by a boot panic, ~47 rungs after the last one that had ever
+executed.**
+
+The sentence higher up this entry — *"The commands that take operands through
+`split_words` are `sed`, `awk`, `tr`, `cut`, `fold`, `base64`, `column`,
+`touch` and `printf`"* — is nine commands.
+`command_parses_own_quotes` (`kernel/src/kshell.rs:1508`) listed **eight**. The
+missing one was `printf`, and being off that list is not a cosmetic difference:
+it is what decides whether `dispatch` hands the command its raw argument text
+or a copy with the quotes already removed.
+
+So for `printf` the empty word was destroyed one stage *upstream* of the
+splitter that TD-KSHELL (b′) had just taught to preserve it. `printf '%s|%s|'
+'' zzb` printed `zzb||` — `zzb` sitting in the slot the empty string should
+have filled, plus a spurious extra format pass to consume it — where GNU prints
+`|zzb|`. Fixing `split_words` could not help, because by the time it ran there
+was no `''` left in the string to split.
+
+**This is the third time in two days that a write-up has named the wrong
+function**, and the three are the same mistake at different scales:
+
+| Where | Named | Actually |
+|---|---|---|
+| TD-KSHELL (c), Correction 7 | `execute_single` | `dispatch` |
+| `tab_complete`'s comment | "the same stage the dispatcher applies" | the dispatcher also expands first |
+| this rung's comment | `split_words` discarded the `''` | `dispatch` did, before `split_words` ran |
+
+The common shape: a stage was blamed because it is the stage where the loss
+becomes *visible*, not the stage where it happens. A shell pipes one string
+through many hands, and the last hand holding it when the damage shows is
+rarely the one that did it.
+
+**The fix, in two parts** — the second is required by the first:
+
+1. Add `printf` to `command_parses_own_quotes`.
+2. Replace `cmd_printf`'s private format-vs-operands split with `split_words`.
+   Part 1 alone would have been a regression. That function found the format's
+   closing quote with `args.find('"')` (or `find('\'')`) — no backslash
+   awareness, no notion of the other quote character: precisely the shape of
+   the eleven scanners `shellquote` was written to retire. It had survived
+   *because* `printf` was off the list, which made those branches unreachable.
+   Putting `printf` on the list would have woken them up, and `printf "a b" x`
+   would have run with the format `a`, with `b` demoted to an operand.
+
+That second part is the interesting one. **An opt-in migration list is also a
+list of code that is not being exercised.** Every command still off
+`command_parses_own_quotes` may be carrying its own dead quote parser, written
+before the consolidation and never removed, which will come back to life on the
+day that command is migrated. Whoever migrates the next one should check for
+that parser first rather than after.
+
+**Why it took a boot to find:** the rung had been written but never run — not
+once, from the commit that wrote it to the commit that fixed it.
+
+`e97f88c38` (TD-KSHELL b′) added both the fix to `split_words` *and* this rung
+asserting it. The rung was correct about what should happen and wrong about
+whether it did, and nothing said so, because no boot got that far:
+
+| boot | commit | reached |
+|---|---|---|
+| 2026-09-04 08:17 | `26545e857` | PASS — but predates `e97f88c38`; the rung did not exist yet |
+| 2026-09-04 13:44 | `be4600d6a` | `#UD` in `fastpy-countin.`, before the kshell battery |
+| 2026-09-04 16:11 | `7631f6906` | rung 53 (`sed` usage text) |
+| 2026-09-04 18:41 | `685c618ee` | **rung 100 — first execution of everything past 53** |
+
+So the earlier green boots are not evidence about this rung; they are evidence
+about a tree that did not contain it. A rung that has never run is
+indistinguishable, in the source, from one that passes — and the gap here was
+long enough that the write-up above went on citing `split_words` as fixed for
+all nine commands while one of the nine had never been tried.
+
+The practical consequence for anyone reading a self-test: **a rung's existence
+is not evidence, and neither is a green boot from before it was written.** The
+only thing that counts is a boot whose tree contained the rung, which
+`bench/boot-history.jsonl` can answer by commit.

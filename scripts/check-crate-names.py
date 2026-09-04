@@ -160,7 +160,11 @@ def _self_test() -> int:
         def crate(directory: str, body: str) -> None:
             d = root / directory
             d.mkdir(parents=True)
-            (d / "Cargo.toml").write_text(body, encoding="utf-8")
+            # newline="" so the fixture holds the exact bytes the literal
+            # spells: text mode on Windows would turn each \n into \r\n, and a
+            # scanner test that reads back CRLF is grading a different file
+            # than the one the case describes.
+            (d / "Cargo.toml").write_text(body, encoding="utf-8", newline="")
 
         crate("matching", '[package]\nname = "matching"\nversion = "0.1.0"\n')
         crate("renamed", '[package]\nname = "renamed-app"\nversion = "0.1.0"\n')

@@ -18,7 +18,6 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![allow(dead_code)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -35,11 +34,15 @@
 #![allow(clippy::wildcard_imports)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
+use oswindow::app::{self, App, Response};
 use std::collections::{HashMap, VecDeque};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -525,10 +528,11 @@ impl MindMap {
         parent_id: Option<NodeId>,
         child_index: usize,
     ) {
-        if nodes.is_empty() {
+        // `first` rather than an emptiness test and then an index: one
+        // expression, and the two cannot drift apart.
+        let Some(subtree_root_id) = nodes.first().map(|n| n.id) else {
             return;
-        }
-        let subtree_root_id = nodes[0].id;
+        };
 
         for node in nodes {
             self.nodes.insert(node.id, node.clone());
@@ -800,7 +804,7 @@ fn layout_branch(
     let mut current_y = center_y - total_height / 2.0;
 
     for (i, &child_id) in children.iter().enumerate() {
-        let subtree_h = heights[i];
+        let subtree_h = heights.get(i).copied().unwrap_or(0.0);
         let node_y = current_y + subtree_h / 2.0;
 
         let node_w = map.nodes.get(&child_id).map_or(DEFAULT_NODE_W, |n| n.width);
@@ -949,7 +953,9 @@ impl MindMapApp {
         // Auto-layout the initial map
         let cx = app.win_width / 2.0;
         let cy = app.win_height / 2.0;
-        auto_layout(&mut app.maps[0], cx, cy);
+        if let Some(first) = app.maps.first_mut() {
+            auto_layout(first, cx, cy);
+        }
         app
     }
 
@@ -957,12 +963,63 @@ impl MindMapApp {
     // Map accessors
     // ========================================================================
 
+    /// The palette entry a node at `depth` gets.
+    ///
+    /// The two callers each did this arithmetic themselves, in slightly
+    /// different ways — one `saturating_add`, one `wrapping_add`, both casting
+    /// through `u8` and indexing the palette. One function, one cast, and the
+    /// index cannot be out of range because the modulo is against the palette's
+    /// own length.
+    fn color_index_for_depth(depth: u32) -> u8 {
+        let n = u32::try_from(NODE_COLORS.len()).unwrap_or(1).max(1);
+        // `checked_rem` although `n` is clamped to at least 1: the clamp and
+        // the modulo are separate statements that an edit can separate further.
+        u8::try_from(depth.saturating_add(1).checked_rem(n).unwrap_or(0)).unwrap_or(0)
+    }
+
+    /// The palette entry after `index`, wrapping round.
+    fn next_color_index(index: u8) -> u8 {
+        let n = u8::try_from(NODE_COLORS.len()).unwrap_or(1).max(1);
+        index.wrapping_add(1).checked_rem(n).unwrap_or(0)
+    }
+
+    /// The colour at a palette index.
+    ///
+    /// Falls back to the first entry, which cannot happen for an index this
+    /// module produced and is a visible wrong rather than a panic if it ever
+    /// does.
+    fn color_at(index: u8) -> Color {
+        NODE_COLORS
+            .get(index as usize)
+            .copied()
+            .unwrap_or(NODE_COLORS[0])
+    }
+
     /// Get the active mind map.
+    /// # Panics
+    ///
+    /// Never in practice: `active_map` is only ever set to an index that
+    /// exists, `maps` is never emptied (`delete_active_map` refuses to remove
+    /// the last one), and both are private to this type. The alternative — an
+    /// `Option` return — would push that same guarantee onto every one of the
+    /// hundred-odd call sites, each of which would have to invent a behaviour
+    /// for a state that cannot arise.
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "the invariant is stated above and enforced by this module"
+    )]
     pub fn active_map_ref(&self) -> &MindMap {
         &self.maps[self.active_map]
     }
 
     /// Get the active mind map mutably.
+    /// # Panics
+    ///
+    /// Never, for the reason given on [`MindMapApp::active_map_ref`].
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "the invariant is stated on `active_map_ref`"
+    )]
     pub fn active_map_mut(&mut self) -> &mut MindMap {
         &mut self.maps[self.active_map]
     }
@@ -1082,9 +1139,8 @@ impl MindMapApp {
     /// Add a child to the selected node (or root if nothing selected).
     pub fn add_child_to_selected(&mut self, text: String) -> Option<NodeId> {
         let parent_id = self.selected_node.unwrap_or(self.active_map_ref().root_id);
-        let color_index = (self.active_map_ref().depth(parent_id).saturating_add(1) as u8)
-            % (NODE_COLORS.len() as u8);
-        let color = NODE_COLORS[color_index as usize];
+        let color_index = Self::color_index_for_depth(self.active_map_ref().depth(parent_id));
+        let color = Self::color_at(color_index);
 
         let new_id =
             self.active_map_mut()
@@ -1117,7 +1173,7 @@ impl MindMapApp {
             .node(sel)
             .map(|n| n.color_index)
             .unwrap_or(0);
-        let color = NODE_COLORS[color_index as usize];
+        let color = Self::color_at(color_index);
 
         let parent_id = self.active_map_ref().node(sel)?.parent;
         let new_id = self
@@ -1202,8 +1258,8 @@ impl MindMapApp {
                 .node(sel)
                 .map(|n| n.color_index)
                 .unwrap_or(0);
-            let new_index = (old_index.wrapping_add(1)) % (NODE_COLORS.len() as u8);
-            let new_color = NODE_COLORS[new_index as usize];
+            let new_index = Self::next_color_index(old_index);
+            let new_color = Self::color_at(new_index);
 
             if let Some((old_color, oi)) = self
                 .active_map_mut()
@@ -1426,7 +1482,14 @@ impl MindMapApp {
         if self.search_results.is_empty() {
             return;
         }
-        self.search_index = (self.search_index.wrapping_add(1)) % self.search_results.len();
+        // `checked_rem` although the emptiness test is three lines up: the
+        // guard and the modulo are separate statements that an edit can
+        // separate further.
+        self.search_index = self
+            .search_index
+            .wrapping_add(1)
+            .checked_rem(self.search_results.len())
+            .unwrap_or(0);
         self.selected_node = self.search_results.get(self.search_index).copied();
     }
 
@@ -1585,9 +1648,9 @@ impl MindMapApp {
             && let Some(pid) = node.parent
             && let Some(parent) = self.active_map_ref().node(pid)
             && let Some(pos) = parent.children.iter().position(|&c| c == sel)
-            && pos + 1 < parent.children.len()
+            && let Some(next) = pos.checked_add(1).and_then(|n| parent.children.get(n))
         {
-            self.selected_node = Some(parent.children[pos + 1]);
+            self.selected_node = Some(*next);
         }
     }
 
@@ -1598,9 +1661,9 @@ impl MindMapApp {
             && let Some(pid) = node.parent
             && let Some(parent) = self.active_map_ref().node(pid)
             && let Some(pos) = parent.children.iter().position(|&c| c == sel)
-            && pos > 0
+            && let Some(prev) = pos.checked_sub(1).and_then(|n| parent.children.get(n))
         {
-            self.selected_node = Some(parent.children[pos - 1]);
+            self.selected_node = Some(*prev);
         }
     }
 
@@ -1617,8 +1680,269 @@ impl MindMapApp {
     // Rendering
     // ========================================================================
 
-    /// Render the entire UI to a list of render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    // ========================================================================
+    // Events
+    // ========================================================================
+
+    /// Route a compositor event into the app.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.win_width = *width as f32;
+                    self.win_height = *height as f32;
+                }
+                // Not `Consumed`: a resize is not by itself a reason to redraw.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a mouse event.
+    ///
+    /// Screen coordinates arrive here and canvas coordinates leave: the hit
+    /// test and the drag routines work in canvas space, and mixing the two is
+    /// how a node jumps across the map the moment it is grabbed at any zoom
+    /// other than 1.0.
+    pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        let (cx, cy) = self.screen_to_canvas(ev.x, ev.y);
+        match ev.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                if let Some(node_id) = self.hit_test_canvas(cx, cy) {
+                    self.selected_node = Some(node_id);
+                    self.start_node_drag(node_id, cx, cy);
+                } else {
+                    // Empty canvas: a drag is a pan, and the click clears the
+                    // selection, which is what makes "click away to deselect"
+                    // work.
+                    self.selected_node = None;
+                    self.start_pan(cx, cy);
+                }
+                EventResult::Consumed
+            }
+            MouseEventKind::Move => {
+                if matches!(self.drag, DragState::None) {
+                    // Not dragging: a bare pointer move changes nothing, and
+                    // answering `Consumed` would redraw the map on every pixel
+                    // the mouse crosses.
+                    return EventResult::Ignored;
+                }
+                self.update_drag(cx, cy);
+                EventResult::Consumed
+            }
+            MouseEventKind::Release(MouseButton::Left) => {
+                if matches!(self.drag, DragState::None) {
+                    return EventResult::Ignored;
+                }
+                self.end_drag();
+                EventResult::Consumed
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                if dy > 0.0 {
+                    self.zoom_in();
+                } else if dy < 0.0 {
+                    self.zoom_out();
+                } else {
+                    return EventResult::Ignored;
+                }
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a key press.
+    ///
+    /// While a node's text is being edited every printable key is text, which
+    /// is why the editing branch comes first: otherwise typing "d" into a node
+    /// name would delete the node.
+    pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        if self.editing_node.is_some() {
+            return self.handle_key_editing(key);
+        }
+        if self.show_search {
+            return self.handle_key_search(key);
+        }
+        let ctrl = key.modifiers.ctrl;
+        match key.key {
+            // Structure.
+            Key::Tab => {
+                self.add_child_to_selected(String::from("New Node"));
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.add_sibling_to_selected(String::from("New Node"));
+                EventResult::Consumed
+            }
+            Key::Delete => {
+                if self.delete_selected() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Key::F2 => {
+                self.start_editing();
+                if self.editing_node.is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            // Selection, along the tree rather than the screen: a mind map's
+            // "up" is its parent, which is what makes arrow navigation useful
+            // on a radial layout where screen-up is meaningless.
+            Key::Up => self.reselect(Self::select_parent),
+            Key::Down => self.reselect(Self::select_first_child),
+            Key::Right => self.reselect(Self::select_next_sibling),
+            Key::Left => self.reselect(Self::select_prev_sibling),
+            // View.
+            Key::Equals => {
+                self.zoom_in();
+                EventResult::Consumed
+            }
+            Key::Minus => {
+                self.zoom_out();
+                EventResult::Consumed
+            }
+            Key::Num0 if ctrl => {
+                self.reset_view();
+                EventResult::Consumed
+            }
+            // Undo and redo, which the app already tracks and had no way to
+            // reach.
+            Key::Z if ctrl => {
+                if self.can_undo() {
+                    self.undo();
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Key::Y if ctrl => {
+                if self.can_redo() {
+                    self.redo();
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Key::F if ctrl => {
+                self.toggle_search();
+                EventResult::Consumed
+            }
+            Key::C => {
+                self.cycle_color();
+                EventResult::Consumed
+            }
+            Key::S => {
+                self.cycle_shape();
+                EventResult::Consumed
+            }
+            Key::Space => {
+                self.toggle_collapse_selected();
+                EventResult::Consumed
+            }
+            Key::L => {
+                self.relayout();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Run a selection move and report whether the selection actually moved.
+    ///
+    /// The `select_*` methods return nothing and do nothing at the edges of the
+    /// tree, so this is what keeps "Up at the root" from redrawing.
+    fn reselect(&mut self, mv: fn(&mut Self)) -> EventResult {
+        let before = self.selected_node;
+        mv(self);
+        if self.selected_node == before {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    /// Keys while a node's text is being edited.
+    fn handle_key_editing(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Enter => {
+                self.finish_editing();
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                self.cancel_editing();
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                if self.edit_buffer.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+                EventResult::Consumed
+            }
+            _ => {
+                if key.text.is_empty() || key.modifiers.ctrl {
+                    return EventResult::Ignored;
+                }
+                self.edit_buffer.push_str(&key.text);
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Keys while the search box is open.
+    fn handle_key_search(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.toggle_search();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                if key.modifiers.shift {
+                    self.prev_search_result();
+                } else {
+                    self.next_search_result();
+                }
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                let mut q = self.search_query.clone();
+                if q.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+                self.set_search_query(q);
+                EventResult::Consumed
+            }
+            _ => {
+                if key.text.is_empty() || key.modifiers.ctrl {
+                    return EventResult::Ignored;
+                }
+                let mut q = self.search_query.clone();
+                q.push_str(&key.text);
+                self.set_search_query(q);
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`, so
+    /// an app that keeps the name draws nothing and reports no error.
+    ///
+    /// Renders the entire UI to a list of render commands.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Full window background
@@ -1881,7 +2205,7 @@ impl MindMapApp {
 
             // Draw a bezier-like curve approximated by a straight line
             // For visual appeal, we use three line segments to approximate a curve
-            let mid_x = (spx + scx) / 2.0;
+            let mid_x = f32::midpoint(spx, scx);
 
             let is_search_match = self.search_results.contains(&node_id);
             let line_color = if is_search_match { YELLOW } else { node.color };
@@ -2467,8 +2791,58 @@ fn node_text_color(bg: Color) -> Color {
 // Entry point
 // ============================================================================
 
-fn main() {
-    let _app = MindMapApp::new();
+impl App for MindMapApp {
+    fn title(&self) -> String {
+        format!("Mind Map — {}", self.active_map_ref().name)
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.win_width as u32, self.win_height as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// Nothing here advances on its own: a node moves when it is dragged, the
+    /// view pans when it is panned, and the layout is recomputed on demand.
+    /// There is no animation and no data that ages, so a tick would wake the
+    /// machine to redraw an identical frame. This is `known-issues.md` lesson
+    /// 47's question asked and answered the other way.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.win_width = width;
+        self.win_height = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut map = MindMapApp::new();
+    app::launch("mindmap", &mut map)
 }
 
 // ============================================================================
@@ -2485,9 +2859,347 @@ fn main() {
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    // A test comparing a coordinate it computed against one it wrote down is
+    // asking whether the arithmetic produced exactly that value, which is the
+    // question, not an accident.
+    clippy::float_cmp,
+    // `sort_unstable` is faster and a test that sorts a handful of ids to
+    // compare them does not care.
+    clippy::stable_sort_primitive
 )]
 mod tests {
+
+    // ------------------------------------------------------------------
+    // Events
+    //
+    // The app had no event handling at all until it was wired to the
+    // compositor: every one of its mutators was reachable only by a caller
+    // invoking it directly.
+    // ------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn press_ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    fn typed(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    fn mouse(kind: MouseEventKind, x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    #[test]
+    fn a_click_selects_the_node_under_it_at_a_zoom_that_is_not_one() {
+        // The hit test and the drag routines work in canvas space and the mouse
+        // arrives in screen space. At zoom 1.0 with no pan the two are the
+        // same, so a test that only checks the default view proves nothing
+        // about the conversion -- the transform has to be exercised away from
+        // its identity.
+        let mut app = MindMapApp::new();
+        app.set_zoom(2.0);
+        app.pan_x = 37.0;
+        app.pan_y = -19.0;
+        let root = app.active_map_ref().root_id;
+        let (nx, ny) = {
+            let n = app.active_map_ref().node(root).expect("the root exists");
+            (n.x, n.y)
+        };
+        let (sx, sy) = app.canvas_to_screen(nx, ny);
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), sx, sy)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.selected_node, Some(root), "the click missed the root");
+    }
+
+    #[test]
+    fn dragging_a_node_moves_it_by_the_distance_dragged_in_canvas_units() {
+        // At zoom 2.0 a 100-pixel drag is a 50-unit move. Getting this wrong is
+        // invisible at the default zoom and obvious at any other.
+        let mut app = MindMapApp::new();
+        app.set_zoom(2.0);
+        let root = app.active_map_ref().root_id;
+        let (nx, ny) = {
+            let n = app.active_map_ref().node(root).expect("the root exists");
+            (n.x, n.y)
+        };
+        let (sx, sy) = app.canvas_to_screen(nx, ny);
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), sx, sy));
+        app.handle_event(&mouse(MouseEventKind::Move, sx + 100.0, sy));
+        let moved = app.active_map_ref().node(root).expect("still there").x;
+        assert!(
+            (moved - (nx + 50.0)).abs() < 0.01,
+            "expected a 50-unit move at zoom 2, got {}",
+            moved - nx
+        );
+        app.handle_event(&mouse(
+            MouseEventKind::Release(MouseButton::Left),
+            sx + 100.0,
+            sy,
+        ));
+        assert!(app.can_undo(), "a completed drag should be undoable");
+    }
+
+    #[test]
+    fn a_pointer_move_with_no_button_down_is_not_a_redraw() {
+        // Otherwise the whole map redraws on every pixel the pointer crosses.
+        let mut app = MindMapApp::new();
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Move, 10.0, 10.0)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn clicking_empty_canvas_clears_the_selection_and_pans() {
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        // Far from any node.
+        app.handle_event(&mouse(
+            MouseEventKind::Press(MouseButton::Left),
+            -9000.0,
+            -9000.0,
+        ));
+        assert_eq!(app.selected_node, None, "clicking away should deselect");
+        let before = app.pan_x;
+        app.handle_event(&mouse(MouseEventKind::Move, -8900.0, -9000.0));
+        assert!(
+            (app.pan_x - before).abs() > 1.0,
+            "the canvas should have panned"
+        );
+    }
+
+    #[test]
+    fn the_wheel_zooms_and_a_zero_delta_does_nothing() {
+        let mut app = MindMapApp::new();
+        let start = app.zoom;
+        app.handle_event(&mouse(
+            MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+            0.0,
+            0.0,
+        ));
+        assert!(app.zoom > start, "wheel away from the user should zoom in");
+        app.handle_event(&mouse(
+            MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+            0.0,
+            0.0,
+        ));
+        assert!((app.zoom - start).abs() < 0.001, "and back out again");
+        assert_eq!(
+            app.handle_event(&mouse(
+                MouseEventKind::Scroll { dx: 0.0, dy: 0.0 },
+                0.0,
+                0.0
+            )),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn tab_adds_a_child_and_enter_adds_a_sibling() {
+        // Counting nodes is not enough: a child and a sibling both add one, so
+        // a test that only counts cannot tell the two keys apart at all. What
+        // distinguishes them is the parent of what they made.
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+
+        assert_eq!(app.handle_event(&press(Key::Tab)), EventResult::Consumed);
+        let child = app.selected_node.expect("the new node is selected");
+        assert_ne!(child, root);
+        assert_eq!(
+            app.active_map_ref().node(child).expect("it exists").parent,
+            Some(root),
+            "Tab should have made a child of the selection"
+        );
+
+        assert_eq!(app.handle_event(&press(Key::Enter)), EventResult::Consumed);
+        let sibling = app.selected_node.expect("the new node is selected");
+        assert_ne!(sibling, child);
+        assert_eq!(
+            app.active_map_ref()
+                .node(sibling)
+                .expect("it exists")
+                .parent,
+            Some(root),
+            "Enter should have made a sibling of the selection, not a child of it"
+        );
+        assert_eq!(
+            app.active_map_ref()
+                .node(child)
+                .expect("it exists")
+                .children
+                .len(),
+            0,
+            "the sibling was attached under the previous node"
+        );
+    }
+
+    #[test]
+    fn the_arrows_walk_the_tree_and_stop_at_its_edges() {
+        // "Up" is the parent, not the node above on screen: a radial layout has
+        // no meaningful screen-up.
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        assert_eq!(
+            app.handle_event(&press(Key::Up)),
+            EventResult::Ignored,
+            "the root has no parent"
+        );
+        app.handle_event(&press(Key::Tab));
+        let child = app.selected_node.expect("the new child is selected");
+        assert_ne!(child, root);
+        assert_eq!(app.handle_event(&press(Key::Up)), EventResult::Consumed);
+        assert_eq!(app.selected_node, Some(root));
+        assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Consumed);
+        assert_eq!(app.selected_node, Some(child));
+    }
+
+    #[test]
+    fn typing_into_a_node_does_not_run_the_shortcuts_those_letters_name() {
+        // `c` cycles the colour and `s` the shape outside the editor. Inside
+        // it they are text, and a node named "cs" must not have been recoloured
+        // and reshaped on the way in.
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        let (colour, shape) = {
+            let n = app.active_map_ref().node(root).expect("the root exists");
+            (n.color, n.shape)
+        };
+        app.handle_event(&press(Key::F2));
+        assert!(app.editing_node.is_some(), "F2 should start editing");
+        // Editing starts from the existing text, so the typed characters are
+        // appended to it rather than replacing it.
+        let seeded = app.edit_buffer.clone();
+        app.handle_event(&typed('c'));
+        app.handle_event(&typed('s'));
+        assert_eq!(app.edit_buffer, format!("{seeded}cs"));
+        let n = app.active_map_ref().node(root).expect("the root exists");
+        assert_eq!(n.color, colour, "the colour changed while typing");
+        assert_eq!(n.shape, shape, "the shape changed while typing");
+        app.handle_event(&press(Key::Enter));
+        assert!(app.editing_node.is_none(), "Enter should finish editing");
+    }
+
+    #[test]
+    fn escape_abandons_an_edit_and_leaves_the_text_alone() {
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        let before = app
+            .active_map_ref()
+            .node(root)
+            .expect("the root exists")
+            .text
+            .clone();
+        app.handle_event(&press(Key::F2));
+        app.handle_event(&typed('x'));
+        app.handle_event(&press(Key::Escape));
+        assert!(app.editing_node.is_none());
+        assert_eq!(
+            app.active_map_ref().node(root).expect("still there").text,
+            before
+        );
+    }
+
+    #[test]
+    fn ctrl_z_reaches_the_undo_stack_the_app_was_already_keeping() {
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        let n = app.active_map_ref().nodes.len();
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(app.active_map_ref().nodes.len(), n + 1);
+        assert!(app.can_undo());
+        assert_eq!(app.handle_event(&press_ctrl(Key::Z)), EventResult::Consumed);
+        assert_eq!(app.active_map_ref().nodes.len(), n, "undo did not undo");
+        assert_eq!(app.handle_event(&press_ctrl(Key::Y)), EventResult::Consumed);
+        assert_eq!(app.active_map_ref().nodes.len(), n + 1, "redo did not redo");
+    }
+
+    #[test]
+    fn undo_with_nothing_to_undo_is_not_a_redraw() {
+        let mut app = MindMapApp::new();
+        assert!(!app.can_undo());
+        assert_eq!(app.handle_event(&press_ctrl(Key::Z)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn typing_in_the_search_box_searches_rather_than_editing_a_node() {
+        let mut app = MindMapApp::new();
+        assert_eq!(app.handle_event(&press_ctrl(Key::F)), EventResult::Consumed);
+        assert!(app.show_search);
+        app.handle_event(&typed('a'));
+        assert_eq!(app.search_query, "a");
+        assert!(
+            app.editing_node.is_none(),
+            "search must not open the editor"
+        );
+        app.handle_event(&press(Key::Backspace));
+        assert_eq!(app.search_query, "");
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.show_search);
+    }
+
+    #[test]
+    fn a_key_the_app_has_no_use_for_is_not_consumed() {
+        let mut app = MindMapApp::new();
+        assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = MindMapApp::new();
+        let n = app.active_map_ref().nodes.len();
+        let release = Event::Key(KeyEvent {
+            key: Key::Tab,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert_eq!(app.active_map_ref().nodes.len(), n);
+    }
+
+    #[test]
+    fn a_resize_is_taken_but_is_not_itself_a_redraw() {
+        let mut app = MindMapApp::new();
+        assert_eq!(
+            app.handle_event(&Event::Resize {
+                width: 1280,
+                height: 1024
+            }),
+            EventResult::Ignored
+        );
+        assert!((app.win_width - 1280.0).abs() < f32::EPSILON);
+        assert!((app.win_height - 1024.0).abs() < f32::EPSILON);
+    }
     use super::*;
 
     // ---- Outline export ----
@@ -3552,7 +4264,7 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let app = MindMapApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3561,7 +4273,7 @@ mod tests {
         let mut app = MindMapApp::new();
         let root = app.active_map_ref().root_id;
         app.selected_node = Some(root);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3570,7 +4282,7 @@ mod tests {
         let mut app = MindMapApp::new();
         app.show_search = true;
         app.search_query = "test".to_string();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3578,7 +4290,7 @@ mod tests {
     fn test_render_sidebar_hidden() {
         let mut app = MindMapApp::new();
         app.show_sidebar = false;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3587,7 +4299,7 @@ mod tests {
         let mut app = MindMapApp::new();
         app.add_child_to_selected("C1".to_string());
         app.add_child_to_selected("C2".to_string());
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10); // should have many render commands
     }
 
@@ -3597,11 +4309,11 @@ mod tests {
         let c1 = app.add_child_to_selected("C1".to_string()).unwrap();
         app.selected_node = Some(c1);
         app.add_child_to_selected("GC1".to_string());
-        let cmds_expanded = app.render();
+        let cmds_expanded = app.render_commands();
 
         app.selected_node = Some(c1);
         app.toggle_collapse_selected();
-        let cmds_collapsed = app.render();
+        let cmds_collapsed = app.render_commands();
 
         // Collapsed should have fewer render commands (no grandchild rendered)
         assert!(cmds_collapsed.len() < cmds_expanded.len());

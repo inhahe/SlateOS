@@ -56981,17 +56981,18 @@ Production findings by lint:
 | `indexing_slicing` (slicing) | 15 |
 | everything else | 30 |
 
-**Eleven crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
+**Twelve crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
 `habits`, `markdowneditor`, `regextester`, `explorer`, `installer`, `finance`,
-`weather`, `reminders` and `flashcards` — taking **491 production findings out
-of the 588 (84%)**. All but one were converted to `oswindow::app` in the same
-pass, since the trigger below says to take a crate's debt when converting it;
-`installer` is a CLI tool with no window, so it got the lint half alone.
+`weather`, `reminders`, `flashcards` and `mindmap` — taking **508 production
+findings out of the 588 (86%)**. All but one were converted to `oswindow::app`
+in the same pass, since the trigger below says to take a crate's debt when
+converting it; `installer` is a CLI tool with no window, so it got the lint
+half alone.
 
 Worst crates by *production* findings: ~~`paint` 135~~, ~~`soundrecorder` 55~~,
 ~~`habits` 43~~, ~~`markdowneditor` 40~~, ~~`regextester` 39~~, ~~`installer`
 33~~, ~~`explorer` 33~~, ~~`finance` 23~~, `metronome` 21, ~~`weather` 21~~,
-~~`reminders` 21~~, ~~`flashcards` 18~~.
+~~`reminders` 21~~, ~~`flashcards` 18~~, ~~`mindmap` 17~~.
 
 **`installer` had been reporting a count that was not its count.** Its
 `build.rs` embeds a Windows manifest and did so with an `expect`. Under

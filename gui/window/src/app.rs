@@ -205,11 +205,26 @@ pub enum ImageChange {
 pub trait App {
     /// What to put in the title bar.
     ///
-    /// Read once, when the window is created. An application that retitles
-    /// itself as its document changes does so through
-    /// [`EventLoop::window_mut`]; making this live would mean re-reading it on
-    /// every event to find out whether it had changed, which is a round trip
-    /// per mouse move to answer "no".
+    /// Re-read at every batch boundary and sent on only when the answer has
+    /// changed, so an application whose title follows its document — the file
+    /// being edited, the slide being shown, the sheet being filled in — says so
+    /// here and nowhere else.
+    ///
+    /// This used to be read exactly once, when the window was created, on the
+    /// reasoning that making it live "would mean re-reading it on every event
+    /// to find out whether it had changed, which is a round trip per mouse move
+    /// to answer no". The premise was wrong: re-reading is a local call that
+    /// builds a `String`, and only a *difference* costs a round trip. What the
+    /// old rule actually bought was a fleet of applications whose titles were
+    /// true for one instant. `apps/slides` opened saying "slide 1 of 6" and
+    /// still said it on slide six; every editor's title named the document it
+    /// had at startup. None of them was wrong in its own file, and none of them
+    /// could be right.
+    ///
+    /// The cost is one `String` per batch — not per event: a burst of mouse
+    /// moves is one boundary — against a frame that has just been laid out and
+    /// serialised. Keep the implementation cheap all the same: it is called
+    /// often, so it should read fields rather than compute anything.
     fn title(&self) -> String;
 
     /// Which program this is, for anything that configures a program rather
@@ -400,6 +415,33 @@ pub fn open<T: Transport, A: App + ?Sized>(
 /// submit stops the loop rather than being swallowed: an application that ran
 /// on happily while the screen no longer changed would be the frozen-clock
 /// defect again, one layer down.
+/// Send the application's title to the compositor if it has changed.
+///
+/// Called at every batch boundary, not on every event and not only when a frame
+/// is drawn. Not per event because a drag is hundreds of them and one boundary;
+/// not only when drawing because an application may rename its window without
+/// anything in the window looking different — a document saved under a new name
+/// is the ordinary case — and that title would then wait for an unrelated
+/// repaint.
+///
+/// A failure to rename is deliberately *not* fatal. Everything else in the loop
+/// that talks to the compositor carries the frame or the pixels in it, and a
+/// window that cannot be drawn is a window with nothing to show; a window that
+/// cannot be renamed still works, and killing the application over the label
+/// above it would trade a cosmetic fault for a lost document.
+fn sync_title<T: Transport, A: App + ?Sized>(events: &mut EventLoop<T>, window: u64, app: &A) {
+    let wanted = app.title();
+    let Some(mut handle) = events.window_mut(window) else {
+        return;
+    };
+    if handle.get().title() == wanted {
+        return;
+    }
+    // Discarded, with the reason above: the title is advisory and the loop
+    // outlives a compositor that declines to change it.
+    let _ = handle.set_title(wanted);
+}
+
 pub fn drive<T: Transport, A: App + ?Sized>(
     events: &mut EventLoop<T>,
     window: u64,
@@ -471,6 +513,9 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             }
         }
         Dispatch::Settled => {
+            // Before the `dirty` check, because a rename is not a repaint: see
+            // `sync_title`.
+            sync_title(events, window, app);
             // Re-armed at every batch boundary rather than only after a tick,
             // so that an application can start animating in response to a key
             // press. The frame clock is one-shot by design (see
@@ -1000,6 +1045,99 @@ mod tests {
             2,
             "the unprompted first frame, and one for the settled burst — a \
              count of 4 means every event drew, which is 3 stale frames per drag"
+        );
+    }
+
+    /// An application whose title names its document -- which is nearly all of
+    /// them -- has to be able to change it, and this is the only place it can
+    /// say so.
+    #[test]
+    fn a_title_that_follows_the_document_reaches_the_title_bar() {
+        struct Retitling {
+            page: usize,
+        }
+
+        impl App for Retitling {
+            fn title(&self) -> String {
+                format!("page {} of 3", self.page)
+            }
+
+            fn on_event(&mut self, _event: &Event) -> Response {
+                self.page = self.page.saturating_add(1);
+                Response::Redraw
+            }
+
+            fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
+                RenderTree::new()
+            }
+        }
+
+        let mut app = Retitling { page: 1 };
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+        assert_eq!(
+            events
+                .window(window)
+                .expect("the loop should know it")
+                .title(),
+            "page 1 of 3",
+            "the window should open under the title the app asked for"
+        );
+
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(
+            events
+                .window(window)
+                .expect("the loop should know it")
+                .title(),
+            "page 2 of 3",
+            "the title was read once at open and never again, so every app \
+             whose title named its document was frozen at whatever it held at \
+             startup -- `apps/slides` said \"slide 1 of 6\" on slide six"
+        );
+        assert!(
+            desktop.borrow().seen.iter().any(|r| matches!(
+                &r.body,
+                guiremote::control::RequestBody::SetTitle { title, .. } if title == "page 2 of 3"
+            )),
+            "the new title has to reach the compositor, not just the local record"
+        );
+    }
+
+    /// The cost of the rule above, which is what the old one was trying to
+    /// avoid: a title that has not changed must not cost a request. `set_title`
+    /// waits for an acknowledgement, so an unconditional send would put a round
+    /// trip in every batch -- one per frame of every drag.
+    #[test]
+    fn a_title_that_has_not_changed_costs_nothing() {
+        let mut app = Recorder::new(Response::Redraw);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        desktop.borrow_mut().script.push_back(vec![
+            InputEvent::new(window, Event::FocusIn),
+            InputEvent::new(window, Event::FocusOut),
+        ]);
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        let renames = desktop
+            .borrow()
+            .seen
+            .iter()
+            .filter(|r| matches!(&r.body, guiremote::control::RequestBody::SetTitle { .. }))
+            .count();
+        assert_eq!(
+            renames, 0,
+            "the title never changed, so nothing should have been sent about it"
         );
     }
 

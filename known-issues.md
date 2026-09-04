@@ -113128,3 +113128,157 @@ no verdict and no visible complaint, and the stale last row of
 `boot-history.jsonl` will be read as the answer. That is the same shape as the
 entry above it: a thing that did not look, reported identically to a thing that
 looked and found nothing.
+
+## A-A-CRLF-CORRUPTION-IS-INVISIBLE-TO-EVERY-GIT-COMMAND-ANYONE-RUNS (lane A) — FIXED 2026-09-03
+
+**In short:** thirteen files in this worktree had Windows line endings
+(CRLF — a carriage return before every newline) where the project requires
+Unix ones (LF alone). The boot test went red on them 45 minutes in. The
+entire time, every command you would run to ask "is my working tree dirty?"
+answered **clean** — `git status`, `git diff`, `git diff --quiet`, and
+`git add`. That is not a bug in git and it is not something I failed to
+check; it is what those commands are specified to do, and it means a whole
+class of corruption is invisible where everyone looks for it. A new gate,
+`scripts/check-eol.py`, now checks the thing git will not.
+
+**Why git says clean.** `.gitattributes` declares `*.sh`, `*.py`, `*.yaml`,
+`*.yml`, `*.md` and `*.txt` as `text eol=lf`. That declaration installs a
+**clean filter** — a normalisation git applies to a file's bytes *before*
+comparing it to the stored version. The filter strips CR. So the comparison
+that `git status` and `git diff` perform is not "do the bytes on disk match
+the bytes in the index?", it is "do the bytes on disk **after normalisation**
+match?" — and a wholly-CRLF file normalises to exactly the stored content.
+
+The proof, and it is worth keeping because it is counter-intuitive: I
+repaired all thirteen files and staged the repair. `git diff --cached`
+was **zero bytes**. Thirteen files rewritten, nothing to commit. The CRLF
+had never reached a commit in the first place, which is also why `main` was
+never red and why the initial hypothesis — "this came in through a merge, so
+every lane is blocked" — was wrong.
+
+| command | sees raw bytes? | verdict it gave |
+|---|---|---|
+| `git status` | no (filters) | clean |
+| `git diff` | no (filters) | empty |
+| `git diff --quiet` | no (filters) | exit 0 |
+| `git add` + `git diff --cached` | no (filters) | empty |
+| `git diff-files` | **yes** | modified |
+| `git ls-files --eol` | **yes** | `i/lf w/crlf` |
+
+The last two are the only ones that disagree, and nobody runs them.
+`git ls-files --eol` is the one to remember: it prints the index encoding
+and the working-tree encoding side by side.
+
+**The deeper point.** `text eol=lf` is a promise git keeps *at checkout*.
+It is not an invariant git enforces afterwards. Anything that writes a file
+after checkout — a script, an editor, a code generator — can violate it
+freely, and git's answer to "did anything change?" is designed to say no.
+So the declaration reads like a guarantee and is a one-time conversion.
+
+**What was caught, and what was not.** `check_shellcheck` found this,
+because shellcheck reads raw bytes and chokes on the CR. But it covers
+`*.sh` only: **1 of the 13** corrupted files. The other twelve were `.py`
+and `.md`, and nothing in the tree looked at them. A whole-tree corruption
+presented as a one-file typo — which is why the new gate covers every
+declared file rather than the extension that happened to catch it. What
+matters about a finding here is not the file; it is that some tool in the
+tree is writing text in the wrong mode.
+
+**The fix (`scripts/check-eol.py`, wired second in the boot-test sweep).**
+Asks `git check-attr` which paths are declared `eol=lf` — rather than
+matching suffixes, so the policy has one home and cannot drift — reads each
+one from disk, and reports any CR. 1438 files, ~32s with a 16-thread pool.
+It runs second, after `check_requests_not_deleted`, because the cost of
+learning this late was 45 minutes.
+
+**Still open — the actual root cause.** Roughly 180 further files are
+wholly CRLF on disk *and not declared* `eol=lf`, so the new gate ignores
+them by construction: most of `kernel/src/fs/*.rs`, plus
+`kernel/src/crypto.rs`, `kernel/src/syscall/handlers.rs`, `kernel/build.rs`,
+`bench/baselines.toml`, and `kernel/ada/*`. `.gitattributes` declares no
+rule for `*.rs`, `*.toml`, `*.ads` or `*.atp`.
+
+That distribution is the evidence: whole directories of generated-looking
+source, in one mode, is what a Python script opening files with
+`open(path, "w")` on Windows produces — text mode translates newline to
+CRLF silently. **Finding that writer is the fix that matters**; repairing
+files without it just schedules the next occurrence. Two candidate
+follow-ups, in order:
+
+1. Find the writer. Search the tree for text-mode `open()` calls without an
+   explicit `newline=""` (or a binary `"wb"` mode) in anything that emits
+   `.rs`, and check the generators under `kernel/` first, since that is
+   where the residue is.
+2. Decide whether `.gitattributes` should declare `*.rs`/`*.toml` too. It
+   probably should — but that is a whole-tree normalisation touching all
+   three lanes, so it wants a request rather than a unilateral commit.
+
+**If the residue is never addressed:** it is presently harmless — `rustc`
+accepts CRLF — so nothing is red. The cost is that the tree carries two
+line-ending conventions with no rule stating which is intended, and the
+writer that produced them is still running.
+
+## TD-A-A-SKIP-REASON-CAN-BE-A-BLANK-LINE-BECAUSE-TWO-STREAMS-RACE (lane A) — FIXED 2026-09-03
+
+**In short:** a build gate is allowed to *decline* — to say "I cannot check
+this here" and be skipped instead of failing the build — and when it does,
+the operator is shown the reason it gave. Two separate defects meant the
+operator could be shown a blank reason, or worse, shown a sentence that
+`run-checker.sh` had written *about* the checker, presented as the checker's
+own account of itself. A gate would skip on every host and the log would
+look like it had explained itself. Both halves are now fixed.
+
+**Background: how a decline works.** `scripts/run-checker.sh` runs a checker
+with its stdout and stderr merged into one log file. If the checker was
+invoked with `--may-skip` and exits **2**, that is a decline; `run_checker`
+sets `RUN_CHECKER_SKIPPED` and takes **the first line of the log** as
+`RUN_CHECKER_SKIP_REASON`. First line, not last — that contract came from
+lane B and was adopted wholesale at merge `a29a07d68`.
+
+**Defect 1 — the two streams do not arrive in the order they were written.**
+A redirected stdout is *block-buffered*; stderr is not. So a checker that
+prints its reason to stdout and an explanation to stderr has the explanation
+hit the file first, while the reason sits in a buffer until the process
+exits. The "first line of the log" is then the wrong sentence — or, when
+stderr's first write is a blank separator, no sentence at all. Observed with
+`scan-unwrap.py`, whose reason went to stdout and whose detail went to
+stderr, and `head -n 1` returned an empty line.
+
+This had been fixed once before on this lane, with `PYTHONUNBUFFERED=1` on
+the child. Merge `a29a07d68` adopted lane B's `--may-skip` implementation —
+correctly — and the buffering fix rode along inside the file that was
+replaced. It is restored at the invocation itself rather than at the call
+sites, so it cannot be lost the same way a third time.
+
+Note that the buffering bug got *worse* under the new contract without
+anyone touching it. Under the old last-line rule, a buffered stdout landing
+late meant the reason arrived last, which is where the reader was looking.
+Under the first-line rule the same buffering hides it. A latent defect was
+promoted to a live one by a change that was itself an improvement.
+
+**Defect 2 — the guard tested the log, not the reason.** The fourth
+condition for accepting a decline read `[ -s "$_rc_log" ]`: "the checker
+printed something." But the claim that matters is about *the sentence this
+will quote*, and the two come apart the moment the first line is blank or
+whitespace. `[ -s ]` says the file has bytes; the display fallback then
+substitutes the string `(it printed nothing)`; and the operator is told a
+gate skipped for a reason that `run-checker.sh` invented. It now tests the
+reason it is about to use, at the place the claim is made.
+
+Both were fixed together in `a5439c918` "because each alone leaves a way
+in": unbuffering without the guard still admits a checker whose genuine
+first line is blank, and the guard without unbuffering still quotes the
+wrong sentence when the checker used both streams.
+
+**Regression cases** are in `scripts/test-pre-push-run-checker.py`: a
+checker whose first line is blank (asserts it is not a skip, is not
+reported as one, and that no invented reason reaches the operator), and a
+two-stream checker run with `PYTHONUNBUFFERED` explicitly unset in the
+driver — so the case fails if `run-checker.sh` ever stops setting it —
+asserting the quoted reason is the one the checker wrote first.
+
+**Standing lesson, which is why this is filed as debt and not just a fix:**
+a checker that declines is trusted to describe why, and every layer between
+it and the operator is an opportunity to substitute something else. Never
+let the reporting layer supply a reason of its own invention. If there is
+no reason, the correct output is a refusal, not a sentence.

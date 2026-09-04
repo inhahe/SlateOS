@@ -113661,3 +113661,124 @@ later loses its refusal (a `return 1` becomes a `return 0` in a refactor,
 which is exactly how `check-doc-links.py` broke and why this file exists),
 this will report "ok — all 47 gates can reach a non-zero exit bare" and be
 wrong, in the same words it uses when it is right.
+
+## A-A-THE-LIBC-SHAPE-GATE-WAS-BORN-DEAD-AND-THE-WIRING-GATE-CALLS-IT-WIRED (lane A, 2026-09-04)
+
+**In short:** a gate added yesterday to check that `libc.a` is carved finely
+enough has **never run, not once, on any host**. Its first line calls a helper
+function that does not exist; the call fails, and the `|| return 0` on that same
+line turns the failure into "this gate passed". Nobody noticed because the
+meta-gate whose whole job is "is every gate actually run by something?" reads
+the call site *textually*, sees the gate named there, and counts it as wired.
+Found by reading a boot-test log line I had previously skimmed as noise.
+
+**The line.** `scripts/boot-test.sh:4232`, the first statement of
+`check_libc_shape()`:
+
+```sh
+check_libc_shape() {
+    local py=""
+    py="$(find_python)" || return 0        # <-- find_python does not exist
+```
+
+`find_python` is defined **nowhere**. Verified three ways rather than assumed,
+because I published an unverified claim earlier today and had to retract it:
+
+| question | answer |
+|---|---|
+| defined in `boot-test.sh`? | no — `grep -n 'find_python' scripts/boot-test.sh` returns line 4232 and nothing else |
+| defined in anything it sources? | no — the only `.` is `run-checker.sh` (`:1259`), which defines `run_checker` and nothing else |
+| an external on `PATH`? | no — `command -v find_python` is empty |
+| across all of `scripts/`? | one hit, the call itself |
+
+And the resulting control flow, demonstrated rather than reasoned about:
+
+```console
+$ bash -c 'f() { local py=""; py="$(find_python)" || return 0; echo "REACHED THE GATE"; }; f; echo "returned $?"'
+environment: line 1: find_python: command not found
+returned 0
+```
+
+The body is never reached and the function reports success.
+
+**What that silently disabled — both halves, and the more important one second.**
+
+1. the real gate, `check-libc-shape.py --ignore-age`;
+2. **its self-test**, which the function's own header singles out as
+   non-skippable: *"it builds its own `ar` archives in memory and needs no
+   sysroot at all, so on a machine with no `libc.a` it is the only thing still
+   checking that this gate can tell a bad archive from a good one."*
+
+**Why the symptom is invisible in practice.** It does print, on every run:
+
+```
+/tmp/boot-test-snapshot.o9Qr30: line 4232: find_python: command not found
+```
+
+One stderr line, sandwiched between two `=== … ===` banners, naming a temp file
+rather than `scripts/boot-test.sh` (the harness re-executes from a snapshot), in
+a log that is tens of thousands of lines long. It carries no `ERROR`, no
+`WARNING`, and does not change the exit status. I had already read past it once.
+
+**Introduced by the commit that was supposed to turn it on.** `e3e72d4bf`
+(2026-09-03), *"wire check-libc-shape.py into the boot test, and unpin it"*.
+That is the part worth dwelling on: the gate previously sat in
+`check-gates-are-wired.py`'s `PINNED` map with the honest reason *"needs an
+opt-in skip channel in run-checker.sh first"*. The commit removed the pin and
+added a call that cannot execute — so the change traded a **tracked** exemption
+for an **untracked** one. A pin says "not wired, and here is why"; a dead call
+site says "wired" to every reader, human and machine. The gate is strictly worse
+off than before it was "wired".
+
+The header of the very function this happened to argues against the outcome in
+so many words — *"we would have wired a gate that never answers"* — as the thing
+it was carefully avoiding by passing `--ignore-age`. It got there anyway, by a
+mechanism the comment was not watching.
+
+**The blind spot this exposes, which is new.** `design-decisions.md` §907
+established that *a gate is what `run_checker` runs, not what it is named*, and
+widened `check-gates-are-wired.py` accordingly. This is the next term in the
+same series and the current gate does not cover it:
+
+> **A call site that exists is not a call site that executes.**
+
+`check-gates-are-wired.py` asks "does some `run_checker` invocation name this
+gate?" — a question about text. It cannot tell a reachable invocation from one
+behind an unconditional early return. So it reported, in this very run:
+
+```
+38 gate(s); 1 unwired, 1 pinned; 32 self-tested; 0 self-test(s) shipped but unrun
+ok -- every gate is either run by something or pinned with a reason, ...
+```
+
+`check-libc-shape` is in neither the "unwired" nor the "pinned" count. It is
+counted among the wired — correct as text, false as fact, and phrased exactly as
+it is phrased when it is right.
+
+Note also that `set -e` cannot help here and neither can `bash -n`: the syntax
+is valid, the failure is at runtime, and `|| return 0` explicitly swallows the
+non-zero status that `set -e` would otherwise act on.
+
+**Proper fix, two parts.**
+
+1. **Replace line 4232 with the idiom the other ~20 gates use** — the inline
+   `command -v python` / `python3` block, with an explicit
+   `echo "=== libc.a shape: skipped (no python) ===" >&2` on the else arm. Note
+   the current line is wrong in a *second* way that would survive merely
+   defining `find_python`: `|| return 0` returns **silently**, whereas every
+   other gate announces its skip. A gate that declines without saying so is the
+   same defect one level down.
+2. **Add a gate for the class.** Scan the shell scripts for a word in command
+   position that is not defined in the file, not defined in anything it sources,
+   not a shell builtin or keyword, and not on `PATH`. That is a small, decidable
+   check which catches this outright, and it is the only one of the two fixes
+   that protects the *next* call to a function nobody wrote. It belongs next to
+   `check-gates-are-wired.py`, since it answers the half of "is this gate run?"
+   that the existing gate structurally cannot.
+
+**If it is never fixed:** `libc.a` member granularity is ungraded on every host
+and every run. That is not a hypothetical failure mode — it is the one that
+broke the GNU make port and got written up as `design-decisions.md` §339, which
+is why this gate was built. And the meta-gate will go on reporting it as wired,
+so the next person to ask "are all our gates running?" gets "yes" in the same
+words that would be true.

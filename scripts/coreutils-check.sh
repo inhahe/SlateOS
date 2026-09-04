@@ -53,15 +53,54 @@
 #
 # ## Why this is not wired into the boot test
 #
-# Cost, and only cost. The host `clippy -p coreutils --all-targets` run took 89
-# minutes; a second full pass on the Linux side is not free, and the boot test
-# already spends forty minutes on gates. Step 2 of the tech-debt entry wants
-# this scoped to the crates a push touches -- exactly as pre-push gate 11
-# scopes itself -- before it becomes something every push pays for. Until then
-# this is the thing you run by hand after touching a `#[cfg(unix)]` arm, and
-# the reason it exists as a script rather than as a paragraph of instructions
-# is `known-issues.md` lesson 63: a rule kept only by copying is a rule that
-# will be dropped.
+# Cost was the stated reason, and the stated cost was wrong. The 89 minutes
+# quoted here originally was a host `clippy --all-targets` run, and this script
+# does not do that: `scope` below is `--lib --bins`, which drops the zone's
+# integration tests and examples -- the slowest part of the build and none of
+# it where a `#[cfg(unix)]` arm lives. Measured 2026-09-04 against a warm
+# shared target dir: the whole Linux half is **2m16s** (clippy 1m12s, test
+# 1m04s). That is a boot-test gate's worth of time, not an hour's, so the
+# premise that kept this unwired does not survive being measured.
+#
+# What remains true is that a warm cache is doing the work. The first run after
+# the shared `slateos-diff-target` is invalidated pays a full Linux build, so a
+# gate wants the scoping step 2 asks for -- the crates a push touches, exactly
+# as pre-push gate 11 scopes itself -- rather than a blanket run.
+#
+# Either way this is also the thing you run by hand after touching a
+# `#[cfg(unix)]` arm, and the reason it exists as a script rather than as a
+# paragraph of instructions is `known-issues.md` lesson 63: a rule kept only by
+# copying is a rule that will be dropped.
+#
+# ## The WSL output boundary, and why stdout here carries only the verdict
+#
+# `wsl.exe` does not share a file offset with any other writer -- not with the
+# shell that launched it, not with a `cat` relaying its own pipe, and not
+# between its own two streams. So when a caller merges the streams into one
+# file, which is what `cmd > log 2>&1` does and what every backgrounded run in
+# this tree is recorded as, whichever of the two WSL streams writes more starts
+# at offset zero and overwrites the other. Nothing reports this; the bytes are
+# simply gone.
+#
+# It is not hypothetical here. A `--only linux --no-clippy=0` run of this very
+# file emitted `=== linux clippy (x86_64-unknown-linux-gnu) ===` on stdout and
+# 1.2 MB of cargo manifest warnings on stderr, and in the merged capture the
+# header did not exist -- so the log said only `result: clean`, with nothing to
+# say which half had produced it. That is this script's own founding defect,
+# one level up: a check that did not visibly happen reading as a check that
+# passed.
+#
+# The fix is that exactly one writer may own the file. The far side therefore
+# does `exec 1>&2` (see `run_linux`), collapsing everything WSL emits -- step
+# headers, cargo's stdout, cargo's stderr -- onto the single stream, and this
+# side keeps **stdout for the summary block and nothing else**. The verdict is
+# then unreachable by any WSL handle, and
+#
+#     scripts/coreutils-check.sh > verdict.txt 2> log.txt
+#
+# gives a five-line verdict and a full log. Relaying WSL's stdout through a
+# pipe was tried and does not work: the relaying process is just one more
+# writer with an offset of its own, and it loses the same bytes.
 #
 # ## Usage
 #
@@ -82,6 +121,15 @@
 # defect being guarded against is a check that did not happen reading as a
 # check that passed. "No WSL on this host" is an honest decline, not a pass,
 # and the summary says which halves actually ran either way.
+#
+# ## Streams
+#
+#     stdout  the summary block, and nothing else
+#     stderr  step headers, cargo output, decline messages
+#
+# So `>verdict 2>log` splits the two cleanly, and a caller that merges them
+# still keeps both -- which was not true before; see "## The WSL output
+# boundary" above for what merging used to destroy.
 
 set -euo pipefail
 
@@ -127,7 +175,10 @@ status=0            # 0 pass, 1 a half failed, 2 a half could not run
 ran=()
 skipped=()
 
-note() { echo "" ; echo "=== $* ===" ; }
+# Step headers annotate the tool output they precede, so they go where that
+# output goes -- stderr. Keeping them off stdout is what leaves the summary
+# block alone there; see "## The WSL output boundary" in the header.
+note() { echo "" >&2 ; echo "=== $* ===" >&2 ; }
 
 # --- the Windows host half ----------------------------------------------------
 # This is the only build in the tree that sees a `cfg(not(unix))` arm in this
@@ -199,6 +250,13 @@ run_linux() {
   local script
   script=$(cat <<'WSLEOF'
 set -eu
+# Everything WSL emits goes out one stream, because two of them cannot survive
+# a caller that merges them into a file: wsl.exe writes each with an offset of
+# its own and the louder one silently overwrites the other. Collapsing here
+# rather than asking callers to redirect is deliberate -- a rule kept only by
+# remembering to redirect is a rule that will be dropped, and the bytes it
+# loses are the ones that say which check ran.
+exec 1>&2
 cd "$1"; shift
 tdir="$HOME/.cache/slateos-diff-target"
 cargo="$HOME/.cargo/bin/cargo"
@@ -237,7 +295,11 @@ case "$only" in
   both)  run_host; run_linux ;;
 esac
 
-note "summary"
+# The one thing written to stdout, and written with `echo` rather than `note`
+# for exactly that reason: this is the verdict, and it is the only output of
+# this script that no WSL handle can overwrite.
+echo ""
+echo "=== summary ==="
 echo "packages: ${pkgs[*]}"
 if [ ${#ran[@]} -gt 0 ]; then echo "ran:      ${ran[*]}"; else echo "ran:      (nothing)"; fi
 if [ ${#skipped[@]} -gt 0 ]; then echo "declined: ${skipped[*]}"; fi
@@ -246,7 +308,9 @@ case "$status" in
   # claim than a full one, and a summary that overstates its own scope is the
   # same defect one level up from the one this script exists to close.
   0) echo "result:   clean (${ran[*]} half checked)" ;;
-  1) echo "result:   FAILED -- see the output above" ;;
+  # "on stderr", not "above": the summary is the whole of stdout now, so for a
+  # caller that captured the two streams separately there is nothing above it.
+  1) echo "result:   FAILED -- see the log on stderr" ;;
   2) echo "result:   INCOMPLETE -- a half could not run, which is not a pass" ;;
 esac
 exit "$status"

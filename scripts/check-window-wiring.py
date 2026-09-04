@@ -147,7 +147,7 @@ def main_line(text: str) -> int:
 # soundrecorder, habits, markdowneditor and regextester wired on. Lowering it
 # in the same commit is the point of a ratchet: ground gained and not held is
 # ground that can be lost again without anything objecting.
-BASELINE = 40
+BASELINE = 39
 
 
 # --------------------------------------------------------------------------

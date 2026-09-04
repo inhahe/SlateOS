@@ -42,6 +42,9 @@ use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -1324,7 +1327,10 @@ impl SysMonitorState {
     // ========================================================================
 
     /// Render the complete system monitor UI.
-    pub fn render(&self) -> RenderTree {
+    /// Named `render_tree` and not `render`: at equal arity an inherent method
+    /// silently wins method lookup over `oswindow::app::App::render`, so an app
+    /// that keeps the name draws nothing and reports no error.
+    pub fn render_tree(&self) -> RenderTree {
         let mut tree = RenderTree::new();
         let w = self.window_width as f32;
         let h = self.window_height as f32;
@@ -3196,58 +3202,63 @@ fn format_uptime_short(secs: u64) -> String {
 // Main
 // ============================================================================
 
-fn main() {
+impl App for SysMonitorState {
+    fn title(&self) -> String {
+        "System Monitor".to_owned()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (self.window_width, self.window_height)
+    }
+
+    /// The user's chosen refresh rate, not a frame rate.
+    ///
+    /// **The one to get right for this app.** It already handled `Event::Tick`
+    /// and refreshed on it before it was wired to anything, so the default
+    /// `None` would have shipped a system monitor whose graphs never move and
+    /// whose alerts never fire, with every one of its tests still passing —
+    /// `known-issues.md` lesson 47 exactly.
+    ///
+    /// It asks for the refresh interval itself rather than something faster:
+    /// the accumulator in the `Tick` arm means a coarser clock is still
+    /// correct, and a monitor that woke the machine sixty times a second to
+    /// redraw the same numbers would be the thing this method's own
+    /// documentation warns about.
+    ///
+    /// It reads the *current* setting, so cycling the refresh rate in the app
+    /// changes the clock it is given.
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(Duration::from_millis(self.refresh_interval.ms()))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.window_width = width as u32;
+        self.window_height = height as u32;
+        self.render_tree()
+    }
+}
+
+fn main() -> ExitCode {
     let mut monitor = SysMonitorState::new();
+    // Until a real process source exists this is what there is to show. It is
+    // loaded here rather than in `new` so that the moment a source arrives,
+    // this is the one line that changes.
     monitor.load_demo_data();
-
-    let render_tree = monitor.render();
-    println!("System Monitor initialized");
-    println!("  {} processes loaded", monitor.processes.len());
-    println!("  {} visible (after filter)", monitor.visible_indices.len());
-    println!("  {} render commands", render_tree.len());
-    println!("  {} active alerts", monitor.active_alerts.len());
-    println!("  Status: {}", monitor.status_message);
-
-    // Demonstrate tab switching
-    for tab in &Tab::ALL {
-        monitor.active_tab = *tab;
-        let tab_tree = monitor.render();
-        println!("  {} tab: {} render commands", tab.label(), tab_tree.len());
-    }
-
-    // Demonstrate sorting
-    monitor.active_tab = Tab::Processes;
-    monitor.set_sort_column(ProcessColumn::Memory);
-    println!(
-        "\nSorted by Memory ({}): first visible = {}",
-        match monitor.sort_direction {
-            SortDirection::Ascending => "asc",
-            SortDirection::Descending => "desc",
-        },
-        monitor
-            .visible_indices
-            .first()
-            .and_then(|&i| monitor.processes.get(i))
-            .map_or("(none)", |p| p.name.as_str()),
-    );
-
-    // Demonstrate filtering
-    monitor.filter_text = "http".to_string();
-    monitor.rebuild_visible_list();
-    println!("Filter 'http': {} matches", monitor.visible_indices.len());
-
-    // Demonstrate alert checking
-    monitor.system_info.cpu_overall = 95.0;
-    monitor.check_alerts();
-    println!(
-        "After CPU spike to 95%: {} alerts",
-        monitor.active_alerts.len()
-    );
-    for alert in &monitor.active_alerts {
-        println!("  [{:?}] {}", alert.severity, alert.message);
-    }
-
-    println!("\nSystem Monitor ready.");
+    monitor.refresh();
+    app::launch("sysmonitor", &mut monitor)
 }
 
 // ============================================================================
@@ -3257,6 +3268,110 @@ fn main() {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+    // ------------------------------------------------------------------
+    // The clock
+    //
+    // `handle_event` already refreshed on `Event::Tick` before this app was
+    // wired to anything, so nothing here is new behaviour — what is new is
+    // that a tick now arrives at all. These pin the wiring rather than the
+    // handler.
+    // ------------------------------------------------------------------
+
+    fn running() -> SysMonitorState {
+        let mut m = SysMonitorState::new();
+        m.load_demo_data();
+        m.refresh();
+        m
+    }
+
+    #[test]
+    fn the_app_asks_for_a_clock_at_its_own_refresh_rate() {
+        // Returning `None` would ship a system monitor whose graphs never move,
+        // with every test still passing. Returning a frame rate would wake the
+        // machine sixty times a second to redraw identical numbers.
+        let m = running();
+        assert_eq!(
+            m.tick_interval(),
+            Some(Duration::from_millis(m.refresh_interval.ms()))
+        );
+    }
+
+    #[test]
+    fn cycling_the_refresh_rate_changes_the_clock_it_is_given() {
+        // `tick_interval` reads the current setting rather than a constant, so
+        // the setting has to actually reach the event loop.
+        let mut m = running();
+        let before = m.tick_interval();
+        m.cycle_refresh_interval();
+        assert_ne!(
+            m.tick_interval(),
+            before,
+            "cycling the interval left the clock unchanged"
+        );
+    }
+
+    #[test]
+    fn ticks_shorter_than_the_interval_accumulate_rather_than_refreshing() {
+        // The accumulator is what lets a coarser clock stay correct; without
+        // it, a tick that arrives early would refresh anyway and the chosen
+        // rate would mean nothing.
+        let mut m = running();
+        let interval = m.refresh_interval.ms();
+        assert!(
+            interval >= 2,
+            "the interval should be more than a millisecond"
+        );
+        let step = interval / 2;
+        m.ms_since_refresh = 0;
+        m.handle_event(&Event::Tick { elapsed_ms: step });
+        assert!(
+            m.ms_since_refresh > 0,
+            "a short tick should have been remembered, not discarded"
+        );
+        m.handle_event(&Event::Tick {
+            elapsed_ms: interval,
+        });
+        assert_eq!(
+            m.ms_since_refresh, 0,
+            "crossing the interval should have refreshed and reset"
+        );
+    }
+
+    #[test]
+    fn a_tick_advances_the_graphs() {
+        // The whole point of the clock in this app: the history behind every
+        // time-series graph only grows when a refresh happens.
+        let mut m = running();
+        let before = m.cpu_history.len();
+        let interval = m.refresh_interval.ms();
+        for _ in 0..3 {
+            m.handle_event(&Event::Tick {
+                elapsed_ms: interval,
+            });
+        }
+        assert!(
+            m.cpu_history.len() > before || before == m.cpu_history.capacity(),
+            "three refreshes added no samples (was {before}, now {})",
+            m.cpu_history.len()
+        );
+    }
+
+    #[test]
+    fn the_initial_size_is_the_size_the_app_is_holding() {
+        let m = running();
+        assert_eq!(m.initial_size(), (m.window_width, m.window_height));
+    }
+
+    #[test]
+    fn rendering_at_a_new_size_adopts_it() {
+        // The first frame is drawn before any `Resize` arrives, and a
+        // compositor may grant a size that was never asked for.
+        let mut m = running();
+        let tree = m.render(1600.0, 900.0);
+        assert_eq!((m.window_width, m.window_height), (1600, 900));
+        assert!(!tree.is_empty(), "the app drew nothing");
+    }
 
     use super::*;
     use guitk::event::{Event, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
@@ -3309,7 +3424,7 @@ mod tests {
         app.active_tab = Tab::Processes;
         app.filter_focused = true;
         app.filter_text = String::from("\u{fc}ber");
-        let tree = app.render();
+        let tree = app.render_tree();
         // The caret is the one-pixel-wide fill pushed straight after the
         // filter text, so find the text first and then look forward.
         let text_i = tree
@@ -3842,7 +3957,7 @@ mod tests {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         s.active_tab = Tab::Overview;
-        let tree = s.render();
+        let tree = s.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3954,7 +4069,7 @@ mod tests {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         s.active_tab = Tab::Processes;
-        let tree = s.render();
+        let tree = s.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3963,7 +4078,7 @@ mod tests {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         s.active_tab = Tab::Cpu;
-        let tree = s.render();
+        let tree = s.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3972,7 +4087,7 @@ mod tests {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         s.active_tab = Tab::Memory;
-        let tree = s.render();
+        let tree = s.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3981,7 +4096,7 @@ mod tests {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         s.active_tab = Tab::Disk;
-        let tree = s.render();
+        let tree = s.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3990,7 +4105,7 @@ mod tests {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         s.active_tab = Tab::Network;
-        let tree = s.render();
+        let tree = s.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3998,7 +4113,7 @@ mod tests {
     fn test_render_empty_disks_tab() {
         let mut s = SysMonitorState::new();
         s.active_tab = Tab::Disk;
-        let tree = s.render();
+        let tree = s.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -4006,7 +4121,7 @@ mod tests {
     fn test_render_empty_network_tab() {
         let mut s = SysMonitorState::new();
         s.active_tab = Tab::Network;
-        let tree = s.render();
+        let tree = s.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -4206,7 +4321,7 @@ mod tests {
             target_pid: 1,
             hover_index: Some(0),
         });
-        let tree = s.render();
+        let tree = s.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -4217,7 +4332,7 @@ mod tests {
         s.system_info.cpu_overall = 95.0;
         s.check_alerts();
         s.active_tab = Tab::Overview;
-        let tree = s.render();
+        let tree = s.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -4289,7 +4404,7 @@ mod tests {
     /// against *that*, so the two can drift together and the test still
     /// passes. This asks the renderer what it drew.
     fn rows_clip(app: &SysMonitorState) -> (f32, f32) {
-        app.render()
+        app.render_tree()
             .commands
             .iter()
             .find_map(|cmd| match cmd {

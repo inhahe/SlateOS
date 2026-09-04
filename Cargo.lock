@@ -5243,6 +5243,7 @@ version = "0.1.0"
 dependencies = [
  "globmatch",
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -7189,6 +7190,7 @@ name = "hexeditor"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -8177,6 +8179,7 @@ name = "jsonviewer"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -9484,6 +9487,7 @@ name = "logviewer"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -11777,6 +11781,7 @@ name = "notes"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -17353,6 +17358,7 @@ name = "sysinfo-app"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -17374,6 +17380,7 @@ name = "sysmonitor"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

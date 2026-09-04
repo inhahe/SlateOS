@@ -63930,6 +63930,68 @@ does not grade the scanner. A Python gate cannot execute Rust, so the
 `scripts/`. The gate's docstring now says so in as many words, with that
 measurement in it, rather than letting its name imply otherwise.
 
+### Second correction — the instrument/gate split was wrong too, and lane B's tree already says so
+
+**In short:** the table above pins two of the four oracles on the grounds that
+they "read no `.rs` file" and so guard nothing of ours. Lane B had independently
+wired all four, that is what the merge (`a29a07d68`) brought in, and it is what
+`boot-test.sh` does today — `check_bash_oracles` runs all four, gates carrying
+`--may-skip`, self-tests not. Only `check-evdev-elf-asm.py` is still pinned.
+Lane B is right and I was wrong, so the wiring stands and this section is the
+record of why my reasoning failed rather than an argument to revisit it.
+
+**Lane B's reason, which I did not have.** It is in the comment above
+`check_bash_oracles` in `boot-test.sh`:
+
+> Every other shell gate here reads kshell's source and checks it against a rule
+> written down in this repository. These four check the *rule* — they hand the
+> same bytes to real bash through WSL and compare. A disagreement means our
+> model of the shell is wrong, which no amount of internal consistency would
+> ever reveal: the rest of the gates would go on agreeing with each other about
+> the wrong answer.
+
+That is the argument I was missing. I asked what a checker *reads* and concluded
+that one reading only a Python table protects nothing here. What it protects is
+the **rule** that a dozen other gates enforce against our source. If the rule is
+wrong, every gate that agrees with it is confidently wrong *together*, and their
+agreement is the thing that makes the error invisible. A checker that reads none
+of our files can still be the only witness that our files are being measured
+against the right standard.
+
+**Both of this entry's errors have one cause.** I classified checkers by *which
+file each one opens* rather than by *what would go undetected without it*, and
+that question got the answer wrong in both directions on the same day:
+
+| | I asked | I concluded | what was true |
+|---|---|---|---|
+| the two wired gates | opens `kernel/src/*.rs`? yes | grades that subsystem | graded one constant and one set of inputs |
+| the two pinned instruments | opens `kernel/src/*.rs`? no | guards nothing of ours | guards the rule every other shell gate enforces |
+
+Over-credit and under-credit, from one bad question. The correction above says
+the discriminating question is "how much of that file can change without this
+noticing"; this one extends it, because that phrasing still presumes the subject
+is a file in our tree. The general form is **what becomes undetectable if this
+program stops running**, which is answerable for an instrument as well as a
+gate — and for the instruments the answer is "that our whole model of bash is
+wrong", which is not nothing and is not smaller than what a gate protects.
+
+**What survives of the split.** The distinction between measuring a third party
+and grading this repository is still real and still worth naming — it is why the
+two instruments genuinely cannot fail on a change to `kernel/`, and why reading
+them as coverage of our quoting code would be a mistake. What does not survive is
+the *conclusion* drawn from it, that only the second kind belongs in the boot
+test. The cost that made me draw it — about 23 seconds per boot — is paid only on
+hosts that have WSL, and `--may-skip` means a host without WSL skips them loudly
+rather than failing. Twenty-three seconds to know that the standard every other
+shell gate is measured against is the real one is obviously worth paying, and I
+priced it against the wrong benefit.
+
+Worth noting that lane B's argument is the same one I used, one level down, to
+justify keeping each gate's own transcription of a rung as a third witness: with
+only two witnesses a silently broken reader passes by comparing bash against
+bash. Wiring the instruments is that argument applied to the family as a whole.
+I made it about a table and missed it about the tree.
+
 ---
 
 ## 806. The file chooser stores no size of its own, and lets an explicit scroll leave the selection off screen

@@ -201,4 +201,23 @@ graded by nothing at all (13 → 16). Written up in `known-issues.md` →
 whose remaining half is the general one: 28 of 30 gates still have no fixture
 that plants a defect in their subject and checks they refuse.
 
-The two instruments are still untouched, as I said they would be.
+**And the thing this file is named after is conceded: you were right to wire all
+four.** The title above, and the classification section in the body, argue that
+`check-kshell-pipeline-vs-bash.py` and `check-ansic-quoting-vs-bash.py` are
+instruments rather than gates and should stay pinned, because they open no `.rs`
+file. You had already wired them, the merge brought that in, and I am leaving it
+wired. Your reason — in the comment above `check_bash_oracles` — is one I did not
+have: those two check the *rule* that every other shell gate enforces against our
+source, and if the rule is wrong then all of them agree with each other about the
+wrong answer, which is precisely the failure no amount of internal consistency
+can surface. Twenty-three seconds a boot for the only witness that our model of
+bash is the real bash is cheap, and `--may-skip` means a WSL-less host pays
+nothing.
+
+I got this wrong the same way I got the tether width wrong, a few hours apart and
+in opposite directions: I asked *which file does this open* instead of *what stops
+being detectable if this stops running*. That question over-credited the two gates
+I wired (they opened a kernel file and graded one line of it) and under-credited
+the two instruments you wired (they open no kernel file and guard the standard the
+whole family is measured against). Recorded in design-decisions.md §905 as a
+second correction. Your wiring stands; nothing here asks you to revisit it.

@@ -113841,3 +113841,68 @@ broke the GNU make port and got written up as `design-decisions.md` §339, which
 is why this gate was built. And the meta-gate will go on reporting it as wired,
 so the next person to ask "are all our gates running?" gets "yes" in the same
 words that would be true.
+
+### Both fixes landed — and the false-positive estimate above was wrong by 100× — 2026-09-04
+
+Fix 1 is commit `9463dd574`: the `find_python` call is replaced by the inline
+`command -v python`/`python3` block the other ~20 gates use. Its no-python arm
+now *announces* the skip, which repairs a second and subtler defect that would
+have survived merely defining `find_python` — a gate that declines without
+saying so is indistinguishable from one that looked and found nothing. The gate
+then ran for the first time in its existence: `--self-test` **24/24**, and
+against the real archive `libc.a shape OK (615 members, 3249 symbols)`.
+
+Fix 2 is commit `26545e857`: `scripts/check-shell-callables.py`, wired into
+`boot-test.sh` immediately after `check_eol`. It takes the substitution-shaped
+rule this entry recommended, resolving each callee against the file's own
+functions, the functions of anything it `source`s, the shell builtins, and
+`PATH` — the last asked of **bash** in one batched `command -v`, because these
+scripts run under MSYS bash, whose `PATH` holds the unix tools that the Windows
+`PATH` this interpreter sees does not. Verified end-to-end by re-planting the
+original line: the gate names `scripts/boot-test.sh:4250`, reports one finding,
+exits 1. Then restored.
+
+**The half of the estimate that held.** "Blast radius exactly one" was right.
+Across the graded corpus the finished gate reports exactly one true defect, the
+one above, and today reports zero because it is fixed.
+
+**The half that did not.** This entry predicted "1 residual false positive,
+removable by not reading inside heredocs whose body is another language". The
+first working implementation produced **193**. None came from the rule; all came
+from *masking* — deciding which bytes are shell at all:
+
+| Cause | Findings | Why it looked like shell |
+|---|---|---|
+| `` \` `` escaped backquotes in double-quoted strings | ~100 | This tree's refusal messages are prose about code: ``echo "\`article_for\` picks by spelling"``. Preserving the escape makes every one a backquote substitution calling `article_for`, `picks`, `text`, `Mutex`, `thread_local`. |
+| the same escapes inside *unquoted* heredoc bodies | ~70 | `pre-push`'s advisory heredocs are English paragraphs full of ``\`static FOO: Mutex<()>\`` and ``\`unwrap_or_else(…)\``. |
+| env-assignment prefixes | few | `$(PYTHONIOENCODING=:replace "$py" -u "$f")` — the callee is not the first word; it is what follows the assignments, and here it is `"$py"`, correctly undecidable. |
+| `<<<` here-strings and `<<` shifts in `$(( ))` | — | See below; these *hid* findings rather than creating them. |
+
+The lesson is a specific one and it is not "estimates are hard". **A static
+scanner's error budget lives in its lexer, not in its rule.** The rule was
+correct as specified on the first try and never changed. Every wrong answer came
+from the question "is this byte code or is it text?", and this tree is unusually
+adversarial about that because its gates explain themselves in prose that quotes
+code — the very habit that makes the refusals good makes the corpus hostile to
+naive scanning. Anyone estimating the cost of the *next* scanner should budget
+for the masker and assume the matching is free.
+
+**And the fourth cause is this file's own subject, one level down again.** A
+`<<<` here-string read as a `<<` heredoc opener made the masker consume every
+line to EOF looking for a delimiter that was really a variable expansion. The
+visible effect: `boot-test.sh` silently fell from 114 command substitutions to
+**46**, and the gate reported a clean tree in a confident tone. There was no
+error, no exception, no empty output — just less looking. That is the fifth
+sighting in this file of *a gate that discovers nothing reports no failures,
+which reads exactly like a pass*, and it is why the gate carries a
+`CANDIDATE_FLOOR` as well as a file-count floor: the file count stayed healthy
+throughout, and only the substitution count moved.
+
+`userspace/oils/tests/corpus/` is excluded, and is the only exclusion. Its files
+are inputs to a shell parser rather than programs anyone runs, so an
+unresolvable callee there is routinely the fixture's whole point —
+`lineno-cmdsub.sh` calls `nosuchcommand_xyz` deliberately, to pin down which
+line number the diagnostic names. That exclusion is itself self-tested: the
+suite asserts it stays at one entry, that it never names a `scripts/` path, and
+that the directory still exists, so it cannot silently widen into a way of
+switching the gate off.

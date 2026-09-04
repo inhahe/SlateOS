@@ -459,14 +459,14 @@ fn parse_jpeg_dimensions(data: &[u8]) -> Option<ImageDimensions> {
         return None;
     }
 
-    let mut pos = 2;
-    while pos + 1 < data.len() {
+    let mut pos: usize = 2;
+    while pos.saturating_add(1) < data.len() {
         if *data.get(pos)? != 0xFF {
-            pos += 1;
+            pos = pos.saturating_add(1);
             continue;
         }
-        let marker = *data.get(pos + 1)?;
-        pos += 2;
+        let marker = *data.get(pos.checked_add(1)?)?;
+        pos = pos.checked_add(2)?;
 
         // Skip padding 0xFF bytes.
         if marker == 0xFF || marker == 0x00 {
@@ -477,7 +477,7 @@ fn parse_jpeg_dimensions(data: &[u8]) -> Option<ImageDimensions> {
             continue;
         }
 
-        if pos + 2 > data.len() {
+        if pos.saturating_add(2) > data.len() {
             return None;
         }
         let seg_len = byteread::u16_be_at(data, pos)? as usize;
@@ -487,18 +487,20 @@ fn parse_jpeg_dimensions(data: &[u8]) -> Option<ImageDimensions> {
 
         // SOF0 (baseline), SOF1 (extended sequential), SOF2 (progressive)
         if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 {
-            if pos + 7 > data.len() {
+            if pos.saturating_add(7) > data.len() {
                 return None;
             }
-            let height = byteread::u16_be_at(data, pos + 3)? as u32;
-            let width = byteread::u16_be_at(data, pos + 5)? as u32;
+            let height = byteread::u16_be_at(data, pos.checked_add(3)?)? as u32;
+            let width = byteread::u16_be_at(data, pos.checked_add(5)?)? as u32;
             if width == 0 || height == 0 {
                 return None;
             }
             return Some(ImageDimensions { width, height });
         }
 
-        pos += seg_len;
+        // `seg_len >= 2` is enforced above, so this always advances — which
+        // is what stops a crafted JPEG spinning here forever.
+        pos = pos.checked_add(seg_len)?;
     }
     None
 }
@@ -535,10 +537,18 @@ fn fit_dimensions(w: u32, h: u32, max_size: u32) -> (u32, u32) {
         return (w, h);
     }
     if w >= h {
-        let new_h = (h as u64 * max_size as u64 / w as u64).max(1) as u32;
+        let new_h = u64::from(h)
+            .saturating_mul(u64::from(max_size))
+            .checked_div(u64::from(w))
+            .unwrap_or(1)
+            .max(1) as u32;
         (max_size, new_h)
     } else {
-        let new_w = (w as u64 * max_size as u64 / h as u64).max(1) as u32;
+        let new_w = u64::from(w)
+            .saturating_mul(u64::from(max_size))
+            .checked_div(u64::from(h))
+            .unwrap_or(1)
+            .max(1) as u32;
         (new_w, max_size)
     }
 }
@@ -1141,12 +1151,12 @@ fn draw_block_text(canvas: &mut Canvas, text: &str, color: Color, x: u32, y: u32
         let char_x = start_x.saturating_add((ci as u32).saturating_mul(ADVANCE));
 
         for (row, bits) in bitmap.iter().enumerate() {
-            for col in 0..5u32 {
+            for col in 0..5u8 {
                 // Bit 4 is the leftmost column of the 5-wide glyph.
-                if bits & (1 << (4 - col)) == 0 {
+                if bits & (1u8 << (4u8.saturating_sub(col))) == 0 {
                     continue;
                 }
-                let px = char_x.saturating_add(col.saturating_mul(SCALE));
+                let px = char_x.saturating_add(u32::from(col).saturating_mul(SCALE));
                 let py = start_y.saturating_add((row as u32).saturating_mul(SCALE));
                 canvas.fill_rect(px, py, SCALE, SCALE, color);
             }
@@ -1264,7 +1274,7 @@ impl ThumbnailGenerator {
     /// view is about to draw it; a full or read-only cache directory is a
     /// reason to regenerate next time, not a reason to fail now.
     pub fn process_batch(&mut self, batch_size: usize) -> usize {
-        let mut processed = 0;
+        let mut processed: usize = 0;
         for _ in 0..batch_size {
             let req = match self.pending.pop_front() {
                 Some(r) => r,
@@ -1286,7 +1296,7 @@ impl ThumbnailGenerator {
                 }
             };
             self.completed.push((req, thumb));
-            processed += 1;
+            processed = processed.saturating_add(1);
         }
         processed
     }
@@ -1379,7 +1389,7 @@ impl DiskCache {
         self.ensure_dir()?;
         let file_path = self.cache_filename(&thumb.source_path, thumb.source_mtime, cap);
 
-        let mut data = Vec::with_capacity(8 + thumb.pixels.len());
+        let mut data = Vec::with_capacity(thumb.pixels.len().saturating_add(8));
         data.extend_from_slice(&thumb.width.to_le_bytes());
         data.extend_from_slice(&thumb.height.to_le_bytes());
         data.extend_from_slice(&thumb.pixels);
@@ -2761,5 +2771,68 @@ mod tests {
     fn make_test_thumb(name: &str, size: u32) -> Thumbnail {
         let canvas = Canvas::filled(size, size, Color::rgba(128, 128, 128, 128));
         into_thumbnail(canvas, Path::new(name), 42)
+    }
+
+    /// Scaling preserves the aspect ratio and never returns a zero side.
+    ///
+    /// `fit_dimensions` has eleven callers and had **no test** before
+    /// 2026-09-03, which was discovered by rewriting its division to
+    /// `checked_div` and having nothing to say whether the behaviour was
+    /// unchanged. The rewrite is safe *because* of the `w == 0 || h == 0`
+    /// guard above it; this is what pins that the guard is still there.
+    #[test]
+    fn scaling_preserves_the_ratio_and_never_returns_zero() {
+        // Already small enough: untouched.
+        assert_eq!(fit_dimensions(40, 30, 128), (40, 30));
+
+        // Landscape and portrait both pin the long side to `max_size`.
+        assert_eq!(fit_dimensions(400, 200, 100), (100, 50));
+        assert_eq!(fit_dimensions(200, 400, 100), (50, 100));
+        assert_eq!(fit_dimensions(300, 300, 100), (100, 100));
+
+        // A sliver does not scale to nothing — a zero-height thumbnail is an
+        // invisible one, and `.max(1)` is what stops it.
+        let (w, h) = fit_dimensions(10_000, 3, 100);
+        assert_eq!(w, 100);
+        assert!(h >= 1, "a very wide image scaled to zero height");
+
+        // The degenerate inputs the guard exists for.
+        assert_eq!(fit_dimensions(0, 10, 100), (0, 0));
+        assert_eq!(fit_dimensions(10, 0, 100), (0, 0));
+        assert_eq!(fit_dimensions(10, 10, 0), (0, 0));
+    }
+
+    /// No prefix of a JPEG panics or hangs the dimension parser.
+    ///
+    /// The segment walker advances by a length read out of the file. It is
+    /// correct — `seg_len < 2` is refused, so the cursor always moves — but
+    /// that is the property worth pinning rather than assuming, since the same
+    /// shape in `apps/musicplayer`'s WAV parser could be made to loop forever.
+    /// A missed bound shows up only at the length that reaches it, so this
+    /// sweeps every prefix rather than sampling.
+    #[test]
+    fn no_prefix_of_a_jpeg_panics_or_hangs_the_parser() {
+        let mut jpeg: Vec<u8> = vec![0xFF, 0xD8];
+        // A comment segment, then SOF0 with 64x48.
+        jpeg.extend_from_slice(&[0xFF, 0xFE, 0x00, 0x04, 0xAA, 0xBB]);
+        jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
+        jpeg.extend_from_slice(&48u16.to_be_bytes());
+        jpeg.extend_from_slice(&64u16.to_be_bytes());
+        jpeg.extend_from_slice(&[0u8; 8]);
+
+        // `ImageDimensions` is not `PartialEq`, so the fields are compared —
+        // and asserting the fixture parses is what keeps the sweep below
+        // meaningful rather than a loop over something that is not a JPEG.
+        let got = parse_jpeg_dimensions(&jpeg).expect("the fixture is a JPEG");
+        assert_eq!((got.width, got.height), (64, 48));
+
+        for len in 0..=jpeg.len() {
+            let _ = parse_jpeg_dimensions(jpeg.get(..len).unwrap_or(&[]));
+        }
+
+        // A segment claiming a length of zero is refused rather than walked
+        // forever: `seg_len < 2` is the check that makes the cursor advance.
+        let stuck = vec![0xFF, 0xD8, 0xFF, 0xFE, 0x00, 0x00, 0x00, 0x00];
+        assert!(parse_jpeg_dimensions(&stuck).is_none());
     }
 }

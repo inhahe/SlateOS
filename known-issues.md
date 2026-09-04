@@ -56845,9 +56845,27 @@ Production findings by lint:
 | `indexing_slicing` (slicing) | 15 |
 | everything else | 30 |
 
-Worst crates by *production* findings: `paint` 135, `soundrecorder` 55,
-`habits` 43, `markdowneditor` 40, `regextester` 39, `installer` 33,
-`explorer` 33, `finance` 23, `metronome` 21, `weather` 21, `reminders` 21.
+**Seven crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
+`habits`, `markdowneditor`, `regextester`, `explorer` and `installer` — taking
+**408 production findings out of the 588 (69%)**. The first six were converted
+to `oswindow::app` in the same pass, since the trigger below says to take a
+crate's debt when converting it; `installer` is a CLI tool with no window, so
+it got the lint half alone.
+
+Worst crates by *production* findings: ~~`paint` 135~~, ~~`soundrecorder` 55~~,
+~~`habits` 43~~, ~~`markdowneditor` 40~~, ~~`regextester` 39~~, ~~`installer`
+33~~, ~~`explorer` 33~~, `finance` 23, `metronome` 21, `weather` 21,
+`reminders` 21.
+
+**`installer` had been reporting a count that was not its count.** Its
+`build.rs` embeds a Windows manifest and did so with an `expect`. Under
+`-D warnings` clippy stops at the *build script*, before it compiles the crate
+at all — so `cargo clippy -p installer -- -D warnings` failed on one line in
+`build.rs` and never analysed `lib.rs` or `grub.rs`. The 33 above came from the
+survey's `--all-targets` run; a bare per-crate check made the crate look like it
+had a single trivial finding. **Worth checking elsewhere:** any crate with a
+`build.rs` that trips a lint is hiding its whole body behind that one line.
+
 
 **Note that `metronome` is on that list**, and it is one of the three apps that
 were *already* converted before today. Wiring an app to the compositor does not
@@ -56904,6 +56922,44 @@ caller is the other defect this file is full of.
 — the two passes touch the same files and the lint tail is most of the work
 either way (see `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`). `paint` at 135 is the
 one worth doing on its own.
+
+### `apps/paint` done 2026-09-03 — 136 to 0, and the pass found a 687 GB allocation
+
+**Not by adding 136 `saturating_*` calls.** Ninety-eight of them were in the
+rasterizer — Bresenham ellipse steps, rounded-rect corners, line drawing — and
+saturating there would be *worse than the lint*: a step that saturated would
+draw a wrong shape in silence, where an overflow at least announces itself in a
+debug build. The fix for a rasterizer is to bound its inputs and then let the
+arithmetic be total.
+
+So: `MAX_CANVAS_DIMENSION` (16384/side, chosen as the GPU texture limit) plus
+`MAX_CANVAS_PIXELS` (64 Mpx), enforced in `PaintApp::set_canvas_size`, which is
+now the **only** writer of `canvas_width`/`canvas_height`. The eleven rasterizer
+functions carry `#[allow(clippy::arithmetic_side_effects)]` with the headroom
+stated: at 16384 the largest intermediate any of them forms is `2 * r * r` =
+5.4e8 against `i32::MAX` of 2.1e9. `the_canvas_bound_leaves_the_rasterizer_inside_i32`
+computes that in `i64` and fails if the constant is ever raised without
+re-reading the rasterizer — so the suppression has a test under it rather than
+a comment.
+
+**Two bounds and not one, because they answer different questions.** Per-side is
+what the rasterizer's arithmetic needs. It does not bound the *memory*: 16384 x
+16384 is 268 Mpx, a gigabyte per layer. The area cap is what bounds that, and
+the per-side bound cannot do its job without being set so low it refuses an
+ordinary 600 dpi scan.
+
+**The test found a real defect while being written.** `new_canvas` clamped the
+two fields and then allocated its layer from its own *arguments* — so
+`new_canvas(u32::MAX, u32::MAX)` asked the allocator for **687 GB** and killed
+the process. Bounding the record of a size is not bounding the memory.
+`set_canvas_size` now *returns* the size it settled on, and `new_canvas` and
+`resize_canvas` allocate from that; returning it rather than leaving callers to
+read the fields back is what makes the mistake hard to repeat. The other 38
+findings were ordinary logic arithmetic and are `checked_*`/`saturating_*`.
+
+Worth generalising, because it is the second time today the same shape has
+appeared: **a bound that is not on the path the memory is allocated from is not
+a bound.**
 
 **If never fixed:** 143 applications ship with 588 unchecked operations, mostly
 arithmetic, in code that reads user files. Most will never be reached. The ones

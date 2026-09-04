@@ -113780,12 +113780,22 @@ longer exists.
 
 ## TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT (lane B, 2026-09-03)
 
-**STATUS 2026-09-04: steps 1 and 2 of the proper fix have landed** — the checker
-exists and pre-push gate 12 runs it. Left open rather than marked RESOLVED
-because the automation covers exactly one crate: `-p coreutils`, on a push that
-touches `userspace/coreutils`. Every other crate in this lane — `posix`,
-`userspace/shell`, the ~30 support crates — still has the whole defect below,
-unmeasured, and step 4 is what would close it.
+**RESOLVED 2026-09-04.** All four steps landed. The checker exists (step 1),
+pre-push gate 12 runs it (step 2), and its scope is no longer one crate but is
+**computed from the push** (step 4): every crate this lane owns that a push
+changes and that contains a `cfg(unix)`/`cfg(windows)` arm is compiled and
+tested for `x86_64-unknown-linux-gnu` before the push is allowed.
+
+Step 4 is worth reading even though it is closed, because **its own premise was
+wrong and a measurement is what showed it.** It named `posix` and
+`userspace/shell` as the crates to widen to; both have zero `cfg(unix)` arms,
+so compiling them for Linux would have added 8m41s a push to type-check source
+the host build had just type-checked — while 32 crates that *do* have such arms
+were on nobody's list. The fix was to stop listing.
+
+What remains unautomated is deliberate and named in step 4: crates outside this
+lane's globs, and the *dependencies* of a checked crate (a dependency whose API
+changes breaks the host build too, which everything else already catches).
 
 **In short:** the coreutils crates are built, linted and tested against the
 *Windows* host target, because that is the toolchain the machine has. Every
@@ -113875,9 +113885,12 @@ to abandon it.
    drives real pushes through the real hook against a stub checker and asserts
    on whether the checker was *invoked* — because a declined gate and a passing
    gate both allow the push, and only the invocation count tells them apart.
-3. Step 2 has landed, but the gate is scoped to `userspace/coreutils` and only
-   fires on a push. **Run step 1's script by hand after touching any
-   `#[cfg(unix)]` arm** in a crate it does not cover, and while iterating:
+3. ~~Step 2 has landed, but the gate is scoped to `userspace/coreutils` and only
+   fires on a push.~~ **Largely obsolete since step 4 (2026-09-04):** the gate
+   now covers *any* crate in this lane that a push changes and that has a
+   platform-conditional arm, so the manual run is no longer the only thing
+   standing between an unchecked `cfg(unix)` arm and origin. It remains the way
+   to iterate — a push is a slow edit-compile loop — so:
 
    ```sh
    scripts/coreutils-check.sh --only linux            # both halves by default
@@ -113887,13 +113900,47 @@ to abandon it.
    First measured run, 2026-09-03: the whole `coreutils` lib reports **416**
    passing tests on the Linux target, `dirfd` alone **24** — against 0 of
    either on the host, since `dirfd`'s unix arm does not compile there at all.
-4. **Widen it past `coreutils`.** Gate 12 compiles one crate because that is
+4. **Widen it past `coreutils`.** ~~Gate 12 compiles one crate because that is
    where the defect was found and because the price is per-crate; the argument
    for it applies unchanged to `posix`, `userspace/shell` and the support
    crates, which are equally host-only-checked today. What is missing is a
    measurement per crate rather than a design: the gate already takes `-p`, and
-   widening it is a matter of deciding how many minutes a push may cost. Do
+   widening it is a matter of deciding how many minutes a push may cost.~~ Do
    that with numbers, not with the instinct that blocked step 2 for a day.
+
+   **DONE 2026-09-04, and the numbers refuted the step as written.** It asked
+   for `posix` and `userspace/shell` by name. Neither belongs:
+
+   | crate | `cfg(unix)`/`cfg(windows)` arms | linux half costs | tests there |
+   |---|---:|---:|---:|
+   | `userspace/coreutils` | 719 | 2m16s warm, ~6m cold | 405 (host: 361) |
+   | `oils` + `cpio` + `stat` | 108 + 20 + 18 | 5m03s together | 4 binaries, clean |
+   | `posix` | **0** | 6m16s | 20,652 |
+   | `userspace/shell` | **0** | 2m25s | **0** |
+
+   `posix`'s conditionals are real but they are `target_os = "none"` — 1,845 of
+   them — which is false on the Windows host and false on Linux alike, and is
+   already compiled by the default `x86_64-unknown-none` build. `userspace/shell`
+   is a 159-line toolchain-validation stub, not a shell. Compiling either for
+   Linux type-checks precisely the source the host build already type-checked,
+   for 8m41s a push. The step's premise — "the argument applies unchanged" —
+   was false; the argument is *entirely* about `cfg(unix)` arms, and those two
+   crates have none.
+
+   Meanwhile the same census found **32 other crates in this lane that do have
+   such arms and were on nobody's list**: `oils` 108, `cpio` 20, `stat` 18,
+   `htop` 9, then `wall`/`vi`/`tput`/`tar`/`stty`/`pkg`/`nano`/`mktemp` 6 each,
+   `ssh-keygen`/`man`/`getopt`/`authlib` 5, `sftp`/`service`/`rsync`/`quoting`/
+   `less` 4, `sshd`/`chown`/`backup` 3, `scp`/`notimpl`/`lsof`/`logind`/
+   `localtime`/`firejail`/`du` 2, `file` 1.
+
+   So the answer was not a longer list — a list is wrong the day it is written
+   and rots from there. **Gate 12's scope is now computed** from the crates a
+   push changed, minus those with no platform-conditional arm at all, the
+   filter being a `git grep` against the pushed commit. It costs nothing on a
+   push that touches no such crate, cannot go stale, and reached `stat` and
+   `oils` without anyone naming them. See `design-decisions.md` §767 and the
+   five new cases in `scripts/test-pre-push-unixhalf-gate.py`.
 
 **If it is never fixed:** warnings and dead code accumulate in the unix half
 where nobody sees them, and — much worse — a unix-only test can rot into a

@@ -1420,6 +1420,14 @@ def build_record(serial: Serial | None, verdict: str, args,
         rec["wall_seconds"] = args.wall_seconds
     if args.build_seconds is not None:
         rec["build_seconds"] = args.build_seconds
+    # The two phases that were invisible until 2026-09-04. Written on the same
+    # absent-not-zero rule as `build_seconds`, and for a sharper reason: a row
+    # missing `gates_seconds` is a run whose gate phase never completed, which
+    # is a different fact from a run whose gates were free.
+    if args.gates_seconds is not None:
+        rec["gates_seconds"] = args.gates_seconds
+    if args.script_seconds is not None:
+        rec["script_seconds"] = args.script_seconds
     # Disk pressure, which is a cause of boot-test failures this file could not
     # previously distinguish from kernel failures.
     #
@@ -1893,6 +1901,82 @@ def report_build(records: list[dict]) -> None:
           "Runs that did not build are absent, not zero.)")
 
 
+def phase_breakdown(rec: dict) -> list[tuple[str, float]]:
+    """`[(phase, seconds), ...]` for one row, ending with the unaccounted rest.
+
+    Pure, and separate from the printing, because the arithmetic is the part
+    worth testing: the interesting case is not the well-formed row but the one
+    whose phases do not add up. A run recorded before this field existed, a run
+    that skipped the build, and a run that spent twenty minutes queued behind
+    another lane's boot lock all produce a *different* residual, and a reader
+    cannot tell them apart from a total alone.
+
+    Returns `[]` when `script_seconds` is absent, because without a total there
+    is nothing to break down -- the individual phases are still in the row and
+    still readable, but calling three numbers with no denominator a "breakdown"
+    would be the same overstatement this whole field set exists to remove.
+
+    The residual is reported even when it is large, and *especially* then. It is
+    every wait that belongs to no phase: free-space checks, the commit-headroom
+    wait that can block for many minutes behind another lane's build, and the
+    cross-worktree boot lock. Those are the runs where "why did this take
+    ninety minutes" has an answer that is not about the kernel at all.
+
+    A negative residual is possible in principle -- the phases are stamped by
+    four independent `date +%s` pairs and a clock could step backwards between
+    them -- and is passed through rather than clamped, on the same rule the rest
+    of this file follows: a number that cannot be true should look untrue, not
+    be quietly rounded into something plausible.
+    """
+    total = rec.get("script_seconds")
+    if not isinstance(total, (int, float)) or isinstance(total, bool):
+        return []
+    out: list[tuple[str, float]] = []
+    accounted = 0.0
+    for key, name in (("gates_seconds", "gates"),
+                      ("build_seconds", "build"),
+                      ("wall_seconds", "qemu")):
+        val = rec.get(key)
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            continue
+        out.append((name, float(val)))
+        accounted += float(val)
+    out.append(("other", float(total) - accounted))
+    return out
+
+
+def report_phases(current: dict) -> None:
+    """Where this run's wall clock went, phase by phase.
+
+    Printed for the run in hand rather than aggregated over history, because
+    the question it answers is asked about a specific run -- "that took ninety
+    minutes and `wall_seconds` says 501, where did the rest go" -- and the
+    answer is not stable enough across hosts to have a useful median. Two lanes
+    building at once changes the gate phase by a factor of several.
+    """
+    parts = phase_breakdown(current)
+    if not parts:
+        return
+    total = float(current["script_seconds"])
+    # Guarded because a zero total is arithmetically possible (a sub-second run
+    # that failed instantly) and a percentage of it is not.
+    if total > 0:
+        body = ", ".join(f"{n} {v:.0f}s ({v / total * 100:.0f}%)"
+                         for n, v in parts)
+    else:
+        body = ", ".join(f"{n} {v:.0f}s" for n, v in parts)
+    print(f"[boot-history] this run took {total:.0f}s: {body}")
+    # Named rather than left as a gap in the arithmetic. "other" is the one
+    # entry a reader cannot guess the meaning of, and it is also the one most
+    # likely to be large on a bad day.
+    other = next((v for n, v in parts if n == "other"), 0.0)
+    if total > 0 and other > 0.25 * total:
+        print("[boot-history]   ('other' is time in no phase: the free-space "
+              "and commit-headroom waits, and queueing for the cross-worktree "
+              "boot lock. A large share here means the host was contended, not "
+              "that the kernel or the gates were slow.)")
+
+
 def report(records: list[dict], current: dict | None) -> None:
     if current is not None:
         verdict = current["verdict"]
@@ -1933,6 +2017,7 @@ def report(records: list[dict], current: dict | None) -> None:
             for fp in FINGERPRINTS:
                 if fp.id in hits and fp.note:
                     print(f"[boot-history]   {fp.id}: {fp.note}")
+        report_phases(current)
 
     # Rows that are not evidence about the tree are set aside before anything is
     # counted, not filtered at each call site: the streak and the totals must
@@ -1979,15 +2064,55 @@ def cmd_streaks(history_path: str) -> int:
     return 0
 
 
+# The `--list` header, kept beside the row's format string so the two cannot
+# drift apart, and named `LIST_COLUMNS` so a test can locate a column by name
+# instead of by index.
+#
+# There was no header until 2026-09-04, and it was survivable only while every
+# column was self-describing: a timestamp, a sha, a verdict, one duration. The
+# second duration is what made it necessary -- `qemu` and `total` are the same
+# shape, differ by a factor of several, and nothing on the line said which was
+# which. An unlabelled pair of numbers that a reader has to guess between is
+# worse than the single number it replaced.
+LIST_COLUMNS = (("when", 26), ("commit", 10), ("verdict", 17),
+                ("qemu", 6), ("total", 7), ("san", 5), ("accel", 5),
+                ("label", 12), ("issues", 0))
+
+
 def cmd_list(history_path: str, limit: int) -> int:
     records = load_history(history_path)
     if not records:
         print(f"boot-history: no records in {display_path(history_path)}")
         return 0
+    # Right-aligned for the two duration columns, matching the rows below, so
+    # the heading sits over the digits rather than over the padding.
+    head = " ".join(
+        (name.rjust(w) if name in ("qemu", "total") else name.ljust(w))
+        for name, w in LIST_COLUMNS)
+    print(head.rstrip())
+    # `total` is `-` on every row written before the field existed, which is
+    # nearly all of them. Said once here rather than left for the reader to
+    # infer from a column of dashes, which reads like a bug in the tool.
+    print("(`total` is the whole boot-test.sh run and `qemu` is the emulator "
+          "window alone; rows before 2026-09-04 measured only the latter.)")
     for rec in records[-limit:]:
         fps = ",".join(rec.get("fingerprints") or []) or "-"
         wall = rec.get("wall_seconds")
         wall_s = f"{wall:.0f}s" if isinstance(wall, (int, float)) else "-"
+        # The column beside `wall`, and the one that makes it interpretable.
+        # `wall` is QEMU alone, so for the whole life of this file a reader
+        # comparing a row against how long they had actually waited found a
+        # number several times too small and no way to reconcile it: the
+        # 26545e857 row says 501s for a run of about ninety minutes.
+        #
+        # `-` on every row written before 2026-09-04, which is most of them.
+        # That is the honest rendering -- those runs did not measure this -- and
+        # it is also why the column is worth having: a budget derived from the
+        # rows that *do* carry it is derived from evidence, whereas the outer
+        # run-timeout.py budget in boot-test.sh's header was derived from
+        # somebody watching a console twice.
+        total = rec.get("script_seconds")
+        total_s = f"{total:.0f}s" if isinstance(total, (int, float)) else "-"
         # Abbreviated to keep the row one terminal line, but still three-valued:
         # `kasan`, `-` (kernel said "none"), `?` (nothing said). A row whose
         # duration looks wrong is almost always a row from the other build, and
@@ -2002,8 +2127,9 @@ def cmd_list(history_path: str, limit: int) -> int:
         accel_s = {"QEMU TCG": "tcg", "Hyper-V/WHPX": "whpx",
                    "bare metal": "metal"}.get(accel_of(rec), "?")
         print(f"{rec.get('ts','?'):<26} {rec.get('commit','?'):<10} "
-              f"{rec.get('verdict','?'):<17} {wall_s:>6} {san_s:<5} "
-              f"{accel_s:<5} {rec.get('label','') or '-':<12} {fps}")
+              f"{rec.get('verdict','?'):<17} {wall_s:>6} {total_s:>7} "
+              f"{san_s:<5} {accel_s:<5} "
+              f"{rec.get('label','') or '-':<12} {fps}")
     return 0
 
 
@@ -2057,6 +2183,29 @@ def main(argv=None) -> int:
                              "profile's cost. This is the half of "
                              "open-questions.md Q46's 'slower build, faster "
                              "boot' tradeoff that had never been measured.")
+    parser.add_argument("--gates-seconds", type=float, default=None,
+                        help="seconds spent in boot-test.sh's pre-build gate "
+                             "phase -- the static checkers, the tooling "
+                             "test-suite sweep, shellcheck and the kernel "
+                             "clippy pass. Omitted when the phase did not "
+                             "finish, which is the ordinary shape of a gate "
+                             "failure. How big it is relative to the build is "
+                             "not yet known: the one hand-measurement we have "
+                             "(2026-08-31, ~3000s pre-QEMU) lumped gates and "
+                             "build together, which is exactly the conflation "
+                             "this field exists to end. The first rows to "
+                             "carry it will say.")
+    parser.add_argument("--script-seconds", type=float, default=None,
+                        help="seconds the whole boot-test.sh run took, start "
+                             "to finish. `wall_seconds` is QEMU alone, so "
+                             "until this field existed the row could not "
+                             "account for its own wall clock: the 26545e857 "
+                             "row reads 501s for a run that took about ninety "
+                             "minutes. Subtracting gates+build+wall from this "
+                             "leaves the waits -- free space, commit headroom, "
+                             "the cross-worktree boot lock -- which belong to "
+                             "no phase and are what a surprising total is "
+                             "usually made of.")
     parser.add_argument("--free-gb-min", type=int, default=None,
                         metavar="GIB",
                         help="the LOWEST free space seen on the tree's volume "

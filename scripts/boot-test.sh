@@ -73,6 +73,18 @@
 # what happened twice on 2026-08-31 before this comment was rewritten.
 # See known-issues.md -> Lesson 50.
 #
+# STOP HAND-MEASURING THIS.  Both numbers above were obtained by watching a
+# console, because bench/boot-history.jsonl -- hundreds of rows, and the obvious
+# place to ask -- recorded only `wall_seconds`, which is QEMU alone.  Since
+# 2026-09-04 every row also carries `script_seconds` (the whole run) and
+# `gates_seconds` (the pre-build gate phase), so the budget can be derived from
+# the last N runs on this host instead of from one remembered observation:
+#
+#   python scripts/boot-history.py --list      # per-run phase columns
+#
+# Re-derive the 7200 above from those rows rather than trusting this paragraph;
+# the gate phase grows every time a lane adds a checker, and a comment does not.
+#
 # Usage:
 #   ./scripts/boot-test.sh              # full build + test (waits for BOOT_OK)
 #   ./scripts/boot-test.sh --no-build   # skip build (still re-stages target/!)
@@ -208,6 +220,30 @@
 
 set -euo pipefail
 
+# --- When this run began -----------------------------------------------------
+#
+# Recorded as `script_seconds` in bench/boot-history.jsonl, because until now
+# the row could not account for its own wall clock.  `wall_seconds` is QEMU
+# alone -- `QEMU_END_EPOCH - QEMU_START_EPOCH` -- so the 26545e857 row reads
+# 501 for a run that took about ninety minutes, and every phase before the
+# emulator started is *absent* from the file rather than small in it.
+#
+# That gap has already cost real work twice.  The header above budgets
+# run-timeout.py at 7200s on the strength of "~3000s observed pre-QEMU", and
+# that number came from watching a console on 2026-08-31 -- because the history
+# file, which has hundreds of rows and is the obvious place to ask, does not
+# know.  Before that, the same header budgeted 900s from the boot half alone
+# and killed two healthy guests mid-diagnostics.  A phase nothing measures is a
+# phase every estimate has to guess at, and the guesses were wrong in the
+# direction that destroys the evidence.
+#
+# Stamped here rather than after the re-exec below so it covers the snapshot
+# copy too, and threaded through that re-exec explicitly: the child re-runs
+# this line, so without inheriting the value it would stamp its own start and
+# silently drop whatever the parent spent.  The `:-` is what makes the parent
+# the single source of truth for both processes.
+BOOT_TEST_START_EPOCH="${BOOT_TEST_START_EPOCH:-$(date +%s)}"
+
 # --- Run from a snapshot of ourselves, not from the file in the tree ---------
 #
 # bash does not read a script into memory. It reads it in chunks, and it seeks
@@ -257,6 +293,7 @@ if [ -z "${BOOT_TEST_REEXEC:-}" ]; then
     trap 'rm -f "$_bt_snapshot"' EXIT INT TERM
     BOOT_TEST_REEXEC=1 \
     BOOT_TEST_ORIG_DIR="$(cd "$(dirname "$0")" && pwd)" \
+    BOOT_TEST_START_EPOCH="$BOOT_TEST_START_EPOCH" \
         bash "$_bt_snapshot" "$@"
     exit $?
 fi
@@ -2753,6 +2790,36 @@ record_boot_outcome() {
     if [ -n "${BUILD_SECONDS:-}" ]; then
         args+=(--build-seconds "$BUILD_SECONDS")
     fi
+    # The two phases the row could not previously see.
+    #
+    # BOTH GUARDS ARE UNREACHABLE TODAY, and that is worth saying rather than
+    # letting the shape imply otherwise.  This function has exactly one caller,
+    # `on_boot_exit`, whose trap is installed several thousand lines below the
+    # end of the gate phase -- so any run that reaches here has finished the
+    # gates and stamped both variables.  A gate *failure* exits before the trap
+    # exists and writes no row at all, which is correct: a run that never booted
+    # is not a boot outcome, and recording one would reset the consecutive-clean
+    # streak that four open kernel issues use as their closure bar.
+    #
+    # They are kept because the unreachability is a property of the current
+    # ordering and nothing enforces it.  If the trap is ever moved earlier --
+    # which is a reasonable thing to want, so that a gate failure leaves a
+    # trace -- the guards are what stop that change from silently recording a
+    # 0-second gate phase and a 0-second run.  An absent field is a question the
+    # reader can answer; a fabricated zero drags every median toward it while
+    # looking like a measurement.
+    if [ -n "${GATES_SECONDS:-}" ]; then
+        args+=(--gates-seconds "$GATES_SECONDS")
+    fi
+    if [ -n "${BOOT_TEST_START_EPOCH:-}" ]; then
+        local script_secs=$(( $(date +%s) - BOOT_TEST_START_EPOCH ))
+        # Guarded against a backwards clock for the same reason `wall` below is:
+        # a negative duration is not a measurement, and one that reaches the
+        # file poisons every median drawn from the column forever after.
+        if [ "$script_secs" -ge 0 ]; then
+            args+=(--script-seconds "$script_secs")
+        fi
+    fi
     # Absent when nothing was measured -- --min-free-gb=0 disables the check
     # entirely, and an unreadable df returns early -- because a run that did not
     # look is not a run that saw zero GiB free.
@@ -3043,6 +3110,32 @@ check_prerequisites() {
 }
 
 check_prerequisites
+
+# --- The gate phase starts here ----------------------------------------------
+#
+# Everything from this line to `check_cfg_unix` is a gate: thirty-odd static
+# checkers, the whole tooling test-suite sweep, shellcheck, and a full clippy
+# pass over the kernel.  The phase is recorded as `gates_seconds`.
+#
+# Whether it is bigger than the build is an open question, and deliberately
+# left open here.  The only measurement in the header above -- "~3000s before
+# QEMU was even started" -- is of gates *and* clippy *and* build together, so it
+# cannot answer it, and writing a guess into this comment would put the same
+# unsourced number back in circulation that this stamp exists to replace.
+#
+# Stamped AFTER check_prerequisites, and matching the reason `BUILD_START_EPOCH`
+# does not use `SECONDS`: locating a toolchain is not a gate, and folding it in
+# would make the number answer a different question on a host that had to go
+# looking for one.
+#
+# The pairing point below is deliberately the last gate rather than the first
+# line of Step 1, so the free-space and commit-headroom waits that precede the
+# build fall into neither `gates_seconds` nor `build_seconds`.  That is not an
+# oversight: `check_commit_headroom` can block for many minutes waiting out
+# another lane, and charging that to the gates would make a contended host look
+# like an expensive checker.  It shows up in `script_seconds` minus the three
+# phases, which is where an unexplained wait belongs.
+GATES_START_EPOCH="$(date +%s)"
 
 # A landed request is stamped, not deleted (roadmap.md rule 2, §315).
 #
@@ -5925,6 +6018,15 @@ check_cfg_unix() {
 }
 
 check_cfg_unix
+
+# --- The gate phase ends here ------------------------------------------------
+#
+# Said out loud as well as recorded, for the same reason the build time is: a
+# reader deciding an outer run-timeout.py budget is looking at this console,
+# not at bench/boot-history.jsonl, and the header's budgeting advice is exactly
+# what this number is evidence for.
+GATES_SECONDS=$(( $(date +%s) - GATES_START_EPOCH ))
+echo "=== Gates OK (${GATES_SECONDS}s) ==="
 
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then

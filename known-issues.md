@@ -111385,6 +111385,10 @@ the regression test all exist. The work is:
    empty directories), and a fixture whose *directory name* contains the alias
    makes `"<alias>" in output` true while the gate has skipped — `_push` now
    redacts the fixture's paths so no case can pass that way.
+   **Gate 8 covered 2026-09-04** (step 13), which leaves **gate 9 as the only
+   converted gate with no behavioural case at all**. The per-gate floors in
+   `test-checkers-honour-head.py` are the live record of which gates are
+   covered; the count is 82 across seven gates.
 
 5. **The path scope itself had the same defect, one level up.** Six gates decide
    whether to run at all through the hook's `touches()` helper, which asked
@@ -111835,6 +111839,54 @@ the regression test all exist. The work is:
 
     This is a defect in *correctness*, not coverage — it does not close step 4's
     gap. Gate 8 still has no case proving `--head` changes what it decides.
+
+13. **Gate 8 given behavioural coverage, 2026-09-04 — and the first run was
+    red.** Fourteen cases in `test-checkers-honour-head.py`, eleven at the
+    checker and three through the real hook, each input made to differ between
+    the commit and the worktree separately: the `.rs` enumeration, each file's
+    text, the baseline's entries, the baseline's *counts*, the `fixed:`
+    direction, the `target/` skip, both routes to exit 2, and an off-branch
+    push. The count case is the one that is particular to this gate — its
+    ratchet's granularity is a digit per file rather than a named finding, so a
+    case that only swaps entries in and out never reaches the value that
+    actually decides the verdict.
+
+    Two of the fourteen failed on the first run, and what they found is the
+    point of the exercise. `read_baseline_from` returned `{}` for a baseline
+    that was **not in the tree**, under a comment calling that "the safe
+    direction — it can only over-report". Over-reporting is not the safe
+    direction. A commit that moved `quote-names-baseline.txt` would have been
+    refused with gate 8's whole refusal over every site the real file forgives —
+    1798 diagnostics across 777 files nobody touched — which is the false
+    accusation `scripts/run-checker.sh` exists to argue is the worst thing a
+    gate can do, and the reliable way to get a gate bypassed. On a clean tree
+    the same read calls every entry stale instead, printing "the backlog is
+    fixed" over a commit that fixed nothing. Gates 4 and 6 both carry this
+    guard; gate 8 shipped its conversion with the corpus half and not this half.
+
+    Fixed by making absence `None` rather than `{}` — the live baseline is
+    legitimately *empty of entries*, so the two states must be distinguishable —
+    and adding `_no_baseline` beside `_no_corpus`, exit 2 for the same reason.
+    `check()`'s `baseline` argument became required in the same change: its old
+    `None` default meant "read it yourself", which would now be the same
+    sentinel as "there is nothing there" at a single call site. The guard sits
+    after `--write-baseline` (the mode whose job is to create the file) and
+    after the plain `report` path (which does not consult the ratchet and exists
+    to survey trees nobody has ratcheted yet).
+
+    **The lesson is about the two kinds of assertion, and it is the reason this
+    is written down rather than just fixed.** Gate 8 was wired on 2026-09-02,
+    listed in `HEAD_GATES`, and green for two days. That assertion is about the
+    *shape* of the invocation and it was telling the truth the whole time. It
+    simply cannot see a checker that takes `--head`, is handed the right sha,
+    and then answers from somewhere else — or, as here, one that reads the right
+    tree and mishandles what it finds. A summary that says "gate 8: wired and
+    asserted" reads as covered and is not. The floors table in
+    `test-checkers-honour-head.py` now carries this history where the next
+    person to add a gate will read it.
+
+    Gate 9 is now the only converted gate with no behavioural case at all, and
+    the same caveat applies to it verbatim.
 
 ### Why it is not done yet
 

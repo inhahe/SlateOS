@@ -67,8 +67,8 @@
 //! - [`FTS_PHYSICAL`] — do not follow symlinks (default and only
 //!   robust mode without cycle detection).
 //! - [`FTS_LOGICAL`] — follow symlinks (best-effort; no cycle
-//!   detection, so a symlink loop will eventually hit
-//!   [`MAX_FTS_DEPTH`] and ENOENT-out).
+//!   detection, so a symlink loop walks until it hits
+//!   [`MAX_FTS_DEPTH`] and stops there with [`FTS_DNR`]).
 //! - [`FTS_NOSTAT`] — skip [`crate::file::stat`] calls; `fts_statp`
 //!   is left zeroed and entries are typed by readdir's `d_type`.
 //! - [`FTS_NOCHDIR`] — accepted (and effectively always set — we
@@ -90,8 +90,13 @@
 //! ## Limits
 //!
 //! - [`MAX_FTS_INSTANCES`] = 2 concurrent open FTS streams.
-//! - [`MAX_FTS_DEPTH`] = 8 levels deep.  Entries below that are skipped
-//!   silently, matching BSD.
+//! - [`MAX_FTS_DEPTH`] = 8 levels deep.  A directory at that depth is
+//!   re-yielded as [`FTS_DNR`] with `fts_errno` = `ENOMEM` rather than
+//!   being descended into.  It used to be skipped in silence — the walk
+//!   simply moved on to the next sibling, and the ninth level, plus the
+//!   post-order [`FTS_DP`] for the directory itself, never appeared.  A
+//!   `rm -r` driven by that reported success on a tree it had not
+//!   emptied.  The limit is still a limit; it is no longer a lie.
 //! - **No limit on entries per directory.**  There was one — 64 — and
 //!   it was the last place in the traversal that could lose a file
 //!   without saying so.  See the implementation note above for what
@@ -825,16 +830,27 @@ fn fts_read_inst(inst: &mut Instance) -> *mut FtsEnt {
     let prev_instr = inst.current.fts_instr;
     inst.current.fts_instr = FTS_NOINSTR;
     if prev_info == FTS_D && prev_instr != FTS_SKIP {
-        // Try to descend into the directory we just yielded.
-        if inst.depth < MAX_FTS_DEPTH {
-            descend_into_current(inst);
-            // Note: descend_into_current pushes a frame.  Fall through
-            // to the main step which will yield the first child (or
-            // pop straight back to DP).
+        // We are about to descend into the directory just yielded.  Both
+        // ways that can fail re-yield *the same entry*, re-typed FTS_DNR
+        // with an errno — which is what glibc's `fts_read` does when
+        // `fts_build` returns NULL, and the only shape that makes the
+        // failure visible at all: `current` is the one entry record, so
+        // marking it and then stepping on would overwrite the mark before
+        // the caller ever saw it.  A caller that ignores FTS_DNR gets
+        // BSD's old behaviour; one that checks it (as `find` does) can
+        // print the "Permission denied" it should always have printed.
+        if let Some(e) = descent_refusal(inst.depth) {
+            inst.current.fts_info = FTS_DNR;
+            inst.current.fts_errno = e;
+            return core::ptr::addr_of_mut!(inst.current);
         }
-        // If we hit the depth limit we just keep walking siblings —
-        // matches BSD's "deeply nested" behavior of skipping deeper
-        // entries silently.
+        if let Err(e) = descend_into_current(inst) {
+            inst.current.fts_info = FTS_DNR;
+            inst.current.fts_errno = e;
+            return core::ptr::addr_of_mut!(inst.current);
+        }
+        // A frame was pushed.  Fall through to the main step, which
+        // yields the first child (or pops straight back to DP).
     } else if prev_info == FTS_D && prev_instr == FTS_SKIP {
         // User said skip — yield FTS_DP immediately and don't push.
         return emit_post_for_current(inst);
@@ -844,12 +860,34 @@ fn fts_read_inst(inst: &mut Instance) -> *mut FtsEnt {
     step(inst)
 }
 
+/// Whether a descent from `depth` must be refused, and with what `errno`.
+///
+/// A named function rather than an `if` at the one call site because the
+/// choice of `errno` *is* the decision, and it is the part a reader will
+/// want to argue with: running out of traversal stack says nothing about
+/// the directory, so reporting `EACCES` would send someone to check
+/// permissions that are fine.  `ENOMEM` is what BSD's `fts_build` reports
+/// when it cannot get the memory it needs, which is the same shape of
+/// answer.
+fn descent_refusal(depth: usize) -> Option<i32> {
+    if depth >= MAX_FTS_DEPTH {
+        Some(errno::ENOMEM)
+    } else {
+        None
+    }
+}
+
 /// Push a frame for the directory described by `current`, opening the
 /// stream the frame will read its children from.  Nothing is read here:
 /// the frame holds the stream for as long as it is on the stack, and
-/// `next_child` pulls one entry at a time.  On open failure, replaces
-/// `current` with an FTS_DNR record so the next `step` will yield it.
-fn descend_into_current(inst: &mut Instance) {
+/// `next_child` pulls one entry at a time.
+///
+/// `Err(errno)` means nothing was pushed and the traversal is still at
+/// the parent's level; the caller decides what the user sees.  It does
+/// *not* touch `current` itself — the failure has to be reported by
+/// returning `current`, not by marking it and stepping past it, and only
+/// the caller is in a position to return.
+fn descend_into_current(inst: &mut Instance) -> Result<(), i32> {
     let frame_idx = inst.depth;
     let mut frame = DIR_FRAME_INIT;
     frame.parent_path_len = inst.path_len as u16;
@@ -858,24 +896,10 @@ fn descend_into_current(inst: &mut Instance) {
 
     // SAFETY: inst.path is NUL-terminated at `path_len`.
     let path_ptr = inst.path.as_ptr();
-    match open_frame(path_ptr, &mut frame) {
-        Ok(()) => {
-            inst.stack[frame_idx] = frame;
-            inst.depth = inst.depth.wrapping_add(1);
-        }
-        Err(e) => {
-            // Convert the previously-yielded FTS_D into a "couldn't
-            // descend" outcome.  Replace current with FTS_DNR so the
-            // user sees it next, *but* we already advanced past it —
-            // so push a one-shot frame that will trigger DP-emission
-            // with the error.
-            // Simpler: just don't push; the next step will pop nothing
-            // and we'll continue with the parent's siblings.  Surface
-            // the error via fts_errno on the current entry.
-            inst.current.fts_info = FTS_DNR;
-            inst.current.fts_errno = e;
-        }
-    }
+    open_frame(path_ptr, &mut frame)?;
+    inst.stack[frame_idx] = frame;
+    inst.depth = inst.depth.wrapping_add(1);
+    Ok(())
 }
 
 /// Yield the FTS_DP that pairs with the most recently popped FTS_D.
@@ -1652,5 +1676,50 @@ mod tests {
             core::mem::size_of::<DirFrame>() < 1024,
             "a DirFrame that large is a listing buffer wearing a frame's name"
         );
+    }
+
+    // -- A descent that does not happen is reported -- -----------------------
+    //
+    // Neither failure can be provoked from a host test: one needs a
+    // directory `opendir` refuses, the other needs nine real levels. What
+    // is checkable is the shape both rely on -- that `descend_into_current`
+    // reports rather than repairs, and that the entry the caller re-reads
+    // is the same record it just saw, re-typed.
+
+    #[test]
+    fn a_failed_descent_pushes_no_frame() {
+        // The Err path used to fall through to `step`, which read the
+        // parent's next child and overwrote the FTS_DNR mark before the
+        // caller could see it -- so an unreadable directory was skipped as
+        // silently as an over-full one. What makes the caller's `return`
+        // correct is that a failed descent leaves the stack exactly as it
+        // was: same depth, no half-pushed frame to trip over later.
+        let mut inst = INSTANCE_INIT;
+        inst.path[0] = 0;
+        inst.path_len = 0;
+        let before = inst.depth;
+        // An empty path is not a directory, so `opendir` must refuse it.
+        // (On the host this goes through the SlateOS syscall shims and
+        // fails; the point of the assert is the *stack*, not the errno.)
+        let r = descend_into_current(&mut inst);
+        assert!(r.is_err(), "opendir(\"\") must not succeed");
+        assert_eq!(inst.depth, before);
+        assert!(inst.stack.iter().all(|f| f.dir.is_null()));
+    }
+
+    #[test]
+    fn a_descent_within_the_depth_limit_is_not_refused() {
+        assert!(descent_refusal(0).is_none());
+        assert!(descent_refusal(MAX_FTS_DEPTH - 1).is_none());
+    }
+
+    #[test]
+    fn the_depth_limit_is_a_resource_error_not_an_access_error() {
+        // ENOMEM rather than EACCES, because nothing is wrong with the
+        // directory -- we ran out of traversal stack. A caller that maps
+        // errno to a message would otherwise tell the user to check
+        // permissions on a directory whose permissions are fine.
+        assert_eq!(descent_refusal(MAX_FTS_DEPTH), Some(errno::ENOMEM));
+        assert_ne!(errno::ENOMEM, errno::EACCES);
     }
 }

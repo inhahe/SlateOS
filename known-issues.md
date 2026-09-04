@@ -57037,8 +57037,18 @@ and that is exactly the shape that survives a reading.
 screenful of information that is a constant compiled into the program. The
 drawing is real, the filtering and sorting and searching are real, the parsing
 is real — and there is no source. This entry names the pattern, because it has
-now been found five times and writing it up five times separately would train
+now been found six times and writing it up six times separately would train
 the reader to skim it.
+
+**`spreadsheet` is the mirror image and belongs here for the same reason.**
+It is not short of a source — the user types the data — it is short of a
+*sink*. `Sheet::export_csv` returns a `String` and `Sheet::import_csv` takes
+one, both implemented and tested, and there is nowhere for that string to come
+from or go: no file dialog, no command line, and no system clipboard (the app's
+`clipboard` field is its own internal cell buffer). The shape is the same — a
+capability that is complete except for the one end that touches the world — and
+the fix is the same shape too: `gui/toolkit` has a file chooser
+(`guitk::dialog`), so this one is nearer than the rest.
 
 **The apps, and what each one is missing.** Every one of these was wired to the
 compositor between 2026-09-03 and 2026-09-04; the wiring is what made the gap
@@ -57052,6 +57062,7 @@ promise to break.
 | `sysinfo` | CPU, memory, disks, uptime | any read at all — uptime is the string `"4h 23m 17s"` | `None`, documented |
 | `sysmonitor` | processes, live graphs, alerts | a real process source, but the *clock* is now real | the refresh interval |
 | `finance` | accounts, budgets, transactions | both a source and a way to enter anything; see its own entry | `None`, documented |
+| `spreadsheet` | a sheet a user can actually fill in | nothing to *show* — the gap is the other way round: `import_csv`/`export_csv` work on a `String` and there is no file dialog, command line or system clipboard to carry one | `None`, documented |
 
 **The rule that came out of it, and it is not "wire a tick".** In each case the
 tempting fix is to return a poll interval from `tick_interval` so the app "feels
@@ -116194,3 +116205,99 @@ requires.
 grep -v -e 'missing `\[lints\]`' -e 'missing_lints_inheritance' \
         -e 'to inherit `workspace.lints' build.log | less
 ```
+---
+
+### Lesson 110: a control that is drawn from live state looks more wired than one that is not (lane C, 2026-09-04)
+
+`apps/spreadsheet` drew a toolbar of twelve buttons. The bold button was filled
+in when the selected cell was bold; the alignment buttons showed which of the
+three was in force; the border button lit when the cell had borders; the freeze
+button lit when panes were frozen. All of that was read from the live document
+on every frame, and all of it was correct.
+
+None of the twelve could be clicked. `handle_left_click` had no hit test for the
+toolbar at all -- the renderer walked a private `bx` accumulator that existed
+only inside `render_toolbar`, so nothing outside it knew where any button was.
+The handler's own comment said so, and said what to do about it:
+
+> Not a cell: the toolbar, the formula bar, the scrollbars. Left unconsumed so
+> that whatever eventually handles those can see it
+
+Nothing ever did. The same file's find-and-replace panel drew a "Replace:" field
+that no key could type into and three buttons -- Find Next, Replace, Replace All
+-- that no click could press; `replace_current` and `replace_all` were written,
+tested, and had no caller anywhere. Five of the nine features the file's own
+module header advertised were reachable by no key and no click.
+
+**The lesson is about how this hides.** An unwired control that is drawn from a
+constant looks dead: the border button would have been permanently unlit and
+someone would have asked why. An unwired control drawn from *live state* looks
+alive. Select a bold cell and the B button lights up; the panel is clearly
+tracking the document, so the natural conclusion is that it works. Every signal
+the eye uses to check "is this connected?" is present, and all of them are
+answering a different question -- whether the *renderer* can see the state, not
+whether the *handler* can see the click.
+
+The repair is the same one this tree has reached for repeatedly (`ScrollbarGeometry`,
+`col_screen_x`): **one geometry function, two callers.** `toolbar_buttons()`
+returns where each button is, what it does, and how it is drawn;
+`render_toolbar` draws that list and `toolbar_button_at` hit-tests it. A button
+that is drawn is a button that can be pressed, by construction, and a new button
+cannot be added to one without the other.
+
+The corollary for reviewing: to check whether a control is wired, do not look at
+what it draws. Search for its *action* and count callers outside the test
+module. Fifteen functions in this file had none.
+
+### Lesson 111: two copies of a rule agree on whichever one was written second (lane C, 2026-09-04)
+
+`Sheet::set_cell_input` and `Sheet::set_cell` each ended with the same four
+lines: if the cell has no value and no raw input, remove it from the map,
+otherwise insert it. Not stored blank is a real optimisation -- an empty sheet
+costs nothing and `export_csv` derives its bounds from the key set.
+
+The rule was wrong, in both copies, in the same way: **a cell's formatting is
+also something worth keeping.** Selecting an empty column and making it currency
+-- which is how anyone lays out a sheet before typing into it -- built a cell
+with a format and no text, which both copies dropped. The format vanished with
+no error, nothing on screen, and no test noticing, because the two callers
+agreed with each other perfectly.
+
+It stayed invisible for as long as the toolbar was unclickable (lesson 110):
+there was no way to ask for the thing that did not work. Wiring the toolbar made
+it a bug you could hit in the first ten seconds. Two defects that each conceal
+the other are not twice the work to find; they are indefinitely hidden until one
+of them is fixed.
+
+Both copies are now one private `store`, whose doc comment states the rule and
+why formatting counts. The same invariant was broken at the other end --
+`delete_selection` wrote `Cell::empty()`, resetting the format along with the
+contents -- so Delete now clears what is in a cell and not how it is drawn,
+which is what every spreadsheet does.
+
+### Lesson 112: a getter the harness calls once is a getter the app cannot use to report anything (lane C, 2026-09-04)
+
+`oswindow::app::App::title` was read exactly once, when the window was created.
+The trait said so, with a reason: making it live "would mean re-reading it on
+every event to find out whether it had changed, which is a round trip per mouse
+move to answer no".
+
+Every part of that is either wrong or avoidable. Re-reading is a local call that
+builds a `String` -- no round trip. Only a *difference* costs one, because the
+loop compares against the title it last sent. And the natural place to do it is
+the batch boundary, not the event: a drag of two hundred mouse moves is one
+boundary.
+
+What the rule bought was a fleet of applications whose titles were true for one
+instant. `apps/slides` was wired an hour before this was noticed; it opens saying
+"slide 1 of 6" and says it on slide six. Its test asserts that the title follows
+the current slide -- and passes, because the test calls `title()` itself. That is
+the shape this window has hit five times now: **a check that runs, passes, and is
+about the wrong thing.** The test was not wrong about the app; it was wrong about
+who its reader is.
+
+The general form: when a trait method's contract is "called once", every
+implementor that computes it from mutable state has written a latent bug, and no
+test of that implementor can find it, because the fault is in the *frequency of
+the call* and the implementor does not make the call. Look for these by grepping
+the harness for the call site, not the implementors for correctness.

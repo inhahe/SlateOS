@@ -6,27 +6,34 @@
 //! - Cell formatting (bold, italic, alignment, number formats)
 //! - Column/row resize, selection, clipboard, undo/redo
 //! - Multiple sheets, sort, auto-fill, freeze panes
-//! - Find and replace, CSV import/export
+//! - Find and replace
+//!
+//! CSV import and export are implemented ([`Sheet::export_csv`],
+//! [`Sheet::import_csv`]) and are not on that list, because nothing can reach
+//! them: they take and return a `String`, and this program has no file dialog,
+//! no command line and no clipboard beyond its own internal one, so there is
+//! nowhere for the text to come from or go. That is tracked under
+//! `known-issues.md` -> `TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`.
+//! The rest of the list was in the same state until this file was wired to a
+//! window -- five of the features named above were reachable by no key and no
+//! click, behind a toolbar that drew twelve buttons and hit-tested none.
 //! - Catppuccin Mocha theme
 //!
 //! Uses the guitk library for UI rendering.
 
-#[allow(unused_imports)]
 use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::event::{
-    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
-};
-#[allow(unused_imports)]
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
-#[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textfind;
 use guitk::wheel;
+use oswindow::app::{self, App, Response};
 
 use std::collections::{BTreeMap, HashMap};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -907,17 +914,31 @@ impl Sheet {
             cell.value = CellValue::Text(input.to_string());
         }
 
-        if cell.value.is_empty() && cell.raw_input.is_empty() {
-            self.cells.remove(&addr);
-        } else {
-            self.cells.insert(addr, cell);
-        }
+        self.store(addr, cell);
         old
     }
 
     /// Set a cell directly (used by undo/redo).
     pub fn set_cell(&mut self, addr: CellAddr, cell: Cell) {
-        if cell.value.is_empty() && cell.raw_input.is_empty() {
+        self.store(addr, cell);
+    }
+
+    /// Keep a cell, or drop it if there is nothing left in it to keep.
+    ///
+    /// Blank cells are not stored, so an empty sheet costs nothing and the
+    /// bounds `export_csv` derives from the key set stay tight. **A cell's
+    /// formatting counts as something to keep**: this used to test the text
+    /// alone, so applying a format to a cell before typing into it -- selecting
+    /// a column and making it currency, which is how anyone lays out a sheet --
+    /// stored a cell with no text, which this dropped, and the format vanished
+    /// with no error and nothing on screen. It was invisible for as long as the
+    /// toolbar was unclickable, because there was no way to ask for it.
+    ///
+    /// The two callers had a copy of the rule each, which is how they came to
+    /// agree on the wrong one.
+    fn store(&mut self, addr: CellAddr, cell: Cell) {
+        let blank = cell.value.is_empty() && cell.raw_input.is_empty();
+        if blank && cell.format == CellFormat::default() {
             self.cells.remove(&addr);
         } else {
             self.cells.insert(addr, cell);
@@ -1946,11 +1967,55 @@ pub fn auto_fill_next(values: &[CellValue], index: usize) -> CellValue {
 // Find and Replace
 // ============================================================================
 
+/// Which of the panel's two text fields the keyboard is typing into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FindField {
+    /// What to look for.
+    #[default]
+    Search,
+    /// What to put in its place.
+    Replace,
+}
+
+/// A control in the find-and-replace panel, and what pressing it does.
+///
+/// The panel draws two labelled fields and three buttons -- "Find Next",
+/// "Replace", "Replace All". None of them could be clicked: the panel had no
+/// hit test at all, so a click on "Replace All" fell through to the *grid
+/// behind the dialog* and quietly moved the selection. That is worse than a
+/// button that does nothing, because the user sees something happen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindControl {
+    /// Type into the field named by this variant.
+    Field(FindField),
+    /// Advance to the next match.
+    FindNext,
+    /// Replace the current match and advance.
+    Replace,
+    /// Replace every match.
+    ReplaceAll,
+}
+
+/// Where the find-and-replace panel and each of its controls are drawn.
+///
+/// One law, two callers, as with [`SpreadsheetApp::toolbar_buttons`] and
+/// [`ScrollbarGeometry`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct FindPanel {
+    /// The dialog itself. A click anywhere inside is the panel's, even where no
+    /// control sits, so the grid behind it never sees one.
+    pub frame: Rect,
+    /// Every control, in drawing order.
+    pub controls: Vec<(Rect, FindControl)>,
+}
+
 /// State for find-and-replace operations.
 #[derive(Clone, Debug)]
 pub struct FindReplace {
     pub search_text: String,
     pub replace_text: String,
+    /// Which field the keyboard types into.
+    pub field: FindField,
     pub case_sensitive: bool,
     pub active: bool,
     pub results: Vec<CellAddr>,
@@ -1969,6 +2034,7 @@ impl FindReplace {
         Self {
             search_text: String::new(),
             replace_text: String::new(),
+            field: FindField::Search,
             case_sensitive: false,
             active: false,
             results: Vec::new(),
@@ -2089,6 +2155,50 @@ impl FindReplace {
     /// Count of search results.
     pub fn result_count(&self) -> usize {
         self.results.len()
+    }
+
+    /// The field the keyboard is typing into, mutably.
+    fn active_field_mut(&mut self) -> &mut String {
+        match self.field {
+            FindField::Search => &mut self.search_text,
+            FindField::Replace => &mut self.replace_text,
+        }
+    }
+
+    /// Type into the focused field.
+    ///
+    /// Editing the search text invalidates the result list -- the matches on
+    /// screen are the matches for what the box said one keystroke ago -- so it
+    /// is cleared rather than left to be replaced one cell at a time by a
+    /// `Replace` aimed at a match for a stale query. Editing the *replacement*
+    /// does not: the same matches are still the matches.
+    pub fn type_text(&mut self, text: &str) {
+        self.active_field_mut().push_str(text);
+        if self.field == FindField::Search {
+            self.clear_results();
+        }
+    }
+
+    /// Delete the character before the cursor in the focused field.
+    pub fn backspace(&mut self) {
+        self.active_field_mut().pop();
+        if self.field == FindField::Search {
+            self.clear_results();
+        }
+    }
+
+    /// Move the keyboard to the other field.
+    pub fn toggle_field(&mut self) {
+        self.field = match self.field {
+            FindField::Search => FindField::Replace,
+            FindField::Replace => FindField::Search,
+        };
+    }
+
+    /// Forget the matches found for a query that has since changed.
+    fn clear_results(&mut self) {
+        self.results.clear();
+        self.current_result = 0;
     }
 }
 
@@ -2284,6 +2394,50 @@ pub enum InteractionMode {
 pub enum SortDirection {
     Ascending,
     Descending,
+}
+
+// ============================================================================
+// Toolbar
+// ============================================================================
+
+/// What a toolbar button does when it is clicked.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ToolbarAction {
+    /// Toggle bold on the selection.
+    Bold,
+    /// Toggle italic on the selection.
+    Italic,
+    /// Set the selection's horizontal alignment.
+    Align(Alignment),
+    /// Set the selection's number format, or clear it back to General.
+    Format(NumberFormat),
+    /// Toggle a box border around the selection.
+    Borders,
+    /// Freeze or unfreeze panes at the active cell.
+    Freeze,
+    /// Sort the active column.
+    Sort(SortDirection),
+}
+
+/// One toolbar button: where it is, what it does, and how it looks.
+///
+/// See [`SpreadsheetApp::toolbar_buttons`] for why this exists rather than the
+/// renderer simply drawing as it goes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolbarButton {
+    /// Where the button is drawn, and where a click on it lands.
+    pub rect: Rect,
+    /// What pressing it does.
+    pub action: ToolbarAction,
+    /// What is written on it.
+    pub label: &'static str,
+    /// Whether it is showing the state it sets as already in effect.
+    pub active: bool,
+    /// Whether the label itself is drawn bold -- the bold button demonstrates
+    /// its own effect.
+    pub bold_label: bool,
+    /// Whether a group separator is drawn to its left.
+    pub separator_before: bool,
 }
 
 // ============================================================================
@@ -2642,12 +2796,6 @@ impl SpreadsheetApp {
         self.sheets.active_mut()
     }
 
-    /// How far the visible sheet is scrolled.
-    ///
-    /// An accessor rather than a field on the app, because the offset belongs
-    /// to the sheet — see [`Sheet::scroll`]. Reading it through the active
-    /// sheet is what makes it impossible for a tab switch to show one sheet at
-    /// another's offset, however that switch came about.
     /// What is selected on the visible sheet.
     ///
     /// An accessor rather than a field on the app — see [`Sheet::selection`].
@@ -2730,7 +2878,13 @@ impl SpreadsheetApp {
             for addr in range.iter() {
                 let old = self.active_sheet().get_cell(addr);
                 if !old.value.is_empty() || !old.raw_input.is_empty() {
-                    let new_cell = Cell::empty();
+                    // Contents, not formatting: a column made currency stays
+                    // currency when the numbers in it are deleted, which is
+                    // what every spreadsheet does and what makes the format
+                    // worth setting on empty cells in the first place. This
+                    // wrote `Cell::empty()`, which resets the format too.
+                    let mut new_cell = Cell::empty();
+                    new_cell.format = old.format.clone();
                     changes.push((addr, old, new_cell));
                 }
             }
@@ -2931,9 +3085,7 @@ impl SpreadsheetApp {
     /// Sort the active sheet by the selected column.
     pub fn sort_column(&mut self, direction: SortDirection) {
         let col = self.selection().active.col;
-        let range = self.selection().primary_range();
-        let start_row = range.start().row;
-        let end_row = range.end().row;
+        let (start_row, end_row) = self.sort_extent(col);
         let ascending = direction == SortDirection::Ascending;
         let sheet_idx = self.sheets.active_index();
 
@@ -2945,6 +3097,61 @@ impl SpreadsheetApp {
                 .push_action(UndoAction::BatchEdit { sheet_idx, changes });
             recalculate_sheet(self.active_sheet_mut());
         }
+    }
+
+    /// Which rows a sort covers.
+    ///
+    /// A selection spanning several rows is taken literally: those rows, and no
+    /// others. A **single cell** means the user pointed at a column rather than
+    /// marking a range, so the sort covers the run of filled rows containing
+    /// that cell, stopping at a blank row -- which is where one table ends and
+    /// the next begins.
+    ///
+    /// Without the second half, both sort buttons did nothing whatever in the
+    /// ordinary case. `Sheet::sort_by_column` returns immediately when
+    /// `start_row >= end_row`, and a single-cell selection is a range of one
+    /// row, so clicking A-Z with a cell selected -- which is how anyone sorts a
+    /// column -- was a no-op with no message.
+    ///
+    /// A header row inside that run is sorted along with the data. Guessing
+    /// which rows are headings is worse than not guessing: it is right most of
+    /// the time and silently scrambles a table the rest of it. Select the rows
+    /// to sort and the selection is obeyed exactly. See `design-decisions.md`.
+    fn sort_extent(&self, col: usize) -> (usize, usize) {
+        let range = self.selection().primary_range();
+        let here = range.start().row;
+        if here != range.end().row {
+            return (here, range.end().row);
+        }
+
+        let sheet = self.active_sheet();
+        let filled = |row: usize| {
+            !sheet
+                .get_cell(CellAddr::new(col, row))
+                .display_text()
+                .is_empty()
+        };
+        if !filled(here) {
+            // Pointing at a blank cell selects no table to sort.
+            return (here, here);
+        }
+
+        let mut first = here;
+        while let Some(prev) = first.checked_sub(1) {
+            if !filled(prev) {
+                break;
+            }
+            first = prev;
+        }
+        let mut last = here;
+        loop {
+            let next = last.saturating_add(1);
+            if next >= MAX_ROWS || !filled(next) {
+                break;
+            }
+            last = next;
+        }
+        (first, last)
     }
 
     /// Auto-fill from a source range to a target range.
@@ -3490,13 +3697,11 @@ impl SpreadsheetApp {
                     return EventResult::Consumed;
                 }
                 Key::F => {
-                    self.mode = InteractionMode::FindReplace;
-                    self.find_replace.active = true;
+                    self.open_find_replace(FindField::Search);
                     return EventResult::Consumed;
                 }
                 Key::H => {
-                    self.mode = InteractionMode::FindReplace;
-                    self.find_replace.active = true;
+                    self.open_find_replace(FindField::Replace);
                     return EventResult::Consumed;
                 }
                 _ => {}
@@ -3589,31 +3794,77 @@ impl SpreadsheetApp {
 
     /// Handle keyboard events in find/replace mode.
     fn handle_find_replace_key(&mut self, event: &KeyEvent) -> EventResult {
+        // Ctrl chords first, so a keyboard that reports Ctrl+F as the letter
+        // `f` does not type it into the search box. `typed()` drops control
+        // characters, which covers the backends that send U+0006 -- but not the
+        // ones that send the plain letter alongside the modifier.
+        if event.modifiers.ctrl {
+            match event.key {
+                // The two shortcuts that open this panel also aim it: Ctrl+F
+                // wants to find something, Ctrl+H wants to replace it. Before
+                // this they were two names for one action and the replacement
+                // field could not be reached at all.
+                Key::F => {
+                    self.find_replace.field = FindField::Search;
+                    return EventResult::Consumed;
+                }
+                Key::H => {
+                    self.find_replace.field = FindField::Replace;
+                    return EventResult::Consumed;
+                }
+                Key::Enter if event.modifiers.shift => {
+                    self.replace_all_matches();
+                    return EventResult::Consumed;
+                }
+                Key::Enter => {
+                    self.replace_current_match();
+                    return EventResult::Consumed;
+                }
+                _ => return EventResult::Ignored,
+            }
+        }
+
         match event.key {
             Key::Escape => {
                 self.mode = InteractionMode::Normal;
                 self.find_replace.active = false;
                 EventResult::Consumed
             }
+            Key::Tab => {
+                self.find_replace.toggle_field();
+                EventResult::Consumed
+            }
+            // Backwards through the matches. `prev_result` was written, tested
+            // for wrap-around, and never called by anything.
+            Key::Enter if event.modifiers.shift => {
+                self.find_previous();
+                EventResult::Consumed
+            }
+            // Forwards. This used to run the search afresh on *every* press --
+            // and `find_all` resets the cursor to the start, so `next_result`
+            // then moved it to 1 again. With three matches on the sheet, Enter
+            // selected the second one and kept selecting it; the third was
+            // unreachable. Searching only when there is nothing to step through
+            // is what makes this the "next" it is labelled as. See
+            // [`Self::find_next`].
             Key::Enter => {
-                // The clamp that used to be written here -- `idx.min(len - 1)`
-                // -- was guarding against an active index past the end, which
-                // `SheetBook` no longer permits.
-                self.find_replace.find_all(self.sheets.active());
-                if let Some(addr) = self.find_replace.next_result() {
-                    *self.selection_mut() = Selection::single(addr);
-                    self.ensure_cell_visible(addr);
-                }
+                self.find_next();
                 EventResult::Consumed
             }
             Key::Backspace => {
-                if !self.find_replace.search_text.is_empty() {
-                    self.find_replace.search_text.pop();
-                }
+                self.find_replace.backspace();
                 EventResult::Consumed
             }
             _ => {
-                self.find_replace.search_text.extend(event.typed());
+                let typed: String = event.typed().collect();
+                if typed.is_empty() {
+                    // A key with no text -- an arrow, a function key -- is not
+                    // for this panel. The catch-all here used to consume it
+                    // anyway, so the panel swallowed every keystroke the
+                    // program had while it was open.
+                    return EventResult::Ignored;
+                }
+                self.find_replace.type_text(&typed);
                 EventResult::Consumed
             }
         }
@@ -3660,6 +3911,45 @@ impl SpreadsheetApp {
 
     /// Handle left mouse click at a position.
     fn handle_left_click(&mut self, x: f32, y: f32, _ctrl_held: bool) -> EventResult {
+        // The find-and-replace panel before anything else, because it is drawn
+        // over everything else. A click inside its frame is the panel's even
+        // where no control sits: it is an opaque dialog with a shadow, and a
+        // click that went through it to move the selection behind would look
+        // like the dialog had reached past itself.
+        if self.find_replace.active {
+            if self.find_panel().frame.contains(x, y) {
+                if let Some(control) = self.find_control_at(x, y) {
+                    self.apply_find_control(control);
+                }
+                return EventResult::Consumed;
+            }
+            // A click outside it dismisses it, which is what a click outside a
+            // dialog does everywhere, and leaves the click to be handled below
+            // as the ordinary cell click it looks like.
+            self.mode = InteractionMode::Normal;
+            self.find_replace.active = false;
+        }
+
+        // The toolbar, because it is the topmost thing drawn in the window. The whole
+        // band is claimed even where no button sits, so a click on the strip
+        // between two groups does not fall through to the grid underneath it.
+        if self.show_toolbar {
+            let top = self.toolbar_top();
+            if y >= top && y < top + TOOLBAR_HEIGHT {
+                if let Some(action) = self.toolbar_button_at(x, y) {
+                    // A click on a formatting button while a cell is open for
+                    // editing has to land on the value being typed, not on the
+                    // value that was there before it: confirm first, exactly as
+                    // clicking another cell does.
+                    if matches!(self.mode, InteractionMode::Editing { .. }) {
+                        self.confirm_edit();
+                    }
+                    self.apply_toolbar_action(action);
+                }
+                return EventResult::Consumed;
+            }
+        }
+
         // Check for sheet tab clicks. The whole strip is claimed, so a click
         // in the blank between two tabs stops here rather than falling
         // through to whatever the grid would have made of it; only a click
@@ -3772,9 +4062,12 @@ impl SpreadsheetApp {
             return EventResult::Consumed;
         }
 
-        // Not a cell: the toolbar, the formula bar, the scrollbars. Left
-        // unconsumed so that whatever eventually handles those can see it,
-        // rather than silently selecting A1 as this did before.
+        // Not a cell: the formula bar, or the margin below the last row. Left
+        // unconsumed rather than silently selecting A1, as this did before.
+        // The toolbar used to be in this list, under the words "so that
+        // whatever eventually handles those can see it" -- nothing did, for as
+        // long as the file existed, which is what made twelve drawn buttons
+        // inert. It is handled at the top of this function now.
         let Some((col, row)) = self.cell_at_position(x, y) else {
             return EventResult::Ignored;
         };
@@ -4048,8 +4341,24 @@ impl SpreadsheetApp {
 
     /// Handle a resize event.
     pub fn handle_resize(&mut self, width: u32, height: u32) {
-        self.window_width = width as f32;
-        self.window_height = height as f32;
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a window wider than 16 million pixels does not exist"
+        )]
+        self.resize_to(width as f32, height as f32);
+    }
+
+    /// Adopt a new client size.
+    ///
+    /// Separate from [`Self::handle_resize`] because the two callers speak
+    /// different units: `Event::Resize` carries whole pixels, and
+    /// [`App::render`] is handed the float size the frame is actually being
+    /// drawn at. Rounding the latter to `u32` and back would put the layout at
+    /// odds with the frame by up to a pixel on a fractional-scale display,
+    /// which is a hit test that misses the edge of a cell.
+    pub fn resize_to(&mut self, width: f32, height: f32) {
+        self.window_width = width;
+        self.window_height = height;
         // Growing the window lowers both limits — the viewport got bigger, so
         // there is less sheet left to reach. Without this, maximising a window
         // that was scrolled to the bottom leaves it showing blank space past
@@ -4089,7 +4398,13 @@ impl SpreadsheetApp {
     // ========================================================================
 
     /// Render the entire spreadsheet UI to a list of render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    ///
+    /// Not `render`: [`App::render`] is the one the window calls, and an
+    /// inherent method of the same name shadows a trait method at equal arity.
+    /// The arities differ here, so this particular pair would have compiled --
+    /// but the app that keeps the name is the app that draws nothing and says
+    /// nothing about it, which has happened in this tree before.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(2000);
 
         // Background
@@ -4143,6 +4458,211 @@ impl SpreadsheetApp {
     }
 
     /// Render the toolbar with formatting buttons.
+    /// Where every toolbar button is, what it does, and how it is drawn.
+    ///
+    /// One law, two callers, for the same reason [`ScrollbarGeometry`] exists:
+    /// the renderer draws these rectangles and the pointer code hit-tests
+    /// *these* rectangles. Until this existed there was only the renderer,
+    /// which walked a running `bx` and drew twelve buttons that lit up to show
+    /// the selected cell's real formatting -- and `handle_left_click` had no
+    /// idea where any of them were, so every one of them was inert. Five of the
+    /// nine features this file's own header advertises were reachable by no key
+    /// and no click: alignment, number formats, borders, freeze panes, sort.
+    ///
+    /// A `Vec` rather than an iterator because the click handler needs `self`
+    /// mutably straight afterwards, and an iterator borrowing `self` would
+    /// still be alive -- the same reason the sheet-tab hit test binds its
+    /// result to a `let`.
+    fn toolbar_buttons(&self) -> Vec<ToolbarButton> {
+        let cell_format = self
+            .active_sheet()
+            .get_cell(self.selection().active)
+            .format
+            .clone();
+        let frozen = self.active_sheet().frozen_cols > 0 || self.active_sheet().frozen_rows > 0;
+
+        let btn_y = self.toolbar_top() + 4.0;
+        let btn_h = TOOLBAR_HEIGHT - 8.0;
+        let btn_w = 32.0;
+        let mut bx = 8.0;
+        let mut out = Vec::with_capacity(12);
+
+        let mut push = |label: &'static str,
+                        action: ToolbarAction,
+                        active: bool,
+                        w: f32,
+                        advance: f32,
+                        separator: bool,
+                        bold_label: bool| {
+            if separator {
+                bx += 8.0;
+            }
+            out.push(ToolbarButton {
+                rect: Rect::new(bx, btn_y, w, btn_h),
+                action,
+                label,
+                active,
+                bold_label,
+                separator_before: separator,
+            });
+            bx += advance;
+        };
+
+        push(
+            "B",
+            ToolbarAction::Bold,
+            cell_format.bold,
+            btn_w,
+            btn_w + 4.0,
+            false,
+            true,
+        );
+        push(
+            "I",
+            ToolbarAction::Italic,
+            cell_format.italic,
+            btn_w,
+            btn_w + 4.0,
+            false,
+            false,
+        );
+
+        for (i, (label, align)) in [
+            ("L", Alignment::Left),
+            ("C", Alignment::Center),
+            ("R", Alignment::Right),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            push(
+                label,
+                ToolbarAction::Align(align),
+                cell_format.alignment == align,
+                btn_w,
+                btn_w + 4.0,
+                i == 0,
+                false,
+            );
+        }
+
+        // The label is the format: `$` is money, so two places; `%` is a whole
+        // percent, because a bare percent sign is how "50%" is written and not
+        // "50.0%"; `.0` is one digit after the point, which is what it says.
+        for (i, (label, format)) in [
+            ("$", NumberFormat::Currency(2)),
+            ("%", NumberFormat::Percentage(0)),
+            (".0", NumberFormat::Decimal(1)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Lit by *variant*, not by an exact match: a cell already at
+            // `Currency(4)` is still a currency cell, and a `$` button that
+            // went dark because someone chose four decimal places would be
+            // reporting the wrong thing.
+            let active = std::mem::discriminant(&cell_format.number_format)
+                == std::mem::discriminant(&format);
+            push(
+                label,
+                ToolbarAction::Format(format),
+                active,
+                btn_w + 4.0,
+                btn_w + 8.0,
+                i == 0,
+                false,
+            );
+        }
+
+        push(
+            "Bdr",
+            ToolbarAction::Borders,
+            cell_format.borders.has_any(),
+            btn_w + 8.0,
+            btn_w + 16.0,
+            true,
+            false,
+        );
+        push(
+            "Freeze",
+            ToolbarAction::Freeze,
+            frozen,
+            btn_w + 16.0,
+            btn_w + 24.0,
+            false,
+            false,
+        );
+        push(
+            "A-Z",
+            ToolbarAction::Sort(SortDirection::Ascending),
+            false,
+            btn_w + 4.0,
+            btn_w + 8.0,
+            false,
+            false,
+        );
+        push(
+            "Z-A",
+            ToolbarAction::Sort(SortDirection::Descending),
+            false,
+            btn_w + 4.0,
+            btn_w + 8.0,
+            false,
+            false,
+        );
+
+        out
+    }
+
+    /// The top edge of the toolbar. Zero -- it is the first thing drawn -- but
+    /// named, because the renderer and the hit test have to agree about it.
+    fn toolbar_top(&self) -> f32 {
+        0.0
+    }
+
+    /// Which toolbar button is under the pointer, if any.
+    fn toolbar_button_at(&self, x: f32, y: f32) -> Option<ToolbarAction> {
+        if !self.show_toolbar {
+            return None;
+        }
+        self.toolbar_buttons()
+            .into_iter()
+            .find(|b| b.rect.contains(x, y))
+            .map(|b| b.action)
+    }
+
+    /// Do what a toolbar button says.
+    ///
+    /// The formatting buttons toggle: pressing `$` on a cell that is already
+    /// currency puts it back to General. Without that there is no control
+    /// anywhere in the program that returns a cell to General, so a mis-click
+    /// on `%` would be permanent -- and the button already draws itself as lit,
+    /// which is the promise that pressing it again turns it off.
+    fn apply_toolbar_action(&mut self, action: ToolbarAction) {
+        match action {
+            ToolbarAction::Bold => self.toggle_bold(),
+            ToolbarAction::Italic => self.toggle_italic(),
+            ToolbarAction::Align(align) => self.set_alignment(align),
+            ToolbarAction::Format(format) => {
+                let current = &self
+                    .active_sheet()
+                    .get_cell(self.selection().active)
+                    .format
+                    .number_format;
+                let already = std::mem::discriminant(current) == std::mem::discriminant(&format);
+                self.set_number_format(if already {
+                    NumberFormat::General
+                } else {
+                    format
+                });
+            }
+            ToolbarAction::Borders => self.toggle_borders(),
+            ToolbarAction::Freeze => self.toggle_freeze_panes(),
+            ToolbarAction::Sort(direction) => self.sort_column(direction),
+        }
+    }
+
+    /// Render the toolbar with formatting buttons.
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
         // Toolbar background
         cmds.push(RenderCommand::FillRect {
@@ -4164,120 +4684,28 @@ impl SpreadsheetApp {
             width: 1.0,
         });
 
-        let btn_y = y + 4.0;
-        let btn_h = TOOLBAR_HEIGHT - 8.0;
-        let btn_w = 32.0;
-        let mut bx = 8.0;
-
-        // Bold button
-        let bold_active = self
-            .active_sheet()
-            .get_cell(self.selection().active)
-            .format
-            .bold;
-        self.render_toolbar_button(cmds, bx, btn_y, btn_w, btn_h, "B", bold_active, true);
-        bx += btn_w + 4.0;
-
-        // Italic button
-        let italic_active = self
-            .active_sheet()
-            .get_cell(self.selection().active)
-            .format
-            .italic;
-        self.render_toolbar_button(cmds, bx, btn_y, btn_w, btn_h, "I", italic_active, false);
-        bx += btn_w + 4.0;
-
-        // Separator
-        cmds.push(RenderCommand::Line {
-            x1: bx,
-            y1: btn_y + 2.0,
-            x2: bx,
-            y2: btn_y + btn_h - 2.0,
-            color: COLOR_SURFACE1,
-            width: 1.0,
-        });
-        bx += 8.0;
-
-        // Alignment buttons
-        let alignment_labels = ["L", "C", "R"];
-        let alignments = [Alignment::Left, Alignment::Center, Alignment::Right];
-        let current_align = self
-            .active_sheet()
-            .get_cell(self.selection().active)
-            .format
-            .alignment;
-        for (label, align) in alignment_labels.iter().zip(alignments.iter()) {
-            let active = current_align == *align;
-            self.render_toolbar_button(cmds, bx, btn_y, btn_w, btn_h, label, active, false);
-            bx += btn_w + 4.0;
+        for button in self.toolbar_buttons() {
+            if button.separator_before {
+                cmds.push(RenderCommand::Line {
+                    x1: button.rect.x - 8.0,
+                    y1: button.rect.y + 2.0,
+                    x2: button.rect.x - 8.0,
+                    y2: button.rect.y + button.rect.h - 2.0,
+                    color: COLOR_SURFACE1,
+                    width: 1.0,
+                });
+            }
+            self.render_toolbar_button(
+                cmds,
+                button.rect.x,
+                button.rect.y,
+                button.rect.w,
+                button.rect.h,
+                button.label,
+                button.active,
+                button.bold_label,
+            );
         }
-
-        // Separator
-        cmds.push(RenderCommand::Line {
-            x1: bx,
-            y1: btn_y + 2.0,
-            x2: bx,
-            y2: btn_y + btn_h - 2.0,
-            color: COLOR_SURFACE1,
-            width: 1.0,
-        });
-        bx += 8.0;
-
-        // Format buttons
-        let format_labels = ["$", "%", ".0"];
-        for label in &format_labels {
-            self.render_toolbar_button(cmds, bx, btn_y, btn_w + 4.0, btn_h, label, false, false);
-            bx += btn_w + 8.0;
-        }
-
-        // Separator
-        cmds.push(RenderCommand::Line {
-            x1: bx,
-            y1: btn_y + 2.0,
-            x2: bx,
-            y2: btn_y + btn_h - 2.0,
-            color: COLOR_SURFACE1,
-            width: 1.0,
-        });
-        bx += 8.0;
-
-        // Border toggle
-        let has_borders = self
-            .active_sheet()
-            .get_cell(self.selection().active)
-            .format
-            .borders
-            .has_any();
-        self.render_toolbar_button(
-            cmds,
-            bx,
-            btn_y,
-            btn_w + 8.0,
-            btn_h,
-            "Bdr",
-            has_borders,
-            false,
-        );
-        bx += btn_w + 16.0;
-
-        // Freeze panes
-        let frozen = self.active_sheet().frozen_cols > 0 || self.active_sheet().frozen_rows > 0;
-        self.render_toolbar_button(
-            cmds,
-            bx,
-            btn_y,
-            btn_w + 16.0,
-            btn_h,
-            "Freeze",
-            frozen,
-            false,
-        );
-        bx += btn_w + 24.0;
-
-        // Sort buttons
-        self.render_toolbar_button(cmds, bx, btn_y, btn_w + 4.0, btn_h, "A-Z", false, false);
-        bx += btn_w + 8.0;
-        self.render_toolbar_button(cmds, bx, btn_y, btn_w + 4.0, btn_h, "Z-A", false, false);
     }
 
     /// Render a single toolbar button. Nine parameters reflect the per-button
@@ -5196,11 +5624,150 @@ impl SpreadsheetApp {
     }
 
     /// Render the find/replace overlay dialog.
-    fn render_find_replace(&self, cmds: &mut Vec<RenderCommand>) {
+    /// Where the find-and-replace panel and each of its controls are drawn.
+    ///
+    /// The renderer draws these rectangles and [`Self::find_control_at`]
+    /// hit-tests *these* rectangles; see [`FindPanel`].
+    fn find_panel(&self) -> FindPanel {
         let dlg_w = 360.0;
         let dlg_h = 140.0;
         let dlg_x = self.window_width - dlg_w - 20.0;
         let dlg_y = 60.0;
+
+        let mut controls = Vec::with_capacity(5);
+        controls.push((
+            Rect::new(dlg_x + 70.0, dlg_y + 35.0, 200.0, 22.0),
+            FindControl::Field(FindField::Search),
+        ));
+        controls.push((
+            Rect::new(dlg_x + 70.0, dlg_y + 65.0, 200.0, 22.0),
+            FindControl::Field(FindField::Replace),
+        ));
+
+        let btn_y = dlg_y + dlg_h - 34.0;
+        let mut bx = dlg_x + 12.0;
+        for (label, control) in [
+            ("Find Next", FindControl::FindNext),
+            ("Replace", FindControl::Replace),
+            ("Replace All", FindControl::ReplaceAll),
+        ] {
+            let bw = text::padded_width(label, 8.0, SMALL_FONT, FontWeightHint::Regular);
+            controls.push((Rect::new(bx, btn_y, bw, 24.0), control));
+            bx += bw + 8.0;
+        }
+
+        FindPanel {
+            frame: Rect::new(dlg_x, dlg_y, dlg_w, dlg_h),
+            controls,
+        }
+    }
+
+    /// Which panel control is under the pointer, if any.
+    ///
+    /// `None` for a point inside the dialog but on no control -- the caller
+    /// still consumes it, because the dialog covers the grid.
+    fn find_control_at(&self, x: f32, y: f32) -> Option<FindControl> {
+        self.find_panel()
+            .controls
+            .into_iter()
+            .find(|(rect, _)| rect.contains(x, y))
+            .map(|(_, control)| control)
+    }
+
+    /// Do what a panel control says.
+    ///
+    /// The three that change cells record undo. That is the whole reason
+    /// [`FindReplace::replace_current`] and [`FindReplace::replace_all`] hand
+    /// back `(address, before, after)` triples rather than editing and staying
+    /// silent -- and, with no caller, the whole reason nothing had ever used
+    /// them.
+    fn apply_find_control(&mut self, control: FindControl) {
+        match control {
+            FindControl::Field(field) => self.find_replace.field = field,
+            FindControl::FindNext => self.find_next(),
+            FindControl::Replace => self.replace_current_match(),
+            FindControl::ReplaceAll => self.replace_all_matches(),
+        }
+    }
+
+    /// Open the find-and-replace panel with the keyboard in one of its fields.
+    ///
+    /// Which field is the only difference between Ctrl+F and Ctrl+H, and it is
+    /// the whole of the difference: the panel is one dialog with both boxes in
+    /// it, so "replace" is "find, aimed at the second box".
+    fn open_find_replace(&mut self, field: FindField) {
+        self.mode = InteractionMode::FindReplace;
+        self.find_replace.active = true;
+        self.find_replace.field = field;
+    }
+
+    /// Select the next match, searching afresh if the query has changed.
+    fn find_next(&mut self) {
+        if self.find_replace.result_count() == 0 {
+            self.find_replace.find_all(self.sheets.active());
+        }
+        if let Some(addr) = self.find_replace.next_result() {
+            *self.selection_mut() = Selection::single(addr);
+            self.ensure_cell_visible(addr);
+        }
+    }
+
+    /// Select the previous match, searching afresh if the query has changed.
+    fn find_previous(&mut self) {
+        if self.find_replace.result_count() == 0 {
+            self.find_replace.find_all(self.sheets.active());
+        }
+        if let Some(addr) = self.find_replace.prev_result() {
+            *self.selection_mut() = Selection::single(addr);
+            self.ensure_cell_visible(addr);
+        }
+    }
+
+    /// Replace the current match, and show what replaced it.
+    fn replace_current_match(&mut self) {
+        if self.find_replace.result_count() == 0 {
+            self.find_replace.find_all(self.sheets.active());
+        }
+        let sheet_idx = self.sheets.active_index();
+        // Two disjoint fields of `self`, borrowed in one expression: the
+        // receiver is `self.find_replace` and the argument is `self.sheets`.
+        let change = self.find_replace.replace_current(self.sheets.active_mut());
+
+        if let Some((addr, old, new_cell)) = change {
+            self.undo_manager.push_action(UndoAction::CellEdit {
+                sheet_idx,
+                addr,
+                old_cell: old,
+                new_cell,
+            });
+            recalculate_sheet(self.active_sheet_mut());
+            *self.selection_mut() = Selection::single(addr);
+            self.ensure_cell_visible(addr);
+        }
+    }
+
+    /// Replace every match, as one undoable action.
+    fn replace_all_matches(&mut self) {
+        if self.find_replace.result_count() == 0 {
+            self.find_replace.find_all(self.sheets.active());
+        }
+        let sheet_idx = self.sheets.active_index();
+        let changes = self.find_replace.replace_all(self.sheets.active_mut());
+
+        if !changes.is_empty() {
+            // One `BatchEdit`, not one action per cell: "replace all" is a
+            // single thing the user did, and undoing it forty times to get back
+            // to where they started is not undo.
+            self.undo_manager
+                .push_action(UndoAction::BatchEdit { sheet_idx, changes });
+            recalculate_sheet(self.active_sheet_mut());
+        }
+    }
+
+    fn render_find_replace(&self, cmds: &mut Vec<RenderCommand>) {
+        let panel = self.find_panel();
+        let (dlg_x, dlg_y, dlg_w, dlg_h) =
+            (panel.frame.x, panel.frame.y, panel.frame.w, panel.frame.h);
 
         // Shadow
         cmds.push(RenderCommand::BoxShadow {
@@ -5249,111 +5816,101 @@ impl SpreadsheetApp {
             overflow: TextOverflow::Clip,
         });
 
-        // Search field label
-        cmds.push(RenderCommand::Text {
-            x: dlg_x + 12.0,
-            y: dlg_y + 40.0,
-            text: "Find:".to_string(),
-            font_size: SMALL_FONT,
-            color: COLOR_SUBTEXT0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        for (rect, control) in &panel.controls {
+            match *control {
+                FindControl::Field(field) => {
+                    let label = match field {
+                        FindField::Search => "Find:",
+                        FindField::Replace => "Replace:",
+                    };
+                    let value = match field {
+                        FindField::Search => &self.find_replace.search_text,
+                        FindField::Replace => &self.find_replace.replace_text,
+                    };
+                    let focused = self.find_replace.field == field;
 
-        // Search field
-        cmds.push(RenderCommand::FillRect {
-            x: dlg_x + 70.0,
-            y: dlg_y + 35.0,
-            width: 200.0,
-            height: 22.0,
-            color: COLOR_SURFACE0,
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: dlg_x + 74.0,
-            y: dlg_y + 39.0,
-            text: self.find_replace.search_text.clone(),
-            font_size: SMALL_FONT,
-            color: COLOR_TEXT,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(192.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Replace field label
-        cmds.push(RenderCommand::Text {
-            x: dlg_x + 12.0,
-            y: dlg_y + 70.0,
-            text: "Replace:".to_string(),
-            font_size: SMALL_FONT,
-            color: COLOR_SUBTEXT0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Replace field
-        cmds.push(RenderCommand::FillRect {
-            x: dlg_x + 70.0,
-            y: dlg_y + 65.0,
-            width: 200.0,
-            height: 22.0,
-            color: COLOR_SURFACE0,
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: dlg_x + 74.0,
-            y: dlg_y + 69.0,
-            text: self.find_replace.replace_text.clone(),
-            font_size: SMALL_FONT,
-            color: COLOR_TEXT,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(192.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+                    cmds.push(RenderCommand::Text {
+                        x: dlg_x + 12.0,
+                        y: rect.y + 5.0,
+                        text: label.to_string(),
+                        font_size: SMALL_FONT,
+                        color: COLOR_SUBTEXT0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
+                    cmds.push(RenderCommand::FillRect {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.w,
+                        height: rect.h,
+                        color: COLOR_SURFACE0,
+                        corner_radii: CornerRadii::all(3.0),
+                    });
+                    // Which field the next keystroke goes into. Two identical
+                    // boxes with a caret in neither is a dialog that cannot be
+                    // used without typing something to find out.
+                    if focused {
+                        cmds.push(RenderCommand::StrokeRect {
+                            x: rect.x,
+                            y: rect.y,
+                            width: rect.w,
+                            height: rect.h,
+                            color: COLOR_BLUE,
+                            line_width: 1.0,
+                            corner_radii: CornerRadii::all(3.0),
+                        });
+                    }
+                    cmds.push(RenderCommand::Text {
+                        x: rect.x + 4.0,
+                        y: rect.y + 4.0,
+                        text: value.clone(),
+                        font_size: SMALL_FONT,
+                        color: COLOR_TEXT,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(rect.w - 8.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
+                FindControl::FindNext | FindControl::Replace | FindControl::ReplaceAll => {
+                    let label = match *control {
+                        FindControl::Replace => "Replace",
+                        FindControl::ReplaceAll => "Replace All",
+                        _ => "Find Next",
+                    };
+                    cmds.push(RenderCommand::FillRect {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.w,
+                        height: rect.h,
+                        color: COLOR_SURFACE0,
+                        corner_radii: CornerRadii::all(4.0),
+                    });
+                    cmds.push(RenderCommand::Text {
+                        x: rect.x + 8.0,
+                        y: rect.y + 5.0,
+                        text: label.to_string(),
+                        font_size: SMALL_FONT,
+                        color: COLOR_TEXT,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(rect.w - 16.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
+            }
+        }
 
         // Result count
-        let count_text = format!("{} found", self.find_replace.result_count());
         cmds.push(RenderCommand::Text {
             x: dlg_x + 280.0,
             y: dlg_y + 40.0,
-            text: count_text,
+            text: format!("{} found", self.find_replace.result_count()),
             font_size: SMALL_FONT,
             color: COLOR_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-
-        // Buttons
-        let btn_y = dlg_y + dlg_h - 34.0;
-        let buttons = ["Find Next", "Replace", "Replace All"];
-        let mut bx = dlg_x + 12.0;
-        for label in &buttons {
-            let bw = text::padded_width(label, 8.0, SMALL_FONT, FontWeightHint::Regular);
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: btn_y,
-                width: bw,
-                height: 24.0,
-                color: COLOR_SURFACE0,
-                corner_radii: CornerRadii::all(4.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: bx + 8.0,
-                y: btn_y + 5.0,
-                text: label.to_string(),
-                font_size: SMALL_FONT,
-                color: COLOR_TEXT,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(bw - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            bx += bw + 8.0;
-        }
     }
 }
 
@@ -5404,44 +5961,139 @@ fn handle_editing_key(buffer: &mut EditBuffer, event: &KeyEvent) -> EventResult 
 // Entry point
 // ============================================================================
 
-fn main() {
-    let mut app = SpreadsheetApp::new(1280.0, 800.0);
-
-    // Set up initial demo data
-    app.set_cell_input(CellAddr::new(0, 0), "Item");
-    app.set_cell_input(CellAddr::new(1, 0), "Price");
-    app.set_cell_input(CellAddr::new(2, 0), "Qty");
-    app.set_cell_input(CellAddr::new(3, 0), "Total");
-
-    app.set_cell_input(CellAddr::new(0, 1), "Widget A");
-    app.set_cell_input(CellAddr::new(1, 1), "10.50");
-    app.set_cell_input(CellAddr::new(2, 1), "5");
-    app.set_cell_input(CellAddr::new(3, 1), "=B2*C2");
-
-    app.set_cell_input(CellAddr::new(0, 2), "Widget B");
-    app.set_cell_input(CellAddr::new(1, 2), "25.00");
-    app.set_cell_input(CellAddr::new(2, 2), "3");
-    app.set_cell_input(CellAddr::new(3, 2), "=B3*C3");
-
-    app.set_cell_input(CellAddr::new(0, 3), "Widget C");
-    app.set_cell_input(CellAddr::new(1, 3), "7.99");
-    app.set_cell_input(CellAddr::new(2, 3), "12");
-    app.set_cell_input(CellAddr::new(3, 3), "=B4*C4");
-
-    app.set_cell_input(CellAddr::new(3, 5), "=SUM(D2:D4)");
-
-    // Bold the header row
-    for col in 0..4 {
-        let addr = CellAddr::new(col, 0);
-        let mut cell = app.active_sheet().get_cell(addr);
-        cell.format.bold = true;
-        app.active_sheet_mut().set_cell(addr, cell);
+impl App for SpreadsheetApp {
+    fn title(&self) -> String {
+        // `Sheet1!B4` is the reference a spreadsheet user would write for the
+        // selected cell, so the title bar says where you are in the same words
+        // the formula bar does. This follows the selection because the harness
+        // re-reads it at every batch boundary; it did not always, and a title
+        // built like this one used to freeze at whatever it said when the
+        // window opened. See `App::title`.
+        format!(
+            "{}!{} - Spreadsheet",
+            self.active_sheet().name,
+            self.selection().active.display()
+        )
     }
 
-    recalculate_sheet(app.active_sheet_mut());
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.window_width as u32, self.window_height as u32)
+        }
+    }
 
-    // Render one frame to verify
-    let _commands = app.render();
+    /// No clock.
+    ///
+    /// Nothing in a sheet ages. The formula language has no volatile function
+    /// -- no `NOW`, no `TODAY`, no `RAND` -- so between one keystroke and the
+    /// next there is nothing a recalculation could produce that is different
+    /// from what is already on screen, and a tick would redraw an identical
+    /// frame. Add one here the day a volatile function is added to
+    /// `FormulaEvaluator`, and not before: an app that wakes up to do nothing
+    /// is the ordinary cause of a laptop that will not sleep.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Taken from the frame we are handed rather than from the last
+        // `Resize`: the compositor may grant a size nobody asked for, and the
+        // first frame is drawn before any `Resize` arrives. Every hit test in
+        // this file is derived from these two numbers, so a stale pair puts the
+        // grid's idea of where a cell is at odds with where it was drawn.
+        self.resize_to(width, height);
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+impl SpreadsheetApp {
+    /// Fill the empty book with something to look at.
+    ///
+    /// In a method rather than in `main` because a test cannot call `main`, and
+    /// a window that opens on a blank grid when it should not is exactly the
+    /// sort of thing that goes unnoticed. This is also what exercises the
+    /// formula engine on the first frame: `D2:D4` are products and `D6` sums
+    /// them, so a recalculation that had stopped working would be visible in
+    /// the opening screen rather than only to whoever typed an `=` sign.
+    pub fn seed_sample_content(&mut self) {
+        for (addr, input) in [
+            ((0, 0), "Item"),
+            ((1, 0), "Price"),
+            ((2, 0), "Qty"),
+            ((3, 0), "Total"),
+            ((0, 1), "Widget A"),
+            ((1, 1), "10.50"),
+            ((2, 1), "5"),
+            ((3, 1), "=B2*C2"),
+            ((0, 2), "Widget B"),
+            ((1, 2), "25.00"),
+            ((2, 2), "3"),
+            ((3, 2), "=B3*C3"),
+            ((0, 3), "Widget C"),
+            ((1, 3), "7.99"),
+            ((2, 3), "12"),
+            ((3, 3), "=B4*C4"),
+            ((3, 5), "=SUM(D2:D4)"),
+        ] {
+            self.set_cell_input(CellAddr::new(addr.0, addr.1), input);
+        }
+
+        // The header row, in bold.
+        for col in 0..4 {
+            let addr = CellAddr::new(col, 0);
+            let mut cell = self.active_sheet().get_cell(addr);
+            cell.format.bold = true;
+            self.active_sheet_mut().set_cell(addr, cell);
+        }
+
+        // The prices are money and the total is a sum of money, so they are
+        // formatted as such -- which also puts a cell of every format the
+        // toolbar can set on the opening screen.
+        for addr in [
+            CellAddr::new(1, 1),
+            CellAddr::new(1, 2),
+            CellAddr::new(1, 3),
+            CellAddr::new(3, 1),
+            CellAddr::new(3, 2),
+            CellAddr::new(3, 3),
+            CellAddr::new(3, 5),
+        ] {
+            let mut cell = self.active_sheet().get_cell(addr);
+            cell.format.number_format = NumberFormat::Currency(2);
+            self.active_sheet_mut().set_cell(addr, cell);
+        }
+
+        recalculate_sheet(self.active_sheet_mut());
+
+        // Seeding is not something the user did, so it is not something the
+        // user can undo. Leaving these on the stack would make the first Ctrl+Z
+        // of a session empty the sample sheet a cell at a time.
+        self.undo_manager = UndoManager::new();
+        *self.selection_mut() = Selection::single(CellAddr::new(0, 0));
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = SpreadsheetApp::new(1280.0, 800.0);
+    app.seed_sample_content();
+    app::launch("spreadsheet", &mut app)
 }
 
 // ============================================================================
@@ -5465,7 +6117,856 @@ mod tests {
         clippy::float_cmp
     )]
 
+    // Only the tests build events by hand; production code reads the fields of
+    // the ones it is handed.
+    use guitk::event::Modifiers;
+
     use super::*;
+
+    // ------------------------------------------------------------------
+    // The window
+    // ------------------------------------------------------------------
+
+    /// A test cannot call `main`, so what `main` puts on screen has to live in
+    /// a method for anything to check that the window does not open blank.
+    #[test]
+    fn the_seeded_sheet_has_values_and_a_working_formula() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.seed_sample_content();
+
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 1))
+                .display_text(),
+            "Widget A"
+        );
+        // 10.50 * 5, formatted as the currency it was marked as. If
+        // recalculation had stopped working this would be the formula text or
+        // an empty cell, on the opening screen, where it is hardest to miss.
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(3, 1))
+                .display_text(),
+            "$52.50"
+        );
+        // =SUM(D2:D4) over 52.50 + 75.00 + 95.88.
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(3, 5))
+                .display_text(),
+            "$223.38"
+        );
+    }
+
+    /// Seeding is not something the user did, so the first Ctrl+Z must not
+    /// start dismantling the sample sheet.
+    #[test]
+    fn the_sample_content_is_not_on_the_undo_stack() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.seed_sample_content();
+        assert!(
+            !app.undo_manager.can_undo(),
+            "there is nothing for the user to undo before they have done anything"
+        );
+    }
+
+    /// The title bar names the cell you are in, in the notation a spreadsheet
+    /// user would write, and follows the selection -- which is only worth
+    /// anything because the harness re-reads it (see `oswindow::app::App`).
+    #[test]
+    fn the_title_names_the_selected_cell() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.seed_sample_content();
+        assert_eq!(app.title(), "Sheet1!A1 - Spreadsheet");
+
+        app.handle_event(&key_event(Key::Down));
+        app.handle_event(&key_event(Key::Right));
+        assert_eq!(
+            app.title(),
+            "Sheet1!B2 - Spreadsheet",
+            "the title should follow the selection"
+        );
+    }
+
+    /// `render` is handed the size the frame is actually drawn at, and every
+    /// hit test in this file is derived from it.
+    #[test]
+    fn rendering_at_a_new_size_moves_the_layout_to_match() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let _ = App::render(&mut app, 900.0, 600.0);
+        assert_eq!(app.window_width, 900.0);
+        assert_eq!(app.window_height, 600.0);
+        assert!(
+            app.grid_right() < 900.0,
+            "the grid should have been re-laid inside the narrower window"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The toolbar
+    //
+    // Twelve buttons were drawn, and lit up to show the selected cell's real
+    // formatting, and none of them could be clicked: the renderer walked a
+    // private `bx` and the click handler had no idea where any of them were.
+    // ------------------------------------------------------------------
+
+    /// Every button is inside the toolbar band and none overlaps its
+    /// neighbour, so every one of them can be hit and none of them steals a
+    /// click meant for the next.
+    #[test]
+    fn the_toolbar_buttons_are_laid_out_without_overlapping() {
+        let app = SpreadsheetApp::new(1280.0, 800.0);
+        let buttons = app.toolbar_buttons();
+        assert_eq!(
+            buttons.len(),
+            12,
+            "B I, three alignments, three formats, borders, freeze, two sorts"
+        );
+
+        for button in &buttons {
+            assert!(
+                button.rect.y >= app.toolbar_top()
+                    && button.rect.y + button.rect.h <= app.toolbar_top() + TOOLBAR_HEIGHT,
+                "{:?} is drawn outside the toolbar band",
+                button.label
+            );
+        }
+        for pair in buttons.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            assert!(
+                a.rect.x + a.rect.w <= b.rect.x,
+                "{:?} overlaps {:?}",
+                a.label,
+                b.label
+            );
+        }
+    }
+
+    /// The point of the shared layout: a click at the centre of a drawn button
+    /// reaches that button. Testing every one at once, because the failure mode
+    /// this replaces was uniform -- all twelve inert.
+    #[test]
+    fn clicking_each_toolbar_button_does_what_it_says() {
+        for index in 0..12 {
+            let mut app = SpreadsheetApp::new(1280.0, 800.0);
+            // Out of order in both directions, so that "A-Z" and "Z-A" each
+            // move the top cell. Two rows would not do it: sorting ["b", "a"]
+            // descending leaves "b" where it is, and the button would look
+            // unwired.
+            app.set_cell_input(CellAddr::new(0, 0), "b");
+            app.set_cell_input(CellAddr::new(0, 1), "c");
+            app.set_cell_input(CellAddr::new(0, 2), "a");
+
+            let button = app.toolbar_buttons().remove(index);
+            // An alignment button that sets the alignment the cell already has
+            // is indistinguishable from one that is not wired, and one of the
+            // three always would be -- whichever matches the starting state. So
+            // start each one somewhere else.
+            if let ToolbarAction::Align(target) = button.action {
+                app.set_alignment(if target == Alignment::Left {
+                    Alignment::Right
+                } else {
+                    Alignment::Left
+                });
+            }
+            if button.action == ToolbarAction::Freeze {
+                // Freezing pins the rows above and the columns left of the
+                // active cell. At A1 there is nothing above or to the left, so
+                // it correctly pins nothing -- see
+                // `freezing_at_the_top_left_cell_pins_nothing`.
+                *app.selection_mut() = Selection::single(CellAddr::new(1, 1));
+            }
+            let (cx, cy) = (
+                button.rect.x + button.rect.w / 2.0,
+                button.rect.y + button.rect.h / 2.0,
+            );
+            let before = app.active_sheet().get_cell(CellAddr::new(0, 0));
+            let frozen_before = app.active_sheet().frozen_rows;
+            let a1_before = app
+                .active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .display_text();
+
+            assert_eq!(
+                app.handle_event(&press_at(cx, cy)),
+                EventResult::Consumed,
+                "the click on {:?} should have been claimed by the toolbar",
+                button.label
+            );
+
+            let after = app.active_sheet().get_cell(CellAddr::new(0, 0));
+            let changed = match button.action {
+                ToolbarAction::Freeze => app.active_sheet().frozen_rows != frozen_before,
+                ToolbarAction::Sort(_) => {
+                    app.active_sheet()
+                        .get_cell(CellAddr::new(0, 0))
+                        .display_text()
+                        != a1_before
+                }
+                _ => after.format != before.format,
+            };
+            assert!(
+                changed,
+                "clicking {:?} changed nothing -- it is drawn but not wired",
+                button.label
+            );
+        }
+    }
+
+    /// Sorting is how anyone sorts: click a cell in the column, press A-Z. The
+    /// range that gets sorted is the run of filled rows around that cell.
+    #[test]
+    fn sorting_from_a_single_cell_covers_the_block_around_it() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        for (row, value) in ["c", "a", "b"].into_iter().enumerate() {
+            app.set_cell_input(CellAddr::new(0, row), value);
+        }
+        // A blank row, then a second table that must not be drawn in.
+        app.set_cell_input(CellAddr::new(0, 5), "z");
+
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 1));
+        app.sort_column(SortDirection::Ascending);
+
+        let column: Vec<String> = (0..3)
+            .map(|r| {
+                app.active_sheet()
+                    .get_cell(CellAddr::new(0, r))
+                    .display_text()
+            })
+            .collect();
+        assert_eq!(
+            column,
+            ["a", "b", "c"],
+            "the block around the cell should be sorted"
+        );
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 5))
+                .display_text(),
+            "z",
+            "a table separated by a blank row is a different table"
+        );
+    }
+
+    /// An explicit selection is obeyed exactly -- which is how a header row is
+    /// kept out of a sort.
+    #[test]
+    fn an_explicit_selection_is_the_range_that_gets_sorted() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        for (row, value) in ["Header", "c", "a", "b"].into_iter().enumerate() {
+            app.set_cell_input(CellAddr::new(0, row), value);
+        }
+        *app.selection_mut() = Selection {
+            active: CellAddr::new(0, 1),
+            ranges: vec![CellRange::new(CellAddr::new(0, 1), CellAddr::new(0, 3))],
+        };
+        app.sort_column(SortDirection::Ascending);
+
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .display_text(),
+            "Header",
+            "the row outside the selection should not have moved"
+        );
+        let sorted: Vec<String> = (1..4)
+            .map(|r| {
+                app.active_sheet()
+                    .get_cell(CellAddr::new(0, r))
+                    .display_text()
+            })
+            .collect();
+        assert_eq!(sorted, ["a", "b", "c"]);
+    }
+
+    /// Pointing at a blank cell selects no table.
+    #[test]
+    fn sorting_from_an_empty_cell_does_nothing() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.set_cell_input(CellAddr::new(0, 0), "c");
+        app.set_cell_input(CellAddr::new(0, 1), "a");
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 9));
+        app.sort_column(SortDirection::Ascending);
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .display_text(),
+            "c",
+            "a sort aimed at empty space should not reach a table elsewhere"
+        );
+    }
+
+    /// Not a bug, and it looks like one: freezing pins what is above and to the
+    /// left of the active cell, so at A1 the button is correctly a no-op. Every
+    /// other spreadsheet behaves the same way -- which is why they have a
+    /// separate "freeze the top row" command.
+    #[test]
+    fn freezing_at_the_top_left_cell_pins_nothing() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.toggle_freeze_panes();
+        assert_eq!(app.active_sheet().frozen_rows, 0);
+        assert_eq!(app.active_sheet().frozen_cols, 0);
+
+        *app.selection_mut() = Selection::single(CellAddr::new(2, 3));
+        app.toggle_freeze_panes();
+        assert_eq!(app.active_sheet().frozen_rows, 3);
+        assert_eq!(app.active_sheet().frozen_cols, 2);
+
+        app.toggle_freeze_panes();
+        assert_eq!(
+            app.active_sheet().frozen_rows,
+            0,
+            "and pressing it again releases them, wherever the cursor is"
+        );
+    }
+
+    /// A click on the toolbar strip between two groups is the toolbar's, not
+    /// the grid's. Before the band was claimed, a click anywhere up there fell
+    /// through to whatever the grid made of it.
+    #[test]
+    fn a_click_on_the_empty_toolbar_does_not_reach_the_grid() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        // The return value is the whole of the assertion, and asserting on the
+        // selection instead is why the first version of this test proved
+        // nothing: the grid also declines a click above its top edge, so it
+        // passed whether the band was claimed or not. `Ignored` becomes
+        // `Response::Idle` in `on_event`, so the difference is real -- it is
+        // whether the strip between two button groups is part of the toolbar or
+        // a hole in it.
+        assert_eq!(
+            app.handle_event(&press_at(1200.0, TOOLBAR_HEIGHT / 2.0)),
+            EventResult::Consumed,
+            "the toolbar band should claim a click that lands between groups"
+        );
+        assert_eq!(
+            app.selection().active,
+            CellAddr::new(0, 0),
+            "and the selection should not have moved"
+        );
+        assert_eq!(app.mode, InteractionMode::Normal);
+    }
+
+    /// Pressing the lit button again puts the cell back. Without it there is no
+    /// control anywhere that returns a cell to General.
+    #[test]
+    fn a_number_format_button_toggles_back_to_general() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let dollar = app
+            .toolbar_buttons()
+            .into_iter()
+            .find(|b| b.label == "$")
+            .expect("there is a currency button");
+        let (cx, cy) = (
+            dollar.rect.x + dollar.rect.w / 2.0,
+            dollar.rect.y + dollar.rect.h / 2.0,
+        );
+
+        app.handle_event(&press_at(cx, cy));
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .format
+                .number_format,
+            NumberFormat::Currency(2)
+        );
+        assert!(
+            app.toolbar_buttons()
+                .into_iter()
+                .find(|b| b.label == "$")
+                .expect("still there")
+                .active,
+            "the button should show the format it just set as in effect"
+        );
+
+        app.handle_event(&press_at(cx, cy));
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .format
+                .number_format,
+            NumberFormat::General,
+            "pressing a lit button should turn it off"
+        );
+    }
+
+    /// A cell at four decimal places is still a currency cell, and the button
+    /// that says so must not go dark because the places differ.
+    #[test]
+    fn the_currency_button_is_lit_by_the_kind_of_format_not_the_places() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.set_number_format(NumberFormat::Currency(4));
+        assert!(
+            app.toolbar_buttons()
+                .into_iter()
+                .find(|b| b.label == "$")
+                .expect("there")
+                .active
+        );
+    }
+
+    /// Formatting a cell that is open for editing has to apply to what is being
+    /// typed, not to the value it is replacing.
+    #[test]
+    fn a_toolbar_click_while_editing_commits_the_edit_first() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.handle_event(&Event::Key(key(Key::A, Some('7'))));
+        assert!(matches!(app.mode, InteractionMode::Editing { .. }));
+
+        let bold = app.toolbar_buttons().remove(0);
+        app.handle_event(&press_at(
+            bold.rect.x + bold.rect.w / 2.0,
+            bold.rect.y + bold.rect.h / 2.0,
+        ));
+
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .display_text(),
+            "7",
+            "the value being typed should have been committed"
+        );
+        assert!(app.active_sheet().get_cell(CellAddr::new(0, 0)).format.bold);
+    }
+
+    // ------------------------------------------------------------------
+    // Find and replace
+    //
+    // The panel drew two labelled fields and three buttons. Nothing could
+    // type into the second field, nothing could press any of the buttons, and
+    // `replace_current`/`replace_all` had no caller at all.
+    // ------------------------------------------------------------------
+
+    fn ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    fn ctrl_shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::ctrl();
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn typing(text: &str) -> Vec<Event> {
+        text.chars()
+            .map(|c| {
+                Event::Key(KeyEvent {
+                    key: Key::A,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                    text: c.to_string(),
+                })
+            })
+            .collect()
+    }
+
+    fn searchable() -> SpreadsheetApp {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        for row in 0..3 {
+            app.set_cell_input(CellAddr::new(0, row), "cat");
+        }
+        app.set_cell_input(CellAddr::new(1, 0), "dog");
+        app
+    }
+
+    /// The only difference between the two shortcuts, and the whole of it: they
+    /// used to be two names for one action, with the replacement field
+    /// unreachable either way.
+    #[test]
+    fn ctrl_f_aims_at_the_search_box_and_ctrl_h_at_the_replacement() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        assert_eq!(app.find_replace.field, FindField::Search);
+
+        app.handle_event(&ctrl(Key::H));
+        assert_eq!(app.find_replace.field, FindField::Replace);
+        assert!(app.find_replace.active, "the panel should still be open");
+    }
+
+    #[test]
+    fn typing_goes_into_the_focused_field_and_tab_switches_them() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        for event in typing("cat") {
+            app.handle_event(&event);
+        }
+        assert_eq!(app.find_replace.search_text, "cat");
+        assert_eq!(
+            app.find_replace.replace_text, "",
+            "nothing should have reached the other field"
+        );
+
+        app.handle_event(&key_event(Key::Tab));
+        for event in typing("dog") {
+            app.handle_event(&event);
+        }
+        assert_eq!(app.find_replace.replace_text, "dog");
+        assert_eq!(app.find_replace.search_text, "cat");
+
+        app.handle_event(&key_event(Key::Backspace));
+        assert_eq!(app.find_replace.replace_text, "do");
+    }
+
+    /// Enter used to re-run the search on every press, and `find_all` resets
+    /// the cursor -- so `next_result` moved it from 0 to 1 every time. With
+    /// three matches the second was selected for ever and the third could not
+    /// be reached at all.
+    #[test]
+    fn enter_steps_through_every_match_rather_than_sticking_on_the_second() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        for event in typing("cat") {
+            app.handle_event(&event);
+        }
+
+        let mut visited = Vec::new();
+        for _ in 0..3 {
+            app.handle_event(&key_event(Key::Enter));
+            visited.push(app.selection().active);
+        }
+        visited.sort_by_key(|a| a.row);
+        visited.dedup();
+        assert_eq!(
+            visited.len(),
+            3,
+            "three presses on three matches should have visited three cells, not one twice"
+        );
+    }
+
+    /// Backwards, which is what `prev_result` was written and tested for and
+    /// what nothing had ever called.
+    #[test]
+    fn shift_enter_steps_backwards_through_the_matches() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        for event in typing("cat") {
+            app.handle_event(&event);
+        }
+        app.handle_event(&key_event(Key::Enter));
+        let forward = app.selection().active;
+        app.handle_event(&shift(Key::Enter));
+        assert_ne!(
+            app.selection().active,
+            forward,
+            "Shift+Enter should have moved off the match Enter landed on"
+        );
+    }
+
+    /// Ctrl+Enter replaces one match, and it is undoable -- which is why
+    /// `replace_current` hands back the before-and-after cells at all.
+    #[test]
+    fn ctrl_enter_replaces_one_match_and_it_can_be_undone() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        for event in typing("cat") {
+            app.handle_event(&event);
+        }
+        app.handle_event(&key_event(Key::Tab));
+        for event in typing("bird") {
+            app.handle_event(&event);
+        }
+
+        app.handle_event(&ctrl(Key::Enter));
+        let replaced = (0..3)
+            .filter(|&row| {
+                app.active_sheet()
+                    .get_cell(CellAddr::new(0, row))
+                    .display_text()
+                    == "bird"
+            })
+            .count();
+        assert_eq!(replaced, 1, "exactly one match should have changed");
+
+        app.undo();
+        assert_eq!(
+            (0..3)
+                .filter(|&row| {
+                    app.active_sheet()
+                        .get_cell(CellAddr::new(0, row))
+                        .display_text()
+                        == "cat"
+                })
+                .count(),
+            3,
+            "undo should have put it back"
+        );
+    }
+
+    /// Replace All is one thing the user did, so it is one thing to undo.
+    #[test]
+    fn ctrl_shift_enter_replaces_every_match_as_a_single_undo() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        for event in typing("cat") {
+            app.handle_event(&event);
+        }
+        app.handle_event(&key_event(Key::Tab));
+        for event in typing("bird") {
+            app.handle_event(&event);
+        }
+
+        app.handle_event(&ctrl_shift(Key::Enter));
+        assert_eq!(
+            (0..3)
+                .filter(|&row| {
+                    app.active_sheet()
+                        .get_cell(CellAddr::new(0, row))
+                        .display_text()
+                        == "bird"
+                })
+                .count(),
+            3,
+            "every match should have been replaced"
+        );
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(1, 0))
+                .display_text(),
+            "dog",
+            "a cell that never matched should be untouched"
+        );
+
+        app.undo();
+        assert_eq!(
+            (0..3)
+                .filter(|&row| {
+                    app.active_sheet()
+                        .get_cell(CellAddr::new(0, row))
+                        .display_text()
+                        == "cat"
+                })
+                .count(),
+            3,
+            "one undo should have put all three back -- undoing a replace-all \
+             three times is not undo"
+        );
+    }
+
+    /// The panel's three buttons are drawn; a click at the centre of one has to
+    /// press it.
+    #[test]
+    fn the_panels_buttons_can_be_clicked() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        for event in typing("cat") {
+            app.handle_event(&event);
+        }
+        app.handle_event(&key_event(Key::Tab));
+        for event in typing("bird") {
+            app.handle_event(&event);
+        }
+
+        let all = app
+            .find_panel()
+            .controls
+            .into_iter()
+            .find(|(_, c)| *c == FindControl::ReplaceAll)
+            .expect("the panel draws a Replace All button");
+        app.handle_event(&press_at(all.0.x + all.0.w / 2.0, all.0.y + all.0.h / 2.0));
+
+        assert_eq!(
+            (0..3)
+                .filter(|&row| {
+                    app.active_sheet()
+                        .get_cell(CellAddr::new(0, row))
+                        .display_text()
+                        == "bird"
+                })
+                .count(),
+            3,
+            "the Replace All button did nothing"
+        );
+    }
+
+    /// A click inside the dialog is the dialog's, even where no control sits.
+    /// It used to fall through to the grid, so pressing a button moved the
+    /// selection behind the panel.
+    #[test]
+    fn a_click_in_the_panel_does_not_reach_the_grid_behind_it() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        let before = app.selection().active;
+
+        let frame = app.find_panel().frame;
+        // The dialog's own bottom-left corner, which is inside the frame and on
+        // no control.
+        app.handle_event(&press_at(frame.x + 2.0, frame.y + frame.h - 2.0));
+
+        assert_eq!(
+            app.selection().active,
+            before,
+            "the click went through the dialog and moved the selection"
+        );
+        assert!(app.find_replace.active, "and it should not have closed it");
+    }
+
+    /// A click outside a dialog dismisses it, which is what a click outside a
+    /// dialog does.
+    #[test]
+    fn a_click_outside_the_panel_closes_it() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        let before = app.selection().active;
+        app.handle_event(&press_at(200.0, 400.0));
+        assert!(!app.find_replace.active, "the panel should have closed");
+        assert_ne!(
+            app.selection().active,
+            before,
+            "and the click should have gone on to select the cell under it"
+        );
+    }
+
+    /// Formatting a cell before typing into it is how anyone lays out a sheet.
+    /// The store dropped any cell with no text in it, formatting and all, so
+    /// selecting an empty column and making it currency did nothing at all.
+    #[test]
+    fn an_empty_cell_keeps_the_formatting_given_to_it() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.set_number_format(NumberFormat::Currency(2));
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .format
+                .number_format,
+            NumberFormat::Currency(2),
+            "the format was applied to an empty cell and thrown away"
+        );
+
+        // And typing into it afterwards uses the format that was waiting.
+        app.set_cell_input(CellAddr::new(0, 0), "3");
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .display_text(),
+            "$3.00"
+        );
+    }
+
+    /// A cell with neither text nor formatting is still not worth storing: the
+    /// space saving is the reason the rule exists, and `export_csv` derives its
+    /// bounds from the key set.
+    #[test]
+    fn a_cell_with_nothing_in_it_at_all_is_still_dropped() {
+        let mut sheet = Sheet::new("S");
+        sheet.set_cell_input(CellAddr::new(0, 0), "x");
+        assert!(!sheet.cells.is_empty());
+        sheet.set_cell(CellAddr::new(0, 0), Cell::empty());
+        assert!(
+            sheet.cells.is_empty(),
+            "a blank, unformatted cell should not be kept"
+        );
+    }
+
+    /// Delete clears what is in a cell, not how it is drawn.
+    #[test]
+    fn deleting_a_cells_contents_keeps_its_formatting() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.set_cell_input(CellAddr::new(0, 0), "3");
+        app.set_number_format(NumberFormat::Currency(2));
+
+        app.delete_selection();
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .display_text(),
+            "",
+            "the contents should be gone"
+        );
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .format
+                .number_format,
+            NumberFormat::Currency(2),
+            "the column should still be a currency column"
+        );
+    }
+
+    /// The matches on screen are the matches for what the box said one
+    /// keystroke ago; editing the query throws them away rather than letting a
+    /// Replace fire at a match for a search nobody is running any more.
+    #[test]
+    fn editing_the_query_discards_the_matches_it_found() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        for event in typing("cat") {
+            app.handle_event(&event);
+        }
+        app.handle_event(&key_event(Key::Enter));
+        assert_eq!(app.find_replace.result_count(), 3);
+
+        app.handle_event(&key_event(Key::Backspace));
+        assert_eq!(
+            app.find_replace.result_count(),
+            0,
+            "the results were found for a query that has since changed"
+        );
+
+        // Editing the *replacement* does not: the same cells still match.
+        for event in typing("t") {
+            app.handle_event(&event);
+        }
+        app.handle_event(&key_event(Key::Enter));
+        app.handle_event(&key_event(Key::Tab));
+        for event in typing("x") {
+            app.handle_event(&event);
+        }
+        assert_eq!(
+            app.find_replace.result_count(),
+            3,
+            "typing a replacement should not have thrown the matches away"
+        );
+    }
+
+    /// A key the panel has no use for is not text, and must not be typed into
+    /// the search box.
+    #[test]
+    fn a_key_that_carries_no_text_is_not_typed_into_the_search_box() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        assert_eq!(
+            app.handle_event(&key_event(Key::F5)),
+            EventResult::Ignored,
+            "the panel should leave a key it has no use for alone"
+        );
+        assert_eq!(app.find_replace.search_text, "");
+    }
+
+    /// Some keyboards report Ctrl+F as the letter `f` alongside the modifier.
+    /// Typing it into the box would be the same bug this tree has already had
+    /// in `apps/notes`.
+    #[test]
+    fn a_ctrl_chord_that_carries_text_is_not_typed_into_the_search_box() {
+        let mut app = searchable();
+        app.handle_event(&ctrl(Key::F));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::S,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: "s".to_string(),
+        }));
+        assert_eq!(app.find_replace.search_text, "", "a Ctrl chord is not text");
+    }
 
     // -- text measurement --
 
@@ -7044,14 +8545,14 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let app = SpreadsheetApp::new(1280.0, 800.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_has_background_fill() {
         let app = SpreadsheetApp::new(1280.0, 800.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_bg = cmds.iter().any(|c| {
             matches!(c, RenderCommand::FillRect { width, height, .. } if *width == 1280.0 && *height == 800.0)
         });
@@ -7062,7 +8563,7 @@ mod tests {
     fn test_render_has_text_commands() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "Hello");
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_text = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Hello"));
@@ -7072,7 +8573,7 @@ mod tests {
     #[test]
     fn test_render_active_cell_outline() {
         let app = SpreadsheetApp::new(1280.0, 800.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_stroke = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == COLOR_BLUE));
@@ -7083,7 +8584,7 @@ mod tests {
     fn test_render_find_replace_overlay() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.find_replace.active = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_overlay = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Find and Replace"));
@@ -7094,7 +8595,7 @@ mod tests {
     fn test_render_sheet_tabs() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.add_sheet();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let tab1 = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Sheet1"));
@@ -7108,7 +8609,7 @@ mod tests {
     #[test]
     fn test_render_formula_bar() {
         let app = SpreadsheetApp::new(1280.0, 800.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_fx = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "fx"));
@@ -7118,7 +8619,7 @@ mod tests {
     #[test]
     fn test_render_col_headers() {
         let app = SpreadsheetApp::new(1280.0, 800.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_a = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "A"));
@@ -7128,7 +8629,7 @@ mod tests {
     #[test]
     fn test_render_row_headers() {
         let app = SpreadsheetApp::new(1280.0, 800.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_1 = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "1"));
@@ -7491,7 +8992,7 @@ mod tests {
             app.set_cell_input(CellAddr::new(1, i), &format!("{}", (i + 1) * 10));
         }
         app.set_cell_input(CellAddr::new(1, 10), "=SUM(B1:B10)");
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Should have many render commands for a populated spreadsheet
         assert!(cmds.len() > 100);
     }
@@ -7654,7 +9155,7 @@ mod tests {
         let app = SpreadsheetApp::new(1.0, 1.0);
         let _ = app.cell_nearest_position(10.0, 10.0);
         let _ = app.cell_at_position(10.0, 10.0);
-        let _ = app.render();
+        let _ = app.render_commands();
     }
 
     /// The bug that made frozen panes unusable: selecting a pinned cell
@@ -8031,7 +9532,7 @@ mod tests {
     /// with the click test wired back to a second, disagreeing layout — which
     /// is exactly the bug they exist to pin.
     fn drawn_tab_rects(app: &SpreadsheetApp) -> Vec<Rect> {
-        app.render()
+        app.render_commands()
             .iter()
             .filter_map(|c| match c {
                 RenderCommand::FillRect {
@@ -8115,7 +9616,7 @@ mod tests {
         // button. It is the only rect of its own width in the strip.
         let last = drawn.last().copied().expect("at least one tab");
         let plus = app
-            .render()
+            .render_commands()
             .iter()
             .find_map(|c| match c {
                 RenderCommand::FillRect {
@@ -8225,7 +9726,7 @@ mod tests {
     #[test]
     fn a_frozen_grid_clips_every_band_it_draws() {
         let app = frozen_app(2, 3);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let pushes = cmds
             .iter()
             .filter(|c| matches!(c, RenderCommand::PushClip { .. }))
@@ -8259,7 +9760,7 @@ mod tests {
             // band's clip is given.
             frozen_app(20, 30),
         ] {
-            for cmd in app.render() {
+            for cmd in app.render_commands() {
                 if let RenderCommand::PushClip { width, height, .. } = cmd {
                     assert!(width >= 0.0 && height >= 0.0, "{width} x {height}");
                 }
@@ -8274,7 +9775,7 @@ mod tests {
     #[test]
     fn the_frozen_band_is_drawn_over_the_one_that_scrolls_under_it() {
         let app = frozen_app(2, 3);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Two cells in one row band: one in the pinned columns, one in the
         // columns that scroll under them. Both must be on screen, so the
         // scrolling one is chosen from what the 500 px offset actually shows —
@@ -8316,7 +9817,7 @@ mod tests {
         let addr = CellAddr::new(1, 2);
         *app.selection_mut() = Selection::single(addr);
         let (want_x, want_y) = (app.col_screen_x(addr.col), app.row_screen_y(addr.row));
-        let found = app.render().into_iter().any(|c| {
+        let found = app.render_commands().into_iter().any(|c| {
             matches!(c, RenderCommand::StrokeRect { x, y, color, .. }
                      if color == COLOR_BLUE
                         && (x - want_x).abs() < 0.5

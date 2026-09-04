@@ -116120,3 +116120,77 @@ the test count says otherwise: the tests above prove the *argument handling*
 and the path arithmetic, and nothing at all about the traversal. All four
 defects here were found by reading, not by a failing test, and a fifth of the
 same kind would have to be found the same way.
+
+---
+
+## TD-B-A-CARGO-RUN-IN-THIS-TREE-IS-82-PERCENT-ONE-REPEATED-WARNING (lane B, 2026-09-04)
+
+**In short:** Every `cargo build`/`clippy`/`test` in this workspace prints the
+same warning about two thousand times, once per crate, and that one warning is
+**82% of the output by volume**. Nothing is broken by it; what is broken is
+anyone's ability to read a build log, including this session's — a real error
+scrolls past inside four megabytes of identical paragraphs.
+
+**Measured, 2026-09-04**, on the `--only linux` run of `oils`+`cpio`+`stat`
+(four cargo invocations, log kept at 5.02 MB):
+
+| | |
+|---|---:|
+| log total | 5.02 MB |
+| `missing [lints] to inherit [workspace.lints]` | **4.11 MB (81.9%)** |
+| everything else — the compile, the lints, 4 test binaries | 0.91 MB |
+| occurrences of the warning | 8,166 (≈2,000 per cargo invocation) |
+| manifests in the tree | 2,950 |
+| manifests with a `[lints]` section | 217 |
+| manifests without one | **2,733**, of which **2,718 are under `userspace/`** |
+
+**Where it lives.** Each crate's `Cargo.toml`. The fix per crate is three
+lines:
+
+```toml
+[lints]
+workspace = true
+```
+
+`cargo::missing_lints_inheritance` is `warn` by default, and the workspace root
+does define `[workspace.lints]`, so every member that does not opt in is told
+so on every invocation.
+
+**Why this is not simply "add the three lines to 2,733 manifests", and why it
+is filed rather than fixed.** Those 2,718 `userspace/` manifests are
+overwhelmingly the stub crates behind the open question at
+`open-questions.md` → *"2,288 of the 2,756 commands in `userspace/` report
+success for work they never did. Which ones do we keep?"* (lane B, 2026-09-02),
+which is **still awaiting the operator**. The three options there are keep /
+delete / mark-unimplemented, and two of the three delete most of these
+manifests outright. Writing `[lints] workspace = true` into all 2,733 now would
+be a 2,733-file commit that the operator's answer may then largely revert —
+and, worse, it would make the stubs *inherit the workspace's strict lints*,
+which is a real behaviour change (`unwrap_used`, `indexing_slicing`,
+`arithmetic_side_effects` and friends) applied to code we may be about to
+delete, on no one's decision.
+
+So this is **deliberately blocked on that question**, not overlooked. It is
+recorded separately because it is a distinct cost — the unreadable logs are
+paid today, by every build, whatever is eventually decided about the stubs —
+and because whoever answers the open question should know that the answer
+carries this with it.
+
+**Do not "fix" it by silencing the warning** (`--cap-lints`, `-A
+cargo::missing_lints_inheritance`, or `[workspace.lints]` removal). The warning
+is correct: those crates genuinely are not covered by the lint policy
+`CLAUDE.md` requires of every crate. Silencing it would convert a loud,
+accurate statement that 2,733 crates are unlinted into silence on the same
+fact, which is the failure shape half this file is about.
+
+**If it is never fixed:** build logs stay unreadable at 5 MB a run, which makes
+every future diagnosis in this lane more expensive and makes a genuine warning
+easy to miss — and 2,733 crates stay outside the lint policy the project
+requires.
+
+**Interim workaround** for reading a build log:
+
+```sh
+grep -v -e 'missing `\[lints\]`' -e 'missing_lints_inheritance' \
+        -e 'to inherit `workspace.lints' build.log | less
+```

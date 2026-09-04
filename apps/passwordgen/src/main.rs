@@ -21,10 +21,14 @@
 // centralised rather than diverging per-crate.
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SecretSource, SeededRng, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -416,7 +420,6 @@ impl AppRandom {
     pub const fn seeded(seed: u64) -> Self {
         Self::Seeded(SeededRng::new(seed))
     }
-
 }
 
 /// Both sides of the draw are checked by [`SecretSource::secret`], which is
@@ -528,7 +531,11 @@ pub fn generate_passphrase<R: RandomSource>(opts: &PassphraseOptions, rng: &mut 
     let mut words: Vec<String> = Vec::with_capacity(opts.word_count);
 
     for _ in 0..opts.word_count {
-        let word = rng.choose(WORD_LIST).copied().unwrap_or("unknown").to_owned();
+        let word = rng
+            .choose(WORD_LIST)
+            .copied()
+            .unwrap_or("unknown")
+            .to_owned();
         if opts.capitalize {
             let mut chars = word.chars();
             let capitalized = match chars.next() {
@@ -1081,6 +1088,56 @@ impl ActiveTab {
 // ============================================================================
 
 /// The password generator/analyzer application.
+/// The ranges the length keys move within.
+///
+/// The generators themselves impose no bound — `generate_password` will happily
+/// be asked for a million characters, and `generate_pin` for zero. These are
+/// the limits of the *control*, chosen so a held-down arrow key cannot put the
+/// app somewhere useless: a password shorter than eight characters is not worth
+/// generating, and one longer than 128 does not fit the field it is drawn in.
+const MIN_PASSWORD_LEN: usize = 8;
+const MAX_PASSWORD_LEN: usize = 128;
+/// Four words is the familiar diceware minimum; twelve is where the phrase
+/// stops fitting on one line.
+const MIN_WORDS: usize = 3;
+const MAX_WORDS: usize = 12;
+/// A PIN below four digits is not a PIN; twelve is the longest any card asks
+/// for.
+const MIN_PIN_LEN: usize = 4;
+const MAX_PIN_LEN: usize = 12;
+/// Bulk generation is bounded by what the list can show without scrolling
+/// becoming the point of the tab.
+const MAX_BULK: usize = 100;
+
+/// Move `value` by `delta`, staying within `[lo, hi]`.
+///
+/// A free function because four generator kinds need the same clamp on four
+/// different fields, and four copies of a saturating step is four chances for one of them
+/// to have the wrong bound.
+fn step(value: usize, delta: isize, lo: usize, hi: usize) -> usize {
+    let moved = if delta < 0 {
+        value.saturating_sub(delta.unsigned_abs())
+    } else {
+        value.saturating_add(delta.unsigned_abs())
+    };
+    moved.clamp(lo, hi)
+}
+
+/// What the generator tab is currently producing.
+///
+/// The three `ActiveTab` values are the *screens*; this is the choice within
+/// the generator screen. It exists because the length arrows and the "another
+/// one" key both need to know which of the five generators they are talking
+/// about, and before there was any input at all nothing had to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenKind {
+    Password,
+    Passphrase,
+    Pin,
+    Pronounceable,
+    Bulk,
+}
+
 pub struct PasswordApp {
     pub password_opts: PasswordOptions,
     pub passphrase_opts: PassphraseOptions,
@@ -1090,6 +1147,8 @@ pub struct PasswordApp {
     pub history: Vec<HistoryEntry>,
     pub policy: PasswordPolicy,
     pub active_tab: ActiveTab,
+    /// What the generator tab is producing; see [`GenKind`].
+    pub gen_kind: GenKind,
     pub pin_length: usize,
     pub bulk_count: usize,
     pub bulk_results: Vec<String>,
@@ -1142,6 +1201,7 @@ impl PasswordApp {
             history: Vec::new(),
             policy: PasswordPolicy::default(),
             active_tab: ActiveTab::Generator,
+            gen_kind: GenKind::Password,
             pin_length: 6,
             bulk_count: 10,
             bulk_results: Vec::new(),
@@ -1288,7 +1348,175 @@ impl PasswordApp {
     // Rendering
     // -----------------------------------------------------------------------
 
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    // ------------------------------------------------------------------
+    // Events
+    // ------------------------------------------------------------------
+
+    /// Route a compositor event into the app.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                // Not `Consumed`: a resize is not by itself a reason to redraw.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a key press.
+    ///
+    /// The app had no input handling at all: every generator, the analyser and
+    /// the history were reachable only by a caller invoking the method. On the
+    /// analyser tab every printable key is the password being analysed, which
+    /// is why that branch comes first — otherwise typing a "p" into a password
+    /// would generate a new one instead of measuring the one being typed.
+    pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        if self.active_tab == ActiveTab::Analyzer {
+            match key.key {
+                Key::Backspace => {
+                    let mut input = self.analyzer_input.clone();
+                    if input.pop().is_none() {
+                        return EventResult::Ignored;
+                    }
+                    self.set_analyzer_input(&input);
+                    // `set_analyzer_input` only stores the text. Measuring it
+                    // is the entire purpose of this tab, so a keystroke that
+                    // stored without measuring would leave the strength meter
+                    // showing the previous password's score.
+                    self.analyze_input();
+                    return EventResult::Consumed;
+                }
+                // The tab keys keep working, or there is no way out of the box.
+                Key::Tab | Key::Num1 | Key::Num2 | Key::Num3 => {}
+                _ => {
+                    if key.text.is_empty() || key.modifiers.ctrl {
+                        return EventResult::Ignored;
+                    }
+                    let mut input = self.analyzer_input.clone();
+                    input.push_str(&key.text);
+                    self.set_analyzer_input(&input);
+                    self.analyze_input();
+                    return EventResult::Consumed;
+                }
+            }
+        }
+        match key.key {
+            Key::Num1 => self.set_tab(ActiveTab::Generator),
+            Key::Num2 => self.set_tab(ActiveTab::Analyzer),
+            Key::Num3 => self.set_tab(ActiveTab::History),
+            Key::Tab => {
+                let next = match self.active_tab {
+                    ActiveTab::Generator => ActiveTab::Analyzer,
+                    ActiveTab::Analyzer => ActiveTab::History,
+                    ActiveTab::History => ActiveTab::Generator,
+                };
+                self.set_tab(next)
+            }
+            // What to generate. Each key both chooses the kind and produces
+            // one, because choosing without producing would leave the field
+            // showing the previous kind's output.
+            Key::P => self.generate(GenKind::Password),
+            Key::W => self.generate(GenKind::Passphrase),
+            Key::N => self.generate(GenKind::Pin),
+            Key::R => self.generate(GenKind::Pronounceable),
+            Key::B => self.generate(GenKind::Bulk),
+            // Another one of the same kind. Space and Enter both, because
+            // "give me another" is the thing this program is for.
+            Key::Space | Key::Enter => {
+                let kind = self.gen_kind;
+                self.generate(kind)
+            }
+            // Length, applied to whichever kind is showing.
+            Key::Left => self.adjust_length(-1),
+            Key::Right => self.adjust_length(1),
+            Key::C => {
+                if self.history.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.clear_history();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Switch tabs, reporting whether anything changed.
+    fn set_tab(&mut self, tab: ActiveTab) -> EventResult {
+        if self.active_tab == tab {
+            return EventResult::Ignored;
+        }
+        self.active_tab = tab;
+        EventResult::Consumed
+    }
+
+    /// Produce one of `kind`, and remember it as what the arrows now size.
+    fn generate(&mut self, kind: GenKind) -> EventResult {
+        self.gen_kind = kind;
+        // Generating is only meaningful on the generator tab, and pressing a
+        // generator key elsewhere plainly means "go and do that".
+        self.active_tab = ActiveTab::Generator;
+        match kind {
+            GenKind::Password => self.gen_password(),
+            GenKind::Passphrase => self.gen_passphrase(),
+            GenKind::Pin => self.gen_pin(),
+            GenKind::Pronounceable => self.gen_pronounceable(),
+            GenKind::Bulk => self.gen_bulk(),
+        }
+        EventResult::Consumed
+    }
+
+    /// Lengthen or shorten what the current kind produces, and produce one.
+    ///
+    /// Each length is clamped to the range its own control accepts, so a
+    /// held-down arrow cannot ask for a one-character password or a
+    /// thousand-word passphrase.
+    fn adjust_length(&mut self, delta: isize) -> EventResult {
+        let changed = match self.gen_kind {
+            GenKind::Password | GenKind::Pronounceable => {
+                let before = self.password_opts.length;
+                self.password_opts.length = step(before, delta, MIN_PASSWORD_LEN, MAX_PASSWORD_LEN);
+                self.password_opts.length != before
+            }
+            GenKind::Passphrase => {
+                let before = self.passphrase_opts.word_count;
+                self.passphrase_opts.word_count = step(before, delta, MIN_WORDS, MAX_WORDS);
+                self.passphrase_opts.word_count != before
+            }
+            GenKind::Pin => {
+                let before = self.pin_length;
+                self.pin_length = step(before, delta, MIN_PIN_LEN, MAX_PIN_LEN);
+                self.pin_length != before
+            }
+            GenKind::Bulk => {
+                let before = self.bulk_count;
+                self.bulk_count = step(before, delta, 1, MAX_BULK);
+                self.bulk_count != before
+            }
+        };
+        if !changed {
+            return EventResult::Ignored;
+        }
+        let kind = self.gen_kind;
+        self.generate(kind)
+    }
+
+    /// Named `render_commands` and not `render`: this takes a width and a
+    /// height, exactly as `oswindow::app::App::render` does, and at equal arity
+    /// an inherent method silently wins method lookup over the trait's — so an
+    /// app that keeps the name draws nothing and reports no error.
+    pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         cmds.push(RenderCommand::FillRect {
@@ -1874,14 +2102,62 @@ impl PasswordApp {
 // Main
 // ============================================================================
 
-fn main() {
+impl App for PasswordApp {
+    fn title(&self) -> String {
+        "Password Generator".to_owned()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.window_width as u32, self.window_height as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// A password appears when one is asked for. Nothing here ages, and a
+    /// generator that produced a new secret on a timer would be actively worse
+    /// than one that did not — the one on screen is the one the user is in the
+    /// middle of copying.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.window_width = width;
+        self.window_height = height;
+        RenderTree {
+            commands: self.render_commands(width, height),
+        }
+    }
+}
+
+fn main() -> ExitCode {
     let mut app = PasswordApp::new();
+    // So the first frame shows something on every tab rather than an empty
+    // field the user has to press a key to fill.
     app.gen_password();
     app.gen_passphrase();
     app.gen_pin();
-
-    let cmds = app.render(1100.0, 700.0);
-    let _ = cmds.len();
+    app::launch("passwordgen", &mut app)
 }
 
 // ============================================================================
@@ -1899,6 +2175,233 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Events
+    //
+    // The app had no input handling at all until it was wired to the
+    // compositor: every generator was reachable only by a caller.
+    // ------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+
+    /// An app with a reproducible source.
+    ///
+    /// `PasswordApp::new` takes the system CSPRNG, which is not available in a
+    /// test process — the generators then *refuse*, which is this app's
+    /// documented behaviour and the reason a test that called `new` saw empty
+    /// output rather than a bug.
+    fn seeded_app() -> PasswordApp {
+        PasswordApp::with_seed(42)
+    }
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn typed(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    #[test]
+    fn each_generator_key_produces_its_own_kind() {
+        let mut app = seeded_app();
+        for (k, kind) in [
+            (Key::W, GenKind::Passphrase),
+            (Key::N, GenKind::Pin),
+            (Key::R, GenKind::Pronounceable),
+            (Key::B, GenKind::Bulk),
+            (Key::P, GenKind::Password),
+        ] {
+            assert_eq!(app.handle_event(&press(k)), EventResult::Consumed);
+            assert_eq!(app.gen_kind, kind, "{k:?} chose the wrong kind");
+            assert_eq!(
+                app.active_tab,
+                ActiveTab::Generator,
+                "a generator key should show the generator"
+            );
+        }
+    }
+
+    #[test]
+    fn space_produces_another_of_the_same_kind() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::N));
+        let kind = app.gen_kind;
+        let first = app.current_password.clone();
+        assert_eq!(app.handle_event(&press(Key::Space)), EventResult::Consumed);
+        assert_eq!(app.gen_kind, kind, "Space changed the kind");
+        // Two PINs of the same length are not guaranteed to differ, so this
+        // asserts the history grew rather than that the text changed.
+        assert!(
+            app.history.len() >= 2,
+            "Space should have generated again: {} entries",
+            app.history.len()
+        );
+        let _ = first;
+    }
+
+    #[test]
+    fn the_length_arrows_stay_inside_the_range_for_each_kind() {
+        // A held-down arrow must not be able to ask for a one-character
+        // password or a thousand-word passphrase.
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::P));
+        for _ in 0..400 {
+            app.handle_event(&press(Key::Right));
+        }
+        assert_eq!(app.password_opts.length, MAX_PASSWORD_LEN);
+        for _ in 0..400 {
+            app.handle_event(&press(Key::Left));
+        }
+        assert_eq!(app.password_opts.length, MIN_PASSWORD_LEN);
+        // And at the end of the range the key stops reporting a redraw.
+        assert_eq!(app.handle_event(&press(Key::Left)), EventResult::Ignored);
+
+        app.handle_event(&press(Key::W));
+        for _ in 0..40 {
+            app.handle_event(&press(Key::Left));
+        }
+        assert_eq!(app.passphrase_opts.word_count, MIN_WORDS);
+
+        app.handle_event(&press(Key::N));
+        for _ in 0..40 {
+            app.handle_event(&press(Key::Right));
+        }
+        assert_eq!(app.pin_length, MAX_PIN_LEN);
+    }
+
+    #[test]
+    fn a_longer_password_is_actually_longer() {
+        // The arrow changes a number; this checks the number reaches the
+        // generator rather than only the label.
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::P));
+        let short = app.current_password.chars().count();
+        for _ in 0..8 {
+            app.handle_event(&press(Key::Right));
+        }
+        let long = app.current_password.chars().count();
+        assert!(
+            long > short,
+            "lengthening produced {long} characters, was {short}"
+        );
+        assert_eq!(long, app.password_opts.length);
+    }
+
+    #[test]
+    fn typing_on_the_analyser_tab_measures_rather_than_generates() {
+        // "p" generates a password everywhere else.
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::Num2));
+        assert_eq!(app.active_tab, ActiveTab::Analyzer);
+        let before = app.current_password.clone();
+        for c in "p4ssw0rd".chars() {
+            app.handle_event(&typed(c));
+        }
+        assert_eq!(app.analyzer_input, "p4ssw0rd");
+        assert_eq!(
+            app.current_password, before,
+            "typing into the analyser generated a password"
+        );
+        // `is_some()` alone proves nothing: generating a password already
+        // leaves an analysis behind, so the assertion has to be that the
+        // analysis is of *this* text.
+        assert_eq!(
+            app.current_analysis.as_ref().map(|a| a.length),
+            Some("p4ssw0rd".len()),
+            "the strength meter is not measuring what was typed"
+        );
+        // Backspace shortens it — and re-measures, which is a separate call
+        // from the one the typing branch makes and needs its own assertion.
+        app.handle_event(&press(Key::Backspace));
+        assert_eq!(app.analyzer_input, "p4ssw0r");
+        assert_eq!(
+            app.current_analysis.as_ref().map(|a| a.length),
+            Some("p4ssw0r".len()),
+            "backspace stored without re-measuring"
+        );
+        for _ in 0.."p4ssw0r".len() {
+            app.handle_event(&press(Key::Backspace));
+        }
+        assert_eq!(app.analyzer_input, "");
+        assert_eq!(
+            app.handle_event(&press(Key::Backspace)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn the_tab_keys_still_work_from_inside_the_analyser() {
+        // Otherwise there is no way out of the text box.
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::Num2));
+        assert_eq!(app.handle_event(&press(Key::Num1)), EventResult::Consumed);
+        assert_eq!(app.active_tab, ActiveTab::Generator);
+    }
+
+    #[test]
+    fn a_key_the_app_has_no_use_for_is_not_consumed() {
+        let mut app = seeded_app();
+        assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = seeded_app();
+        let before = app.current_password.clone();
+        let release = Event::Key(KeyEvent {
+            key: Key::P,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert_eq!(app.current_password, before);
+    }
+
+    #[test]
+    fn clearing_an_empty_history_is_not_a_redraw() {
+        let mut app = seeded_app();
+        app.clear_history();
+        assert_eq!(app.handle_event(&press(Key::C)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn the_app_asks_for_no_clock() {
+        // A generator that produced a new secret on a timer would replace the
+        // one the user is in the middle of copying.
+        let app = seeded_app();
+        assert_eq!(app.tick_interval(), None);
+    }
+
+    #[test]
+    fn rendering_draws_something_on_every_tab_at_an_awkward_size() {
+        let mut app = seeded_app();
+        for tab in [
+            ActiveTab::Generator,
+            ActiveTab::Analyzer,
+            ActiveTab::History,
+        ] {
+            app.active_tab = tab;
+            for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+                assert!(
+                    !app.render(w, h).commands.is_empty(),
+                    "{tab:?} drew nothing at {w}x{h}"
+                );
+            }
+        }
+    }
 
     // --- Measured-width tests ---
 
@@ -2289,7 +2792,7 @@ mod tests {
     fn test_app_render() {
         let mut app = PasswordApp::with_seed(42);
         app.gen_password();
-        let cmds = app.render(1100.0, 700.0);
+        let cmds = app.render_commands(1100.0, 700.0);
         assert!(!cmds.is_empty());
     }
 
@@ -2338,7 +2841,7 @@ mod tests {
             analysis.patterns_found.len(),
         );
 
-        let cmds = app.render(TEST_WINDOW_W, TEST_WINDOW_H);
+        let cmds = app.render_commands(TEST_WINDOW_W, TEST_WINDOW_H);
         let rows = text_rows(&cmds);
         let mut checked = 0;
         for (y, text) in &rows {
@@ -2373,7 +2876,7 @@ mod tests {
             .len();
         assert!(expected > 0, "test needs at least one pattern");
 
-        let rows = text_rows(&app.render(TEST_WINDOW_W, TEST_WINDOW_H));
+        let rows = text_rows(&app.render_commands(TEST_WINDOW_W, TEST_WINDOW_H));
         let drawn = rows.iter().filter(|(_, t)| t.starts_with('[')).count();
         assert_eq!(drawn, expected, "expected every pattern drawn: {rows:?}");
         assert!(
@@ -2395,7 +2898,7 @@ mod tests {
             "test needs a long history"
         );
 
-        let rows = text_rows(&app.render(TEST_WINDOW_W, TEST_WINDOW_H));
+        let rows = text_rows(&app.render_commands(TEST_WINDOW_W, TEST_WINDOW_H));
         let marker = rows
             .iter()
             .find(|(_, t)| t.ends_with(" older"))
@@ -2418,7 +2921,7 @@ mod tests {
         }
         app.active_tab = ActiveTab::History;
         let column_w = (TEST_WINDOW_W - LEFT_PANEL_WIDTH - 24.0) - 140.0;
-        let rows: Vec<String> = text_rows(&app.render(TEST_WINDOW_W, TEST_WINDOW_H))
+        let rows: Vec<String> = text_rows(&app.render_commands(TEST_WINDOW_W, TEST_WINDOW_H))
             .into_iter()
             .map(|(_, t)| t)
             .filter(|t| t.starts_with('W'))
@@ -2526,7 +3029,7 @@ mod tests {
     fn the_refusal_is_rendered_in_place_of_the_password() {
         let mut app = PasswordApp::with_random(AppRandom::Unavailable);
         app.gen_password();
-        let shown = app.render(1100.0, 700.0).into_iter().any(|cmd| {
+        let shown = app.render_commands(1100.0, 700.0).into_iter().any(|cmd| {
             matches!(cmd, RenderCommand::Text { ref text, color, .. }
                 if text == NO_ENTROPY_MESSAGE && color == RED)
         });

@@ -114310,3 +114310,84 @@ the *system* temp directory with explicit prefixes, so a leak there is the
 platform's to collect rather than debris in a directory people read. They were
 left alone rather than swept up silently, because whether they leak at all has
 not been measured and a fix to something unmeasured is a guess.
+
+## TD-A-AN-ABSENT-OPERAND-AND-AN-EMPTY-ONE-ARE-THE-SAME-STRING-IN-KSHELL (lane A, 2026-09-04)
+
+**In short:** in the kernel shell, a command that was given no filename and a
+command that was given the filename `''` (two quote marks — an empty name) look
+identical to the code, because both end up as the empty string. The empty string
+then gets turned into "the current directory" on its way to the filesystem. So
+`fold ''` does not say *"there is no file called that"*; it goes and reads the
+current directory instead, and complains about **`/`** — a path the user never
+typed. Nothing is corrupted and nothing reports false success, but the error
+message names the wrong thing, which is the kind of misdirection that costs an
+hour when it eventually matters.
+
+### Where it lives
+
+`resolve_path` (`kernel/src/kshell.rs:699`) joins its argument onto the current
+working directory and normalises the result. For the empty string that join is a
+no-op, the component loop sees no components, and `parts.is_empty()` returns
+`/`:
+
+```rust
+if parts.is_empty() {
+    return PathBuf::from("/");
+}
+```
+
+That is *correct and wanted* for the great majority of its 257 callers, which
+pass a command's whole argument line: `ls`, `du`, `df` and friends are written
+as `let path = resolve_path(args);` precisely so that a bare `ls` means the cwd.
+The empty string is doing double duty — "no argument was given" for those, and
+"an argument was given and it is empty" for the handful of commands that collect
+a list of operands.
+
+### How it became reachable
+
+TD-KSHELL (b′) — `split_words` now keeps an explicitly quoted empty word, so
+`fold ''` produces a one-element file list whose element is `""`. Before that
+the word was discarded by the splitter and the command saw no operand at all.
+The commands that take operands through `split_words` are `sed`, `awk`, `tr`,
+`cut`, `fold`, `base64`, `column`, `touch` and `printf`.
+
+That commit audited all of them and fixed every case where the empty word
+produced a *wrong answer*: `tr a ''` now refuses as GNU refuses, `column -s ''`
+separates on nothing as util-linux does, `sed ''` and `awk ''` are valid empty
+programs. `touch ''` reaches the same `file_path.is_empty()` guard as a missing
+operand and is refused. What is left is only the three that pass the empty name
+through to the filesystem — `cut`, `fold`, `base64` — where the outcome is a
+refusal with exit 1, but with `/` in the message instead of `''`.
+
+### Why it was not fixed there
+
+The obvious one-line fix — have `resolve_path("")` return an empty `PathBuf`
+rather than `/` — breaks every bare-argument command in the same file, because
+those 257 call sites *want* the empty string to mean the cwd. Making that change
+safely means auditing all of them and giving "no argument" its own
+representation (`Option<&str>`, or a separate entry point), which is a
+restructuring of the shell's argument plumbing and not a line in a commit about
+word splitting.
+
+### What the proper fix is
+
+Give the two meanings two representations, at the point the operand is read
+rather than at the point the path is resolved:
+
+1. Commands that collect an operand **list** (`files: Vec<String>`) reject an
+   empty element when they collect it, with GNU's wording —
+   `fold: '': No such file or directory`, exit 1. That is three parsers
+   (`parse_cut_args`, `parse_fold_args`, `parse_base64_args`) and is the whole
+   user-visible fix.
+2. Separately, and larger: audit the `resolve_path(args)` sites so that "the
+   command was given no argument" is expressed as something other than an empty
+   string. Until that is done, `resolve_path("") == "/"` must be treated as a
+   documented property rather than an accident, which is what this entry makes
+   it.
+
+Step 1 is worth doing on its own and does not depend on step 2.
+
+### How to reproduce
+
+In the kernel shell: `fold ''`. Expect `fold: '': No such file or directory`;
+observe a message naming `/`. Same for `cut -d, -f1 ''` and `base64 ''`.

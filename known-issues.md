@@ -34203,6 +34203,49 @@ the old look at the rate the player asks for. `tick_interval` is gated on
 Baseline 47 → 46. Running total: three conversions today, three live defects,
 and 102 clippy findings cleared across them.
 
+**`apps/paint` is number 91, and its gap was the largest yet: it had no event
+handling of any kind.** Not a missing arm — `Event` did not appear once in four
+thousand lines, while `on_canvas_press`, `on_canvas_drag`, `on_canvas_release`,
+`handle_key_press` and `handle_special_key` all sat there written and tested,
+taking arguments nothing in the program computed. A paint program that cannot be
+drawn in, whose drawing code was covered by tests that passed canvas
+coordinates straight in. That is `apps/mixer`'s slider, four thousand lines
+wide.
+
+`handle_event` now routes mouse and keys. The mouse work is the interesting
+half: a press must land on the pixel it points at, which means
+`window_to_canvas` and `canvas_to_window` — both of which already existed — have
+to agree, through the zoom and the scroll.
+
+**And the test that checks it caught nothing until it was mutation-checked.**
+The first version drove clicks on a fresh `PaintApp`, where `scroll_x`,
+`scroll_y` are 0 and `zoom` is 1 — so every term of the transform is the
+identity. Deleting `+ self.scroll_x` from `window_to_canvas` left all 174 tests
+green. The test now sweeps three (zoom, scroll) states, and the same mutation
+fails exactly one test. Worth recording as a shape rather than an incident: **a
+transform tested only at its identity state is not tested.**
+
+Fixing that exposed a second thing worth having: with the canvas scrolled by 37,
+canvas pixel 0 is off the left of the viewport and a press there is *correctly*
+refused. The strengthened test failed on its own fixture before it failed on the
+code, and asks for offsets from the scroll position instead.
+
+Seven tests, including that a press on the chrome is not a stroke, that a bare
+move is not a stroke, and that a drag leaving the viewport keeps drawing while
+the release is accepted from anywhere — or a mouse-up outside the window leaves
+the app permanently mid-stroke.
+
+**Left undone deliberately:** the toolbar, option bar, colour swatches and
+layers panel are not clickable. Each computes its geometry inline in its own
+render function, so hit-testing them means extracting that geometry first, and a
+second hand-written copy of it is the defect `apps/fontmanager` was just fixed
+for. Tools are reachable from the keyboard meanwhile. **And paint's 136
+arithmetic findings are not fixed here** — they are the largest single pile in
+`apps/` and are their own task, per
+`TD-C-APPS-CARRY-1812-CLIPPY-FINDINGS-AND-588-OF-THEM-ARE-IN-PRODUCTION`.
+
+Baseline 46 → 45.
+
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY

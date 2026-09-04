@@ -44,6 +44,12 @@ _SIMPLE_ESCAPES = {"n": 10, "t": 9, "r": 13, "0": 0, BS: 92, '"': 34, "'": 39}
 _ASSERT_OPEN = re.compile(r"assert_eq!\s*\(\s*$")
 _LOOKBEHIND = 40
 
+# A Rust character literal: `'a'`, `'\n'`, `'\''`, `'\x7f'`. Matched whole so a
+# bracket scanner can step over it -- `b'('` and `b'\''` both unbalance a
+# counter that does not. Anything else beginning with `'` (a lifetime, say) is
+# left to be treated as an ordinary character.
+_CHAR_LIT = re.compile(r"'(?:\\x[0-9a-fA-F]{2}|\\.|[^'\\])'")
+
 
 class RungParseError(Exception):
     """The source contains something this reader does not understand.
@@ -138,6 +144,62 @@ def literals_in(expr: str) -> list[bytes]:
             i = j + 1
         else:
             i += 1
+    return out
+
+
+def _match_bracket(src: str, i: int) -> int:
+    """Index of the bracket closing the one at `src[i]`, tracking Rust syntax.
+
+    Character literals are skipped whole rather than treated as string
+    delimiters, because `find_bare(b"a>b", b'>')` is an ordinary rung shape and
+    a naive scanner reading `'` as a quote would swallow the rest of the file.
+    """
+    depth = 0
+    while i < len(src):
+        c = src[i]
+        if c == '"':
+            i += 1
+            while i < len(src) and src[i] != '"':
+                i += 2 if src[i] == BS else 1
+            if i >= len(src):
+                raise RungParseError("unterminated string literal")
+        elif c == "'":
+            m = _CHAR_LIT.match(src, i)
+            if m:
+                i = m.end() - 1  # the loop's own += 1 lands past the close
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise RungParseError("unbalanced brackets")
+
+
+def assert_eq_calls(src: str, funcs=None) -> list[tuple[int, str]]:
+    """Every `assert_eq!(f(..), ..)` in `src`, as `(line, call text)`.
+
+    This is the *discovery* half of the reader, and it exists for a failure
+    `expectations()` cannot see.  `expectations()` answers "does the tree still
+    assert what my table says it asserts", which is only a question about the
+    rungs a table already names.  A rung nobody transcribed is invisible to it:
+    the table is silent, the rung is unread, and the oracle reports full
+    agreement over whatever subset it happens to know about.  That is how three
+    `remove_quotes` rungs in kshell.rs stayed graded by nothing while a gate
+    named after them reported a clean tree.
+
+    So a caller can enumerate what the tree actually asserts and refuse to
+    return a verdict until every rung is either graded or explicitly excused.
+    """
+    out = []
+    for m in re.finditer(
+        r"assert_eq!\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(", src
+    ):
+        if funcs is not None and m.group(1) not in funcs:
+            continue
+        end = _match_bracket(src, m.end() - 1)
+        out.append((src.count("\n", 0, m.start()) + 1, src[m.start(1):end + 1]))
     return out
 
 
@@ -237,6 +299,37 @@ def self_test() -> int:
 
     # An absent rung is an empty list, which the caller must treat as a finding.
     check("absent rung", expectations(_FIXTURE, "split_words(\"nope\")"), [])
+
+    # --- the discovery half -------------------------------------------------
+    calls = [c for _line, c in assert_eq_calls(_FIXTURE)]
+    check(
+        "every asserted call is enumerated, and only those",
+        calls,
+        [
+            'remove_quotes("a\\\\ b")',
+            'split_words("a\\\\ b")',
+            'split_words("a b  c")',
+            "find_bare(b\"a>b\", b'>')",
+            'strip_quotes(b"\\"C:\\\\dir\\"")',
+        ],
+    )
+    check("the decoy `let` is not enumerated either",
+          any("never asserted" in c for c in calls), False)
+    check("filtering by function name narrows it",
+          [c for _l, c in assert_eq_calls(_FIXTURE, ("find_bare",))],
+          ["find_bare(b\"a>b\", b'>')"])
+    # The char-literal hazard: `b'>'` must be skipped whole. A scanner reading
+    # that apostrophe as a string delimiter runs to the end of the file and
+    # returns one absurd call, which is why this is asserted and not assumed.
+    check("a char-literal argument does not swallow the rest of the file",
+          assert_eq_calls(_FIXTURE, ("find_bare",))[0][1].endswith("b'>')"),
+          True)
+    # And it must survive a `(` inside a char literal, which is the case that
+    # would silently unbalance a bracket counter.
+    check("a parenthesis inside a char literal is not counted as a bracket",
+          [c for _l, c in assert_eq_calls(
+              "assert_eq!(depth(b'('), 1);", ("depth",))],
+          ["depth(b'(')"])
 
     print(f"\nrustrungs self-test: {fails} failure(s)")
     return 1 if fails else 0

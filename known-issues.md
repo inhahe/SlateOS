@@ -114019,6 +114019,89 @@ It is the same defect as Lesson 111's fixture, in a different costume: an
 observation whose two possible causes produce identical output, mistaken for
 evidence of one of them.
 
+### Lesson 113: a log written by two processes at once is not a log, and `wsl.exe` is always the second one (lane B, 2026-09-04)
+
+**In short:** when a program running inside WSL writes to both stdout and
+stderr, and the caller merges the two into one file — `cmd > log 2>&1`, which
+is how every backgrounded run in this tree is recorded — the quieter of the two
+streams is **silently overwritten**. Not truncated, not interleaved: gone, with
+no error anywhere. `wsl.exe` does not share a file offset with any other
+writer, so each stream starts at byte zero of the same file and the louder one
+paves over the other. Two of this project's checks were affected, and the
+symptom in both is a log that reads as if the check passed.
+
+**How it surfaced.** I ran `scripts/coreutils-check.sh --only linux` to measure
+what the Linux half costs, and grepped the captured output for its section
+headers to confirm which half had run. The grep matched only `=== summary ===`.
+The natural reading is "clippy did not run" — and I nearly acted on it. Running
+the script again with the streams captured *separately* showed the header
+present and correct on stdout. Nothing had failed to run; the bytes had been
+destroyed in transit. The merged capture said `result: clean` with nothing left
+in it to say which half had produced that verdict, which is precisely the
+defect `coreutils-check.sh` was written to close, one level up: a check that
+did not visibly happen, reading as a check that passed.
+
+**The minimal reproduce**, which is worth keeping because the behaviour is not
+documented anywhere and is easy to disbelieve:
+
+```bash
+cat > probe.sh <<'EOF'
+wsl -e bash -c 'echo "VERDICT"; for i in $(seq 1 40000); do echo "noise" >&2; done'
+EOF
+bash probe.sh > f.txt 2>&1
+grep -c VERDICT f.txt        # 0 -- the line is gone
+bash probe.sh > o.txt 2> e.txt
+grep -c VERDICT o.txt        # 1 -- it was always being written
+```
+
+Volume decides the winner, which is what makes this so dangerous: a *warm*
+build is quiet, so the verdict survives and the arrangement looks fine. It is
+the failing run — the one that floods stderr, the one whose output you actually
+need — that loses it.
+
+**Two plausible fixes that do not work, and why.** Both are worth recording
+because both look obviously correct.
+
+| Attempt | Why it fails |
+|---|---|
+| Redirect on the near side (`wsl … 2>&1`) | This is already what `> log 2>&1` does: it makes fd2 a dup of fd1. `wsl.exe` still writes the two with offsets of its own. |
+| Relay WSL's stdout through a pipe (`wsl … \| cat`) | The relay is simply one more writer with an offset of its own, racing `wsl.exe`'s stderr. Same bytes lost. |
+
+**What works is the rule that exactly one writer may own the file**, and the
+collapse must happen on the *far* side, where both streams are still ordinary
+pipes back to `wsl.exe`. One `exec` redirect does it. Which direction to
+collapse is a real choice and it went differently in the two places, for
+reasons in design-decisions.md §762: `coreutils-check.sh` does `exec 1>&2`,
+freeing stdout to carry its verdict alone where no WSL handle can reach it;
+`diff-wsl.sh` does `exec 2>&1`, because the 50 harnesses' report is *already*
+on stdout and every caller looks for it there.
+
+**Scope, once you know to look for it.** 34 files here invoke WSL, but command
+substitution — `$(wsl …)` — is immune, because a pipe has no offset to collide
+over. Only invocations that let `wsl.exe` inherit the caller's file handles can
+lose anything, and there were exactly two: `coreutils-check.sh`, and
+`diff-wsl.sh`'s `exec wsl -e env "$@"`, which is the shared preamble every one
+of the 50 `*-diff.sh` differential harnesses re-execs itself through. That
+second one means the primary correctness evidence for coreutils has been
+written this way for as long as the harnesses have existed.
+
+**The generalisable shape.** A redirection is a *contract about a file offset*,
+and it silently stops holding whenever the writer is on the far side of a
+process boundary that reopens the handle — WSL here, but the same is true of
+anything that marshals handles across a VM or container edge. So: **decide
+which stream carries the verdict, make it the only thing on that stream, and
+make the collapse happen where the streams originate.** A verdict sharing a
+file with unbounded tool output is a verdict you have merely been lucky to keep
+reading.
+
+And the reason this was caught at all is Lesson 112's postscript, applied
+without meaning to: I was reasoning from the **absence** of a line. That entry
+says never to infer from an absence in truncated output; the wider rule this
+adds is that a missing line has *three* causes, not two — it was never written,
+it was cut off, or it was written and then destroyed — and the third is the one
+nobody checks. When output disagrees with what you believe ran, re-capture with
+the streams separated before you conclude anything about the program.
+
 ## TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM (lane A, 2026-09-03)
 
 **In short:** the two checkers wired by the entry above were switched on because

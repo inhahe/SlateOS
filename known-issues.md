@@ -113297,6 +113297,31 @@ Per-banner elapsed stamps (item 2 as originally written) are still worth having
 for reading a live log, but they are not a substitute: they are not in the
 history file, so they cannot be compared across runs, and they die with the log.
 
+**Now measured within a single run, which the argument above could not do.** The
+replacement run's own log gives the split directly, because `run-timeout.py`
+prints an elapsed heartbeat every 120 s and `boot-test.sh` prints a banner at
+each phase change. Reading the two against each other:
+
+| boundary | evidence in the log | elapsed |
+|---|---|---|
+| gate sweep begins | `Prerequisites OK (limine,services,rootfs).` | ~120 s |
+| gate sweep ends | `=== Building kernel ===` falls between the `3960s` and `4080s` heartbeats | ~3960 s |
+| **sweep alone** | | **~3840 s (~64 min)** |
+
+Against a `wall_seconds` of ~500 s for the QEMU window on a comparable run, the
+sweep is roughly **7.7× the only phase the history file records**, measured on
+one run rather than inferred across two. Two individual gates account for a
+large share of it and both announce their own cost, so the harness already knows
+these numbers and simply discards them: `Clippy OK (debug profile, **202s**, …)`
+and `cfg(unix) OK (**553s**, …)`.
+
+That last detail sharpens the fix. `gates_seconds` as a single total is worth
+having, but the sweep is 30-odd checkers and a bare total will not say which one
+grew. Since `run_checker` is the common call path for every gate, it is the
+natural place to stamp start/end per gate and accumulate a per-gate map — the
+same shape as the existing `gated_ran` field, which already proves a
+dictionary-valued column is workable in this row format.
+
 **If it is never fixed:** every future budget gets sized from `wall_seconds`,
 because it is the only duration in the only file anyone treats as the record.
 That is not a mistake a careful reader avoids — I made it the day after writing

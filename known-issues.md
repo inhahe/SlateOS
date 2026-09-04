@@ -113791,12 +113791,22 @@ longer exists.
 
 ## TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT (lane B, 2026-09-03)
 
-**STATUS 2026-09-04: steps 1 and 2 of the proper fix have landed** — the checker
-exists and pre-push gate 12 runs it. Left open rather than marked RESOLVED
-because the automation covers exactly one crate: `-p coreutils`, on a push that
-touches `userspace/coreutils`. Every other crate in this lane — `posix`,
-`userspace/shell`, the ~30 support crates — still has the whole defect below,
-unmeasured, and step 4 is what would close it.
+**RESOLVED 2026-09-04.** All four steps landed. The checker exists (step 1),
+pre-push gate 12 runs it (step 2), and its scope is no longer one crate but is
+**computed from the push** (step 4): every crate this lane owns that a push
+changes and that contains a `cfg(unix)`/`cfg(windows)` arm is compiled and
+tested for `x86_64-unknown-linux-gnu` before the push is allowed.
+
+Step 4 is worth reading even though it is closed, because **its own premise was
+wrong and a measurement is what showed it.** It named `posix` and
+`userspace/shell` as the crates to widen to; both have zero `cfg(unix)` arms,
+so compiling them for Linux would have added 8m41s a push to type-check source
+the host build had just type-checked — while 32 crates that *do* have such arms
+were on nobody's list. The fix was to stop listing.
+
+What remains unautomated is deliberate and named in step 4: crates outside this
+lane's globs, and the *dependencies* of a checked crate (a dependency whose API
+changes breaks the host build too, which everything else already catches).
 
 **In short:** the coreutils crates are built, linted and tested against the
 *Windows* host target, because that is the toolchain the machine has. Every
@@ -113886,9 +113896,12 @@ to abandon it.
    drives real pushes through the real hook against a stub checker and asserts
    on whether the checker was *invoked* — because a declined gate and a passing
    gate both allow the push, and only the invocation count tells them apart.
-3. Step 2 has landed, but the gate is scoped to `userspace/coreutils` and only
-   fires on a push. **Run step 1's script by hand after touching any
-   `#[cfg(unix)]` arm** in a crate it does not cover, and while iterating:
+3. ~~Step 2 has landed, but the gate is scoped to `userspace/coreutils` and only
+   fires on a push.~~ **Largely obsolete since step 4 (2026-09-04):** the gate
+   now covers *any* crate in this lane that a push changes and that has a
+   platform-conditional arm, so the manual run is no longer the only thing
+   standing between an unchecked `cfg(unix)` arm and origin. It remains the way
+   to iterate — a push is a slow edit-compile loop — so:
 
    ```sh
    scripts/coreutils-check.sh --only linux            # both halves by default
@@ -113898,13 +113911,47 @@ to abandon it.
    First measured run, 2026-09-03: the whole `coreutils` lib reports **416**
    passing tests on the Linux target, `dirfd` alone **24** — against 0 of
    either on the host, since `dirfd`'s unix arm does not compile there at all.
-4. **Widen it past `coreutils`.** Gate 12 compiles one crate because that is
+4. **Widen it past `coreutils`.** ~~Gate 12 compiles one crate because that is
    where the defect was found and because the price is per-crate; the argument
    for it applies unchanged to `posix`, `userspace/shell` and the support
    crates, which are equally host-only-checked today. What is missing is a
    measurement per crate rather than a design: the gate already takes `-p`, and
-   widening it is a matter of deciding how many minutes a push may cost. Do
+   widening it is a matter of deciding how many minutes a push may cost.~~ Do
    that with numbers, not with the instinct that blocked step 2 for a day.
+
+   **DONE 2026-09-04, and the numbers refuted the step as written.** It asked
+   for `posix` and `userspace/shell` by name. Neither belongs:
+
+   | crate | `cfg(unix)`/`cfg(windows)` arms | linux half costs | tests there |
+   |---|---:|---:|---:|
+   | `userspace/coreutils` | 719 | 2m16s warm, ~6m cold | 405 (host: 361) |
+   | `oils` + `cpio` + `stat` | 108 + 20 + 18 | 5m03s together | 4 binaries, clean |
+   | `posix` | **0** | 6m16s | 20,652 |
+   | `userspace/shell` | **0** | 2m25s | **0** |
+
+   `posix`'s conditionals are real but they are `target_os = "none"` — 1,845 of
+   them — which is false on the Windows host and false on Linux alike, and is
+   already compiled by the default `x86_64-unknown-none` build. `userspace/shell`
+   is a 159-line toolchain-validation stub, not a shell. Compiling either for
+   Linux type-checks precisely the source the host build already type-checked,
+   for 8m41s a push. The step's premise — "the argument applies unchanged" —
+   was false; the argument is *entirely* about `cfg(unix)` arms, and those two
+   crates have none.
+
+   Meanwhile the same census found **32 other crates in this lane that do have
+   such arms and were on nobody's list**: `oils` 108, `cpio` 20, `stat` 18,
+   `htop` 9, then `wall`/`vi`/`tput`/`tar`/`stty`/`pkg`/`nano`/`mktemp` 6 each,
+   `ssh-keygen`/`man`/`getopt`/`authlib` 5, `sftp`/`service`/`rsync`/`quoting`/
+   `less` 4, `sshd`/`chown`/`backup` 3, `scp`/`notimpl`/`lsof`/`logind`/
+   `localtime`/`firejail`/`du` 2, `file` 1.
+
+   So the answer was not a longer list — a list is wrong the day it is written
+   and rots from there. **Gate 12's scope is now computed** from the crates a
+   push changed, minus those with no platform-conditional arm at all, the
+   filter being a `git grep` against the pushed commit. It costs nothing on a
+   push that touches no such crate, cannot go stale, and reached `stat` and
+   `oils` without anyone naming them. See `design-decisions.md` §767 and the
+   five new cases in `scripts/test-pre-push-unixhalf-gate.py`.
 
 **If it is never fixed:** warnings and dead code accumulate in the unix half
 where nobody sees them, and — much worse — a unix-only test can rot into a
@@ -116084,6 +116131,81 @@ the test count says otherwise: the tests above prove the *argument handling*
 and the path arithmetic, and nothing at all about the traversal. All four
 defects here were found by reading, not by a failing test, and a fifth of the
 same kind would have to be found the same way.
+
+---
+
+## TD-B-A-CARGO-RUN-IN-THIS-TREE-IS-82-PERCENT-ONE-REPEATED-WARNING (lane B, 2026-09-04)
+
+**In short:** Every `cargo build`/`clippy`/`test` in this workspace prints the
+same warning about two thousand times, once per crate, and that one warning is
+**82% of the output by volume**. Nothing is broken by it; what is broken is
+anyone's ability to read a build log, including this session's — a real error
+scrolls past inside four megabytes of identical paragraphs.
+
+**Measured, 2026-09-04**, on the `--only linux` run of `oils`+`cpio`+`stat`
+(four cargo invocations, log kept at 5.02 MB):
+
+| | |
+|---|---:|
+| log total | 5.02 MB |
+| `missing [lints] to inherit [workspace.lints]` | **4.11 MB (81.9%)** |
+| everything else — the compile, the lints, 4 test binaries | 0.91 MB |
+| occurrences of the warning | 8,166 (≈2,000 per cargo invocation) |
+| manifests in the tree | 2,950 |
+| manifests with a `[lints]` section | 217 |
+| manifests without one | **2,733**, of which **2,718 are under `userspace/`** |
+
+**Where it lives.** Each crate's `Cargo.toml`. The fix per crate is three
+lines:
+
+```toml
+[lints]
+workspace = true
+```
+
+`cargo::missing_lints_inheritance` is `warn` by default, and the workspace root
+does define `[workspace.lints]`, so every member that does not opt in is told
+so on every invocation.
+
+**Why this is not simply "add the three lines to 2,733 manifests", and why it
+is filed rather than fixed.** Those 2,718 `userspace/` manifests are
+overwhelmingly the stub crates behind the open question at
+`open-questions.md` → *"2,288 of the 2,756 commands in `userspace/` report
+success for work they never did. Which ones do we keep?"* (lane B, 2026-09-02),
+which is **still awaiting the operator**. The three options there are keep /
+delete / mark-unimplemented, and two of the three delete most of these
+manifests outright. Writing `[lints] workspace = true` into all 2,733 now would
+be a 2,733-file commit that the operator's answer may then largely revert —
+and, worse, it would make the stubs *inherit the workspace's strict lints*,
+which is a real behaviour change (`unwrap_used`, `indexing_slicing`,
+`arithmetic_side_effects` and friends) applied to code we may be about to
+delete, on no one's decision.
+
+So this is **deliberately blocked on that question**, not overlooked. It is
+recorded separately because it is a distinct cost — the unreadable logs are
+paid today, by every build, whatever is eventually decided about the stubs —
+and because whoever answers the open question should know that the answer
+carries this with it.
+
+**Do not "fix" it by silencing the warning** (`--cap-lints`, `-A
+cargo::missing_lints_inheritance`, or `[workspace.lints]` removal). The warning
+is correct: those crates genuinely are not covered by the lint policy
+`CLAUDE.md` requires of every crate. Silencing it would convert a loud,
+accurate statement that 2,733 crates are unlinted into silence on the same
+fact, which is the failure shape half this file is about.
+
+**If it is never fixed:** build logs stay unreadable at 5 MB a run, which makes
+every future diagnosis in this lane more expensive and makes a genuine warning
+easy to miss — and 2,733 crates stay outside the lint policy the project
+requires.
+
+**Interim workaround** for reading a build log:
+
+```sh
+grep -v -e 'missing `\[lints\]`' -e 'missing_lints_inheritance' \
+        -e 'to inherit `workspace.lints' build.log | less
+```
+---
 
 ### Lesson 110: a control that is drawn from live state looks more wired than one that is not (lane C, 2026-09-04)
 

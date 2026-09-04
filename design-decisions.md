@@ -65973,6 +65973,172 @@ list off the disk while reading its deletions from the commit) is fixed either
 way. This is a cost decision layered on top of a correctness fix, and if gate 9
 ever needs a listing it should switch to `open_tree` without ceremony.
 
+## 766. What targets a package has is read from its manifest, not asked of cargo — because the half that owns a cargo is not always the half that runs
+
+**Lane:** B
+**Date:** 2026-09-04
+**Decided by:** Claude (autonomous)
+
+**In short:** `scripts/coreutils-check.sh` compiles a crate twice — once for
+Windows, once for Linux through WSL — because each build hides half the code
+from the other. It was told to compile "the library and the programs" of
+whatever crate it was pointed at. That works until you point it at a crate that
+has no library, which is what every ordinary program is: it died on
+`-p shell` with "no library targets found in package 'shell'". So it now has to
+find out, per crate, whether there is a library to compile. The decision is
+where that answer comes from: ask cargo, which knows for certain, or read the
+crate's `Cargo.toml` and work it out. It reads the manifest.
+
+**Why the question is not symmetric.** `--lib` and `--bins` fail in opposite
+directions, and only one of them is loud:
+
+| Flag | Package has none of that kind | |
+|---|---|---|
+| `--lib` | cargo errors and nothing is built | loud — you find out immediately |
+| `--bins` | cargo accepts it and builds nothing | **silent** — the run ends "result: clean" |
+
+That asymmetry rules out the one-line fix of dropping `--lib`. A crate with
+neither a library nor a binary would then be compiled with `--bins`, compile
+nothing, and be reported clean — which is precisely the defect this script was
+written to close, reappearing inside the script. Such a package is now refused
+by name (exit 64), not scoped down to nothing.
+
+**The two ways to get the answer.**
+
+| | Ask cargo | Read the manifest |
+|---|---|---|
+| *What changes:* | the answer is whatever cargo itself would do, by construction | the answer is derived from cargo's documented rules, and a run needs no cargo on the host |
+| Cost | a workspace load per query: measured 2026-09-04 against this tree's 2,950 members, `cargo read-manifest` 8–9 s per package, `cargo metadata --no-deps --offline` 13.8 s | one `git ls-files` plus one `grep`, ~3 s worst case and a dozen `stat`s in the ordinary case |
+| Where it can run | only where a cargo exists | anywhere |
+| Failure mode | none | over-count on `autolib = false` / `autobins = false`, which is the loud direction |
+
+**Why the manifest won, and it is not mainly the seconds.** It is *where* the
+seconds could be spent. This script exists to compile the Linux half on a
+Windows host, and it explicitly declines the host half when there is no cargo
+there — so "the side that has a cargo" and "the side that is doing the work"
+are not the same side in the configuration the script was written for. Scope is
+computed once, on the near side, and handed to both halves as arguments; a
+mechanism that needed a local cargo could not do that without either two code
+paths or a second workspace load inside WSL.
+
+**Why this is not a heuristic, which is the objection it invites.** A cargo
+library target exists if and only if the manifest declares `[lib]` or the file
+`src/lib.rs` is present. There is no third spelling: a library whose source
+lives elsewhere must say so with `[lib] path = ...`, which is a `[lib]` section.
+So the test is a complete case analysis of cargo's rules, not a guess at them.
+The `autolib`/`autobins` opt-outs make it over-count — it would pass `--lib` for
+a crate that has suppressed its `src/lib.rs` — and over-counting lands in the
+loud column above: cargo says the target is missing and the script fails with
+it. Under-counting, the silent direction, cannot happen.
+
+**The locator is the part that could have gone wrong.** Finding a package's
+manifest from its name means, in the worst case, reading 2,950 manifests. The
+first draft ran one `awk` per file, which on Windows is 2,950 process spawns and
+most of a minute — a locator that costs more than the build it is scoping is a
+locator that gets deleted. It now guesses the conventional directory first
+(a dozen `stat`s), narrows with a single `grep -l` over the whole list, and
+verifies the survivors' `[package] name` with `awk`. The verification is not
+optional: `[[bin]] name = "shell"` is a legal line in a manifest for a different
+crate, and in a tree whose coreutils crate builds ~180 named binaries, matching
+on the line alone would attribute one crate's targets to another.
+
+**What it does not decide.** It does not change *what* is compiled for a package
+that has both kinds of target — that is still the library and the binaries, and
+still not the integration tests, for the reasons the script's header gives. It
+also does not settle which packages the pre-push gate should check; that is step
+4 of `TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT`,
+which this change unblocks by making a bin-only crate measurable at all.
+
+---
+
+## 767. Gate 12's scope is computed from the push, not listed — because the list was wrong the day it was written
+
+**Lane:** B
+**Date:** 2026-09-04
+**Decided by:** Claude (autonomous)
+
+**In short:** Before a push is allowed, one pre-push gate re-compiles the code
+you changed for Linux as well as for Windows, because a lot of our code is
+written as "do it this way on unix, that way on Windows" and the Windows-only
+build we normally run never even looks at the unix half. The question was
+*which* crates to put through that second, slower build. The obvious answer is
+to keep a list. I counted instead, and the count said a list would be wrong:
+the two crates the list was going to name have no unix-specific code at all,
+and thirty-two crates that do have it were not on anyone's list. So the gate
+now works out for itself, on each push, which of the crates you touched
+actually contain unix-specific code, and compiles only those.
+
+### The count
+
+The tech-debt note asked to widen the gate "to `posix`, `userspace/shell` and
+the support crates". Measured against the tree on 2026-09-04:
+
+| crate | platform-conditional arms | linux half costs |
+|---|---:|---:|
+| `userspace/coreutils` | 719 | 2m16s warm |
+| `oils` + `cpio` + `stat` | 146 | 5m03s |
+| `posix` | **0** | 6m16s |
+| `userspace/shell` | **0** | 2m25s |
+
+`posix` is not un-conditional — it has 1,845 `target_os = "none"` arms. But
+`"none"` is false on Windows *and* false on Linux, and those arms are already
+compiled by the default `x86_64-unknown-none` build. `userspace/shell` is a
+159-line toolchain-validation stub with no tests. A second target build of
+either compiles the identical source the first one did.
+
+Thirty-two crates in this lane *do* have `cfg(unix)`/`cfg(windows)` arms:
+`oils` 108, `cpio` 20, `stat` 18, `htop` 9, and a tail of twenty-eight more.
+None was proposed.
+
+### The options
+
+| | *What changes:* |
+|---|---|
+| **Keep listing, but a better list** | The gate compiles a fixed set of crates. A crate added to the tree tomorrow with a `cfg(unix)` arm is unchecked until someone remembers to add it — and nobody will, because nothing fails when they don't. |
+| **Every crate the push touched** | A push editing a crate with no platform-conditional line anywhere in it waits minutes for a build that can find nothing. Most pushes are that push. A gate that charges for nothing gets bypassed, and a bypassed gate checks nothing. |
+| **Computed: touched, and has an arm** ✔ | A push pays only for crates where the second target can actually see something the first could not. Adding a crate to the tree adds it to the gate. Nobody maintains anything. |
+
+### Why the filter is what makes it affordable
+
+The middle option is the honest-looking one and it is the one that fails,
+because its cost falls on the pushes that get nothing for it. The filter —
+`git grep -E 'cfg\( *(not\( *)?(unix|windows)'` against the pushed commit —
+answers in milliseconds and turns the common case back into a free one.
+
+Reading it out of the *commit* rather than off the disk is not paranoia: the
+gate has already established that the disk equals the push (one ref, sha equal
+to `HEAD`, no modified or untracked file), so the two agree — and reading the
+commit is what says so in the code.
+
+### Two ordering facts that are easy to get wrong
+
+- **The scope is computed *after* the working-tree-identity precondition, not
+  before.** It reads `$pushed_shas` as a single commit, which is only true once
+  that block has checked it. Run first, a multi-ref push computes an empty
+  scope from a truncated sha and skips *in silence* — swallowing the loud
+  decline the author needs in exactly the case they can act on. Getting this
+  backwards converts a diagnosable refusal into an invisible non-check, which
+  is the whole failure family this gate exists to end.
+- **A directory is not a crate.** `userspace/coreutils/tests/` matches the path
+  pattern the scope is derived from and has no manifest. Passing it to `--dir`
+  is a usage error — exit 64 — and this gate calls the checker with
+  `--may-skip`, which tolerates a decline. Without the `-f .../Cargo.toml`
+  test, one such directory would have made the gate skip on every push,
+  forever, without a word. This is the second time exit 64 has earned its
+  separation from exit 2 (see §766's neighbour in the script's header).
+
+### What it does not decide
+
+Not the *dependencies* of a checked crate (`ere`, `quoting`, `bignum`, …): a
+dependency whose API changes breaks the host build too, which everything else
+already catches, and the arms this gate exists for are the touched crate's own.
+Not crates outside lane B's globs — those are another lane's gate to write.
+And not the tally name, which stays `coreutils-unix-half` while
+`requests/b-a-check-gates-are-wired-cannot-see-a-gate-written-in-bash.md` quotes
+those lines to lane A; renaming the text being quoted would make that report
+read as already-fixed.
+---
+
 ## 811. An application's window title is re-read every batch, and a spreadsheet sort aimed at one cell covers the block around it
 
 **Date:** 2026-09-04. **Decided by:** Claude (autonomous).

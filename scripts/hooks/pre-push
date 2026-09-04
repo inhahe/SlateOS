@@ -2031,12 +2031,38 @@ fi
 # declined, so wrapping would replace "no WSL on this host" with a banner in
 # every skip message this gate ever prints.
 #
-# SCOPE: pushes that touch `userspace/coreutils` or the checker itself. Not the
-# crate's path dependencies (`ere`, `quoting`, `bignum`, …): a dependency whose
-# API changes breaks the host build too, which everything else already catches,
-# and the arms this gate exists for are coreutils' own. Not `userspace/`
-# wholesale, which every lane B push touches and would put minutes on all of
-# them for a crate they did not edit.
+# SCOPE: computed from the push, not listed. The crates this push changed, minus
+# the ones with no platform-conditional code in them. Two things made that the
+# design rather than a list of crate names.
+#
+# The list was measured wrong on 2026-09-04. This gate was pinned to
+# `userspace/coreutils`, and step 4 of the tech-debt entry proposed widening it
+# to `posix` and `userspace/shell`. Both proposals died on contact with a count:
+# those two crates contain ZERO `cfg(unix)` arms between them — `posix` is
+# conditional on `target_os = "none"`, 1,845 times, which is false on the
+# Windows host and false on Linux alike — so compiling them for Linux checks
+# precisely the source the host build already checked, at 6m16s and 2m25s a
+# push. The same count found 32 OTHER crates in this zone that do have such
+# arms and were on nobody's list: `oils` (108), `cpio` (20), `stat` (18),
+# `htop` (9), and a tail of twenty-eight more. A hand-written list would have
+# been wrong on the day it was written, and would rot from there.
+#
+# And the filter is what makes a computed scope affordable. "Every crate the
+# push touched" would put minutes on a push that edited a crate with no
+# platform-conditional line in it, which is most of them, and a gate that
+# charges for nothing is a gate that gets bypassed. `git grep` against the
+# pushed commit answers that in milliseconds.
+#
+# Still NOT the crates' path dependencies (`ere`, `quoting`, `bignum`, …): a
+# dependency whose API changes breaks the host build too, which everything else
+# already catches, and the arms this gate exists for are the touched crate's
+# own. Still not `userspace/` wholesale, which every lane B push touches.
+#
+# The tally name stays `coreutils-unix-half` although the gate is no longer only
+# about coreutils. `requests/b-a-check-gates-are-wired-cannot-see-a-gate-written
+# -in-bash.md` quotes these very lines to lane A as the text its checker cannot
+# parse; renaming the thing being quoted while that request is open would make
+# the report read as already-fixed. Rename it once that lands.
 #
 # Bypass: ALLOW_UNCHECKED_UNIX_HALF=1 git push origin <branch>
 # ---------------------------------------------------------------------------
@@ -2053,7 +2079,8 @@ cucheck="${repo_root:-.}/scripts/coreutils-check.sh"
 # The script is bash (it uses arrays); `sh` here may be dash on a Linux host.
 command -v bash >/dev/null 2>&1 || skip_unixhalf=1
 if [ "$skip_unixhalf" != "1" ]; then
-    touches userspace/coreutils scripts/coreutils-check.sh || skip_unixhalf=1
+    touches userspace/coreutils scripts/coreutils-check.sh \
+            posix userspace services init || skip_unixhalf=1
 fi
 
 # The working-tree-identity precondition described above. Each condition names
@@ -2086,18 +2113,76 @@ if [ "$skip_unixhalf" != "1" ]; then
     fi
 fi
 
+# The scope, computed. See "SCOPE" above for why it is computed and not listed.
+# `--dir` rather than `-p` because what a push tells us is which *directory*
+# changed, and `userspace/ssh-keygen/src/main.rs` says nothing about what the
+# crate there is called; `coreutils-check.sh` owns that translation, so there is
+# one implementation of it rather than a second one here.
+#
+# Deliberately AFTER the identity precondition and not before it. This reads
+# `$pushed_shas` as a single commit, which is only true once that block has
+# established it; run first, it would compute an empty scope from a truncated
+# multi-ref sha and skip silently, swallowing the loud decline the author needs
+# in exactly the case they can act on. Ordering it here also means no push that
+# is going to decline pays for the `git log`/`git grep` below.
+if [ "$skip_unixhalf" != "1" ]; then
+    _uh_sha=${pushed_shas# }
+    _uh_scope=""
+    _uh_names=""
+    # A change to the checker itself changes every check it performs, so it is
+    # re-run against the crate it was written for whatever else the push holds.
+    if touches scripts/coreutils-check.sh; then
+        _uh_scope="--dir userspace/coreutils"
+        _uh_names=" coreutils"
+    fi
+    # shellcheck disable=SC2086
+    for _uh_dir in $(git log --format= --name-only $pushed_shas \
+                         --not --remotes="$remote_name" 2>/dev/null \
+                     | sed -n -e 's|^\(posix\)/.*|\1|p' \
+                              -e 's|^\(userspace/[^/]*\)/.*|\1|p' \
+                              -e 's|^\(services/[^/]*\)/.*|\1|p' \
+                              -e 's|^\(init/[^/]*\)/.*|\1|p' \
+                     | sort -u); do
+        case " $_uh_scope " in *" --dir $_uh_dir "*) continue ;; esac
+        # A directory is not a crate. `userspace/coreutils/tests/` matches the
+        # pattern above and has no manifest; passing it to `--dir` would be a
+        # usage error, which `--may-skip` would then tolerate as a skip forever.
+        [ -f "${repo_root:-.}/$_uh_dir/Cargo.toml" ] || continue
+        # Only crates that actually have a platform-conditional arm, and read
+        # out of the commit rather than off the disk -- the disk and the commit
+        # are equal by the block above, and reading the commit says so.
+        git grep -q -E 'cfg\( *(not\( *)?(unix|windows)' "$_uh_sha" \
+            -- "$_uh_dir" >/dev/null 2>&1 || continue
+        _uh_scope="$_uh_scope --dir $_uh_dir"
+        _uh_names="$_uh_names ${_uh_dir##*/}"
+    done
+    if [ -z "$_uh_scope" ]; then
+        # Not a decline, and deliberately silent: the push genuinely contains no
+        # crate with a platform-conditional arm, so there is nothing here for a
+        # second target to check that the host build did not. That is the same
+        # "out of scope" the path filter above expresses, and is recorded the
+        # same way -- as a skip, with no message, because there is nothing the
+        # author could do about it and nothing they need to know.
+        skip_unixhalf=1
+    fi
+fi
+
 note_gate coreutils-unix-half "$skip_unixhalf"
 
 unixhalf_failed=0
 if [ "$skip_unixhalf" != "1" ]; then
-    echo "pre-push: compiling coreutils for linux through WSL — this takes minutes." >&2
+    # Names the crates, because the scope is computed now and the author would
+    # otherwise have no way to tell which of the ones they edited is costing
+    # them the minutes.
+    echo "pre-push: compiling for linux through WSL —$_uh_names — takes minutes." >&2
     # --may-skip: on a host with no WSL, or no cargo inside it, the script exits
     # 2 and says why on its first line, and that is a decline rather than a
     # failure — refusing every push on such a host would get this hook
     # uninstalled. Usage errors here exit 64, not 2, so a future renamed flag
     # cannot be read as that decline; see the script's "## Exit codes".
+    # shellcheck disable=SC2086
     if ! run_checker --may-skip coreutils-unix-half \
-                     bash "$cucheck" --only linux -p coreutils; then
+                     bash "$cucheck" --only linux $_uh_scope; then
         unixhalf_failed=1
     fi
     # run_checker returns 0 for an allowed skip, so the gate has to correct its
@@ -2112,7 +2197,7 @@ fi
 if [ "$unixhalf_failed" = "1" ]; then
     cat >&2 <<EOF
 
-pre-push: REFUSING to push — coreutils does not compile, or does not pass its
+pre-push: REFUSING to push —$_uh_names does not compile, or does not pass its
 tests, for a unix target.
 
 This is not a duplicate of the build you just ran. That build targeted a Windows
@@ -2121,19 +2206,23 @@ host, where \`cfg(unix)\` is false, so every
     #[cfg(unix)]
     fn chown_impl(...) { ... }
 
-in the crate was skipped by the compiler before it was type-checked — including
-the \`#[cfg(unix)]\` tests, which is why the linux run has 405 tests where the
-host has 361. The arms that failed above are the only ones that will ever run on
-SlateOS; the ones that passed on the host never ship.
+in those crates was skipped by the compiler before it was type-checked —
+including the \`#[cfg(unix)]\` tests, which is why coreutils' linux run has 405
+tests where the host has 361. The arms that failed above are the only ones that
+will ever run on SlateOS; the ones that passed on the host never ship.
+
+The crates named are the ones this push changed that contain a
+platform-conditional arm at all. A crate you edited and do not see there has
+none, so compiling it for Linux would have compiled the same source twice.
 
 Reproduce and iterate with:
 
-    bash scripts/coreutils-check.sh --only linux -p coreutils
+    bash scripts/coreutils-check.sh --only linux $_uh_scope
 
 and narrow it while fixing:
 
-    bash scripts/coreutils-check.sh --only linux --no-test -p coreutils
-    bash scripts/coreutils-check.sh --only linux --no-clippy -p coreutils -- chown
+    bash scripts/coreutils-check.sh --only linux --no-test $_uh_scope
+    bash scripts/coreutils-check.sh --only linux --no-clippy $_uh_scope -- chown
 
 Full output is kept at the path named above.
 

@@ -54,6 +54,36 @@ gets graded, read out of git rather than duplicated here as a list of suffixes.
 A suffix list would be a second copy of the policy, free to drift from the first,
 and the drift would show up as a gate quietly not covering a newly-declared type.
 
+## Why *reporting* is that wide but *refusing* is not (2026-09-04)
+
+The paragraphs above are still the reporting policy and are unchanged. What they
+got wrong is the severity, and they got it wrong by assuming the writer is
+always a tool. On 2026-09-04 it was not: `todo3.txt`, the operator's own scratch
+notes, picked up CRLF because a human was typing into it in a Windows editor.
+That refused the build. It was repaired, and four minutes later the operator
+saved again and it refused the *next* build too -- two boot tests, 187 s and
+259 s, thrown away for a notes file in which nothing was wrong and nothing ever
+would be. `*.txt` covers every design document in this tree, so that is not a
+quirk of one file; it is every lane's build, blocked whenever the operator edits
+prose on a Windows box, forever.
+
+A gate that stops three agents' work over a byte that harms nothing gets
+bypassed, and then it is not protecting the `.sh` files either. So the two
+questions are now answered separately:
+
+* **Is anything reported?** Every declared file, exactly as argued above. The
+  size of the cause stays visible; nothing is hidden.
+* **Does the build stop?** Only if a CR is in a file some machine *executes*
+  from disk -- a `.sh`, or anything with a `#!`. See `is_run_from_disk`.
+
+That keeps every property the 2026-09-03 event asks for. Re-run against that
+event: `scripts/boot-test.sh` was among the thirteen, so the build still stops,
+and the report still names all thirteen, so the size of the cause is still
+there to see. What changes is only the case where the answer is "a human saved a
+text file", which is not a defect and should not read as one.
+
+Recorded in `design-decisions.md` §764.
+
 ## Cost
 
 Reading the ~1440 declared files is ~37 MB. That is 93 s single-threaded on this
@@ -85,8 +115,10 @@ real declared file's real bytes is reported while the same CR planted in an
 undeclared file's bytes is not. Nothing is written to disk.
 
 Exit codes:
-    0   every declared file is LF on disk
-    1   at least one is not (the finding)
+    0   no declared file that is executed from disk has a CR. Prose files with
+        CRs are printed and do not change this code -- see the severity split
+        above; `--list` and the summary line still say how many there were.
+    1   a file that some machine executes from disk has a CR (the finding)
     2   could not look: not a git worktree, or fewer files found than the floor
 
 Usage:
@@ -180,27 +212,59 @@ def scan_bytes(data: bytes) -> tuple[int, int]:
     return (n, data.find(b"\r")) if n else (0, -1)
 
 
-def read_and_scan(paths: list[bytes]) -> tuple[list[tuple[str, int, int]], int]:
+def is_run_from_disk(name: str, data: bytes) -> bool:
+    """Whether a CR in this file changes what a *machine* does with it.
+
+    This is the line between the two severities below, and it is drawn at
+    "something executes these bytes", not at "these bytes look like code".
+    Two ways for that to be true, and only two:
+
+    * a `.sh`, because `bash` tokenises a CR as part of the word it ends, so
+      `set -u` becomes `set -u$'\\r'` and a sourced path gains a trailing CR;
+    * anything opening `#!`, because the kernel reads that line verbatim and a
+      trailing CR becomes part of the interpreter's *path*. `/usr/bin/env
+      python3\\r` is not a program that exists, and the error names a file that
+      plainly does, which is among the worse diagnostics a person can be handed.
+
+    Deliberately not keyed on `.py`. CPython decodes CRLF source correctly
+    (universal newlines), so an imported module is unharmed; a `.py` that is
+    *executed* is caught by its shebang, which is the property that actually
+    matters. Keying on the suffix instead would refuse builds over library
+    files where nothing is wrong, which is the false positive this split exists
+    to remove.
+    """
+    if name.endswith(".sh"):
+        return True
+    return data.startswith(b"#!")
+
+
+def read_and_scan(paths: list[bytes]) -> tuple[list[tuple[str, int, int, bool]], int]:
     """Scan every path, in parallel. Returns `(findings, files_read)`.
 
     Unreadable paths are counted as read rather than skipped silently: a file
     that git tracks and this cannot open is a fact worth surfacing, and it is
     surfaced as a finding below rather than swallowed here.
+
+    The fourth field is `is_run_from_disk`, decided here because this is where
+    the bytes are in hand -- reopening the file later to look at two of them
+    would double the read cost that the thread pool above exists to contain.
     """
-    findings: list[tuple[str, int, int]] = []
+    findings: list[tuple[str, int, int, bool]] = []
     read = 0
 
-    def one(p: bytes) -> tuple[str, int, int] | None:
+    def one(p: bytes) -> tuple[str, int, int, bool] | None:
         name = p.decode("utf-8", "surrogateescape")
         try:
             data = Path(name).read_bytes()
         except OSError:
             # A tracked path that will not open is not a CR finding, and
             # pretending it is would misdescribe it. It is also not nothing:
-            # returning -1 as the count marks it for the caller.
-            return (name, -1, -1)
+            # returning -1 as the count marks it for the caller. Fatal, because
+            # unlike a CR in prose this is not a thing anyone has shown to be
+            # harmless -- it is a thing nobody has been able to look at.
+            return (name, -1, -1, True)
         n, off = scan_bytes(data)
-        return (name, n, off) if n else None
+        return (name, n, off, is_run_from_disk(name, data)) if n else None
 
     with concurrent.futures.ThreadPoolExecutor(READ_THREADS) as pool:
         for got in pool.map(one, paths):
@@ -239,16 +303,21 @@ def check(declared: list[bytes], show_list: bool = False) -> int:
         for p in declared:
             print(f"  {p.decode('utf-8', 'surrogateescape')}")
 
-    for name, n, off in findings:
+    for name, n, off, fatal in findings:
+        mark = "" if fatal else "  (prose; reported, not fatal)"
         if n < 0:
-            print(f"{name}: tracked but could not be read")
+            print(f"{name}: tracked but could not be read{mark}")
         else:
-            print(f"{name}: {n} carriage return(s), first at byte {off}")
+            print(f"{name}: {n} carriage return(s), first at byte {off}{mark}")
 
+    fatal = [f for f in findings if f[3]]
     print(f"\n{read} file(s) declared `text eol=lf`, {len(findings)} with a "
-          f"carriage return")
+          f"carriage return, {len(fatal)} of them executed from disk")
 
     if not findings:
+        return 0
+    if not fatal:
+        print(NOTICE)
         return 0
     print(REFUSAL)
     return 1
@@ -322,19 +391,51 @@ def self_test() -> int:
         clean_f.write_bytes(b"#!/bin/sh\nset -u\necho hello\n")
         dirty_f = Path(td) / "dirty.sh"
         dirty_f.write_bytes(b"#!/bin/sh\r\nset -u\r\necho hello\r\n")
-        # Redirect the reporting: these two calls print a full refusal each, and
-        # a self-test whose output is two refusals reads like a failure.
+        # The severity split, as three files that differ only in the property
+        # that decides it. `prose.txt` is the 2026-09-04 case -- the operator's
+        # notes -- and must NOT stop a build. `hashbang` has no `.sh` suffix
+        # and must, because the kernel reads its first line as a path. Without
+        # that third file the split could be implemented as "refuse on .sh"
+        # and pass, and a CRLF `scripts/foo` with a `#!` would sail through.
+        prose_f = Path(td) / "prose.txt"
+        prose_f.write_bytes(b"notes\r\nmore notes\r\n")
+        hashbang_f = Path(td) / "hashbang"
+        hashbang_f.write_bytes(b"#!/usr/bin/env python3\r\nprint(1)\r\n")
+        # Redirect the reporting: these calls print a full refusal each, and a
+        # self-test whose output is several refusals reads like a failure.
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc_clean = check([str(clean_f).encode()])
             rc_dirty = check([str(dirty_f).encode()])
         pipeline_said = "carriage return(s), first at byte 9" in buf.getvalue()
+        prose_buf = io.StringIO()
+        with contextlib.redirect_stdout(prose_buf):
+            rc_prose = check([str(prose_f).encode()])
+            rc_hashbang = check([str(hashbang_f).encode()])
+        prose_out = prose_buf.getvalue()
 
     cases: list[tuple[str, object, object]] = [
         # -- the verdict, end to end
         ("end to end, a clean file returns 0", rc_clean, 0),
         ("end to end, a CRLF file returns 1", rc_dirty, 1),
         ("and the finding names the byte it found", pipeline_said, True),
+
+        # -- the severity split (2026-09-04). The pairing is the assertion:
+        # "reported" and "fatal" must come apart, or the split is not there.
+        ("a CRLF text file does not stop the build", rc_prose, 0),
+        ("...but is still reported, which is the whole point",
+         "prose.txt: 2 carriage return(s)" in prose_out, True),
+        ("...and is marked as the reason the build continued",
+         "(prose; reported, not fatal)" in prose_out, True),
+        ("a CRLF file with a #! stops the build even without a .sh suffix",
+         rc_hashbang, 1),
+        (".sh is executed from disk whatever its first bytes are",
+         is_run_from_disk("x.sh", b"not a script\n"), True),
+        ("a #! is executed from disk whatever its suffix is",
+         is_run_from_disk("x.md", b"#!/bin/sh\n"), True),
+        ("a .py without a #! is not: CPython reads CRLF source correctly",
+         is_run_from_disk("x.py", b"import os\n"), False),
+        ("prose is not", is_run_from_disk("notes.txt", b"hello\n"), False),
 
         # -- the floor, as a decision rather than as a printed paragraph
         ("a run that discovered nothing declines",
@@ -434,6 +535,27 @@ def main() -> int:
 
     return check(declared, show_list=args.list)
 
+
+NOTICE = """
+NOTE: the file(s) above are declared `text eol=lf` in .gitattributes and have
+carriage returns in the working tree.  None of them is executed from disk -- no
+`.sh`, nothing with a `#!` -- so nothing is broken by this and the build goes
+ahead.  It is printed anyway, every run, because a CR is evidence about whatever
+wrote the file and that is worth knowing even when it costs nothing today.
+
+The commonest cause is benign and needs no action: a person editing a `.txt` or
+`.md` in a Windows editor, which saves CRLF.  Git normalises it away on commit,
+so it never reaches history.
+
+The cause worth acting on is a *tool* rewriting tracked files through Python's
+default text mode.  Tell the two apart by the shape: one file, growing, that
+someone is plainly editing is a person; several files at once, or a file no
+human would open, is a tool -- and a tool that does this will reach a `.sh`
+eventually, which is the run that stops the build.
+
+To repair the bytes, see the command in the refusal text below this gate's
+source, or just re-save the file with LF endings.
+"""
 
 REFUSAL = """
 ERROR: refusing to build.  A file above is declared `text eol=lf` in

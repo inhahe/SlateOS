@@ -63803,6 +63803,119 @@ it as step 3 of four; it is tracked in `known-issues.md` →
 `TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED` and is the immediate next
 piece of work, not a deferral.
 
+### Correction, same day — "yes" in that table was true but far too narrow
+
+**In short:** the table above answers "can a change to our tree red it?" with
+"yes" for the two gates I wired. I established that by reading which file each
+one opens, which is the wrong question. Both do open a kernel source file — and
+then read one line of it. Afterwards I mutated each gate's subject to see what
+it would catch, and both reported a clean tree while looking straight at a
+defect. The gates were worth having and stayed wired; the claim that a kernel
+change reds them needed narrowing to what was actually true, which was a much
+smaller thing than the table implies. Both are now fixed.
+
+What each one actually read, before the fix:
+
+| gate | its whole tether to our tree | what could change without it noticing |
+|---|---|---|
+| `check-shellquote-vs-bash.py` | one regex for `const DQ_ESCAPABLE: [u8; N] = [...]` | every other line of `shellquote.rs` — the entire scanner |
+| `check-kshell-rungs-vs-bash.py` | the rung *inputs* occur verbatim (`assert_rust_src_is_verbatim`) | every rung's *expected value* |
+
+Both were established by mutation, not by reading:
+
+- Changing `shellquote.rs`'s `Ctx::Single` arm to `let structural = false;` — a
+  scanner in which a single-quoted string can never close — gave
+  `0 failure(s)`, exit 0. The gate did catch a renamed or re-shaped
+  `DQ_ESCAPABLE` and a drifted alphabet, which was the whole of what it caught.
+- Corrupting a kshell rung's expectation from `alloc::vec!["a", "b", "c"]` to
+  `alloc::vec!["a", "b", "", "c"]` — a blank word bash never produces — gave
+  "0 rung assertion(s) disagree with the reference tool", exit 0.
+
+**The sentence in "What is still missing" was also wrong, and wrong in the
+direction that matters.** It said these gates "scan Rust source by regex for
+literals, which means a rename makes them match nothing and report a clean
+tree". For `check-kshell-rungs-vs-bash.py` a renamed *input* literal does not
+pass quietly — `assert_rust_src_is_verbatim()` fails the run, and that check was
+added precisely to be the discovery floor. The real hole was not a rename going
+unnoticed; it was that the expectation side of every rung was never read at all.
+I had described a weaker version of the defect than the one present, which is
+worse than describing none, because it reads as though the floor were the gap.
+
+### What generalises: a tether's width is not visible from its name
+
+The check I ran when classifying these — *does it open a file in `kernel/`?* —
+cannot distinguish a gate that grades a subsystem from one that grades a single
+constant inside it. Both answer yes. The question that discriminates is **how
+much of that file can change without this noticing**, and the only way to answer
+it is to change something and watch. That is a mutation test, and its absence is
+why a wrong answer survived being written into a decision record.
+
+This also sharpens this entry's own framing. The split above between
+*instruments* (measure a third party) and *gates* (grade this repository) was
+treated as binary. It is not: a gate can grade this repository through a tether
+one line wide, and from outside — same directory, same exit 0, same silence — it
+is indistinguishable from one that grades the subsystem its name claims.
+`check-gates-can-refuse.py` already documents the neighbouring version of this
+("a gate that passes on a clean tree is indistinguishable from a gate that
+passes on everything") and explains why it cannot test for it: doing so means
+"planting a defect each gate would notice — 30 bespoke fixtures against 30
+unrelated subjects". Two of those thirty fixtures now exist, written by hand
+during this work; the other twenty-eight do not, and that residue is tracked in
+`known-issues.md` →
+`TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM`.
+
+Worth recording that the false-clean had two channels, not one. `pre-boot.py`
+globs `scripts/check-*.py` and runs every gate bare, so both oracles had been
+reporting clean there as well for as long as they had existed — not only from
+`boot-test.sh` since that morning. That does not change the wiring argument
+(pre-boot is a ~40-minute local pre-flight nobody is obliged to run, which is
+exactly why being named in `boot-test.sh` is what "wired" means), but it does
+mean the reassurance was being printed twice.
+
+### The fix, and the part of it that is a refusal to pretend
+
+Landed as `a6551a3af` (kshell) and `d280f66b1` (shellquote). Rung expectations
+are now read out of the Rust by `scripts/rustrungs.py`, a shared reader — both
+`kshell.rs` and `shellquote.rs::self_test()` assert in the same
+`assert_eq!(call(literal), expected)` shape, so one parser serves both. Three
+choices inside that work had a case on either side:
+
+- **Three witnesses, not two.** The transcription in each gate's own table is
+  kept rather than dropped as redundant, so a gate now requires the rung's own
+  expectation, its transcription, and real bash to agree. Dropping the
+  transcription is tempting — it is duplicated data that must be maintained —
+  but then a silently broken *reader* passes by comparing bash against bash.
+  Same argument that put `assert_rust_src_is_verbatim()` there in the first
+  place.
+- **Coverage is a separate failure from correctness, and is reported
+  separately.** A table-driven oracle cannot see a rung nobody transcribed:
+  `expectations()` answers "does the tree still assert what my table says",
+  which is silent about a rung the table omits. So `assert_eq_calls()`
+  enumerates every asserted call in the Rust and the gate raises on any it does
+  not account for, naming the rung and the table to add it to. It *raises*
+  rather than incrementing the failure count, because an ungraded rung is an
+  unasked question, not a wrong answer. Reading the Rust this way found three
+  kshell rungs graded by nothing (13 → 16) — which is the whole defect class,
+  found a second time by the machinery built to prevent it.
+- **What cannot be graded is named, not quietly dropped.** Of `shellquote.rs`'s
+  thirteen rungs: five `strip_quotes` rungs are gradeable against real bash; one
+  (`strip_quotes(b"a\\")`) is a deliberate divergence from bash and is pinned
+  three ways so that *agreeing* with bash reds the gate; the five `find_bare`
+  and two `bare_positions` rungs assert byte offsets, which bash does not
+  expose, so they are graded against the Python port and labelled as such; two
+  are excused by name, being inside a round-trip loop with no fixed literal.
+  Likewise `remove_quotes("a 'b,c'")` is excluded from the kshell oracle with
+  its reason in the code — its input has an unquoted space, so bash splits it
+  into two words while `remove_quotes` splits nothing, and any `want` that
+  greens one leg reds the other. Covering it would be the same false coverage
+  this correction is about.
+
+The one thing not fixed, and deliberately: `check-shellquote-vs-bash.py` still
+does not grade the scanner. A Python gate cannot execute Rust, so the
+`Ctx::Single` mutation is caught by `self_test()` at boot and by nothing in
+`scripts/`. The gate's docstring now says so in as many words, with that
+measurement in it, rather than letting its name imply otherwise.
+
 ---
 
 ## 806. The file chooser stores no size of its own, and lets an explicit scroll leave the selection off screen

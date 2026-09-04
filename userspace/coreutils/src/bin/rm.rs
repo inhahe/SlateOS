@@ -92,6 +92,7 @@ use coreutils::dirfd::{Dir, Kind, Stat};
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, os_from_bytes, quoteaf};
+use coreutils::remove;
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers, yesno};
 use std::ffi::OsString;
@@ -517,6 +518,15 @@ enum Question {
     Descend,
     /// `remove [write-protected ]<type> 'x'? `
     Remove,
+    /// `attempt removal of inaccessible directory 'x'? `
+    ///
+    /// The third of upstream's three, asked only about a directory whose
+    /// contents could not be read, and only when `-r` is *off* — under `-r` the
+    /// question would have to be `Descend` or `Remove`, and choosing between
+    /// them needs the listing that just failed. It takes no `write-protected`
+    /// variant: measured, `rm -d -i` on a directory that is both unreadable and
+    /// unwritable (mode 0100) asks this sentence unmodified.
+    AttemptInaccessible,
 }
 
 /// A file's identity, for "is this the same file as `/`?".
@@ -860,8 +870,7 @@ impl Rm<'_> {
         let children = match list(loc, st) {
             Ok((_, names)) => names,
             Err(e) => {
-                self.cannot_remove(loc.path, &e);
-                return Verdict::Abandoned;
+                return self.remove_inaccessible_directory(loc, st, e);
             }
         };
         if !children.is_empty() {
@@ -878,15 +887,15 @@ impl Rm<'_> {
 
     /// `-r`: the directory, its contents, and the two prompts around them.
     fn remove_tree(&mut self, loc: &Loc<'_>, st: &Stat, level: u32, top: Option<u64>) -> Verdict {
-        // Open and read first. A directory that cannot be read is reported
-        // without ever being prompted about — measured, and the natural order
-        // anyway, since whether it is empty decides which question gets asked.
+        // Open and read first, which is the natural order anyway: whether the
+        // directory is empty decides *which* of the two questions gets asked,
+        // so there is nothing to ask until the listing has answered. A
+        // directory that cannot be read therefore never reaches a prompt here
+        // — see [`Rm::remove_inaccessible_directory`] for what happens to it
+        // instead, which is not the same as failing.
         let (dir, children) = match list(loc, st) {
             Ok(pair) => pair,
-            Err(e) => {
-                self.cannot_remove(loc.path, &e);
-                return Verdict::Abandoned;
-            }
+            Err(e) => return self.remove_inaccessible_directory(loc, st, e),
         };
 
         if children.is_empty() {
@@ -946,7 +955,63 @@ impl Rm<'_> {
         self.rmdir(loc)
     }
 
+    /// A directory whose contents could not be read — and which is therefore
+    /// still worth one `rmdir`.
+    ///
+    /// # Why this is not simply an error
+    ///
+    /// Listing a directory needs `r`; removing an empty one needs `w`+`x` on
+    /// its *parent* and nothing at all on the directory itself. `chmod 300 d`
+    /// on an empty `d` is thus a directory nobody can read and anybody can
+    /// delete, and GNU deletes it — `fts` hands the entry over as `FTS_DNR` and
+    /// `remove.c:571` calls `excise` on it regardless. This file used to report
+    /// the read failure and stop, so `rm -rv d` printed
+    /// `cannot remove 'd': Permission denied` and left the directory standing
+    /// where GNU printed `removed directory 'd'`. Measured against GNU 9.x on
+    /// 2026-09-03; `mv.rs`'s younger walk had the rule and this one did not,
+    /// which is the drift
+    /// `TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS` was filed to catch.
+    ///
+    /// # Why `-r` and `-d` part company here
+    ///
+    /// Only when a question is due. Under `-d` the whole operation *is* the
+    /// `rmdir`, so upstream asks a third question — `attempt removal of
+    /// inaccessible directory 'd'? ` — and proceeds on a yes. Under `-r` the
+    /// question would have to be `descend into …?` or `remove …?`, and which
+    /// one it is depends on whether the directory is empty, which is exactly
+    /// what the failed listing was going to say. There is nothing to ask, so
+    /// the read failure becomes the diagnostic after all. Both halves are
+    /// measured: `rm -d -i` on mode 0300 asks and removes, `rm -r -i` on the
+    /// same directory reports `Permission denied`, and `rm -r` without `-i`
+    /// removes it.
+    ///
+    /// The read error is carried into the `rmdir` rather than dropped, because
+    /// a non-empty unreadable directory earns `ENOTEMPTY` there and upstream
+    /// prints the earlier `EACCES` instead — see [`remove::blame`].
+    fn remove_inaccessible_directory(
+        &mut self,
+        loc: &Loc<'_>,
+        st: &Stat,
+        why: io::Error,
+    ) -> Verdict {
+        if self.options.recursive {
+            if self.asking_about(loc, st).is_some() {
+                self.cannot_remove(loc.path, &why);
+                return Verdict::Abandoned;
+            }
+        } else if !self.prompt(loc, st, Question::AttemptInaccessible) {
+            return Verdict::Declined;
+        }
+        self.rmdir_blaming(loc, Some(why))
+    }
+
     fn rmdir(&mut self, loc: &Loc<'_>) -> Verdict {
+        self.rmdir_blaming(loc, None)
+    }
+
+    /// `rmdir`, reporting `held` instead of the failure when the failure is one
+    /// of the errnos upstream considers uninformative.
+    fn rmdir_blaming(&mut self, loc: &Loc<'_>, held: Option<io::Error>) -> Verdict {
         match loc.rmdir() {
             Ok(()) => {
                 self.verbose("removed directory", loc.path);
@@ -956,7 +1021,7 @@ impl Rm<'_> {
                 Verdict::Removed
             }
             Err(e) => {
-                self.cannot_remove(loc.path, &e);
+                self.cannot_remove(loc.path, remove::blame(held.as_ref(), &e));
                 Verdict::Abandoned
             }
         }
@@ -964,10 +1029,15 @@ impl Rm<'_> {
 
     // ------------------------------------------------------------ prompts --
 
-    /// GNU's `prompt()`. Returns whether to go ahead.
-    fn prompt(&mut self, loc: &Loc<'_>, st: &Stat, question: Question) -> bool {
+    /// Whether a question is going to be asked about this entry at all, and if
+    /// so whether it will carry the words `write-protected`.
+    ///
+    /// Split out of [`Rm::prompt`] because the *answer to this* — not the
+    /// answer to the question itself — is what decides whether an unreadable
+    /// directory is an error. See [`Rm::remove_inaccessible_directory`].
+    fn asking_about(&mut self, loc: &Loc<'_>, st: &Stat) -> Option<bool> {
         if self.options.interactive == Interactive::Never {
-            return true;
+            return None;
         }
 
         // The write-protection probe is itself conditional: it costs a syscall
@@ -979,9 +1049,18 @@ impl Rm<'_> {
             && !st.is_symlink()
             && loc.write_protected();
 
-        if !(write_protected || self.options.interactive == Interactive::Always) {
-            return true;
+        if write_protected || self.options.interactive == Interactive::Always {
+            Some(write_protected)
+        } else {
+            None
         }
+    }
+
+    /// GNU's `prompt()`. Returns whether to go ahead.
+    fn prompt(&mut self, loc: &Loc<'_>, st: &Stat, question: Question) -> bool {
+        let Some(write_protected) = self.asking_about(loc, st) else {
+            return true;
+        };
 
         let name = quoteaf(loc.path);
         let sentence = match (question, write_protected) {
@@ -993,6 +1072,9 @@ impl Rm<'_> {
                 format!("rm: remove write-protected {} {name}? ", file_type(st))
             }
             (Question::Remove, false) => format!("rm: remove {} {name}? ", file_type(st)),
+            (Question::AttemptInaccessible, _) => {
+                format!("rm: attempt removal of inaccessible directory {name}? ")
+            }
         };
         self.ask(&sentence)
     }
@@ -2278,6 +2360,19 @@ mod tests {
 
     /// A failure below stops the ancestors being removed, and says so exactly
     /// once.
+    ///
+    /// The unreadable directory has to be **non-empty** for there to be a
+    /// failure at all, and that word is the whole correction this test needed.
+    /// It used to build an *empty* one and assert the run failed — which is
+    /// what the code did, and is not what GNU does, so the test was pinning the
+    /// bug rather than the rule. See the companion below, and
+    /// `known-issues.md` → `TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS`.
+    ///
+    /// What makes it fail now is the child: the `rmdir` answers `ENOTEMPTY`,
+    /// which [`remove::blame`] throws away in favour of the read's `EACCES`.
+    /// So `Permission denied` below is not the read error reported directly —
+    /// it is the read error *substituted back in*, and asserting it is
+    /// asserting the substitution happened.
     #[test]
     #[cfg(unix)]
     fn an_unreadable_directory_is_reported_once_and_its_parent_left() {
@@ -2287,16 +2382,51 @@ mod tests {
         let closed = outer.join("closed");
         fs::create_dir_all(&closed).unwrap();
         fs::write(outer.join("f"), b"x").unwrap();
+        // Written before the `chmod`, because afterwards nothing can be.
+        fs::write(closed.join("kept"), b"x").unwrap();
         fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
 
         let r = run(&recursive(), &[&outer]);
         assert!(!r.ok);
         assert_eq!(r.err.matches("cannot remove").count(), 1, "{}", r.err);
         assert!(r.err.contains("Permission denied"), "{}", r.err);
+        assert!(
+            !r.err.contains("not empty"),
+            "the rmdir's ENOTEMPTY should have been thrown away: {}",
+            r.err
+        );
         assert!(outer.is_dir(), "the ancestor is left, in silence");
         assert!(!outer.join("f").exists(), "its siblings still go");
 
         fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// ...and an unreadable directory that is *empty* is removed, which is the
+    /// same branch of the same walk taking the other outcome.
+    ///
+    /// Listing a directory needs `r`; removing an empty one needs only `w`+`x`
+    /// on its *parent*. So mode 0300 is a directory nobody can list and anybody
+    /// can delete, and GNU deletes it. The assertion that matters is not that
+    /// `closed` is gone — a walk that skipped it entirely would also leave it
+    /// gone once `outer` went — but that the run is **silent and successful**,
+    /// which only a completed `rmdir` produces.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_but_empty_directory_is_still_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("unreadable-empty");
+        let outer = dir.join("outer");
+        let closed = outer.join("closed");
+        fs::create_dir_all(&closed).unwrap();
+        fs::write(outer.join("f"), b"x").unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o300)).unwrap();
+
+        let r = run(&recursive(), &[&outer]);
+        assert!(r.ok, "{}", r.err);
+        assert_eq!(r.err, "");
+        assert!(!outer.exists(), "the whole tree goes");
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

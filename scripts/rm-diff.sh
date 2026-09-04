@@ -588,10 +588,10 @@ run_case --presume-input-tty tree/a.txt
 # =============================================================================
 # 15. Directories that cannot be read or emptied
 # =============================================================================
-# An unreadable directory under `-r` is reported *without* a prompt, because
-# the read is attempted before the question is asked; its ancestors are then
-# abandoned in silence, with the status already earned. An unremovable child is
-# the same shape one level down.
+# A *non-empty* unreadable directory under `-r` is reported *without* a prompt,
+# because the read is attempted before the question is asked; its ancestors are
+# then abandoned in silence, with the status already earned. An unremovable
+# child is the same shape one level down.
 
 TREE='mktree; chmod 000 tree/sub'
 run_case -rv tree
@@ -611,6 +611,74 @@ TREE='mktree; chmod 500 tree/sub'
 run_case -rv tree
 TREE='mktree; chmod 500 tree/sub'
 run_case -rfv tree
+
+# An *empty* unreadable directory is the other half, and the half every case
+# above misses: `tree/sub` holds `b.txt`, so GNU's `rmdir` fails too and prints
+# the same substituted `Permission denied` — which means a remover that never
+# attempted the `rmdir` at all looks identical here. It is not identical.
+# Reading a directory needs `r`, while removing an empty one needs only `w`+`x`
+# on its *parent*, so `chmod 300 d` is a directory nobody can list and anybody
+# can delete, and GNU deletes it. The read failure is therefore *held*, not
+# reported, and becomes the diagnostic only if the `rmdir` also fails with an
+# errno that says less than it did (`remove.c:420`, shared here as
+# `coreutils::remove::blame`).
+#
+# The two flags part company because `-r` has a question it cannot ask.
+# Descend-or-remove is not decidable without the listing, so a prompt that
+# comes due under `-r` is fatal — but with no prompt due, the `rmdir` still
+# runs. Under `-d` there is nothing to descend into, so the question *can* be
+# asked, and upstream asks a third sentence for it.
+#
+# These cases exist because their absence let a real divergence live: see
+# `known-issues.md` → `TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS`.
+
+TREE='mkdir d; chmod 300 d'
+run_case -rv d
+TREE='mkdir d; chmod 300 d'
+run_case -rfv d
+TREE='mkdir d; chmod 300 d'
+INPUT='y\n'; run_case -i -rv d
+TREE='mkdir d; chmod 300 d'
+INPUT='y\n'; run_case -I -rv d
+# Writable, so no question comes due even on a tty, and it goes.
+TREE='mkdir d; chmod 300 d'
+run_case ---presume-input-tty -rv d
+# Unwritable, so the write-protected question comes due — and under `-r` that
+# is the fatal case, because it is the question that cannot be worded.
+TREE='mkdir d; chmod 100 d'
+run_case ---presume-input-tty -rv d
+TREE='mkdir d; chmod 000 d'
+INPUT='y\n'; run_case -i -rv d
+# Readable but write-protected: the listing succeeds, so this is the ordinary
+# write-protected route and not this rule at all. Here to prove the boundary.
+TREE='mkdir d; chmod 500 d'
+INPUT='y\n'; run_case ---presume-input-tty -rv d
+
+# Under `-d`: `rm: attempt removal of inaccessible directory 'd'? `, the third
+# of upstream's three prompts, which no other case in this file reaches.
+TREE='mkdir d; chmod 300 d'
+INPUT='y\n'; run_case -d -iv d
+TREE='mkdir d; chmod 100 d'
+INPUT='y\n'; run_case -d -iv d
+TREE='mkdir d; chmod 000 d'
+INPUT='y\n'; run_case -d -iv d
+# Declined leaves the directory and still exits 0: the answer was obeyed, not
+# failed. That is what makes it different from the `-r` refusals above.
+TREE='mkdir d; chmod 300 d'
+INPUT='n\n'; run_case -d -iv d
+# Writable, so nothing is asked and it goes silently...
+TREE='mkdir d; chmod 300 d'
+run_case ---presume-input-tty -dv d
+# ...while unwritable reaches the same prompt by the write-protected route,
+# which is what shows the sentence replaces the wording rather than adding a
+# question.
+TREE='mkdir d; chmod 100 d'
+INPUT='y\n'; run_case ---presume-input-tty -dv d
+# Not empty, so the `rmdir` answers `ENOTEMPTY` — uninformative, being the
+# mechanical consequence of the entry that could not be listed — and the held
+# read error is printed in its place.
+TREE='mkdir -p d/sub; printf x > d/sub/b.txt; chmod 300 d'
+INPUT='y\n'; run_case -d -iv d
 
 # =============================================================================
 # 16. Bytes that are not valid UTF-8

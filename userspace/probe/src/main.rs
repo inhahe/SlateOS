@@ -1,3 +1,3 @@
 fn f() {
-    eprintln!("cut: '{p}': no such file");
+    eprintln!("cut: {}: no such file", quotef_os(&p));
 }

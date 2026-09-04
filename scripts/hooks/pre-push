@@ -1953,6 +1953,17 @@ fi
 # order anyway) and loud when it happens, so it does not quietly become the
 # usual path. If it ever does, the tally will say so on every push.
 #
+# WHAT THE GUARD DOES NOT COVER, said plainly rather than left to be discovered:
+# it is a snapshot taken before the build starts, and the build then runs for
+# minutes. An edit made during those minutes is compiled and not noticed. That
+# is observed, not theoretical — it happened on this gate's own first live push,
+# 2026-09-04, when the author edited three `scripts/*.py` files while the
+# compile was in flight. It is not fixable from here (any check has to happen at
+# some instant, and the compiler reads the tree afterwards either way), and it
+# is not worth much: the window belongs to the person doing the pushing, who is
+# the one the gate is reporting to. Recorded so that "the guard passed" is read
+# as "the tree matched when we looked", which is the only claim it makes.
+#
 # NOT WRAPPED IN run-timeout.py, unlike the long runs in boot-test.sh. Two
 # reasons. This hook is interactive — it runs in the terminal of whoever typed
 # `git push`, where a hang is visible and interruptible, unlike a backgrounded

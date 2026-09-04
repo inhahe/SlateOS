@@ -113776,6 +113776,40 @@ non-zero status that `set -e` would otherwise act on.
    `check-gates-are-wired.py`, since it answers the half of "is this gate run?"
    that the existing gate structurally cannot.
 
+**How big is the class? Measured, not guessed — one.** Before proposing a gate I
+scanned the corpus for the defect, twice, and both attempts are worth recording
+because the first failed in the way this whole file is about.
+
+*Attempt 1, which found nothing and looked like a clean bill of health.* Match a
+snake_case word in command position — start of line, or after `;` `|` `&&` `(`
+— and report those neither defined, nor a builtin, nor on `PATH`. Result: 42
+names, **every one a false positive** (arithmetic inside `$(( ))`, variables in
+awk program bodies, C declarations in heredoc'd source: `size_t`, `pid_t`,
+`got_signo`). And `find_python` **was not among them** — the pattern required
+trailing whitespace after the name, but the real line is `$(find_python)"`,
+where the next character is `)`. A scan written specifically to find this bug
+did not find this bug, and reported "42 findings" in a tone indistinguishable
+from working.
+
+*Attempt 2, matching the defect's actual shape.* Take the **first word of a
+command substitution** — `\$\(\s*([a-z_][a-z0-9_]*)`. Arithmetic cannot collide
+with it, because `$((` opens with a paren rather than a word. Over **89 shell
+files with 302 functions defined**: 37 raw hits, 35 of them builtins spelled as
+substitutions (`$(cd …)`, `$(command -v …)`, `$(umask)`), leaving:
+
+| finding | verdict |
+|---|---|
+| `scripts/boot-test.sh:4232` — `py="$(find_python)"` | **the bug** |
+| `scripts/create-ext4-rootfs.sh:1522` — `CAPTURED := $(shell printf …)` | false positive — GNU **make** syntax inside a heredoc, not bash |
+
+So the blast radius is exactly one call site, and the proposed gate has a
+measured signal of 1 true finding against 1 residual false positive on today's
+tree — the latter removable by not reading inside heredocs whose body is another
+language. That is a gate worth writing rather than a fishing expedition. It also
+settles the design: prefer the substitution-shaped rule to the command-position
+one, because the narrow pattern found the defect the broad one missed. It keys
+on structure bash guarantees rather than on surrounding whitespace.
+
 **If it is never fixed:** `libc.a` member granularity is ungraded on every host
 and every run. That is not a hypothetical failure mode — it is the one that
 broke the GNU make port and got written up as `design-decisions.md` §339, which

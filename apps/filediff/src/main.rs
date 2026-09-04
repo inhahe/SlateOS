@@ -28,8 +28,6 @@
 )]
 
 #[allow(unused_imports)]
-use guitk::color::Color;
-#[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -44,6 +42,10 @@ use guitk::textfind;
 use guitk::wheel;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
+#[allow(unused_imports)]
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::fmt;
 
@@ -1329,9 +1331,28 @@ impl FileDiffApp {
         }
     }
 
-    /// Render the entire application to a render tree.
+    /// Load the two files a first run compares.
+    ///
+    /// This was the body of `main`, and it is a method so that a test can check
+    /// the window does not open empty — a test cannot call `main`, so a seed
+    /// that lives there is a blind spot. When files can be opened, this is the
+    /// one call that changes.
+    ///
+    /// Two versions of the same short function, so that every kind of hunk the
+    /// viewer draws — changed, added, unchanged — appears in the first frame.
+    pub fn load_sample_comparison(&mut self) {
+        let left = "fn main() {\n    println!(\"Hello, world!\");\n    let x = 42;\n}\n";
+        let right = "fn main() {\n    println!(\"Hello, Slate OS!\");\n    let x = 42;\n    let y = 100;\n}\n";
+        self.load_files("left.rs", left, "right.rs", right);
+    }
+
+    /// Named `render_tree` and not `render`: at equal arity an inherent method
+    /// silently wins method lookup over `oswindow::app::App::render`, so an app
+    /// that keeps the name draws nothing and reports no error.
+    ///
+    /// Renders the entire application to a render tree.
     #[must_use]
-    pub fn render(&self) -> RenderTree {
+    pub fn render_tree(&self) -> RenderTree {
         let mut tree = RenderTree::new();
 
         // Background
@@ -2602,16 +2623,54 @@ fn render_dir_entry(tree: &mut RenderTree, ey: f32, entry: &DirCompareEntry) {
 // Entry point
 // ============================================================================
 
-fn main() {
+impl App for FileDiffApp {
+    fn title(&self) -> String {
+        "File Diff".to_owned()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.width as u32, self.height as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// A diff is computed when files are loaded; nothing here ages, so a tick
+    /// would redraw an identical frame.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.width = width;
+        self.height = height;
+        self.render_tree()
+    }
+}
+
+fn main() -> ExitCode {
     let mut app = FileDiffApp::new();
-
-    // Demo: load sample files for testing
-    let left = "fn main() {\n    println!(\"Hello, world!\");\n    let x = 42;\n}\n";
-    let right =
-        "fn main() {\n    println!(\"Hello, Slate OS!\");\n    let x = 42;\n    let y = 100;\n}\n";
-    app.load_files("left.rs", left, "right.rs", right);
-
-    let _tree = app.render();
+    app.load_sample_comparison();
+    app::launch("filediff", &mut app)
 }
 
 // ============================================================================
@@ -2634,6 +2693,127 @@ mod tests {
         clippy::arithmetic_side_effects,
         clippy::float_cmp
     )]
+
+    // ------------------------------------------------------------------
+    // Compositor wiring
+    //
+    // `handle_event`, `handle_key` and `handle_mouse` already existed and were
+    // already tested. What was missing was anything that called them.
+    // ------------------------------------------------------------------
+
+    fn loaded() -> FileDiffApp {
+        let mut app = FileDiffApp::new();
+        app.load_files(
+            "left.rs",
+            "one\ntwo\nthree\n",
+            "right.rs",
+            "one\ntwo CHANGED\nthree\nfour\n",
+        );
+        app
+    }
+
+    #[test]
+    fn the_sample_comparison_actually_differs() {
+        // The seed is what the window opens on. A seed that loaded two
+        // identical files, or none, would open on an empty diff and nothing
+        // else would say so.
+        let mut app = FileDiffApp::new();
+        app.load_sample_comparison();
+        assert!(
+            !app.render(1280.0, 800.0).commands.is_empty(),
+            "the seeded comparison drew nothing"
+        );
+        assert!(
+            !app.left_content.is_empty() && !app.right_content.is_empty(),
+            "the seed loaded no content"
+        );
+        assert_ne!(
+            app.left_content, app.right_content,
+            "a comparison of two identical files shows nothing"
+        );
+    }
+
+    #[test]
+    fn the_first_frame_has_a_diff_in_it() {
+        // `main` used to load these two files and render once to prove the
+        // code ran; now they are what the window opens on, so an empty first
+        // frame would be the visible failure.
+        let mut app = loaded();
+        let tree = app.render(1280.0, 800.0);
+        assert!(!tree.commands.is_empty(), "the first frame drew nothing");
+    }
+
+    #[test]
+    fn the_app_asks_for_no_clock() {
+        // A diff is computed when files are loaded; nothing here ages.
+        let app = FileDiffApp::new();
+        assert_eq!(app.tick_interval(), None);
+    }
+
+    #[test]
+    fn rendering_at_a_new_size_adopts_it() {
+        // The first frame is drawn before any `Resize` arrives, and a
+        // compositor may grant a size that was never asked for.
+        let mut app = loaded();
+        let _ = app.render(1600.0, 900.0);
+        assert!((app.width - 1600.0).abs() < f32::EPSILON);
+        assert!((app.height - 900.0).abs() < f32::EPSILON);
+        assert_eq!(app.initial_size(), (1600, 900));
+    }
+
+    #[test]
+    fn a_close_request_exits_and_an_unwanted_key_does_not_redraw() {
+        let mut app = loaded();
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+        let unwanted = Event::Key(KeyEvent {
+            key: Key::F9,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert!(matches!(app.on_event(&unwanted), Response::Idle));
+    }
+
+    #[test]
+    fn a_key_reaches_the_handler_through_on_event() {
+        // The dispatch is what was missing; the handler itself was tested.
+        let mut app = loaded();
+        let down = Event::Key(KeyEvent {
+            key: Key::Down,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        // Whatever the handler decides, a *release* of the same key must not
+        // reach it: that is the branch the dispatch adds.
+        let release = Event::Key(KeyEvent {
+            key: Key::Down,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        let moved = app.on_event(&down);
+        let ignored = app.on_event(&release);
+        assert!(
+            matches!(ignored, Response::Idle),
+            "a key release should not be acted on"
+        );
+        let _ = moved;
+    }
+
+    #[test]
+    fn rendering_draws_something_at_an_awkward_size() {
+        let mut app = loaded();
+        for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+            assert!(
+                !app.render(w, h).commands.is_empty(),
+                "drew nothing at {w}x{h}"
+            );
+        }
+    }
 
     use super::*;
     use diffcore::myers_diff;
@@ -3291,7 +3471,7 @@ mod tests {
     #[test]
     fn test_render_empty_state() {
         let app = FileDiffApp::new();
-        let tree = app.render();
+        let tree = app.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3299,7 +3479,7 @@ mod tests {
     fn test_render_with_diff() {
         let mut app = FileDiffApp::new();
         app.load_files("a", "hello\nworld", "b", "hello\nrust");
-        let tree = app.render();
+        let tree = app.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3308,7 +3488,7 @@ mod tests {
         let mut app = FileDiffApp::new();
         app.view_mode = ViewMode::Unified;
         app.load_files("a", "hello\nworld", "b", "hello\nrust");
-        let tree = app.render();
+        let tree = app.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3317,7 +3497,7 @@ mod tests {
         let mut app = FileDiffApp::new();
         app.view_mode = ViewMode::Inline;
         app.load_files("a", "hello world", "b", "hello rust");
-        let tree = app.render();
+        let tree = app.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3728,7 +3908,7 @@ mod tests {
                 "b",
                 "alpha\nbravo iiii\ndelta",
             );
-            let tree = app.render();
+            let tree = app.render_tree();
 
             let mut depth = 0_i32;
             let mut deepest = 0_i32;
@@ -4018,7 +4198,7 @@ mod tests {
         for mode in [ViewMode::SideBySide, ViewMode::Unified, ViewMode::Inline] {
             let app = searching_app(mode, "alpha");
             assert!(!app.search.matches.is_empty(), "{mode:?}: nothing matched");
-            let (plain, current) = highlight_counts(&app.render());
+            let (plain, current) = highlight_counts(&app.render_tree());
             assert!(
                 plain + current > 0,
                 "{mode:?}: {} matches and no highlight drawn",
@@ -4039,12 +4219,12 @@ mod tests {
             2,
             "an equal line records one match per panel"
         );
-        let (plain, current) = highlight_counts(&app.render());
+        let (plain, current) = highlight_counts(&app.render_tree());
         assert_eq!(plain + current, 1, "but the unified view draws one line");
 
         // Side-by-side draws the line twice, so it draws both.
         let app = searching_app(ViewMode::SideBySide, "alpha");
-        let (plain, current) = highlight_counts(&app.render());
+        let (plain, current) = highlight_counts(&app.render_tree());
         assert_eq!(plain + current, 2, "one per panel");
     }
 
@@ -4059,7 +4239,7 @@ mod tests {
         let app = searching_app(ViewMode::SideBySide, "zulu");
         assert_eq!(app.search.matches.len(), 1, "only the right side has it");
         assert_eq!(app.search.matches[0].panel, 1);
-        let (plain, current) = highlight_counts(&app.render());
+        let (plain, current) = highlight_counts(&app.render_tree());
         assert_eq!(plain + current, 1, "drawn once, on the right");
     }
 
@@ -4079,7 +4259,7 @@ mod tests {
         let m = app.search.matches.first().copied().expect("a match");
         assert_eq!(m.byte_offset, 6, "six bytes in, three cells in");
 
-        let tree = app.render();
+        let tree = app.render_tree();
         // Where `render_unified_line` puts the line's first character: two
         // gutters, the panel padding, then the two-cell `+ ` / `- ` marker.
         let text_x = GUTTER_WIDTH * 2.0 + PANEL_PADDING + char_width() * 2.0;
@@ -4283,7 +4463,7 @@ mod tests {
             );
         }
         // And the highlighter agrees with the new layout.
-        let (plain, current) = highlight_counts(&app.render());
+        let (plain, current) = highlight_counts(&app.render_tree());
         assert!(
             plain + current > 0,
             "the hit is still there, and still drawn"

@@ -56846,6 +56846,41 @@ that make it likely to recur:
 inert rather than wrong. The remaining string-keyed apps have not been converted
 yet, and each is an opportunity to hit this again.
 
+### TD-C-LOGVIEWER-TAILS-A-STRING-COMPILED-INTO-ITSELF — 2026-09-04 — OPEN
+
+**In short.** The log viewer's own description promises "real-time log tailing
+with auto-scroll", and it draws an auto-scroll indicator in the status bar that
+the user can toggle. There is no log. The twenty-one lines it shows are a string
+literal compiled into the program, and nothing in the crate opens a file. The
+window is a working log viewer with nothing to view.
+
+**What is real and what is not.**
+
+| real | not real |
+|---|---|
+| the JSON-lines parser, and it is now hardened against truncated input | any file being read |
+| filtering by severity, source, time and text | any of it updating |
+| bookmarks, search, the stats view | the auto-scroll toggle, which has nothing to scroll |
+| the entry-count and search-result caps | the tailing the header promises |
+
+**Why `tick_interval` is `None`.** Returning a poll interval would wake the
+machine on a timer to re-render a buffer that cannot change — `known-issues.md`
+lesson 47's cost with none of its benefit. The doc comment on the method says
+this and says what to return instead once a source exists.
+
+**Proper fix.** `LogFile` already carries a path (`/var/log/system.log`), so the
+shape is there: read the file at startup, remember the offset, and on each tick
+read from that offset to the end and append. Two details make it more than a
+`fs::read_to_string`: a file that is rotated or truncated must be detected and
+re-read from the start rather than silently stopping, and a line that is only
+half-written at the moment of the read has to be held over rather than parsed —
+which is the case the parser was hardened for in the same commit that filed
+this.
+
+**Not urgent, and it does not get worse.** Nothing is lost. The reason to write
+it down is that the app asserts otherwise on its own status bar, and a reader
+looking for the tailing loop will not find one.
+
 ### TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH — 2026-09-04 — OPEN
 
 **In short.** The weather app's settings offer an update interval — "every 30
@@ -56981,18 +57016,18 @@ Production findings by lint:
 | `indexing_slicing` (slicing) | 15 |
 | everything else | 30 |
 
-**Twelve crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
+**Thirteen crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
 `habits`, `markdowneditor`, `regextester`, `explorer`, `installer`, `finance`,
-`weather`, `reminders`, `flashcards` and `mindmap` — taking **508 production
-findings out of the 588 (86%)**. All but one were converted to `oswindow::app`
-in the same pass, since the trigger below says to take a crate's debt when
-converting it; `installer` is a CLI tool with no window, so it got the lint
-half alone.
+`weather`, `reminders`, `flashcards`, `mindmap` and `logviewer` — taking **522
+production findings out of the 588 (89%)**. All but one were converted to
+`oswindow::app` in the same pass, since the trigger below says to take a
+crate's debt when converting it; `installer` is a CLI tool with no window, so
+it got the lint half alone.
 
 Worst crates by *production* findings: ~~`paint` 135~~, ~~`soundrecorder` 55~~,
 ~~`habits` 43~~, ~~`markdowneditor` 40~~, ~~`regextester` 39~~, ~~`installer`
 33~~, ~~`explorer` 33~~, ~~`finance` 23~~, `metronome` 21, ~~`weather` 21~~,
-~~`reminders` 21~~, ~~`flashcards` 18~~, ~~`mindmap` 17~~.
+~~`reminders` 21~~, ~~`flashcards` 18~~, ~~`mindmap` 17~~, ~~`logviewer` 14~~.
 
 **`installer` had been reporting a count that was not its count.** Its
 `build.rs` embeds a Windows manifest and did so with an `expect`. Under

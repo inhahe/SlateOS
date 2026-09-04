@@ -56801,6 +56801,97 @@ That entry's account of the `SKY` transposition names `gui/toolkit/src/theme.rs`
 among the files spelling `0x89DCEB`; as of today it spells nothing.
 ---
 
+### TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH — 2026-09-04 — OPEN
+
+**In short.** The weather app's settings offer an update interval — "every 30
+minutes" by default, adjustable from 5 to 120 — and nothing is behind it. There
+is no weather source at all: every temperature, forecast and alert in the app is
+sample data compiled into the binary. The setting is a control wired to nothing,
+displayed as though it worked.
+
+**Why the app does not ask for a clock.** `tick_interval` returns `None`, which
+is deliberate and is documented at the method. Returning
+`update_interval_min * 60` would wake a sleeping machine on a schedule to redraw
+numbers that cannot have changed — `known-issues.md` lesson 47's cost paid for
+none of its benefit. The one line to change when a source exists is written out
+in the doc comment.
+
+**What the user sees today.** A complete, correct-looking weather dashboard for
+a city, which never changes and is not about the weather where they are. The
+locations list is real (a user can add and remove cities); what each city
+*shows* is the same fixed sample.
+
+**Proper fix.** A source, in this order: an HTTP client against a public
+forecast API (lane C would need one — `net/` is lane C but no app currently makes
+an outbound request), a cache with the fetch time so a stale reading is labelled
+rather than shown as current, and only then `tick_interval` returning the
+setting. The interval control should be greyed out or absent until it drives
+something.
+
+**Not urgent, and it does not get worse with time.** Nothing is lost or
+corrupted; the app is a picture of a weather app. The reason to write it down is
+that the settings screen actively asserts otherwise, and a future reader could
+spend a while looking for the fetch that the interval configures.
+
+### TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA — 2026-09-04 — OPEN
+
+**In short.** The finance app now opens a window and responds to the keyboard,
+but there is no way to *put anything into it*: no "new transaction", no "new
+account", no way to change a budget, and nothing is saved when it closes. Every
+figure on screen comes from a fixed block of made-up May 2026 data compiled into
+the program. It reads like a working budget tracker and is in fact a picture of
+one.
+
+**Three separate gaps, which have to be closed together.**
+
+| gap | what it looks like now |
+|---|---|
+| no creation UI | `add_account` and `add_transaction` exist and work; the only caller is `create_sample_data`. The keyboard has no binding that reaches them. |
+| no persistence | Not a single `fs::` call in the crate. Close the window and any edit — a deletion, a budget change — is gone. |
+| no clock | `current_date` was `SimpleDate::new(2026, 5, 18)`, a constant. |
+
+They are one job because fixing any one alone makes the app worse. A real clock
+without real data opens the app on an empty September while the sample
+transactions sit in May, so the dashboard reads all zeroes. Persistence without
+a creation UI saves a file nobody can change. A creation UI without persistence
+invites the user to type in their finances and then throws them away.
+
+**What was done on 2026-09-04, and what was deliberately not.** The app was
+wired to the compositor and its defects fixed (below). `current_date` was left
+as a constant, and `Home` now returns the view to the month containing it, so
+the field is at least read. Wiring `SystemTime::now()` was *not* done: it is one
+line, and it would have shipped an app whose every screen reads zero.
+
+**The defects the wiring exposed**, all fixed in the same commit:
+
+- **The selection was an index into a `Vec` that `remove()` is called on.**
+  `CLAUDE.md` names this one directly — store stable identifiers, not positions
+  into a container that moves. Every deletion silently re-pointed the selection
+  at whatever slid into the gap.
+- **Arrow keys walked rows the user could not see.** Navigation stepped through
+  all transactions by index while the screen listed only the filtered ones, so
+  with a filter or a search active the highlight vanished for several presses —
+  and Ctrl+D then deleted an invisible row.
+- **Ctrl+D on a fresh window deleted the first transaction**, which the user had
+  never pointed at. Nothing is deleted without a selection now.
+- **A budget limit of zero divided by zero** on the dashboard, producing `inf`,
+  which draws as a bar past the end of its track and a permanently red category.
+  The budgets screen returned `0.0` for the same input: two copies of one
+  division that disagreed. Now one `usage_ratio`.
+- Money arithmetic (`income - expenses`, `initial + tx_sum`, `-amount`) was
+  unchecked; it saturates now, because a wrap turns a surplus into a deficit.
+- `prev_month` at January of year 0 wrapped to year 65535.
+
+**Proper fix for the entry itself.** In order: a transaction/account/budget
+editor, then a YAML store under the user's config directory written through
+`safeio` (the archive manager and the installer both already route their writes
+that way), then `SystemTime::now()` for `current_date` — and the sample data
+becomes what a *first run* seeds, or is dropped entirely.
+
+**Why it is not urgent.** Nothing here loses user data, because there is no user
+data. It is a demo that a user may mistake for an application, and the cost of
+that mistake is disappointment rather than damage.
+
 ### TD-C-APPS-CARRY-1812-CLIPPY-FINDINGS-AND-588-OF-THEM-ARE-IN-PRODUCTION — 2026-09-03 — OPEN
 
 **In short.** Running the project's own lint settings across every application
@@ -56845,16 +56936,16 @@ Production findings by lint:
 | `indexing_slicing` (slicing) | 15 |
 | everything else | 30 |
 
-**Seven crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
-`habits`, `markdowneditor`, `regextester`, `explorer` and `installer` — taking
-**408 production findings out of the 588 (69%)**. The first six were converted
-to `oswindow::app` in the same pass, since the trigger below says to take a
-crate's debt when converting it; `installer` is a CLI tool with no window, so
-it got the lint half alone.
+**Nine crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
+`habits`, `markdowneditor`, `regextester`, `explorer`, `installer`, `finance`
+and `weather` — taking **452 production findings out of the 588 (77%)**. All
+but one were converted to `oswindow::app` in the same pass, since the trigger below says
+to take a crate's debt when converting it; `installer` is a CLI tool with no
+window, so it got the lint half alone.
 
 Worst crates by *production* findings: ~~`paint` 135~~, ~~`soundrecorder` 55~~,
 ~~`habits` 43~~, ~~`markdowneditor` 40~~, ~~`regextester` 39~~, ~~`installer`
-33~~, ~~`explorer` 33~~, `finance` 23, `metronome` 21, `weather` 21,
+33~~, ~~`explorer` 33~~, ~~`finance` 23~~, `metronome` 21, ~~`weather` 21~~,
 `reminders` 21.
 
 **`installer` had been reporting a count that was not its count.** Its
@@ -113434,3 +113525,515 @@ through because it had no opinion; the shared module had an opinion, and the
 opinion was wrong. Extraction is not only a diff about call sites — it is a diff
 about which layer is allowed to have opinions, and every opinion the new layer
 adds is a behaviour change that has to be certified, not assumed.
+## TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM (lane A, 2026-09-03)
+
+**In short:** the two checkers wired by the entry above were switched on because
+they read a file in `kernel/`. They do — and then check one line of it. I
+deliberately broke the code each one is named after, and both reported a clean
+tree. Both are now fixed. What is *not* fixed is the general problem they are an
+instance of: a gate's `--self-test` proves its *logic* works on strings the
+author made up, and proves nothing about whether the gate is still attached to
+the real file it claims to grade. 24 of 37 gates have a self-test; after this
+work, 2 of 37 have a case that mutates their actual subject and demands a
+refusal.
+
+`scripts/check-shellquote-vs-bash.py`, `scripts/check-kshell-rungs-vs-bash.py`,
+wired into `scripts/boot-test.sh` in `cb29ea5dc`; fixed in `a6551a3af` and
+`d280f66b1`.
+
+**How this surfaced.** Not from a failure. The entry above closes with lane B's
+warning that "a later edit to `shellquote.rs` that changes behaviour is caught
+by nothing", offered as the cost of leaving the gates unwired. After wiring them
+I went to confirm that cost had been paid, by planting the edit lane B
+described. It was not caught. The warning survived the fix that was supposed to
+answer it.
+
+**Reproductions** (against the tree as of `cb29ea5dc`; both are one-line edits
+to a clean tree, and both exit 0):
+
+1. In `kernel/src/shellquote.rs`, change the `Ctx::Single` arm to
+   `let structural = false;` — a scanner in which a single-quoted string can
+   never close. `python scripts/check-shellquote-vs-bash.py` printed
+   `0 failure(s)` and exited 0. Its only read of the Rust was a regex for
+   `const DQ_ESCAPABLE: [u8; N] = [...]`; everything else it compared was a
+   Python re-implementation of the scanner, measured against bash.
+2. In `kernel/src/kshell.rs:22167`, change `alloc::vec!["a", "b", "c"]` to
+   `alloc::vec!["a", "b", "", "c"]` — a blank word bash never produces.
+   `python scripts/check-kshell-rungs-vs-bash.py` printed `0 rung assertion(s)
+   disagree with the reference tool` and exited 0. It pinned the rung *inputs*
+   verbatim and never read a single rung's *expected value*.
+
+**Status: both fixed.** `scripts/rustrungs.py` is a new shared reader that pulls
+a rung's own `assert_eq!` expectation out of the Rust; both oracles now require
+three-way agreement between the rung, the transcription in the gate's own table,
+and real bash, and both now enumerate every asserted call in their subject file
+so a rung nobody transcribed raises instead of passing silently. Coverage went
+from 13 rungs to 16 in kshell, because reading the Rust found three graded by
+nothing. Each of the seven mutants above and below was replanted after the fix
+and each is now caught. The honest scope of `check-shellquote-vs-bash.py` is
+written into its docstring: of `shellquote.rs`'s thirteen rungs, five
+`strip_quotes` rungs are gradeable against bash, one (`strip_quotes(b"a\\")`) is
+a deliberate divergence pinned three ways so that *agreeing* with bash reds the
+gate, the five `find_bare` and two `bare_positions` rungs assert byte offsets
+that bash does not expose and are graded against the Python port and labelled as
+such, and two are excused by name. Reproduction (1) is still not caught by the
+gate — a Python program cannot execute Rust, so a scanner defect is caught by
+`self_test()` at boot and by nothing in `scripts/`. The docstring now says that
+in as many words rather than letting the file's name imply otherwise.
+
+**The general debt, which is the part that remains.** Stated precisely, because
+the imprecise version of this sentence is what let the defect through: 24 of the
+tree's 37 gates *do* ship a `--self-test`, and those self-tests *do* contain
+true-positive cases — a fixture the gate is expected to refuse. What none of
+them had, before the two written here, is a true-positive case built from the
+gate's **real subject as it stands in the tree**, mutated. That distinction is
+not a nicety; it is the whole failure. `check-shellquote-vs-bash.py`'s
+`--self-test` was green at 25/25 while the gate graded a single line of
+`shellquote.rs`, because every one of those 25 cases was a synthetic string the
+gate was handed rather than the file the gate is supposed to be reading. A
+synthetic fixture proves the comparison logic works on input shaped the way the
+author imagined; only a mutated real subject proves the gate is still *attached*
+to the thing it claims to grade.
+
+`check-gates-can-refuse.py` covers the neighbouring question — is *any* non-zero
+exit reachable on a bare run — and its docstring is explicit that it cannot
+cover this one, because doing so means "planting a defect each gate would
+notice: 30 bespoke fixtures against 30 unrelated subjects". (That "30" is
+historical: the ratchet counted 30 gates when the line was written and counts
+**37** today, which is itself the point — the number only grows.) Two of the
+thirty-seven now have a real-subject mutation fixture, written by hand during
+this investigation. The other **thirty-five** do not, and a gate in that state
+is indistinguishable from a working one from outside: same directory, same exit
+0, same green self-test, same silence.
+
+The check that failed here is worth naming, because it is cheap and I used it:
+asking *does this gate open a file in `kernel/`?* cannot tell a gate that grades
+a subsystem from one that grades a single constant inside it. Both answer yes.
+The question that separates them is **how much of that file can change without
+this noticing**, and it can only be answered by changing something and watching.
+
+**Proper fix for the residue.** A per-gate mutation fixture, in the shape the
+two written here already have: a `--self-test` case that takes the gate's real
+subject text, plants a defect in it in memory, feeds it to the gate through an
+injectable `src` parameter, and asserts a non-zero verdict. The injectable
+parameter is the load-bearing part — it is what makes the fixture free of the
+working tree, so a gate can prove it refuses without a lane ever writing a
+broken file to disk. `rustrungs.py` and both oracles now demonstrate the
+pattern; the work is applying it **thirty-five** more times, one gate at a time,
+in whichever lane owns each gate's subject. Where a gate already has a
+`--self-test`, this is an addition to it rather than a replacement: the synthetic
+cases still guard the comparison logic, and the mutated-real-subject case guards
+the tether. Both are needed, and only the second was missing.
+
+**If it is never fixed:** the two oracles are now genuinely tethered, so the
+specific hole is closed. But the same defect can be reintroduced anywhere else
+in `scripts/` and will look exactly like a passing gate, which is how this one
+survived being written into a decision record as a "yes". Every gate added from
+here is a coin flip on whether it grades anything, resolved only if someone
+happens to break its subject and look.
+
+## TD-A-A-KILLED-BOOT-TEST-LEAVES-NO-TRACE-WHERE-ANYONE-LOOKS-FOR-ONE (lane A, 2026-09-03)
+
+**In short:** if `run-timeout.py` kills a boot test for exceeding its budget,
+the run writes **no row** to `bench/boot-history.jsonl` — and the wrapper that
+launched it can still report a clean finish. So the two places a person
+actually looks (the task list, and the last row of the history file) both look
+exactly as they do when no boot test was ever started. Today one run was killed
+at 2400s, ~24 gates into the pre-build sweep, and I read the stale previous row
+as though it were the new verdict for several minutes before noticing the
+commit hash had not moved.
+
+**The rule this makes concrete, which `CLAUDE.md` already states:** read the
+verdict from the log and from `bench/boot-history.jsonl`, never from an exit
+code. What today adds is *how to tell a missing verdict from a passing one*,
+since a missing verdict is not an error message:
+
+| what you see | what it means |
+|---|---|
+| last row's `commit` == `git rev-parse --short HEAD` | this is your run's verdict |
+| last row's `commit` is an older commit | **your run produced no verdict**; the row belongs to someone else's run |
+| log's last line is `[run-timeout] TIMEOUT after Ns -- killing process tree` | killed; nothing was decided |
+
+Checking the commit hash is the cheap discriminator and I was not doing it.
+`ts` is not a substitute: another lane's run appends rows to the same file
+through the shared worktree history, so a *newer* timestamp does not mean a
+newer row of yours.
+
+**Why the budget was exceeded, as far as it is measured.** The pre-build gate
+sweep is 30 checkers, most of which walk all ~805 kernel source files, and it
+is **not serialised across lanes**. The cross-worktree boot lock
+(`scripts/boot-test.sh:6039`) is acquired *after* the build, deliberately —
+its own header explains that waiting inside the lock would idle while holding
+the one resource other lanes queue for. That is the right call for the lock,
+but it leaves the gate sweep and the `cargo` build entirely unserialised, and
+those are as CPU-bound as the QEMU phase the lock does cover.
+
+Measured on this host, `Logoplex3`, all on `lane-a`:
+
+| run | phase reached | elapsed |
+|---|---|---|
+| `e7d9573b9`, `5c3a57267` (history rows) | **whole run**, gates + build + QEMU | 530s, 537s |
+| today's killed run, another lane's boot test live throughout | gate ~24 of 30, **sweep only** | 2400s (killed) |
+| today's replacement run, same overlap | gate 12 of 30, **sweep only** | 840s |
+
+The sweep alone taking longer than two entire previous runs is the observation.
+Overlap with another lane is the obvious hypothesis and the timing fits, but
+**it is not proven**: I have no instrumented solo measurement of the sweep by
+itself to compare against, and the sweep also grew today (the two bash oracles
+were rewritten to shell out to bash far more often). Both changed at once,
+which is exactly the condition under which not to name a cause.
+
+**Proper fix, in the order I would do it.**
+
+1. **Make a killed run say so where the verdict lives.** The absence of a row
+   is currently indistinguishable from not having run. `boot-test.sh` cannot
+   write the row (it is dead), so the writer has to be the wrapper: have
+   `run-timeout.py` — or a thin boot-test-specific wrapper around it — append a
+   `{"verdict": "KILLED", "commit": …, "phase": <last `=== …` line seen>}` row
+   on exit 124. The `phase` field is the part worth having; "killed at gate 24"
+   and "killed in QEMU" are different bugs and the log is the only thing that
+   distinguishes them today.
+2. **Time the phases.** `boot-test.sh` prints `=== … ===` per gate but no
+   clock, so nobody can say what the sweep costs solo. Stamping each banner
+   with elapsed seconds costs nothing and would have answered the question
+   above rather than leaving it a hypothesis.
+3. **Only then** decide whether the sweep needs its own serialisation. It may
+   well not — extending the boot lock over the build would idle two lanes for
+   ~7 min each, which the lock's header already argues against — but the
+   decision needs (2) first.
+
+**If it is never fixed:** every boot test whose budget is a guess can end with
+no verdict and no visible complaint, and the stale last row of
+`boot-history.jsonl` will be read as the answer. That is the same shape as the
+entry above it: a thing that did not look, reported identically to a thing that
+looked and found nothing.
+
+## A-A-CRLF-CORRUPTION-IS-INVISIBLE-TO-EVERY-GIT-COMMAND-ANYONE-RUNS (lane A) — FIXED 2026-09-03
+
+**In short:** thirteen files in this worktree had Windows line endings
+(CRLF — a carriage return before every newline) where the project requires
+Unix ones (LF alone). The boot test went red on them 45 minutes in. The
+entire time, every command you would run to ask "is my working tree dirty?"
+answered **clean** — `git status`, `git diff`, `git diff --quiet`, and
+`git add`. That is not a bug in git and it is not something I failed to
+check; it is what those commands are specified to do, and it means a whole
+class of corruption is invisible where everyone looks for it. A new gate,
+`scripts/check-eol.py`, now checks the thing git will not.
+
+**Why git says clean.** `.gitattributes` declares `*.sh`, `*.py`, `*.yaml`,
+`*.yml`, `*.md` and `*.txt` as `text eol=lf`. That declaration installs a
+**clean filter** — a normalisation git applies to a file's bytes *before*
+comparing it to the stored version. The filter strips CR. So the comparison
+that `git status` and `git diff` perform is not "do the bytes on disk match
+the bytes in the index?", it is "do the bytes on disk **after normalisation**
+match?" — and a wholly-CRLF file normalises to exactly the stored content.
+
+The proof, and it is worth keeping because it is counter-intuitive: I
+repaired all thirteen files and staged the repair. `git diff --cached`
+was **zero bytes**. Thirteen files rewritten, nothing to commit. The CRLF
+had never reached a commit in the first place, which is also why `main` was
+never red and why the initial hypothesis — "this came in through a merge, so
+every lane is blocked" — was wrong.
+
+| command | sees raw bytes? | verdict it gave |
+|---|---|---|
+| `git status` | no (filters) | clean |
+| `git diff` | no (filters) | empty |
+| `git diff --quiet` | no (filters) | exit 0 |
+| `git add` + `git diff --cached` | no (filters) | empty |
+| `git diff-files` | **yes** | modified |
+| `git ls-files --eol` | **yes** | `i/lf w/crlf` |
+
+The last two are the only ones that disagree, and nobody runs them.
+`git ls-files --eol` is the one to remember: it prints the index encoding
+and the working-tree encoding side by side.
+
+**The deeper point.** `text eol=lf` is a promise git keeps *at checkout*.
+It is not an invariant git enforces afterwards. Anything that writes a file
+after checkout — a script, an editor, a code generator — can violate it
+freely, and git's answer to "did anything change?" is designed to say no.
+So the declaration reads like a guarantee and is a one-time conversion.
+
+**What was caught, and what was not.** `check_shellcheck` found this,
+because shellcheck reads raw bytes and chokes on the CR. But it covers
+`*.sh` only: **1 of the 13** corrupted files. The other twelve were `.py`
+and `.md`, and nothing in the tree looked at them. A whole-tree corruption
+presented as a one-file typo — which is why the new gate covers every
+declared file rather than the extension that happened to catch it. What
+matters about a finding here is not the file; it is that some tool in the
+tree is writing text in the wrong mode.
+
+**The fix (`scripts/check-eol.py`, wired second in the boot-test sweep).**
+Asks `git check-attr` which paths are declared `eol=lf` — rather than
+matching suffixes, so the policy has one home and cannot drift — reads each
+one from disk, and reports any CR. 1438 files, ~32s with a 16-thread pool.
+It runs second, after `check_requests_not_deleted`, because the cost of
+learning this late was 45 minutes.
+
+**Still open — the actual root cause.** Roughly 180 further files are
+wholly CRLF on disk *and not declared* `eol=lf`, so the new gate ignores
+them by construction: most of `kernel/src/fs/*.rs`, plus
+`kernel/src/crypto.rs`, `kernel/src/syscall/handlers.rs`, `kernel/build.rs`,
+`bench/baselines.toml`, and `kernel/ada/*`. `.gitattributes` declares no
+rule for `*.rs`, `*.toml`, `*.ads` or `*.atp`.
+
+That distribution is the evidence: whole directories of generated-looking
+source, in one mode, is what a Python script opening files with
+`open(path, "w")` on Windows produces — text mode translates newline to
+CRLF silently. **Finding that writer is the fix that matters**; repairing
+files without it just schedules the next occurrence.
+
+**The mechanism is no longer a hypothesis — it was reproduced the same day,
+by me, in this repository.** Hours after the gate was written I edited
+`scripts/check-gates-can-refuse.py` with a short Python script ending in
+`p.write_text(s, encoding="utf-8")`. `Path.write_text` opens in **text
+mode**, and on Windows text mode rewrites every newline to CRLF. That one
+call put 649 carriage returns into one script and 461 into another.
+`git status` called the tree clean, exactly as documented above, and
+`git commit` accepted it without complaint — the clean filter normalised the
+content on the way in, so the *commit* is correct and only the working tree
+was wrong. The new gate caught it on its first day, in the field, against
+real corruption rather than a fixture.
+
+Two lessons worth carrying:
+
+- **`Path.write_text()` and `open(p, "w")` are the bug.** Any script here
+  that writes a tracked file must pass `newline=""` or write bytes. This is
+  not a Windows quirk to catch at review time; it is the default behaviour of
+  the most obvious API, which is why it keeps happening.
+- **`git commit` will not stop you.** The filter makes the committed object
+  correct, so the corruption never appears in history and lives only on disk
+  — where the next tool that reads raw bytes (shellcheck, a compiler, a
+  parser) trips over it.
+
+An aside on the repair, because it costs time every occurrence: after
+rewriting the bytes correctly, `git status` reports the file as ` M` with a
+**zero-byte diff**. That is the same disagreement pointing the other way —
+the stat cache sees changed raw bytes, the content comparison sees none.
+`git add` or `git update-index --refresh` settles it; nothing is actually
+staged, because there is nothing to stage.
+
+Two candidate follow-ups, in order:
+
+1. Find the writer. Search the tree for text-mode `open()` calls without an
+   explicit `newline=""` (or a binary `"wb"` mode) in anything that emits
+   `.rs`, and check the generators under `kernel/` first, since that is
+   where the residue is.
+2. Decide whether `.gitattributes` should declare `*.rs`/`*.toml` too. It
+   probably should — but that is a whole-tree normalisation touching all
+   three lanes, so it wants a request rather than a unilateral commit.
+
+### Follow-up 1 is done: the writers, found — 2026-09-04
+
+Method: parse every `scripts/**/*.py` and report each `Path.write_text(...)`,
+`p.open("w"/"a")` and `open(p, "w"/"a")` that does **not** pass an explicit
+`newline=`. **79 sites in 28 scripts** — 40 `write_text`, 39 `open()`.
+
+47 of the 79 write into a `tempfile` directory. Of the remaining 32, three
+write files that are actually in the repository:
+
+| Site | Target | Tracked? | Declared `eol=lf`? |
+|---|---|---|---|
+| `check-selftest-reinit.py:327` | `scripts/selftest-reinit-baseline.txt`, on `--pin` | yes | **yes** |
+| `scan-orphan-modules.py:602` | `scripts/orphan-modules-baseline.txt`, on `pin` | yes | **yes** |
+| `strip-workspace-sections.py:80` | `{apps,userspace,gui,init,net}/*/Cargo.toml`, **in place** | yes | **no** |
+
+The first two are the exact signature of this entry: a declared-LF tracked file
+rewritten after checkout, with git silent about it. Both are `--pin` paths — run
+deliberately, then committed — which is precisely how a corrupted worktree
+survives a commit and still looks clean.
+
+The third is worse in kind and lower in risk. It is a `read_text` → `write_text`
+round trip, so it is **not idempotent on Windows**: the read normalises CRLF to
+`\n` and the write turns every `\n` back into CRLF, converting an LF file to CRLF
+whenever the script changes anything at all. It aims at `*.toml`, which is *not*
+declared `eol=lf`, so `check-eol.py` cannot see the damage it does. It is also
+**orphaned** — no reference to it exists anywhere under `scripts/`, nor in any
+tracked `.md`, `.txt`, `.sh` or `.toml` — and it is a one-shot migration script
+from the original workspace setup.
+
+**Another lane hit the same mechanism a fortnight earlier and did not find the
+writer either.** See
+`B-THE-FIXTURE-STAMP-HASHED-WORKTREE-BYTES-SO-IT-DID-NOT-SURVIVE-A-CHECKOUT`
+(lane B, 2026-08-16) above, under "How widespread the CRLF is, since the next
+reader will ask": a survey of 13,145
+tracked files in lane B's worktree found 70 CRLF files, *every one* a
+`services/*/build.py`, all attributed to "whatever generated those files in text
+mode". Lane B fixed the **consequence** — the hash rule — and the writer went on
+running. That is the argument for fixing writers instead of consequences: the
+consequence-fix protected hashing and left every other reader of raw bytes
+exposed, and on 2026-09-03 `shellcheck` was the reader that tripped.
+
+**One correction to lane B's reasoning, since it bears on follow-up 2.** That
+entry declines `.gitattributes` on the grounds that "a config that governs
+checkout cannot fix a file rewritten post-checkout". The premise is right and the
+conclusion does not follow, because prevention is not what the declaration buys.
+A declaration is what makes a file **visible to `check-eol.py`** — it is the
+difference between damage that is detected on the next build and damage that is
+detected never. `*.toml` being undeclared is exactly why
+`strip-workspace-sections.py` could corrupt every sub-crate manifest in silence.
+Declaration does not prevent; it makes prevention checkable.
+
+### The fix is a gate, not 79 edits
+
+Adding `newline=""` at 79 sites is correct at each site and protects nothing at
+site 80. The defect is not that 79 authors were careless — it is that **the most
+obvious API in the language is wrong by default on this platform**, so the fix
+has to be something that keeps being true. Planned, in this order:
+
+1. `scripts/check-text-mode-writes.py` — refuses any text-mode write under
+   `scripts/` that lacks an explicit `newline=`. The census above is already the
+   analysis; it only needs a verdict, a discovery floor and a `--self-test`.
+2. The 79 edits, to make that gate green.
+3. **Delete** `strip-workspace-sections.py` rather than repair it. It is orphaned
+   and one-shot; fixing a script nobody runs adds a maintained file for no
+   benefit, and leaving it fixed-but-unrun leaves a loaded gun with the safety on.
+
+The gate is deliberately **blanket** rather than scoped to sites that write
+tracked files, for three reasons: the destination usually cannot be resolved
+statically; a temp-dir write today becomes a repo write the moment someone reuses
+the helper; and a CRLF *fixture* makes a self-test behave differently on Windows
+from Linux, which is a real portability defect even when no tracked file is
+touched. `newline=""` costs nothing anywhere, so there is no scope worth arguing
+about.
+
+**If the residue is never addressed:** it is presently harmless — `rustc`
+accepts CRLF — so nothing is red. The cost is that the tree carries two
+line-ending conventions with no rule stating which is intended, and the
+writer that produced them is still running.
+
+## TD-A-A-SKIP-REASON-CAN-BE-A-BLANK-LINE-BECAUSE-TWO-STREAMS-RACE (lane A) — FIXED 2026-09-03
+
+**In short:** a build gate is allowed to *decline* — to say "I cannot check
+this here" and be skipped instead of failing the build — and when it does,
+the operator is shown the reason it gave. Two separate defects meant the
+operator could be shown a blank reason, or worse, shown a sentence that
+`run-checker.sh` had written *about* the checker, presented as the checker's
+own account of itself. A gate would skip on every host and the log would
+look like it had explained itself. Both halves are now fixed.
+
+**Background: how a decline works.** `scripts/run-checker.sh` runs a checker
+with its stdout and stderr merged into one log file. If the checker was
+invoked with `--may-skip` and exits **2**, that is a decline; `run_checker`
+sets `RUN_CHECKER_SKIPPED` and takes **the first line of the log** as
+`RUN_CHECKER_SKIP_REASON`. First line, not last — that contract came from
+lane B and was adopted wholesale at merge `a29a07d68`.
+
+**Defect 1 — the two streams do not arrive in the order they were written.**
+A redirected stdout is *block-buffered*; stderr is not. So a checker that
+prints its reason to stdout and an explanation to stderr has the explanation
+hit the file first, while the reason sits in a buffer until the process
+exits. The "first line of the log" is then the wrong sentence — or, when
+stderr's first write is a blank separator, no sentence at all. Observed with
+`scan-unwrap.py`, whose reason went to stdout and whose detail went to
+stderr, and `head -n 1` returned an empty line.
+
+This had been fixed once before on this lane, with `PYTHONUNBUFFERED=1` on
+the child. Merge `a29a07d68` adopted lane B's `--may-skip` implementation —
+correctly — and the buffering fix rode along inside the file that was
+replaced. It is restored at the invocation itself rather than at the call
+sites, so it cannot be lost the same way a third time.
+
+Note that the buffering bug got *worse* under the new contract without
+anyone touching it. Under the old last-line rule, a buffered stdout landing
+late meant the reason arrived last, which is where the reader was looking.
+Under the first-line rule the same buffering hides it. A latent defect was
+promoted to a live one by a change that was itself an improvement.
+
+**Defect 2 — the guard tested the log, not the reason.** The fourth
+condition for accepting a decline read `[ -s "$_rc_log" ]`: "the checker
+printed something." But the claim that matters is about *the sentence this
+will quote*, and the two come apart the moment the first line is blank or
+whitespace. `[ -s ]` says the file has bytes; the display fallback then
+substitutes the string `(it printed nothing)`; and the operator is told a
+gate skipped for a reason that `run-checker.sh` invented. It now tests the
+reason it is about to use, at the place the claim is made.
+
+Both were fixed together in `a5439c918` "because each alone leaves a way
+in": unbuffering without the guard still admits a checker whose genuine
+first line is blank, and the guard without unbuffering still quotes the
+wrong sentence when the checker used both streams.
+
+**Regression cases** are in `scripts/test-pre-push-run-checker.py`: a
+checker whose first line is blank (asserts it is not a skip, is not
+reported as one, and that no invented reason reaches the operator), and a
+two-stream checker run with `PYTHONUNBUFFERED` explicitly unset in the
+driver — so the case fails if `run-checker.sh` ever stops setting it —
+asserting the quoted reason is the one the checker wrote first.
+
+**Standing lesson, which is why this is filed as debt and not just a fix:**
+a checker that declines is trusted to describe why, and every layer between
+it and the operator is an opportunity to substitute something else. Never
+let the reporting layer supply a reason of its own invention. If there is
+no reason, the correct output is a refusal, not a sentence.
+
+## TD-A-A-GATE-THAT-CANNOT-REFUSE-IS-STILL-UNDETECTED-IN-10-OF-47-GATES (lane A, 2026-09-03)
+
+**In short:** `scripts/check-gates-can-refuse.py` exists to answer one
+question about every build gate — *if this checker finds a problem, can it
+actually fail the build, or does it print and exit 0?* Measured today, it
+answers correctly for 37 of the 47 gates and is fooled by the other 10. That
+is up from 12 of 47 before today's fix, so the gate is now doing real work;
+this entry records what it still cannot see, so nobody reads its "ok" as a
+statement about all 47.
+
+**How the number is measured, since a checker's own claim is not evidence.**
+Take each gate, rewrite every literal non-zero exit status in it to 0 — a
+mechanical transform producing a checker that provably cannot refuse
+anything — and ask whether `check-gates-can-refuse.py` notices. Anything it
+misses is a real blind spot, not a hypothetical one. The census is ~20 lines
+of `ast.NodeTransformer` and takes under a second; it is worth re-running
+after any change to the analysis, and the numbers below are from
+`ab173d435`.
+
+| | detected |
+|---|---|
+| before `ab173d435` | 12 / 47 |
+| after | **37 / 47** |
+
+**What the fix covered.** A `return` of a call to a function defined in the
+same module is now resolved by analysing that function, instead of being
+waved through as "delegated, assume it can refuse". The idiom that mattered
+is `return _decline(reason, detail)` — a helper that prints a no-verdict
+message and returns 2 — which appears in most gates here; one such call
+anywhere in `main()` used to clear the whole file. Both arms of
+`return 1 if findings else 0` are now read as well.
+
+**What still gets through, by shape.** These are the expressions the analysis
+still cannot follow, with the gates each affects:
+
+| shape | example | gates |
+|---|---|---|
+| a returned local variable | `return bad` | `check-evdev-elf-asm.py`, `check-query-status.py`, `check-usage-status.py` |
+| a returned comparison / comprehension / subscript | `return classify(...) == 'production'` | `check-option-refusal.py`, `scan-orphan-modules.py` |
+| a call whose own body contains an unanalysable expression | `return selftest()` where `selftest` returns a name | `argv-utf8.py`, `check-selftest-reinit.py`, `host-errmsg.py`, `raced-globals.py` |
+| no `main()` at all — analysis falls back to the module body, which is much weaker | — | `rustscan.py` |
+
+Note the third row is a *chain*: resolving a call is only as good as the
+analysis of the callee, so one unreadable expression deep inside a helper
+still clears the caller. That is the conservative direction working as
+designed, and it is why the remaining gap is not simply "four more
+expression types".
+
+**Proper fix.** Single-assignment local dataflow inside a function: if a
+returned name is bound exactly once, from an expression the analysis can
+already read, substitute it. That covers the first row outright and part of
+the third. The second row needs a value lattice (is this comparison ever
+truthy?) and is probably not worth it — a checker that returns a comparison
+directly is rare and reads oddly anyway. `rustscan.py` is better fixed at
+the source, by giving it a `main()`, than by strengthening the module-level
+path for one file.
+
+Do **not** fix this by widening the "assume it can refuse" fallback in the
+other direction, i.e. reporting everything unanalysable. The file's header
+argues the opposite and is right: this gate runs on every build, and a
+version that cries wolf on ten gates gets its findings ignored, at which
+point it detects nothing at all regardless of what its analysis can see.
+
+**If it is never fixed:** the current state is safe but oversold. All 47
+gates can refuse *today* — that was verified directly, not assumed — so
+nothing is currently broken. The risk is future: if one of those 10 gates
+later loses its refusal (a `return 1` becomes a `return 0` in a refactor,
+which is exactly how `check-doc-links.py` broke and why this file exists),
+this will report "ok — all 47 gates can reach a non-zero exit bare" and be
+wrong, in the same words it uses when it is right.

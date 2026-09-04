@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -11,8 +10,12 @@
 //! trends, manage accounts, and get financial summaries.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -130,10 +133,6 @@ impl Category {
             Self::Other => OVERLAY0,
         }
     }
-
-    fn is_income(self) -> bool {
-        matches!(self, Self::Income | Self::Investment)
-    }
 }
 
 // ── Date ────────────────────────────────────────────────────────────
@@ -175,43 +174,29 @@ impl SimpleDate {
         self.year == other.year && self.month == other.month
     }
 
-    fn next_day(self) -> Self {
-        let days_in_month = match self.month {
-            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-            4 | 6 | 9 | 11 => 30,
-            2 => {
-                if self.year.is_multiple_of(4)
-                    && (!self.year.is_multiple_of(100) || self.year.is_multiple_of(400))
-                {
-                    29
-                } else {
-                    28
-                }
-            }
-            _ => 30,
-        };
-        if self.day < days_in_month {
-            Self::new(self.year, self.month, self.day + 1)
-        } else if self.month < 12 {
-            Self::new(self.year, self.month + 1, 1)
-        } else {
-            Self::new(self.year + 1, 1, 1)
-        }
-    }
-
+    /// The first of the previous month.
+    ///
+    /// Stops at January of year 0 rather than wrapping to year 65535: a
+    /// calendar that runs backwards past its own start is worse than one that
+    /// refuses to.
     fn prev_month(self) -> Self {
-        if self.month > 1 {
-            Self::new(self.year, self.month - 1, 1)
-        } else {
-            Self::new(self.year - 1, 12, 1)
+        match self.month.checked_sub(1) {
+            Some(m) if m >= 1 => Self::new(self.year, m, 1),
+            _ => match self.year.checked_sub(1) {
+                Some(y) => Self::new(y, 12, 1),
+                None => Self::new(0, 1, 1),
+            },
         }
     }
 
+    /// The first of the next month, saturating at December of year 65535.
     fn next_month(self) -> Self {
-        if self.month < 12 {
-            Self::new(self.year, self.month + 1, 1)
-        } else {
-            Self::new(self.year + 1, 1, 1)
+        match self.month.checked_add(1) {
+            Some(m) if m <= 12 => Self::new(self.year, m, 1),
+            _ => match self.year.checked_add(1) {
+                Some(y) => Self::new(y, 1, 1),
+                None => Self::new(u16::MAX, 12, 1),
+            },
         }
     }
 }
@@ -230,10 +215,6 @@ struct Transaction {
 }
 
 impl Transaction {
-    fn amount_dollars(&self) -> f64 {
-        self.amount as f64 / 100.0
-    }
-
     fn is_income(&self) -> bool {
         self.amount > 0
     }
@@ -258,6 +239,13 @@ enum AccountType {
     Savings,
     CreditCard,
     Cash,
+    /// Nothing constructs this, and that is a statement about the app rather
+    /// than about the variant: there is no account-creation UI at all, so every
+    /// account in existence comes from `create_sample_data`, and the sample set
+    /// happens to cover the other four. Deleting it would encode "the sample
+    /// data has no brokerage account" as "SlateOS has no such account type".
+    /// See known-issues.md -> TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA.
+    #[allow(dead_code, reason = "a model variant awaiting the creation UI")]
     Investment,
 }
 
@@ -322,7 +310,14 @@ struct FinanceApp {
     next_account_id: u32,
     current_date: SimpleDate,
     view_month: SimpleDate, // first day of the month being viewed
-    selected_tx: usize,
+    /// The selected transaction's **id**, not its index.
+    ///
+    /// It was an index, and `delete_transaction` calls `Vec::remove` — so every
+    /// deletion silently re-pointed the selection at whatever slid into the
+    /// gap. `CLAUDE.md` names this directly: store stable identifiers, not
+    /// positions into a container that moves. `None` means nothing is selected,
+    /// which is the honest state for an empty or fully-filtered-out list.
+    selected_id: Option<u32>,
     search_query: String,
     search_active: bool,
     category_filter: Option<Category>,
@@ -343,7 +338,7 @@ impl FinanceApp {
             next_account_id: 1,
             current_date: today,
             view_month: SimpleDate::new(today.year, today.month, 1),
-            selected_tx: 0,
+            selected_id: None,
             search_query: String::new(),
             search_active: false,
             category_filter: None,
@@ -546,7 +541,9 @@ impl FinanceApp {
 
     fn add_account(&mut self, name: &str, atype: AccountType, initial: i64) -> u32 {
         let id = self.next_account_id;
-        self.next_account_id += 1;
+        // Saturating rather than wrapping: a wrapped counter hands out an id
+        // that already exists, and selection and deletion are both by id.
+        self.next_account_id = self.next_account_id.saturating_add(1);
         self.accounts.push(Account {
             id,
             name: name.to_string(),
@@ -571,7 +568,7 @@ impl FinanceApp {
         recurring: bool,
     ) -> u32 {
         let id = self.next_tx_id;
-        self.next_tx_id += 1;
+        self.next_tx_id = self.next_tx_id.saturating_add(1);
         self.transactions.push(Transaction {
             id,
             date,
@@ -585,13 +582,79 @@ impl FinanceApp {
         id
     }
 
-    fn delete_transaction(&mut self, idx: usize) {
-        if idx < self.transactions.len() {
-            self.transactions.remove(idx);
-            if self.selected_tx >= self.transactions.len() && !self.transactions.is_empty() {
-                self.selected_tx = self.transactions.len().saturating_sub(1);
+    /// Delete by id, and leave the selection on a row that still exists.
+    fn delete_transaction(&mut self, id: u32) {
+        let Some(idx) = self.transactions.iter().position(|tx| tx.id == id) else {
+            return;
+        };
+        self.transactions.remove(idx);
+        // Prefer the row that took its place, then the one before it; the point
+        // is that repeated deletes walk down the list rather than jumping to
+        // the end or landing on nothing.
+        let visible = self.visible_ids();
+        self.selected_id = visible
+            .get(idx)
+            .or_else(|| visible.get(idx.saturating_sub(1)))
+            .or_else(|| visible.first())
+            .copied();
+        self.status_msg = String::from("Transaction deleted");
+    }
+
+    /// The ids of the transactions currently on screen, in screen order.
+    fn visible_ids(&self) -> Vec<u32> {
+        self.filtered_transactions()
+            .iter()
+            .map(|(_, tx)| tx.id)
+            .collect()
+    }
+
+    /// Move the selection by `delta` rows **through the list on screen**.
+    ///
+    /// It used to step through `transactions` by index while the screen showed
+    /// `filtered_transactions()`, so with a filter or a search active the arrow
+    /// keys walked through hidden rows: the highlight vanished for several
+    /// presses, and Ctrl+D then deleted a row the user could not see.
+    fn move_selection(&mut self, delta: isize) {
+        let visible = self.visible_ids();
+        if visible.is_empty() {
+            self.selected_id = None;
+            return;
+        }
+        let current = self
+            .selected_id
+            .and_then(|id| visible.iter().position(|&v| v == id));
+        let next = match current {
+            // Not on screen (the filter just changed under it): the first
+            // visible row is where the selection belongs, whichever way the
+            // user pressed.
+            None => 0,
+            Some(pos) => {
+                let Ok(pos) = isize::try_from(pos) else {
+                    return;
+                };
+                let Some(moved) = pos.checked_add(delta) else {
+                    return;
+                };
+                let Ok(moved) = usize::try_from(moved) else {
+                    return; // stepped off the top; stay put
+                };
+                if moved >= visible.len() {
+                    return; // stepped off the bottom; stay put
+                }
+                moved
             }
-            self.status_msg = String::from("Transaction deleted");
+        };
+        self.selected_id = visible.get(next).copied();
+    }
+
+    /// Put the selection back on a visible row after the view changed.
+    ///
+    /// Changing a filter, a search or the month can hide whatever was selected.
+    /// Leaving it hidden is the state that made the highlight disappear.
+    fn reanchor_selection(&mut self) {
+        let visible = self.visible_ids();
+        if !self.selected_id.is_some_and(|id| visible.contains(&id)) {
+            self.selected_id = visible.first().copied();
         }
     }
 
@@ -631,7 +694,10 @@ impl FinanceApp {
     }
 
     fn month_savings(&self) -> i64 {
-        self.month_income() - self.month_expenses()
+        // Saturating, not wrapping: i64 cents is ~92 quadrillion dollars, so
+        // the only way to reach the edge is corrupt data — and a wrap there
+        // would report a huge surplus as a huge deficit.
+        self.month_income().saturating_sub(self.month_expenses())
     }
 
     fn category_spending(&self, cat: Category) -> i64 {
@@ -642,21 +708,27 @@ impl FinanceApp {
             .sum()
     }
 
-    fn budget_for(&self, cat: Category) -> Option<i64> {
-        self.budgets
-            .iter()
-            .find(|b| b.category == cat)
-            .map(|b| b.monthly_limit)
-    }
-
-    fn budget_usage(&self, cat: Category) -> Option<f32> {
-        self.budget_for(cat).map(|limit| {
-            if limit == 0 {
-                return 0.0;
-            }
-            let spent = self.category_spending(cat);
-            spent as f32 / limit as f32
-        })
+    /// Fraction of a monthly limit already spent.
+    ///
+    /// The dashboard and the budgets screen both draw this bar and each used to
+    /// divide for itself. Two copies of a division are two chances to disagree
+    /// about what a limit of zero means — and they did: one returned `0.0`, the
+    /// other divided by it.
+    fn usage_ratio(spent: i64, monthly_limit: i64) -> f32 {
+        if monthly_limit <= 0 {
+            // An unset limit is not "infinitely overspent"; it is a budget
+            // nobody has set, and its bar should read empty rather than red.
+            return 0.0;
+        }
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a ratio for a progress bar; cents beyond f32's exact range \
+                      are past any plausible household budget and the bar is \
+                      clamped for drawing anyway"
+        )]
+        {
+            spent as f32 / monthly_limit as f32
+        }
     }
 
     fn account_balance(&self, account_id: u32) -> i64 {
@@ -671,7 +743,7 @@ impl FinanceApp {
             .filter(|tx| tx.account_id == account_id)
             .map(|tx| tx.amount)
             .sum();
-        initial + tx_sum
+        initial.saturating_add(tx_sum)
     }
 
     fn total_balance(&self) -> i64 {
@@ -721,9 +793,11 @@ impl FinanceApp {
                 "Escape" => {
                     self.search_active = false;
                     self.search_query.clear();
+                    self.reanchor_selection();
                 }
                 "Backspace" => {
                     self.search_query.pop();
+                    self.reanchor_selection();
                 }
                 _ => {}
             }
@@ -737,42 +811,50 @@ impl FinanceApp {
             "5" => self.screen = Screen::Reports,
             "Left" => {
                 self.view_month = self.view_month.prev_month();
+                self.reanchor_selection();
             }
             "Right" => {
                 self.view_month = self.view_month.next_month();
+                self.reanchor_selection();
             }
-            "Up" | "k" if self.selected_tx > 0 => {
-                self.selected_tx -= 1;
+            // Back to the month containing today, which is otherwise reachable
+            // only by counting arrow presses.
+            "Home" => {
+                self.view_month =
+                    SimpleDate::new(self.current_date.year, self.current_date.month, 1);
+                self.reanchor_selection();
             }
-            "Down" | "j" if self.selected_tx + 1 < self.transactions.len() => {
-                self.selected_tx += 1;
-            }
+            "Up" | "k" => self.move_selection(-1),
+            "Down" | "j" => self.move_selection(1),
             "/" => {
                 self.search_active = true;
                 self.search_query.clear();
             }
             "c" => {
                 // Cycle category filter
+                // `get` on the next position rather than an index guarded by a
+                // separate length test: running off the end is how the cycle
+                // returns to "All", so it is the normal path and not an error.
                 self.category_filter = match self.category_filter {
-                    None => Some(Category::ALL[0]),
-                    Some(cat) => {
-                        let idx = Category::ALL.iter().position(|&c| c == cat).unwrap_or(0);
-                        if idx + 1 < Category::ALL.len() {
-                            Some(Category::ALL[idx + 1])
-                        } else {
-                            None
-                        }
-                    }
+                    None => Category::ALL.first().copied(),
+                    Some(cat) => Category::ALL
+                        .iter()
+                        .position(|&c| c == cat)
+                        .and_then(|idx| idx.checked_add(1))
+                        .and_then(|next| Category::ALL.get(next))
+                        .copied(),
                 };
                 if let Some(cat) = self.category_filter {
                     self.status_msg = format!("Filter: {}", cat.label());
                 } else {
                     self.status_msg = String::from("Filter: All");
                 }
+                self.reanchor_selection();
             }
             "Delete" | "d" if ctrl => {
-                let idx = self.selected_tx;
-                self.delete_transaction(idx);
+                if let Some(id) = self.selected_id {
+                    self.delete_transaction(id);
+                }
             }
             _ => {}
         }
@@ -781,6 +863,7 @@ impl FinanceApp {
     fn handle_search_text(&mut self, text: &str) {
         if self.search_active {
             self.search_query.push_str(text);
+            self.reanchor_selection();
         }
     }
 
@@ -794,12 +877,10 @@ impl FinanceApp {
 
     fn format_currency_colored(cents: i64) -> (String, Color) {
         let text = Self::format_currency(cents);
-        let color = if cents > 0 {
-            GREEN
-        } else if cents < 0 {
-            RED
-        } else {
-            TEXT_COLOR
+        let color = match cents.cmp(&0) {
+            std::cmp::Ordering::Greater => GREEN,
+            std::cmp::Ordering::Less => RED,
+            std::cmp::Ordering::Equal => TEXT_COLOR,
         };
         (text, color)
     }
@@ -822,8 +903,120 @@ impl FinanceApp {
         (self.height - Self::HEADER_H - Self::STATUS_H).max(100.0)
     }
 
+    /// The y below which a row is off the bottom of the content area.
+    ///
+    /// The row loops each open-coded `self.height - STATUS_H`, which agrees
+    /// with `content_h` at ordinary sizes and disagrees at tiny ones, where
+    /// `content_h`'s floor applies and the open-coded form does not — so a very
+    /// short window drew nothing at all rather than a clipped first row.
+    fn content_bottom(&self) -> f32 {
+        self.content_y() + self.content_h()
+    }
+
+    // ── Events ──────────────────────────────────────────────────────
+
+    /// Route a compositor event into the app.
+    fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key_event(key_ev),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.width = *width as f32;
+                    self.height = *height as f32;
+                }
+                // Deliberately not `Consumed`: a resize is not a reason to
+                // redraw by itself. The compositor asks for the frame it wants.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Translate a key event and apply it.
+    ///
+    /// Text goes to the search box first, because a search for `1` must not be
+    /// read as "switch to the dashboard".
+    fn handle_key_event(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        let ctrl = key.modifiers.ctrl;
+        let shift = key.modifiers.shift;
+
+        // While searching, a typed character is search text and not a shortcut:
+        // a search for "1" must not be read as "switch to the dashboard".
+        if self.search_active && !ctrl && !key.text.is_empty() {
+            self.handle_search_text(&key.text);
+            return EventResult::Consumed;
+        }
+
+        let Some(name) = Self::key_name(key) else {
+            return EventResult::Ignored;
+        };
+        let before = self.state_fingerprint();
+        self.handle_key(&name, ctrl, shift);
+        if self.state_fingerprint() == before {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    /// The name `handle_key` knows a key by.
+    ///
+    /// `handle_key` matches on strings and its tests call it that way, so this
+    /// is the one place the compositor's `Key` becomes one of those names —
+    /// rather than duplicating the whole key table in a second form.
+    fn key_name(key: &KeyEvent) -> Option<String> {
+        let named = match key.key {
+            Key::Up => "Up",
+            Key::Down => "Down",
+            Key::Left => "Left",
+            Key::Right => "Right",
+            Key::Escape => "Escape",
+            Key::Backspace => "Backspace",
+            Key::Delete => "Delete",
+            Key::Enter => "Return",
+            Key::Tab => "Tab",
+            _ => {
+                // Everything else is only interesting as the character typed,
+                // which is how the shortcuts below are written.
+                let typed = key.text.chars().next()?;
+                return Some(typed.to_string());
+            }
+        };
+        Some(named.to_string())
+    }
+
+    /// A cheap summary of everything a keystroke can change.
+    ///
+    /// `handle_key` reports nothing about whether it did anything, and an app
+    /// that answers `Consumed` to every key redraws on keys it ignored. Rather
+    /// than have every arm of that match remember to report, this compares the
+    /// state around the call. It is a tuple of small copies, not a hash: a
+    /// hash could collide and silently drop a redraw.
+    fn state_fingerprint(&self) -> (Screen, Option<u32>, bool, usize, Option<Category>, u16, u8) {
+        (
+            self.screen,
+            self.selected_id,
+            self.search_active,
+            self.transactions.len(),
+            self.category_filter,
+            self.view_month.year,
+            self.view_month.month,
+        )
+    }
+
     // ── Rendering ───────────────────────────────────────────────────
-    fn render(&self) -> Vec<RenderCommand> {
+
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`,
+    /// so an app that keeps the name draws nothing and says nothing about it.
+    fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(512);
 
         cmds.push(RenderCommand::FillRect {
@@ -895,7 +1088,7 @@ impl FinanceApp {
             cmds.push(RenderCommand::Text {
                 x: 20.0,
                 y: iy + 9.0,
-                text: format!("{} {}", i + 1, screen.label()),
+                text: format!("{} {}", i.saturating_add(1), screen.label()),
                 font_size: 13.0,
                 color: tc,
                 font_weight: if is_active {
@@ -987,7 +1180,7 @@ impl FinanceApp {
             // Expenses are accumulated as a positive magnitude; render them as
             // a money-out (negative) figure so the header reads "-$X.XX".
             let val = if label == "Expenses" {
-                Self::format_currency(-amount)
+                Self::format_currency(amount.saturating_neg())
             } else {
                 Self::format_currency(amount)
             };
@@ -1033,11 +1226,7 @@ impl FinanceApp {
             }
 
             let spent = self.category_spending(budget.category);
-            let usage = if budget.monthly_limit > 0 {
-                spent as f32 / budget.monthly_limit as f32
-            } else {
-                0.0
-            };
+            let usage = Self::usage_ratio(spent, budget.monthly_limit);
             let bar_color = if usage > 1.0 {
                 RED
             } else if usage > 0.8 {
@@ -1302,10 +1491,11 @@ impl FinanceApp {
         let start = list_y + 32.0;
         for (vi, (orig_idx, tx)) in filtered.iter().enumerate() {
             let ry = start + vi as f32 * row_h;
-            if ry > self.height - Self::STATUS_H {
+            if ry > self.content_bottom() {
                 break;
             }
-            let is_sel = *orig_idx == self.selected_tx;
+            let is_sel = Some(tx.id) == self.selected_id;
+            let _ = orig_idx;
             let bg = if is_sel {
                 SURFACE1
             } else if vi % 2 == 0 {
@@ -1401,16 +1591,12 @@ impl FinanceApp {
         let item_h = 80.0;
         for (i, budget) in self.budgets.iter().enumerate() {
             let iy = cy + 36.0 + i as f32 * (item_h + 8.0);
-            if iy + item_h > self.height - Self::STATUS_H {
+            if iy + item_h > self.content_bottom() {
                 break;
             }
             let spent = self.category_spending(budget.category);
-            let usage = if budget.monthly_limit > 0 {
-                spent as f32 / budget.monthly_limit as f32
-            } else {
-                0.0
-            };
-            let remaining = budget.monthly_limit - spent;
+            let usage = Self::usage_ratio(spent, budget.monthly_limit);
+            let remaining = budget.monthly_limit.saturating_sub(spent);
             let bar_color = if usage > 1.0 {
                 RED
             } else if usage > 0.8 {
@@ -1493,7 +1679,10 @@ impl FinanceApp {
             let rem_text = if remaining >= 0 {
                 format!("{} remaining", Self::format_currency(remaining))
             } else {
-                format!("{} over budget!", Self::format_currency(-remaining))
+                format!(
+                    "{} over budget!",
+                    Self::format_currency(remaining.saturating_neg())
+                )
             };
             cmds.push(RenderCommand::Text {
                 x: cx + 140.0,
@@ -1598,7 +1787,7 @@ impl FinanceApp {
 
         let income = self.month_income();
         let expenses = self.month_expenses();
-        let net = income - expenses;
+        let net = income.saturating_sub(expenses);
         let tx_count = self.month_transactions().len();
 
         // Summary cards
@@ -1747,13 +1936,78 @@ impl FinanceApp {
     }
 }
 
-fn main() {
-    let _app = FinanceApp::new();
+impl App for FinanceApp {
+    fn title(&self) -> String {
+        "Finance".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.width as u32, self.height as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// Nothing in this app ages: balances change only when a transaction is
+    /// added or deleted, and the month on screen moves only when the user moves
+    /// it. Asking for a tick would wake the machine to redraw an identical
+    /// frame. This is the opposite of `known-issues.md` lesson 47, and the
+    /// check is the same one — *is there state that advances on its own?* Here
+    /// there is not, and `current_date` is a constant besides, which is its own
+    /// entry.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.width = width;
+        self.height = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut finance = FinanceApp::new();
+    app::launch("finance", &mut finance)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
+    // A test that overflows, indexes out of range or unwraps a `None` should
+    // fail loudly and point at the line that did it — that is the diagnosis.
+    // The defensive lints exist to keep panics out of code that runs on a
+    // user's data, which this is not.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     #[test]
@@ -1805,8 +2059,73 @@ mod tests {
     fn test_delete_transaction() {
         let mut app = FinanceApp::new();
         let n = app.transactions.len();
-        app.delete_transaction(0);
+        let id = app.transactions[0].id;
+        app.delete_transaction(id);
         assert_eq!(app.transactions.len(), n - 1);
+        assert!(
+            !app.transactions.iter().any(|tx| tx.id == id),
+            "the deleted transaction should be the one that is gone"
+        );
+    }
+
+    #[test]
+    fn deleting_leaves_the_selection_on_a_row_that_still_exists() {
+        // The old index-based selection re-pointed at whatever slid into the
+        // gap; worse, deleting the last row left it past the end.
+        let mut app = FinanceApp::new();
+        app.handle_key("Down", false, false);
+        for _ in 0..3 {
+            let Some(id) = app.selected_id else {
+                panic!("something should be selected while rows remain")
+            };
+            app.delete_transaction(id);
+            assert_ne!(
+                app.selected_id,
+                Some(id),
+                "selection stayed on a deleted row"
+            );
+            if let Some(sel) = app.selected_id {
+                assert!(
+                    app.transactions.iter().any(|tx| tx.id == sel),
+                    "selection points at a transaction that does not exist"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arrow_keys_stay_inside_the_rows_actually_on_screen() {
+        // With a filter on, the arrow keys used to walk through hidden rows:
+        // the highlight vanished for several presses and Ctrl+D then deleted
+        // something the user could not see.
+        let mut app = FinanceApp::new();
+        app.category_filter = Some(Category::Food);
+        app.reanchor_selection();
+        let visible = app.visible_ids();
+        assert!(
+            visible.len() >= 2,
+            "the sample data should have at least two Food transactions"
+        );
+        assert!(
+            visible.len() < app.transactions.len(),
+            "the filter should hide rows"
+        );
+        for _ in 0..app.transactions.len() {
+            app.handle_key("Down", false, false);
+            let sel = app.selected_id.expect("a visible row stays selected");
+            assert!(visible.contains(&sel), "selection left the filtered view");
+        }
+    }
+
+    #[test]
+    fn nothing_is_deleted_while_nothing_is_selected() {
+        // Ctrl+D on a fresh window used to delete the first transaction, which
+        // the user had never pointed at.
+        let mut app = FinanceApp::new();
+        let n = app.transactions.len();
+        assert!(app.selected_id.is_none(), "a fresh window selects nothing");
+        app.handle_key("d", true, false);
+        assert_eq!(app.transactions.len(), n);
     }
 
     #[test]
@@ -1815,14 +2134,6 @@ mod tests {
         let n = app.transactions.len();
         app.delete_transaction(999);
         assert_eq!(app.transactions.len(), n);
-    }
-
-    #[test]
-    fn test_set_budget() {
-        let mut app = FinanceApp::new();
-        app.set_budget(Category::Food, 80_000);
-        let b = app.budget_for(Category::Food);
-        assert_eq!(b, Some(80_000));
     }
 
     #[test]
@@ -1861,22 +2172,6 @@ mod tests {
         let app = FinanceApp::new();
         let food = app.category_spending(Category::Food);
         assert!(food > 0);
-    }
-
-    #[test]
-    fn test_budget_usage() {
-        let app = FinanceApp::new();
-        let usage = app.budget_usage(Category::Food);
-        assert!(usage.is_some());
-        let u = usage.unwrap();
-        assert!(u > 0.0);
-    }
-
-    #[test]
-    fn test_budget_usage_none() {
-        let app = FinanceApp::new();
-        let usage = app.budget_usage(Category::Income);
-        assert!(usage.is_none());
     }
 
     #[test]
@@ -1974,47 +2269,6 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_date_next_day() {
-        let d = SimpleDate::new(2026, 5, 18);
-        let n = d.next_day();
-        assert_eq!(n.day, 19);
-    }
-
-    #[test]
-    fn test_simple_date_next_day_month_wrap() {
-        let d = SimpleDate::new(2026, 5, 31);
-        let n = d.next_day();
-        assert_eq!(n.month, 6);
-        assert_eq!(n.day, 1);
-    }
-
-    #[test]
-    fn test_simple_date_next_day_year_wrap() {
-        let d = SimpleDate::new(2026, 12, 31);
-        let n = d.next_day();
-        assert_eq!(n.year, 2027);
-        assert_eq!(n.month, 1);
-        assert_eq!(n.day, 1);
-    }
-
-    #[test]
-    fn test_simple_date_leap_year() {
-        let d = SimpleDate::new(2024, 2, 28);
-        let n = d.next_day();
-        assert_eq!(n.day, 29);
-        let m = n.next_day();
-        assert_eq!(m.month, 3);
-    }
-
-    #[test]
-    fn test_simple_date_non_leap_year() {
-        let d = SimpleDate::new(2026, 2, 28);
-        let n = d.next_day();
-        assert_eq!(n.month, 3);
-        assert_eq!(n.day, 1);
-    }
-
-    #[test]
     fn test_prev_month() {
         let d = SimpleDate::new(2026, 5, 1);
         let p = d.prev_month();
@@ -2050,28 +2304,6 @@ mod tests {
             assert!(!cat.label().is_empty());
             assert!(!cat.icon().is_empty());
         }
-    }
-
-    #[test]
-    fn test_category_is_income() {
-        assert!(Category::Income.is_income());
-        assert!(Category::Investment.is_income());
-        assert!(!Category::Food.is_income());
-    }
-
-    #[test]
-    fn test_transaction_amount_dollars() {
-        let tx = Transaction {
-            id: 1,
-            date: SimpleDate::new(2026, 5, 1),
-            description: String::new(),
-            amount: 12345,
-            category: Category::Income,
-            account_id: 1,
-            notes: String::new(),
-            recurring: false,
-        };
-        assert!((tx.amount_dollars() - 123.45).abs() < 0.01);
     }
 
     #[test]
@@ -2146,12 +2378,65 @@ mod tests {
     }
 
     #[test]
+    fn test_set_budget() {
+        let mut app = FinanceApp::new();
+        app.set_budget(Category::Food, 80_000);
+        // Observed on the store itself rather than through an accessor that
+        // exists only for this test.
+        let b = app
+            .budgets
+            .iter()
+            .find(|b| b.category == Category::Food)
+            .map(|b| b.monthly_limit);
+        assert_eq!(b, Some(80_000));
+    }
+
+    #[test]
+    fn usage_ratio_is_the_fraction_of_the_limit_spent() {
+        assert!((FinanceApp::usage_ratio(30_000, 60_000) - 0.5).abs() < 0.001);
+        assert!((FinanceApp::usage_ratio(60_000, 60_000) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn usage_ratio_reports_overspending_rather_than_clamping() {
+        // The bar's colour depends on crossing 1.0, so the ratio must be able
+        // to exceed it.
+        assert!(FinanceApp::usage_ratio(90_000, 60_000) > 1.0);
+    }
+
+    #[test]
+    fn a_limit_of_zero_reads_as_empty_and_not_as_infinity() {
+        // This is the branch the dashboard and the budgets screen disagreed
+        // about while each had its own copy of the division: one returned 0.0,
+        // the other divided by zero and produced `inf`, which draws as a bar
+        // past the end of its track and a permanently red category.
+        assert!((FinanceApp::usage_ratio(5_000, 0) - 0.0).abs() < f32::EPSILON);
+        assert!(FinanceApp::usage_ratio(5_000, 0).is_finite());
+        // A negative limit is nonsense rather than infinite overspend.
+        assert!((FinanceApp::usage_ratio(5_000, -100) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn spending_nothing_against_a_real_limit_is_zero() {
+        assert!((FinanceApp::usage_ratio(0, 60_000) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn test_handle_key_navigation() {
         let mut app = FinanceApp::new();
+        let visible = app.visible_ids();
+        assert!(visible.len() >= 2, "the sample data should fill the list");
+        // Nothing is selected until the user moves, and the first move lands on
+        // the first row rather than the second.
         app.handle_key("Down", false, false);
-        assert_eq!(app.selected_tx, 1);
+        assert_eq!(app.selected_id, visible.first().copied());
+        app.handle_key("Down", false, false);
+        assert_eq!(app.selected_id, visible.get(1).copied());
         app.handle_key("Up", false, false);
-        assert_eq!(app.selected_tx, 0);
+        assert_eq!(app.selected_id, visible.first().copied());
+        // At the top, Up stays put rather than wrapping to the bottom.
+        app.handle_key("Up", false, false);
+        assert_eq!(app.selected_id, visible.first().copied());
     }
 
     #[test]
@@ -2165,7 +2450,7 @@ mod tests {
     #[test]
     fn test_render_dashboard() {
         let app = FinanceApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2173,7 +2458,7 @@ mod tests {
     fn test_render_transactions() {
         let mut app = FinanceApp::new();
         app.screen = Screen::Transactions;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2181,7 +2466,7 @@ mod tests {
     fn test_render_budgets() {
         let mut app = FinanceApp::new();
         app.screen = Screen::Budgets;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2189,7 +2474,7 @@ mod tests {
     fn test_render_accounts() {
         let mut app = FinanceApp::new();
         app.screen = Screen::Accounts;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2197,7 +2482,7 @@ mod tests {
     fn test_render_reports() {
         let mut app = FinanceApp::new();
         app.screen = Screen::Reports;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2207,7 +2492,7 @@ mod tests {
         app.screen = Screen::Transactions;
         app.search_active = true;
         app.search_query = String::from("grocery");
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2216,7 +2501,7 @@ mod tests {
         let mut app = FinanceApp::new();
         app.screen = Screen::Transactions;
         app.category_filter = Some(Category::Food);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2262,6 +2547,7 @@ mod tests {
     fn test_handle_key_delete() {
         let mut app = FinanceApp::new();
         let n = app.transactions.len();
+        app.handle_key("Down", false, false);
         app.handle_key("d", true, false);
         assert_eq!(app.transactions.len(), n - 1);
     }

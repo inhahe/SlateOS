@@ -3102,6 +3102,84 @@ check_requests_not_deleted() {
 
 check_requests_not_deleted
 
+# A file declared `text eol=lf` that holds CRLF on disk, which no git command
+# you would think to run will tell you about.
+#
+# On 2026-09-03 this sweep went red at `check_shellcheck`, ~45 minutes in, on
+# thirteen files a tool in this tree had rewritten in text mode.  The whole
+# working tree said clean the entire time: `git status`, `git diff`, `git diff
+# --quiet` and `git add` all compare *through* the clean filter, which converts
+# CRLF to LF before any comparison happens, so a wholly-CRLF file is identical
+# to the index as far as every command anyone actually runs is concerned.
+# Staging the repair of all thirteen produced a zero-byte diff.  Only
+# `git diff-files` and `git ls-files --eol` see the raw bytes, and nobody runs
+# those.  `text eol=lf` is a promise kept at checkout, not an invariant checked
+# afterwards -- so nothing was checking it.
+#
+# It runs HERE, second, for the reason the cost was 45 minutes rather than 30
+# seconds.  It cannot claim the first slot: the gate above it is about
+# information that is already destroyed, and this one is only about wasting a
+# cycle.  Everything else in the sweep can wait behind it.
+#
+# Scope is every declared file, not just `*.sh`, deliberately.  `check_shellcheck`
+# is what caught this, and it covers `.sh` -- so it saw one of the thirteen and
+# was silent about the other twelve, which is exactly the shape that makes a
+# whole-tree corruption read like a one-file typo.  The thing worth learning
+# from a finding here is that some tool wrote text in the wrong mode; a
+# `.sh`-only gate hides the size of that.  Costs ~32 seconds reading 37 MB
+# across 1438 files, pooled 16 ways -- the cost is per-file antivirus
+# interception, not bandwidth (see open-questions.md A-Q7).
+check_eol() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== eol check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Graded against the real tree first.  Every way this checker can break --
+    # a `git check-attr` stream walked out of alignment, an attribute filter
+    # that matches nothing, a CR test that only counts CRLF -- makes the
+    # declared set or the finding set go *empty*, and an empty finding set is
+    # reported in the same words as a clean tree.  Its self-test drives the
+    # whole pipeline end to end for that reason: a fixture aimed at the parts
+    # cannot see a gate that finds a defect, prints it, and returns 0 anyway.
+    echo "=== Checking the eol gate against the tree it grades ==="
+    if ! run_checker check-eol-selftest "$py" "$PROJECT_ROOT/scripts/check-eol.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The eol gate no longer agrees with the" >&2
+        echo "tree it grades, so its verdict means nothing -- every failure mode" >&2
+        echo "it has empties its own finding set, which it reports exactly the" >&2
+        echo "way it reports a clean tree." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that no file declared eol=lf holds a carriage return ==="
+    if run_checker check-eol "$py" "$PROJECT_ROOT/scripts/check-eol.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each file above is declared \`text eol=lf\`" >&2
+    echo "in .gitattributes and has CRLF line endings on disk." >&2
+    echo "" >&2
+    echo "Do not trust git about this.  \`git status\` and \`git diff\` will call" >&2
+    echo "the tree clean, because they compare through the clean filter, which" >&2
+    echo "normalises the CRLF away before the comparison.  Staging the repair" >&2
+    echo "produces an empty diff.  Use \`git ls-files --eol\` to see it." >&2
+    echo "" >&2
+    echo "Repair by rewriting the bytes -- read the file, replace CRLF with LF," >&2
+    echo "write it back in binary mode.  Then find what wrote it that way: this" >&2
+    echo "is almost always a script opening a file in text mode on Windows, and" >&2
+    echo "fixing the file without fixing the writer just schedules the next one." >&2
+    exit 1
+}
+
+check_eol
+
 # Every gate in this script trusts that a checker which finds a problem will
 # *say so* by exiting non-zero.  `check-doc-links.py` did not.  A bare run of it
 # fell through to `ap.print_help(); return 0` while every refusal sat behind
@@ -3317,6 +3395,24 @@ check_mutation_needles() {
 }
 
 check_mutation_needles
+
+# `check_unwired_gate_selftests` used to stand here. It ran the *fixtures* of
+# three lane-C gates whose real checks nothing ran, on the reasoning that
+# "unwired" and "rotting" are different problems: a checker waiting to be
+# switched on drifts meanwhile, and the first real run of a drifted checker
+# reports nothing, which reads exactly like a pass.
+#
+# Lane C wired all three for real on 2026-09-03 (`check_lane_c_gui_gates`,
+# below), and ran each gate's `--self-test` immediately before the check it
+# guards -- the same protection, sited better. Keeping both would have run
+# three fixtures twice per boot under duplicate `run_checker` labels, which is
+# itself a gate failure: `test-pre-push-run-checker.py` requires the labels in
+# this file to be distinct, because a label is how a run is identified in the
+# skiplog and in `bench/boot-history.jsonl`.
+#
+# The reasoning is preserved here rather than in a deleted commit because it is
+# the argument for running a fixture at all, and it will be needed again the
+# next time a gate is written before its tree is ready for it.
 
 # A self-test that nothing calls is not a test.  It compiles, it reads as
 # coverage, it gets cited in a commit message as "tested" -- and it has never
@@ -4670,6 +4766,25 @@ check_production_unwrap() {
         return 0
     fi
 
+    # Graded against a real kernel file first, not a fixture string.  Every way
+    # this checker can break -- a test-scope detector that starts swallowing
+    # production scope, a `?` suffix rule that widens, a comment stripper that
+    # eats a line it should keep -- makes findings *disappear*, and it reports
+    # zero findings in the same words whether it looked or not.  The self-test
+    # picks a real `kernel/src/**.rs` with a production fn and a nested test fn,
+    # plants the site in each, and asserts which one is reported: a synthetic
+    # fixture would only prove the matcher works on input shaped the way I
+    # imagined, not that it is still attached to the code it claims to grade.
+    echo "=== Checking the production unwrap gate against a real kernel file ==="
+    if ! run_checker scan-unwrap-selftest "$py" "$PROJECT_ROOT/scripts/scan-unwrap.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The production unwrap gate no longer" >&2
+        echo "agrees with the kernel source it grades, so its verdict means" >&2
+        echo "nothing -- every failure mode it has empties its own finding set," >&2
+        echo "which it reports exactly the way it reports a clean tree." >&2
+        exit 1
+    fi
+
     echo "=== Checking for unwrap/expect in kernel production paths ==="
     if run_checker scan-unwrap "$py" "$PROJECT_ROOT/scripts/scan-unwrap.py" --summary; then
         return 0
@@ -5132,6 +5247,64 @@ check_design_decisions_bands() {
 
 check_design_decisions_bands
 
+# `open-questions.md` is the operator's decision queue, and its one structural
+# rule -- open questions in the body, answered ones below `# Resolved` -- was
+# broken eight times before anything checked it.  Three separate lanes filed a
+# new question into the archive, because that is simply where the file ends,
+# and an open question filed under `# Resolved` is invisible: the operator
+# reads the queue from the top and never reaches it.
+#
+# Warnings rather than failures for two of the rules, which is the whole
+# design: a missing `C-Q<n>` identifier and a duplicate number whose copies are
+# all *archived* are both reported and neither stops the build.  A gate that
+# hard-failed on another lane's heading text would be cross-lane breakage --
+# lane A's build would refuse over a sentence only lane C may edit -- and
+# rewriting an archived entry to satisfy a checker would falsify the record of
+# what those numbers meant when they were answered.  See design-decisions.md
+# §903.
+check_open_questions() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== open-questions.md check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the open-questions gate against its fixtures ==="
+    if ! run_checker check-open-questions-selftest "$py" -u \
+        "$PROJECT_ROOT/scripts/check-open-questions.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The open-questions gate no longer" >&2
+        echo "agrees with its own fixtures, so its verdict means nothing." >&2
+        exit 1
+    fi
+
+    echo "=== Checking open-questions.md structure ==="
+    if run_checker check-open-questions "$py" -u \
+        "$PROJECT_ROOT/scripts/check-open-questions.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  open-questions.md is structurally wrong." >&2
+    echo "" >&2
+    echo "Almost always this is a new question appended to the end of the" >&2
+    echo "file, which puts it below \`# Resolved\` among the answered ones." >&2
+    echo "The operator reads the queue from the top, so a question filed" >&2
+    echo "there is not a question that was asked -- move it up into the body." >&2
+    echo "" >&2
+    echo "The other two causes: a body entry whose \`Status:\` is no longer" >&2
+    echo "OPEN (it has been answered, so it belongs in the archive index)," >&2
+    echo "and two entries sharing one identifier while at least one is still" >&2
+    echo "open (an answer naming that number could not be acted on)." >&2
+    exit 1
+}
+
+check_open_questions
+
 # Refuse to build when a self-test skip has fired on every recorded boot.
 #
 # This reads `bench/boot-history.jsonl`, so it is about the *previous* runs and
@@ -5440,6 +5613,67 @@ check_kernel_clippy() {
     done
 }
 
+# Pin the teardown shape of the `/proc` self-test tables.
+#
+# Requested by lane B in
+# `requests/b-a-check-selftest-reinit-is-never-run-by-anything.md`, and answered
+# in `requests/a-b-wiring-check-selftest-reinit-and-a-correction-it-runs-nowhere.md`.
+#
+# Lane B's request said this gate ran "only inside scripts/pre-boot.py". It ran
+# nowhere at all -- nothing in `scripts/` on either branch named it. That is
+# worse than an unrun gate, because something was relying on it:
+# `design-decisions.md` §612 states the liability in plain terms ("a future
+# reader may reasonably think diagnostics should not run during boot and remove
+# the `fs::*::self_test()` calls, silently switching 146 /proc tables back off
+# -- with no error and no failing test, because a table that refuses writes and
+# a table with no writers print the same zeros") and names two mitigations
+# against it. The sibling, `check-self-tests-wired.py`, is wired. This one had
+# never executed, so the record claimed two mitigations and the tree had one.
+#
+# Placed here, after every cheap document gate, because it is slow -- ~60-100 s,
+# and essentially all of it is I/O: it opens 805 `.rs` files on a host that
+# costs ~77 ms per file open regardless of cache state (profiled 2026-09-03:
+# 59.2 s of 60.6 s in `read()`, 0.46 s in all the regex work combined). A typo
+# in `design-decisions.md` still fails in under a second, ahead of this.
+check_selftest_reinit() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== self-test reinit check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the selftest-reinit gate against its fixtures ==="
+    if ! run_checker check-selftest-reinit-selftest "$py" -u \
+        "$PROJECT_ROOT/scripts/check-selftest-reinit.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The selftest-reinit gate no longer" >&2
+        echo "agrees with its own fixtures, so its verdict means nothing." >&2
+        exit 1
+    fi
+
+    echo "=== Checking /proc self-test tables are re-opened after clearing ==="
+    if run_checker check-selftest-reinit "$py" -u \
+        "$PROJECT_ROOT/scripts/check-selftest-reinit.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A self_test clears a \`Mutex<Option<_>>\`" >&2
+    echo "table and does not call \`init_defaults()\` afterwards, so the table" >&2
+    echo "stays switched off for the rest of the boot." >&2
+    echo "" >&2
+    echo "This does not fail a test and does not print an error: a /proc table" >&2
+    echo "that refuses writes and one with no writers both print zeros.  That" >&2
+    echo "is why it is a gate and not a test.  See design-decisions.md §612." >&2
+    exit 1
+}
+
+check_selftest_reinit
+
 check_kernel_clippy
 
 # Compile every `#[cfg(unix)]` arm in the workspace, which nothing else does.
@@ -5497,6 +5731,59 @@ check_kernel_clippy
 # it maintains a parallel set.  That is why the cold column is not a
 # first-run artifact that goes away, and why the numbers above were taken
 # with clippy running twice *before* check: check still had nothing to reuse.
+#
+# WHY `--all-targets`, AND WHY `--exclude kernel` COMES WITH IT.  Without
+# `--all-targets` cargo builds each crate's lib and bin and nothing else, so
+# this gate never compiled a single `#[cfg(test)]` module -- and `#[cfg(unix)]`
+# is *concentrated* in test code, because production code here is mostly
+# written against `std` while the tests are full of `set_permissions(0o4741)`,
+# `symlink`, `nlink`, `chown` and xattr fixtures that exist on unix and nowhere
+# else.  In `userspace/coreutils` most `#[cfg(unix)]` items in `src/bin/*.rs`
+# are inside `mod tests`.  So the gate compiled the smaller half of the thing it
+# was built for and printed OK.
+#
+# Lane B demonstrated the gap rather than arguing it: the same command with
+# `--all-targets` against `-p coreutils` found four hard compile errors in
+# `userspace/coreutils/src/bin/cp.rs` that had been in the tree for weeks, all
+# four inside `#[cfg(unix)] #[test]` helpers, all four missing imports.  Three
+# were found by eye first and believed to be all of them; the fourth was eighty
+# lines further down under a different name and only the compiler found it.
+#
+# `--exclude kernel` is not a scope reduction, it is what makes `--all-targets`
+# build at all.  `--all-targets` adds each crate's `test` target; a `test`
+# target links the harness, which pulls `std`, which already defines
+# `panic_impl` -- so a `#![no_std]` binary supplying its own `#[panic_handler]`
+# cannot have a `test` target on a hosted triple:
+#
+#     error[E0152]: found duplicate lang item `panic_impl`
+#         --> kernel/src/main.rs:7963:1
+#
+# That is structural, not a lint.  `kernel` is the only crate in the workspace
+# it hits: seven crates define a `#[panic_handler]`, but the other six are the
+# `services/*` binaries, which the workspace's own `exclude` list (root
+# Cargo.toml ~183) already keeps out.  And nothing is lost by excluding it --
+# the kernel is `no_std`, so it has no `cfg(unix)` arms for this gate to check.
+#
+# The failure mode of `--exclude` is the good one: if a second bare-metal
+# binary is ever added *inside* the workspace, this breaks loudly on the next
+# run instead of quietly skipping it.  Naming the hosted crates positively with
+# `-p` would under-cover in silence instead.
+#
+# COST, measured by lane B on 2026-09-03 on this workspace, not extrapolated:
+# 508 s of one-time compilation on a cache that already held every crate's lib
+# and bin, and **zero** new deny-level findings across all three lanes
+# (0 errors, 1,857 warnings, which stay warnings).  Steady state after a
+# one-line fix in the crate with the most test code in the tree is 46 s.  The
+# full `clippy --workspace --exclude kernel --all-targets` pass measured 1,513 s
+# cold, but `check` and `clippy` invalidate each other's fingerprints in a
+# shared target/, so every run of this gate already pays a rebuild; what
+# `--all-targets` adds on top is the test targets, i.e. the 508 s.
+#
+# Taken in both places at once rather than staged through pre-boot.py first,
+# because the risk a staged rollout would have been protecting against -- new
+# denials from three lanes' unseen test code -- was measured at zero, and lane B
+# left the workspace green under this exact command.  See design-decisions.md
+# §904.
 check_cfg_unix() {
     if ! rustup target list --installed 2>/dev/null \
         | grep -qx "x86_64-unknown-linux-gnu"; then
@@ -5512,7 +5799,11 @@ check_cfg_unix() {
     # Same `&& rc=0 || rc=$?` reasoning as check_shellcheck: this file runs
     # under `set -e`, so a bare `if ! cargo ...` is fine but a plain command
     # whose status we want to read is not.
-    "$CARGO" clippy --workspace --target x86_64-unknown-linux-gnu \
+    # `--all-targets --exclude kernel`, requested with measurements in
+    # requests/b-a-the-cfg-unix-gate-skips-every-test-module.md.  See the
+    # WHY --all-targets block above the function.
+    "$CARGO" clippy --workspace --exclude kernel --all-targets \
+        --target x86_64-unknown-linux-gnu \
         --message-format=short > "$log" 2>&1 && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "cfg(unix) OK ($(( $(date +%s) - start ))s, every cfg(unix) arm compiles and lints)."

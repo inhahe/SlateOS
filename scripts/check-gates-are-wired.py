@@ -37,8 +37,8 @@ nobody has to think about.
 
 WHY THE PARSING IS FUSSY
 ------------------------
-Three obvious ways to measure this are wrong, and each produced a confidently
-wrong number before this file existed:
+Four obvious ways to measure this are wrong, and each produced a confidently
+wrong number -- the first three before this file existed, the fourth inside it:
 
 1. **Grep the basename.**  Over-counts.  `boot-test.sh` discusses gates in
    prose -- including a worked example named `check-thing.py` that has never
@@ -63,9 +63,24 @@ wrong number before this file existed:
    two hundred lines before calling `run_checker … "$doclinks"`.  Judged
    literally, the hook runs zero checkers.
 
+4. **Extract the `.py` token and, if it is not a `check-*.py`, call the line
+   out of scope.**  Under-counts, and this one was this file's own bug rather
+   than a hypothetical.  Wiring three gates as a `for` loop over their names
+   gives the argument
+
+       "$PROJECT_ROOT/scripts/$g.py"
+
+   from which the `.py` matcher extracts `g.py`.  That is a perfectly
+   well-formed token and it is not a gate, so it took the same exit as
+   `getopt-ambiguity-check.py` -- deliberately ignored.  Three self-tests ran
+   and this file counted none of them, and said nothing, because a *partial*
+   parse is indistinguishable from a complete parse of something irrelevant.
+   Which is method 1's mistake wearing different clothes.
+
 So: join `\` continuations, drop comment lines, resolve simple
-`var=<path>.py` assignments, and read the script argument of each
-`run_checker` call.
+`var=<path>.py` assignments, read the script argument of each `run_checker`
+call -- and report, rather than interpret, any call that builds the filename
+itself out of a variable.
 
 THE CONSERVATIVE DIRECTION
 --------------------------
@@ -105,7 +120,11 @@ CALLERS = (
 PINNED: dict[str, str] = {
     # The other five lane-C gates filed here on 2026-09-02 were wired into
     # boot-test.sh on 2026-09-03 (check_lane_c_gui_gates) and their entries
-    # deleted with the same commit, which is what this dict is for.
+    # deleted with the same commit, which is what this dict is for. Lane A's
+    # `check_unwired_gate_selftests` -- which ran three of their *fixtures* to
+    # stop them rotting while they waited -- went with them: a self-test run
+    # beside a real check that is now also run is duplicated work, and lane C's
+    # version runs the fixture immediately before the check it guards.
     "check-evdev-elf-asm.py":
         "lane C, and DELIBERATELY unwired: it imports `capstone`, a "
         "third-party disassembler that nothing in this repository declares as "
@@ -116,13 +135,17 @@ PINNED: dict[str, str] = {
         "could not build on a fresh checkout. Its own docstring says it is a "
         "developer check, not part of the build. It exits 2 when capstone is "
         "absent (as of 2026-09-03; it used to exit 1, claiming the payload was "
-        "wrong when it had not looked at it), so it is honest under pre-boot "
-        "and could not be wired anyway while run_checker aborts on 2. Run it "
-        "by hand after touching those byte literals. Decided by lane C "
-        "2026-09-03, answering "
+        "wrong when it had not looked at it), so it is honest under pre-boot. "
+        "Now that run_checker has `--may-skip` this COULD be wired as a "
+        "skipping gate; lane C's decision to keep it out stands until lane C "
+        "revisits it. Run it by hand after touching those byte literals. "
+        "Decided by lane C 2026-09-03, answering "
         "requests/b-c-six-gui-gates-are-never-run-by-anything.md",
-    "check-selftest-reinit.py":
-        "lane A (kernel/src); filed to lane A 2026-09-02",
+    # check-selftest-reinit.py was pinned here as "lane A (kernel/src); filed
+    # to lane A 2026-09-02". Lane A wired it on 2026-09-03 (boot-test.sh,
+    # check_selftest_reinit: the self-test first, then the gate), so the entry
+    # is deleted rather than carried, which is what this dict is for.
+    #
     # check-libc-shape.py was pinned here with the reason "needs an opt-in skip
     # channel in run-checker.sh first"; it was unpinned on 2026-09-03, when that
     # channel came to exist. It is wired into boot-test.sh as check_libc_shape:
@@ -131,6 +154,7 @@ PINNED: dict[str, str] = {
     # which is nearly always -- and the self-test unconditionally, since it
     # builds its own archives and needs no sysroot. See known-issues.md ->
     # TD-B-TEN-GATES-ARE-NEVER-ASKED.
+    #
     # The four `check-*-vs-bash.py` oracles were pinned here from the day they
     # were written and were unpinned on 2026-09-03, when both of the things
     # their entry said had to change had changed: bashprobe now exits 2 (a
@@ -138,15 +162,61 @@ PINNED: dict[str, str] = {
     # run_checker grew the per-call-site `--may-skip` channel. They are wired
     # into boot-test.sh as check_bash_oracles -- gates skippable, self-tests
     # not. See known-issues.md -> TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED.
+    #
+    # Two lanes reached that conclusion independently and by different routes,
+    # and the merge is worth recording because the disagreement was real. Lane A
+    # wired two of the four and kept `check-kshell-pipeline-vs-bash.py` and
+    # `check-ansic-quoting-vs-bash.py` pinned on the ground that **they do not
+    # read the kernel**: each compares a Python table of expectations against
+    # real bash and opens no `.rs` file, so no change under kernel/src/ can
+    # make either fail. That claim was re-checked at merge time and is still
+    # true. It is no longer a reason to keep them *out*, because being unable
+    # to fail is not the same as being useless -- they are how bash's answers
+    # are learned before those answers are written into kshell's rungs, and
+    # running them in the boot test is what stops that reference drifting
+    # unnoticed. What the claim is a reason for is not mistaking them for
+    # gates, so the distinction now lives at the wiring site in boot-test.sh,
+    # where a reader meets it, rather than in a pin list they are absent from.
+    #
+    # The sharper lesson, learned the same day by mutating each gate's subject:
+    # "does it open a file in kernel/?" does not separate an instrument from a
+    # gate. `check-shellquote-vs-bash.py` opens shellquote.rs and, until it was
+    # re-tethered, read one `const` out of it -- so it answered yes while
+    # grading almost nothing. The question that discriminates is *how much of
+    # that file can change without this noticing*, and only mutation answers
+    # it. See design-decisions.md §905 and known-issues.md ->
+    # TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM.
 }
 
-_GATE = re.compile(r"(check-[A-Za-z0-9_.-]+\.py)")
+# The naming convention, which is how an *unwired* gate is found: there is no
+# other way to notice a file nothing calls than to recognise it by its name.
+#
+# It is deliberately NOT how a *wired* gate is found. See `analyse`, which used
+# to filter its results through this and thereby under-counted for the third
+# time in this file's history -- `scan-unwrap.py`, `scan-orphan-modules.py` and
+# `rustscan.py` are all run through `run_checker` by `boot-test.sh`, are all
+# gates in the only sense that matters (each can refuse the build), and were
+# all invisible here because of how they are spelled.
+_GATE_NAME = re.compile(r"(check-[A-Za-z0-9_.-]+\.py)")
 _ANY_SCRIPT = re.compile(r"[A-Za-z0-9_.-]+\.py")
 _ASSIGN = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
 # `run_checker` in command position: line start, after a separator, or after
 # `if`/`elif`/`then`/`!`. Not inside an echo, and not as a bare substring.
 _CALL = re.compile(r"(?:^|[;&|(]|\b(?:if|elif|then|else|do)\s+)\s*!?\s*run_checker\b")
 _VARREF = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+# A variable spliced into the *filename* -- `$g.py`, `${gate}-check.py` -- as
+# opposed to one standing for a directory, `$root/scripts/check-x.py`. The
+# distinction is the absence of a `/` between the expansion and the `.py`.
+#
+# This is the hole that motivated the rule. Wiring three gates as a `for` loop
+# over their names produced `"$PROJECT_ROOT/scripts/$g.py"`, from which the
+# `.py` matcher extracted the token `g.py`; that is not a `check-*.py`, so the
+# call was classified as an out-of-scope script and dropped. Three self-tests
+# ran and this file counted none of them, silently -- an under-count in the
+# checker whose entire job is to not under-count, arrived at by the same route
+# as every wrong answer in the docstring above: a partial parse mistaken for a
+# complete one.
+_INTERPOLATED_NAME = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[A-Za-z0-9_.-]*\.py")
 # Both spellings are live in this repo. A call carrying either runs the gate's
 # own cases, not the gate, and must not count as wiring.
 _SELFTEST_FLAG = re.compile(r"--self-?test\b")
@@ -203,10 +273,43 @@ def analyse(path: Path) -> tuple[set[str], set[str], list[str]]:
         #
         # Both spellings are in use here (`--selftest` and `--self-test`), so
         # match both rather than picking one and quietly missing the other.
+        # Checked before anything is extracted, because the failure mode is
+        # extraction *succeeding* on a fragment: `$g.py` yields `g.py`, which
+        # looks exactly like a resolvable out-of-scope script and is thrown
+        # away on that basis. Report and move on -- a name assembled at run
+        # time is a name this file cannot know, and the conservative direction
+        # for an unknown is noise, not silence.
+        if _INTERPOLATED_NAME.search(line):
+            unresolved.append(
+                f"{path.name}: a variable is spliced into the script's "
+                f"filename, so what it runs is only known at run time. "
+                f"Spell the path out: {line.strip()[:110]}")
+            continue
+
         literal = _ANY_SCRIPT.findall(line)
         named = ([] if literal
                  else [bound[v] for v in _VARREF.findall(line) if v in bound])
-        scripts = [n for n in (literal or named) if _GATE.fullmatch(n)]
+        # No name filter. What makes something a gate here is that a caller
+        # runs it through `run_checker` -- that is the whole definition, and it
+        # is the one the build obeys: whatever this line names can refuse the
+        # build, whatever it is called.
+        #
+        # This used to read `if _GATE_NAME.fullmatch(n)`, and that was the same
+        # mistake as method 4 in the docstring above, made a second time in the
+        # same expression. Method 4 dropped `$g.py` for not matching the
+        # convention; this dropped `scan-unwrap.py`, `scan-orphan-modules.py`
+        # and `rustscan.py` for the same reason -- three gates `boot-test.sh`
+        # genuinely runs, two of which ship self-tests. The consequence was the
+        # exact sentence this file exists to prevent anyone from believing:
+        # "0 self-test(s) shipped but unrun", true of the subset it looked at,
+        # printed as though it were true of the tree.
+        #
+        # Naming still matters for the *other* question -- an unwired gate can
+        # only be found by its name, because nothing calls it -- so `_GATE_NAME`
+        # is still what builds the subject set in `audit`. The two questions
+        # need two different definitions, and collapsing them into one filter
+        # is what went wrong.
+        scripts = list(literal or named)
 
         if _SELFTEST_FLAG.search(line):
             # Recorded separately, never as wiring. A gate's own cases are not
@@ -284,7 +387,8 @@ def audit(root: Path, pinned: dict[str, str] | None = None
         notes.append(f"{rel.as_posix()}: runs {len(runs)} gate(s), "
                      f"self-tests {len(tested)}")
 
-    gates = sorted(p.name for p in (root / "scripts").glob("check-*.py"))
+    gates = sorted(p.name for p in (root / "scripts").glob("check-*.py")
+                   if _GATE_NAME.fullmatch(p.name))
     if not gates:
         findings.append("scripts/: no check-*.py found -- nothing to judge, "
                         "which is not the same as a clean tree")
@@ -322,7 +426,13 @@ def audit(root: Path, pinned: dict[str, str] | None = None
     # Graded into its own list rather than into `findings`, because the two
     # defects do not cost the same to fix -- see audit()'s docstring on lane A's
     # cross-lane asymmetry.
-    for g in gates:
+    # The subject is every gate this knows of, by *either* route: the ones the
+    # naming convention finds on disk, and the ones a caller demonstrably runs
+    # whatever they are called. The union is the point -- `scan-unwrap.py` is
+    # in the second set only, and it is the case that showed the first set was
+    # never the right subject for this question. Everything in `wired` is wired
+    # by construction, so widening here cannot produce a false wiring finding.
+    for g in sorted(set(gates) | wired):
         if g in unwired or g in selftested:
             continue
         try:
@@ -358,6 +468,8 @@ run_checker outofscope "$py" "$gopt"
 run_checker mystery "$py" "$undefined_var"
 if ! run_checker sto-selftest "$py" "$root/scripts/check-selftest-only.py" --selftest; then :; fi
 if ! run_checker sto2-selftest "$py" "$root/scripts/check-hyphen-selftest-only.py" --self-test; then :; fi
+run_checker interp "$py" "$root/scripts/$g.py"
+run_checker interp-st "$py" "$root/scripts/${gate}-thing.py" --self-test
 """
 
 
@@ -390,10 +502,31 @@ def selftest() -> int:
         check("check-echoed.py" not in runs,
               "a gate named only in an echo must NOT count -- this is the "
               "shape b5246478b added")
-        check(len(unresolved) == 1 and "mystery" in unresolved[0],
+        check(any("mystery" in u for u in unresolved),
               f"an unresolvable call must be reported, got {unresolved!r}")
         check(not any("outofscope" in u for u in unresolved),
               "a resolvable non-gate script is out of scope, not unresolved")
+
+        # A variable spliced into the filename, which is the shape that got
+        # past this file: `$g.py` extracts as the token `g.py`, which is not a
+        # `check-*.py` and so was discarded as out-of-scope -- indistinguishable
+        # from the `outofscope` case above, and wrong. Both spellings, and the
+        # self-test-flagged form too, because the real occurrence carried
+        # `--self-test` and would otherwise have been swallowed one branch
+        # later instead.
+        check(any("interp " in u or u.rstrip().endswith("$g.py\"")
+                  for u in unresolved),
+              f"`$g.py` must be reported, not dropped, got {unresolved!r}")
+        check(any("interp-st" in u for u in unresolved),
+              f"`${{gate}}-thing.py --self-test` must be reported too, "
+              f"got {unresolved!r}")
+        check("g.py" not in runs and "g.py" not in tested,
+              "the fragment left by an unexpanded variable must never be "
+              "recorded as a script that ran")
+        check(len(unresolved) == 3,
+              f"exactly three calls in the fixture are unresolvable; over-"
+              f"reporting is noise that trains the reader to skim: "
+              f"{unresolved!r}")
 
         # This pair is a regression test for a mutant that survived. Deleting
         # the real run_checker call for check-tick-wiring.py changed nothing,

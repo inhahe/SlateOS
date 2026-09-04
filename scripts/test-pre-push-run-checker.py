@@ -173,7 +173,7 @@ class KeptLog:
 
 def fake_checker(tmp: Path, name: str, body: str) -> Path:
     p = tmp / f"{name}.py"
-    p.write_text(body, encoding="utf-8")
+    p.write_text(body, encoding="utf-8", newline="")
     return p
 
 
@@ -230,7 +230,7 @@ def write_driver(
         + 'echo "MARKER-SKIPPED=[${RUN_CHECKER_SKIPPED:-}]"\n'
         + 'echo "MARKER-REASON=[${RUN_CHECKER_SKIP_REASON:-}]"\n',
         encoding="utf-8",
-    )
+    newline="")
     return driver
 
 
@@ -652,7 +652,7 @@ def main() -> int:
             + f'run_checker testgate "{sys.executable}" '
             + f'"{crashed.as_posix()}" --check one two\n',
             encoding="utf-8",
-        )
+        newline="")
         r = subprocess.run(["sh", str(driver)], capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
                            env=child_env())
@@ -972,7 +972,7 @@ def main() -> int:
             + 'echo "MARKER-RETURNED rc=$?"\n'
             + 'echo "MARKER-REASON=[${RUN_CHECKER_SKIP_REASON:-}]"\n',
             encoding="utf-8",
-        )
+        newline="")
         r = subprocess.run(["sh", str(order_driver)], capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
                            env=child_env())
@@ -1034,7 +1034,7 @@ def main() -> int:
             + 'echo "AFTER-TWO=[${RUN_CHECKER_SKIPPED:-}]"\n'
             + 'echo "AFTER-TWO-REASON=[${RUN_CHECKER_SKIP_REASON:-}]"\n',
             encoding="utf-8",
-        )
+        newline="")
         r = subprocess.run(["sh", str(leak_driver)], capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
                            env=child_env())
@@ -1060,7 +1060,7 @@ def main() -> int:
             + "run_checker --may-skip lonely\n"
             + 'echo "MARKER-RETURNED rc=$?"\n',
             encoding="utf-8",
-        )
+        newline="")
         r = subprocess.run(["sh", str(miscall)], capture_output=True, text=True,
                            encoding="utf-8", errors="replace", env=child_env())
         out = r.stdout + r.stderr

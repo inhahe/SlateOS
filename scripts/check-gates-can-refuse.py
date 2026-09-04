@@ -513,7 +513,7 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         for i, (src, want, why) in enumerate(_FIXTURES):
             p = Path(tmp) / f"check-fixture{i}.py"
-            p.write_text(src, encoding="utf-8")
+            p.write_text(src, encoding="utf-8", newline="")
             got = bool(audit([p]))
             check(got == want,
                   f"{why}: reported={got}, expected {want}")
@@ -527,7 +527,7 @@ def selftest() -> int:
             bad_dir = Path(tmp) / "bad"
             bad_dir.mkdir()
             (bad_dir / "check-cannot-refuse.py").write_text(
-                _FIXTURES[0][0], encoding="utf-8")
+                _FIXTURES[0][0], encoding="utf-8", newline="")
             for argv, want, why in (
                 (["x"], 1, "a finding must make a bare run FAIL"),
                 (["x", "--list"], 0, "--list reports without failing"),

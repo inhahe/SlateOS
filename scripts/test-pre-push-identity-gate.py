@@ -150,7 +150,7 @@ def build_fixture(tmp: str) -> str:
         out.write(lib_body)
 
     git(work, "remote", "add", "origin", remote)
-    with open(os.path.join(work, "a.txt"), "w", encoding="utf-8") as fh:
+    with open(os.path.join(work, "a.txt"), "w", encoding="utf-8", newline="") as fh:
         fh.write("one\n")
     git(work, "add", "a.txt")
     git(work, "commit", "--quiet", "-m", "clean commit")
@@ -160,7 +160,7 @@ def build_fixture(tmp: str) -> str:
 def commit_as(work: str, path: str, *, author: str | None = None,
               committer: str | None = None) -> None:
     """Add `path` and commit it, optionally wearing a borrowed identity."""
-    with open(os.path.join(work, path), "w", encoding="utf-8") as fh:
+    with open(os.path.join(work, path), "w", encoding="utf-8", newline="") as fh:
         fh.write(path + "\n")
     git(work, "add", path)
     args = ["commit", "--quiet", "-m", f"commit adding {path}"]

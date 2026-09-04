@@ -194,7 +194,7 @@ def test_unbalanced_paren_is_left_alone():
 
 def test_record_carries_skips_as_a_list(tmpdir):
     path = os.path.join(tmpdir, "serial.txt")
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write(REAL_LOG)
     serial = bh.read_serial(path)
     check_true("read_serial populates skips", bool(serial and serial.skips))
@@ -208,7 +208,7 @@ def test_record_carries_the_covered_half_too(tmpdir):
     # not "was it picked up elsewhere", and the second question is the one that
     # separates a tripwire from a defect.
     path = os.path.join(tmpdir, "serial.txt")
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write(REAL_LOG)
     serial = bh.read_serial(path)
     check("read_serial splits the skips in two",
@@ -379,7 +379,7 @@ def test_allowlist_entries_state_a_condition():
 
 def test_main_exits_zero_on_an_empty_history(tmpdir):
     path = os.path.join(tmpdir, "empty.jsonl")
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write("")
     check("an empty history is 'no verdict', not a failure",
           gate.main(["--history", path]), 0)
@@ -387,7 +387,7 @@ def test_main_exits_zero_on_an_empty_history(tmpdir):
 
 def test_main_survives_a_malformed_line(tmpdir):
     path = os.path.join(tmpdir, "bad.jsonl")
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write("{not json\n")
         for rec in _rows(10, ["[x] never runs"]):
             handle.write(json.dumps(rec) + "\n")

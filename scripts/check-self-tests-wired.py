@@ -644,7 +644,7 @@ def main():
             json.dump(payload, sys.stdout, indent=2, sort_keys=True)
             sys.stdout.write("\n")
         else:
-            with io.open(args.emit_markers, "w", encoding="utf-8") as fh:
+            with io.open(args.emit_markers, "w", encoding="utf-8", newline="") as fh:
                 json.dump(payload, fh, indent=2, sort_keys=True)
                 fh.write("\n")
 

@@ -379,7 +379,7 @@ def test_this_suites_loader_still_reads_the_file(mod):  # noqa: ARG001
     stamp = 1_600_000_000.0
 
     def write(path, text):
-        with open(path, "w", encoding="utf-8") as fh:
+        with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
         os.utime(path, (stamp, stamp))
 
@@ -727,7 +727,7 @@ def _classify_text(mod, text):
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         p = pathlib.Path(d) / "b-a-fixture.md"
-        p.write_text(text, encoding="utf-8")
+        p.write_text(text, encoding="utf-8", newline="")
         is_open, reason, _title = mod.classify(p)
     return is_open, reason
 

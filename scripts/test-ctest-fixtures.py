@@ -178,7 +178,7 @@ def test_a_real_edit_is_reported_by_the_stamp(cf, tmpdir):
     """The gate must still do its job: changed content is always drift."""
     repo = _fake_tree(cf, tmpdir)
     cf.SYSROOT_STAMP.write_text(cf.compute_sysroot(), encoding="utf-8", newline="\n")
-    (repo / "posix" / "src" / "io.rs").write_text("pub fn b() { changed(); }\n", encoding="utf-8")
+    (repo / "posix" / "src" / "io.rs").write_text("pub fn b() { changed(); }\n", encoding="utf-8", newline="")
 
     mode, findings = cf.sysroot_staleness()
     check("a real edit is stamp drift", mode, "stamp")
@@ -236,7 +236,7 @@ def test_a_new_input_is_reported(cf, tmpdir):
     """A source file that appeared after the build is a reason to rebuild."""
     repo = _fake_tree(cf, tmpdir)
     cf.SYSROOT_STAMP.write_text(cf.compute_sysroot(), encoding="utf-8", newline="\n")
-    (repo / "posix" / "src" / "new.rs").write_text("pub fn d() {}\n", encoding="utf-8")
+    (repo / "posix" / "src" / "new.rs").write_text("pub fn d() {}\n", encoding="utf-8", newline="")
 
     mode, findings = cf.sysroot_staleness()
     check("a new input is drift", mode, "stamp")
@@ -266,7 +266,7 @@ def test_target_dir_is_excluded(cf, tmpdir):
     out = repo / "toolchain" / "stubs" / "target" / "release"
     out.mkdir(parents=True)
     (out / "libstubs.a").write_bytes(b"\x00" * 64)
-    (out / "build.rs").write_text("// generated\n", encoding="utf-8")
+    (out / "build.rs").write_text("// generated\n", encoding="utf-8", newline="")
 
     labels = [label for label, _p, _t in cf._sysroot_inputs()]
     check("target/ contributes no inputs",
@@ -277,7 +277,7 @@ def test_dot_dirs_are_excluded(cf, tmpdir):
     repo = _fake_tree(cf, tmpdir)
     hidden = repo / "posix" / "src" / ".cache"
     hidden.mkdir()
-    (hidden / "junk.rs").write_text("noise\n", encoding="utf-8")
+    (hidden / "junk.rs").write_text("noise\n", encoding="utf-8", newline="")
 
     labels = [label for label, _p, _t in cf._sysroot_inputs()]
     check("dot-directories contribute no inputs",
@@ -330,7 +330,7 @@ def test_an_empty_stamp_falls_back_rather_than_passing(cf, tmpdir):
     indistinguishable from a check that passed.
     """
     repo = _fake_tree(cf, tmpdir)
-    cf.SYSROOT_STAMP.write_text("", encoding="utf-8")
+    cf.SYSROOT_STAMP.write_text("", encoding="utf-8", newline="")
     _age(cf.LIBC, 600)
     for path in repo.rglob("*"):
         if path.is_file() and path != cf.LIBC:

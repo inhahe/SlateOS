@@ -1465,7 +1465,7 @@ def test_list_shows_the_accelerator(bh, tmpdir):
     import io
     path = os.path.join(tmpdir, "h.jsonl")
     accels = ("QEMU TCG", "Hyper-V/WHPX", "bare metal", None)
-    with open(path, "w", encoding="utf-8") as fh:
+    with open(path, "w", encoding="utf-8", newline="") as fh:
         for accel in accels:
             # An explicit `sanitizer` so the column beside this one renders as
             # `-`. Leave it out and *it* prints `?`, and a test that merely
@@ -1733,7 +1733,7 @@ def test_the_real_history_has_a_uniform_utc_offset(bh):
 
 def _markers_file(tmpdir, *literals):
     path = os.path.join(tmpdir, "gated-markers.json")
-    with open(path, "w", encoding="utf-8") as fh:
+    with open(path, "w", encoding="utf-8", newline="") as fh:
         json.dump({"root": "main.rs",
                    "markers": {lit: {"sites": [1], "tests": ["x::self_test"]}
                                for lit in literals}}, fh)
@@ -1825,7 +1825,7 @@ def test_malformed_marker_files_do_not_cost_the_row(bh, tmpdir):
     """
     bad = os.path.join(tmpdir, "bad.json")
     for content in ("{not json", "[]", '{"markers": "not an object"}', "null"):
-        with open(bad, "w", encoding="utf-8") as fh:
+        with open(bad, "w", encoding="utf-8", newline="") as fh:
             fh.write(content)
         check(f"{content[:20]!r} yields unknown, not a crash",
               bh.load_gated_markers(bad), None)
@@ -2139,7 +2139,7 @@ def test_a_missing_qemu_stderr_is_absence_of_evidence(bh, tmpdir):
     check("a path that is not a file", bh.read_qemu_stderr(tmpdir), "")
 
     real = os.path.join(tmpdir, "qemu-stderr.txt")
-    with open(real, "w", encoding="utf-8") as fh:
+    with open(real, "w", encoding="utf-8", newline="") as fh:
         fh.write(E_HOST_OOM)
     check("and a real file is read", bh.read_qemu_stderr(real), E_HOST_OOM)
 

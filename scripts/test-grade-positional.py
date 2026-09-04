@@ -445,7 +445,7 @@ def test_only_a_recognised_confession_is_admitted():
                         ("unknown problem", '{"problem": "gremlins"}')):
         handle, path = tempfile.mkstemp(suffix=".json")
         try:
-            with os.fdopen(handle, "w") as out:
+            with os.fdopen(handle, "w", newline="") as out:
                 out.write(body)
             check(f"a {label} record is not a confession",
                   gp.load_record_problem(path), None)
@@ -453,7 +453,7 @@ def test_only_a_recognised_confession_is_admitted():
             os.unlink(path)
     handle, path = tempfile.mkstemp(suffix=".json")
     try:
-        with os.fdopen(handle, "w") as out:
+        with os.fdopen(handle, "w", newline="") as out:
             json.dump({"problem": "until-never-matched"}, out)
         check("a recognised problem is admitted",
               gp.load_record_problem(path), "until-never-matched")
@@ -540,7 +540,7 @@ def test_end_to_end_a_confessed_broken_window_is_ungraded_and_exhibited():
               "host_probe": {"inflation": 3.11, "samples": 120}}
     handle, record_path = tempfile.mkstemp(suffix=".json")
     try:
-        with os.fdopen(handle, "w") as out:
+        with os.fdopen(handle, "w", newline="") as out:
             json.dump(record, out)
         with synthetic_run() as args:
             buf = io.StringIO()
@@ -868,9 +868,9 @@ def synthetic_run(**kwargs):
     serial_fd, serial = tempfile.mkstemp(suffix=".txt")
     history_fd, history = tempfile.mkstemp(suffix=".jsonl")
     try:
-        with os.fdopen(serial_fd, "w") as out:
+        with os.fdopen(serial_fd, "w", newline="") as out:
             out.write(_synthetic_serial(**kwargs))
-        with os.fdopen(history_fd, "w") as out:
+        with os.fdopen(history_fd, "w", newline="") as out:
             out.write(json.dumps(_synthetic_baseline()) + "\n")
         yield ["--serial", serial, "--history", history, "--host", SYNTH_HOST,
                "--profile", "release"]
@@ -961,7 +961,7 @@ def test_end_to_end_reports_the_load_records_own_account_separately():
               "completions_during": 3, "completions_before_on": 41}
     handle, record_path = tempfile.mkstemp(suffix=".json")
     try:
-        with os.fdopen(handle, "w") as out:
+        with os.fdopen(handle, "w", newline="") as out:
             json.dump(record, out)
         with synthetic_run() as args:
             buf = io.StringIO()
@@ -1038,9 +1038,9 @@ def test_the_baseline_comes_from_this_runs_own_accelerator():
     serial_fd, serial = tempfile.mkstemp(suffix=".txt")
     history_fd, history = tempfile.mkstemp(suffix=".jsonl")
     try:
-        with os.fdopen(serial_fd, "w") as out:
+        with os.fdopen(serial_fd, "w", newline="") as out:
             out.write(_WHPX_BANNER + _synthetic_serial())
-        with os.fdopen(history_fd, "w") as out:
+        with os.fdopen(history_fd, "w", newline="") as out:
             for record in (decoy, mine):
                 out.write(json.dumps(record) + "\n")
         check("the log states which accelerator ran it",

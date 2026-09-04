@@ -599,7 +599,7 @@ def main():
     if mode == "pin":
         body = "\n".join(sorted(hard_paths))
         BASELINE.parent.mkdir(parents=True, exist_ok=True)
-        BASELINE.write_text(BASELINE_HEADER + body + "\n", encoding="utf-8")
+        BASELINE.write_text(BASELINE_HEADER + body + "\n", encoding="utf-8", newline="")
         print(f"pinned {len(hard_paths)} island(s) to {BASELINE.as_posix()}")
         return 0
 

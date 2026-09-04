@@ -1013,12 +1013,12 @@ fn d() { helper2(); }
         # the checker uses, with the crate at the tree's own root (`""`).
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / "Cargo.toml").write_text(manifest, encoding="utf-8")
+            (root / "Cargo.toml").write_text(manifest, encoding="utf-8", newline="")
             (root / "src").mkdir()
             for rel, content in (files or {}).items():
                 p = root / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(content, encoding="utf-8")
+                p.write_text(content, encoding="utf-8", newline="")
             _TEST_TARGET_CACHE.pop("", None)
             with gittree.WorkTree(str(root)) as tree:
                 return not crate_has_test_target(tree, "")

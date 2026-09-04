@@ -111,7 +111,7 @@ def _make_victim(tmp):
     git(tmp, "config", "user.name", "victim")
     os.makedirs(os.path.join(tmp, "requests"))
     for name in ("keep-me.md", "and-me.md"):
-        with open(os.path.join(tmp, "requests", name), "w", encoding="utf-8") as fh:
+        with open(os.path.join(tmp, "requests", name), "w", encoding="utf-8", newline="") as fh:
             fh.write("# a request that must survive\n")
     git(tmp, "add", "-A")
     git(tmp, "commit", "--quiet", "-m", "the victim's only commit")
@@ -274,7 +274,7 @@ def test_a_repository_with_no_trunk_is_skipped_not_failed():
             with open(source, encoding="utf-8") as src:
                 body = src.read()
             with open(os.path.join(scripts, os.path.basename(source)),
-                      "w", encoding="utf-8") as dst:
+                      "w", encoding="utf-8", newline="") as dst:
                 dst.write(body)
         installed = os.path.join(scripts, os.path.basename(CHECKER))
 

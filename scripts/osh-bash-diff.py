@@ -523,7 +523,7 @@ def write_report(case: Case, bash_run: Run, osh_run: Run, diffs: list[str]) -> P
         ]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(body), encoding="utf-8", errors="replace")
+        path.write_text("\n".join(body), encoding="utf-8", errors="replace", newline="")
     except OSError:
         return None
     return path

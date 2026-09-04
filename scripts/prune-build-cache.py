@@ -561,7 +561,7 @@ def self_test():
             d = os.path.join(fp, f"{name}-{hash_}")
             os.makedirs(d)
             stamp = os.path.join(d, "invoked.timestamp")
-            with open(stamp, "w") as fh:
+            with open(stamp, "w", newline="") as fh:
                 fh.write("x")
             os.utime(stamp, (when, when))
             return d
@@ -617,7 +617,7 @@ def self_test():
         script_fp = os.path.join(fp, "epsilon-8888888888888888")
         os.makedirs(script_fp)
         with open(os.path.join(script_fp, "run-build-script-build-script-build"),
-                  "w") as fh:
+                  "w", newline="") as fh:
             fh.write("x")
 
         notes = []

@@ -488,7 +488,7 @@ def selftest() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         caller = Path(tmp) / "fixture.sh"
-        caller.write_text(_FIXTURE_CALLER, encoding="utf-8")
+        caller.write_text(_FIXTURE_CALLER, encoding="utf-8", newline="")
         runs, tested, unresolved = analyse(caller)
 
         # Each of these was a real wrong answer before this file existed.
@@ -550,9 +550,9 @@ def selftest() -> int:
         # prints a full report drowns its own verdict.
         fake = Path(tmp) / "tree"
         (fake / "scripts" / "hooks").mkdir(parents=True)
-        (fake / "scripts" / "check-orphan.py").write_text("", encoding="utf-8")
-        (fake / "scripts" / "boot-test.sh").write_text("", encoding="utf-8")
-        (fake / "scripts" / "hooks" / "pre-push").write_text("", encoding="utf-8")
+        (fake / "scripts" / "check-orphan.py").write_text("", encoding="utf-8", newline="")
+        (fake / "scripts" / "boot-test.sh").write_text("", encoding="utf-8", newline="")
+        (fake / "scripts" / "hooks" / "pre-push").write_text("", encoding="utf-8", newline="")
 
         findings, _, _ = audit(fake, {})
         check(any("check-orphan.py" in f for f in findings),
@@ -585,7 +585,7 @@ def selftest() -> int:
             # And a pinned entry that is now wired.
             (fake / "scripts" / "boot-test.sh").write_text(
                 'run_checker orphan "$py" "$r/scripts/check-orphan.py"\n',
-                encoding="utf-8")
+                encoding="utf-8", newline="")
             check(any("something runs it now" in f
                       for f in audit(fake, {"check-orphan.py": "stale"})[0]),
                   "a stale exemption must be reported")
@@ -600,7 +600,7 @@ def selftest() -> int:
             # Third arm: the gate is wired, ships a self-test, and nothing
             # runs it. Live case when this was written: check-option-refusal.py.
             (fake / "scripts" / "check-orphan.py").write_text(
-                'if "--self-test" in sys.argv:\n    pass\n', encoding="utf-8")
+                'if "--self-test" in sys.argv:\n    pass\n', encoding="utf-8", newline="")
             gate_f, self_f, _ = audit(fake, {})
             check(any("nothing runs" in f for f in self_f),
                   "a wired gate whose self-test nothing runs must be reported")
@@ -632,7 +632,7 @@ def selftest() -> int:
                 'run_checker orphan "$py" "$r/scripts/check-orphan.py"\n'
                 'run_checker orphan-selftest "$py" '
                 '"$r/scripts/check-orphan.py" --self-test\n',
-                encoding="utf-8")
+                encoding="utf-8", newline="")
             rc, text = run_out(["x"])
             check(rc == 0, "adding the self-test call must clear it")
             # A clean run prints neither heading. Asserted because the split
@@ -649,7 +649,7 @@ def selftest() -> int:
             # the split creates a new way for this to rot, since a message
             # that moved to the list this case does not read looks identical
             # to a message that was correctly suppressed.
-            (fake / "scripts" / "boot-test.sh").write_text("", encoding="utf-8")
+            (fake / "scripts" / "boot-test.sh").write_text("", encoding="utf-8", newline="")
             gate_f, self_f, _ = audit(fake, {})
             check(not any("ships a self-test" in f
                           for f in gate_f + self_f),

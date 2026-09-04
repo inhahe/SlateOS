@@ -3490,7 +3490,7 @@ def test_hot_symbols_degrade_quietly_on_bad_input(bh, tmpdir):
     check("absent file yields {}", bh.elf_symbol_addresses(missing), {})
 
     notelf = os.path.join(tmpdir, "plain.txt")
-    with open(notelf, "w", encoding="utf-8") as fh:
+    with open(notelf, "w", encoding="utf-8", newline="") as fh:
         fh.write("this is not an ELF file, it is a note about one\n")
     check("non-ELF yields {}", bh.elf_symbol_addresses(notelf), {})
 
@@ -4608,7 +4608,7 @@ def _bands_view(bh, tmpdir, records, profile="release"):
 
     path = os.path.join(tmpdir, "history.jsonl")
     host = platform.node() or "unknown"
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         for record in records:
             handle.write(json.dumps(dict(record, host=host)) + "\n")
     buf = io.StringIO()
@@ -4899,9 +4899,9 @@ def test_the_benchmark_subsystem_map_is_read_out_of_bench_rs(bh, tmpdir):
     _os.makedirs(_os.path.join(src, "sched"))
     _os.makedirs(_os.path.join(src, "mm"))
     for leaf in ("lib.rs", "tlb.rs"):
-        open(_os.path.join(src, leaf), "w").close()
+        open(_os.path.join(src, leaf), "w", newline="").close()
     bench_rs = _os.path.join(tmpdir, "bench.rs")
-    with open(bench_rs, "w", encoding="utf-8") as handle:
+    with open(bench_rs, "w", encoding="utf-8", newline="") as handle:
         handle.write(
             "fn bench_pick_next() {\n"
             "    let t = sched::spawn();\n"
@@ -5086,7 +5086,7 @@ def _accel_view(bh, tmpdir, records, spec="tcg:whpx", **kwargs):
 
     path = os.path.join(tmpdir, "history.jsonl")
     host = platform.node() or "unknown"
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         for record in records:
             handle.write(json.dumps(dict(record, host=host)) + "\n")
     return capture(bh.cmd_accel_compare, path, "release", spec, **kwargs)
@@ -5783,7 +5783,7 @@ def test_the_listing_rejudges_each_row_on_its_own_accelerator(bh, tmpdir):
                                    "samples": 10, "min": 200, "max": 202,
                                    "spread": 1}))
     path = os.path.join(tmpdir, "history.jsonl")
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         for record in history:
             handle.write(json.dumps(record) + "\n")
 

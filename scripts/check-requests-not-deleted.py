@@ -265,7 +265,7 @@ def selftest() -> int:
         reqs = os.path.join(tmp, "requests")
         os.makedirs(reqs)
         for name in ("a-b-one.md", "a-b-two.md", "a-b-swept.md", ".gitkeep"):
-            with open(os.path.join(reqs, name), "w", encoding="utf-8") as fh:
+            with open(os.path.join(reqs, name), "w", encoding="utf-8", newline="") as fh:
                 fh.write("# fixture\n")
         run(tmp, "add", "-A")
         run(tmp, "commit", "--quiet", "-m", "base")
@@ -305,7 +305,7 @@ def selftest() -> int:
         # index is simply absent -- so an untracked restore leaves the deletion
         # visible. That narrows the false negative but does not remove it.
         one = os.path.join(reqs, "a-b-one.md")
-        with open(one, "w", encoding="utf-8") as fh:
+        with open(one, "w", encoding="utf-8", newline="") as fh:
             fh.write("# restored, uncommitted\n")
         expect("an untracked restore does not hide the deletion",
                "requests/a-b-one.md" in deleted_since(base), True)
@@ -316,7 +316,7 @@ def selftest() -> int:
                "requests/a-b-one.md" in deleted_since(base, head), True)
 
         ALLOWLIST = Path(tmp) / "requests" / ".deletions-allowed"
-        with open(ALLOWLIST, "w", encoding="utf-8") as fh:
+        with open(ALLOWLIST, "w", encoding="utf-8", newline="") as fh:
             fh.write("# a comment\na-b-one.md  # folded into a-b-two.md\n")
         allowed = load_allowlist()
         expect("the allowlist waives by basename", "a-b-one.md" in allowed, True)

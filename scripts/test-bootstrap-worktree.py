@@ -97,7 +97,7 @@ def make_tree(parent: str, name: str, services, *, limine=True, rootfs="good",
             os.makedirs(os.path.dirname(artifact), exist_ok=True)
             with open(artifact, "wb") as fh:
                 fh.write(b"\x7fELF fake\n")
-    with open(os.path.join(root, "kernel", "src", "main.rs"), "w") as fh:
+    with open(os.path.join(root, "kernel", "src", "main.rs"), "w", newline="") as fh:
         fh.writelines(lines)
 
     if limine:

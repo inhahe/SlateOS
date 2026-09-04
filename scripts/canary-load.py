@@ -776,7 +776,7 @@ def run(args):
         # Seen as a ~1-in-20 flake in `scripts/test-canary-load.py`
         # ("spinner pids were published: got 0, want 2").
         tmp = f"{args.ready_file}.tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
+        with open(tmp, "w", encoding="utf-8", newline="") as handle:
             handle.write(" ".join(str(worker.pid) for worker in workers))
         os.replace(tmp, args.ready_file)
 
@@ -1113,7 +1113,7 @@ def read_known_names(path):
 def write_known_names(path, names, aliases=None, scored=None):
     """Record this run's live names and name pairings, for the next run."""
     try:
-        with open(path, "w", encoding="utf-8") as handle:
+        with open(path, "w", encoding="utf-8", newline="") as handle:
             for name in sorted(set(names)):
                 handle.write(name + "\n")
             for score_name, live in sorted((aliases or {}).items()):
@@ -1298,7 +1298,7 @@ def main(argv=None):
         report_unreachable_scored(set(live_seen), measured_as, scored_seen)
 
     if args.record:
-        with open(args.record, "w", encoding="utf-8") as handle:
+        with open(args.record, "w", encoding="utf-8", newline="") as handle:
             json.dump(record, handle, indent=2, sort_keys=True)
 
     print("=== load controller summary ===", flush=True)

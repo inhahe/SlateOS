@@ -39,8 +39,12 @@
 #![allow(clippy::wildcard_imports)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::collections::VecDeque;
 
@@ -1297,8 +1301,185 @@ impl SlidesApp {
     // Rendering
     // ========================================================================
 
-    /// Render the full application UI and return the list of draw commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    /// The identity of the slide at `index`, for tests that need to tell
+    /// reordering from paging.
+    #[cfg(test)]
+    fn slide_id_at(&self, index: usize) -> Option<SlideId> {
+        self.slides.get(index).map(|s| s.id)
+    }
+
+    /// Fill the deck with the slides a first run shows.
+    ///
+    /// This was the body of `main`, and it is a method so that a test can check
+    /// the presentation does not open empty — a test cannot call `main`, so a
+    /// seed that lives there is a blind spot. One of each layout, so every
+    /// layout the renderer knows how to draw appears somewhere.
+    pub fn seed_sample_deck(&mut self) {
+        for layout in [
+            SlideLayout::TitleContent,
+            SlideLayout::SectionHeader,
+            SlideLayout::TwoColumn,
+            SlideLayout::ImageCaption,
+            SlideLayout::Blank,
+        ] {
+            self.add_slide(layout);
+        }
+        self.go_to_slide(0);
+        self.set_current_notes(String::from("Welcome the audience. Introduce the topic."));
+    }
+
+    // ------------------------------------------------------------------
+    // Events
+    // ------------------------------------------------------------------
+
+    /// Route a compositor event into the app.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                // Not `Consumed`: a resize is not by itself a reason to redraw.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a key press.
+    ///
+    /// The app had no input handling at all: slides, elements, the clipboard,
+    /// undo/redo and the presenter view were reachable only by a caller.
+    ///
+    /// There is no presenting branch because there is no presenting view:
+    /// `ViewMode` has `Edit` and `Sorter` and nothing else, so this program
+    /// edits a deck and cannot show one. That is the largest thing missing
+    /// from it, and it is a feature to build rather than a defect to fix.
+    pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        let ctrl = key.modifiers.ctrl;
+        match key.key {
+            // Views.
+            Key::Num1 => self.set_view(ViewMode::Edit),
+            Key::Num2 => self.set_view(ViewMode::Sorter),
+            Key::Tab => {
+                let next = match self.view {
+                    ViewMode::Edit => ViewMode::Sorter,
+                    ViewMode::Sorter => ViewMode::Edit,
+                };
+                self.set_view(next)
+            }
+            // Reordering, before the plain paging keys below: a guard narrows
+            // only the arm it is on, so an unguarded `Key::PageUp` listed first
+            // swallows the Ctrl case entirely — Ctrl+PageUp would page back
+            // rather than move the slide.
+            Key::PageUp if ctrl => {
+                self.move_slide_up();
+                EventResult::Consumed
+            }
+            Key::PageDown if ctrl => {
+                self.move_slide_down();
+                EventResult::Consumed
+            }
+            // Moving through the deck.
+            Key::Right | Key::PageDown => self.advance(1),
+            Key::Left | Key::PageUp => self.advance(-1),
+            Key::Home => self.jump_to(0),
+            Key::End => self.jump_to(self.slides.len().saturating_sub(1)),
+            // Editing the deck.
+            Key::N if ctrl => {
+                self.add_slide(SlideLayout::TitleContent);
+                EventResult::Consumed
+            }
+            Key::D if ctrl => {
+                self.duplicate_current_slide();
+                EventResult::Consumed
+            }
+            Key::Delete => {
+                if self.slides.len() < 2 {
+                    // Refusing to delete the last slide rather than leaving an
+                    // empty deck with nothing to draw or select.
+                    return EventResult::Ignored;
+                }
+                let index = self.current_index;
+                self.delete_slide(index);
+                EventResult::Consumed
+            }
+            Key::C if ctrl => {
+                self.copy_slide();
+                EventResult::Consumed
+            }
+            Key::V if ctrl => {
+                let before = self.slides.len();
+                self.paste_slide();
+                if self.slides.len() == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
+            }
+            Key::T => {
+                self.add_textbox();
+                EventResult::Consumed
+            }
+            Key::B => {
+                self.show_notes = !self.show_notes;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Switch views, reporting whether anything changed.
+    fn set_view(&mut self, view: ViewMode) -> EventResult {
+        if self.view == view {
+            return EventResult::Ignored;
+        }
+        self.view = view;
+        EventResult::Consumed
+    }
+
+    /// Step forward or back through the deck, stopping at the ends.
+    ///
+    /// Stopping rather than wrapping: a presentation that jumps from the last
+    /// slide back to the title is one the speaker has to notice and undo in
+    /// front of the room.
+    fn advance(&mut self, delta: isize) -> EventResult {
+        let Ok(current) = isize::try_from(self.current_index) else {
+            return EventResult::Ignored;
+        };
+        let Some(moved) = current.checked_add(delta) else {
+            return EventResult::Ignored;
+        };
+        let Ok(moved) = usize::try_from(moved) else {
+            return EventResult::Ignored;
+        };
+        self.jump_to(moved)
+    }
+
+    /// Show a particular slide, reporting whether the view moved.
+    fn jump_to(&mut self, index: usize) -> EventResult {
+        if index >= self.slides.len() || index == self.current_index {
+            return EventResult::Ignored;
+        }
+        self.go_to_slide(index);
+        EventResult::Consumed
+    }
+
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`, so
+    /// an app that keeps the name draws nothing and reports no error.
+    ///
+    /// Renders the full application UI and returns the list of draw commands.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds: Vec<RenderCommand> = Vec::with_capacity(256);
 
         // Background fill the entire window.
@@ -2462,31 +2643,63 @@ fn push_html_escaped(out: &mut String, text: &str) {
 // Entry point
 // ============================================================================
 
-fn main() {
+impl App for SlidesApp {
+    fn title(&self) -> String {
+        format!(
+            "{} — slide {} of {}",
+            self.title,
+            self.current_index.saturating_add(1),
+            self.slides.len()
+        )
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.window_width as u32, self.window_height as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// Slides advance when the speaker advances them. There are no transitions
+    /// and no timed rehearsal mode, so a tick would redraw an identical frame —
+    /// and this is a program that runs full-screen in front of an audience,
+    /// where a needless wake-up is a dropped frame someone can see.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.window_width = width;
+        self.window_height = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
     let mut app = SlidesApp::new(1280.0, 720.0);
-
-    // Add sample slides for demonstration.
-    app.add_slide(SlideLayout::TitleContent);
-    app.add_slide(SlideLayout::SectionHeader);
-    app.add_slide(SlideLayout::TwoColumn);
-    app.add_slide(SlideLayout::ImageCaption);
-    app.add_slide(SlideLayout::Blank);
-
-    // Set some notes.
-    app.go_to_slide(0);
-    app.set_current_notes(String::from("Welcome the audience. Introduce the topic."));
-
-    // Render one frame.
-    let cmds = app.render();
-    let _ = cmds.len();
-
-    // In a real OS environment, we would enter the event loop here:
-    // loop {
-    //     let event = wait_for_event();
-    //     app.handle_event(event);
-    //     let cmds = app.render();
-    //     submit_render_commands(&cmds);
-    // }
+    app.seed_sample_deck();
+    app::launch("slides", &mut app)
 }
 
 // ============================================================================
@@ -2502,6 +2715,214 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Events
+    //
+    // The app had no input handling at all until it was wired to the
+    // compositor.
+    // ------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+
+    fn seeded() -> SlidesApp {
+        let mut app = SlidesApp::new(1280.0, 720.0);
+        app.seed_sample_deck();
+        app
+    }
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn press_ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    #[test]
+    fn the_seeded_deck_has_one_of_every_layout() {
+        // The seed is what the window opens on, and a test cannot call `main`,
+        // so it lives in a method. One of each layout, so every layout the
+        // renderer knows how to draw appears somewhere in the first deck.
+        let app = seeded();
+        // Six, not five: `SlidesApp::new` already starts with one slide, and
+        // the seed adds one of each of the five layouts on top of it.
+        assert_eq!(app.slide_count(), 6, "the seeded deck is the wrong size");
+    }
+
+    #[test]
+    fn paging_moves_through_the_deck_and_stops_at_the_ends() {
+        // Stopping rather than wrapping: a presentation that jumps from the
+        // last slide back to the title is one the speaker has to notice and
+        // undo in front of the room.
+        let mut app = seeded();
+        assert_eq!(app.current_index(), 0);
+        assert_eq!(app.handle_event(&press(Key::Left)), EventResult::Ignored);
+        for i in 1..app.slide_count() {
+            assert_eq!(app.handle_event(&press(Key::Right)), EventResult::Consumed);
+            assert_eq!(app.current_index(), i);
+        }
+        // At the last slide, forward stops rather than wrapping to the title.
+        let last = app.current_index();
+        assert_eq!(app.handle_event(&press(Key::Right)), EventResult::Ignored);
+        assert_eq!(
+            app.current_index(),
+            last,
+            "paging past the end wrapped to the start"
+        );
+        assert_eq!(app.handle_event(&press(Key::Home)), EventResult::Consumed);
+        assert_eq!(app.current_index(), 0);
+        assert_eq!(app.handle_event(&press(Key::End)), EventResult::Consumed);
+        assert_eq!(app.current_index(), app.slide_count() - 1);
+    }
+
+    #[test]
+    fn ctrl_pageup_reorders_rather_than_paging() {
+        // A guard narrows only the arm it is on, so an unguarded `Key::PageUp`
+        // listed first swallows the Ctrl case entirely — which is what the
+        // compiler reported as an unreachable pattern.
+        let mut app = seeded();
+        app.go_to_slide(2);
+        // Moving a slide up *also* moves the cursor with it, so the index
+        // alone cannot tell reordering from paging. What distinguishes them is
+        // that the deck's order changed: after a move, the slide that was above
+        // is now below.
+        let above = app.slide_id_at(app.current_index().saturating_sub(1));
+        let moved = app.slide_id_at(app.current_index());
+        assert_eq!(
+            app.handle_event(&press_ctrl(Key::PageUp)),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            app.slide_id_at(app.current_index()),
+            moved,
+            "the cursor should have followed the slide"
+        );
+        assert_eq!(
+            app.slide_id_at(app.current_index().saturating_add(1)),
+            above,
+            "Ctrl+PageUp paged back instead of reordering"
+        );
+    }
+
+    #[test]
+    fn ctrl_n_adds_a_slide_and_ctrl_d_duplicates_one() {
+        let mut app = seeded();
+        let before = app.slide_count();
+        assert_eq!(app.handle_event(&press_ctrl(Key::N)), EventResult::Consumed);
+        assert_eq!(app.slide_count(), before + 1);
+        assert_eq!(app.handle_event(&press_ctrl(Key::D)), EventResult::Consumed);
+        assert_eq!(app.slide_count(), before + 2);
+    }
+
+    #[test]
+    fn copy_and_paste_round_trip_a_slide() {
+        let mut app = seeded();
+        let before = app.slide_count();
+        assert_eq!(app.handle_event(&press_ctrl(Key::C)), EventResult::Consumed);
+        assert_eq!(app.handle_event(&press_ctrl(Key::V)), EventResult::Consumed);
+        assert_eq!(app.slide_count(), before + 1);
+    }
+
+    #[test]
+    fn pasting_an_empty_clipboard_is_not_a_redraw() {
+        let mut app = seeded();
+        assert_eq!(app.handle_event(&press_ctrl(Key::V)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn the_last_slide_cannot_be_deleted() {
+        // An empty deck has nothing to draw and nothing to select.
+        // `new` already starts with one slide, which is the case under test.
+        let mut app = SlidesApp::new(1280.0, 720.0);
+        assert_eq!(app.slide_count(), 1);
+        assert_eq!(app.handle_event(&press(Key::Delete)), EventResult::Ignored);
+        assert_eq!(app.slide_count(), 1);
+        app.add_slide(SlideLayout::Blank);
+        assert_eq!(app.slide_count(), 2);
+        assert_eq!(app.handle_event(&press(Key::Delete)), EventResult::Consumed);
+        assert_eq!(app.slide_count(), 1);
+    }
+
+    #[test]
+    fn the_view_keys_switch_between_the_two_views() {
+        let mut app = seeded();
+        assert_eq!(app.handle_event(&press(Key::Num2)), EventResult::Consumed);
+        assert_eq!(app.view, ViewMode::Sorter);
+        // Asking for the view already shown is not a redraw.
+        assert_eq!(app.handle_event(&press(Key::Num2)), EventResult::Ignored);
+        assert_eq!(app.handle_event(&press(Key::Tab)), EventResult::Consumed);
+        assert_eq!(app.view, ViewMode::Edit);
+    }
+
+    #[test]
+    fn a_key_the_app_has_no_use_for_is_not_consumed() {
+        let mut app = seeded();
+        assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = seeded();
+        let before = app.slide_count();
+        let release = Event::Key(KeyEvent {
+            key: Key::N,
+            pressed: false,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert_eq!(app.slide_count(), before);
+    }
+
+    #[test]
+    fn the_title_says_which_slide_of_how_many() {
+        // A minimised presentation is a taskbar entry and nothing else.
+        let mut app = seeded();
+        // The whole phrase, not the digits alone: the presentation's own title
+        // may contain a number, so `contains('1')` can be satisfied by text
+        // that has nothing to do with the slide position.
+        let n = app.slide_count();
+        assert!(
+            app.title().contains(&format!("slide 1 of {n}")),
+            "title {:?} does not say which slide of how many",
+            app.title()
+        );
+        app.handle_event(&press(Key::End));
+        assert!(
+            app.title().contains(&format!("slide {n} of {n}")),
+            "the title should follow the current slide, said {:?}",
+            app.title()
+        );
+    }
+
+    #[test]
+    fn rendering_draws_something_in_both_views_at_an_awkward_size() {
+        let mut app = seeded();
+        for view in [ViewMode::Edit, ViewMode::Sorter] {
+            let _ = app.handle_event(&press(if view == ViewMode::Edit {
+                Key::Num1
+            } else {
+                Key::Num2
+            }));
+            for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+                assert!(
+                    !app.render(w, h).commands.is_empty(),
+                    "{view:?} drew nothing at {w}x{h}"
+                );
+            }
+        }
+    }
 
     // ---- HTML export escaping ----------------------------------------------
 
@@ -3096,7 +3517,7 @@ mod tests {
     #[test]
     fn test_render_edit_mode() {
         let app = SlidesApp::new(1280.0, 720.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3105,7 +3526,7 @@ mod tests {
         let mut app = SlidesApp::new(1280.0, 720.0);
         app.add_slide(SlideLayout::Blank);
         app.view = ViewMode::Sorter;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3113,7 +3534,7 @@ mod tests {
     fn test_render_with_selected_element() {
         let mut app = SlidesApp::new(1280.0, 720.0);
         app.add_textbox();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3121,7 +3542,7 @@ mod tests {
     fn test_render_with_notes_hidden() {
         let mut app = SlidesApp::new(1280.0, 720.0);
         app.show_notes = false;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 

@@ -12684,6 +12684,7 @@ version = "0.1.0"
 dependencies = [
  "byteread",
  "guitk",
+ "oswindow",
  "safeio",
  "scratchdir",
 ]

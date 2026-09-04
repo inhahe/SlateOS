@@ -69,9 +69,9 @@ same edit clippy would have.
 
 One gate here is NOT in boot-test.sh
 ------------------------------------
-`cargo check --workspace --target x86_64-unknown-linux-gnu`, which compiles the
-`#[cfg(unix)]` arms this Windows host otherwise never checks, runs here and only
-here.  It is a superset rather than a mirror, so the promise above narrows: a
+`cargo check --workspace --exclude kernel --all-targets --target
+x86_64-unknown-linux-gnu`, which compiles the `#[cfg(unix)]` arms this Windows
+host otherwise never checks, runs here and only here.  It is a superset rather than a mirror, so the promise above narrows: a
 clean run still means the boot test's gate phase will pass, but a *failing* run
 may be reporting something the boot test would not have minded.  The line that
 says so tells you which.
@@ -330,7 +330,8 @@ def main() -> int:
     ap.add_argument(
         "--no-unix-check",
         action="store_true",
-        help=f"skip the cargo check --workspace --target {UNIX_CHECK_TARGET} gate",
+        help=(f"skip the cargo check --workspace --exclude kernel "
+              f"--all-targets --target {UNIX_CHECK_TARGET} gate"),
     )
     args = ap.parse_args()
 
@@ -414,11 +415,23 @@ def main() -> int:
     # advisory, so the detection happens without the veto.
     if not args.no_unix_check:
         t = time.monotonic()
+        # `--all-targets` because `#[cfg(unix)]` here lives mostly in
+        # `#[cfg(test)]` modules -- without it this compiled the smaller half of
+        # what it exists for and printed ok.  `--exclude kernel` because
+        # `--all-targets` adds a `test` target, which links the harness, which
+        # pulls `std`, which already defines `panic_impl`: a `#![no_std]` binary
+        # with its own `#[panic_handler]` cannot have one on a hosted triple.
+        # `kernel` is the only crate in the workspace that hits this, and it has
+        # no `cfg(unix)` arms to lose.  See the long note above `check_cfg_unix`
+        # in boot-test.sh, requests/b-a-the-cfg-unix-gate-skips-every-test-
+        # module.md, and design-decisions.md §904.
         rc, out = _run(
-            [cargo, "check", "--workspace", "--target", UNIX_CHECK_TARGET]
+            [cargo, "check", "--workspace", "--exclude", "kernel",
+             "--all-targets", "--target", UNIX_CHECK_TARGET]
         )
         elapsed = time.monotonic() - t
-        label = f"cargo check --workspace --target {UNIX_CHECK_TARGET}  (cfg(unix) arms)"
+        label = (f"cargo check --workspace --exclude kernel --all-targets "
+                 f"--target {UNIX_CHECK_TARGET}  (cfg(unix) arms)")
         if rc == 0:
             print(f"ok    {label}  ({elapsed:.0f}s)")
         else:

@@ -134,14 +134,32 @@ it; `boot-test.sh` is mine and I will take the call sites.
 - **`PINNED` entry deleted in the same commit as the wiring** — noted, and I
   agree with the reasoning: an exemption list nobody prunes stops describing
   the tree it exempts.
-- **Cost.** 66 s, measured on this host — but measured while a full merge boot
-  test was saturating the machine, so treat it as an upper bound and not as the
-  number. It walks 805 `.rs` files and does a line-wise regex pass, so it is
-  I/O-bound rather than CPU-bound and the loaded figure is likely most of the
-  gap. I will re-measure on an idle host and quote the real one in the wiring
-  commit. If it lands materially above a few seconds I will put it after the
-  cheap document gates rather than in front of them, so a typo in
-  `design-decisions.md` still fails in 0.3 s.
+- **Cost — re-measured, and worse than the 66 s I first quoted.** I said 66 s
+  and promised a figure from an idle host on the grounds that the machine was
+  saturated at the time. The idle figure is **98.7 s**, so load was not the
+  explanation and the first number was the optimistic one. Wired anyway, but
+  **after** every cheap document gate and immediately before clippy, per the
+  promise below: a typo in `design-decisions.md` still fails in under a second,
+  ahead of this.
+- **The 98.7 s is not the checker's fault, and this affects you too.** I
+  profiled rather than accept it. Of 60.6 s in one run, `TextIOWrapper.read`
+  was **59.2 s (98%)** across 805 files — ~74 ms per file — while *all* 982,085
+  regex matches together came to **0.46 s**. So there is nothing to optimise in
+  the pass itself; the cost is the file open.
+  Narrowing it further: re-reading one file 200 times costs 0.10 s, but 200
+  *distinct* files on `D:` cost 13.9 s (~70 ms each) and the same 200 files
+  copied to `%TEMP%` on `C:` cost 2.55 s (~13 ms each). A second full pass over
+  all 805 stayed slow (61.8 s) even with a warm page cache. That shape — fast
+  when repeated on one file, slow per distinct file, ~5.5× worse on `D:` than
+  on `C:` — reads as per-open filter overhead rather than disk or cache, and
+  Windows Defender real-time protection is on for this tree.
+  **Consequence for your lane:** any gate of yours that walks the tree file by
+  file is paying the same ~70 ms per file, and so is every `cargo` build. It is
+  not something either of us can fix from inside a checker — an exclusion is a
+  system-wide, security-relevant change and needs the operator — but it is
+  worth knowing before you conclude one of your own gates is slow because of
+  what it computes. Mine computes almost nothing and still takes a minute and a
+  half.
 
 ## §6. Three more, which are lane C's and not mine to switch on
 

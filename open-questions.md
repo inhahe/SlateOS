@@ -57,6 +57,22 @@ the `# Resolved` index, numbered with your lane's prefix (`A-Q<n>`, `B-Q<n>`,
 `C-Q<n>`). The unprefixed `Q<n>` numbers are pre-split and are not to be
 extended.
 
+**Read that last paragraph twice — it is the rule this file gets wrong.** "At
+the end of the body" is not the end of the file, and appending to the end of
+the file lands you *below* `# Resolved`, among the answered questions, where
+the operator will never reach you. Three lanes have now done exactly that, and
+eight entries had to be moved back. It is not carelessness: the end of the
+file is simply where a text editor puts you, and the archive looks like the
+place new things go because it is last.
+
+`scripts/check-open-questions.py` enforces it — run it before you commit, or
+let `scripts/boot-test.sh` run it for you. It **fails** the build on a question
+filed below the boundary, on a body entry whose `Status:` is no longer `OPEN`,
+and on two entries sharing an identifier while one is still open. It only
+**warns** about a missing `C-Q<n>`-style identifier and about the two historic
+duplicate numbers in the archive, both of which are another lane's text to fix
+or history's to keep. Reasoning: `design-decisions.md` §903.
+
 ## Q46 — [A] Every benchmark ever recorded measured an `opt-level = 0` kernel. Should the *non-bench* boot test also switch to release, or only the bench path? — Status: OPEN (costs now measured 2026-08-21; recommendation moved A → C)
 
 **Background.** `scripts/boot-test.sh:602` runs a bare `cargo build` and stages
@@ -2297,6 +2313,85 @@ light theme gets accent text at about 1:1, i.e. invisible. Should a custom
 accent be (i) adjusted for the mode like the presets are, (ii) accepted but
 warned about in the picker, or (iii) left exactly as chosen on the grounds that
 the user asked for it? I lean (i), matching what the presets already do.
+
+## A-Q7 — [A] Every build and check on this machine is paying about 70 milliseconds per file opened, and the likely cause is the antivirus. Should the project folder be excluded from real-time scanning? — Status: OPEN (raised 2026-09-03)
+
+**In short:** opening a file on the `D:` drive on this machine costs roughly 70
+milliseconds — about five times what the same file costs on `C:`, and about a
+hundred times what it should cost once the file has already been read once.
+Nothing we write is slow; the cost is paid by the act of opening the file at
+all, before a single byte is looked at. Because compiling and checking this
+project means opening tens of thousands of files, this is being paid over and
+over, by every build and by several of the automated checks. Everything about
+the measurement points at Windows Defender's real-time scanning, which inspects
+each file as it is opened. Excluding the project folder from that scanning
+would very likely make everything here substantially faster — but it is a
+security setting, it needs administrator access, and turning off scanning for a
+folder is not a decision to make on someone's behalf.
+
+**How we know it is not the disk, the cache, or our code.** Four measurements,
+all taken on 2026-09-03 on this machine:
+
+| measurement | result | what it rules out |
+|---|---|---|
+| A checker that reads 805 source files, timed internally | 98.7 s total, of which **98%** was inside the read call and **0.46 s** was all of its actual pattern-matching combined | our code — there is nothing left to optimise |
+| Reading **one** file 200 times | 0.10 s | nothing is inherently slow about a read |
+| Reading **200 different** files on `D:` | 13.9 s (~70 ms each) | — this is the effect |
+| The same 200 files copied to `C:` and read there | 2.55 s (~13 ms each) | the files themselves, and their size |
+| A second full pass over all 805 files, immediately | still 61.8 s | the disk, and the operating system's file cache — a warm cache changes nothing |
+
+Fast when repeated on one file, slow once per *distinct* file, five times worse
+on `D:` than on `C:`, and completely indifferent to whether the data is already
+in memory. That is the signature of something inspecting each file the first
+time it is opened, per drive. Defender's real-time protection is on; its
+exclusion list cannot even be *read* without an administrator prompt, so
+whether `D:` already has exclusions is unknown.
+
+**What this is costing.** Directly measured: one automated check takes 98.7 s
+where the work in it accounts for under half a second, and two more (lane C's)
+take 92 s and 95 s for the same reason. Not measured but following from the
+same cause: every `cargo build` and `cargo check` in all three lanes opens far
+more files than that, so the compiler is paying it too. This is the larger
+prize and also the less certain one — a compiler's time is not all file opens,
+and I have not isolated the fraction.
+
+**The options.**
+
+1. **Exclude the project tree from real-time scanning** (`D:\visual studio
+   projects`, or the individual worktrees). *What changes:* builds and checks
+   here get faster, probably substantially; files inside that folder are no
+   longer scanned as they are opened. Everything else on the machine is
+   unaffected.
+2. **Exclude only the build output** (`target` folders). *What changes:* most
+   of the win, since compiler output is the bulk of the file traffic, while
+   source files and anything downloaded into the tree stay scanned.
+3. **Exclude nothing; move the work to `C:`.** *What changes:* the ~5×
+   difference suggests `C:` is already faster for this, so the cost drops
+   without weakening any setting — but the tree is large, `C:` may not have
+   room, and it is a disruptive move for an uncertain gain.
+4. **Leave it.** *What changes:* nothing; the cost stays.
+
+**What I would do, and why it is still your call:** option 2. The build output
+is generated by our own compiler from sources that were themselves scanned,
+which is the weakest case for scanning it, and it is where nearly all the file
+traffic is. Option 1 is meaningfully faster still but covers source files and
+anything a dependency downloads into the tree, which is a real reduction in
+coverage. I am not making that trade unasked — it is a security setting, it is
+system-wide, and it needs an administrator either way.
+
+**What happens if this is never answered:** nothing breaks; everything just
+stays slower than it needs to be, and gets slightly worse as the tree grows. It
+also keeps distorting decisions — a gate that costs 90 s gets placed, deferred
+or argued about differently than one costing 10 s, and three such arguments
+have already happened on the assumption that the checkers were the problem.
+
+**Where it bites:** `scripts/check-selftest-reinit.py` (98.7 s, wired
+2026-09-03 after every cheap gate for exactly this reason),
+`scripts/check-key-release-wiring.py` (92 s) and
+`scripts/check-window-wiring.py` (95 s), both lane C's; and every `cargo`
+invocation in all three worktrees. The profiling is written up in
+`requests/a-b-wiring-check-selftest-reinit-and-a-correction-it-runs-nowhere.md`
+§5 and `requests/a-c-i-wired-three-of-your-gates-fixtures-not-their-checks.md`.
 
 # Resolved
 

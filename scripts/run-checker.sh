@@ -80,11 +80,21 @@
 #    else in the run would say so. argparse's first line is `usage: …`, which
 #    makes it as cheaply detectable as the traceback banner, and is caught the
 #    same way for the same reason.
-# 4. **The checker printed something.** A skip is a claim — "I could not answer,
-#    and here is why" — and a claim with no evidence is indistinguishable from a
-#    gate that silently did nothing, which is precisely the shape being guarded
-#    against. A silent exit 2 is therefore *not* a skip; it takes the no-verdict
-#    arm and aborts, flag or no flag.
+# 4. **The line this would quote as the reason is not blank.** A skip is a claim
+#    — "I could not answer, and here is why" — and a claim with no evidence is
+#    indistinguishable from a gate that silently did nothing, which is precisely
+#    the shape being guarded against. A silent exit 2 is therefore *not* a skip;
+#    it takes the no-verdict arm and aborts, flag or no flag.
+#
+#    Note what is tested: *the reason*, not the log. Those are not the same
+#    claim, and testing the log instead — `[ -s "$_rc_log" ]`, which is what this
+#    did until 2026-09-03 — lets a checker whose first line is blank or
+#    whitespace skip while quoting `(it printed nothing)`, a sentence this file
+#    wrote, as though the checker had said it. The blank first line is not a
+#    hypothetical: with a merged stdout+stderr log and a block-buffered stdout it
+#    is what a Python checker routinely produces. Both halves are fixed —
+#    `PYTHONUNBUFFERED` stops the reordering, this stops it mattering — because
+#    each alone leaves a way in.
 #
 # A skip returns **0**, so the call site's `if ! run_checker …` keeps its shape,
 # and sets `RUN_CHECKER_SKIPPED` (with `RUN_CHECKER_SKIP_REASON` carrying the
@@ -207,7 +217,24 @@ run_checker() {
     _rc_cmd="$*"
     IFS=$_rc_oldifs
 
-    "$@" >"$_rc_log" 2>&1
+    # PYTHONUNBUFFERED is set on the child, not exported into the caller, and it
+    # is here rather than as a `-u` at each call site because the correctness of
+    # the evidence must not depend on every future caller remembering a flag.
+    #
+    # The two streams below are merged into one file, and they do not arrive in
+    # the order they were written: a redirected stdout is block-buffered while
+    # stderr is not, so a checker's stdout sits in a buffer until it exits and
+    # lands *after* everything its stderr said in the meantime. That is not a
+    # cosmetic reordering here -- `_rc_first` below quotes the first line of this
+    # file as the reason a gate declined, so the buffering decides which sentence
+    # gets quoted. Observed: `scan-unwrap.py` printing its reason to stdout and
+    # its explanation to stderr, and `head -n 1` returning a blank line.
+    #
+    # (This was fixed once already on lane A and lost in merge a29a07d68, which
+    # adopted lane B's --may-skip implementation wholesale -- correctly, but the
+    # buffering fix rode along in the file that was replaced. It is restored here
+    # rather than in the caller so it cannot be lost the same way twice.)
+    PYTHONUNBUFFERED=1 "$@" >"$_rc_log" 2>&1
     _rc=$?
     cat "$_rc_log" >&2
 
@@ -223,8 +250,21 @@ run_checker() {
     # The first line of the checker's own output is the discriminator between
     # every reading below, so quote it rather than making the reader open the
     # log to find `Argument list too long` sitting at the top of it.
-    _rc_first=$(head -n 1 "$_rc_log" 2>/dev/null)
-    [ -n "$_rc_first" ] || _rc_first="(it printed nothing)"
+    _rc_first=$(head -n 1 "$_rc_log" 2>/dev/null | tr -d '\r')
+    # Keep the raw reason apart from the display form. Condition 4 in the header
+    # -- "the checker printed something" -- is a claim about *the sentence this
+    # would quote*, not about whether the file has bytes in it, and the two come
+    # apart whenever the first line is blank or whitespace: `[ -s ]` says the log
+    # is non-empty, the substitution below then hands the skip arm the reason
+    # "(it printed nothing)", and a gate skips on every host quoting a sentence
+    # this file wrote about it. Testing the reason instead closes that gap at the
+    # place the claim is actually made.
+    _rc_reason=$_rc_first
+    case $_rc_reason in
+    *[![:space:]]*) ;;
+    *) _rc_reason= ;;
+    esac
+    [ -n "$_rc_reason" ] || _rc_first="(it printed nothing)"
 
     # The declined-verdict arm. All four conditions are checked here rather
     # than folded into one test so that a future reader can see which one a
@@ -235,7 +275,7 @@ run_checker() {
     if [ -n "$_rc_may_skip" ] && [ "$_rc" = "2" ] &&
        ! grep -q '^Traceback (most recent call last):' "$_rc_log" &&
        ! grep -q '^usage: ' "$_rc_log" &&
-       [ -s "$_rc_log" ]; then
+       [ -n "$_rc_reason" ]; then
         # shellcheck disable=SC2034  # outward channel; see the top of the function
         RUN_CHECKER_SKIPPED=1
         # shellcheck disable=SC2034

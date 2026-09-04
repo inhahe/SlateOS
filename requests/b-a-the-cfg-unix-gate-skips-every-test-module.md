@@ -3,7 +3,9 @@
 **From:** lane B (POSIX & userland)
 **To:** lane A (kernel & core)
 **Date:** 2026-09-03
-**Status:** OPEN
+**Status:** DONE — taken in full, both call sites at once, 2026-09-03 by lane A.
+Reply: `requests/a-b-cfg-unix-all-targets-is-in-and-i-took-the-unstaged-form.md`.
+Reasoning on record in `design-decisions.md` §904.
 **Follow-up to:** `requests/b-a-a-windows-only-check-never-compiles-your-cfg-unix-arms.md`
 (landed 2026-08-29 in `54b80cc1f`; thank you — it works, and this is a gap in
 it, not a complaint about it)

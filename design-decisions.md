@@ -63584,6 +63584,742 @@ the choice is between an enforced rule and no rule.
 
 ---
 
+## §904 — the cfg(unix) gate now compiles test code too, in both places at once rather than staged
+
+**Date:** 2026-09-03. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** SlateOS ships as a unix-family target, but development happens on
+Windows, so code written inside `#[cfg(unix)]` — "compile this part only on
+unix" — is never compiled by anything the developer runs. A gate exists to
+close that: it compiles the whole workspace for a Linux target so those parts
+get built at least once. It turns out it was building only about half of what
+it should. Cargo builds a crate's library and its programs by default, and
+*not* its tests, and in this tree the `#[cfg(unix)]` code is mostly *in* the
+tests — the production code is written against the standard library, while the
+tests are full of file permissions, symlinks and ownership fixtures that only
+exist on unix. So the gate compiled the smaller half and reported success. The
+decision is to switch on the flag that also builds tests, in both places that
+run this gate at the same time, rather than trying it in the advisory one
+first.
+
+Requested, with every cost measured rather than estimated, in
+`requests/b-a-the-cfg-unix-gate-skips-every-test-module.md`.
+
+### Why this is not just a flag
+
+The evidence lane B brought is the part that settles it. Running the gate's own
+command *with* `--all-targets` against one crate found four hard compile errors
+in `userspace/coreutils/src/bin/cp.rs` that had been in the tree for weeks —
+all four inside `#[cfg(unix)] #[test]` helpers, all four nothing more exotic
+than a missing import. Three of them were found by eye first, by someone who
+then reasonably believed they had found all of them; the fourth was a different
+name in a different function eighty lines further down, and only a compiler
+found it.
+
+That is the whole argument for the change. A gate that compiles the arm is not
+a stricter version of careful reading. It is a different instrument, and it is
+the only one that works on this class of defect.
+
+### `--exclude kernel` is not a scope reduction
+
+`--all-targets` adds each crate's `test` target. A `test` target links the test
+harness, the harness pulls `std`, and `std` already defines the `panic_impl`
+lang item — so a `#![no_std]` binary that supplies its own `#[panic_handler]`
+cannot have a `test` target on a hosted triple at all:
+
+```
+error[E0152]: found duplicate lang item `panic_impl`
+    --> kernel/src/main.rs:7963:1
+```
+
+This is structural. `kernel` is the only crate in the workspace affected: seven
+crates define a `#[panic_handler]`, but the other six are the `services/*`
+binaries, which the workspace's own `exclude` list already keeps out. And
+nothing is lost by excluding it, because the kernel is `no_std` and therefore
+has no `cfg(unix)` arms for this gate to check in the first place.
+
+Spelling it as `--exclude` rather than naming the hosted crates positively with
+`-p` is deliberate, and the reason is the failure mode. If a second bare-metal
+binary is ever added *inside* the workspace, `--exclude kernel` breaks loudly
+on the next run and someone deals with it. A positive `-p` list would silently
+under-cover instead — the new crate simply would not be checked, and nothing
+would say so. Given that this entire entry is about a gate that under-covered
+in silence for weeks, the loud failure is the one to choose.
+
+### Decision: both call sites at once, not staged through the advisory one
+
+The gate runs in two places: `scripts/boot-test.sh` → `check_cfg_unix`, which
+blocks a merge, and `scripts/pre-boot.py`, where a failure outside lane A is
+advisory. Lane B offered a staged rollout — the advisory one first, the
+blocking one later.
+
+| | Stage it | Both at once |
+|---|---|---|
+| *What changes:* | new findings appear as advice for a while before they can block anyone | the next boot test is the first run, and it either passes or it does not |
+| Protects against | unknown deny-level findings in three lanes' unseen test code | — |
+| Costs | the blocking gate keeps under-covering for as long as the stage lasts | one run's worth of surprise, if the measurement was wrong |
+
+Staging protects against exactly one risk: that compiling three lanes' test
+code for the first time turns up deny-level lints that then red the shared
+build. That risk was measured, not guessed —
+`clippy --workspace --exclude kernel --all-targets` over this tree gave **0
+errors and 1,857 warnings**, and the warnings stay warnings (`unwrap`,
+`expect`, `panic` and `indexing` are `warn` by CLAUDE.md's own rule). Lane B
+then left the workspace green under that exact command.
+
+So the thing staging would buy has already been bought by the measurement, and
+what staging costs is real: the blocking gate goes on reporting OK about half a
+job for however long the stage lasts, which is the defect this entry exists to
+fix. A rollout designed to manage a risk of zero is just a delay.
+
+The cost accepted is 508 s of one-time compilation on a cache that already held
+every crate's lib and bin. Steady state afterwards, measured on the crate with
+the most test code in the tree, is 46 s.
+
+### What reversing this looks like
+
+Delete `--exclude kernel --all-targets` from the `"$CARGO" clippy` line in
+`check_cfg_unix` (`scripts/boot-test.sh`) and from the `_run([cargo, "check",
+…])` call in `scripts/pre-boot.py`, and the gate returns to compiling libs and
+bins only. The signal that this is worth reconsidering is the flag turning up
+deny-level findings in another lane's test code faster than that lane fixes
+them — at which point the blocking site should drop back and the advisory site
+should keep the flag, because the detection is still worth having even when the
+veto is not.
+
+---
+
+## §905 — "I could not look" is a third verdict, and a checker that grades a third party is an instrument rather than a gate
+
+**Date:** 2026-09-03. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** The boot test runs about thirty small checking programs before it
+builds anything. Each one answers yes or no, and `run_checker` — the wrapper
+they all go through — treats any other answer as a bug and stops the build, on
+the principle that a checker which did not reach a verdict must not be mistaken
+for one that reached "fine". That was right, but it left several perfectly good
+checkers permanently switched off, because they legitimately cannot answer on
+some machines: one needs a Linux shell that not every developer has installed,
+another grades a file produced by a build step that a fresh checkout has not
+run. Three decisions here. Checkers may now declare, per call site, one exit
+code that means *"I could not look"*, and the build says so loudly and
+continues. A checker that could not reach its instrument must use that code and
+never exit 0 or 1. And two of the four checkers waiting on this turned out not
+to belong in the boot test at all, for a reason that has nothing to do with
+availability: they do not read our code.
+
+The three parts landed as `e7d9573b9` (the channel), `0662772f8` (the exit
+split), `cb29ea5dc` and `5c3a57267` (the classification and the wiring).
+Requested by lane B in
+`requests/c-b-four-of-your-new-shell-gates-are-unwired-and-main-is-red.md`,
+which lists it as the one change five pinned gates were all waiting on.
+
+### The channel is opt-in per call site, not a property of the checker
+
+`run_checker --may-skip=2 <label> <command>` says: *at this call site*, exit 2
+from this checker means it could not look. Any other unexpected code still
+aborts the build.
+
+> **Spelling superseded, same day — the argument below is unchanged.** Lane B
+> had written the same channel independently, and the merge (`a29a07d68`) kept
+> lane B's spelling: the flag is bare **`--may-skip`**, with 2 hard-coded as the
+> tree's one code for "I did not reach a verdict", rather than
+> `--may-skip=<rc>` naming the code per site. Everything this section argues —
+> opt-in per call site, permission living in the grader not the graded — holds
+> identically for the bare form, which is why the merge was not contested. What
+> is lost is the ability to allow a *different* code per site, and that turned
+> out to be a freedom nobody wanted: a second no-verdict code would be a second
+> convention to remember. The reason string is also lane B's: the checker's
+> **first** line of output, not its last, and a skip is refused outright if that
+> line is a `usage:` banner, a traceback, or empty. Read `--may-skip=2` below as
+> `--may-skip`.
+
+The alternative was to let the checker declare it — a convention that exit 2
+always means "could not look", enforced nowhere. That is the cheaper design and
+it is wrong here, for a reason this repo has already been bitten by: the
+declaration would live in the file being graded rather than in the file doing
+the grading. A checker that acquires a new exit-2 path — a bare `return 2` from
+some later error branch, added by someone who never read this rule — would
+silently convert an abort into a skip, and a skip reads as *nothing was wrong*.
+Putting the permission at the call site means widening what may be skipped is
+an edit to `boot-test.sh`, where the ratchet and the label-distinctness suite
+can both see it.
+
+The cost is real: five call sites now repeat `--may-skip=2`, and a sixth that
+forgets it will abort the build on a host that should have skipped. That is the
+right failure direction — it stops the build and names the gate, rather than
+passing.
+
+Against the whole idea: a skip is a hole, and holes accumulate. The mitigation
+is that the skip is *loud* — it prints the checker's own last line as the
+reason and appends a row to `CHECKER_SKIPLOG`, so a machine that never builds a
+sysroot is told every single boot which checks are not being made. A silent
+skip would have been strictly worse than the pin it replaced.
+
+### Why the exit code has to be split at the checker too
+
+`bashprobe.py` left via `raise SystemExit("no WSL")` when the Linux shell was
+absent, which Python maps to **exit 1** — the code that means *"I looked and
+found a problem."* On a machine without WSL, four checkers therefore reported
+that our shell quoting disagreed with bash, about a bash they never reached.
+Lane B found this while writing the pin and flagged it as the first thing to
+fix, correctly.
+
+It now has three endings that cannot be confused: 0 or 1 after actually
+comparing, **2** for "I could not look", and an uncaught exception — a
+traceback, not a tidy exit — for the case where the comparison machinery itself
+is broken. The third deserves the ugliest ending on purpose: if the harness is
+wrong then no result it produces means anything, including a clean one, and
+that must not be expressible as a number the caller might handle.
+
+### The classification, which is the part that generalises
+
+Four checkers were pinned as "needs WSL". Once WSL-dependence became wireable,
+the obvious move was to wire all four. Reading their inputs says otherwise, and
+the distinction is not about availability at all:
+
+| | reads | can a change to our tree red it? |
+|---|---|---|
+| `check-shellquote-vs-bash.py` | `kernel/src/shellquote.rs` + bash | yes — **wired** |
+| `check-kshell-rungs-vs-bash.py` | `kernel/src/kshell.rs` + bash | yes — **wired** |
+| `check-kshell-pipeline-vs-bash.py` | a Python table + bash | no — **pinned** |
+| `check-ansic-quoting-vs-bash.py` | a Python table + bash | no — **pinned** |
+
+The bottom two open no `.rs` file. They compare a written-down model of bash
+against real bash, and their own docstring says a disagreement means the model
+is wrong, not bash. Wiring them would add about 23 seconds to every boot to
+guard nothing, and — worse — would be *read* as coverage of our quoting code by
+anyone scanning the gate list.
+
+That is the general rule this entry exists to record: **a program that measures
+a third party is an instrument, and only a program that grades this repository
+is a gate.** They look identical from outside — both live in `scripts/`, both
+exit 0, both print little — which is exactly why the difference has to be
+written down where the list of gates is kept, rather than left to be
+rediscovered. The two instruments stay valuable and stay run by hand: they are
+how bash's answers are learned before those answers are written into kshell's
+own self-test rungs, and the rungs *are* gated.
+
+Against this split: it is a judgement call per checker, and a wrong call is
+invisible — a misfiled instrument is a gate nobody runs. The pins therefore
+carry the unpinning condition explicitly ("wire it if it ever grows an
+assertion against `kernel/src/kshell.rs`"), so the question is re-asked by the
+file itself rather than by memory.
+
+### What is still missing, and is not fixed by any of this
+
+None of the four has a `--self-test`, so nothing proves either of the two now
+wired can still *find* anything. They scan Rust source by regex for literals,
+which means a rename makes them match nothing and report a clean tree — the
+failure this whole family of gates exists to prevent, in the two gates just
+added to the family. Lane B predicted this in the reply cited above and listed
+it as step 3 of four; it is tracked in `known-issues.md` →
+`TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED` and is the immediate next
+piece of work, not a deferral.
+
+### Correction, same day — "yes" in that table was true but far too narrow
+
+**In short:** the table above answers "can a change to our tree red it?" with
+"yes" for the two gates I wired. I established that by reading which file each
+one opens, which is the wrong question. Both do open a kernel source file — and
+then read one line of it. Afterwards I mutated each gate's subject to see what
+it would catch, and both reported a clean tree while looking straight at a
+defect. The gates were worth having and stayed wired; the claim that a kernel
+change reds them needed narrowing to what was actually true, which was a much
+smaller thing than the table implies. Both are now fixed.
+
+What each one actually read, before the fix:
+
+| gate | its whole tether to our tree | what could change without it noticing |
+|---|---|---|
+| `check-shellquote-vs-bash.py` | one regex for `const DQ_ESCAPABLE: [u8; N] = [...]` | every other line of `shellquote.rs` — the entire scanner |
+| `check-kshell-rungs-vs-bash.py` | the rung *inputs* occur verbatim (`assert_rust_src_is_verbatim`) | every rung's *expected value* |
+
+Both were established by mutation, not by reading:
+
+- Changing `shellquote.rs`'s `Ctx::Single` arm to `let structural = false;` — a
+  scanner in which a single-quoted string can never close — gave
+  `0 failure(s)`, exit 0. The gate did catch a renamed or re-shaped
+  `DQ_ESCAPABLE` and a drifted alphabet, which was the whole of what it caught.
+- Corrupting a kshell rung's expectation from `alloc::vec!["a", "b", "c"]` to
+  `alloc::vec!["a", "b", "", "c"]` — a blank word bash never produces — gave
+  "0 rung assertion(s) disagree with the reference tool", exit 0.
+
+**The sentence in "What is still missing" was also wrong, and wrong in the
+direction that matters.** It said these gates "scan Rust source by regex for
+literals, which means a rename makes them match nothing and report a clean
+tree". For `check-kshell-rungs-vs-bash.py` a renamed *input* literal does not
+pass quietly — `assert_rust_src_is_verbatim()` fails the run, and that check was
+added precisely to be the discovery floor. The real hole was not a rename going
+unnoticed; it was that the expectation side of every rung was never read at all.
+I had described a weaker version of the defect than the one present, which is
+worse than describing none, because it reads as though the floor were the gap.
+
+### What generalises: a tether's width is not visible from its name
+
+The check I ran when classifying these — *does it open a file in `kernel/`?* —
+cannot distinguish a gate that grades a subsystem from one that grades a single
+constant inside it. Both answer yes. The question that discriminates is **how
+much of that file can change without this noticing**, and the only way to answer
+it is to change something and watch. That is a mutation test, and its absence is
+why a wrong answer survived being written into a decision record.
+
+This also sharpens this entry's own framing. The split above between
+*instruments* (measure a third party) and *gates* (grade this repository) was
+treated as binary. It is not: a gate can grade this repository through a tether
+one line wide, and from outside — same directory, same exit 0, same silence — it
+is indistinguishable from one that grades the subsystem its name claims.
+`check-gates-can-refuse.py` already documents the neighbouring version of this
+("a gate that passes on a clean tree is indistinguishable from a gate that
+passes on everything") and explains why it cannot test for it: doing so means
+"planting a defect each gate would notice — 30 bespoke fixtures against 30
+unrelated subjects". Two of those thirty fixtures now exist, written by hand
+during this work; the other twenty-eight do not, and that residue is tracked in
+`known-issues.md` →
+`TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM`.
+
+Worth recording that the false-clean had two channels, not one. `pre-boot.py`
+globs `scripts/check-*.py` and runs every gate bare, so both oracles had been
+reporting clean there as well for as long as they had existed — not only from
+`boot-test.sh` since that morning. That does not change the wiring argument
+(pre-boot is a ~40-minute local pre-flight nobody is obliged to run, which is
+exactly why being named in `boot-test.sh` is what "wired" means), but it does
+mean the reassurance was being printed twice.
+
+### The fix, and the part of it that is a refusal to pretend
+
+Landed as `a6551a3af` (kshell) and `d280f66b1` (shellquote). Rung expectations
+are now read out of the Rust by `scripts/rustrungs.py`, a shared reader — both
+`kshell.rs` and `shellquote.rs::self_test()` assert in the same
+`assert_eq!(call(literal), expected)` shape, so one parser serves both. Three
+choices inside that work had a case on either side:
+
+- **Three witnesses, not two.** The transcription in each gate's own table is
+  kept rather than dropped as redundant, so a gate now requires the rung's own
+  expectation, its transcription, and real bash to agree. Dropping the
+  transcription is tempting — it is duplicated data that must be maintained —
+  but then a silently broken *reader* passes by comparing bash against bash.
+  Same argument that put `assert_rust_src_is_verbatim()` there in the first
+  place.
+- **Coverage is a separate failure from correctness, and is reported
+  separately.** A table-driven oracle cannot see a rung nobody transcribed:
+  `expectations()` answers "does the tree still assert what my table says",
+  which is silent about a rung the table omits. So `assert_eq_calls()`
+  enumerates every asserted call in the Rust and the gate raises on any it does
+  not account for, naming the rung and the table to add it to. It *raises*
+  rather than incrementing the failure count, because an ungraded rung is an
+  unasked question, not a wrong answer. Reading the Rust this way found three
+  kshell rungs graded by nothing (13 → 16) — which is the whole defect class,
+  found a second time by the machinery built to prevent it.
+- **What cannot be graded is named, not quietly dropped.** Of `shellquote.rs`'s
+  thirteen rungs: five `strip_quotes` rungs are gradeable against real bash; one
+  (`strip_quotes(b"a\\")`) is a deliberate divergence from bash and is pinned
+  three ways so that *agreeing* with bash reds the gate; the five `find_bare`
+  and two `bare_positions` rungs assert byte offsets, which bash does not
+  expose, so they are graded against the Python port and labelled as such; two
+  are excused by name, being inside a round-trip loop with no fixed literal.
+  Likewise `remove_quotes("a 'b,c'")` is excluded from the kshell oracle with
+  its reason in the code — its input has an unquoted space, so bash splits it
+  into two words while `remove_quotes` splits nothing, and any `want` that
+  greens one leg reds the other. Covering it would be the same false coverage
+  this correction is about.
+
+The one thing not fixed, and deliberately: `check-shellquote-vs-bash.py` still
+does not grade the scanner. A Python gate cannot execute Rust, so the
+`Ctx::Single` mutation is caught by `self_test()` at boot and by nothing in
+`scripts/`. The gate's docstring now says so in as many words, with that
+measurement in it, rather than letting its name imply otherwise.
+
+### Second correction — the instrument/gate split was wrong too, and lane B's tree already says so
+
+**In short:** the table above pins two of the four oracles on the grounds that
+they "read no `.rs` file" and so guard nothing of ours. Lane B had independently
+wired all four, that is what the merge (`a29a07d68`) brought in, and it is what
+`boot-test.sh` does today — `check_bash_oracles` runs all four, gates carrying
+`--may-skip`, self-tests not. Only `check-evdev-elf-asm.py` is still pinned.
+Lane B is right and I was wrong, so the wiring stands and this section is the
+record of why my reasoning failed rather than an argument to revisit it.
+
+**Lane B's reason, which I did not have.** It is in the comment above
+`check_bash_oracles` in `boot-test.sh`:
+
+> Every other shell gate here reads kshell's source and checks it against a rule
+> written down in this repository. These four check the *rule* — they hand the
+> same bytes to real bash through WSL and compare. A disagreement means our
+> model of the shell is wrong, which no amount of internal consistency would
+> ever reveal: the rest of the gates would go on agreeing with each other about
+> the wrong answer.
+
+That is the argument I was missing. I asked what a checker *reads* and concluded
+that one reading only a Python table protects nothing here. What it protects is
+the **rule** that a dozen other gates enforce against our source. If the rule is
+wrong, every gate that agrees with it is confidently wrong *together*, and their
+agreement is the thing that makes the error invisible. A checker that reads none
+of our files can still be the only witness that our files are being measured
+against the right standard.
+
+**Both of this entry's errors have one cause.** I classified checkers by *which
+file each one opens* rather than by *what would go undetected without it*, and
+that question got the answer wrong in both directions on the same day:
+
+| | I asked | I concluded | what was true |
+|---|---|---|---|
+| the two wired gates | opens `kernel/src/*.rs`? yes | grades that subsystem | graded one constant and one set of inputs |
+| the two pinned instruments | opens `kernel/src/*.rs`? no | guards nothing of ours | guards the rule every other shell gate enforces |
+
+Over-credit and under-credit, from one bad question. The correction above says
+the discriminating question is "how much of that file can change without this
+noticing"; this one extends it, because that phrasing still presumes the subject
+is a file in our tree. The general form is **what becomes undetectable if this
+program stops running**, which is answerable for an instrument as well as a
+gate — and for the instruments the answer is "that our whole model of bash is
+wrong", which is not nothing and is not smaller than what a gate protects.
+
+**What survives of the split.** The distinction between measuring a third party
+and grading this repository is still real and still worth naming — it is why the
+two instruments genuinely cannot fail on a change to `kernel/`, and why reading
+them as coverage of our quoting code would be a mistake. What does not survive is
+the *conclusion* drawn from it, that only the second kind belongs in the boot
+test. The cost that made me draw it — about 23 seconds per boot — is paid only on
+hosts that have WSL, and `--may-skip` means a host without WSL skips them loudly
+rather than failing. Twenty-three seconds to know that the standard every other
+shell gate is measured against is the real one is obviously worth paying, and I
+priced it against the wrong benefit.
+
+Worth noting that lane B's argument is the same one I used, one level down, to
+justify keeping each gate's own transcription of a rung as a third witness: with
+only two witnesses a silently broken reader passes by comparing bash against
+bash. Wiring the instruments is that argument applied to the family as a whole.
+I made it about a table and missed it about the tree.
+
+---
+
+## §906 — The end-of-line gate grades the promise rather than the tree, and runs second rather than first
+
+**Date:** 2026-09-03. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** A file that git has been told to keep with Unix line endings can be
+sitting on disk with Windows ones, and no git command anybody actually types will
+say so — `git status` is clean, `git diff` is empty, `git commit` says nothing.
+On 2026-09-03 thirteen files in this worktree were in exactly that state,
+`scripts/boot-test.sh` among them, and it cost a forty-seven-minute boot test to
+find out. `scripts/check-eol.py` is the gate that reads the files directly. Two
+things about it were judgement calls rather than obvious, and this entry is about
+those two: **which** files it grades, and **where** in the pre-build sweep it
+runs.
+
+### Why this needs a gate at all: git is not merely unhelpful here, it is confidently wrong
+
+`text eol=lf` installs a clean filter, and the filter runs *before* any
+comparison. A file that is CRLF on disk and LF in the index is therefore not
+"modified in a way git chooses to ignore" — it is, to git, byte-identical to the
+index.
+
+| Command | Sees the CRLF? |
+|---|---|
+| `git status` | no — reports a clean tree |
+| `git diff`, `git diff --quiet` | no — empty, exit 0 |
+| `git add`, `git commit` | no — stages nothing |
+| `git diff-files` | **yes** — compares raw bytes |
+| `git ls-files --eol` | **yes** — reports raw bytes |
+
+Only the bottom two rows look at the working tree's actual bytes, and nobody runs
+them. That is why this failure was *invisible* rather than merely *unreported*:
+every instrument on the desk agreed the tree was clean, and every one of them was
+answering a question about the index.
+
+The proof that nothing was ever going to point at it: repairing all thirteen
+files and staging the result produced a **zero-byte diff**. The bad bytes had
+never reached a commit and never would have.
+
+### Decision: the graded set is whatever `.gitattributes` declares — not a suffix list, and not the whole tree
+
+| | *What changes:* | Catches | Misses |
+|---|---|---|---|
+| Only `*.sh` | the gate fires only where a CR actually breaks something | the one file that broke | the other twelve — that is, the size of the cause |
+| Everything declared `eol=lf` (**chosen**) | the gate fires on any declared file whose bytes contradict the declaration | all thirteen | files about which no promise was made |
+| Every tracked file | the gate fires on any CR anywhere | everything | nothing — and it is red on day one |
+
+The `.sh`-only scope is the tempting one, because `.sh` is the only extension
+where a CR does observable harm today (`bash` folds the CR into the token it
+ends, so `set -u` becomes `set -u$'\r'`). It is wrong for a reason that
+generalises: **the thirteen files were corrupted by one event, and `.sh` was one
+of the thirteen.** A gate scoped to the harm would have reported the symptom and
+concealed the extent of the cause. What is worth learning from a CR in a `.md`
+file is not that the `.md` file is broken — visibly, it isn't — but that *a tool
+in this tree writes text files in the wrong mode*, and the count of affected
+files is the evidence for that.
+
+The whole-tree scope fails at the other end. On the order of 180 tracked files
+are CRLF in the worktree and carry no `eol` declaration at all — `kernel/src/fs/`
+`*.rs`, `kernel/src/crypto.rs`, `kernel/src/syscall/handlers.rs`,
+`kernel/build.rs`, `bench/baselines.toml`, the Ada sources. Grading those would
+make the gate red on its first run, over files against which no promise was ever
+made; and a gate that is red for reasons its own repository considers acceptable
+is a gate that gets switched off. Whether those files *should* be declared is a
+separate question, and a cross-lane one — see below.
+
+So the scope is the promise itself, read out of git via `git check-attr` rather
+than restated here as a list of suffixes. A suffix list would be a second copy of
+the policy, free to drift from the first, and the drift would surface as the gate
+quietly not covering a newly-declared file type — which is this entry's own
+failure mode, one level up.
+
+### Decision: second in the sweep, not first
+
+Prerequisites aside, `check_requests_not_deleted` keeps the head of the sweep and
+`check_eol` follows it. The argument is not about which check is cheaper:
+
+| | If it runs late | What is at stake |
+|---|---|---|
+| `check_requests_not_deleted` | a cross-lane request has already been destroyed | **information that cannot be recovered** |
+| `check_eol` | a build has already started against bad bytes | **one wasted cycle** |
+
+The head of the sweep is ordered by what a *late* detection costs, and only one
+thing in this tree costs something irreversible. Everything below that is ordered
+cheap-and-broad first, and `check_eol` is now the first of those. That is the
+whole point of the placement: the equivalent evidence already existed inside
+`check_shellcheck`, some forty-five minutes into the sweep and covering only
+`.sh`. That is where the CR was found on 2026-09-03, and finding it there is what
+threw the run away.
+
+### The floor, because this gate can fail in the exact way it exists to catch
+
+`DISCOVERY_FLOOR = 500`, against ~1,438 declared files in a tree of 13,884
+tracked ones. The fragile part of this gate is not "does `\r` appear in these
+bytes" — that cannot drift. It is the attribute query: a NUL-separated
+`git check-attr -z --stdin` stream walked three fields at a time. If that framing
+changes, or the invocation grows a typo, **the declared set becomes empty and the
+gate reports a clean tree in a fraction of a second, forever, on every host** —
+which is the identical failure it exists to catch elsewhere. The floor converts
+that into an exit 2.
+
+### The cost accepted
+
+~37 MB across ~1,438 files: 93 s single-threaded on this host, ~32 s across a
+16-thread pool. The cost is per-file antivirus interception rather than
+bandwidth, which is both why threads help this much and why the pool is what
+makes the gate affordable at all. `open-questions.md` A-Q7 asks about an
+exclusion; if it is ever answered, this drops into the noise.
+
+### What this deliberately does not settle
+
+Declaring `*.rs` and `*.toml` as `eol=lf` is the change that would make the
+undeclared set empty. It is a whole-tree normalisation touching all three lanes'
+files at once, so it wants a `requests/` file and the other two lanes' agreement,
+not a unilateral commit from lane A. Until then the undeclared files are out of
+scope by construction, and this section is the record of that being a choice
+rather than an oversight.
+
+### Reversing this
+
+Delete the `check_eol` call from `scripts/boot-test.sh`; the gate still works
+standalone. If it is the *scope* that turns out to be wrong, the change is one
+predicate in `declared_lf()` — but note that widening it to the whole tree
+without first declaring the `*.rs` files means adopting ~180 pre-existing
+findings on day one. The honest order is declaration first, gate second.
+
+---
+
+## §907 — A gate is what `run_checker` runs, not what it is named — and the two questions about a gate need two different definitions
+
+**Date:** 2026-09-03. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** Two of the checking programs in `scripts/` exist to grade the
+*other* checking programs. One asks "is this gate actually wired into a build,
+and is its self-test actually run?"; the other asks "if this gate found
+something, could it even fail?". Both decided what counted as a gate by looking
+at the **filename**. Nine real gates are spelled differently — `scan-unwrap.py`,
+`rustscan.py`, and six run only by the pre-push hook — so both meta-gates skipped
+them entirely and reported "ok". The fix is to define a gate by what a caller
+actually runs. This entry records why the two questions nevertheless still need
+two *different* definitions, which is the part that is easy to get wrong twice.
+
+### The failure, stated generally
+
+**A gate that discovers nothing reports no failures, and that reads exactly like
+a pass.** This shape turned up three times in one work session, at three
+different levels — a gate's subject set, a meta-gate's corpus, and an analyser's
+expression coverage. The meta-gate form is the nastiest, because a corpus that
+*omits* a file reports "ok" in the same words as one that includes it and finds
+nothing wrong. No wording, no exit code and no log line distinguishes them. Only
+counting the corpus does.
+
+The concrete symptom was a sentence `check-gates-are-wired.py` printed with total
+confidence:
+
+```
+0 self-test(s) shipped but unrun
+```
+
+True of the subset it looked at. Printed as though it were true of the tree.
+
+### The mistake was made twice in one expression
+
+`analyse()` collected call sites out of `scripts/boot-test.sh` and
+`scripts/hooks/pre-push`, reading the *actual* `run_checker` invocations — and
+then filtered the result through `if _GATE.fullmatch(n)`, a regex over the
+filename. Having done the hard and correct thing, it discarded the answer for
+anything that did not look the way a gate is supposed to look. The file's own
+docstring lists "matching filenames" as method 4, a known-bad approach, in the
+course of explaining why it does not use it.
+
+### Decision: define "a gate" as "a script some caller passes to `run_checker`"
+
+`scripts = list(literal or named)` — no name filter. The corpus is the union,
+over `CALLERS` (`scripts/boot-test.sh`, `scripts/hooks/pre-push`), of every
+script run through `run_checker`; plus, for the wiring question only, the
+filesystem glob.
+
+Measured effect:
+
+| | Before | After |
+|---|---|---|
+| `boot-test.sh` — gates run / self-tests run | 36 / 23 | **38 / 25** |
+| `pre-push` — gates run / self-tests run | 2 / 2 | **8 / 7** |
+| `check-gates-can-refuse.py` corpus | 38 | **47** |
+
+The nine that had been exempt purely by spelling: `scan-unwrap.py`,
+`scan-orphan-modules.py`, `rustscan.py`, and — all six from the pre-push hook —
+`argv-utf8.py`, `getopt-ambiguity-check.py`, `host-errmsg.py`,
+`multicall-aliases.py`, `quote-names.py`, `raced-globals.py`.
+
+### The subtle part: the two questions cannot share one definition
+
+Collapsing them is what produced the bug, and "just use the call sites
+everywhere" would produce its mirror image.
+
+| Question | Must be answered from | Because |
+|---|---|---|
+| *Is this gate wired at all?* | the **filesystem** — i.e. names | an unwired gate has **no call site to read**. Defining the corpus as "what callers run" makes the answer vacuously yes, always. |
+| *Is its self-test run? Can it refuse?* | the **call sites** — i.e. what is invoked | a gate's spelling is a habit; the build obeys the call, not the convention |
+
+So `check-gates-are-wired.py` keeps a name-shaped constant — renamed `_GATE_NAME`
+precisely so the next reader cannot mistake it for a definition of "gate" — and
+uses it *only* to enumerate candidates on disk. Everything downstream of that
+uses call sites. The self-test arm's subject became `sorted(set(gates) | wired)`:
+the union, because a script that is run but does not match the name is exactly
+the case that was being missed.
+
+### Decision: when the corpus cannot be determined, decline — do not fall back to the glob
+
+`check-gates-can-refuse.py` now imports the sibling parser rather than copying
+it, and if `scripts/boot-test.sh` or the pre-push hook is missing it returns a
+`why_not` and `main()` exits **2**.
+
+The rejected alternative was to fall back to the directory glob, on the grounds
+that it "still checks something". That is the identical defect one level up: a
+strictly smaller corpus, reported in identical words. Exit 2 is this tree's
+single code for "I did not reach a verdict" (§905), and this is precisely that
+situation.
+
+One implementation note worth keeping, because the self-test caught it: the
+sibling parser must be located via `Path(__file__).resolve().parent` and **not**
+the module-global `SCRIPTS`, which the self-test deliberately repoints at a
+temporary directory. Using `SCRIPTS` made the gate silently analyse a fixture
+directory instead of the real tree. That the self-test caught it is the argument
+for its asserting the contract by *calling* `main()` rather than by reading the
+source.
+
+### Reversing this
+
+Restore `if _GATE_NAME.fullmatch(n)` in `analyse()` and the counts return to
+36/23 and 2/2. There is no reason to; but the signal that the *definition* is
+wrong would be a script that `run_checker` runs which is genuinely not a gate — at
+which point the fix is an explicit exemption carrying a reason, in the style of
+the existing unwired list, and never a return to grading by filename.
+
+---
+
+## §908 — The refusal analyser assumes an unreadable expression can refuse, and the residue is documented rather than reported
+
+**Date:** 2026-09-03. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** `check-gates-can-refuse.py` reads each checking program's source and
+asks whether it could ever exit non-zero — a gate that physically cannot fail is
+worse than no gate, because it emits a reassuring line of output on every build.
+It was missing most of them: it cleared any file that used `return _decline(...)`,
+which is the commonest way a gate refuses in this tree. Fixing that took
+detection from 12 of 47 to 37 of 47. This entry records how that was measured,
+and the deliberate decision *not* to close the remaining ten by reporting
+everything the analyser cannot read.
+
+### How it was measured, because a checker's own "ok" is not evidence
+
+The gate printed "ok — all 47 gates can reach a non-zero exit bare" both before
+and after the fix. That sentence is worth nothing by itself; it is the sentence a
+broken gate prints too.
+
+The unit of evidence is a **mutation census**: neuter every subject mechanically
+— rewrite its verdict so it can only return 0 — and count how many the gate
+catches.
+
+| | Detected |
+|---|---|
+| Before | **12 / 47** |
+| After | **37 / 47** |
+
+Zero regressions: everything caught before is still caught.
+
+### The false negative: "delegated, so assume it can refuse"
+
+`_could_be_nonzero` treated a call as opaque and answered `True` — the
+conservative answer, on the reasoning that the callee is unknown. But the callee
+is usually thirty lines up in the same file. `return _decline(reason, detail)` is
+*the* refusal idiom here, and it cleared every file it appeared in, whether
+`_decline` returned 2 or returned 0.
+
+The fix resolves module-local calls: `audit()` builds `{name: FunctionDef}` for
+the module, and `_value_could_be_nonzero` recurses into a called function's own
+returns, with a `seen` set to bound recursion. **Conservatism is not conservative
+when the answer is in the file you have already parsed.**
+
+The self-test's decisive pair is two fixtures that are identical at the call site
+and opposite in fact: a `_decline` helper that returns 2 (must clear the gate)
+and one that returns 0 (must be reported). Nothing at `return _decline(...)`
+distinguishes them; only following the call does. Thirteen fixtures now, up from
+eight.
+
+### Decision: leave the remaining ten to `known-issues.md` rather than reporting them
+
+The tempting close is to invert the default and report anything the analyser
+cannot *prove* refuses. That would reach 47/47 by construction.
+
+| | *What changes:* | Cost |
+|---|---|---|
+| Report the unanalysable (rejected) | ten gates are flagged on every build until each is rewritten into a shape the analyser reads | a per-build gate that cries wolf gets ignored — and then it has also stopped working for the 37 cases where it is right |
+| Assume it can refuse (**chosen**) | the gate stays silent on shapes it cannot read; the residue is tracked in prose | ten known false negatives, invisible to the build |
+
+The decisive consideration is that this gate's output is one line inside a sweep
+of forty. Its value is entirely that the line is *trustworthy*. A gate that
+reports ten standing non-problems trains its reader to skim it, and the failure
+mode of a skimmed gate is that it gets skimmed on the day it is right.
+
+So the residue is written down with its measured shapes rather than guessed
+causes, in `known-issues.md` →
+`TD-A-A-GATE-THAT-CANNOT-REFUSE-IS-STILL-UNDETECTED-IN-10-OF-47-GATES`:
+
+| Shape | Gates |
+|---|---|
+| verdict is a returned local variable | `check-evdev-elf-asm.py`, `check-query-status.py`, `check-usage-status.py` |
+| verdict is a returned comparison / comprehension / subscript | `check-option-refusal.py`, `scan-orphan-modules.py` |
+| a call whose callee contains an unanalysable expression | `argv-utf8.py`, `check-selftest-reinit.py`, `host-errmsg.py`, `raced-globals.py` |
+| no `main()` at all | `rustscan.py` |
+
+The first two rows are one improvement away — single-assignment local dataflow,
+which is bounded work and is on the list. The last row is a defect in the
+subject, not in the analyser.
+
+### Reversing this
+
+Drop `funcs` from the three `_could_be_nonzero` call sites and the analyser
+returns to treating every call as opaque, i.e. to 12/47. The signal that the
+*default* should flip is the residue growing rather than shrinking: if new gates
+keep landing in shapes the analyser cannot read, then those shapes are the
+convention and the analyser is the outlier.
+
+---
+
 ## 806. The file chooser stores no size of its own, and lets an explicit scroll leave the selection off screen
 
 **Date:** 2026-09-03

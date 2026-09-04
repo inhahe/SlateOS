@@ -223,6 +223,44 @@ struct YamlLine {
     content: String,
 }
 
+/// Tracks quoting while scanning a YAML line byte by byte.
+///
+/// Three scanners in this parser need to know whether a `#` or a `:` is
+/// structural or part of a quoted scalar, and each used to carry its own copy
+/// of the rule — including the escaped-quote test, which is exactly the kind of
+/// detail that ends up subtly different in one of three copies. One
+/// implementation, one set of tests.
+#[derive(Default)]
+struct QuoteState {
+    in_single: bool,
+    in_double: bool,
+}
+
+impl QuoteState {
+    /// Feed the byte at index `i`, returning whether a structural character at
+    /// this position is outside quotes.
+    ///
+    /// A double quote preceded by a backslash is data rather than a delimiter;
+    /// a quote of one kind inside the other is likewise just a character. YAML
+    /// gives no such meaning to a backslash inside single quotes, and neither
+    /// does this.
+    fn step(&mut self, bytes: &[u8], i: usize, b: u8) -> bool {
+        match b {
+            b'\'' if !self.in_double => self.in_single = !self.in_single,
+            b'"' if !self.in_single && !Self::is_escaped(bytes, i) => {
+                self.in_double = !self.in_double;
+            }
+            _ => {}
+        }
+        !self.in_single && !self.in_double
+    }
+
+    /// Is the byte at `i` escaped by a backslash immediately before it?
+    fn is_escaped(bytes: &[u8], i: usize) -> bool {
+        i.checked_sub(1).and_then(|j| bytes.get(j)) == Some(&b'\\')
+    }
+}
+
 impl YamlParser {
     /// Parse a YAML document from a string.
     pub fn parse(input: &str) -> Result<YamlValue, ParseError> {
@@ -262,23 +300,15 @@ impl YamlParser {
 
     /// Remove inline `#` comments that are not inside quotes.
     fn strip_inline_comment(s: &str) -> String {
-        let mut in_single = false;
-        let mut in_double = false;
+        let mut quotes = QuoteState::default();
         let mut prev_space = false;
         let bytes = s.as_bytes();
         for (i, &b) in bytes.iter().enumerate() {
-            match b {
-                b'\'' if !in_double => in_single = !in_single,
-                b'"' if !in_single
-                    // Check for escaped quote.
-                    && (i == 0 || bytes[i.wrapping_sub(1)] != b'\\') =>
-                {
-                    in_double = !in_double;
-                }
-                b'#' if !in_single && !in_double && prev_space => {
-                    return s[..i].trim_end().to_string();
-                }
-                _ => {}
+            let outside = quotes.step(bytes, i, b);
+            // A `#` only starts a comment when it follows whitespace, so that a
+            // value like `pass#word` keeps its hash.
+            if b == b'#' && outside && prev_space {
+                return s.get(..i).unwrap_or(s).trim_end().to_string();
             }
             prev_space = b == b' ';
         }
@@ -294,10 +324,11 @@ impl YamlParser {
         pos: &mut usize,
         min_indent: usize,
     ) -> Result<YamlValue, ParseError> {
-        if *pos >= lines.len() {
+        // `get` rather than `[*pos]` under the bounds test above: one
+        // expression instead of a test and an index that can drift apart.
+        let Some(line) = lines.get(*pos) else {
             return Ok(YamlValue::Null);
-        }
-        let line = &lines[*pos];
+        };
         if line.indent < min_indent {
             return Ok(YamlValue::Null);
         }
@@ -314,32 +345,24 @@ impl YamlParser {
 
         // Scalar.
         *pos = pos.wrapping_add(1);
-        Self::parse_scalar(&line.content, line.number)
+        Ok(Self::parse_scalar(&line.content))
     }
 
     /// Detect whether a line looks like `key: value` (not a scalar that
     /// happens to contain a colon).
     fn looks_like_mapping(content: &str) -> bool {
-        // Find the first unquoted colon.
-        let mut in_single = false;
-        let mut in_double = false;
+        let mut quotes = QuoteState::default();
         let bytes = content.as_bytes();
         for (i, &b) in bytes.iter().enumerate() {
-            match b {
-                b'\'' if !in_double => in_single = !in_single,
-                b'"' if !in_single && (i == 0 || bytes[i.wrapping_sub(1)] != b'\\') => {
-                    in_double = !in_double;
+            let outside = quotes.step(bytes, i, b);
+            if b == b':' && outside {
+                // Must be followed by space, EOL, or be at the end.
+                let after = i.wrapping_add(1);
+                if bytes.get(after).is_none_or(|b| *b == b' ') {
+                    // Key must not start with `- ` (that's a list item
+                    // containing a colon).
+                    return !content.starts_with("- ");
                 }
-                b':' if !in_single && !in_double => {
-                    // Must be followed by space, EOL, or be at the end.
-                    let after = i.wrapping_add(1);
-                    if after >= bytes.len() || bytes[after] == b' ' {
-                        // Key must not start with `- ` (that's a list item
-                        // containing a colon).
-                        return !content.starts_with("- ");
-                    }
-                }
-                _ => {}
             }
         }
         false
@@ -355,7 +378,9 @@ impl YamlParser {
         let mut pairs: Vec<(String, YamlValue)> = Vec::new();
 
         while *pos < lines.len() {
-            let line = &lines[*pos];
+            let Some(line) = lines.get(*pos) else {
+                break;
+            };
             if line.indent < base_indent {
                 break;
             }
@@ -390,8 +415,10 @@ impl YamlParser {
                 pairs.push((key, YamlValue::Str(val)));
             } else if rest.is_empty() {
                 // Value is on subsequent indented lines (nested map or list).
-                if *pos < lines.len() && lines[*pos].indent > base_indent {
-                    let child_indent = lines[*pos].indent;
+                if let Some(next) = lines.get(*pos)
+                    && next.indent > base_indent
+                {
+                    let child_indent = next.indent;
                     let val = Self::parse_value(lines, pos, child_indent)?;
                     pairs.push((key, val));
                 } else {
@@ -399,7 +426,7 @@ impl YamlParser {
                 }
             } else {
                 // Inline scalar value.
-                let val = Self::parse_scalar(&rest, line.number)?;
+                let val = Self::parse_scalar(&rest);
                 pairs.push((key, val));
             }
         }
@@ -417,7 +444,9 @@ impl YamlParser {
         let mut items: Vec<YamlValue> = Vec::new();
 
         while *pos < lines.len() {
-            let line = &lines[*pos];
+            let Some(line) = lines.get(*pos) else {
+                break;
+            };
             if line.indent < base_indent {
                 break;
             }
@@ -438,8 +467,10 @@ impl YamlParser {
 
             if item_text.is_empty() {
                 // Nested block under the dash.
-                if *pos < lines.len() && lines[*pos].indent > base_indent {
-                    let child_indent = lines[*pos].indent;
+                if let Some(next) = lines.get(*pos)
+                    && next.indent > base_indent
+                {
+                    let child_indent = next.indent;
                     let val = Self::parse_value(lines, pos, child_indent)?;
                     items.push(val);
                 } else {
@@ -454,15 +485,17 @@ impl YamlParser {
 
                 if rest.is_empty() {
                     // Value is nested below.
-                    if *pos < lines.len() && lines[*pos].indent > base_indent {
-                        let child_indent = lines[*pos].indent;
+                    if let Some(next) = lines.get(*pos)
+                        && next.indent > base_indent
+                    {
+                        let child_indent = next.indent;
                         let val = Self::parse_value(lines, pos, child_indent)?;
                         map_pairs.push((key, val));
                     } else {
                         map_pairs.push((key, YamlValue::Null));
                     }
                 } else {
-                    let val = Self::parse_scalar(&rest, line.number)?;
+                    let val = Self::parse_scalar(&rest);
                     map_pairs.push((key, val));
                 }
 
@@ -471,8 +504,12 @@ impl YamlParser {
                 // base_indent + 2.
                 let continuation_indent = base_indent.wrapping_add(2);
                 while *pos < lines.len()
-                    && lines[*pos].indent == continuation_indent
-                    && Self::looks_like_mapping(&lines[*pos].content)
+                    && lines
+                        .get(*pos)
+                        .is_some_and(|l| l.indent == continuation_indent)
+                    && lines
+                        .get(*pos)
+                        .is_some_and(|l| Self::looks_like_mapping(&l.content))
                 {
                     let nested_map = Self::parse_map(lines, pos, continuation_indent)?;
                     if let YamlValue::Map(extra_pairs) = nested_map {
@@ -483,7 +520,7 @@ impl YamlParser {
                 items.push(YamlValue::Map(map_pairs));
             } else {
                 // Plain scalar list item.
-                let val = Self::parse_scalar(&item_text, line.number)?;
+                let val = Self::parse_scalar(&item_text);
                 items.push(val);
             }
         }
@@ -500,25 +537,27 @@ impl YamlParser {
         chomp: Chomp,
     ) -> String {
         let mut collected: Vec<String> = Vec::new();
-        let block_indent = if *pos < lines.len() {
-            lines[*pos].indent
-        } else {
-            parent_indent.wrapping_add(2)
-        };
+        let block_indent = lines
+            .get(*pos)
+            .map_or_else(|| parent_indent.wrapping_add(2), |l| l.indent);
 
         // Block content must be indented beyond the parent.
         if block_indent <= parent_indent {
             return String::new();
         }
 
-        while *pos < lines.len() && lines[*pos].indent >= block_indent {
+        while lines.get(*pos).is_some_and(|l| l.indent >= block_indent) {
             // Preserve relative indentation beyond block_indent.
-            let extra = lines[*pos].indent.saturating_sub(block_indent);
+            let extra = lines
+                .get(*pos)
+                .map_or(0, |l| l.indent.saturating_sub(block_indent));
             let mut line_content = String::new();
             for _ in 0..extra {
                 line_content.push(' ');
             }
-            line_content.push_str(&lines[*pos].content);
+            if let Some(l) = lines.get(*pos) {
+                line_content.push_str(&l.content);
+            }
             collected.push(line_content);
             *pos = pos.wrapping_add(1);
         }
@@ -535,7 +574,12 @@ impl YamlParser {
                 if line.is_empty() {
                     out.push('\n');
                 } else {
-                    if i > 0 && !collected[i.wrapping_sub(1)].is_empty() && !out.ends_with('\n') {
+                    if i > 0
+                        && i.checked_sub(1)
+                            .and_then(|j| collected.get(j))
+                            .is_some_and(|c| !c.is_empty())
+                        && !out.ends_with('\n')
+                    {
                         out.push(' ');
                     }
                     out.push_str(line);
@@ -572,40 +616,40 @@ impl YamlParser {
 
     /// Split `"key: value"` into `(key, value_remainder)`.
     fn split_mapping_key(content: &str, line: usize) -> Result<(String, String), ParseError> {
-        let mut in_single = false;
-        let mut in_double = false;
+        let mut quotes = QuoteState::default();
         let bytes = content.as_bytes();
         for (i, &b) in bytes.iter().enumerate() {
-            match b {
-                b'\'' if !in_double => in_single = !in_single,
-                b'"' if !in_single && (i == 0 || bytes[i.wrapping_sub(1)] != b'\\') => {
-                    in_double = !in_double;
+            let outside = quotes.step(bytes, i, b);
+            if b == b':' && outside {
+                // Must be followed by space or end of line; `a:b` is a scalar.
+                let after = i.wrapping_add(1);
+                if bytes.get(after).is_none_or(|b| *b == b' ') {
+                    let key = content.get(..i).unwrap_or_default().trim().to_string();
+                    let val_start = if after < bytes.len() {
+                        after.wrapping_add(1)
+                    } else {
+                        after
+                    };
+                    let val = content
+                        .get(val_start..)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    return Ok((key, val));
                 }
-                b':' if !in_single && !in_double => {
-                    let after = i.wrapping_add(1);
-                    if after >= bytes.len() || bytes[after] == b' ' {
-                        let key = content[..i].trim().to_string();
-                        let val_start = if after < bytes.len() {
-                            after.wrapping_add(1)
-                        } else {
-                            after
-                        };
-                        let val = if val_start <= content.len() {
-                            content[val_start..].trim().to_string()
-                        } else {
-                            String::new()
-                        };
-                        return Ok((key, val));
-                    }
-                }
-                _ => {}
             }
         }
         Err(ParseError::ExpectedColon { line })
     }
 
     /// Parse a scalar string into a `YamlValue`.
-    fn parse_scalar(s: &str, _line: usize) -> Result<YamlValue, ParseError> {
+    /// Returns a value, not a `Result`.
+    ///
+    /// It used to return `Result<_, ParseError>` and never produce an `Err`,
+    /// which made every caller write `?` for nothing and hid which of the
+    /// parser's calls can genuinely fail. A scalar is whatever it looks like —
+    /// there is no input this can reject.
+    fn parse_scalar(s: &str) -> YamlValue {
         let trimmed = s.trim();
 
         // Null.
@@ -615,16 +659,16 @@ impl YamlParser {
             || trimmed == "Null"
             || trimmed == "NULL"
         {
-            return Ok(YamlValue::Null);
+            return YamlValue::Null;
         }
 
         // Booleans.
         match trimmed {
             "true" | "True" | "TRUE" | "yes" | "Yes" | "YES" | "on" | "On" | "ON" => {
-                return Ok(YamlValue::Bool(true));
+                return YamlValue::Bool(true);
             }
             "false" | "False" | "FALSE" | "no" | "No" | "NO" | "off" | "Off" | "OFF" => {
-                return Ok(YamlValue::Bool(false));
+                return YamlValue::Bool(false);
             }
             _ => {}
         }
@@ -648,24 +692,24 @@ impl YamlParser {
                 .strip_prefix(quote)
                 .and_then(|rest| rest.strip_suffix(quote))
             {
-                return Ok(YamlValue::Str(Self::unescape_string(inner)));
+                return YamlValue::Str(Self::unescape_string(inner));
             }
         }
 
         // Numbers — try integer first, then float.
         if let Ok(n) = trimmed.parse::<i64>() {
-            return Ok(YamlValue::Int(n));
+            return YamlValue::Int(n);
         }
         if let Ok(f) = trimmed.parse::<f64>() {
             // Only accept if it looks numeric (not "inf", "nan", etc. unless
             // explicitly those values).
             if trimmed.contains('.') || trimmed.contains('e') || trimmed.contains('E') {
-                return Ok(YamlValue::Float(f));
+                return YamlValue::Float(f);
             }
         }
 
         // Plain string (unquoted).
-        Ok(YamlValue::Str(trimmed.to_string()))
+        YamlValue::Str(trimmed.to_string())
     }
 
     /// Process escape sequences in a double-quoted string.
@@ -1856,6 +1900,19 @@ fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    // A test that overflows, indexes out of range or unwraps a `None` should
+    // fail loudly and point at the line that did it — that is the diagnosis.
+    // The defensive lints exist to keep panics out of code that runs on a
+    // user's data, which this is not.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     // -- YAML parser: scalars -----------------------------------------------
@@ -2033,6 +2090,95 @@ mod tests {
         assert_eq!(val.get("key2").unwrap().as_str(), Some("value2"));
     }
 
+    // -- YAML parser: quoting, escapes and the structural characters ---------
+    //
+    // Three scanners share `QuoteState`, and mutating its escape test used to
+    // break no test at all: inverting the rule in all three places left the
+    // suite green. These pin it.
+
+    #[test]
+    fn a_hash_inside_a_quoted_value_is_not_a_comment() {
+        let val = YamlParser::parse("host: \"my # pc\"").unwrap();
+        assert_eq!(val.get("host").unwrap().as_str(), Some("my # pc"));
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_close_the_value() {
+        // The middle quote is escaped, so the value is still open when the `#`
+        // arrives and the `#` is data. Get this wrong and the tail of a
+        // password or a hostname silently disappears.
+        let yaml = "pw: \"a\\\" # b\"";
+        let val = YamlParser::parse(yaml).unwrap();
+        let got = val.get("pw").unwrap().as_str().unwrap();
+        assert!(
+            got.contains('#'),
+            "the hash was inside quotes and should have survived, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn a_colon_inside_a_quoted_value_does_not_split_the_key() {
+        let val = YamlParser::parse("url: \"http://x:80\"").unwrap();
+        assert_eq!(val.get("url").unwrap().as_str(), Some("http://x:80"));
+    }
+
+    #[test]
+    fn a_hash_without_leading_space_is_part_of_the_value() {
+        // `pass#word` is a legal unquoted scalar; only ` #` starts a comment.
+        let val = YamlParser::parse("pw: pass#word").unwrap();
+        assert_eq!(val.get("pw").unwrap().as_str(), Some("pass#word"));
+    }
+
+    #[test]
+    fn quote_state_reports_position_relative_to_quotes() {
+        // Directly, because the three callers only ever ask about `#` and `:`
+        // and so cannot observe every state this has.
+        let probe = |text: &str| -> Vec<bool> {
+            let bytes = text.as_bytes();
+            let mut q = QuoteState::default();
+            bytes
+                .iter()
+                .enumerate()
+                .map(|(i, &b)| q.step(bytes, i, b))
+                .collect()
+        };
+        // `a"b"c`: the opening quote and the quoted byte are inside; the
+        // closing quote is the position at which we are outside again.
+        assert_eq!(probe("a\"b\"c"), vec![true, false, false, true, true]);
+        // A single-quoted region behaves the same way.
+        assert_eq!(probe("a'b'c"), vec![true, false, false, true, true]);
+        // A double quote inside single quotes is just a character: the region
+        // stays open across it.
+        assert_eq!(probe("'\"'"), vec![false, false, true]);
+    }
+
+    #[test]
+    fn a_backslash_escapes_only_the_byte_right_after_it() {
+        assert!(
+            !QuoteState::is_escaped(b"\\", 0),
+            "nothing precedes index 0"
+        );
+        assert!(QuoteState::is_escaped(b"\\\"", 1), "the quote is escaped");
+        assert!(
+            !QuoteState::is_escaped(b"a\"\"", 2),
+            "a quote does not escape the next one"
+        );
+    }
+
+    #[test]
+    fn a_key_whose_value_sits_at_the_same_indent_is_not_its_child() {
+        // The nested-value test is `>` and not `>=`: a line at the parent's own
+        // indent is the next sibling, not the value. With `>=`, `b` would be
+        // swallowed as the value of `a` and vanish from the document.
+        let val = YamlParser::parse("a:\nb: 2").unwrap();
+        assert!(val.get("a").is_some(), "a should still be present");
+        assert_eq!(
+            val.get("b").unwrap().as_int(),
+            Some(2),
+            "b is a sibling of a, not its value"
+        );
+    }
+
     // -- YAML parser: multi-line strings ------------------------------------
 
     #[test]
@@ -2144,7 +2290,7 @@ users:
         assert!(
             errors
                 .iter()
-                .any(|e| { matches!(e, ConfigError::MissingField(f) if f.contains("/")) })
+                .any(|e| { matches!(e, ConfigError::MissingField(f) if f.contains('/')) })
         );
     }
 
@@ -2224,7 +2370,7 @@ users:
 
     #[test]
     fn config_validate_no_password_hash() {
-        let yaml = r#"hostname: test
+        let yaml = r"hostname: test
 locale: en_US.UTF-8
 timezone: America/Chicago
 disk:
@@ -2243,7 +2389,7 @@ disk:
       mount_point: /
 users:
   - username: admin
-"#;
+";
         let config = InstallConfig::from_yaml(yaml).unwrap();
         let errors = config.validate().unwrap_err();
         assert!(errors.iter().any(|e| {
@@ -2623,7 +2769,7 @@ users:
                 assert_eq!(s.address, "192.168.1.100/24");
                 assert_eq!(s.gateway, "192.168.1.1");
             }
-            _ => panic!("expected static network mode"),
+            NetworkMode::Dhcp => panic!("expected static network mode"),
         }
     }
 

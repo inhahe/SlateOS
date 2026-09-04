@@ -6,8 +6,6 @@
 //!   installer --plan <path.yaml>         Show install plan without executing
 //!   installer --generate-config          Output a sample YAML config to stdout
 
-#![allow(dead_code)]
-
 use std::env;
 use std::fs;
 use std::process;
@@ -15,6 +13,7 @@ use std::process;
 use installer::{InstallConfig, InstallPlan, generate_sample_config};
 
 /// CLI operating mode.
+#[derive(Debug)]
 enum Mode {
     /// Run a full unattended installation.
     Install(String),
@@ -50,44 +49,45 @@ fn main() {
     }
 }
 
-/// Parse command-line arguments into a `Mode`.
+/// Parse the real command line, reporting a usage error and exiting on one.
 fn parse_args() -> Mode {
     let args: Vec<String> = env::args().collect();
-
-    if args.len() < 2 {
-        return Mode::Help;
-    }
-
-    // The first real argument determines the mode.  Arguments that take a
-    // path consume args[2].
-    match args[1].as_str() {
-        "--help" | "-h" => Mode::Help,
-        "--generate-config" => Mode::GenerateConfig,
-        "--config" => {
-            let path = args.get(2).unwrap_or_else(|| {
-                eprintln!("error: --config requires a file path argument");
-                process::exit(1);
-            });
-            Mode::Install(path.clone())
-        }
-        "--validate" => {
-            let path = args.get(2).unwrap_or_else(|| {
-                eprintln!("error: --validate requires a file path argument");
-                process::exit(1);
-            });
-            Mode::Validate(path.clone())
-        }
-        "--plan" => {
-            let path = args.get(2).unwrap_or_else(|| {
-                eprintln!("error: --plan requires a file path argument");
-                process::exit(1);
-            });
-            Mode::Plan(path.clone())
-        }
-        other => {
-            eprintln!("error: unknown argument '{other}'");
+    match mode_from_args(&args) {
+        Ok(mode) => mode,
+        Err(msg) => {
+            eprintln!("error: {msg}");
             process::exit(1);
         }
+    }
+}
+
+/// Decide the mode from an argument vector, `argv[0]` included.
+///
+/// Split out from [`parse_args`] so it can be tested: the version that reads
+/// `env::args` and calls `process::exit` cannot be, and an argument parser that
+/// no test has ever run is exactly the kind of code that greets a user with the
+/// wrong mode.
+fn mode_from_args(args: &[String]) -> Result<Mode, String> {
+    // `get` rather than a length test plus an index: one expression that cannot
+    // disagree with itself. No argument at all is not an error — it is help.
+    let Some(first) = args.get(1) else {
+        return Ok(Mode::Help);
+    };
+
+    // Modes that take a path consume the next argument.
+    let path = |what: &str| -> Result<String, String> {
+        args.get(2)
+            .cloned()
+            .ok_or_else(|| format!("{what} requires a file path argument"))
+    };
+
+    match first.as_str() {
+        "--help" | "-h" => Ok(Mode::Help),
+        "--generate-config" => Ok(Mode::GenerateConfig),
+        "--config" => Ok(Mode::Install(path("--config")?)),
+        "--validate" => Ok(Mode::Validate(path("--validate")?)),
+        "--plan" => Ok(Mode::Plan(path("--plan")?)),
+        other => Err(format!("unknown argument '{other}'")),
     }
 }
 
@@ -250,4 +250,85 @@ fn cmd_install(path: &str) {
 
     println!();
     println!("Installation complete.");
+}
+
+#[cfg(test)]
+mod tests {
+    // A test that unwraps a failure should fail loudly at the line that did
+    // it — that is the diagnosis. The defensive lints exist to keep panics out
+    // of code that runs on a user's data, which this is not.
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use super::{Mode, mode_from_args};
+
+    fn argv(rest: &[&str]) -> Vec<String> {
+        std::iter::once("installer".to_string())
+            .chain(rest.iter().map(|s| (*s).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn no_arguments_is_help_and_not_an_error() {
+        // Running the installer with no arguments is how a user asks what it
+        // does, so it must not exit non-zero.
+        assert!(matches!(mode_from_args(&argv(&[])), Ok(Mode::Help)));
+    }
+
+    #[test]
+    fn both_spellings_of_help_are_accepted() {
+        assert!(matches!(mode_from_args(&argv(&["--help"])), Ok(Mode::Help)));
+        assert!(matches!(mode_from_args(&argv(&["-h"])), Ok(Mode::Help)));
+    }
+
+    #[test]
+    fn each_path_mode_keeps_its_own_path() {
+        // The three path modes differ only in the variant they build, which is
+        // exactly the kind of thing a copy-paste edit gets wrong silently.
+        for flag in ["--config", "--validate", "--plan"] {
+            let mode = mode_from_args(&argv(&[flag, "cfg.yaml"])).unwrap();
+            let got = match (flag, &mode) {
+                ("--config", Mode::Install(p))
+                | ("--validate", Mode::Validate(p))
+                | ("--plan", Mode::Plan(p)) => Some(p.as_str()),
+                _ => None,
+            };
+            assert_eq!(got, Some("cfg.yaml"), "{flag} built {mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_path_mode_without_a_path_names_the_flag_that_wanted_one() {
+        for flag in ["--config", "--validate", "--plan"] {
+            let err = mode_from_args(&argv(&[flag])).unwrap_err();
+            assert!(
+                err.contains(flag),
+                "the error for a missing path should name {flag}, said: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_config_takes_no_path() {
+        // It writes to stdout, so a stray second argument is not consumed and
+        // must not turn it into an install.
+        assert!(matches!(
+            mode_from_args(&argv(&["--generate-config", "ignored"])),
+            Ok(Mode::GenerateConfig)
+        ));
+    }
+
+    #[test]
+    fn an_unknown_flag_is_rejected_and_quoted_back() {
+        // Quoting matters: a mistyped flag with a trailing space reads as
+        // correct in an unquoted message.
+        let err = mode_from_args(&argv(&["--isntall"])).unwrap_err();
+        assert!(err.contains("'--isntall'"), "said: {err}");
+    }
+
+    #[test]
+    fn a_bare_path_is_rejected_rather_than_guessed_at() {
+        // `installer cfg.yaml` could plausibly mean install, but guessing at an
+        // unattended install of a whole disk is not a guess worth making.
+        assert!(mode_from_args(&argv(&["cfg.yaml"])).is_err());
+    }
 }

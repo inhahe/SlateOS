@@ -56801,6 +56801,51 @@ That entry's account of the `SKY` transposition names `gui/toolkit/src/theme.rs`
 among the files spelling `0x89DCEB`; as of today it spells nothing.
 ---
 
+### TD-C-A-KEY-NAME-TABLE-IS-PER-APP-AND-A-WRONG-ONE-FAILS-SILENTLY — 2026-09-04 — OPEN
+
+**In short.** Several apps handle keys by name — their handler takes a string
+like `"Enter"` or `"Down"` and matches on it. Wiring such an app to the
+compositor needs a small table turning a real key into one of those names, and
+**the names are not the same from one app to the next**: `apps/flashcards` spells
+the return key `"Enter"`, `apps/habits` spells it `"Return"`. A table that
+guesses wrong does not fail, warn, or log: the key simply does nothing, and
+every existing test still passes because they call the handler with strings
+directly and never go through the table.
+
+**It has already happened once.** Converting `apps/flashcards` on 2026-09-04, the
+table mapped the return key to `"Return"` while every match arm in that app says
+`"Enter"`. Enter did nothing in the deck list — the app's primary action. It was
+caught only because a new test pressed a real `Key::Enter` and asserted the view
+changed. Without that test the conversion would have shipped, green.
+
+**Why this is a category and not one mistake.** The trap has three properties
+that make it likely to recur:
+
+| | |
+|---|---|
+| the vocabulary is invisible | it exists only as string literals scattered through five `match` statements |
+| the failure is silent | an unmatched name falls into `_ => {}`, which is also how the app ignores keys it genuinely does not want |
+| the old tests cannot see it | they call `handle_key("Enter", …)` directly, below the table |
+
+**Proper fix, in preference order.**
+
+1. **Stop translating.** The handler should take the `KeyEvent`, as
+   `apps/procexplorer` and `apps/reminders` do. Then the compiler checks the
+   match, and there is no vocabulary to get wrong. This is the real fix and the
+   only one that removes the category.
+2. Failing that, **every conversion of a string-keyed app must include a test
+   that presses each named key as a real `Key` and asserts the effect** — not a
+   test that calls the handler with a string. That is what caught this one.
+3. A checker could compare the names a crate's table produces against the string
+   literals its `match` arms accept, and report names that no arm can ever
+   receive. That is mechanical and would have found this without a test.
+
+**Where it stands now.** `flashcards` is correct and covered. `habits` and
+`finance` were checked by hand on 2026-09-04: `habits` genuinely uses
+`"Return"`, and `finance` has no return-key action at all, so its mapping is
+inert rather than wrong. The remaining string-keyed apps have not been converted
+yet, and each is an opportunity to hit this again.
+
 ### TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH — 2026-09-04 — OPEN
 
 **In short.** The weather app's settings offer an update interval — "every 30
@@ -56936,17 +56981,17 @@ Production findings by lint:
 | `indexing_slicing` (slicing) | 15 |
 | everything else | 30 |
 
-**Ten crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
-`habits`, `markdowneditor`, `regextester`, `explorer`, `installer`, `finance`
-`weather` and `reminders` — taking **473 production findings out of the 588
-(80%)**. All but one were converted to `oswindow::app` in the same pass, since the trigger below says
-to take a crate's debt when converting it; `installer` is a CLI tool with no
-window, so it got the lint half alone.
+**Eleven crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
+`habits`, `markdowneditor`, `regextester`, `explorer`, `installer`, `finance`,
+`weather`, `reminders` and `flashcards` — taking **491 production findings out
+of the 588 (84%)**. All but one were converted to `oswindow::app` in the same
+pass, since the trigger below says to take a crate's debt when converting it;
+`installer` is a CLI tool with no window, so it got the lint half alone.
 
 Worst crates by *production* findings: ~~`paint` 135~~, ~~`soundrecorder` 55~~,
 ~~`habits` 43~~, ~~`markdowneditor` 40~~, ~~`regextester` 39~~, ~~`installer`
 33~~, ~~`explorer` 33~~, ~~`finance` 23~~, `metronome` 21, ~~`weather` 21~~,
-~~`reminders` 21~~.
+~~`reminders` 21~~, ~~`flashcards` 18~~.
 
 **`installer` had been reporting a count that was not its count.** Its
 `build.rs` embeds a Windows manifest and did so with an `expect`. Under

@@ -113052,3 +113052,79 @@ in `scripts/` and will look exactly like a passing gate, which is how this one
 survived being written into a decision record as a "yes". Every gate added from
 here is a coin flip on whether it grades anything, resolved only if someone
 happens to break its subject and look.
+
+## TD-A-A-KILLED-BOOT-TEST-LEAVES-NO-TRACE-WHERE-ANYONE-LOOKS-FOR-ONE (lane A, 2026-09-03)
+
+**In short:** if `run-timeout.py` kills a boot test for exceeding its budget,
+the run writes **no row** to `bench/boot-history.jsonl` — and the wrapper that
+launched it can still report a clean finish. So the two places a person
+actually looks (the task list, and the last row of the history file) both look
+exactly as they do when no boot test was ever started. Today one run was killed
+at 2400s, ~24 gates into the pre-build sweep, and I read the stale previous row
+as though it were the new verdict for several minutes before noticing the
+commit hash had not moved.
+
+**The rule this makes concrete, which `CLAUDE.md` already states:** read the
+verdict from the log and from `bench/boot-history.jsonl`, never from an exit
+code. What today adds is *how to tell a missing verdict from a passing one*,
+since a missing verdict is not an error message:
+
+| what you see | what it means |
+|---|---|
+| last row's `commit` == `git rev-parse --short HEAD` | this is your run's verdict |
+| last row's `commit` is an older commit | **your run produced no verdict**; the row belongs to someone else's run |
+| log's last line is `[run-timeout] TIMEOUT after Ns -- killing process tree` | killed; nothing was decided |
+
+Checking the commit hash is the cheap discriminator and I was not doing it.
+`ts` is not a substitute: another lane's run appends rows to the same file
+through the shared worktree history, so a *newer* timestamp does not mean a
+newer row of yours.
+
+**Why the budget was exceeded, as far as it is measured.** The pre-build gate
+sweep is 30 checkers, most of which walk all ~805 kernel source files, and it
+is **not serialised across lanes**. The cross-worktree boot lock
+(`scripts/boot-test.sh:6039`) is acquired *after* the build, deliberately —
+its own header explains that waiting inside the lock would idle while holding
+the one resource other lanes queue for. That is the right call for the lock,
+but it leaves the gate sweep and the `cargo` build entirely unserialised, and
+those are as CPU-bound as the QEMU phase the lock does cover.
+
+Measured on this host, `Logoplex3`, all on `lane-a`:
+
+| run | phase reached | elapsed |
+|---|---|---|
+| `e7d9573b9`, `5c3a57267` (history rows) | **whole run**, gates + build + QEMU | 530s, 537s |
+| today's killed run, another lane's boot test live throughout | gate ~24 of 30, **sweep only** | 2400s (killed) |
+| today's replacement run, same overlap | gate 12 of 30, **sweep only** | 840s |
+
+The sweep alone taking longer than two entire previous runs is the observation.
+Overlap with another lane is the obvious hypothesis and the timing fits, but
+**it is not proven**: I have no instrumented solo measurement of the sweep by
+itself to compare against, and the sweep also grew today (the two bash oracles
+were rewritten to shell out to bash far more often). Both changed at once,
+which is exactly the condition under which not to name a cause.
+
+**Proper fix, in the order I would do it.**
+
+1. **Make a killed run say so where the verdict lives.** The absence of a row
+   is currently indistinguishable from not having run. `boot-test.sh` cannot
+   write the row (it is dead), so the writer has to be the wrapper: have
+   `run-timeout.py` — or a thin boot-test-specific wrapper around it — append a
+   `{"verdict": "KILLED", "commit": …, "phase": <last `=== …` line seen>}` row
+   on exit 124. The `phase` field is the part worth having; "killed at gate 24"
+   and "killed in QEMU" are different bugs and the log is the only thing that
+   distinguishes them today.
+2. **Time the phases.** `boot-test.sh` prints `=== … ===` per gate but no
+   clock, so nobody can say what the sweep costs solo. Stamping each banner
+   with elapsed seconds costs nothing and would have answered the question
+   above rather than leaving it a hypothesis.
+3. **Only then** decide whether the sweep needs its own serialisation. It may
+   well not — extending the boot lock over the build would idle two lanes for
+   ~7 min each, which the lock's header already argues against — but the
+   decision needs (2) first.
+
+**If it is never fixed:** every boot test whose budget is a guess can end with
+no verdict and no visible complaint, and the stale last row of
+`boot-history.jsonl` will be read as the answer. That is the same shape as the
+entry above it: a thing that did not look, reported identically to a thing that
+looked and found nothing.

@@ -151,6 +151,22 @@ members = [
     # edge. The fix that does not end in a second parser of untrusted input is
     # the one that moves the first parser somewhere both callers can name it.
     "ziparchive",
+    # Reading and parsing `/proc` and `/sys`: the key-value files, the
+    # whitespace-separated ones, and the process walk. Requested by lane C in
+    # `requests/c-b-the-proc-readers-in-userspace-sysinfo-should-be-a-crate-both-sysinfos-can-use.md`.
+    # `userspace/sysinfo` read real data; `apps/sysinfo` displayed integer
+    # literals and a hardcoded uptime string, so the graphical program's only
+    # route to real numbers was a second parser of the kernel's interface,
+    # living in another lane's tree. Two parsers of `/proc/meminfo` in one
+    # repository is the arrangement where a format change fixes one program and
+    # not the other, and nobody notices, because both still produce numbers.
+    #
+    # The one `std` crate in this list, and unavoidably so: half of it is
+    # `std::fs`, and a `no_std` parser with no reader has nothing to parse in
+    # the one place the format is authoritative. It stays out of
+    # `default-members` for the usual reason -- the workspace-root target is
+    # x86_64-unknown-none, which has no `std` at all.
+    "procinfo",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

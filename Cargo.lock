@@ -13823,6 +13823,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "procinfo"
+version = "0.1.0"
+
+[[package]]
 name = "procreate-cli"
 version = "0.1.0"
 dependencies = [
@@ -17352,6 +17356,9 @@ dependencies = [
 [[package]]
 name = "sysinfo"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "sysinfo-app"

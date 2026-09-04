@@ -3,4 +3,14 @@ name = "sysinfo"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS system information utility — query hardware, OS, and runtime state"
+
+# The reading and parsing of `/proc` used to live in `src/main.rs`; it now
+# lives in `procinfo`, so that this program and `apps/sysinfo` parse the
+# kernel's files with one implementation rather than two. What is left here is
+# formatting: columns, headings, JSON. See `procinfo/src/lib.rs` and
+# `requests/c-b-the-proc-readers-in-userspace-sysinfo-should-be-a-crate-both-sysinfos-can-use.md`.
 [dependencies]
+procinfo = { path = "../../procinfo" }
+
+[lints]
+workspace = true

@@ -691,9 +691,9 @@ impl Document {
         let newlines = if self.lines.is_empty() {
             0
         } else {
-            self.lines.len() - 1
+            self.lines.len().saturating_sub(1)
         };
-        line_chars + newlines
+        line_chars.saturating_add(newlines)
     }
 
     /// Estimate reading time in minutes based on word count.
@@ -1208,8 +1208,11 @@ impl Document {
     pub fn ensure_cursor_visible(&mut self, visible_lines: usize) {
         if self.cursor_line < self.scroll_line {
             self.scroll_line = self.cursor_line;
-        } else if self.cursor_line >= self.scroll_line + visible_lines {
-            self.scroll_line = self.cursor_line - visible_lines + 1;
+        } else if self.cursor_line >= self.scroll_line.saturating_add(visible_lines) {
+            self.scroll_line = self
+                .cursor_line
+                .saturating_sub(visible_lines)
+                .saturating_add(1);
         }
     }
 }
@@ -1338,21 +1341,21 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
     while let Some(&line) = lines.get(idx) {
         // Blank line — skip.
         if line.trim().is_empty() {
-            idx += 1;
+            idx = idx.saturating_add(1);
             continue;
         }
 
         // Horizontal rule: ---, ***, ___ (3+ chars, optional spaces).
         if is_horizontal_rule(line) {
             blocks.push(MdBlock::HorizontalRule);
-            idx += 1;
+            idx = idx.saturating_add(1);
             continue;
         }
 
         // Heading: # through ######.
         if let Some(heading) = parse_heading(line) {
             blocks.push(heading);
-            idx += 1;
+            idx = idx.saturating_add(1);
             continue;
         }
 
@@ -1370,16 +1373,16 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
                 .to_string();
             let mut code_lines = Vec::new();
             let closing_fence: String = core::iter::repeat_n(fence_char, 3).collect();
-            idx += 1;
+            idx = idx.saturating_add(1);
             while let Some(&cl) = lines.get(idx) {
                 if cl.trim_start().starts_with(&closing_fence)
                     && cl.trim().chars().all(|c| c == fence_char)
                 {
-                    idx += 1;
+                    idx = idx.saturating_add(1);
                     break;
                 }
                 code_lines.push(cl);
-                idx += 1;
+                idx = idx.saturating_add(1);
             }
             blocks.push(MdBlock::CodeBlock {
                 language,
@@ -1401,7 +1404,7 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
                     .or_else(|| ql.strip_prefix('>'))
                     .unwrap_or(ql);
                 quote_lines.push(stripped);
-                idx += 1;
+                idx = idx.saturating_add(1);
             }
             let inner_text = quote_lines.join("\n");
             let children = parse_markdown(&inner_text);
@@ -1410,19 +1413,22 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
         }
 
         // Table: line contains | and the next line is a separator row.
-        if let Some(&separator) = lines.get(idx + 1).filter(|_| line.contains('|'))
+        if let Some(&separator) = idx
+            .checked_add(1)
+            .and_then(|n| lines.get(n))
+            .filter(|_| line.contains('|'))
             && is_table_separator(separator)
         {
             let headers = parse_table_row(line);
             let alignments = parse_table_alignments(separator);
-            idx += 2;
+            idx = idx.saturating_add(2);
             let mut rows = Vec::new();
             while let Some(&row) = lines
                 .get(idx)
                 .filter(|l| l.contains('|') && !l.trim().is_empty())
             {
                 rows.push(parse_table_row(row));
-                idx += 1;
+                idx = idx.saturating_add(1);
             }
             blocks.push(MdBlock::Table {
                 alignments,
@@ -1437,7 +1443,7 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
             let mut items = Vec::new();
             while let Some(&item) = lines.get(idx).filter(|l| is_unordered_list_start(l)) {
                 items.push(parse_list_item(item, false));
-                idx += 1;
+                idx = idx.saturating_add(1);
             }
             blocks.push(MdBlock::UnorderedList { items });
             continue;
@@ -1449,7 +1455,7 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
             let mut items = Vec::new();
             while let Some(&item) = lines.get(idx).filter(|l| is_ordered_list_start(l)) {
                 items.push(parse_list_item(item, true));
-                idx += 1;
+                idx = idx.saturating_add(1);
             }
             blocks.push(MdBlock::OrderedList {
                 start: start_num,
@@ -1465,7 +1471,7 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
             .filter(|l| !l.trim().is_empty() && !is_block_start(l))
         {
             para_lines.push(para);
-            idx += 1;
+            idx = idx.saturating_add(1);
         }
         if !para_lines.is_empty() {
             let text = para_lines.join(" ");
@@ -1913,7 +1919,11 @@ impl FindReplaceState {
     /// Move to the next match.
     pub fn next_match(&mut self) {
         if !self.matches.is_empty() {
-            self.current_match = (self.current_match + 1) % self.matches.len();
+            self.current_match = self
+                .current_match
+                .saturating_add(1)
+                .checked_rem(self.matches.len())
+                .unwrap_or(0);
         }
     }
 
@@ -2225,7 +2235,7 @@ pub struct HighlightSpan {
 pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     let trimmed = line.trim_start();
-    let indent_len = line.len() - trimmed.len();
+    let indent_len = line.len().saturating_sub(trimmed.len());
 
     // Heading lines: color the whole line.
     if trimmed.starts_with('#') {
@@ -2243,14 +2253,14 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
             // Hash marks get dimmed.
             spans.push(HighlightSpan {
                 start: indent_len,
-                end: indent_len + hashes,
+                end: indent_len.saturating_add(hashes),
                 color: OVERLAY0,
                 weight: FontWeightHint::Bold,
             });
             // The heading text.
-            if line.len() > indent_len + hashes {
+            if line.len() > indent_len.saturating_add(hashes) {
                 spans.push(HighlightSpan {
-                    start: indent_len + hashes,
+                    start: indent_len.saturating_add(hashes),
                     end: line.len(),
                     color: heading_color,
                     weight: FontWeightHint::Bold,
@@ -2275,13 +2285,13 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
     if trimmed.starts_with('>') {
         spans.push(HighlightSpan {
             start: indent_len,
-            end: indent_len + 1,
+            end: indent_len.saturating_add(1),
             color: BLUE,
             weight: FontWeightHint::Bold,
         });
-        if line.len() > indent_len + 1 {
+        if line.len() > indent_len.saturating_add(1) {
             spans.push(HighlightSpan {
-                start: indent_len + 1,
+                start: indent_len.saturating_add(1),
                 end: line.len(),
                 color: SUBTEXT0,
                 weight: FontWeightHint::Regular,
@@ -2303,7 +2313,7 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
 
     // List items: color the bullet/number.
     if is_unordered_list_start(line) {
-        let bullet_end = indent_len + 2;
+        let bullet_end = indent_len.saturating_add(2);
         spans.push(HighlightSpan {
             start: indent_len,
             end: bullet_end.min(line.len()),
@@ -2315,19 +2325,19 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
         if after_bullet.starts_with("[x] ") || after_bullet.starts_with("[X] ") {
             spans.push(HighlightSpan {
                 start: bullet_end,
-                end: bullet_end + 4,
+                end: bullet_end.saturating_add(4),
                 color: GREEN,
                 weight: FontWeightHint::Regular,
             });
-            highlight_inline_spans(line, bullet_end + 4, &mut spans);
+            highlight_inline_spans(line, bullet_end.saturating_add(4), &mut spans);
         } else if after_bullet.starts_with("[ ] ") {
             spans.push(HighlightSpan {
                 start: bullet_end,
-                end: bullet_end + 4,
+                end: bullet_end.saturating_add(4),
                 color: OVERLAY0,
                 weight: FontWeightHint::Regular,
             });
-            highlight_inline_spans(line, bullet_end + 4, &mut spans);
+            highlight_inline_spans(line, bullet_end.saturating_add(4), &mut spans);
         } else {
             highlight_inline_spans(line, bullet_end, &mut spans);
         }
@@ -2338,7 +2348,7 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
         let num_end = trimmed
             .find(|c: char| !c.is_ascii_digit() && c != '.' && c != ')')
             .unwrap_or(trimmed.len());
-        let abs_end = indent_len + num_end;
+        let abs_end = indent_len.saturating_add(num_end);
         spans.push(HighlightSpan {
             start: indent_len,
             end: abs_end.min(line.len()),
@@ -2660,7 +2670,7 @@ pub fn insert_code_block(doc: &mut Document) {
     let text = "```\n\n```";
     doc.insert_text(text);
     // Position cursor inside the code block.
-    doc.cursor_line = line + 1;
+    doc.cursor_line = line.saturating_add(1);
     doc.cursor_col = 0;
 }
 
@@ -2856,7 +2866,7 @@ pub fn render_editor(
         }
 
         // Line number.
-        let line_num_text = format!("{}", line_num + 1);
+        let line_num_text = format!("{}", line_num.saturating_add(1));
         let num_color = if line_num == doc.cursor_line {
             TEXT
         } else {
@@ -3228,7 +3238,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
         MdBlock::OrderedList { start, items } => {
             for (i, item) in items.iter().enumerate() {
                 if ctx.is_visible(LINE_HEIGHT) {
-                    let num_text = format!("{}.", start + i);
+                    let num_text = format!("{}.", start.saturating_add(i));
                     ctx.cmds.push(RenderCommand::Text {
                         x: ctx.x,
                         y: ctx.render_y(),
@@ -3356,7 +3366,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
             }
 
             // Table border.
-            let total_height = row_height * (1 + rows.len()) as f32 + 2.0;
+            let total_height = row_height * (rows.len().saturating_add(1)) as f32 + 2.0;
             let _ = alignments; // used for alignment but rendering simplified here
             ctx.cmds.push(RenderCommand::StrokeRect {
                 x: ctx.x,
@@ -3945,7 +3955,11 @@ pub fn render_status_bar(
         .get(doc.cursor_line)
         .and_then(|line| line.get(..doc.cursor_col.min(line.len())))
         .map_or(doc.cursor_col, |prefix| prefix.chars().count());
-    let pos_text = format!("Ln {}, Col {}", doc.cursor_line + 1, cursor_column + 1);
+    let pos_text = format!(
+        "Ln {}, Col {}",
+        doc.cursor_line.saturating_add(1),
+        cursor_column.saturating_add(1)
+    );
     cmds.push(RenderCommand::Text {
         x: x + 12.0,
         y: y + 5.0,
@@ -4192,7 +4206,7 @@ pub fn render_find_replace(
     } else {
         format!(
             "{} of {} matches",
-            state.current_match + 1,
+            state.current_match.saturating_add(1),
             state.matches.len()
         )
     };
@@ -4379,6 +4393,12 @@ pub fn render_template_chooser(x: f32, y: f32, width: f32, height: f32) -> Vec<R
 
 /// The full state of the markdown editor application.
 pub struct App {
+    /// Milliseconds seen since the last whole second was handed to autosave.
+    ///
+    /// `tick_autosave` counts in whole seconds and `Event::Tick` arrives in
+    /// milliseconds, so the remainder has to live somewhere or the interval
+    /// drifts long by up to a second per tick.
+    tick_ms_carry: u64,
     /// All open documents, and which one is in front.
     ///
     /// A `Vec<Document>` plus an `active_doc: usize` said the same thing but
@@ -4455,6 +4475,7 @@ impl App {
         let blocks = parse_markdown(&text);
         let toc = extract_toc(&text);
         Self {
+            tick_ms_carry: 0,
             documents: Tabs::with(doc),
             view_mode: ViewMode::Split,
             toc_visible: false,
@@ -4787,7 +4808,7 @@ impl App {
         let mut attempted = false;
         let mut failure = None;
         for doc in self.documents.iter_mut() {
-            doc.seconds_since_save += elapsed_seconds;
+            doc.seconds_since_save = doc.seconds_since_save.saturating_add(elapsed_seconds);
             if doc.modified
                 && doc.path.is_some()
                 && doc.seconds_since_save >= self.autosave_interval
@@ -4824,7 +4845,9 @@ impl App {
     }
 
     /// Render the full application frame.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Full window background.
@@ -5203,7 +5226,7 @@ impl App {
             cmds.push(RenderCommand::Text {
                 x: dx + 2.0,
                 y,
-                text: format!("#{}", i + 1),
+                text: format!("#{}", i.saturating_add(1)),
                 font_size: 9.0,
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
@@ -5456,11 +5479,183 @@ fn compute_visible_lines(app: &App) -> usize {
 // Entry point
 // ============================================================================
 
-fn main() {
-    let _app = App::new(1280.0, 800.0);
-    // In a real application, this would enter the event loop
-    // provided by the OS compositor/window system. The render()
-    // method produces RenderCommands for the compositor to draw.
+// ============================================================================
+// Compositor wiring
+// ============================================================================
+
+/// Translate a toolkit key event into this app's own vocabulary.
+///
+/// **The app declares its own `Key` and `Modifiers`**, a complete parallel
+/// input vocabulary beside `guitk::event`'s and the wire's — the same
+/// three-enums-for-one-concept the compositor client was rewritten to remove
+/// (`known-issues.md` → `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`, step (d½)).
+/// They are not collapsed here because `handle_key` and its several hundred
+/// lines of shortcut matching are the app's own logic and converting them is a
+/// separate change; this is the one place the two vocabularies meet, which is
+/// what makes that change possible later.
+///
+/// `text` is consulted before the key code for `Char`, so a shifted key and a
+/// dead-key sequence arrive correctly spelled — asking the enum for a letter
+/// cannot do that, and is what would make this the file to edit when
+/// `TD-ONLY-ONE-KEYBOARD-LAYOUT` is closed.
+fn translate_key(ev: &guitk::event::KeyEvent) -> Option<(Key, Modifiers)> {
+    use guitk::event::Key as GKey;
+    let key = match ev.key {
+        GKey::Enter => Key::Enter,
+        GKey::Backspace => Key::Backspace,
+        GKey::Delete => Key::Delete,
+        GKey::Up => Key::Up,
+        GKey::Down => Key::Down,
+        GKey::Left => Key::Left,
+        GKey::Right => Key::Right,
+        GKey::Home => Key::Home,
+        GKey::End => Key::End,
+        GKey::PageUp => Key::PageUp,
+        GKey::PageDown => Key::PageDown,
+        GKey::Tab => Key::Tab,
+        GKey::Escape => Key::Escape,
+        GKey::F1 => Key::Function(1),
+        GKey::F2 => Key::Function(2),
+        GKey::F3 => Key::Function(3),
+        GKey::F4 => Key::Function(4),
+        GKey::F5 => Key::Function(5),
+        GKey::F6 => Key::Function(6),
+        GKey::F7 => Key::Function(7),
+        GKey::F8 => Key::Function(8),
+        GKey::F9 => Key::Function(9),
+        GKey::F10 => Key::Function(10),
+        GKey::F11 => Key::Function(11),
+        GKey::F12 => Key::Function(12),
+        _ => Key::Char(printable(ev)?),
+    };
+    Some((
+        key,
+        Modifiers {
+            ctrl: ev.modifiers.ctrl,
+            shift: ev.modifiers.shift,
+            alt: ev.modifiers.alt,
+        },
+    ))
+}
+
+/// The character a keystroke produced, falling back to the letter its key
+/// names when a chord suppressed the text.
+///
+/// A chord produces no text on most layouts, so `Ctrl+S` would otherwise have
+/// no character at all and every shortcut in the app would be unreachable.
+fn printable(ev: &guitk::event::KeyEvent) -> Option<char> {
+    use guitk::event::Key as GKey;
+    if let Some(c) = ev.text.chars().next() {
+        return Some(c);
+    }
+    let c = match ev.key {
+        GKey::A => 'a',
+        GKey::B => 'b',
+        GKey::C => 'c',
+        GKey::D => 'd',
+        GKey::E => 'e',
+        GKey::F => 'f',
+        GKey::G => 'g',
+        GKey::H => 'h',
+        GKey::I => 'i',
+        GKey::J => 'j',
+        GKey::K => 'k',
+        GKey::L => 'l',
+        GKey::M => 'm',
+        GKey::N => 'n',
+        GKey::O => 'o',
+        GKey::P => 'p',
+        GKey::Q => 'q',
+        GKey::R => 'r',
+        GKey::S => 's',
+        GKey::T => 't',
+        GKey::U => 'u',
+        GKey::V => 'v',
+        GKey::W => 'w',
+        GKey::X => 'x',
+        GKey::Y => 'y',
+        GKey::Z => 'z',
+        GKey::Space => ' ',
+        _ => return None,
+    };
+    Some(c)
+}
+
+impl oswindow::app::App for App {
+    fn title(&self) -> String {
+        "Markdown Editor".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (self.window_width as u32, self.window_height as u32)
+    }
+
+    /// A clock only while autosave is on.
+    ///
+    /// `tick_autosave` returns immediately when it is off, so an unconditional
+    /// interval would wake the machine once a second to do nothing for as long
+    /// as the window is open. Returning `None` while it is *on* would ship an
+    /// autosave that never fires, with its tests still green — which is the
+    /// half `known-issues.md` lesson 47 is about.
+    ///
+    /// One second, because `tick_autosave` counts in whole seconds and a finer
+    /// clock would deliver fractions it discards.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        self.autosave_enabled
+            .then(|| std::time::Duration::from_secs(1))
+    }
+
+    fn on_event(&mut self, event: &guitk::event::Event) -> oswindow::app::Response {
+        use guitk::event::Event as GEvent;
+        use oswindow::app::Response;
+        match event {
+            GEvent::CloseRequested => Response::Exit,
+            GEvent::Resize { width, height } => {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                Response::Redraw
+            }
+            GEvent::Tick { elapsed_ms } => {
+                // Whole seconds, and the remainder is *kept*: dropping it makes
+                // the autosave interval drift long by up to a second per tick,
+                // which over an editing session is the difference between
+                // "every five minutes" and "eventually".
+                self.tick_ms_carry = self.tick_ms_carry.saturating_add(*elapsed_ms);
+                let secs = self.tick_ms_carry / 1000;
+                if secs > 0 {
+                    self.tick_ms_carry =
+                        self.tick_ms_carry.saturating_sub(secs.saturating_mul(1000));
+                    self.tick_autosave(secs);
+                    return Response::Redraw;
+                }
+                Response::Idle
+            }
+            GEvent::Key(key) if key.pressed => {
+                let Some((k, m)) = translate_key(key) else {
+                    return Response::Idle;
+                };
+                handle_key(self, k, m);
+                Response::Redraw
+            }
+            _ => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> guitk::render::RenderTree {
+        self.window_width = width;
+        self.window_height = height;
+        let mut tree = guitk::render::RenderTree::new();
+        tree.commands = self.render_commands();
+        tree
+    }
+}
+
+fn main() -> std::process::ExitCode {
+    oswindow::app::launch("markdowneditor", &mut App::new(1280.0, 800.0))
 }
 
 // ============================================================================
@@ -5469,7 +5664,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // A test that overflows or indexes out of range should fail loudly and
+    // point at the line that did it — that is the diagnosis. The defensive
+    // lints exist to keep panics out of code that runs on a user's data.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
 
     use super::*;
     use scratchdir::ScratchDir;
@@ -6277,7 +6482,7 @@ mod tests {
     #[test]
     fn test_find_empty_query() {
         let mut state = FindReplaceState::new();
-        state.query = "".to_string();
+        state.query = String::new();
         let lines = vec!["some text".to_string()];
         state.find_all(&lines);
         assert!(state.matches.is_empty());
@@ -6616,7 +6821,7 @@ mod tests {
         let mut doc = Document::new();
         insert_table(&mut doc);
         let text = doc.full_text();
-        assert!(text.contains("|"));
+        assert!(text.contains('|'));
         assert!(text.contains("Column 1"));
     }
 
@@ -6825,7 +7030,7 @@ mod tests {
     #[test]
     fn test_app_render_produces_commands() {
         let app = App::new(1280.0, 800.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -7925,5 +8130,126 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- Compositor wiring ---
+
+    use oswindow::app::App as _;
+
+    fn tick(ms: u64) -> guitk::event::Event {
+        guitk::event::Event::Tick { elapsed_ms: ms }
+    }
+
+    /// The autosave clock keeps its remainder between ticks.
+    ///
+    /// `tick_autosave` counts whole seconds and `Event::Tick` arrives in
+    /// milliseconds. Discarding the remainder makes the interval drift *long*
+    /// by up to a second per tick — over an editing session that is the
+    /// difference between "every five minutes" and "eventually", and it would
+    /// never show up as a failure, only as an autosave that feels unreliable.
+    #[test]
+    fn the_autosave_clock_keeps_its_remainder() {
+        let mut app = App::new(1280.0, 800.0);
+        app.autosave_enabled = true;
+
+        // Ten 100ms ticks are one second, not zero.
+        for _ in 0..10 {
+            app.on_event(&tick(100));
+        }
+        assert_eq!(
+            app.active_document().seconds_since_save,
+            1,
+            "ten 100ms ticks did not add up to a second"
+        );
+
+        // And the remainder carries: 1500ms then 600ms is two seconds, not one.
+        let mut app = App::new(1280.0, 800.0);
+        app.autosave_enabled = true;
+        app.on_event(&tick(1500));
+        app.on_event(&tick(600));
+        assert_eq!(
+            app.active_document().seconds_since_save,
+            2,
+            "the 500ms remainder was dropped"
+        );
+    }
+
+    /// A sub-second tick is not a repaint.
+    ///
+    /// Answering `Redraw` to every tick would redraw the whole editor ten times
+    /// a second to show a second counter that has not changed.
+    #[test]
+    fn a_tick_that_completes_no_second_asks_for_no_repaint() {
+        let mut app = App::new(1280.0, 800.0);
+        app.autosave_enabled = true;
+        assert_eq!(app.on_event(&tick(100)), oswindow::app::Response::Idle);
+        assert_eq!(app.on_event(&tick(900)), oswindow::app::Response::Redraw);
+    }
+
+    /// The clock is asked for only when autosave is on.
+    #[test]
+    fn the_clock_is_asked_for_only_when_autosave_is_on() {
+        let mut app = App::new(1280.0, 800.0);
+        app.autosave_enabled = false;
+        assert_eq!(app.tick_interval(), None);
+        app.autosave_enabled = true;
+        assert_eq!(app.tick_interval(), Some(std::time::Duration::from_secs(1)));
+    }
+
+    /// Every key this app's handlers understand has a toolkit key that reaches
+    /// it.
+    ///
+    /// The app declares its own `Key` enum — a parallel vocabulary — and a
+    /// variant with no translation is silently unreachable: the app looks like
+    /// it has no Home key rather than like it has a gap in a match.
+    #[test]
+    fn every_named_key_has_a_translation() {
+        use guitk::event::Key as GKey;
+        for (g, want) in [
+            (GKey::Enter, Key::Enter),
+            (GKey::Backspace, Key::Backspace),
+            (GKey::Delete, Key::Delete),
+            (GKey::Up, Key::Up),
+            (GKey::Down, Key::Down),
+            (GKey::Left, Key::Left),
+            (GKey::Right, Key::Right),
+            (GKey::Home, Key::Home),
+            (GKey::End, Key::End),
+            (GKey::PageUp, Key::PageUp),
+            (GKey::PageDown, Key::PageDown),
+            (GKey::Tab, Key::Tab),
+            (GKey::Escape, Key::Escape),
+            (GKey::F1, Key::Function(1)),
+            (GKey::F12, Key::Function(12)),
+        ] {
+            let ev = guitk::event::KeyEvent {
+                key: g,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::new(),
+            };
+            assert_eq!(
+                translate_key(&ev).map(|(k, _)| k),
+                Some(want),
+                "{g:?} did not translate to {want:?}"
+            );
+        }
+    }
+
+    /// A chord still carries its letter, though it produces no text.
+    ///
+    /// On most layouts `Ctrl+S` delivers an empty `text`, so a translation that
+    /// only read `text` would make every shortcut in the app unreachable.
+    #[test]
+    fn a_chord_carries_its_letter_despite_producing_no_text() {
+        let ev = guitk::event::KeyEvent {
+            key: guitk::event::Key::S,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        };
+        let (k, m) = translate_key(&ev).expect("Ctrl+S translates");
+        assert_eq!(k, Key::Char('s'));
+        assert!(m.ctrl, "the chord lost its modifier");
     }
 }

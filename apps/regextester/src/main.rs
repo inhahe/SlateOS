@@ -251,7 +251,9 @@ impl RegexCompiler {
                 // Copy branch nodes, adjusting indices
                 let offset = new_nodes.len().wrapping_sub(bstart);
                 for j in bstart..bend {
-                    let mut node = self.nodes[j].clone();
+                    let Some(mut node) = self.nodes.get(j).cloned() else {
+                        continue;
+                    };
                     adjust_node(&mut node, offset, bstart, bend);
                     new_nodes.push(node);
                 }
@@ -461,7 +463,11 @@ impl RegexCompiler {
         min: usize,
         max: Option<usize>,
     ) {
-        let atom_nodes: Vec<RegexNode> = self.nodes[atom_start..atom_end].to_vec();
+        let atom_nodes: Vec<RegexNode> = self
+            .nodes
+            .get(atom_start..atom_end)
+            .map(<[RegexNode]>::to_vec)
+            .unwrap_or_default();
         self.nodes.truncate(atom_start);
 
         // Required copies (min)
@@ -936,6 +942,15 @@ fn execute_regex(compiled: &CompiledRegex, input: &str, start_pos: usize) -> Opt
     best_match
 }
 
+// The NFA simulation indexes by *its own* program counter and thread index,
+// both of which it produces and bounds itself: `pc >= nodes.len()` is checked
+// at the head of the loop below, and every `pc` written afterwards is either
+// that one plus a step or a successor index the compiler emitted. Converting
+// each access to `get` would force an `else` branch at every step whose only
+// honest content is "this cannot happen because the loop head just checked" —
+// which is noise that hides the one place the invariant is actually
+// established. Same argument as `apps/paint`'s rasterizer.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn add_epsilon_threads(
     threads: &mut Vec<Thread>,
     nodes: &[RegexNode],
@@ -1054,7 +1069,7 @@ fn apply_replacement(input: &str, matches: &[RegexMatch], replacement: &str) -> 
 
     for m in matches {
         // Append text before this match
-        for &c in &chars[last_end..m.start] {
+        for &c in chars.get(last_end..m.start).unwrap_or_default() {
             result.push(c);
         }
 
@@ -1062,18 +1077,18 @@ fn apply_replacement(input: &str, matches: &[RegexMatch], replacement: &str) -> 
         let rep_chars: Vec<char> = replacement.chars().collect();
         let mut ri = 0;
         while ri < rep_chars.len() {
-            if rep_chars[ri] == '$' {
+            if rep_chars.get(ri) == Some(&'$') {
                 if let Some(&next) = rep_chars.get(ri.saturating_add(1))
                     && next.is_ascii_digit()
                 {
                     let group_idx = (next as usize).wrapping_sub('0' as usize);
                     if group_idx == 0 {
                         // $0 = entire match
-                        for &c in &chars[m.start..m.end] {
+                        for &c in chars.get(m.start..m.end).unwrap_or_default() {
                             result.push(c);
                         }
                     } else if let Some(Some((gs, ge))) = m.groups.get(group_idx) {
-                        for &c in &chars[*gs..*ge] {
+                        for &c in chars.get(*gs..*ge).unwrap_or_default() {
                             result.push(c);
                         }
                     }
@@ -1081,7 +1096,7 @@ fn apply_replacement(input: &str, matches: &[RegexMatch], replacement: &str) -> 
                     continue;
                 }
                 result.push('$');
-            } else if rep_chars[ri] == '\\' {
+            } else if rep_chars.get(ri) == Some(&'\\') {
                 if let Some(&next) = rep_chars.get(ri.saturating_add(1)) {
                     match next {
                         'n' => result.push('\n'),
@@ -1092,8 +1107,8 @@ fn apply_replacement(input: &str, matches: &[RegexMatch], replacement: &str) -> 
                     continue;
                 }
                 result.push('\\');
-            } else {
-                result.push(rep_chars[ri]);
+            } else if let Some(&c) = rep_chars.get(ri) {
+                result.push(c);
             }
             ri = ri.saturating_add(1);
         }
@@ -1102,7 +1117,7 @@ fn apply_replacement(input: &str, matches: &[RegexMatch], replacement: &str) -> 
     }
 
     // Append remaining text
-    for &c in &chars[last_end..] {
+    for &c in chars.get(last_end..).unwrap_or_default() {
         result.push(c);
     }
 
@@ -1119,7 +1134,9 @@ fn explain_regex(pattern: &str) -> Vec<String> {
     let mut i = 0;
 
     while i < chars.len() {
-        let c = chars[i];
+        let Some(&c) = chars.get(i) else {
+            break;
+        };
         match c {
             '^' => explanations.push("^  Start of string".into()),
             '$' => explanations.push("$  End of string".into()),
@@ -1168,8 +1185,8 @@ fn explain_regex(pattern: &str) -> Vec<String> {
                     i = i.saturating_add(1);
                 }
                 i = i.saturating_add(1);
-                while i < chars.len() && chars[i] != ']' {
-                    desc.push(chars[i]);
+                while let Some(&c) = chars.get(i).filter(|c| **c != ']') {
+                    desc.push(c);
                     i = i.saturating_add(1);
                 }
                 desc.push(']');
@@ -1206,8 +1223,8 @@ fn explain_regex(pattern: &str) -> Vec<String> {
                 let mut rep = String::from("{");
                 let start = i;
                 i = i.saturating_add(1);
-                while i < chars.len() && chars[i] != '}' {
-                    rep.push(chars[i]);
+                while let Some(&c) = chars.get(i).filter(|c| **c != '}') {
+                    rep.push(c);
                     i = i.saturating_add(1);
                 }
                 if i < chars.len() {
@@ -1450,6 +1467,17 @@ impl Default for RegexFlags {
 }
 
 struct App {
+    /// The window size as the compositor granted it.
+    ///
+    /// A field rather than the `self.window_width`/`self.window_height` constants the
+    /// layout used to read directly: a compositor may grant a size that was
+    /// never requested, and the first frame is drawn before any `Resize`
+    /// arrives — so an app that lays out against a constant draws its first
+    /// frame at the wrong width and never notices a resize at all.
+    window_width: f32,
+    /// See [`Self::window_width`].
+    window_height: f32,
+
     // Current state
     pattern: String,
     input_text: String,
@@ -1486,6 +1514,8 @@ impl App {
     fn new() -> Self {
         let library = built_in_patterns();
         Self {
+            window_width: WINDOW_WIDTH,
+            window_height: WINDOW_HEIGHT,
             pattern: String::new(),
             input_text: String::new(),
             replace_text: String::new(),
@@ -1554,7 +1584,10 @@ impl App {
             self.highlights.push(MatchHighlight {
                 start: m.start,
                 end: m.end,
-                group_index: match_colors[mi % match_colors.len()],
+                group_index: mi
+                    .checked_rem(match_colors.len())
+                    .and_then(|k| match_colors.get(k).copied())
+                    .unwrap_or(0),
             });
         }
 
@@ -1631,8 +1664,11 @@ impl App {
 
     fn next_match(&mut self) {
         if !self.matches.is_empty() {
-            self.current_match_index =
-                (self.current_match_index.saturating_add(1)) % self.matches.len();
+            self.current_match_index = self
+                .current_match_index
+                .saturating_add(1)
+                .checked_rem(self.matches.len())
+                .unwrap_or(0);
         }
     }
 
@@ -1677,15 +1713,17 @@ impl App {
         stats
     }
 
-    fn render(&self) -> Vec<RenderCommand> {
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`.
+    fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
+            width: self.window_width,
+            height: self.window_height,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1697,7 +1735,7 @@ impl App {
         match self.active_tab {
             ActiveTab::Tester => self.render_tester_tab(&mut cmds),
             ActiveTab::Library => self.render_library_tab(&mut cmds),
-            ActiveTab::Reference => Self::render_reference_tab(&mut cmds),
+            ActiveTab::Reference => self.render_reference_tab(&mut cmds),
         }
 
         cmds
@@ -1708,7 +1746,7 @@ impl App {
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: TOOLBAR_HEIGHT,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
@@ -1767,7 +1805,7 @@ impl App {
         }
 
         // Flags on the right
-        let flags_x = WINDOW_WIDTH - 250.0;
+        let flags_x = self.window_width - 250.0;
         let flag_items = [
             ("i", self.flags.case_insensitive, "Case insensitive"),
             ("g", self.flags.global, "Global"),
@@ -1805,7 +1843,7 @@ impl App {
                 self.matches.len()
             );
             cmds.push(RenderCommand::Text {
-                x: WINDOW_WIDTH - 100.0,
+                x: self.window_width - 100.0,
                 y: 15.0,
                 text: nav_text,
                 font_size: SMALL_TEXT,
@@ -1819,7 +1857,7 @@ impl App {
 
     fn render_tester_tab(&self, cmds: &mut Vec<RenderCommand>) {
         let content_y = TOOLBAR_HEIGHT + PADDING;
-        let content_height = WINDOW_HEIGHT - content_y - PADDING;
+        let content_height = self.window_height - content_y - PADDING;
 
         // Pattern input area
         let pattern_y = content_y;
@@ -1827,7 +1865,7 @@ impl App {
             cmds,
             PADDING,
             pattern_y,
-            WINDOW_WIDTH - 2.0 * PADDING,
+            self.window_width - 2.0 * PADDING,
             36.0,
             "Pattern:",
             &self.pattern,
@@ -1844,7 +1882,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 color: RED,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(WINDOW_WIDTH - 100.0),
+                max_width: Some(self.window_width - 100.0),
                 overflow: TextOverflow::Ellipsis,
             });
         } else if !self.pattern.is_empty() {
@@ -1855,7 +1893,7 @@ impl App {
                 font_size: SMALL_TEXT,
                 color: GREEN,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(WINDOW_WIDTH - 100.0),
+                max_width: Some(self.window_width - 100.0),
                 overflow: TextOverflow::Ellipsis,
             });
         }
@@ -1867,7 +1905,7 @@ impl App {
                 cmds,
                 PADDING,
                 next_y,
-                WINDOW_WIDTH - 2.0 * PADDING,
+                self.window_width - 2.0 * PADDING,
                 36.0,
                 "Replace:",
                 &self.replace_text,
@@ -1879,9 +1917,9 @@ impl App {
         // Split: left = input text, right = results
         let split_y = next_y + 4.0;
         let split_height = content_height - (split_y - content_y) - PADDING;
-        let left_width = (WINDOW_WIDTH - 3.0 * PADDING) * 0.55;
+        let left_width = (self.window_width - 3.0 * PADDING) * 0.55;
         let right_x = PADDING + left_width + PADDING;
-        let right_width = WINDOW_WIDTH - right_x - PADDING;
+        let right_width = self.window_width - right_x - PADDING;
 
         // Input text area
         self.render_text_area(
@@ -2076,7 +2114,7 @@ impl App {
         let mut char_offset = 0usize;
 
         for (li, line) in lines.iter().enumerate().skip(scroll).take(max_visible) {
-            let ly = body_y + 6.0 + ((li - scroll) as f32) * LINE_HEIGHT;
+            let ly = body_y + 6.0 + (li.saturating_sub(scroll) as f32) * LINE_HEIGHT;
 
             // Line number
             cmds.push(RenderCommand::Text {
@@ -2108,9 +2146,7 @@ impl App {
                 // the band right by one cell per extra byte.
                 let before = line.get(..hl_start).unwrap_or("");
                 let matched = line.get(hl_start..hl_end).unwrap_or("");
-                let hl_x = x
-                    + 40.0
-                    + text::measure(before, NORMAL_TEXT, FontWeightHint::Regular);
+                let hl_x = x + 40.0 + text::measure(before, NORMAL_TEXT, FontWeightHint::Regular);
                 let hl_w = text::measure(matched, NORMAL_TEXT, FontWeightHint::Regular);
 
                 cmds.push(RenderCommand::FillRect {
@@ -2124,8 +2160,13 @@ impl App {
             }
 
             // Line text
-            let display_line =
-                text::elide(line, text_width, "...", NORMAL_TEXT, FontWeightHint::Regular);
+            let display_line = text::elide(
+                line,
+                text_width,
+                "...",
+                NORMAL_TEXT,
+                FontWeightHint::Regular,
+            );
             cmds.push(RenderCommand::Text {
                 x: x + 40.0,
                 y: ly,
@@ -2293,7 +2334,7 @@ impl App {
             .skip(scroll)
             .take(max_visible)
         {
-            let row_y = y + 4.0 + ((mi - scroll) as f32) * LINE_HEIGHT * 2.0;
+            let row_y = y + 4.0 + (mi.saturating_sub(scroll) as f32) * LINE_HEIGHT * 2.0;
             let is_current = mi == self.current_match_index;
 
             // Highlight current match row
@@ -2321,7 +2362,9 @@ impl App {
             });
 
             // Matched text
-            let matched: String = input_chars[m.start..m.end.min(input_chars.len())]
+            let matched: String = input_chars
+                .get(m.start..m.end.min(input_chars.len()))
+                .unwrap_or_default()
                 .iter()
                 .take(40)
                 .collect();
@@ -2351,7 +2394,9 @@ impl App {
                     .skip(1) // skip group 0 (whole match)
                     .filter_map(|(gi, g)| {
                         g.map(|(gs, ge)| {
-                            let text: String = input_chars[gs..ge.min(input_chars.len())]
+                            let text: String = input_chars
+                                .get(gs..ge.min(input_chars.len()))
+                                .unwrap_or_default()
                                 .iter()
                                 .take(20)
                                 .collect();
@@ -2437,7 +2482,7 @@ impl App {
 
         for (vi, (original_idx, entry)) in filtered.iter().enumerate() {
             let row_y = list_y + (vi as f32) * 60.0;
-            if row_y > WINDOW_HEIGHT - 30.0 {
+            if row_y > self.window_height - 30.0 {
                 break;
             }
 
@@ -2447,7 +2492,7 @@ impl App {
             cmds.push(RenderCommand::FillRect {
                 x: PADDING,
                 y: row_y,
-                width: WINDOW_WIDTH - 2.0 * PADDING,
+                width: self.window_width - 2.0 * PADDING,
                 height: 54.0,
                 color: if selected { SURFACE0 } else { MANTLE },
                 corner_radii: CornerRadii::all(6.0),
@@ -2493,7 +2538,7 @@ impl App {
                 y: row_y + 30.0,
                 text: text::elide(
                     &entry.pattern,
-                    WINDOW_WIDTH - 40.0,
+                    self.window_width - 40.0,
                     "...",
                     SMALL_TEXT,
                     FontWeightHint::Regular,
@@ -2501,13 +2546,13 @@ impl App {
                 font_size: SMALL_TEXT,
                 color: SKY,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(WINDOW_WIDTH - 40.0),
+                max_width: Some(self.window_width - 40.0),
                 overflow: TextOverflow::Ellipsis,
             });
 
             // Description on right
             cmds.push(RenderCommand::Text {
-                x: WINDOW_WIDTH - 250.0,
+                x: self.window_width - 250.0,
                 y: row_y + 8.0,
                 text: entry.description.clone(),
                 font_size: SMALL_TEXT,
@@ -2520,7 +2565,7 @@ impl App {
 
         if filtered.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: WINDOW_WIDTH / 2.0 - 80.0,
+                x: self.window_width / 2.0 - 80.0,
                 y: list_y + 40.0,
                 text: "No patterns in this category".into(),
                 font_size: NORMAL_TEXT,
@@ -2532,16 +2577,16 @@ impl App {
         }
     }
 
-    fn render_reference_tab(cmds: &mut Vec<RenderCommand>) {
+    fn render_reference_tab(&self, cmds: &mut Vec<RenderCommand>) {
         let content_y = TOOLBAR_HEIGHT + PADDING;
-        let col_width = (WINDOW_WIDTH - 3.0 * PADDING) / 2.0;
+        let col_width = (self.window_width - 3.0 * PADDING) / 2.0;
 
         // Left column: Syntax reference
         cmds.push(RenderCommand::FillRect {
             x: PADDING,
             y: content_y,
             width: col_width,
-            height: WINDOW_HEIGHT - content_y - PADDING,
+            height: self.window_height - content_y - PADDING,
             color: MANTLE,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -2587,7 +2632,7 @@ impl App {
 
         for (si, (syntax, desc)) in syntax_items.iter().enumerate() {
             let sy = content_y + 36.0 + (si as f32) * LINE_HEIGHT;
-            if sy > WINDOW_HEIGHT - 30.0 {
+            if sy > self.window_height - 30.0 {
                 break;
             }
 
@@ -2619,7 +2664,7 @@ impl App {
             x: right_x,
             y: content_y,
             width: col_width,
-            height: WINDOW_HEIGHT - content_y - PADDING,
+            height: self.window_height - content_y - PADDING,
             color: MANTLE,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -2693,7 +2738,7 @@ impl App {
 
         for (ti, tip) in tips.iter().enumerate() {
             let ty = tips_y + 26.0 + (ti as f32) * LINE_HEIGHT;
-            if ty > WINDOW_HEIGHT - 30.0 {
+            if ty > self.window_height - 30.0 {
                 break;
             }
 
@@ -2709,17 +2754,136 @@ impl App {
             });
         }
     }
+
+    /// Route one event.
+    ///
+    /// **This app had no event handling of any kind until 2026-09-03**: `main`
+    /// built an `App`, rendered one frame and returned. `update_regex`,
+    /// `next_match`, `load_library_entry` and the rest were exercised only by
+    /// tests calling them directly, so nothing had ever established that a
+    /// keystroke could reach them.
+    ///
+    /// Returns whether anything changed, which `App::on_event` turns into a
+    /// repaint.
+    fn handle_event(&mut self, event: &guitk::event::Event) -> bool {
+        use guitk::event::Event as GEvent;
+        match event {
+            GEvent::Resize { width, height } => {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                true
+            }
+            GEvent::Key(key) if key.pressed => self.handle_key(key),
+            _ => false,
+        }
+    }
+
+    /// Keyboard handling.
+    ///
+    /// Typing goes to whichever field has focus, which is what makes this a
+    /// tester rather than a viewer: the pattern is recompiled on every edit, so
+    /// the match list under it follows the keystroke.
+    fn handle_key(&mut self, key: &guitk::event::KeyEvent) -> bool {
+        use guitk::event::Key as GKey;
+        match key.key {
+            GKey::Tab => {
+                // Cycles focus rather than inserting a tab: a regex tester's
+                // three fields are the whole interface, and Tab is how every
+                // form on every desktop moves between them.
+                self.active_field = match self.active_field {
+                    ActiveField::Pattern => ActiveField::Input,
+                    ActiveField::Input => ActiveField::Replace,
+                    ActiveField::Replace => ActiveField::Pattern,
+                };
+                true
+            }
+            GKey::Down => {
+                self.next_match();
+                true
+            }
+            GKey::Up => {
+                self.prev_match();
+                true
+            }
+            GKey::Backspace => {
+                let field = self.active_field_mut();
+                // `pop` and not `truncate(len - 1)`: a pattern can hold any
+                // character, and removing a byte would split a multi-byte one
+                // and panic on the next slice.
+                if field.pop().is_none() {
+                    return false;
+                }
+                self.update_regex();
+                true
+            }
+            _ => {
+                let Some(ch) = key.text.chars().next() else {
+                    return false;
+                };
+                if ch.is_control() {
+                    return false;
+                }
+                self.active_field_mut().push(ch);
+                self.update_regex();
+                true
+            }
+        }
+    }
+
+    /// The text of the field that currently has focus.
+    ///
+    /// One accessor rather than a `match` at each of the three call sites,
+    /// because three copies of "which field is focused" is three chances for
+    /// one of them to disagree with the renderer about where the caret is.
+    fn active_field_mut(&mut self) -> &mut String {
+        match self.active_field {
+            ActiveField::Pattern => &mut self.pattern,
+            ActiveField::Input => &mut self.input_text,
+            ActiveField::Replace => &mut self.replace_text,
+        }
+    }
 }
 
-// ============================================================================
-// Main
-// ============================================================================
+impl oswindow::app::App for App {
+    fn title(&self) -> String {
+        "Regex Tester".to_string()
+    }
 
-fn main() {
-    let app = App::new();
-    let _cmds = app.render();
-    // In the real OS, this would enter the GUI event loop
-    // For now, validate that rendering works
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &guitk::event::Event) -> oswindow::app::Response {
+        use oswindow::app::Response;
+        if matches!(event, guitk::event::Event::CloseRequested) {
+            return Response::Exit;
+        }
+        if self.handle_event(event) {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> guitk::render::RenderTree {
+        self.window_width = width;
+        self.window_height = height;
+        let mut tree = guitk::render::RenderTree::new();
+        tree.commands = self.render_commands();
+        tree
+    }
+
+    // No `tick_interval`: nothing here ages. A regex tester recompiles on a
+    // keystroke and has no animation, no playback and no timer — checked by
+    // grepping for `elapsed` and finding none.
+}
+
+fn main() -> std::process::ExitCode {
+    oswindow::app::launch("regextester", &mut App::new())
 }
 
 // ============================================================================
@@ -2728,6 +2892,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that overflows or indexes out of range should fail loudly and
+    // point at the line that did it — that is the diagnosis. The defensive
+    // lints exist to keep panics out of code that runs on a user's data.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     // --- Regex compilation tests ---
@@ -3382,7 +3558,7 @@ mod tests {
     #[test]
     fn test_app_render() {
         let app = App::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3391,15 +3567,15 @@ mod tests {
         let mut app = App::new();
 
         app.active_tab = ActiveTab::Tester;
-        let cmds1 = app.render();
+        let cmds1 = app.render_commands();
         assert!(!cmds1.is_empty());
 
         app.active_tab = ActiveTab::Library;
-        let cmds2 = app.render();
+        let cmds2 = app.render_commands();
         assert!(!cmds2.is_empty());
 
         app.active_tab = ActiveTab::Reference;
-        let cmds3 = app.render();
+        let cmds3 = app.render_commands();
         assert!(!cmds3.is_empty());
     }
 
@@ -3522,5 +3698,116 @@ mod tests {
         app.flags.case_insensitive = true;
         app.update_regex();
         assert!(app.matches.len() >= 2);
+    }
+
+    // --- Compositor wiring ---
+
+    use oswindow::app::App as _;
+
+    fn press(app: &mut App, k: guitk::event::Key, text: &str) -> bool {
+        app.handle_event(&guitk::event::Event::Key(guitk::event::KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: text.to_string(),
+        }))
+    }
+
+    /// Typing goes to the focused field and recompiles as it goes.
+    ///
+    /// This app had no event handling until 2026-09-03: `main` built an `App`,
+    /// rendered one frame and returned, so `update_regex` was exercised only by
+    /// tests calling it directly. Being able to *type* a pattern is the whole
+    /// application.
+    #[test]
+    fn typing_a_pattern_recompiles_it() {
+        let mut app = App::new();
+        app.active_field = ActiveField::Pattern;
+        for c in ['a', '+', 'b'] {
+            assert!(press(&mut app, guitk::event::Key::A, &c.to_string()));
+        }
+        assert_eq!(app.pattern, "a+b");
+        assert!(app.compiled.is_some(), "the pattern was not compiled");
+        assert!(app.compile_error.is_none());
+    }
+
+    /// Tab cycles the three fields rather than inserting a tab character.
+    #[test]
+    fn tab_cycles_the_fields() {
+        let mut app = App::new();
+        app.active_field = ActiveField::Pattern;
+        press(&mut app, guitk::event::Key::Tab, "");
+        assert_eq!(app.active_field, ActiveField::Input);
+        press(&mut app, guitk::event::Key::Tab, "");
+        assert_eq!(app.active_field, ActiveField::Replace);
+        press(&mut app, guitk::event::Key::Tab, "");
+        assert_eq!(app.active_field, ActiveField::Pattern);
+        assert!(
+            app.pattern.is_empty(),
+            "Tab typed a character into the field"
+        );
+    }
+
+    /// Backspace removes a whole character, not a byte.
+    ///
+    /// The field holds a regex, which may contain any character. Truncating by
+    /// one byte would split a multi-byte one and panic on the next slice — so
+    /// this is a crash test, not a cosmetic one.
+    #[test]
+    fn backspace_removes_a_whole_character() {
+        let mut app = App::new();
+        app.active_field = ActiveField::Input;
+        app.input_text = "aé".to_string();
+        assert!(press(&mut app, guitk::event::Key::Backspace, ""));
+        assert_eq!(app.input_text, "a");
+        assert!(press(&mut app, guitk::event::Key::Backspace, ""));
+        assert_eq!(app.input_text, "");
+        assert!(
+            !press(&mut app, guitk::event::Key::Backspace, ""),
+            "backspace on an empty field reported a change"
+        );
+    }
+
+    /// The size the compositor grants is the size the layout uses.
+    ///
+    /// The renderer read the `WINDOW_WIDTH`/`WINDOW_HEIGHT` constants directly
+    /// until 2026-09-03, so the first frame was laid out for 1100x750 whatever
+    /// the window actually was, and a resize changed nothing.
+    #[test]
+    fn the_layout_follows_the_granted_size() {
+        let mut app = App::new();
+        let _ = app.render(1600.0, 900.0);
+        assert_eq!(app.window_width, 1600.0);
+        assert_eq!(app.window_height, 900.0);
+
+        app.handle_event(&guitk::event::Event::Resize {
+            width: 800,
+            height: 600,
+        });
+        assert_eq!(app.window_width, 800.0);
+    }
+
+    /// Replacement still works after the indexing rewrite.
+    ///
+    /// `apply_replacement` walks the replacement string by index and had seven
+    /// bare `rep_chars[ri]`. The rewrite has to preserve `$1` group references
+    /// and backslash escapes, which is what this checks — the arithmetic being
+    /// right is not the same as the behaviour being unchanged.
+    #[test]
+    fn replacement_survives_the_bounds_rewrite() {
+        let mut app = App::new();
+        app.active_field = ActiveField::Pattern;
+        app.pattern = "(a)(b)".to_string();
+        app.input_text = "ab".to_string();
+        app.replace_text = "$2$1".to_string();
+        // The replace pane has to be open, or `update_regex` deliberately leaves
+        // `replace_result` empty — which is what this test first caught.
+        app.show_replace = true;
+        app.update_regex();
+        assert_eq!(
+            app.replace_result.as_deref(),
+            Some("ba"),
+            "group references did not survive"
+        );
     }
 }

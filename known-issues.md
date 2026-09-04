@@ -113330,6 +113330,80 @@ Two candidate follow-ups, in order:
    probably should — but that is a whole-tree normalisation touching all
    three lanes, so it wants a request rather than a unilateral commit.
 
+### Follow-up 1 is done: the writers, found — 2026-09-04
+
+Method: parse every `scripts/**/*.py` and report each `Path.write_text(...)`,
+`p.open("w"/"a")` and `open(p, "w"/"a")` that does **not** pass an explicit
+`newline=`. **79 sites in 28 scripts** — 40 `write_text`, 39 `open()`.
+
+47 of the 79 write into a `tempfile` directory. Of the remaining 32, three
+write files that are actually in the repository:
+
+| Site | Target | Tracked? | Declared `eol=lf`? |
+|---|---|---|---|
+| `check-selftest-reinit.py:327` | `scripts/selftest-reinit-baseline.txt`, on `--pin` | yes | **yes** |
+| `scan-orphan-modules.py:602` | `scripts/orphan-modules-baseline.txt`, on `pin` | yes | **yes** |
+| `strip-workspace-sections.py:80` | `{apps,userspace,gui,init,net}/*/Cargo.toml`, **in place** | yes | **no** |
+
+The first two are the exact signature of this entry: a declared-LF tracked file
+rewritten after checkout, with git silent about it. Both are `--pin` paths — run
+deliberately, then committed — which is precisely how a corrupted worktree
+survives a commit and still looks clean.
+
+The third is worse in kind and lower in risk. It is a `read_text` → `write_text`
+round trip, so it is **not idempotent on Windows**: the read normalises CRLF to
+`\n` and the write turns every `\n` back into CRLF, converting an LF file to CRLF
+whenever the script changes anything at all. It aims at `*.toml`, which is *not*
+declared `eol=lf`, so `check-eol.py` cannot see the damage it does. It is also
+**orphaned** — no reference to it exists anywhere under `scripts/`, nor in any
+tracked `.md`, `.txt`, `.sh` or `.toml` — and it is a one-shot migration script
+from the original workspace setup.
+
+**Another lane hit the same mechanism a fortnight earlier and did not find the
+writer either.** See
+`B-THE-FIXTURE-STAMP-HASHED-WORKTREE-BYTES-SO-IT-DID-NOT-SURVIVE-A-CHECKOUT`
+(lane B, 2026-08-16) above, under "How widespread the CRLF is, since the next
+reader will ask": a survey of 13,145
+tracked files in lane B's worktree found 70 CRLF files, *every one* a
+`services/*/build.py`, all attributed to "whatever generated those files in text
+mode". Lane B fixed the **consequence** — the hash rule — and the writer went on
+running. That is the argument for fixing writers instead of consequences: the
+consequence-fix protected hashing and left every other reader of raw bytes
+exposed, and on 2026-09-03 `shellcheck` was the reader that tripped.
+
+**One correction to lane B's reasoning, since it bears on follow-up 2.** That
+entry declines `.gitattributes` on the grounds that "a config that governs
+checkout cannot fix a file rewritten post-checkout". The premise is right and the
+conclusion does not follow, because prevention is not what the declaration buys.
+A declaration is what makes a file **visible to `check-eol.py`** — it is the
+difference between damage that is detected on the next build and damage that is
+detected never. `*.toml` being undeclared is exactly why
+`strip-workspace-sections.py` could corrupt every sub-crate manifest in silence.
+Declaration does not prevent; it makes prevention checkable.
+
+### The fix is a gate, not 79 edits
+
+Adding `newline=""` at 79 sites is correct at each site and protects nothing at
+site 80. The defect is not that 79 authors were careless — it is that **the most
+obvious API in the language is wrong by default on this platform**, so the fix
+has to be something that keeps being true. Planned, in this order:
+
+1. `scripts/check-text-mode-writes.py` — refuses any text-mode write under
+   `scripts/` that lacks an explicit `newline=`. The census above is already the
+   analysis; it only needs a verdict, a discovery floor and a `--self-test`.
+2. The 79 edits, to make that gate green.
+3. **Delete** `strip-workspace-sections.py` rather than repair it. It is orphaned
+   and one-shot; fixing a script nobody runs adds a maintained file for no
+   benefit, and leaving it fixed-but-unrun leaves a loaded gun with the safety on.
+
+The gate is deliberately **blanket** rather than scoped to sites that write
+tracked files, for three reasons: the destination usually cannot be resolved
+statically; a temp-dir write today becomes a repo write the moment someone reuses
+the helper; and a CRLF *fixture* makes a self-test behave differently on Windows
+from Linux, which is a real portability defect even when no tracked file is
+touched. `newline=""` costs nothing anywhere, so there is no scope worth arguing
+about.
+
 **If the residue is never addressed:** it is presently harmless — `rustc`
 accepts CRLF — so nothing is red. The cost is that the tree carries two
 line-ending conventions with no rule stating which is intended, and the

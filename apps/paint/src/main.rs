@@ -89,6 +89,38 @@ const LAYER_ROW_HEIGHT: f32 = 28.0;
 /// Maximum number of undo steps.
 const MAX_UNDO_STEPS: usize = 50;
 /// Default canvas width.
+/// The largest canvas this program will hold, per side.
+///
+/// **This is what makes the rasterizer's integer arithmetic total.** Those
+/// functions work in `i32` and take squares and doubled squares of radii —
+/// `rx * rx`, `py -= 2 * rx2` — and none of them checks, because a Bresenham
+/// step that saturated would draw the wrong shape silently rather than fail.
+/// The bound is what makes checking unnecessary: with every coordinate and
+/// radius under 16384, `rx * rx` is at most 2.7e8 and `2 * rx * rx` at most
+/// 5.4e8, against `i32::MAX` of 2.1e9 — a factor of four in hand.
+///
+/// 16384 because it is the texture limit of essentially every GPU this desktop
+/// could run on, so a canvas that fits here fits anywhere it could be shown.
+///
+/// It is enforced in exactly one place, [`PaintApp::set_canvas_size`], which is
+/// the only writer of `canvas_width`/`canvas_height`. Before that existed, the
+/// four sizing paths — new, resize, crop and BMP load — each wrote the fields
+/// directly and none of them bounded anything; `new_canvas(u32::MAX, u32::MAX)`
+/// was a legal call.
+const MAX_CANVAS_DIMENSION: u32 = 16_384;
+
+/// The largest canvas this program will *allocate*, in pixels.
+///
+/// [`MAX_CANVAS_DIMENSION`] bounds each side, which is what the rasterizer's
+/// arithmetic needs. It does not bound the memory: 16384 x 16384 is 268 million
+/// pixels and, at four bytes each, **a gigabyte per layer**. Two bounds because
+/// they answer two different questions, and the per-side one cannot answer this
+/// one without being set so low it refuses an ordinary scan.
+///
+/// 64 Mpx is 256 MB per layer, and admits 8192 x 8192 square or 16384 x 4096
+/// wide — larger than a 600 dpi A4 page, which is about 35 Mpx.
+const MAX_CANVAS_PIXELS: u64 = 64 << 20;
+
 const DEFAULT_CANVAS_WIDTH: u32 = 800;
 /// Default canvas height.
 const DEFAULT_CANVAS_HEIGHT: u32 = 600;
@@ -267,6 +299,11 @@ impl Default for BrushSettings {
 // ============================================================================
 
 /// Draws a line using Bresenham's algorithm.
+// Bounded by `MAX_CANVAS_DIMENSION`, which is what makes this total; see that
+// constant for the headroom arithmetic. Saturating here would be worse than
+// useless: a Bresenham step that saturated would draw a wrong shape in
+// silence, where the bound makes the wrong shape unreachable.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn draw_line(
     buf: &mut Canvas,
     x0: i32,
@@ -312,6 +349,11 @@ pub fn draw_line(
 }
 
 /// Draws a filled circle centered at (cx, cy) with given radius.
+// Bounded by `MAX_CANVAS_DIMENSION`, which is what makes this total; see that
+// constant for the headroom arithmetic. Saturating here would be worse than
+// useless: a Bresenham step that saturated would draw a wrong shape in
+// silence, where the bound makes the wrong shape unreachable.
+#[allow(clippy::arithmetic_side_effects)]
 fn draw_filled_circle_at(buf: &mut Canvas, cx: i32, cy: i32, radius: i32, color: Color) {
     let r2 = radius * radius;
     for dy in -radius..=radius {
@@ -328,6 +370,11 @@ fn draw_filled_circle_at(buf: &mut Canvas, cx: i32, cy: i32, radius: i32, color:
 }
 
 /// Draws an outlined rectangle on the pixel buffer.
+// Bounded by `MAX_CANVAS_DIMENSION`, which is what makes this total; see that
+// constant for the headroom arithmetic. Saturating here would be worse than
+// useless: a Bresenham step that saturated would draw a wrong shape in
+// silence, where the bound makes the wrong shape unreachable.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn draw_rect_outline(
     buf: &mut Canvas,
     x: i32,
@@ -346,6 +393,11 @@ pub fn draw_rect_outline(
 }
 
 /// Draws a filled rectangle on the pixel buffer.
+// Bounded by `MAX_CANVAS_DIMENSION`, which is what makes this total; see that
+// constant for the headroom arithmetic. Saturating here would be worse than
+// useless: a Bresenham step that saturated would draw a wrong shape in
+// silence, where the bound makes the wrong shape unreachable.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn draw_rect_filled(buf: &mut Canvas, x: i32, y: i32, w: i32, h: i32, color: Color) {
     for dy in 0..h {
         for dx in 0..w {
@@ -359,6 +411,11 @@ pub fn draw_rect_filled(buf: &mut Canvas, x: i32, y: i32, w: i32, h: i32, color:
 }
 
 /// Draws an outlined ellipse using the midpoint algorithm.
+// Bounded by `MAX_CANVAS_DIMENSION`, which is what makes this total; see that
+// constant for the headroom arithmetic. Saturating here would be worse than
+// useless: a Bresenham step that saturated would draw a wrong shape in
+// silence, where the bound makes the wrong shape unreachable.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn draw_ellipse_outline(
     buf: &mut Canvas,
     cx: i32,
@@ -412,6 +469,11 @@ pub fn draw_ellipse_outline(
 }
 
 /// Plots the four symmetrical points of an ellipse.
+// Bounded by `MAX_CANVAS_DIMENSION`, which is what makes this total; see that
+// constant for the headroom arithmetic. Saturating here would be worse than
+// useless: a Bresenham step that saturated would draw a wrong shape in
+// silence, where the bound makes the wrong shape unreachable.
+#[allow(clippy::arithmetic_side_effects)]
 fn plot_ellipse_points(
     buf: &mut Canvas,
     cx: i32,
@@ -440,6 +502,11 @@ fn plot_ellipse_points(
 }
 
 /// Draws a filled ellipse using horizontal scan lines.
+// Bounded by `MAX_CANVAS_DIMENSION`, which is what makes this total; see that
+// constant for the headroom arithmetic. Saturating here would be worse than
+// useless: a Bresenham step that saturated would draw a wrong shape in
+// silence, where the bound makes the wrong shape unreachable.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn draw_ellipse_filled(buf: &mut Canvas, cx: i32, cy: i32, rx: i32, ry: i32, color: Color) {
     if rx <= 0 || ry <= 0 {
         return;
@@ -463,6 +530,11 @@ pub fn draw_ellipse_filled(buf: &mut Canvas, cx: i32, cy: i32, rx: i32, ry: i32,
 // throughout the paint primitives — splitting these into a struct would just
 // shift the call-site verbosity without adding clarity.
 #[allow(clippy::too_many_arguments)]
+// Bounded by `MAX_CANVAS_DIMENSION`, which is what makes this total; see that
+// constant for the headroom arithmetic. Saturating here would be worse than
+// useless: a Bresenham step that saturated would draw a wrong shape in
+// silence, where the bound makes the wrong shape unreachable.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn draw_rounded_rect_outline(
     buf: &mut Canvas,
     x: i32,
@@ -491,6 +563,11 @@ pub fn draw_rounded_rect_outline(
 }
 
 /// Draws a filled rounded rectangle on the pixel buffer.
+// Bounded by `MAX_CANVAS_DIMENSION`, which is what makes this total; see that
+// constant for the headroom arithmetic. Saturating here would be worse than
+// useless: a Bresenham step that saturated would draw a wrong shape in
+// silence, where the bound makes the wrong shape unreachable.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn draw_rounded_rect_filled(
     buf: &mut Canvas,
     x: i32,
@@ -519,6 +596,11 @@ pub fn draw_rounded_rect_filled(
 // 8 args — same rationale as draw_rounded_rect_outline above (intrinsic
 // geometry signature, struct-bundling would only shift verbosity).
 #[allow(clippy::too_many_arguments)]
+// Bounded by `MAX_CANVAS_DIMENSION`, which is what makes this total; see that
+// constant for the headroom arithmetic. Saturating here would be worse than
+// useless: a Bresenham step that saturated would draw a wrong shape in
+// silence, where the bound makes the wrong shape unreachable.
+#[allow(clippy::arithmetic_side_effects)]
 fn draw_corner_arc(
     buf: &mut Canvas,
     cx: i32,
@@ -556,6 +638,11 @@ fn draw_corner_arc(
 }
 
 /// Fills a quarter circle. Quadrant: 0=bottom-right, 1=top-right, 2=top-left, 3=bottom-left.
+// Bounded by `MAX_CANVAS_DIMENSION`, which is what makes this total; see that
+// constant for the headroom arithmetic. Saturating here would be worse than
+// useless: a Bresenham step that saturated would draw a wrong shape in
+// silence, where the bound makes the wrong shape unreachable.
+#[allow(clippy::arithmetic_side_effects)]
 fn fill_quarter_circle(buf: &mut Canvas, cx: i32, cy: i32, r: i32, quadrant: u8, color: Color) {
     let r2 = r * r;
     for dy in 0..=r {
@@ -597,17 +684,21 @@ pub fn flood_fill(buf: &mut Canvas, start_x: u32, start_y: u32, fill_color: Colo
             }
             buf.set(px, py, fill_color);
 
-            if px > 0 {
-                stack.push((px - 1, py));
+            // Each neighbour is produced by the checked operation itself
+            // rather than by a `> 0` test on the line above it: `px` and `py`
+            // are unsigned, so the guard and the subtraction drifting apart is
+            // an underflow to four billion rather than a negative index.
+            if let Some(left) = px.checked_sub(1) {
+                stack.push((left, py));
             }
-            if px + 1 < buf.width() {
-                stack.push((px + 1, py));
+            if let Some(right) = px.checked_add(1).filter(|n| *n < buf.width()) {
+                stack.push((right, py));
             }
-            if py > 0 {
-                stack.push((px, py - 1));
+            if let Some(up) = py.checked_sub(1) {
+                stack.push((px, up));
             }
-            if py + 1 < buf.height() {
-                stack.push((px, py + 1));
+            if let Some(down) = py.checked_add(1).filter(|n| *n < buf.height()) {
+                stack.push((px, down));
             }
         }
     }
@@ -751,8 +842,8 @@ impl Selection {
     pub fn contains(&self, px: i32, py: i32) -> bool {
         px >= self.x
             && py >= self.y
-            && px < self.x + self.width as i32
-            && py < self.y + self.height as i32
+            && px < self.x.saturating_add(self.width as i32)
+            && py < self.y.saturating_add(self.height as i32)
     }
 }
 
@@ -916,10 +1007,10 @@ impl PolygonBuilder {
             // the slice it indexes.
             for (&(x0, y0), &(x1, y1)) in pts.iter().zip(pts.iter().cycle().skip(1)) {
                 if (y0 <= y && y1 > y) || (y1 <= y && y0 > y) {
-                    let dy = y1 - y0;
+                    let dy = y1.saturating_sub(y0);
                     if dy != 0 {
-                        let t = (y - y0) as f64 / dy as f64;
-                        let ix = x0 as f64 + t * (x1 - x0) as f64;
+                        let t = f64::from(y.saturating_sub(y0)) / f64::from(dy);
+                        let ix = f64::from(x0) + t * f64::from(x1.saturating_sub(x0));
                         intersections.push(ix as i32);
                     }
                 }
@@ -1030,9 +1121,9 @@ pub fn default_palette() -> Vec<Color> {
 pub fn encode_bmp(buf: &Canvas) -> Vec<u8> {
     let w = buf.width();
     let h = buf.height();
-    let row_size = w as usize * 4;
-    let pixel_data_size = row_size * h as usize;
-    let file_size = 54 + pixel_data_size;
+    let row_size = (w as usize).saturating_mul(4);
+    let pixel_data_size = row_size.saturating_mul(h as usize);
+    let file_size = pixel_data_size.saturating_add(54);
 
     let mut out = Vec::with_capacity(file_size);
 
@@ -1167,7 +1258,7 @@ impl TextInput {
     pub fn insert_char(&mut self, ch: char) {
         if self.cursor <= self.text.len() {
             self.text.insert(self.cursor, ch);
-            self.cursor += ch.len_utf8();
+            self.cursor = self.cursor.saturating_add(ch.len_utf8());
         }
     }
 
@@ -1209,7 +1300,7 @@ impl TextInput {
             self.cursor = self.text[self.cursor..]
                 .char_indices()
                 .nth(1)
-                .map(|(i, _)| self.cursor + i)
+                .map(|(i, _)| self.cursor.saturating_add(i))
                 .unwrap_or(self.text.len());
         }
     }
@@ -1457,8 +1548,8 @@ impl DragState {
     pub fn rect(&self) -> (i32, i32, u32, u32) {
         let x = self.start_x.min(self.current_x);
         let y = self.start_y.min(self.current_y);
-        let w = (self.start_x - self.current_x).unsigned_abs();
-        let h = (self.start_y - self.current_y).unsigned_abs();
+        let w = self.start_x.abs_diff(self.current_x);
+        let h = self.start_y.abs_diff(self.current_y);
         (x, y, w, h)
     }
 
@@ -1737,7 +1828,7 @@ impl PaintApp {
         // a dead-key sequence both arrive correctly spelled — which asking the
         // `Key` enum for a letter could not do.
         let typed = key.text.chars().next();
-        let Some(ch) = typed.or_else(|| match key.key {
+        let from_key = match key.key {
             // A chord produces no text on most layouts, so the shortcut keys
             // need their letter from the key itself.
             Key::A => Some('a'),
@@ -1757,10 +1848,54 @@ impl PaintApp {
             Key::Y => Some('y'),
             Key::Z => Some('z'),
             _ => None,
-        }) else {
+        };
+        let Some(ch) = typed.or(from_key) else {
             return false;
         };
         self.handle_key_press(ch, key.modifiers.ctrl, key.modifiers.shift)
+    }
+
+    /// Set the canvas dimensions, bounded.
+    ///
+    /// The only writer of `canvas_width` and `canvas_height`. Every sizing path
+    /// goes through here — new, resize, crop, and loading a BMP — so the bound
+    /// that [`MAX_CANVAS_DIMENSION`] documents holds for all of them rather
+    /// than for the ones someone remembered.
+    ///
+    /// The BMP path is why this is not merely tidiness: `decode_bmp` bounds its
+    /// dimensions against the file's own length, which is correct for the
+    /// decoder and still admits a very wide canvas from a very large file. A
+    /// 1 GB file can legitimately claim to be 256 million pixels across.
+    ///
+    /// Clamps rather than refuses: a canvas is not data the user typed, it is a
+    /// picture they are trying to open, and cropping it is a better answer than
+    /// declining to show it. Zero is raised to one for the same reason a zero
+    /// canvas is not a canvas.
+    /// Returns the dimensions it settled on, which callers must use for the
+    /// pixel buffers they allocate. Returning them rather than leaving callers
+    /// to read the fields back is not stylistic: `new_canvas` clamped the
+    /// fields and then allocated its layer from its own *arguments*, so a
+    /// `new_canvas(u32::MAX, u32::MAX)` asked for 687 GB and aborted the
+    /// process. Bounding the record of a size is not bounding the memory.
+    fn set_canvas_size(&mut self, width: u32, height: u32) -> (u32, u32) {
+        let mut w = width.clamp(1, MAX_CANVAS_DIMENSION);
+        let mut h = height.clamp(1, MAX_CANVAS_DIMENSION);
+        // Halve the longer side until the area fits. Halving rather than
+        // scaling to fit exactly, because it keeps the aspect ratio close and
+        // terminates in at most a handful of steps from any starting point.
+        while u64::from(w).saturating_mul(u64::from(h)) > MAX_CANVAS_PIXELS {
+            if w >= h {
+                w = (w / 2).max(1);
+            } else {
+                h = (h / 2).max(1);
+            }
+            if w == 1 && h == 1 {
+                break;
+            }
+        }
+        self.canvas_width = w;
+        self.canvas_height = h;
+        (w, h)
     }
 
     /// Converts canvas pixel coordinates to window (screen) coordinates.
@@ -1840,10 +1975,10 @@ impl PaintApp {
     /// Adds a new transparent layer above the active layer.
     pub fn add_layer(&mut self) {
         let idx = self.layers.len();
-        let name = format!("Layer {}", idx + 1);
+        let name = format!("Layer {}", idx.saturating_add(1));
         self.layers
             .push(Layer::new(name, self.canvas_width, self.canvas_height));
-        self.active_layer = self.layers.len() - 1;
+        self.active_layer = self.layers.len().saturating_sub(1);
     }
 
     /// Deletes the active layer. Cannot delete the last layer.
@@ -1865,9 +2000,10 @@ impl PaintApp {
 
     /// Moves the active layer up (towards the top). Returns true on success.
     pub fn move_layer_up(&mut self) -> bool {
-        if self.active_layer + 1 < self.layers.len() {
-            self.layers.swap(self.active_layer, self.active_layer + 1);
-            self.active_layer += 1;
+        let above = self.active_layer.saturating_add(1);
+        if above < self.layers.len() {
+            self.layers.swap(self.active_layer, above);
+            self.active_layer = above;
             true
         } else {
             false
@@ -1876,13 +2012,15 @@ impl PaintApp {
 
     /// Moves the active layer down (towards the bottom). Returns true on success.
     pub fn move_layer_down(&mut self) -> bool {
-        if self.active_layer > 0 {
-            self.layers.swap(self.active_layer, self.active_layer - 1);
-            self.active_layer -= 1;
-            true
-        } else {
-            false
-        }
+        // The `checked_sub` *is* the "is there a layer below" test, rather than
+        // a `> 0` on the line above it: two spellings of one condition is how
+        // they come apart.
+        let Some(below) = self.active_layer.checked_sub(1) else {
+            return false;
+        };
+        self.layers.swap(self.active_layer, below);
+        self.active_layer = below;
+        true
     }
 
     /// Merges the active layer down onto the layer below it.
@@ -2069,8 +2207,8 @@ impl PaintApp {
             if let Some(layer) = self.layers.get_mut(self.active_layer) {
                 for dy in 0..sh {
                     for dx in 0..sw {
-                        let px = sx + dx as i32;
-                        let py = sy + dy as i32;
+                        let px = sx.saturating_add(dx as i32);
+                        let py = sy.saturating_add(dy as i32);
                         if px >= 0 && py >= 0 {
                             layer.pixels.set(px as u32, py as u32, Color::TRANSPARENT);
                         }
@@ -2122,8 +2260,7 @@ impl PaintApp {
         for layer in &mut self.layers {
             layer.pixels = layer.pixels.copy_region(sx, sy, sw, sh);
         }
-        self.canvas_width = sw;
-        self.canvas_height = sh;
+        self.set_canvas_size(sw, sh);
         self.selection = None;
     }
 
@@ -2177,11 +2314,12 @@ impl PaintApp {
             return;
         }
         self.push_history("resize canvas");
+        // Settle the size *before* resizing the buffers, for the same reason:
+        // `resize_nearest` allocates from what it is given.
+        let (w, h) = self.set_canvas_size(new_width, new_height);
         for layer in &mut self.layers {
-            layer.pixels = layer.pixels.resize_nearest(new_width, new_height);
+            layer.pixels = layer.pixels.resize_nearest(w, h);
         }
-        self.canvas_width = new_width;
-        self.canvas_height = new_height;
     }
 
     // ========================================================================
@@ -2207,8 +2345,7 @@ impl PaintApp {
         let buf = decode_bmp(&data).ok_or_else(|| "Invalid BMP format".to_string())?;
 
         self.push_history("load BMP");
-        self.canvas_width = buf.width();
-        self.canvas_height = buf.height();
+        self.set_canvas_size(buf.width(), buf.height());
 
         // Replace all layers with a single background layer
         self.layers.clear();
@@ -2257,7 +2394,13 @@ impl PaintApp {
                         layer.pixels.set(canvas_x as u32, canvas_y as u32, color);
                     } else {
                         let half = (size / 2) as i32;
-                        let r2 = half * half;
+                        let r2 = half.saturating_mul(half);
+                        // Same argument as the rasterizer's: `half` is a brush
+                        // radius and the coordinates are bounded by
+                        // `MAX_CANVAS_DIMENSION`, so the squares and sums are
+                        // far inside `i32`. Saturating a coordinate here would
+                        // paint the wrong pixel rather than refuse.
+                        #[allow(clippy::arithmetic_side_effects)]
                         for dy in -half..=half {
                             for dx in -half..=half {
                                 if dx * dx + dy * dy <= r2 {
@@ -2409,8 +2552,8 @@ impl PaintApp {
             }
             Tool::Select if self.moving_selection => {
                 if let Some(sel) = &mut self.selection {
-                    sel.x += canvas_x - prev_x;
-                    sel.y += canvas_y - prev_y;
+                    sel.x = sel.x.saturating_add(canvas_x.saturating_sub(prev_x));
+                    sel.y = sel.y.saturating_add(canvas_y.saturating_sub(prev_y));
                 }
             }
             Tool::Line
@@ -2491,8 +2634,8 @@ impl PaintApp {
             Tool::Ellipse => {
                 let (rx, ry, rw, rh) = self.drag.rect();
                 if rw > 0 && rh > 0 {
-                    let cx = rx + rw as i32 / 2;
-                    let cy = ry + rh as i32 / 2;
+                    let cx = rx.saturating_add(rw as i32 / 2);
+                    let cy = ry.saturating_add(rh as i32 / 2);
                     let erx = rw as i32 / 2;
                     let ery = rh as i32 / 2;
                     let color = self.drawing_color();
@@ -3097,7 +3240,7 @@ impl PaintApp {
         let rows = (h / check_size).ceil() as u32;
         for row in 0..rows {
             for col in 0..cols {
-                if (row + col) % 2 == 1 {
+                if !row.saturating_add(col).is_multiple_of(2) {
                     cmds.push(RenderCommand::FillRect {
                         x: x + col as f32 * check_size,
                         y: y + row as f32 * check_size,
@@ -3140,7 +3283,7 @@ impl PaintApp {
                 if c.a == 0 {
                     // End current run if any
                     if let Some((start, run_color)) = run_start.take() {
-                        let run_len = px - start;
+                        let run_len = px.saturating_sub(start);
                         cmds.push(RenderCommand::FillRect {
                             x: base_x + start as f32 * z,
                             y: base_y + py as f32 * z,
@@ -3159,7 +3302,7 @@ impl PaintApp {
                     }
                     Some((start, run_color)) => {
                         // End previous run, start new one
-                        let run_len = px - start;
+                        let run_len = px.saturating_sub(start);
                         cmds.push(RenderCommand::FillRect {
                             x: base_x + start as f32 * z,
                             y: base_y + py as f32 * z,
@@ -3178,7 +3321,7 @@ impl PaintApp {
 
             // Flush last run
             if let Some((start, run_color)) = run_start {
-                let run_len = layer.pixels.width() - start;
+                let run_len = layer.pixels.width().saturating_sub(start);
                 cmds.push(RenderCommand::FillRect {
                     x: base_x + start as f32 * z,
                     y: base_y + py as f32 * z,
@@ -3455,7 +3598,8 @@ impl PaintApp {
         // Layer list
         let list_y = btn_y + 28.0;
         for (i, layer) in self.layers.iter().enumerate().rev() {
-            let ly = list_y + (self.layers.len() - 1 - i) as f32 * LAYER_ROW_HEIGHT;
+            let ly = list_y
+                + (self.layers.len().saturating_sub(1).saturating_sub(i)) as f32 * LAYER_ROW_HEIGHT;
             let is_active = i == self.active_layer;
 
             let bg = if is_active {
@@ -4144,8 +4288,8 @@ impl PaintApp {
                     if let Some(layer) = self.layers.get_mut(self.active_layer) {
                         for dy in 0..sh {
                             for dx in 0..sw {
-                                let px = sx + dx as i32;
-                                let py = sy + dy as i32;
+                                let px = sx.saturating_add(dx as i32);
+                                let py = sy.saturating_add(dy as i32);
                                 if px >= 0 && py >= 0 {
                                     layer.pixels.set(px as u32, py as u32, Color::TRANSPARENT);
                                 }
@@ -4193,13 +4337,14 @@ impl PaintApp {
     /// Creates a new blank canvas, discarding current content.
     pub fn new_canvas(&mut self, width: u32, height: u32) {
         self.push_history("new canvas");
-        self.canvas_width = width;
-        self.canvas_height = height;
+        // The settled size, not the arguments: allocating from the arguments is
+        // what made `new_canvas(u32::MAX, u32::MAX)` a 687 GB request.
+        let (w, h) = self.set_canvas_size(width, height);
         self.layers.clear();
         self.layers.push(Layer::with_background(
             "Background".to_string(),
-            width,
-            height,
+            w,
+            h,
             self.canvas_bg,
         ));
         self.active_layer = 0;
@@ -5929,11 +6074,11 @@ mod tests {
         let layer = app.layers.get(app.active_layer)?;
         let (w, h) = (layer.pixels.width(), layer.pixels.height());
         let mut bounds: Option<(u32, u32, u32, u32)> = None;
-        let mut count = 0;
+        let mut count = 0usize;
         for y in 0..h {
             for x in 0..w {
                 if layer.pixels.get(x, y).is_some_and(|c| c.a != 0) {
-                    count += 1;
+                    count = count.saturating_add(1);
                     bounds = Some(match bounds {
                         None => (x, y, x, y),
                         Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
@@ -6341,5 +6486,96 @@ mod tests {
             modifiers: guitk::event::Modifiers::ctrl(),
             text: String::new(),
         })));
+    }
+
+    /// The canvas is bounded, and every sizing path respects it.
+    ///
+    /// **This is the test the rasterizer's `#[allow(arithmetic_side_effects)]`
+    /// rests on.** Those functions take `rx * rx` and `py -= 2 * rx2` in `i32`
+    /// without checking, because a Bresenham step that saturated would draw a
+    /// wrong shape in silence. That is only safe while the inputs are bounded —
+    /// so if this test goes, the suppressions become unfounded rather than
+    /// merely untested.
+    ///
+    /// All four sizing paths are exercised, not just the obvious one: before
+    /// `set_canvas_size` existed each wrote `canvas_width`/`canvas_height`
+    /// directly and none bounded anything, so `new_canvas(u32::MAX, u32::MAX)`
+    /// was a legal call.
+    #[test]
+    fn no_sizing_path_can_exceed_the_canvas_bound() {
+        // New.
+        let mut app = PaintApp::new(1024.0, 768.0);
+        app.new_canvas(u32::MAX, u32::MAX);
+        assert!(app.canvas_width <= MAX_CANVAS_DIMENSION);
+        assert!(app.canvas_height <= MAX_CANVAS_DIMENSION);
+
+        // Resize.
+        let mut app = PaintApp::new(1024.0, 768.0);
+        app.resize_canvas(u32::MAX, 40);
+        assert!(app.canvas_width <= MAX_CANVAS_DIMENSION);
+        assert!(app.canvas_height >= 1);
+
+        // And the *area* is bounded too, which is the half that bounds the
+        // memory. Per-side alone admits 16384 x 16384 — a gigabyte per layer.
+        for (w, h) in [(u32::MAX, u32::MAX), (16_384, 16_384), (16_384, 9_000)] {
+            let mut app = PaintApp::new(1024.0, 768.0);
+            app.new_canvas(w, h);
+            let area = u64::from(app.canvas_width) * u64::from(app.canvas_height);
+            assert!(
+                area <= MAX_CANVAS_PIXELS,
+                "{w}x{h} settled at {}x{} = {area} pixels, over the cap",
+                app.canvas_width,
+                app.canvas_height
+            );
+        }
+
+        // And zero is raised rather than accepted: a canvas with no pixels is
+        // not a canvas, and every `for` over it would silently do nothing.
+        let mut app = PaintApp::new(1024.0, 768.0);
+        app.new_canvas(0, 0);
+        assert_eq!((app.canvas_width, app.canvas_height), (1, 1));
+    }
+
+    /// The bound leaves the rasterizer's arithmetic inside `i32`, with room.
+    ///
+    /// Stated as arithmetic rather than as prose so that raising
+    /// `MAX_CANVAS_DIMENSION` without re-reading the rasterizer fails here.
+    /// `2 * r * r` is the largest intermediate any of those functions forms —
+    /// the ellipse stepper's `py -= 2 * rx2`.
+    #[test]
+    fn the_canvas_bound_leaves_the_rasterizer_inside_i32() {
+        let r = i64::from(MAX_CANVAS_DIMENSION);
+        let worst = 2 * r * r;
+        assert!(
+            worst < i64::from(i32::MAX),
+            "a {MAX_CANVAS_DIMENSION}px canvas forms {worst}, over i32::MAX;              the rasterizer's arithmetic_side_effects suppressions no longer hold"
+        );
+    }
+
+    /// Moving a layer up and down are inverses, and neither runs off an end.
+    ///
+    /// `move_layer_down` used to be `if self.active_layer > 0 { ... - 1 }` —
+    /// the test and the subtraction two lines apart. It is one `checked_sub`
+    /// now, which *is* the "is there a layer below" question.
+    #[test]
+    fn moving_a_layer_stops_at_both_ends() {
+        let mut app = PaintApp::new(1024.0, 768.0);
+        app.add_layer();
+        app.add_layer();
+        let top = app.layers.len().saturating_sub(1);
+
+        app.active_layer = 0;
+        assert!(!app.move_layer_down(), "the bottom layer moved down");
+        assert_eq!(app.active_layer, 0);
+
+        app.active_layer = top;
+        assert!(!app.move_layer_up(), "the top layer moved up");
+        assert_eq!(app.active_layer, top);
+
+        app.active_layer = 1;
+        assert!(app.move_layer_up());
+        assert_eq!(app.active_layer, 2);
+        assert!(app.move_layer_down());
+        assert_eq!(app.active_layer, 1);
     }
 }

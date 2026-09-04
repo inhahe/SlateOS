@@ -4685,6 +4685,25 @@ check_production_unwrap() {
         return 0
     fi
 
+    # Graded against a real kernel file first, not a fixture string.  Every way
+    # this checker can break -- a test-scope detector that starts swallowing
+    # production scope, a `?` suffix rule that widens, a comment stripper that
+    # eats a line it should keep -- makes findings *disappear*, and it reports
+    # zero findings in the same words whether it looked or not.  The self-test
+    # picks a real `kernel/src/**.rs` with a production fn and a nested test fn,
+    # plants the site in each, and asserts which one is reported: a synthetic
+    # fixture would only prove the matcher works on input shaped the way I
+    # imagined, not that it is still attached to the code it claims to grade.
+    echo "=== Checking the production unwrap gate against a real kernel file ==="
+    if ! run_checker scan-unwrap-selftest "$py" "$PROJECT_ROOT/scripts/scan-unwrap.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The production unwrap gate no longer" >&2
+        echo "agrees with the kernel source it grades, so its verdict means" >&2
+        echo "nothing -- every failure mode it has empties its own finding set," >&2
+        echo "which it reports exactly the way it reports a clean tree." >&2
+        exit 1
+    fi
+
     echo "=== Checking for unwrap/expect in kernel production paths ==="
     if run_checker scan-unwrap "$py" "$PROJECT_ROOT/scripts/scan-unwrap.py" --summary; then
         return 0

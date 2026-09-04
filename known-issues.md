@@ -114057,9 +114057,9 @@ suite asserts it stays at one entry, that it never names a `scripts/` path, and
 that the directory still exists, so it cannot silently widen into a way of
 switching the gate off.
 
-## A-FIXTURE-CLEANUP-LEAVES-EMPTY-DIRECTORIES-IN-BUILD-AND-CANNOT-TELL-YOU (lane A, 2026-09-04)
+## A-FIXTURE-CLEANUP-LEAVES-EMPTY-DIRECTORIES-IN-BUILD-AND-CANNOT-TELL-YOU (lane A, 2026-09-04) — FIXED 2026-09-04
 
-**Status: OPEN.** Cosmetic today, but the mechanism is not, and the mechanism is
+**Status: FIXED the same day it was filed; see "Fixed, and the retry count settles the diagnosis" at the end. Filed as:** Cosmetic today, but the mechanism is not, and the mechanism is
 this file's recurring one.
 
 `build/` in the lane-A worktree currently holds **fourteen leaked directories**:
@@ -114181,3 +114181,58 @@ The three creation sites sit in helpers — `_run_clippy_gate` (`:506`),
 per test case, so the seven leaks are seven cases spread across the three, and
 repairing the three `mkdtemp`/`rmtree` pairs covers all of them. There is no
 fourth site: these are the only `mkdtemp(dir=…)` calls anywhere in `scripts/`.
+
+### Fixed, and the retry count settles the diagnosis — 2026-09-04
+
+All four steps landed, in the order the entry set out.
+
+1. `FIXTURE_PREFIX = "slateos-boot-test-fixture-"`, applied through a single
+   `new_fixture()` helper that replaces the three bare `mkdtemp(dir=build)`
+   calls.
+2. `drop_fixture()` replaces `shutil.rmtree(tmp, ignore_errors=True)`. It
+   retries the whole `rmtree` — not just the final `os.rmdir` — so a fixture
+   stuck on a *file* is retried too, sleeps `0.05 s × attempt` between tries,
+   bounds at ten, and records what each teardown cost. It still never raises:
+   a teardown that threw would fail a test that had already passed, which is
+   the one thing `ignore_errors=True` got right. The difference is that a
+   refusal is now recorded rather than discarded.
+3. `sweep_stale_fixtures()` runs first in `main()`, collecting anything an
+   earlier run could not — a suite killed by Ctrl-C or by `run-timeout.py`
+   firing never reaches its own `finally`. It announces itself only when it
+   finds something: a line that prints "0" on every clean run is a line nobody
+   reads on the run where it says 3.
+4. The twenty-one pre-fix leftovers are deleted. `build/tmp` — the real,
+   unrelated directory — was checked and left alone, which is the whole reason
+   step 1 had to come first.
+
+**The measurement the entry asked for.** The prediction was that a survivor
+after a sleeping retry would mean the milliseconds-long-window diagnosis was
+wrong. The first run under the fix reports:
+
+```
+fixture teardown: 11 removed, 7 needed a retry, worst 2 of 10 attempts
+```
+
+**Seven needed a retry, and the worst case was the second attempt** — one 50 ms
+sleep. Seven is exactly the number that used to leak per run, and eleven minus
+seven is exactly the four teardowns that never had a problem. So the diagnosis
+holds precisely: the handle is always still open when we first ask, and always
+released well before we ask again. Nothing leaked; the run left zero
+directories behind.
+
+**What did not change, deliberately.** A fixture that survives all ten attempts
+is reported as a named `WARNING` with its path, whether it still has contents,
+and the underlying `OSError` — but it does **not** fail the suite. It is not a
+`boot-test.sh` defect, and a red suite for a held file handle would be a flaky
+red that gets bypassed by habit, which is how this tree loses gates. The
+distance between that and the `ignore_errors=True` it replaces is the whole
+point: the old code produced *no output at all*, so twenty-one directories
+accumulated under a suite that printed `PASSED`. A named warning plus a sweep
+on the next run is visible, greppable, and self-clearing.
+
+**Still open, and out of scope here:** the other three `mkdtemp` calls in the
+file (`:166`, `:199`, `:351`) also pass `ignore_errors=True`, but they write to
+the *system* temp directory with explicit prefixes, so a leak there is the
+platform's to collect rather than debris in a directory people read. They were
+left alone rather than swept up silently, because whether they leak at all has
+not been measured and a fix to something unmeasured is a guess.

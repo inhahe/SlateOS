@@ -14618,6 +14618,8 @@ name = "reminders"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
+ "tzrules",
 ]
 
 [[package]]

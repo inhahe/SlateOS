@@ -111204,7 +111204,7 @@ read the disk:
 | Gate | Reads | How |
 |---|---|---|
 | 1 private-file | pushed tip | `git cat-file -e "$local_sha:$path"` |
-| 9 request-deletion | pushed tip | checker takes `--head "$sha"` |
+| 9 request-deletion | pushed tip | checker takes `--head "$sha"` — the *waiver* half only from 2026-09-04, see step 14 |
 | 7 rustfmt | pushed tip | mirror of pushed blobs — **fixed 2026-09-02** |
 | 2 unreachable-command | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 3 raced-global | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
@@ -111222,12 +111222,19 @@ by hand alongside the thing it describes will do this; what saves it is that
 step 3's `HEAD_GATES` is executable and cannot go stale the same way, which is
 why the backfill described there is worth more than this row is.
 
-The *conversion* half of this debt is therefore closed. The half that remains is
-step 4's, and it is not bookkeeping: gates 8 and 9 have no behavioural coverage
-at all. Both are wired correctly and both are asserted to be wired correctly,
-but nothing has ever pushed a fixture past either one, so there is no evidence
-that the flag changes what they *decide*. A checker can accept `--head`, be
-called with it correctly, and ignore it.
+The *conversion* half of this debt is therefore closed, and so, as of
+2026-09-04, is step 4's — **every converted gate now has behavioural cases**,
+checker-level and end-to-end (91 of them, across eight gates).
+
+The paragraph that stood here said gates 8 and 9 were "wired correctly and
+asserted to be wired correctly, but nothing has ever pushed a fixture past
+either one, so there is no evidence that the flag changes what they *decide*.
+A checker can accept `--head`, be called with it correctly, and ignore it."
+Both were then covered on the same day and **both came back red on the first
+run** — gate 8 over a missing baseline (step 13), gate 9 over a waiver read
+from the wrong tree (step 14). Neither defect was predicted; both were found by
+asking the gate a question with the commit and the worktree disagreeing. Two of
+two is a small sample and still the whole argument for step 4.
 
 Gate 7 is not on that list any more, and it is the proof the rest matter: it had
 exactly this defect and it published two unformatted commits (`861f4d80e`,
@@ -111280,11 +111287,22 @@ Unacceptable at the push boundary.
 
 ### What the proper fix looks like
 
-Give the checkers the seam gate 9's checker already has. `check-request-deletion.py`
-takes `--head <sha>` and reads blobs out of git rather than off the disk, and
-`test-pre-push-gates.py` has a test asserting it is passed (`gate 9 passes
---head so it judges the pushed commit`) — so the pattern, the precedent and even
-the regression test all exist. The work is:
+Give the checkers the seam gate 9's checker already has.
+`check-requests-not-deleted.py` takes `--head <sha>` and asks git about the
+pushed commit rather than about the disk, and `test-pre-push-gates.py` has a
+test asserting it is passed (`gate 9 passes --head so it judges the pushed
+commit`) — so the pattern, the precedent and even the regression test all
+exist. The work is:
+
+> **Correction, 2026-09-04 (step 14).** Two things in that paragraph were
+> wrong, and both mattered. The script is `check-requests-not-deleted.py`, not
+> `check-request-deletion.py` — a name typed from memory into the document that
+> nominates it as the model. And the precedent was only half a precedent: gate
+> 9 read its *deletions* from the commit and its *waivers* off the disk, so the
+> pattern being copied here had the very defect this task exists to remove. It
+> was found by writing gate 9's own behavioural cases, months of pushes after
+> the paragraph above called it the model to follow. A precedent nobody has
+> tested is a claim, not a precedent.
 
 1. ~~A shared helper — `scripts/gittree.py` — exposing `list(rev, pathspec)` and
    `read(rev, path)` over one long-lived `git cat-file --batch`, so N files cost
@@ -111385,10 +111403,12 @@ the regression test all exist. The work is:
    empty directories), and a fixture whose *directory name* contains the alias
    makes `"<alias>" in output` true while the gate has skipped — `_push` now
    redacts the fixture's paths so no case can pass that way.
-   **Gate 8 covered 2026-09-04** (step 13), which leaves **gate 9 as the only
-   converted gate with no behavioural case at all**. The per-gate floors in
-   `test-checkers-honour-head.py` are the live record of which gates are
-   covered; the count is 82 across seven gates.
+   **Gates 8 and 9 covered 2026-09-04** (steps 13 and 14), which completes the
+   set: **every converted gate now has behavioural cases, checker-level and
+   end-to-end.** The per-gate floors in `test-checkers-honour-head.py` are the
+   live record of which gates are covered, and they are executable, so unlike
+   the hand-maintained table in step 2 they cannot quietly go stale; the count
+   is 91 across eight gates.
 
 5. **The path scope itself had the same defect, one level up.** Six gates decide
    whether to run at all through the hook's `touches()` helper, which asked
@@ -111885,8 +111905,70 @@ the regression test all exist. The work is:
     `test-checkers-honour-head.py` now carries this history where the next
     person to add a gate will read it.
 
-    Gate 9 is now the only converted gate with no behavioural case at all, and
-    the same caveat applies to it verbatim.
+    Gate 9 was the only converted gate left with no behavioural case at all, and
+    the same caveat applied to it verbatim. Step 14 is what happened when it was
+    finally asked.
+
+14. **Gate 9 covered, 2026-09-04 — and its `--head` conversion turned out to
+    have carried only one of its two inputs.** Nine checker-level cases and
+    three end-to-end, written on the same day and for the same reason as gate
+    8's. One came back red on the first run:
+
+    ```
+    FAIL  gate 9: an uncommitted waiver does not excuse a committed deletion
+            got : 0
+            want: 1
+    ```
+
+    `check-requests-not-deleted.py` asks one question — "does this tree delete a
+    request it does not waive?" — and it has two inputs. `deleted_since` took
+    `head` in the 2026-09-02 conversion and read the deletions from the commit
+    being pushed. `load_allowlist` did not, and went on reading
+    `requests/.deletions-allowed` off the disk through a module-level
+    `ALLOWLIST` path bound at import time. So for two days the gate read its
+    deletions from the commit and its *permissions* from the working tree.
+
+    **That is a worse hole than the one `--head` was added to close.** The
+    staged-restore false negative at least leaves the file present somewhere; a
+    disk-only waiver leaves nothing at all. Write the basename into
+    `.deletions-allowed`, push the deletion, `git checkout` the waiver away, and
+    the request is gone from shared history with no record that an override was
+    ever claimed — which defeats the exact property the escape hatch is *for*,
+    since "a deliberate, reviewable act" is a claim about something published.
+    The hook already argued the point and enforced the wrong half of it: gate 9's
+    `touches` scope includes `requests/.deletions-allowed` so that "editing the
+    waiver list must be the push that re-verifies it". Re-verifying it against
+    the working tree's copy is not that.
+
+    Fixed by giving `load_allowlist` the same `head` parameter its sibling has,
+    reading the blob through `gittree.GitTree.read` — *not* `open_tree`: this is
+    one small file, and `RevTree` would build a `git ls-tree -r` index of all
+    13,821 paths (~3.8 s) on every push to answer about one path that is usually
+    absent. `GitTree.read` is the same seam without the index and already spells
+    absence as `None`. The parse was split into `_parse_allowlist` so a waiver
+    cannot mean one thing on the disk and another in a commit, and the
+    module-level `ALLOWLIST` path became a repo-relative `ALLOWLIST_REL`
+    constant — a `ROOT /` path can only ever name the disk, and it was also the
+    second global the self-test had to repoint, which is one more way for a
+    fixture to read the real repository.
+
+    Note the asymmetry with gate 8, since it is deliberate: an absent allowlist
+    waives nothing and so fails *toward strict*, whereas an absent
+    `quote-names-baseline.txt` would forgive nothing and therefore accuse
+    everything. That is why gate 8 refuses to return a verdict without its file
+    (step 13) and gate 9 is content to carry on without its own.
+
+    Four self-test cases pin the provenance: an uncommitted waiver is invisible
+    to `--head`; a committed one is not (the control, without which a reader
+    returning `{}` for every revision would pass while refusing every legitimate
+    sweep); a waiver is not backdated onto the commit before it; and a tree with
+    no allowlist waives nothing.
+
+    Gate 9's end-to-end cases are worth their cost for a reason unique to it: it
+    is the only gate in the hook that calls its checker **once per pushed sha**,
+    so it has a failure mode no other gate's case can see — a `$pushed_shas`
+    loop that iterates zero times prints nothing, refuses nothing, and still
+    reports the gate as having run.
 
 ### Why it is not done yet
 

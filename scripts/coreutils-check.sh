@@ -105,10 +105,16 @@
 #
 # ## Usage
 #
-#     scripts/coreutils-check.sh [-p PKG]... [--only host|linux]
+#     scripts/coreutils-check.sh [-p PKG]... [--dir DIR]... [--only host|linux]
 #                                [--no-clippy] [--no-test] [--] [cargo args...]
 #
-# Defaults: `-p coreutils`, both targets, clippy and test both run.
+# `--dir` names a crate by where it lives instead of what it is called, and is
+# for callers that have a path and not a name -- pre-push gate 12 derives its
+# scope from the files a push changed. The two may be mixed, and a crate named
+# both ways is compiled once.
+#
+# Defaults: `-p coreutils` (only when neither -p nor --dir was given), both
+# targets, clippy and test both run.
 # Trailing arguments after `--` are appended to every cargo invocation, which
 # is how you narrow a run to one module (`-- dirfd`) while iterating.
 #
@@ -155,6 +161,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
 
 pkgs=()
+dirs=()
 only=both
 run_clippy=1
 run_test=1
@@ -163,6 +170,14 @@ extra=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -p|--package) pkgs+=("$2"); shift 2 ;;
+    # `--dir` exists for callers that know a *path* and not a package name --
+    # pre-push gate 12 derives its scope from the files a push changed, and
+    # `userspace/ssh-keygen/src/main.rs` says which directory changed and
+    # nothing about what the crate there is called. Resolving that here rather
+    # than in the caller keeps one implementation of "what package lives in
+    # this directory"; a second one in the hook would be a second thing to be
+    # wrong the first time a crate's name stops matching its folder.
+    --dir) dirs+=("$2"); shift 2 ;;
     --only) only="$2"; shift 2 ;;
     --no-clippy) run_clippy=0; shift ;;
     --no-test) run_test=0; shift ;;
@@ -173,7 +188,6 @@ while [ $# -gt 0 ]; do
     *) echo "coreutils-check: unknown argument: $1" >&2; exit 64 ;;
   esac
 done
-if [ ${#pkgs[@]} -eq 0 ]; then pkgs=(coreutils); fi
 case "$only" in
   both|host|linux) ;;
   *) echo "coreutils-check: --only takes host, linux or both" >&2; exit 64 ;;
@@ -288,6 +302,36 @@ $(cd "$root" && all_manifests | tr '\n' '\0' | xargs -0 --no-run-if-empty \
 EOF
   return 1
 }
+
+# `--dir` resolved, now that `manifest_name` exists. A directory that holds no
+# manifest, or a manifest that is a workspace rather than a package, is a usage
+# error and not a quiet omission: the caller believed there was a crate there,
+# and dropping it silently would shrink the checked set without saying so --
+# which is the shape of defect this whole script was written against.
+for d in ${dirs[@]+"${dirs[@]}"}; do
+  case "$d" in /*|?:[/\\]*) mf_dir=$d ;; *) mf_dir="$root/$d" ;; esac
+  if [ ! -f "$mf_dir/Cargo.toml" ]; then
+    echo "coreutils-check: --dir '$d' has no Cargo.toml; nothing ran." >&2
+    exit 64
+  fi
+  n=$(manifest_name "$mf_dir/Cargo.toml")
+  if [ -z "$n" ]; then
+    echo "coreutils-check: --dir '$d' has a Cargo.toml with no [package] name," >&2
+    echo "  so it is a workspace and not a crate. Nothing ran." >&2
+    exit 64
+  fi
+  pkgs+=("$n")
+done
+
+# The `-p coreutils` default belongs after `--dir` resolution, not before it:
+# applied at parse time it would silently add coreutils to every `--dir` run.
+if [ ${#pkgs[@]} -eq 0 ]; then pkgs=(coreutils); fi
+
+# Two spellings of the same crate -- `-p stat --dir userspace/stat`, or a push
+# that changed two files in one directory -- must not compile it twice.
+if [ ${#pkgs[@]} -gt 1 ]; then
+  mapfile -t pkgs < <(printf '%s\n' "${pkgs[@]}" | awk '!seen[$0]++')
+fi
 
 pkg_has_lib() {
   local dir

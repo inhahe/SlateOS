@@ -2393,6 +2393,39 @@ invocation in all three worktrees. The profiling is written up in
 `requests/a-b-wiring-check-selftest-reinit-and-a-correction-it-runs-nowhere.md`
 §5 and `requests/a-c-i-wired-three-of-your-gates-fixtures-not-their-checks.md`.
 
+### 2026-09-04 — a second symptom, and this one is not just slowness
+
+The case above rests entirely on *time*: everything is slower than it should
+be. There is now a second, independent symptom of the same suspected cause, and
+it leaves visible debris rather than merely costing seconds.
+
+`build/` in the lane-A worktree holds **fourteen empty directories** — leftover
+test fixtures, seven from each of two runs of `scripts/test-boot-test.py` on
+2026-09-04. Empty is the whole point: the cleanup code deleted everything
+*inside* each directory successfully and then failed to delete the now-empty
+directory itself. On Windows that failure has essentially one cause — something
+else still had the directory open for the fraction of a second after its last
+file went away. A file scanner inspecting each file as it is touched is exactly
+such a something, and it is the same drive, the same tree, and the same
+suspected program as the 70 ms-per-open measurement above.
+
+Why this matters for *this* decision rather than being a separate bug: it moves
+the cost of leaving the setting alone out of the "everything is a bit slower"
+column. The slowness is invisible and uniform; this is a concrete, accumulating
+mess in the directory people look in first when a boot test misbehaves, growing
+seven entries per suite run with no upper bound. It also raises the prior on
+option 1 or 2 actually working, because it is a *behavioural* fingerprint
+(a held handle) rather than a timing one, and timing arguments always leave
+room for "maybe the disk is just slow".
+
+It does **not** change the recommendation, and it must not be read as a reason
+to rush the setting. The retry loop that makes the cleanup robust is correct
+whether or not an exclusion is ever added — code that assumes no scanner is
+running is wrong on any Windows machine, and that fix is filed separately as
+`A-FIXTURE-CLEANUP-LEAVES-EMPTY-DIRECTORIES-IN-BUILD-AND-CANNOT-TELL-YOU` in
+`known-issues.md`. The point here is only that the evidence for the diagnosis is
+now of two different kinds instead of one.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

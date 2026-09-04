@@ -128,7 +128,7 @@ impl OperationProgress {
             self.bytes_per_sec = (self.copied_bytes as f64 / self.elapsed_secs) as u64;
         }
         if self.bytes_per_sec > 0 && self.total_bytes > self.copied_bytes {
-            let remaining = self.total_bytes - self.copied_bytes;
+            let remaining = self.total_bytes.saturating_sub(self.copied_bytes);
             self.eta_secs = remaining as f64 / self.bytes_per_sec as f64;
         } else {
             self.eta_secs = 0.0;
@@ -762,7 +762,7 @@ impl OperationExecutor {
             // Skip actions already completed in a previous (interrupted) run.
             if journal.is_complete(action.index) {
                 if !action.is_dir {
-                    self.progress.completed_files += 1;
+                    self.progress.completed_files = self.progress.completed_files.saturating_add(1);
                     self.progress.copied_bytes =
                         self.progress.copied_bytes.saturating_add(action.size);
                 }
@@ -786,7 +786,8 @@ impl OperationExecutor {
                     // resume, which is why it does not abort the operation.
                     let _ = journal.mark_complete(action.index);
                     if !action.is_dir {
-                        self.progress.completed_files += 1;
+                        self.progress.completed_files =
+                            self.progress.completed_files.saturating_add(1);
                         self.progress.copied_bytes =
                             self.progress.copied_bytes.saturating_add(action.size);
                     }
@@ -795,9 +796,10 @@ impl OperationExecutor {
                     // Recorded as a *skip*: nothing was copied, so a Move must
                     // not delete this source. See `OperationJournal`.
                     let _ = journal.mark_skipped(action.index);
-                    self.skipped += 1;
+                    self.skipped = self.skipped.saturating_add(1);
                     if !action.is_dir {
-                        self.progress.completed_files += 1;
+                        self.progress.completed_files =
+                            self.progress.completed_files.saturating_add(1);
                         // Count skipped bytes in progress so ETA stays accurate.
                         self.progress.copied_bytes =
                             self.progress.copied_bytes.saturating_add(action.size);
@@ -820,7 +822,7 @@ impl OperationExecutor {
                             break;
                         }
                         ErrorPolicy::SkipAndContinue => {
-                            self.skipped += 1;
+                            self.skipped = self.skipped.saturating_add(1);
                             continue;
                         }
                         ErrorPolicy::RetryN(max) => {
@@ -837,12 +839,13 @@ impl OperationExecutor {
                                 if let Ok(outcome) = retry {
                                     if matches!(outcome, ActionOutcome::Skipped) {
                                         let _ = journal.mark_skipped(action.index);
-                                        self.skipped += 1;
+                                        self.skipped = self.skipped.saturating_add(1);
                                     } else {
                                         let _ = journal.mark_complete(action.index);
                                     }
                                     if !action.is_dir {
-                                        self.progress.completed_files += 1;
+                                        self.progress.completed_files =
+                                            self.progress.completed_files.saturating_add(1);
                                         self.progress.copied_bytes =
                                             self.progress.copied_bytes.saturating_add(action.size);
                                     }
@@ -851,7 +854,7 @@ impl OperationExecutor {
                                 }
                             }
                             if !retried {
-                                self.skipped += 1;
+                                self.skipped = self.skipped.saturating_add(1);
                             }
                         }
                     }
@@ -1539,7 +1542,7 @@ impl RecycleBin {
         for entry in &entries {
             let entry_dir = self.root.join(&entry.id);
             if fs::remove_dir_all(&entry_dir).is_ok() {
-                count += 1;
+                count = count.saturating_add(1);
             }
         }
         Ok(count)
@@ -1558,7 +1561,7 @@ impl RecycleBin {
             if age > self.max_age {
                 let entry_dir = self.root.join(&entry.id);
                 if fs::remove_dir_all(&entry_dir).is_ok() {
-                    count += 1;
+                    count = count.saturating_add(1);
                 }
             }
         }
@@ -1674,7 +1677,9 @@ impl RecycleBin {
             .parse()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad timestamp"))?;
 
-        let recycled_at = SystemTime::UNIX_EPOCH + Duration::from_secs(ts_secs);
+        let recycled_at = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(ts_secs))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "timestamp out of range"))?;
 
         let data_path = entry_dir.join("data");
         let (size, is_dir) = if data_path.exists() {

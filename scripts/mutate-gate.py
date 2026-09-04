@@ -103,11 +103,34 @@ def table_span(source: str) -> tuple[int, int]:
     return 0, 0
 
 
-def selftest_passes(gate: Path) -> bool:
-    """Whether `gate --selftest` exits 0, with its output discarded."""
-    r = subprocess.run([sys.executable, str(gate), "--selftest"],
+#: Both spellings in use. `check-doc-links.py` says `--selftest`,
+#: `check-libc-shape.py` says `--self-test`, and each is published -- named in
+#: `boot-test.sh` and read by `check-gates-are-wired.py` -- so neither can be
+#: renamed to suit this file. The flag is discovered instead of assumed, and
+#: the discovery is free: the sweep already has to run the suite once before
+#: mutating anything, so that run is what identifies the spelling.
+SELFTEST_FLAGS = ("--selftest", "--self-test")
+
+
+def selftest_passes(gate: Path, flag: str) -> bool:
+    """Whether `gate <flag>` exits 0, with its output discarded."""
+    r = subprocess.run([sys.executable, str(gate), flag],
                        capture_output=True, text=True)
     return r.returncode == 0
+
+
+def find_selftest_flag(gate: Path) -> str | None:
+    """The spelling this gate answers to, or None if it passes under neither.
+
+    Returning None is not "no such flag" -- it is the dirty-start abort. A gate
+    whose suite does not pass before anything has been done to it cannot give a
+    meaningful verdict about a mutant, whether the cause is a genuine failure,
+    a sweep killed before its restore, or a second sweep running right now.
+    """
+    for flag in SELFTEST_FLAGS:
+        if selftest_passes(gate, flag):
+            return flag
+    return None
 
 
 def load_table(gate: Path) -> list[tuple[str, str, str]] | None:
@@ -133,13 +156,16 @@ def sweep(gate: Path) -> int:
         print(f"{gate.name}: declares no SELFTEST_MUTANTS -- nothing to sweep.")
         return 0
 
-    if not selftest_passes(gate):
-        print(f"ABORT: {gate.name} --selftest does not pass before any mutation "
-              f"was applied.\n"
-              f"       Either the gate is genuinely broken, or a previous sweep "
-              f"died without restoring it,\n"
-              f"       or another sweep is running right now. Every verdict "
-              f"below would describe some other program.")
+    flag = find_selftest_flag(gate)
+    if flag is None:
+        print(f"ABORT: {gate.name} passes under neither "
+              f"{' nor '.join(SELFTEST_FLAGS)}, before any mutation was "
+              f"applied.\n"
+              f"       Either the gate is genuinely broken, or it declares a "
+              f"table but has no self-test,\n"
+              f"       or a previous sweep died without restoring it, or "
+              f"another sweep is running right now.\n"
+              f"       Every verdict below would describe some other program.")
         return 2
 
     # The gate's code, with its own mutation table cut out -- see `table_span`.
@@ -163,7 +189,7 @@ def sweep(gate: Path) -> int:
                 survivors.append(f"{label} (no-op mutant)")
                 continue
             gate.write_text(mutated, encoding="utf-8")
-            if selftest_passes(gate):
+            if selftest_passes(gate, flag):
                 print(f"[SURVIVED] {label}")
                 survivors.append(label)
             else:

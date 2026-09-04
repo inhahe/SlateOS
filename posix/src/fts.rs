@@ -4,8 +4,8 @@
 //    `inst.idx`, which is range-checked on every entry to the helper.
 //  - A `MAX_FTS_DEPTH`-deep stack of in-progress directory frames
 //    indexed by `inst.depth.wrapping_sub(1)` after `depth > 0` checks.
-//  - Per-frame child cursors counted up to `n_children`, which is the
-//    same field that bounds the iteration.
+//  - A `FTS_NAME_MAX`-sized name buffer filled from a `readdir` entry
+//    whose length was measured before the copy.
 //  - A `PATH_MAX`-sized path buffer mutated in place; every write is
 //    preceded by an explicit length budget check.
 //
@@ -29,17 +29,27 @@
 //! Each instance owns:
 //!
 //! - A traversal stack of up to [`MAX_FTS_DEPTH`] in-progress directory
-//!   frames.  Each frame caches the child listing of the directory it
-//!   represents so we can release the underlying `DIR*` handle before
-//!   descending, rather than holding one open per level.  That was
-//!   originally forced on us — there were only 8
-//!   [`crate::dirent::Dir`] slots system-wide, so a traversal deeper
-//!   than that would have exhausted them.  The pool is
-//!   `dirent::MAX_OPEN_DIRS` = 64 now that a slot no longer
-//!   carries a 68 KiB inline buffer, which is deeper than
-//!   [`MAX_FTS_DEPTH`]; the eager read is kept anyway, because it is
-//!   also what makes a frame independent of a stream that could be
-//!   invalidated underneath it.
+//!   frames.  **Each frame holds its directory's [`crate::dirent::Dir`]
+//!   stream open for as long as the frame is on the stack**, and reads
+//!   the next child from it on demand.
+//!
+//!   It did not always.  Frames used to copy a fixed 64 children into
+//!   the frame and close the stream immediately, which was forced on
+//!   us: there were once only 8 `Dir` slots system-wide, so one stream
+//!   per level would have exhausted the pool at exactly the depth this
+//!   module allows.  A directory with a 65th entry therefore lost it,
+//!   silently — and since `fts` is what `find`, `rm -rf`, `du` and
+//!   `chmod -R` are built on, "silently" meant a recursive delete that
+//!   reported success while leaving files behind.
+//!
+//!   Two things had to become true before holding a stream per level
+//!   was correct, and both now are.  `dirent::MAX_OPEN_DIRS` is 64,
+//!   comfortably above [`MAX_FTS_DEPTH`], since a slot stopped carrying
+//!   a 68 KiB inline buffer.  And a `Dir` *is itself a snapshot* — it
+//!   slurps the complete listing to the heap at `opendir` time and
+//!   never re-reads — so a held stream is exactly as independent of
+//!   later mutation as a copied array was.  The frame gave up nothing
+//!   by dropping its copy, and stopped being able to lose a file.
 //! - The currently-displayed [`FtsEnt`], whose `fts_path` is a
 //!   mutated-in-place buffer that grows as we descend and shrinks as
 //!   we ascend.  `fts_name` points into `fts_path` at the basename
@@ -79,17 +89,19 @@
 //!
 //! ## Limits
 //!
-//! - [`MAX_FTS_INSTANCES`] = 2 concurrent open streams.
-//! - [`MAX_FTS_DEPTH`] = 8 levels deep.
-//! - [`MAX_FTS_CHILDREN`] = 64 entries per directory (anything beyond
-//!   is silently truncated).  This used to be one truncation among
-//!   several: the listing itself stopped at `SYS_FS_LIST_DIR`'s
-//!   256-entry cap.  That cap is gone — streams read complete listings
-//!   via `SYS_FS_GETDENTS_PINNED` — so this per-frame buffer is now the
-//!   *only* place a traversal loses entries, which makes it the one
-//!   worth fixing.  Tracked in known-issues.md.
-//! - [`FTS_NAME_MAX`] = 64 bytes per component (longer names are
-//!   skipped with an [`FTS_ERR`] entry).
+//! - [`MAX_FTS_INSTANCES`] = 2 concurrent open FTS streams.
+//! - [`MAX_FTS_DEPTH`] = 8 levels deep.  Entries below that are skipped
+//!   silently, matching BSD.
+//! - **No limit on entries per directory.**  There was one — 64 — and
+//!   it was the last place in the traversal that could lose a file
+//!   without saying so.  See the implementation note above for what
+//!   made it removable.
+//! - [`FTS_NAME_MAX`] = 256 bytes per component, which is
+//!   [`crate::dirent::Dirent`]'s own `d_name` capacity, so no name a
+//!   `readdir` can produce is too long for a frame to carry.  A longer
+//!   one cannot arrive; if the two constants ever diverge, the
+//!   assertion beside `FTS_NAME_MAX` fails the build rather than
+//!   letting names go missing again.
 //! - Path length capped at [`crate::unistd::PATH_MAX`] (4096).
 
 use crate::errno;
@@ -193,13 +205,37 @@ pub const FTS_NOINSTR: i32 = 4;
 const MAX_FTS_INSTANCES: usize = 2;
 
 /// Maximum depth of the traversal stack.
+///
+/// Also the number of [`crate::dirent::Dir`] streams a single traversal
+/// holds open at once, one per level, which is why the assertion below
+/// exists.
 const MAX_FTS_DEPTH: usize = 8;
 
-/// Maximum children cached per directory frame.
-const MAX_FTS_CHILDREN: usize = 64;
+// A frame holds its directory's stream open for its whole life, so a
+// traversal at full depth occupies `MAX_FTS_DEPTH` slots of the `Dir`
+// pool -- and two concurrent FTS streams occupy twice that.  If either
+// constant is ever raised past the pool, the failure is not a build
+// error but a `descend_into_current` that starts returning `FTS_DNR`
+// with `EMFILE` partway down a tree, which reads exactly like a
+// permissions problem.  Fail here instead, where the cause is legible.
+const _: () = assert!(
+    MAX_FTS_INSTANCES * MAX_FTS_DEPTH <= crate::dirent::MAX_OPEN_DIRS,
+    "FTS holds one Dir stream per level per stream; the Dir pool must cover them all"
+);
 
 /// Maximum length of a single path component, including NUL.
-pub const FTS_NAME_MAX: usize = 64;
+///
+/// Equal to [`crate::dirent::Dirent`]'s `d_name` capacity by the
+/// assertion below: a component that `readdir` can return must fit a
+/// frame, because the alternative is skipping it, and a traversal that
+/// skips a file it was asked to visit is the bug this module spent its
+/// first year having.
+pub const FTS_NAME_MAX: usize = 256;
+
+const _: () = assert!(
+    FTS_NAME_MAX >= crate::dirent::DIRENT_NAME_MAX,
+    "a name readdir can produce must fit an FTS frame"
+);
 
 // ---------------------------------------------------------------------------
 // Public structures
@@ -272,26 +308,31 @@ pub struct Fts {
 // Internal state
 // ---------------------------------------------------------------------------
 
-/// One child entry cached in a directory frame.
+/// One child entry, copied out of a `readdir` result.
+///
+/// Not stored — this is what [`next_child`] hands to [`yield_child`].
+/// The `Dirent` it was copied from is only valid until the next
+/// `readdir` on the same stream, and the copy is what makes the
+/// distance between those two functions safe to have.
 #[derive(Clone, Copy)]
-struct CachedChild {
+struct Child {
     name: [u8; FTS_NAME_MAX],
-    name_len: u8,
+    name_len: usize,
     d_type: u8,
 }
-
-const CACHED_CHILD_INIT: CachedChild = CachedChild {
-    name: [0; FTS_NAME_MAX],
-    name_len: 0,
-    d_type: crate::dirent::DT_UNKNOWN,
-};
 
 /// One in-progress directory on the traversal stack.
 #[derive(Clone, Copy)]
 struct DirFrame {
-    children: [CachedChild; MAX_FTS_CHILDREN],
-    n_children: u16,
-    cursor: u16,
+    /// This directory's open stream, or null for an unused frame.
+    ///
+    /// Owned by the frame: whoever removes the frame from the stack —
+    /// [`pop_and_yield_dp`] on the normal path, [`close_open_frames`]
+    /// on `fts_close` — closes it.  A raw pointer rather than a guard
+    /// type because `DirFrame` is `Copy` and lives in a `static` pool,
+    /// so there is no drop to hang the release on; the two call sites
+    /// above are the whole of the ownership discipline.
+    dir: *mut crate::dirent::Dir,
     /// Length of `Instance::path` *before* this directory's basename
     /// was appended.  Used to truncate `path` back when popping.
     parent_path_len: u16,
@@ -306,9 +347,7 @@ struct DirFrame {
 }
 
 const DIR_FRAME_INIT: DirFrame = DirFrame {
-    children: [CACHED_CHILD_INIT; MAX_FTS_CHILDREN],
-    n_children: 0,
-    cursor: 0,
+    dir: core::ptr::null_mut(),
     parent_path_len: 0,
     yielded_pre: false,
     saved_stat: zeroed_stat(),
@@ -445,6 +484,10 @@ fn release_instance(idx: usize) {
     // SAFETY: see `allocate_instance`.
     let table = unsafe { &mut *instances_ptr() };
     if let Some(inst) = table.get_mut(idx) {
+        // Before the slot is overwritten, not after: `INSTANCE_INIT`
+        // nulls every frame's `dir`, and a stream whose only pointer
+        // has just been overwritten cannot be closed by anyone.
+        close_open_frames(inst);
         *inst = INSTANCE_INIT;
     }
 }
@@ -538,55 +581,94 @@ fn basename_offset(path: &[u8], len: usize) -> usize {
 // Reading a directory into a frame
 // ---------------------------------------------------------------------------
 
-/// Open `path` and snapshot its children into `frame`.  Returns:
+/// Open `path` and attach its stream to `frame`.  Returns:
 ///
-/// - `Ok(())` on success.
-/// - `Err(errno_value)` if opendir failed.
+/// - `Ok(())` on success, with `frame.dir` owning an open stream.
+/// - `Err(errno_value)` if opendir failed, with `frame.dir` left null.
 ///
-/// Truncates silently at [`MAX_FTS_CHILDREN`].
-fn snapshot_dir(path: *const u8, frame: &mut DirFrame) -> Result<(), i32> {
+/// Reads nothing.  The children are read one at a time by
+/// [`next_child`] as the traversal asks for them, which is what removed
+/// the 64-entry cap: there is no longer a buffer to overflow.
+fn open_frame(path: *const u8, frame: &mut DirFrame) -> Result<(), i32> {
     let dir = crate::dirent::opendir(path);
     if dir.is_null() {
-        // opendir set errno for us.
+        // opendir set errno for us.  EMFILE is possible and is a real
+        // answer: the process is out of directory streams, and saying
+        // so beats descending into a directory we cannot read.
         return Err(errno::get_errno());
     }
-    frame.n_children = 0;
-    frame.cursor = 0;
+    frame.dir = dir;
+    Ok(())
+}
+
+/// Close a frame's stream if it has one, and null the field.
+///
+/// Idempotent, because the two owners of a frame's stream — the pop
+/// path and the close path — can both plausibly run for the same frame
+/// during teardown, and a double `closedir` would free a pool slot
+/// another traversal had since taken.
+fn close_frame(frame: &mut DirFrame) {
+    if !frame.dir.is_null() {
+        crate::dirent::closedir(frame.dir);
+        frame.dir = core::ptr::null_mut();
+    }
+}
+
+/// Close every stream still held by an instance's frame stack.
+///
+/// `fts_close` releasing an instance without this leaks one `Dir` pool
+/// slot per level the traversal had reached — and the pool is a fixed
+/// 64, so a program that opens and abandons traversals in a loop
+/// eventually gets `EMFILE` from an unrelated `opendir`.
+fn close_open_frames(inst: &mut Instance) {
+    for frame in &mut inst.stack {
+        close_frame(frame);
+    }
+    inst.depth = 0;
+}
+
+/// Read the next real child of `frame`'s directory, skipping `.` and
+/// `..`.  `None` means the listing is exhausted.
+///
+/// The name is *copied* out of the `Dirent`: the pointer `readdir`
+/// returns is only valid until the next call on the same stream, and
+/// the caller goes on to stat and yield before asking for another.
+fn next_child(frame: &DirFrame) -> Option<Child> {
+    if frame.dir.is_null() {
+        return None;
+    }
     loop {
-        let entry = crate::dirent::readdir(dir);
+        let entry = crate::dirent::readdir(frame.dir);
         if entry.is_null() {
-            break;
+            return None;
         }
         // SAFETY: readdir returned a valid entry pointer.
         let name_ptr = unsafe { core::ptr::addr_of!((*entry).d_name).cast::<u8>() };
-        // SAFETY: dirent name is NUL-terminated within 256 bytes.
+        // SAFETY: dirent name is NUL-terminated within DIRENT_NAME_MAX.
         let nlen = unsafe { crate::string::strlen(name_ptr) };
         // Skip "." and ".." regardless of FTS_SEEDOT (not supported).
         if is_dot_or_dotdot(name_ptr, nlen) {
             continue;
         }
+        // Unreachable while the compile-time assertion beside
+        // `FTS_NAME_MAX` holds; kept because the alternative to a
+        // bounds check here is a buffer overrun, and a `continue` that
+        // can never run costs nothing.
         if nlen >= FTS_NAME_MAX {
-            // Component too long for our cache.  Skip silently (the
-            // alternative would be to materialise an FTS_ERR entry,
-            // but cycles of "name too long" are rarely useful).
             continue;
         }
-        if frame.n_children as usize >= MAX_FTS_CHILDREN {
-            break; // Truncate.
-        }
-        let slot = &mut frame.children[frame.n_children as usize];
-        slot.name = [0; FTS_NAME_MAX];
+        let mut child = Child {
+            name: [0; FTS_NAME_MAX],
+            name_len: nlen,
+            // SAFETY: as above.
+            d_type: unsafe { (*entry).d_type },
+        };
         for i in 0..nlen {
             // SAFETY: i < nlen and the name is NUL-terminated.
-            slot.name[i] = unsafe { *name_ptr.add(i) };
+            child.name[i] = unsafe { *name_ptr.add(i) };
         }
-        slot.name_len = nlen as u8;
-        // SAFETY: same as above.
-        slot.d_type = unsafe { (*entry).d_type };
-        frame.n_children = frame.n_children.wrapping_add(1);
+        return Some(child);
     }
-    crate::dirent::closedir(dir);
-    Ok(())
 }
 
 fn is_dot_or_dotdot(name: *const u8, len: usize) -> bool {
@@ -762,9 +844,11 @@ fn fts_read_inst(inst: &mut Instance) -> *mut FtsEnt {
     step(inst)
 }
 
-/// Push a frame for the directory described by `current` and snapshot
-/// its children.  On open failure, replaces `current` with an
-/// FTS_DNR/FTS_ERR record so the next `step` will yield it.
+/// Push a frame for the directory described by `current`, opening the
+/// stream the frame will read its children from.  Nothing is read here:
+/// the frame holds the stream for as long as it is on the stack, and
+/// `next_child` pulls one entry at a time.  On open failure, replaces
+/// `current` with an FTS_DNR record so the next `step` will yield it.
 fn descend_into_current(inst: &mut Instance) {
     let frame_idx = inst.depth;
     let mut frame = DIR_FRAME_INIT;
@@ -774,7 +858,7 @@ fn descend_into_current(inst: &mut Instance) {
 
     // SAFETY: inst.path is NUL-terminated at `path_len`.
     let path_ptr = inst.path.as_ptr();
-    match snapshot_dir(path_ptr, &mut frame) {
+    match open_frame(path_ptr, &mut frame) {
         Ok(()) => {
             inst.stack[frame_idx] = frame;
             inst.depth = inst.depth.wrapping_add(1);
@@ -819,13 +903,10 @@ fn step(inst: &mut Instance) -> *mut FtsEnt {
     // expressed as `if` rather than `while`.
     if inst.depth > 0 {
         let frame_idx = inst.depth.wrapping_sub(1);
-        let cursor = inst.stack[frame_idx].cursor as usize;
-        let n = inst.stack[frame_idx].n_children as usize;
-        if cursor < n {
-            inst.stack[frame_idx].cursor = (cursor as u16).wrapping_add(1);
-            return yield_child(inst, frame_idx, cursor);
+        if let Some(child) = next_child(&inst.stack[frame_idx]) {
+            return yield_child(inst, frame_idx, &child);
         }
-        // Frame exhausted — pop and yield FTS_DP.
+        // Listing exhausted — pop and yield FTS_DP.
         return pop_and_yield_dp(inst);
     }
 
@@ -875,21 +956,20 @@ fn yield_root(inst: &mut Instance) -> *mut FtsEnt {
     core::ptr::addr_of_mut!(inst.current)
 }
 
-/// Yield the `child_idx`-th child of the directory at stack depth
+/// Yield `child`, just read from the directory at stack depth
 /// `frame_idx`.  Builds `path = parent_path + "/" + child_name`,
 /// stats it (unless FTS_NOSTAT), and populates `current`.
-fn yield_child(inst: &mut Instance, frame_idx: usize, child_idx: usize) -> *mut FtsEnt {
+fn yield_child(inst: &mut Instance, frame_idx: usize, child: &Child) -> *mut FtsEnt {
     // Restore path to the parent's prefix before appending.
     let parent_len = inst.stack[frame_idx].parent_path_len as usize;
     inst.path_len = parent_len;
     inst.path[parent_len] = 0;
 
-    let (name_buf, name_len, d_type) = {
-        let c = &inst.stack[frame_idx].children[child_idx];
-        (c.name, c.name_len as usize, c.d_type)
-    };
+    let name_len = child.name_len;
+    let d_type = child.d_type;
 
-    let Some(new_len) = append_component(&mut inst.path, parent_len, &name_buf[..name_len]) else {
+    let Some(new_len) = append_component(&mut inst.path, parent_len, &child.name[..name_len])
+    else {
         // Path overflow — yield ERR.
         inst.current.fts_path = inst.path.as_ptr();
         inst.current.fts_pathlen = parent_len;
@@ -965,6 +1045,11 @@ fn pop_and_yield_dp(inst: &mut Instance) -> *mut FtsEnt {
     let frame_idx = inst.depth.wrapping_sub(1);
     let parent_len = inst.stack[frame_idx].parent_path_len as usize;
     let saved = inst.stack[frame_idx].saved_stat;
+    // The frame owns its stream; popping is where that ownership ends.
+    // Not doing this here is not merely a leak of one pool slot -- it is
+    // a slot leaked per directory *visited*, so a `rm -rf` of a wide
+    // tree would run the pool dry partway through.
+    close_frame(&mut inst.stack[frame_idx]);
     inst.depth = frame_idx;
 
     // Restore statbuf to the snapshot taken at descent.
@@ -1022,10 +1107,15 @@ fn pop_and_yield_dp(inst: &mut Instance) -> *mut FtsEnt {
 
 /// Return the children of the current directory as a singly-linked
 /// list.  Our implementation returns a non-functional stub: null with
-/// errno ENOSYS.  Real `fts_children` requires pre-snapshotting all
-/// siblings simultaneously, which our static frame buffer already
-/// does — but exposing it would require a separate FtsEnt-per-child
-/// pool that we don't allocate.
+/// errno ENOSYS.
+///
+/// Real `fts_children` hands back every sibling at once, which needs an
+/// `FtsEnt` per child alive simultaneously — and this module allocates
+/// nothing: an entry's `fts_path` points into the one path buffer the
+/// instance mutates as it walks, so two live entries would name the
+/// same bytes.  Supporting it means a per-child pool, and the callers
+/// that matter here (`find`, `rm -rf`, `du`, `chmod -R`) drive
+/// `fts_read` instead.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fts_children(_ftsp: *mut Fts, _instr: i32) -> *mut FtsEnt {
     errno::set_errno(errno::ENOSYS);
@@ -1476,5 +1566,91 @@ mod tests {
         assert!(is_dot_or_dotdot(b"..\0".as_ptr(), 2));
         assert!(!is_dot_or_dotdot(b"a\0".as_ptr(), 1));
         assert!(!is_dot_or_dotdot(b"..a\0".as_ptr(), 3));
+    }
+
+    // -- Streams held per level -- ------------------------------------------
+    //
+    // A frame used to copy 64 children out of its directory and close the
+    // stream; the 65th entry was dropped, silently, from every `find`,
+    // `rm -rf` and `du` that walked the tree. A frame now holds the stream
+    // and reads on demand. None of that can be exercised against a real
+    // directory from a host test -- `opendir` here goes through SlateOS
+    // syscalls -- so what is pinned below is the set of facts that made the
+    // change safe, each of which is a thing a later edit could silently take
+    // back.
+
+    #[test]
+    fn a_traversal_at_full_depth_cannot_exhaust_the_dir_pool() {
+        // The `const _` assertion beside MAX_FTS_DEPTH says this at build
+        // time; restated here because a build error names a file and a test
+        // names the consequence. Every level holds one stream for as long as
+        // it is on the stack, and two FTS streams may be open at once, so
+        // the pool has to cover the product -- otherwise a deep walk starts
+        // reporting FTS_DNR/EMFILE partway down, which reads like a
+        // permissions problem and is not one.
+        assert!(MAX_FTS_INSTANCES * MAX_FTS_DEPTH <= crate::dirent::MAX_OPEN_DIRS);
+    }
+
+    #[test]
+    fn every_name_readdir_can_produce_fits_a_frame() {
+        // The component buffer was 64 bytes and anything longer was skipped
+        // with no entry and no error -- the same silent loss as the 64-child
+        // cap, one directory deeper. Matching `d_name` exactly is what makes
+        // the skip unreachable rather than merely unlikely.
+        assert!(FTS_NAME_MAX >= crate::dirent::DIRENT_NAME_MAX);
+    }
+
+    #[test]
+    fn a_fresh_frame_owns_no_stream() {
+        // `DIR_FRAME_INIT` is what `INSTANCE_INIT` fills the stack with, so a
+        // non-null `dir` here would mean every newly allocated instance
+        // believed it owned eight streams it had never opened -- and would
+        // close them.
+        assert!(DIR_FRAME_INIT.dir.is_null());
+    }
+
+    #[test]
+    fn closing_a_frame_twice_does_not_close_twice() {
+        // Idempotence is not tidiness here: `fts_close` on a partly-walked
+        // tree runs `close_open_frames` over frames the pop path may already
+        // have closed, and a second `closedir` on the same pointer frees a
+        // pool slot that another traversal has since been given.
+        let mut frame = DIR_FRAME_INIT;
+        close_frame(&mut frame);
+        close_frame(&mut frame);
+        assert!(frame.dir.is_null());
+    }
+
+    #[test]
+    fn a_frame_with_no_stream_yields_no_children() {
+        // The null check in `next_child` is what stops a failed descent --
+        // where `open_frame` returned Err and left `dir` null -- from being
+        // read as a directory with entries.
+        let frame = DIR_FRAME_INIT;
+        assert!(next_child(&frame).is_none());
+    }
+
+    #[test]
+    fn closing_the_open_frames_empties_the_stack() {
+        let mut inst = INSTANCE_INIT;
+        inst.depth = MAX_FTS_DEPTH;
+        close_open_frames(&mut inst);
+        assert_eq!(inst.depth, 0);
+        assert!(inst.stack.iter().all(|f| f.dir.is_null()));
+    }
+
+    #[test]
+    fn a_frame_no_longer_carries_a_listing() {
+        // The frame held `[CachedChild; 64]` -- 64 names of 64 bytes plus two
+        // counters, about 4.2 KiB, eight of them per instance and two
+        // instances per process. It now holds a pointer, two lengths, a flag
+        // and a `Stat`. The bound is loose on purpose: it is not a budget,
+        // it is a tripwire for someone reintroducing a per-directory buffer,
+        // because such a buffer is a cap and a cap is a file quietly not
+        // visited.
+        assert!(
+            core::mem::size_of::<DirFrame>() < 1024,
+            "a DirFrame that large is a listing buffer wearing a frame's name"
+        );
     }
 }

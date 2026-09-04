@@ -243,8 +243,17 @@ pub struct Dirent {
     /// File type (DT_REG, DT_DIR, etc.).
     pub d_type: u8,
     /// Null-terminated filename.
-    pub d_name: [u8; 256],
+    pub d_name: [u8; DIRENT_NAME_MAX],
 }
+
+/// Capacity of [`Dirent::d_name`], terminator included.
+///
+/// Named rather than left as a literal because it is the widest name any
+/// caller of [`readdir`] can ever receive, so it is the size every caller's
+/// own buffer has to match. [`crate::fts`] asserts against it at compile
+/// time: it used to carry a 64-byte component buffer and skip anything
+/// longer, which lost files from a traversal without saying so.
+pub(crate) const DIRENT_NAME_MAX: usize = 256;
 
 /// Opaque directory stream handle.
 ///

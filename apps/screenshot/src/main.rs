@@ -11,7 +11,6 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -20,6 +19,10 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+#[allow(unused_imports)]
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::path::{Path, PathBuf};
 
@@ -400,7 +403,7 @@ pub fn write_bmp(path: &Path, width: u32, height: u32, pixels: &[u32]) -> Result
         file_size,
         header_size,
         pixel_data_size,
-    )?;
+    );
     safeio::write_atomically(path, &data)?;
     Ok(())
 }
@@ -461,17 +464,23 @@ pub fn encode_bmp(width: u32, height: u32, pixels: &[u32]) -> Result<Vec<u8>, Bm
         .checked_add(pixel_data_size)
         .ok_or(BmpError::DimensionOverflow)?;
 
-    encode_bmp_bytes(
+    Ok(encode_bmp_bytes(
         width,
         height,
         pixels,
         file_size,
         header_size,
         pixel_data_size,
-    )
+    ))
 }
 
 /// Internal helper: builds the complete BMP byte buffer.
+///
+/// Returns the bytes, not a `Result`: every way this encoding can fail — an
+/// overflowing file size, a pixel buffer that does not match the dimensions —
+/// is checked by the callers before they get here, so a `Result` that is always
+/// `Ok` made both of them write `?` for nothing and hid which of their steps
+/// can really fail.
 fn encode_bmp_bytes(
     width: u32,
     height: u32,
@@ -479,7 +488,7 @@ fn encode_bmp_bytes(
     file_size: u32,
     header_offset: u32,
     pixel_data_size: u32,
-) -> Result<Vec<u8>, BmpError> {
+) -> Vec<u8> {
     let mut buf = Vec::with_capacity(file_size as usize);
 
     // --- BITMAPFILEHEADER (14 bytes) ---
@@ -522,7 +531,7 @@ fn encode_bmp_bytes(
         }
     }
 
-    Ok(buf)
+    buf
 }
 
 // ============================================================================
@@ -1398,7 +1407,35 @@ impl ScreenshotApp {
     // ========================================================================
 
     /// Render the current application state into a `RenderTree`.
-    pub fn render(&self) -> RenderTree {
+    /// Act on a capture mode given on the command line.
+    ///
+    /// This was the body of `main`, and it is a method so that a test can check
+    /// each flag reaches the mode it names — a test cannot call `main`, so a
+    /// switch that lives there is a blind spot. `argv[0]` is included, as it
+    /// is in `std::env::args`.
+    pub fn apply_command_line(&mut self, args: &[String]) {
+        let Some(mode_arg) = args.get(1) else {
+            return;
+        };
+        let mode = match mode_arg.as_str() {
+            "--fullscreen" | "-f" => CaptureMode::FullScreen,
+            "--window" | "-w" => CaptureMode::Window,
+            "--region" | "-r" => CaptureMode::Region,
+            "--delay3" => CaptureMode::Delayed(3),
+            "--delay5" => CaptureMode::Delayed(5),
+            // An unknown argument opens the menu rather than guessing: a
+            // screenshot taken because a flag was mistyped is a screenshot the
+            // user did not ask for.
+            _ => return,
+        };
+        self.mode = mode;
+        self.start_capture();
+    }
+
+    /// Named `render_tree` and not `render`: at equal arity an inherent method
+    /// silently wins method lookup over `oswindow::app::App::render`, so an app
+    /// that keeps the name draws nothing and reports no error.
+    pub fn render_tree(&self) -> RenderTree {
         let mut tree = RenderTree::new();
 
         match self.view {
@@ -2080,48 +2117,77 @@ fn menu_modes() -> Vec<CaptureMode> {
 // Entry point
 // ============================================================================
 
-fn main() {
-    let mut app = ScreenshotApp::new(800.0, 600.0);
+impl App for ScreenshotApp {
+    fn title(&self) -> String {
+        "Screenshot".to_owned()
+    }
 
-    // Parse command-line arguments for immediate capture mode.
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(mode_arg) = args.get(1) {
-        match mode_arg.as_str() {
-            "--fullscreen" | "-f" => {
-                app.mode = CaptureMode::FullScreen;
-                app.start_capture();
-            }
-            "--window" | "-w" => {
-                app.mode = CaptureMode::Window;
-                app.start_capture();
-            }
-            "--region" | "-r" => {
-                app.mode = CaptureMode::Region;
-                app.start_capture();
-            }
-            "--delay3" => {
-                app.mode = CaptureMode::Delayed(3);
-                app.start_capture();
-            }
-            "--delay5" => {
-                app.mode = CaptureMode::Delayed(5);
-                app.start_capture();
-            }
-            _ => {}
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.window_width as u32, self.window_height as u32)
         }
     }
 
-    // Render one frame to verify the rendering pipeline works.
-    let _frame = app.render();
+    /// A clock, but only while something is counting.
+    ///
+    /// **The one to get right for this app.** `handle_tick` runs the delayed
+    /// capture's countdown and expires the notification banner; with the
+    /// default `None` a "capture in 5 seconds" would count down to five
+    /// forever and never take the picture, with every existing test still
+    /// passing — `known-issues.md` lesson 47.
+    ///
+    /// It asks for nothing when there is nothing to count. A screenshot tool
+    /// sitting in the corner of the desktop is the archetypal program that
+    /// should let the machine sleep, and the countdown is the only thing here
+    /// that advances on its own.
+    ///
+    /// A quarter of a second rather than a second: the countdown is displayed
+    /// in whole seconds, and a clock exactly as coarse as the thing it drives
+    /// shows each number for anywhere between one and two seconds depending on
+    /// where the phase happens to land.
+    fn tick_interval(&self) -> Option<Duration> {
+        let counting = self.view == AppView::Countdown && self.countdown_remaining > 0;
+        if counting || self.notification.is_some() {
+            Some(Duration::from_millis(250))
+        } else {
+            None
+        }
+    }
 
-    // Event loop placeholder: in practice, the compositor calls us with events
-    // and we return render trees each frame.
-    // loop {
-    //     let event = wait_for_event();
-    //     app.handle_event(&event);
-    //     let frame = app.render();
-    //     submit_frame(frame);
-    // }
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        if self.handle_event(event) {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives. The
+        // region selector needs it too, or a drag-to-select rectangle is
+        // measured against the wrong screen.
+        self.window_width = width;
+        self.window_height = height;
+        self.region_selector.screen_width = width;
+        self.region_selector.screen_height = height;
+        self.render_tree()
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = ScreenshotApp::new(800.0, 600.0);
+    app.apply_command_line(&std::env::args().collect::<Vec<_>>());
+    app::launch("screenshot", &mut app)
 }
 
 // ============================================================================
@@ -2140,6 +2206,175 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // The clock, and the command line
+    //
+    // `handle_event` already routed `Event::Tick` and `handle_tick` already
+    // ran the countdown. What was missing was anything that delivered a tick.
+    // ------------------------------------------------------------------
+
+    fn argv(rest: &[&str]) -> Vec<String> {
+        std::iter::once("screenshot".to_owned())
+            .chain(rest.iter().map(|s| (*s).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn an_idle_screenshot_tool_asks_for_no_clock() {
+        // The archetypal program that should let the machine sleep: it sits in
+        // the corner of the desktop doing nothing until asked.
+        let app = ScreenshotApp::new(800.0, 600.0);
+        assert_eq!(app.tick_interval(), None);
+    }
+
+    #[test]
+    fn a_running_countdown_asks_for_one() {
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        app.mode = CaptureMode::Delayed(3);
+        app.start_capture();
+        assert_eq!(app.view, AppView::Countdown);
+        assert!(
+            app.tick_interval().is_some(),
+            "a counting-down app must ask for a clock or it counts forever"
+        );
+    }
+
+    #[test]
+    fn the_countdown_reaches_zero_and_takes_the_picture() {
+        // With `tick_interval` returning `None` this app would count down to
+        // five forever and never capture, with every existing test passing.
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        app.mode = CaptureMode::Delayed(3);
+        app.start_capture();
+        assert_eq!(app.countdown_remaining, 3);
+        // Four seconds of quarter-second ticks is more than enough for three.
+        for _ in 0..16 {
+            app.handle_event(&Event::Tick { elapsed_ms: 250 });
+        }
+        assert_eq!(app.countdown_remaining, 0, "the countdown never finished");
+        assert_ne!(
+            app.view,
+            AppView::Countdown,
+            "reaching zero should have left the countdown screen"
+        );
+    }
+
+    #[test]
+    fn the_countdown_takes_a_whole_second_per_number() {
+        // The clock is finer than the display on purpose; three ticks of a
+        // quarter second must not advance a one-second counter.
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        app.mode = CaptureMode::Delayed(5);
+        app.start_capture();
+        let start = app.countdown_remaining;
+        for _ in 0..3 {
+            app.handle_event(&Event::Tick { elapsed_ms: 250 });
+        }
+        assert_eq!(
+            app.countdown_remaining, start,
+            "750 ms should not have advanced a whole second"
+        );
+        app.handle_event(&Event::Tick { elapsed_ms: 250 });
+        assert_eq!(app.countdown_remaining, start.saturating_sub(1));
+    }
+
+    #[test]
+    fn each_command_line_flag_reaches_the_mode_it_names() {
+        // A test cannot call `main`, so this switch was a blind spot until it
+        // became a method.
+        for (flag, mode) in [
+            ("--fullscreen", CaptureMode::FullScreen),
+            ("-f", CaptureMode::FullScreen),
+            ("--window", CaptureMode::Window),
+            ("-w", CaptureMode::Window),
+            ("--region", CaptureMode::Region),
+            ("-r", CaptureMode::Region),
+            ("--delay3", CaptureMode::Delayed(3)),
+            ("--delay5", CaptureMode::Delayed(5)),
+        ] {
+            let mut app = ScreenshotApp::new(800.0, 600.0);
+            app.apply_command_line(&argv(&[flag]));
+            assert_eq!(app.mode, mode, "{flag} chose the wrong mode");
+        }
+    }
+
+    #[test]
+    fn no_arguments_opens_the_menu_and_captures_nothing() {
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        let before = app.view;
+        app.apply_command_line(&argv(&[]));
+        assert_eq!(app.view, before, "an argument-less launch captured");
+    }
+
+    #[test]
+    fn a_mistyped_flag_captures_nothing() {
+        // A screenshot taken because a flag was mistyped is a screenshot the
+        // user did not ask for. The mode is what says so: a capture that
+        // finishes immediately may leave the view where it started, so the
+        // view alone cannot tell "did nothing" from "did it and came back".
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        let (view, mode) = (app.view, app.mode);
+        app.apply_command_line(&argv(&["--fulscreen"]));
+        assert_eq!(app.mode, mode, "a mistyped flag chose a capture mode");
+        assert_eq!(app.view, view, "a mistyped flag moved off the menu");
+        assert!(
+            app.current_capture.is_none(),
+            "a mistyped flag took a screenshot"
+        );
+    }
+
+    #[test]
+    fn rendering_at_a_new_size_moves_the_region_selector_too() {
+        // A drag-to-select rectangle measured against the wrong screen size is
+        // a region that does not match what the user drew.
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        let _ = app.render(1920.0, 1080.0);
+        assert!((app.window_width - 1920.0).abs() < f32::EPSILON);
+        assert!(
+            (app.region_selector.screen_width - 1920.0).abs() < f32::EPSILON,
+            "the region selector still thinks the screen is {} wide",
+            app.region_selector.screen_width
+        );
+    }
+
+    #[test]
+    fn a_close_request_exits() {
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+    }
+
+    #[test]
+    fn rendering_draws_something_in_every_view() {
+        // Each view is entered the way the app enters it, not by assigning the
+        // field: the region overlay draws nothing while the selector is
+        // inactive, and setting `view` alone reaches a state the program never
+        // puts itself in.
+        for mode in [
+            CaptureMode::FullScreen,
+            CaptureMode::Region,
+            CaptureMode::Delayed(3),
+        ] {
+            let mut app = ScreenshotApp::new(800.0, 600.0);
+            app.mode = mode;
+            app.start_capture();
+            for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+                assert!(
+                    !app.render(w, h).is_empty(),
+                    "{:?} drew nothing at {w}x{h}",
+                    app.view
+                );
+            }
+        }
+        // And the menu, which is where it starts.
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        assert_eq!(app.view, AppView::Menu);
+        assert!(!app.render(640.0, 480.0).is_empty());
+    }
+
     use scratchdir::ScratchDir;
 
     // ---- Shared helpers ----
@@ -3249,7 +3484,7 @@ mod tests {
     #[test]
     fn test_app_render_produces_commands() {
         let app = ScreenshotApp::new(800.0, 600.0);
-        let tree = app.render();
+        let tree = app.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3437,7 +3672,7 @@ mod tests {
             text: String::new(),
         });
 
-        let tree = app.render();
+        let tree = app.render_tree();
         assert!(!tree.is_empty());
     }
 }

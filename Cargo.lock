@@ -15433,6 +15433,7 @@ name = "screenshot"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
  "safeio",
  "scratchdir",
 ]
@@ -16090,6 +16091,7 @@ name = "slides"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

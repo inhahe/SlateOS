@@ -224,12 +224,27 @@ def test_the_request_deletion_gate_judges_the_commit(text):
 # the conversion is seven separate edits to one file, and "did gate 6 get the
 # flag too?" is exactly the question a reader of the hook cannot answer by
 # looking, because a gate that dropped it looks like every other gate.
+#
+# ADDING TO IT IS PART OF CONVERTING, and that is not a nicety -- it was missed
+# twice. Gates 8 and 11 were converted on 2026-09-02 and 2026-09-03, wired with
+# `--head "$sha"` in the hook, and *not* listed here until 2026-09-04. So for
+# two days the guard covered five of the seven converted gates and nothing said
+# so: an unlisted gate does not fail this suite, it is simply never asked
+# about, which reads exactly like a gate that passed. They were found by
+# grepping the hook for `--head` and diffing that against this dict -- by hand,
+# which is the comparison this dict exists to make unnecessary.
+#
+# So: the commit that adds `--head` to a gate adds its checker here. A guard
+# that has to be remembered is only as good as the memory of whoever last
+# extended it, and the evidence above is that the memory is not good enough.
 HEAD_GATES = {
     "multicall-aliases.py": "gate 2, unreachable command names",
     "raced-globals.py": "gate 3, raced process-globals",
     "argv-utf8.py": "gate 4, argv read as String",
     "host-errmsg.py": "gate 6, host error text",
+    "quote-names.py": "gate 8, file names in diagnostics",
     "check-requests-not-deleted.py": "gate 9, request deletion",
+    "check-doc-links.py": "gate 11, dead doc links",
 }
 
 

@@ -48,26 +48,44 @@ Then:
     python scripts/mutate-gate.py scripts/check-doc-links.py
 
 Exit 0 if every mutant died, 1 if any survived, 2 if the sweep could not be
-trusted to mean anything (see `refuse a dirty start`).
+trusted to mean anything (see `the gate is never written to`).
 
-## Refusing a dirty start
+## The gate is never written to
 
-The sweep mutates the gate in place and restores it in a `finally`. Two things
-defeat that, and both are checked before any mutation:
+Each mutant is written to a **sibling file** -- `.mutant-<pid>-<gate>` in the
+same directory -- and that copy is what gets run. The gate itself is only ever
+read.
 
-* A run killed by something that never asks for cleanup -- a SIGKILL, the
-  machine going down -- leaves the gate mutated on disk. Mutating on top of
-  that produces verdicts about a program already broken somewhere else, and
-  they all look normal.
-* Two sweeps at once. The second one's "original" is the first one's mutant.
-  This is not hypothetical; it happened while developing this file, and the
-  guard below is what caught it.
+The first version did the obvious thing instead: mutate in place, restore in a
+`finally`. It works right up until something skips the `finally`. A SIGKILL or
+a machine going down leaves the gate mutated on disk, and the next sweep then
+issues verdicts about a program that was already broken somewhere else -- all
+of which look perfectly normal. Worse, two sweeps at once means the second
+one's "original" is the first one's mutant; that is not hypothetical, it
+happened while this file was being written.
 
-Both show up the same way: the gate's own `--selftest` does not pass before
-anything has been done to it. That is the check.
+Both were caught by a guard, and a guard against a hazard is worth less than
+not having the hazard. Writing to a sibling removes the failure mode rather
+than detecting it: nothing to restore, so nothing to fail to restore, and the
+pid in the name means two sweeps cannot collide. It is also what makes the
+sweep safe to run unattended in a tree three lanes share.
+
+The sibling has to live in the gate's own directory, not in a temp dir,
+because a gate locates the tree relative to its own file --
+`check-doc-links.py` computes `ROOT` as its parent's parent -- and a copy
+somewhere else would scan somewhere else.
+
+## Still checking the clean run first
+
+One thing the copy does not remove: a gate whose self-test genuinely fails
+kills every mutant, because every mutant's run fails too, and the sweep
+reports a perfect score for a suite that is asserting nothing. So the clean
+run still happens before any mutation, and failing it is still exit 2. It is
+no longer a check for a dirty tree; it is a check that the suite works at all.
 """
 
 import ast
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -121,10 +139,10 @@ def selftest_passes(gate: Path, flag: str) -> bool:
 def find_selftest_flag(gate: Path) -> str | None:
     """The spelling this gate answers to, or None if it passes under neither.
 
-    Returning None is not "no such flag" -- it is the dirty-start abort. A gate
-    whose suite does not pass before anything has been done to it cannot give a
-    meaningful verdict about a mutant, whether the cause is a genuine failure,
-    a sweep killed before its restore, or a second sweep running right now.
+    Returning None is not "no such flag" -- it is the abort. A gate whose suite
+    does not pass before anything has been done to it kills every mutant for
+    the wrong reason: the mutant's run fails because the *clean* run fails, and
+    the sweep reports a perfect score for a suite that is asserting nothing.
     """
     for flag in SELFTEST_FLAGS:
         if selftest_passes(gate, flag):
@@ -208,6 +226,50 @@ def needle_problems(
     return problems
 
 
+def run_mutants(gate: Path, source: str, table: list[tuple[str, str, str]],
+                flag: str, say=None) -> list[str]:
+    """Every row that did not die, as a line naming why, given a live `flag`.
+
+    `gate` is opened for reading and never for writing: each mutant goes to a
+    sibling file whose name carries this process's pid, so a killed run leaves
+    at most one stray copy and two concurrent sweeps cannot see each other's.
+    The sibling must be a sibling and not a temp file elsewhere, because a gate
+    finds the tree relative to its own path.
+    """
+    say = say or (lambda _line: None)
+
+    # The gate's code, with its own mutation table cut out -- see `table_span`.
+    lo, hi = table_span(source)
+    head, body, tail = source[:lo], source[lo:hi], source[hi:]
+
+    # Not survivors and not kills: the sweep could not ask the question at all.
+    # Counted as failures anyway, because a needle that matches nothing is a
+    # hole that reads as coverage.
+    problems = needle_problems(source, table)
+    dead = {i for i, _, _ in problems}
+    survivors: list[str] = []
+    for _, label, reason in problems:
+        say(f"[BAD NEEDLE] {label}: {reason}")
+        survivors.append(f"{label} ({reason})")
+
+    mutant = gate.with_name(f".mutant-{os.getpid()}-{gate.name}")
+    try:
+        for i, (label, old, new) in enumerate(table):
+            if i in dead:
+                continue
+            mutant.write_text(
+                head.replace(old, new) + body + tail.replace(old, new),
+                encoding="utf-8")
+            if selftest_passes(mutant, flag):
+                say(f"[SURVIVED] {label}")
+                survivors.append(label)
+            else:
+                say(f"[killed]   {label}")
+    finally:
+        mutant.unlink(missing_ok=True)
+    return survivors
+
+
 def sweep(gate: Path) -> int:
     original = gate.read_text(encoding="utf-8")
 
@@ -227,38 +289,12 @@ def sweep(gate: Path) -> int:
               f"applied.\n"
               f"       Either the gate is genuinely broken, or it declares a "
               f"table but has no self-test,\n"
-              f"       or a previous sweep died without restoring it, or "
-              f"another sweep is running right now.\n"
-              f"       Every verdict below would describe some other program.")
+              f"       or its suite is genuinely failing right now.\n"
+              f"       Every mutant would then die of the clean run's failure "
+              f"and score as a kill.")
         return 2
 
-    # The gate's code, with its own mutation table cut out -- see `table_span`.
-    lo, hi = table_span(original)
-    head, body, tail = original[:lo], original[lo:hi], original[hi:]
-
-    # Not survivors and not kills: the sweep could not ask the question at all.
-    # Counted as failures anyway, because a needle that matches nothing is a
-    # hole that reads as coverage.
-    problems = needle_problems(original, table)
-    dead = {i for i, _, _ in problems}
-    survivors: list[str] = []
-    for _, label, reason in problems:
-        print(f"[BAD NEEDLE] {label}: {reason}")
-        survivors.append(f"{label} ({reason})")
-
-    try:
-        for i, (label, old, new) in enumerate(table):
-            if i in dead:
-                continue
-            mutated = head.replace(old, new) + body + tail.replace(old, new)
-            gate.write_text(mutated, encoding="utf-8")
-            if selftest_passes(gate, flag):
-                print(f"[SURVIVED] {label}")
-                survivors.append(label)
-            else:
-                print(f"[killed]   {label}")
-    finally:
-        gate.write_text(original, encoding="utf-8")
+    survivors = run_mutants(gate, original, table, flag, say=print)
 
     killed = len(table) - len(survivors)
     print(f"\n{killed}/{len(table)} mutants killed")

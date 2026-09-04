@@ -5395,6 +5395,8 @@ name = "flashcards"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
+ "tzrules",
 ]
 
 [[package]]
@@ -10597,6 +10599,7 @@ name = "mindmap"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -14618,6 +14621,8 @@ name = "reminders"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
+ "tzrules",
 ]
 
 [[package]]

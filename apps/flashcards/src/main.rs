@@ -21,12 +21,16 @@
 //! - Three sample decks pre-loaded
 
 use guitk::color::Color;
+use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::kv;
-use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -135,7 +139,7 @@ impl ReviewData {
     /// Apply SM-2 algorithm after a review.
     fn apply_rating(&mut self, rating: Rating, current_day: u32) {
         let q = rating.quality();
-        self.total_reviews += 1;
+        self.total_reviews = self.total_reviews.saturating_add(1);
         let idx = match rating {
             Rating::Again => 0,
             Rating::Hard => 1,
@@ -143,7 +147,7 @@ impl ReviewData {
             Rating::Easy => 3,
         };
         if let Some(count) = self.rating_counts.get_mut(idx) {
-            *count += 1;
+            *count = count.saturating_add(1);
         }
         self.last_review_day = current_day;
 
@@ -152,7 +156,7 @@ impl ReviewData {
             self.repetitions = 0;
             self.interval_days = 1;
         } else {
-            self.repetitions += 1;
+            self.repetitions = self.repetitions.saturating_add(1);
             match self.repetitions {
                 1 => self.interval_days = 1,
                 2 => self.interval_days = 6,
@@ -177,7 +181,12 @@ impl ReviewData {
         if self.total_reviews == 0 {
             return true; // never reviewed
         }
-        current_day >= self.last_review_day + self.interval_days
+        // `checked_add`, and due when it overflows: a card whose next review
+        // lands past the end of the calendar is one nobody should be waiting
+        // for, and wrapping would make it due at the wrong moment instead.
+        self.last_review_day
+            .checked_add(self.interval_days)
+            .is_none_or(|next| current_day >= next)
     }
 
     /// Accuracy as a percentage (0..100). Returns 0 if no reviews.
@@ -185,8 +194,14 @@ impl ReviewData {
         if self.total_reviews == 0 {
             return 0;
         }
-        let good_and_easy = self.rating_counts[2] + self.rating_counts[3];
-        (good_and_easy * 100) / self.total_reviews
+        // `get` and saturating throughout: this is a percentage on a card,
+        // not a place to panic if a count is missing.
+        let good = self.rating_counts.get(2).copied().unwrap_or(0);
+        let easy = self.rating_counts.get(3).copied().unwrap_or(0);
+        good.saturating_add(easy)
+            .saturating_mul(100)
+            .checked_div(self.total_reviews)
+            .unwrap_or(0)
     }
 }
 
@@ -256,14 +271,14 @@ impl Deck {
 
     fn add_card(&mut self, front: &str, back: &str) -> u32 {
         let id = self.next_card_id;
-        self.next_card_id += 1;
+        self.next_card_id = self.next_card_id.saturating_add(1);
         self.cards.push(Card::new(id, front, back));
         id
     }
 
     fn add_card_with_tags(&mut self, front: &str, back: &str, tags: &[&str]) -> u32 {
         let id = self.next_card_id;
-        self.next_card_id += 1;
+        self.next_card_id = self.next_card_id.saturating_add(1);
         self.cards.push(Card::new(id, front, back).with_tags(tags));
         id
     }
@@ -308,7 +323,12 @@ impl Deck {
             return 0;
         }
         let sum: u32 = reviewed.iter().map(|c| c.review.accuracy_percent()).sum();
-        sum / reviewed.len() as u32
+        // The caller checked the slice is non-empty, but the check and the
+        // division are far enough apart to drift.
+        u32::try_from(reviewed.len())
+            .ok()
+            .and_then(|n| sum.checked_div(n))
+            .unwrap_or(0)
     }
 
     fn mastered_count(&self) -> usize {
@@ -413,11 +433,11 @@ impl Deck {
                 // End of a card block
                 if let (Some(f), Some(b)) = (front.take(), back.take()) {
                     let id = self.next_card_id;
-                    self.next_card_id += 1;
+                    self.next_card_id = self.next_card_id.saturating_add(1);
                     let mut card = Card::new(id, &f, &b);
                     card.tags = tags.clone();
                     self.cards.push(card);
-                    count += 1;
+                    count = count.saturating_add(1);
                     tags.clear();
                 }
                 continue;
@@ -440,11 +460,11 @@ impl Deck {
         // Handle last card if no trailing blank line
         if let (Some(f), Some(b)) = (front.take(), back.take()) {
             let id = self.next_card_id;
-            self.next_card_id += 1;
+            self.next_card_id = self.next_card_id.saturating_add(1);
             let mut card = Card::new(id, &f, &b);
             card.tags = tags;
             self.cards.push(card);
-            count += 1;
+            count = count.saturating_add(1);
         }
         count
     }
@@ -585,7 +605,9 @@ impl StudySession {
         if self.current_pos >= self.queue.len() {
             0
         } else {
-            self.queue.len() - self.current_pos
+            // Saturating: `current_pos` walks past the end when the session
+            // finishes, and a wrapped remainder reads as four billion cards left.
+            self.queue.len().saturating_sub(self.current_pos)
         }
     }
 
@@ -597,17 +619,21 @@ impl StudySession {
             Rating::Easy => 3,
         };
         if let Some(count) = self.session_ratings.get_mut(idx) {
-            *count += 1;
+            *count = count.saturating_add(1);
         }
-        self.reviewed += 1;
+        self.reviewed = self.reviewed.saturating_add(1);
     }
 
     fn session_accuracy(&self) -> u32 {
         if self.reviewed == 0 {
             return 0;
         }
-        let good_easy = self.session_ratings[2] + self.session_ratings[3];
-        (good_easy * 100) / self.reviewed
+        let good = self.session_ratings.get(2).copied().unwrap_or(0);
+        let easy = self.session_ratings.get(3).copied().unwrap_or(0);
+        good.saturating_add(easy)
+            .saturating_mul(100)
+            .checked_div(self.reviewed)
+            .unwrap_or(0)
     }
 }
 
@@ -618,7 +644,15 @@ struct FlashcardsApp {
     view: AppView,
     decks: Vec<Deck>,
     selected_deck: usize,
-    /// Current simulated day (for spaced repetition scheduling).
+    /// Today, as a count of days since 1970 — the scale `ReviewData` schedules
+    /// on.
+    ///
+    /// It used to be a simulated counter that started at 1 and only moved when
+    /// the user pressed `d`, which meant the spaced-repetition scheduler this
+    /// whole app is built around could never advance on its own: a card given a
+    /// six-day interval came due six presses later and never otherwise. Its
+    /// unit is unchanged — a day is a day — so `is_due` and `apply_rating` did
+    /// not have to change at all.
     current_day: u32,
     /// Active study session.
     study_session: Option<StudySession>,
@@ -664,7 +698,7 @@ impl FlashcardsApp {
             view: AppView::DeckList,
             decks,
             selected_deck: 0,
-            current_day: 1,
+            current_day: today(),
             study_session: None,
             search_query: String::new(),
             tag_filter: None,
@@ -869,7 +903,9 @@ impl FlashcardsApp {
 
     fn remove_deck(&mut self, idx: usize) {
         if idx < self.decks.len() && self.decks.len() > 1 {
-            let name = self.decks[idx].name.clone();
+            let Some(name) = self.decks.get(idx).map(|d| d.name.clone()) else {
+                return;
+            };
             self.decks.remove(idx);
             if self.selected_deck >= self.decks.len() {
                 self.selected_deck = self.decks.len().saturating_sub(1);
@@ -952,7 +988,7 @@ impl FlashcardsApp {
 
         // Advance to next card
         if let Some(session) = &mut self.study_session {
-            session.current_pos += 1;
+            session.current_pos = session.current_pos.saturating_add(1);
             session.flipped = false;
         }
     }
@@ -963,9 +999,20 @@ impl FlashcardsApp {
         self.status_msg = String::from("Study session ended");
     }
 
-    fn advance_day(&mut self) {
-        self.current_day += 1;
-        self.status_msg = format!("Day {} -- cards may be due for review", self.current_day);
+    /// Take the calendar's word for what day it is.
+    ///
+    /// This replaced `advance_day`, which added one to a simulated counter on a
+    /// key press. That control had a meaning only while the day was invented;
+    /// with a real calendar there is nothing for it to do that waiting until
+    /// tomorrow does not do correctly.
+    fn refresh_day(&mut self) -> EventResult {
+        let day = today();
+        if day == self.current_day {
+            return EventResult::Ignored;
+        }
+        self.current_day = day;
+        self.status_msg = String::from("A new day -- cards may be due for review");
+        EventResult::Consumed
     }
 
     // ── Card editor ─────────────────────────────────────────────────
@@ -1021,7 +1068,7 @@ impl FlashcardsApp {
             // Create new card
             if let Some(deck) = self.current_deck_mut() {
                 let id = deck.next_card_id;
-                deck.next_card_id += 1;
+                deck.next_card_id = deck.next_card_id.saturating_add(1);
                 let mut card = Card::new(id, &front, &back);
                 card.tags = tags;
                 deck.cards.push(card);
@@ -1056,6 +1103,107 @@ impl FlashcardsApp {
     }
 
     // ── Key handling ────────────────────────────────────────────────
+    /// The calendar date this day number stands for.
+    ///
+    /// The header used to read "Day 1", which was true of the simulation and
+    /// would read "Day 20700" once the count became real — a number that means
+    /// nothing to anyone. The date does.
+    fn day_label(day: u32) -> String {
+        let date = guitk::date::Date::from_days_since_epoch(i32::try_from(day).unwrap_or(0));
+        let (year, month, d) = date.ymd();
+        format!("{year:04}-{month:02}-{d:02}")
+    }
+
+    // ── Events ──────────────────────────────────────────────────────
+
+    /// Route a compositor event into the app.
+    fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key_event(key_ev),
+            Event::Tick { .. } => self.refresh_day(),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.width = *width as f32;
+                    self.height = *height as f32;
+                }
+                // Not `Consumed`: a resize is not by itself a reason to redraw.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Translate a key event and apply it.
+    fn handle_key_event(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        let Some(name) = Self::key_name(key) else {
+            return EventResult::Ignored;
+        };
+        let before = self.state_fingerprint();
+        self.handle_key(&name, key.modifiers.ctrl, key.modifiers.shift);
+        if self.state_fingerprint() == before {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    /// The name `handle_key` knows a key by.
+    ///
+    /// `handle_key` matches on strings and its tests call it that way, so this
+    /// is the one place a compositor `Key` becomes one of those names, rather
+    /// than the key table existing twice in two forms.
+    fn key_name(key: &KeyEvent) -> Option<String> {
+        let named = match key.key {
+            Key::Up => "Up",
+            Key::Down => "Down",
+            Key::Left => "Left",
+            Key::Right => "Right",
+            Key::Escape => "Escape",
+            Key::Backspace => "Backspace",
+            Key::Delete => "Delete",
+            // "Enter" and not "Return": this app'"'"'s own key strings say Enter,
+            // and a translation table that disagrees with the vocabulary it
+            // translates into silently drops the key. `apps/habits` spells the
+            // same key "Return"; the name is per-app and has to be read off
+            // the app rather than assumed.
+            Key::Enter => "Enter",
+            Key::Tab => "Tab",
+            Key::Space => "Space",
+            _ => {
+                // Everything else is only interesting as the character it
+                // typed, which is how the shortcuts are written.
+                let typed = key.text.chars().next()?;
+                return Some(typed.to_string());
+            }
+        };
+        Some(named.to_string())
+    }
+
+    /// A cheap summary of everything a keystroke can change.
+    ///
+    /// `handle_key` reports nothing about whether it did anything, and an app
+    /// that answers `Consumed` to every key redraws on the ones it ignored.
+    /// Comparing the state around the call beats making every arm of five
+    /// separate matches remember to report.
+    fn state_fingerprint(&self) -> (AppView, usize, usize, bool, usize, String, String) {
+        (
+            self.view,
+            self.selected_deck,
+            self.selected_card,
+            self.study_session.is_some(),
+            self.decks.len(),
+            self.search_query.clone(),
+            self.status_msg.clone(),
+        )
+    }
+
     fn handle_key(&mut self, key: &str, ctrl: bool, _shift: bool) {
         match self.view {
             AppView::DeckList => self.handle_key_deck_list(key, ctrl),
@@ -1069,10 +1217,10 @@ impl FlashcardsApp {
     fn handle_key_deck_list(&mut self, key: &str, _ctrl: bool) {
         match key {
             "Up" | "k" if self.selected_deck > 0 => {
-                self.selected_deck -= 1;
+                self.selected_deck = self.selected_deck.saturating_sub(1);
             }
-            "Down" | "j" if self.selected_deck + 1 < self.decks.len() => {
-                self.selected_deck += 1;
+            "Down" | "j" if self.selected_deck.saturating_add(1) < self.decks.len() => {
+                self.selected_deck = self.selected_deck.saturating_add(1);
             }
             "Enter" => self.select_deck(self.selected_deck),
             "n" => self.add_deck("New Deck", ""),
@@ -1092,13 +1240,13 @@ impl FlashcardsApp {
                 self.tag_filter = None;
             }
             "Up" | "k" if self.selected_card > 0 => {
-                self.selected_card -= 1;
+                self.selected_card = self.selected_card.saturating_sub(1);
                 self.ensure_card_visible();
             }
             "Down" | "j" => {
                 let count = self.matching_card_indices().len();
-                if self.selected_card + 1 < count {
-                    self.selected_card += 1;
+                if self.selected_card.saturating_add(1) < count {
+                    self.selected_card = self.selected_card.saturating_add(1);
                     self.ensure_card_visible();
                 }
             }
@@ -1116,7 +1264,6 @@ impl FlashcardsApp {
                 }
             }
             "Delete" | "x" => self.delete_selected_card(),
-            "d" => self.advance_day(),
             "r" => {
                 // The generator has to come out of `self` before
                 // `current_deck_mut` borrows `self` mutably; taking it and
@@ -1137,11 +1284,13 @@ impl FlashcardsApp {
                         return;
                     }
                     let next = match &self.tag_filter {
-                        None => Some(tags[0].clone()),
+                        None => tags.first().cloned(),
                         Some(current) => {
                             let pos = tags.iter().position(|t| t == current);
                             match pos {
-                                Some(i) if i + 1 < tags.len() => Some(tags[i + 1].clone()),
+                                // Running off the end is how the cycle returns to "no filter",
+                                // so it is the normal path rather than an error.
+                                Some(i) => i.checked_add(1).and_then(|n| tags.get(n)).cloned(),
                                 _ => None,
                             }
                         }
@@ -1208,8 +1357,14 @@ impl FlashcardsApp {
         let visible_rows = 8usize;
         if self.selected_card < self.scroll_offset {
             self.scroll_offset = self.selected_card;
-        } else if self.selected_card >= self.scroll_offset + visible_rows {
-            self.scroll_offset = self.selected_card + 1 - visible_rows;
+        } else if self.selected_card >= self.scroll_offset.saturating_add(visible_rows) {
+            // Enough to bring the selected row onto the last visible line.
+            // The branch condition proves the subtraction is in range; doing it
+            // this way keeps the proof in the expression.
+            self.scroll_offset = self
+                .selected_card
+                .saturating_add(1)
+                .saturating_sub(visible_rows);
         }
     }
 
@@ -1278,7 +1433,10 @@ impl FlashcardsApp {
     }
 
     // ── Rendering ───────────────────────────────────────────────────
-    fn render(&self) -> Vec<RenderCommand> {
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`, so
+    /// an app that keeps the name draws nothing and reports no error.
+    fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(512);
 
         // Background
@@ -1349,7 +1507,7 @@ impl FlashcardsApp {
         cmds.push(RenderCommand::Text {
             x: self.width - 120.0,
             y: 18.0,
-            text: format!("Day {}", self.current_day),
+            text: Self::day_label(self.current_day),
             font_size: 14.0,
             color: TEAL,
             font_weight: FontWeightHint::Regular,
@@ -1641,7 +1799,10 @@ impl FlashcardsApp {
         let rows_top = list_top + 20.0;
         let visible_count = 8usize;
 
-        let end = (self.scroll_offset + visible_count).min(matching.len());
+        let end = self
+            .scroll_offset
+            .saturating_add(visible_count)
+            .min(matching.len());
         for (vis_i, list_i) in (self.scroll_offset..end).enumerate() {
             if let Some(&card_idx) = matching.get(list_i)
                 && let Some(card) = deck.cards.get(card_idx)
@@ -1741,7 +1902,7 @@ impl FlashcardsApp {
                 y: rows_top + (visible_count as f32) * Self::CARD_ROW_H + 4.0,
                 text: format!(
                     "Showing {}-{} of {}",
-                    self.scroll_offset + 1,
+                    self.scroll_offset.saturating_add(1),
                     end,
                     matching.len()
                 ),
@@ -2070,7 +2231,7 @@ impl FlashcardsApp {
                 cmds.push(RenderCommand::Text {
                     x: x + 10.0,
                     y: btn_y + 10.0,
-                    text: format!("[{}] {}", i + 1, rating.label()),
+                    text: format!("[{}] {}", i.saturating_add(1), rating.label()),
                     font_size: 14.0,
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
@@ -2162,7 +2323,10 @@ impl FlashcardsApp {
             cmds.push(RenderCommand::Text {
                 x: cx - 80.0,
                 y,
-                text: format!("{}: {}", label, session.session_ratings[i]),
+                text: format!(
+                    "{label}: {}",
+                    session.session_ratings.get(i).copied().unwrap_or(0)
+                ),
                 font_size: 13.0,
                 color: *color,
                 font_weight: FontWeightHint::Regular,
@@ -2407,8 +2571,83 @@ impl FlashcardsApp {
     }
 }
 
-fn main() {
-    let _app = FlashcardsApp::new();
+/// Today, as days since 1970 — the unit `ReviewData` schedules on.
+///
+/// Falls back to day 0 only if the system clock cannot be read at all. That is
+/// the same fallback the old simulated counter effectively had, and it fails in
+/// the safe direction here: every card reads as due, which is a visible wrong
+/// rather than a silent one.
+///
+/// The zone comes from `tzrules` the same way `apps/alarmclock` gets it, so a
+/// real local zone arrives here on the day
+/// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ` is fixed. It matters more than it
+/// looks: "is this card due today" is a question about the user's midnight, not
+/// about UTC's.
+fn today() -> u32 {
+    let Ok(since_epoch) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return 0;
+    };
+    let Ok(utc) = i64::try_from(since_epoch.as_secs()) else {
+        return 0;
+    };
+    let zone = tzrules::Tz::utc();
+    let local = utc.saturating_add(i64::from(zone.lookup(utc).gmtoff));
+    u32::try_from(guitk::date::Date::from_unix_utc(local).days_since_epoch()).unwrap_or(0)
+}
+
+impl App for FlashcardsApp {
+    fn title(&self) -> String {
+        "Flashcards".to_owned()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.width as u32, self.height as u32)
+        }
+    }
+
+    /// Five minutes, to notice midnight.
+    ///
+    /// Cards come due at a day boundary and nothing else here advances on its
+    /// own, so this is not an animation clock — it is the coarsest thing that
+    /// still catches the one event per day that matters. `refresh_day` answers
+    /// `Ignored` unless the day actually changed, so a tick that finds the same
+    /// day costs a clock read rather than a frame; only the one crossing
+    /// midnight redraws.
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(Duration::from_mins(5))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.width = width;
+        self.height = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut cards = FlashcardsApp::new();
+    app::launch("flashcards", &mut cards)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -2425,6 +2664,166 @@ mod tests {
         clippy::float_cmp,
         clippy::arithmetic_side_effects
     )]
+
+    // ------------------------------------------------------------------
+    // The day, and the event layer
+    // ------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn typed(c: char) -> Event {
+        Event::Key(KeyEvent {
+            // The scancode a letter arrives with is not what the shortcuts
+            // are written as; the text is.
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    #[test]
+    fn the_day_comes_from_the_calendar_and_not_from_a_counter() {
+        // The scheduler this app is built around measures in days; a day that
+        // only moves when a key is pressed means a six-day interval comes due
+        // after six presses and never otherwise.
+        let day = today();
+        assert!(
+            day > 20_000,
+            "days since 1970 should be past 2024, got {day}"
+        );
+        assert!(
+            day < 40_000,
+            "days since 1970 should be before 2079, got {day}"
+        );
+    }
+
+    #[test]
+    fn the_day_number_labels_as_the_date_it_stands_for() {
+        // Guards the conversion: "Day 20700" means nothing to a reader, and an
+        // off-by-one in the epoch shows up here as the wrong date.
+        assert_eq!(FlashcardsApp::day_label(0), "1970-01-01");
+        assert_eq!(FlashcardsApp::day_label(1), "1970-01-02");
+        // 2000-03-01, one day past a leap day that only a correct calendar has.
+        assert_eq!(FlashcardsApp::day_label(11_017), "2000-03-01");
+        assert_eq!(FlashcardsApp::day_label(11_016), "2000-02-29");
+    }
+
+    #[test]
+    fn a_tick_on_the_same_day_is_not_a_redraw() {
+        // 288 ticks a day, of which at most one crosses midnight: the rest must
+        // cost a clock read and not a frame.
+        let mut app = FlashcardsApp::new();
+        assert_eq!(
+            app.handle_event(&Event::Tick {
+                elapsed_ms: 300_000
+            }),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn a_tick_after_midnight_takes_the_new_day() {
+        let mut app = FlashcardsApp::new();
+        // Yesterday, as the app would have seen it before midnight.
+        app.current_day = today().saturating_sub(1);
+        assert_eq!(
+            app.handle_event(&Event::Tick {
+                elapsed_ms: 300_000
+            }),
+            EventResult::Consumed
+        );
+        assert_eq!(app.current_day, today());
+    }
+
+    #[test]
+    fn a_card_left_unreviewed_long_enough_comes_due_on_its_own() {
+        // The whole point of the clock: the scheduler already worked, and had
+        // no way to be told that time had passed.
+        let mut review = ReviewData::new();
+        let day = today();
+        review.apply_rating(Rating::Good, day);
+        review.apply_rating(Rating::Good, day);
+        let interval = review.interval_days;
+        assert!(interval >= 1, "a reviewed card gets a real interval");
+        assert!(!review.is_due(day), "just reviewed, so not due today");
+        assert!(
+            !review.is_due(day + interval - 1),
+            "not due the day before its interval elapses"
+        );
+        assert!(
+            review.is_due(day + interval),
+            "due once the interval has elapsed"
+        );
+    }
+
+    #[test]
+    fn a_key_the_view_has_no_use_for_is_not_consumed() {
+        // An app that consumes every key stops the compositor routing any of
+        // them elsewhere, and redraws on each.
+        let mut app = FlashcardsApp::new();
+        assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = FlashcardsApp::new();
+        let before = app.view;
+        let release = Event::Key(KeyEvent {
+            key: Key::Down,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert_eq!(app.view, before);
+    }
+
+    #[test]
+    fn the_arrows_reach_the_deck_list_through_the_event_layer() {
+        // The translation from a compositor `Key` to the string `handle_key`
+        // matches on is the new surface, so it needs its own coverage.
+        let mut app = FlashcardsApp::new();
+        assert!(app.decks.len() >= 2, "the sample data should have decks");
+        assert_eq!(app.selected_deck, 0);
+        assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Consumed);
+        assert_eq!(app.selected_deck, 1);
+        assert_eq!(app.handle_event(&press(Key::Up)), EventResult::Consumed);
+        assert_eq!(app.selected_deck, 0);
+    }
+
+    #[test]
+    fn a_typed_character_reaches_the_shortcut_it_names() {
+        // `Key::Unknown` with text is how a letter arrives, and the letter is
+        // what every shortcut in this app is written as.
+        let mut app = FlashcardsApp::new();
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.view, AppView::DeckDetail, "Enter opens the deck");
+        assert_eq!(app.handle_event(&typed('s')), EventResult::Consumed);
+    }
+
+    #[test]
+    fn a_resize_is_taken_but_is_not_itself_a_redraw() {
+        let mut app = FlashcardsApp::new();
+        assert_eq!(
+            app.handle_event(&Event::Resize {
+                width: 1280,
+                height: 1024
+            }),
+            EventResult::Ignored
+        );
+        assert!((app.width - 1280.0).abs() < f32::EPSILON);
+        assert!((app.height - 1024.0).abs() < f32::EPSILON);
+    }
 
     use super::*;
 
@@ -3113,7 +3512,7 @@ mod tests {
         assert_eq!(app.decks.len(), 3);
         assert_eq!(app.selected_deck, 0);
         assert_eq!(app.view, AppView::DeckList);
-        assert_eq!(app.current_day, 1);
+        assert_eq!(app.current_day, today());
     }
 
     #[test]
@@ -3362,14 +3761,6 @@ mod tests {
     }
 
     #[test]
-    fn test_advance_day() {
-        let mut app = FlashcardsApp::new();
-        let d = app.current_day;
-        app.advance_day();
-        assert_eq!(app.current_day, d + 1);
-    }
-
-    #[test]
     fn test_card_editor_save_new() {
         let mut app = FlashcardsApp::new();
         app.open_new_card_editor();
@@ -3464,7 +3855,7 @@ mod tests {
     #[test]
     fn test_render_deck_list() {
         let app = FlashcardsApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3472,7 +3863,7 @@ mod tests {
     fn test_render_deck_detail() {
         let mut app = FlashcardsApp::new();
         app.view = AppView::DeckDetail;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10);
     }
 
@@ -3480,7 +3871,7 @@ mod tests {
     fn test_render_card_editor() {
         let mut app = FlashcardsApp::new();
         app.open_new_card_editor();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10);
     }
 
@@ -3488,7 +3879,7 @@ mod tests {
     fn test_render_study_mode() {
         let mut app = FlashcardsApp::new();
         app.start_study();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10);
     }
 
@@ -3497,7 +3888,7 @@ mod tests {
         let mut app = FlashcardsApp::new();
         app.start_study();
         app.flip_card();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10);
     }
 
@@ -3510,7 +3901,7 @@ mod tests {
             app.flip_card();
             app.rate_card(Rating::Good);
         }
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 5);
     }
 
@@ -3518,7 +3909,7 @@ mod tests {
     fn test_render_statistics() {
         let mut app = FlashcardsApp::new();
         app.view = AppView::Statistics;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10);
     }
 
@@ -3527,7 +3918,7 @@ mod tests {
         let mut app = FlashcardsApp::new();
         app.view = AppView::DeckDetail;
         app.search_query = String::from("capital");
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 5);
     }
 
@@ -3536,7 +3927,7 @@ mod tests {
         let mut app = FlashcardsApp::new();
         app.view = AppView::DeckDetail;
         app.tag_filter = Some(String::from("europe"));
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 5);
     }
 
@@ -3545,7 +3936,7 @@ mod tests {
         let mut app = FlashcardsApp::new();
         app.view = AppView::DeckDetail;
         app.search_query = String::from("zzzznonexistent");
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 5);
     }
 
@@ -3663,12 +4054,12 @@ mod tests {
     #[test]
     fn test_study_no_due_cards() {
         let mut app = FlashcardsApp::new();
-        // Review all cards so none are due
+        // Review every card as of today, so none is due today.
+        let day = app.current_day;
         for card in &mut app.decks[0].cards {
-            card.review.apply_rating(Rating::Good, 1);
+            card.review.apply_rating(Rating::Good, day);
         }
         app.start_study();
-        // Should not enter study mode since no cards are due on day 1
         assert!(app.study_session.is_none());
     }
 

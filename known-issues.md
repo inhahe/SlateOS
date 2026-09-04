@@ -56801,6 +56801,51 @@ That entry's account of the `SKY` transposition names `gui/toolkit/src/theme.rs`
 among the files spelling `0x89DCEB`; as of today it spells nothing.
 ---
 
+### TD-C-A-KEY-NAME-TABLE-IS-PER-APP-AND-A-WRONG-ONE-FAILS-SILENTLY — 2026-09-04 — OPEN
+
+**In short.** Several apps handle keys by name — their handler takes a string
+like `"Enter"` or `"Down"` and matches on it. Wiring such an app to the
+compositor needs a small table turning a real key into one of those names, and
+**the names are not the same from one app to the next**: `apps/flashcards` spells
+the return key `"Enter"`, `apps/habits` spells it `"Return"`. A table that
+guesses wrong does not fail, warn, or log: the key simply does nothing, and
+every existing test still passes because they call the handler with strings
+directly and never go through the table.
+
+**It has already happened once.** Converting `apps/flashcards` on 2026-09-04, the
+table mapped the return key to `"Return"` while every match arm in that app says
+`"Enter"`. Enter did nothing in the deck list — the app's primary action. It was
+caught only because a new test pressed a real `Key::Enter` and asserted the view
+changed. Without that test the conversion would have shipped, green.
+
+**Why this is a category and not one mistake.** The trap has three properties
+that make it likely to recur:
+
+| | |
+|---|---|
+| the vocabulary is invisible | it exists only as string literals scattered through five `match` statements |
+| the failure is silent | an unmatched name falls into `_ => {}`, which is also how the app ignores keys it genuinely does not want |
+| the old tests cannot see it | they call `handle_key("Enter", …)` directly, below the table |
+
+**Proper fix, in preference order.**
+
+1. **Stop translating.** The handler should take the `KeyEvent`, as
+   `apps/procexplorer` and `apps/reminders` do. Then the compiler checks the
+   match, and there is no vocabulary to get wrong. This is the real fix and the
+   only one that removes the category.
+2. Failing that, **every conversion of a string-keyed app must include a test
+   that presses each named key as a real `Key` and asserts the effect** — not a
+   test that calls the handler with a string. That is what caught this one.
+3. A checker could compare the names a crate's table produces against the string
+   literals its `match` arms accept, and report names that no arm can ever
+   receive. That is mechanical and would have found this without a test.
+
+**Where it stands now.** `flashcards` is correct and covered. `habits` and
+`finance` were checked by hand on 2026-09-04: `habits` genuinely uses
+`"Return"`, and `finance` has no return-key action at all, so its mapping is
+inert rather than wrong. The remaining string-keyed apps have not been converted
+yet, and each is an opportunity to hit this again.
+
 ### TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH — 2026-09-04 — OPEN
 
 **In short.** The weather app's settings offer an update interval — "every 30
@@ -56936,17 +56981,18 @@ Production findings by lint:
 | `indexing_slicing` (slicing) | 15 |
 | everything else | 30 |
 
-**Nine crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
-`habits`, `markdowneditor`, `regextester`, `explorer`, `installer`, `finance`
-and `weather` — taking **452 production findings out of the 588 (77%)**. All
-but one were converted to `oswindow::app` in the same pass, since the trigger below says
-to take a crate's debt when converting it; `installer` is a CLI tool with no
-window, so it got the lint half alone.
+**Twelve crates are done** as of 2026-09-04 — `paint`, `soundrecorder`,
+`habits`, `markdowneditor`, `regextester`, `explorer`, `installer`, `finance`,
+`weather`, `reminders`, `flashcards` and `mindmap` — taking **508 production
+findings out of the 588 (86%)**. All but one were converted to `oswindow::app`
+in the same pass, since the trigger below says to take a crate's debt when
+converting it; `installer` is a CLI tool with no window, so it got the lint
+half alone.
 
 Worst crates by *production* findings: ~~`paint` 135~~, ~~`soundrecorder` 55~~,
 ~~`habits` 43~~, ~~`markdowneditor` 40~~, ~~`regextester` 39~~, ~~`installer`
 33~~, ~~`explorer` 33~~, ~~`finance` 23~~, `metronome` 21, ~~`weather` 21~~,
-`reminders` 21.
+~~`reminders` 21~~, ~~`flashcards` 18~~, ~~`mindmap` 17~~.
 
 **`installer` had been reporting a count that was not its count.** Its
 `build.rs` embeds a Windows manifest and did so with an `expect`. Under
@@ -113845,6 +113891,120 @@ no verdict and no visible complaint, and the stale last row of
 entry above it: a thing that did not look, reported identically to a thing that
 looked and found nothing.
 
+### Fix 2 has a name now: no field records how long the script ran — 2026-09-04
+
+Item 2 above says "time the phases" and treats it as instrumentation nobody has
+got round to. It is worse than that: it is why item 2 keeps costing runs. I
+repeated the exact failure this entry describes today, one day later, having
+written the entry.
+
+**What I did.** Sizing a `run-timeout` budget for a boot test at `a1ee59162`, I
+took the last `bench/boot-history.jsonl` row (`5c3a57267`), read
+`wall_seconds: 537`, allowed ~6.7× headroom, and launched with `3600`. At
+`+53 min` the run was still in the gate sweep and would have been killed at
+`+60`. I killed it by PID and relaunched at `10800`. The immediately preceding
+full run, recorded in `build/boot-test-gates.log`, had taken **6051 s** —
+**11.3× the `wall_seconds` I sized against.**
+
+**Why the number was 11× wrong, and why that is not a reading error.** The row
+has 25 fields. Exactly two are durations, and each is *correctly* scoped to a
+phase:
+
+| field | covers | set at |
+|---|---|---|
+| `build_seconds` | `cargo build` only — deliberately excludes the prerequisite and free-space checks | `boot-test.sh:5789–5791` |
+| `wall_seconds` | the QEMU window only — `QEMU_START_EPOCH`→`QEMU_END_EPOCH`, stamped at the first `kill_qemu` so log processing is not counted as guest time | `:6530`, `:1442`, `:2606` |
+
+Neither is mislabelled; both are documented and both are right. The gap is that
+the **third and now largest phase has no field at all**. The gate sweep runs
+from the first `run_checker` (`:3087`) to the last (`:5578`) and is stamped
+nowhere, so `build_seconds + wall_seconds` is not the run — on today's numbers
+it is under a tenth of it. There is no field whose absence you would notice: a
+row that omits the dominant term looks exactly like a row that reports it, which
+is the same shape as everything else in this file's neighbourhood.
+
+**The only record of a total is an accident of redirection.** The
+`[run-timeout] child exited: PASS, 6051s elapsed` line lives in whatever log the
+agent happened to redirect that run to. `grep -rn boot-test-gates scripts/`
+returns nothing — the harness never chose that filename; a session did.
+
+Counted today: **119** files under `build/` contain both `=== Boot test PASSED
+===` and a `child exited: …, Ns elapsed` line. That is 119 measured full-run
+totals the project already owns and cannot query, carrying no commit, no verdict
+linkage and no protection from the next session reusing the name. The longest
+five:
+
+| total | log |
+|---|---|
+| **6515 s** | `build/boot-test-merge.log` |
+| 6138 s | `build/boot-test-batch3.log` |
+| 6051 s | `build/boot-test-gates.log` |
+| 4880 s | `build/boot-cgroup.log` |
+| 4023 s | `build/boot-ap4.log` |
+
+So the worst case on record is **12.1×** the `wall_seconds` a budget gets sized
+from, and a `3600` budget was never survivable by five of the runs the tree has
+already done. `build/boot-test-gates.log` is being overwritten by the
+replacement run as I write this; the 6051 s survives only because I read it
+first. The other 118 are one filename collision each from the same fate.
+
+**The argument for fixing it is already written in the file that needs it.**
+`boot-test.sh:5777–5784` explains why `build_seconds` was added: Q46's tradeoff
+is "slower build, faster boot", "we have always measured the boot half
+precisely … and the build half not at all, so one side of that comparison was
+an assertion and the other was evidence." That reasoning now applies with more
+force to the sweep, which is bigger than either half it was written about, is
+the term that actually decides whether a run fits its budget, and is *growing* —
+`check_eol`, added yesterday, put ~32 s on it by itself.
+
+**Proper fix.** Two more fields on the boot-history row:
+
+- **`script_seconds`** — stamped at the very top of `boot-test.sh`, before the
+  prerequisite checks. Note this is deliberately the opposite convention to
+  `BUILD_START_EPOCH`, which excludes them on purpose: the point of this field
+  is to be the number a budget is sized from, so it must include everything a
+  budget must cover.
+- **`gates_seconds`** — around the sweep. `script_seconds` alone tells you a run
+  got long; only the split tells you *which* phase grew, which is the question
+  every subsequent "why is this slow" investigation opens with, and the one this
+  entry's own timing table had to leave as an unproven hypothesis.
+
+Per-banner elapsed stamps (item 2 as originally written) are still worth having
+for reading a live log, but they are not a substitute: they are not in the
+history file, so they cannot be compared across runs, and they die with the log.
+
+**Now measured within a single run, which the argument above could not do.** The
+replacement run's own log gives the split directly, because `run-timeout.py`
+prints an elapsed heartbeat every 120 s and `boot-test.sh` prints a banner at
+each phase change. Reading the two against each other:
+
+| boundary | evidence in the log | elapsed |
+|---|---|---|
+| gate sweep begins | `Prerequisites OK (limine,services,rootfs).` | ~120 s |
+| gate sweep ends | `=== Building kernel ===` falls between the `3960s` and `4080s` heartbeats | ~3960 s |
+| **sweep alone** | | **~3840 s (~64 min)** |
+
+Against a `wall_seconds` of ~500 s for the QEMU window on a comparable run, the
+sweep is roughly **7.7× the only phase the history file records**, measured on
+one run rather than inferred across two. Two individual gates account for a
+large share of it and both announce their own cost, so the harness already knows
+these numbers and simply discards them: `Clippy OK (debug profile, **202s**, …)`
+and `cfg(unix) OK (**553s**, …)`.
+
+That last detail sharpens the fix. `gates_seconds` as a single total is worth
+having, but the sweep is 30-odd checkers and a bare total will not say which one
+grew. Since `run_checker` is the common call path for every gate, it is the
+natural place to stamp start/end per gate and accumulate a per-gate map — the
+same shape as the existing `gated_ran` field, which already proves a
+dictionary-valued column is workable in this row format.
+
+**If it is never fixed:** every future budget gets sized from `wall_seconds`,
+because it is the only duration in the only file anyone treats as the record.
+That is not a mistake a careful reader avoids — I made it the day after writing
+this entry, with the entry open. The failure mode is self-perpetuating: a
+too-small budget kills the run, a killed run writes no row, and no row means the
+next person sizes from `wall_seconds` again.
+
 ## A-A-CRLF-CORRUPTION-IS-INVISIBLE-TO-EVERY-GIT-COMMAND-ANYONE-RUNS (lane A) — FIXED 2026-09-03
 
 **In short:** thirteen files in this worktree had Windows line endings
@@ -113971,20 +114131,48 @@ write files that are actually in the repository:
 
 | Site | Target | Tracked? | Declared `eol=lf`? |
 |---|---|---|---|
-| `check-selftest-reinit.py:327` | `scripts/selftest-reinit-baseline.txt`, on `--pin` | yes | **yes** |
+| `check-selftest-reinit.py:327` | `scripts/selftest-reinit-baseline.txt`, on `--pin` | **not yet** | **yes**, on creation |
 | `scan-orphan-modules.py:602` | `scripts/orphan-modules-baseline.txt`, on `pin` | yes | **yes** |
 | `strip-workspace-sections.py:80` | `{apps,userspace,gui,init,net}/*/Cargo.toml`, **in place** | yes | **no** |
 
-The first two are the exact signature of this entry: a declared-LF tracked file
-rewritten after checkout, with git silent about it. Both are `--pin` paths — run
-deliberately, then committed — which is precisely how a corrupted worktree
+*Corrected 2026-09-04.* The first row originally read "Tracked? yes". It is not:
+`git ls-files scripts/selftest-reinit-baseline*` is empty and the path does not
+exist on disk — nobody has run `--pin` yet. `.gitattributes:41` (`*.txt text
+eol=lf`) covers it in advance, so `git check-attr` already answers `text: set,
+eol: lf` for a file that does not exist. Verified by direct query, not inferred.
+
+That distinction changes what happens, so it is worth stating rather than
+patching over:
+
+| | `orphan-modules-baseline.txt` (tracked) | `selftest-reinit-baseline.txt` (not yet) |
+|---|---|---|
+| born CRLF by `write_text` on Windows | yes | yes |
+| in `check-eol.py`'s subject set | **yes** — declared ∩ tracked | **no** — declared but untracked |
+| so a CRLF rewrite is | caught on the next run | invisible until someone `git add`s it |
+
+Which means row 2 is the one this entry's fix already covers, and row 1 is a
+**latent** instance: it is fine precisely because the feature has never been
+used. The first `--pin` writes CRLF; the first `git add` of that output hides it
+(the clean filter normalises the index copy, so `git status`/`git diff` stay
+silent); and only then does the file enter `check-eol.py`'s subject set and the
+gate start reporting it — after the corruption, not before. Being caught late
+still beats not being caught, but the ordering is worth knowing: this gate
+detects, it does not prevent.
+
+Both rows are the exact signature of this entry — a declared-LF file rewritten
+after checkout with git silent about it — and both are `--pin` paths, run
+deliberately then committed, which is precisely how a corrupted worktree
 survives a commit and still looks clean.
 
 The third is worse in kind and lower in risk. It is a `read_text` → `write_text`
 round trip, so it is **not idempotent on Windows**: the read normalises CRLF to
 `\n` and the write turns every `\n` back into CRLF, converting an LF file to CRLF
 whenever the script changes anything at all. It aims at `*.toml`, which is *not*
-declared `eol=lf`, so `check-eol.py` cannot see the damage it does. It is also
+declared `eol=lf` — `git check-attr text eol -- apps/calc/Cargo.toml` answers
+`unspecified` for both, checked 2026-09-04 — so its targets are tracked but
+outside `check-eol.py`'s subject set, and the gate cannot see the damage it
+does. That is the third row's real hazard: unlike rows 1 and 2, nothing would
+ever report it. It is also
 **orphaned** — no reference to it exists anywhere under `scripts/`, nor in any
 tracked `.md`, `.txt`, `.sh` or `.toml` — and it is a one-shot migration script
 from the original workspace setup.
@@ -114230,3 +114418,348 @@ is about *which lints*).
 as good as it was. What is lost is the assumption every "clean" in this file
 has been written under. Treat past clean results for `coreutils` as "clean at
 stock clippy", not "clean at the project standard", until step 2 has a number.
+
+## A-A-THE-LIBC-SHAPE-GATE-WAS-BORN-DEAD-AND-THE-WIRING-GATE-CALLS-IT-WIRED (lane A, 2026-09-04)
+
+**In short:** a gate added yesterday to check that `libc.a` is carved finely
+enough has **never run, not once, on any host**. Its first line calls a helper
+function that does not exist; the call fails, and the `|| return 0` on that same
+line turns the failure into "this gate passed". Nobody noticed because the
+meta-gate whose whole job is "is every gate actually run by something?" reads
+the call site *textually*, sees the gate named there, and counts it as wired.
+Found by reading a boot-test log line I had previously skimmed as noise.
+
+**The line.** `scripts/boot-test.sh:4232`, the first statement of
+`check_libc_shape()`:
+
+```sh
+check_libc_shape() {
+    local py=""
+    py="$(find_python)" || return 0        # <-- find_python does not exist
+```
+
+`find_python` is defined **nowhere**. Verified three ways rather than assumed,
+because I published an unverified claim earlier today and had to retract it:
+
+| question | answer |
+|---|---|
+| defined in `boot-test.sh`? | no — `grep -n 'find_python' scripts/boot-test.sh` returns line 4232 and nothing else |
+| defined in anything it sources? | no — the only `.` is `run-checker.sh` (`:1259`), which defines `run_checker` and nothing else |
+| an external on `PATH`? | no — `command -v find_python` is empty |
+| across all of `scripts/`? | one hit, the call itself |
+
+And the resulting control flow, demonstrated rather than reasoned about:
+
+```console
+$ bash -c 'f() { local py=""; py="$(find_python)" || return 0; echo "REACHED THE GATE"; }; f; echo "returned $?"'
+environment: line 1: find_python: command not found
+returned 0
+```
+
+The body is never reached and the function reports success.
+
+**What that silently disabled — both halves, and the more important one second.**
+
+1. the real gate, `check-libc-shape.py --ignore-age`;
+2. **its self-test**, which the function's own header singles out as
+   non-skippable: *"it builds its own `ar` archives in memory and needs no
+   sysroot at all, so on a machine with no `libc.a` it is the only thing still
+   checking that this gate can tell a bad archive from a good one."*
+
+**Why the symptom is invisible in practice.** It does print, on every run:
+
+```
+/tmp/boot-test-snapshot.o9Qr30: line 4232: find_python: command not found
+```
+
+One stderr line, sandwiched between two `=== … ===` banners, naming a temp file
+rather than `scripts/boot-test.sh` (the harness re-executes from a snapshot), in
+a log that is tens of thousands of lines long. It carries no `ERROR`, no
+`WARNING`, and does not change the exit status. I had already read past it once.
+
+**Introduced by the commit that was supposed to turn it on.** `e3e72d4bf`
+(2026-09-03), *"wire check-libc-shape.py into the boot test, and unpin it"*.
+That is the part worth dwelling on: the gate previously sat in
+`check-gates-are-wired.py`'s `PINNED` map with the honest reason *"needs an
+opt-in skip channel in run-checker.sh first"*. The commit removed the pin and
+added a call that cannot execute — so the change traded a **tracked** exemption
+for an **untracked** one. A pin says "not wired, and here is why"; a dead call
+site says "wired" to every reader, human and machine. The gate is strictly worse
+off than before it was "wired".
+
+The header of the very function this happened to argues against the outcome in
+so many words — *"we would have wired a gate that never answers"* — as the thing
+it was carefully avoiding by passing `--ignore-age`. It got there anyway, by a
+mechanism the comment was not watching.
+
+**The blind spot this exposes, which is new.** `design-decisions.md` §907
+established that *a gate is what `run_checker` runs, not what it is named*, and
+widened `check-gates-are-wired.py` accordingly. This is the next term in the
+same series and the current gate does not cover it:
+
+> **A call site that exists is not a call site that executes.**
+
+`check-gates-are-wired.py` asks "does some `run_checker` invocation name this
+gate?" — a question about text. It cannot tell a reachable invocation from one
+behind an unconditional early return. So it reported, in this very run:
+
+```
+38 gate(s); 1 unwired, 1 pinned; 32 self-tested; 0 self-test(s) shipped but unrun
+ok -- every gate is either run by something or pinned with a reason, ...
+```
+
+`check-libc-shape` is in neither the "unwired" nor the "pinned" count. It is
+counted among the wired — correct as text, false as fact, and phrased exactly as
+it is phrased when it is right.
+
+Note also that `set -e` cannot help here and neither can `bash -n`: the syntax
+is valid, the failure is at runtime, and `|| return 0` explicitly swallows the
+non-zero status that `set -e` would otherwise act on.
+
+**Proper fix, two parts.**
+
+1. **Replace line 4232 with the idiom the other ~20 gates use** — the inline
+   `command -v python` / `python3` block, with an explicit
+   `echo "=== libc.a shape: skipped (no python) ===" >&2` on the else arm. Note
+   the current line is wrong in a *second* way that would survive merely
+   defining `find_python`: `|| return 0` returns **silently**, whereas every
+   other gate announces its skip. A gate that declines without saying so is the
+   same defect one level down.
+2. **Add a gate for the class.** Scan the shell scripts for a word in command
+   position that is not defined in the file, not defined in anything it sources,
+   not a shell builtin or keyword, and not on `PATH`. That is a small, decidable
+   check which catches this outright, and it is the only one of the two fixes
+   that protects the *next* call to a function nobody wrote. It belongs next to
+   `check-gates-are-wired.py`, since it answers the half of "is this gate run?"
+   that the existing gate structurally cannot.
+
+**How big is the class? Measured, not guessed — one.** Before proposing a gate I
+scanned the corpus for the defect, twice, and both attempts are worth recording
+because the first failed in the way this whole file is about.
+
+*Attempt 1, which found nothing and looked like a clean bill of health.* Match a
+snake_case word in command position — start of line, or after `;` `|` `&&` `(`
+— and report those neither defined, nor a builtin, nor on `PATH`. Result: 42
+names, **every one a false positive** (arithmetic inside `$(( ))`, variables in
+awk program bodies, C declarations in heredoc'd source: `size_t`, `pid_t`,
+`got_signo`). And `find_python` **was not among them** — the pattern required
+trailing whitespace after the name, but the real line is `$(find_python)"`,
+where the next character is `)`. A scan written specifically to find this bug
+did not find this bug, and reported "42 findings" in a tone indistinguishable
+from working.
+
+*Attempt 2, matching the defect's actual shape.* Take the **first word of a
+command substitution** — `\$\(\s*([a-z_][a-z0-9_]*)`. Arithmetic cannot collide
+with it, because `$((` opens with a paren rather than a word. Over **89 shell
+files with 302 functions defined**: 37 raw hits, 35 of them builtins spelled as
+substitutions (`$(cd …)`, `$(command -v …)`, `$(umask)`), leaving:
+
+| finding | verdict |
+|---|---|
+| `scripts/boot-test.sh:4232` — `py="$(find_python)"` | **the bug** |
+| `scripts/create-ext4-rootfs.sh:1522` — `CAPTURED := $(shell printf …)` | false positive — GNU **make** syntax inside a heredoc, not bash |
+
+So the blast radius is exactly one call site, and the proposed gate has a
+measured signal of 1 true finding against 1 residual false positive on today's
+tree — the latter removable by not reading inside heredocs whose body is another
+language. That is a gate worth writing rather than a fishing expedition. It also
+settles the design: prefer the substitution-shaped rule to the command-position
+one, because the narrow pattern found the defect the broad one missed. It keys
+on structure bash guarantees rather than on surrounding whitespace.
+
+**If it is never fixed:** `libc.a` member granularity is ungraded on every host
+and every run. That is not a hypothetical failure mode — it is the one that
+broke the GNU make port and got written up as `design-decisions.md` §339, which
+is why this gate was built. And the meta-gate will go on reporting it as wired,
+so the next person to ask "are all our gates running?" gets "yes" in the same
+words that would be true.
+
+### Both fixes landed — and the false-positive estimate above was wrong by 100× — 2026-09-04
+
+Fix 1 is commit `9463dd574`: the `find_python` call is replaced by the inline
+`command -v python`/`python3` block the other ~20 gates use. Its no-python arm
+now *announces* the skip, which repairs a second and subtler defect that would
+have survived merely defining `find_python` — a gate that declines without
+saying so is indistinguishable from one that looked and found nothing. The gate
+then ran for the first time in its existence: `--self-test` **24/24**, and
+against the real archive `libc.a shape OK (615 members, 3249 symbols)`.
+
+Fix 2 is commit `26545e857`: `scripts/check-shell-callables.py`, wired into
+`boot-test.sh` immediately after `check_eol`. It takes the substitution-shaped
+rule this entry recommended, resolving each callee against the file's own
+functions, the functions of anything it `source`s, the shell builtins, and
+`PATH` — the last asked of **bash** in one batched `command -v`, because these
+scripts run under MSYS bash, whose `PATH` holds the unix tools that the Windows
+`PATH` this interpreter sees does not. Verified end-to-end by re-planting the
+original line: the gate names `scripts/boot-test.sh:4250`, reports one finding,
+exits 1. Then restored.
+
+**The half of the estimate that held.** "Blast radius exactly one" was right.
+Across the graded corpus the finished gate reports exactly one true defect, the
+one above, and today reports zero because it is fixed.
+
+**The half that did not.** This entry predicted "1 residual false positive,
+removable by not reading inside heredocs whose body is another language". The
+first working implementation produced **193**. None came from the rule; all came
+from *masking* — deciding which bytes are shell at all:
+
+| Cause | Findings | Why it looked like shell |
+|---|---|---|
+| `` \` `` escaped backquotes in double-quoted strings | ~100 | This tree's refusal messages are prose about code: ``echo "\`article_for\` picks by spelling"``. Preserving the escape makes every one a backquote substitution calling `article_for`, `picks`, `text`, `Mutex`, `thread_local`. |
+| the same escapes inside *unquoted* heredoc bodies | ~70 | `pre-push`'s advisory heredocs are English paragraphs full of ``\`static FOO: Mutex<()>\`` and ``\`unwrap_or_else(…)\``. |
+| env-assignment prefixes | few | `$(PYTHONIOENCODING=:replace "$py" -u "$f")` — the callee is not the first word; it is what follows the assignments, and here it is `"$py"`, correctly undecidable. |
+| `<<<` here-strings and `<<` shifts in `$(( ))` | — | See below; these *hid* findings rather than creating them. |
+
+The lesson is a specific one and it is not "estimates are hard". **A static
+scanner's error budget lives in its lexer, not in its rule.** The rule was
+correct as specified on the first try and never changed. Every wrong answer came
+from the question "is this byte code or is it text?", and this tree is unusually
+adversarial about that because its gates explain themselves in prose that quotes
+code — the very habit that makes the refusals good makes the corpus hostile to
+naive scanning. Anyone estimating the cost of the *next* scanner should budget
+for the masker and assume the matching is free.
+
+**And the fourth cause is this file's own subject, one level down again.** A
+`<<<` here-string read as a `<<` heredoc opener made the masker consume every
+line to EOF looking for a delimiter that was really a variable expansion. The
+visible effect: `boot-test.sh` silently fell from 114 command substitutions to
+**46**, and the gate reported a clean tree in a confident tone. There was no
+error, no exception, no empty output — just less looking. That is the fifth
+sighting in this file of *a gate that discovers nothing reports no failures,
+which reads exactly like a pass*, and it is why the gate carries a
+`CANDIDATE_FLOOR` as well as a file-count floor: the file count stayed healthy
+throughout, and only the substitution count moved.
+
+`userspace/oils/tests/corpus/` is excluded, and is the only exclusion. Its files
+are inputs to a shell parser rather than programs anyone runs, so an
+unresolvable callee there is routinely the fixture's whole point —
+`lineno-cmdsub.sh` calls `nosuchcommand_xyz` deliberately, to pin down which
+line number the diagnostic names. That exclusion is itself self-tested: the
+suite asserts it stays at one entry, that it never names a `scripts/` path, and
+that the directory still exists, so it cannot silently widen into a way of
+switching the gate off.
+
+## A-FIXTURE-CLEANUP-LEAVES-EMPTY-DIRECTORIES-IN-BUILD-AND-CANNOT-TELL-YOU (lane A, 2026-09-04)
+
+**Status: OPEN.** Cosmetic today, but the mechanism is not, and the mechanism is
+this file's recurring one.
+
+`build/` in the lane-A worktree currently holds **fourteen leaked directories**:
+
+```
+build/tmpbn11j9gi  build/tmpjdvgdtgm  build/tmpk7eblvhs  build/tmplcrx43y1
+build/tmpp2zjzoj6  build/tmptsejfhu0  build/tmptvcr4ibw          (7, 2026-09-04 00:44)
+build/tmp_huu_e07  build/tmpdbdgw0hw  build/tmpgi8c5lb2  build/tmphzx24y10
+build/tmpiev_ii77  build/tmpnssaex3m  build/tmpusyrju0j          (7, 2026-09-04 01:31)
+```
+
+Two runs, seven each. **Every one of them is empty.** That is the diagnosis,
+not an aside: `shutil.rmtree` deleted the contents successfully and failed only
+on the final `os.rmdir` of the directory itself — the classic Windows transient
+sharing violation, an indexer or scanner still holding the directory handle a
+few milliseconds after its last child went away. The retry that would fix it is
+one loop; what there is instead is `ignore_errors=True`.
+
+**Where.** Three sites in `scripts/test-boot-test.py`, all the same shape:
+
+| Create | Clean up |
+|---|---|
+| `:534` `tempfile.mkdtemp(dir=fixture_root)` | `:586` `shutil.rmtree(tmp, ignore_errors=True)` |
+| `:708` `tempfile.mkdtemp(dir=fixture_root)` | `:745` `shutil.rmtree(tmp, ignore_errors=True)` |
+| `:842` `tempfile.mkdtemp(dir=fixture_root)` | `:872` `shutil.rmtree(tmp, ignore_errors=True)` |
+
+with `fixture_root = os.path.join(REPO_ROOT, "build")` at `:532`, `:706`, `:840`.
+
+**Two defects, and the second is the interesting one.**
+
+1. **No `prefix=`.** These are the only three `mkdtemp` calls in the file that
+   omit one; the other three (`:166`, `:199`, `:351`) pass
+   `slateos-bash-probe-`, `slateos-boot-test-`, `slateos-elsewhere-` and go to
+   the system temp directory. Without a prefix the leak is named `tmpXXXXXXXX`,
+   which is (a) unattributable — nothing in the name says which script made it
+   or why — and (b) unsweepable, because `build/tmp` is a *real* directory in
+   this tree, created 2026-08-29 and unrelated to these fixtures, so the obvious
+   `rm -rf build/tmp*` deletes it too. A leak you cannot safely glob for is a
+   leak nobody will ever clean; nothing in `scripts/` sweeps these by name, and
+   neither `prune-build-trees.py` nor `prune-build-cache.py` mentions `tmp` at
+   all.
+
+2. **`ignore_errors=True` makes a failed cleanup indistinguishable from a
+   successful one.** This is the same shape as the five sightings already in
+   this file of *a gate that discovers nothing reports no failures, which reads
+   exactly like a pass*, moved from a gate into a teardown. The suite has passed
+   every time while leaving fourteen directories behind, because the only signal
+   was thrown away at the point it was produced. And the flag is not merely
+   noisy-suppressing: it would equally swallow a fixture that failed to clean
+   with its *contents* intact — a real disk leak, on a drive whose space is a
+   standing project constraint — and report it identically to this harmless one.
+   The empty directories are the benign end of a range the code cannot
+   distinguish.
+
+**Why it is worth fixing even though the leak is 0 bytes.** Because `build/` is
+the first place anyone looks when a boot test misbehaves, and fourteen
+identically-shaped mystery directories are exactly the kind of noise that makes
+a real artifact hard to see; because the count grows monotonically, seven per
+suite run, with no upper bound; and because the failure is silent by
+construction, so the day it starts leaking something that is *not* empty, it
+will report that in precisely the same way it reports today: not at all.
+
+**The proper fix**, in the order it should be done:
+
+1. Give all three sites `prefix="slateos-boot-test-fixture-"`. This is what
+   makes every later step possible, and it is what distinguishes the fixtures
+   from `build/tmp`.
+2. Replace `ignore_errors=True` with a bounded retry — remove the tree, then
+   retry the final `os.rmdir` a handful of times with a short sleep, since the
+   handle is released within milliseconds. A directory that survives the retries
+   is a real finding: **print it and fail the case**, do not swallow it.
+3. Sweep the recognisable prefix at suite startup, so that a fixture orphaned by
+   a killed run (Ctrl-C, `run-timeout.py` firing) is collected by the next run
+   rather than accumulating forever. Step 1 is what makes this safe to write.
+4. Delete the fourteen existing directories once step 1 has landed, not before —
+   deleting them first only hides the evidence that the fix has to be verified
+   against.
+
+**How to confirm the fix.** Run `scripts/test-boot-test.py`, then check that
+`ls -d build/slateos-boot-test-fixture-*` reports nothing and that the count of
+`build/tmp*` entries is exactly one (`build/tmp` itself). Before the fix, the
+same run adds seven.
+
+**Related:** this is the same transient-file-handle class as **A-Q7** (the
+antivirus exclusion question in `open-questions.md`). An exclusion for the
+worktree would likely make the `rmdir` stop failing in the first place — but the
+retry is correct regardless, since the fix must not depend on an operator having
+configured a scanner.
+
+### Watched it happen, 2026-09-04 03:27 — it is deterministic, not intermittent
+
+The entry above was written from fourteen directories found after the fact. The
+boot test running at the time then reached `test-boot-test.py` in its self-test
+sweep, which gave a live observation instead of a reconstruction:
+
+| | before | after |
+|---|---|---|
+| leaked fixture directories | 14 | **21** |
+| all empty | yes | yes, 21 of 21 |
+| `build/tmp` (the real, unrelated one) | 1 entry | 1 entry, untouched |
+
+**Exactly seven more, all empty, in one run.** Three suite runs have now each
+leaked exactly seven, so this is not an intermittent race that occasionally
+loses — every fixture teardown in the file fails its final `os.rmdir`, every
+time, and has been doing so for as long as anyone has looked. The suite reported
+`PASSED` while doing it, which is the whole complaint.
+
+That also sharpens the fix. A failure rate of 100% is not "the handle is
+occasionally still open"; it is "the handle is *always* still open at the moment
+we ask". So the bounded retry in step 2 must actually sleep between attempts
+rather than spin — a zero-delay retry loop would fail all its attempts just as
+reliably as the single try does now — and while the fix is being developed it
+should print how many attempts it actually took. If that number turns out to be
+larger than a handful, the assumption that this is a milliseconds-long window is
+wrong, and the diagnosis needs revisiting before the retry is called a fix.
+
+The three creation sites sit in helpers — `_run_clippy_gate` (`:506`),
+`_run_prune_hook` (`:694`) and `_run_python_suites` (`:829`) — each invoked once
+per test case, so the seven leaks are seven cases spread across the three, and
+repairing the three `mkdtemp`/`rmtree` pairs covers all of them. There is no
+fourth site: these are the only `mkdtemp(dir=…)` calls anywhere in `scripts/`.

@@ -90,27 +90,110 @@ CASES = [
 ]
 
 
+#: A floor on how much this file must still be pinning, not a target. Set
+#: below the real count (see CASES) by enough that ordinary editing does not
+#: trip it, and far enough above zero that a table someone gutted, or a bad
+#: merge that took one side of a conflict, does.
+MIN_CASES = 20
+
+
+def _selftest() -> int:
+    """Check what this file owns, without asking bash anything.
+
+    The scoring loop belongs to `bashprobe.score_cases` and is tested there
+    against a stubbed bash; running it again here would test the same code
+    twice and this file's own contribution not at all. What is this file's own
+    is the *table*, and the floor that keeps an emptied table from reading as
+    a clean run.
+
+    Neither needs WSL, which is the whole reason the split is worth making:
+    this gate is wired with `--may-skip` and will decline on a host without
+    WSL, so a self-test that needed WSL would be skipped in precisely the runs
+    where the gate itself was skipped -- covering nothing, on every machine
+    where the coverage was the only thing left.
+    """
+    checks = bad = 0
+
+    def check(label, ok):
+        nonlocal checks, bad
+        checks += 1
+        if ok:
+            print(f"ok   {label}")
+        else:
+            print(f"selftest FAIL: {label}", file=sys.stderr)
+            bad += 1
+
+    problems = bashprobe.table_problems(CASES)
+    check(f"the {len(CASES)} real cases are well-formed", not problems)
+    for p in problems:
+        print(f"       {p}", file=sys.stderr)
+
+    # The floor, seen to fire. A floor that has never fired is a guess about a
+    # number, and this one guards the case where the gate reports success over
+    # a table that is no longer there.
+    check("the floor is below the real table, or the gate cannot pass",
+          MIN_CASES <= len(CASES))
+    real = CASES
+    try:
+        globals()["CASES"] = CASES[:1]
+        try:
+            _assert_table_is_not_gutted()
+        except SystemExit as exc:
+            check("a gutted table refuses to return a verdict",
+                  "below the floor" in str(exc))
+        else:
+            check("a gutted table refuses to return a verdict", False)
+    finally:
+        globals()["CASES"] = real
+    check("...and the real table passes the same guard",
+          _assert_table_is_not_gutted() is None)
+
+    if bad:
+        print(f"selftest: {bad} of {checks} cases FAILED", file=sys.stderr)
+        return 1
+    print(f"selftest: {checks}/{checks} cases pass")
+    return 0
+
+
+def _assert_table_is_not_gutted() -> None:
+    """Refuse to grade a table too thin to be the one this file was written on.
+
+    An emptied or truncated `CASES` sails through the scoring loop and prints
+    `0 disagreements with bash`, which is spelled exactly like a clean run.
+    No fixture can catch that, because the fixture is precisely the input that
+    went missing -- so the assertion has to be on the *real* run. (Lane A's
+    framing, in `requests/a-b-yes-to-the-self-test-rule-and-one-half-it-does-
+    not-cover.md` §2: a floor on discovery, not a target.)
+
+    Raises rather than returning a verdict, deliberately: a breach means the
+    question was not answered, not that the answer was no.
+    """
+    if len(CASES) < MIN_CASES:
+        raise SystemExit(
+            f"only {len(CASES)} case(s) in CASES, below the floor of "
+            f"{MIN_CASES}. Either this table has been gutted or a merge took "
+            f"one side of a conflict; both want a human, and reporting "
+            f"'0 disagreements with bash' over a table this thin would be the "
+            f"failure this checker exists to prevent.")
+
+
 def main():
+    # Before bash is asked anything, and before the transport check, because
+    # neither needs WSL and a gutted table is worth reporting on a host that
+    # cannot run the rest of this file at all.
+    _assert_table_is_not_gutted()
     bashprobe.assert_transport_is_faithful()
     print("transport verified faithful\n")
-    fails = 0
-    for line, want, why in CASES:
-        got = bashprobe.words(line)
-        if want is None:
-            ok = got is None
-            shown = "<bash error>" if got is None else repr(got)
-        else:
-            ok = got == want
-            shown = "<bash error>" if got is None else repr(got)
-        if not ok:
-            fails += 1
-        print(f"{'ok  ' if ok else 'FAIL'} {line!r:26} -> {shown}")
-        if not ok:
-            print(f"       expected {want!r}")
-            print(f"       ({why})")
-    print(f"\n{fails} disagreement(s) with bash")
+    fails = bashprobe.score_cases(CASES)
+    print(f"\n{fails} disagreement(s) with bash over {len(CASES)} case(s)")
     return 1 if fails else 0
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:] or "--selftest" in sys.argv[1:]:
+        # The scoring loop is bashprobe's and is tested there, against a
+        # stubbed bash; what is this file's own is the table. Checking it
+        # needs no WSL, which is the point -- these four gates run on a host
+        # that has bash, and their self-tests must run on one that does not.
+        sys.exit(_selftest())
     sys.exit(main())

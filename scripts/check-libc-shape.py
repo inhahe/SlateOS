@@ -88,6 +88,8 @@ archive). Note that 2 is a failure too -- see `main()`.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import struct
 import sys
 from pathlib import Path
@@ -327,6 +329,14 @@ UNAVOIDABLE = frozenset(
 
 AR_MAGIC = b"!<arch>\n"
 
+#: Floors on how much of the archive must have been read before a verdict is
+#: worth printing. Not targets: set an order of magnitude below what a real
+#: build produces (615 members / 3251 symbols, measured 2026-09-03) and far
+#: above what a misparse yields, so ordinary growth or shrinkage of libc never
+#: trips them and a symbol index that decoded to nothing always does.
+MIN_MEMBERS = 100
+MIN_SYMBOLS = 500
+
 
 def is_collidable(symbol: str) -> bool:
     """Could a third-party program plausibly define this same name?
@@ -562,6 +572,291 @@ def stale_against_sources(archive: Path) -> tuple[int, str | None]:
     return count, newest_rel
 
 
+def _ar_header(name: str, size: int) -> bytes:
+    """A 60-byte GNU `ar` member header. Only name and size are ever read."""
+    return (f"{name:<16}{'0':<12}{'0':<6}{'0':<6}{'644':<8}{size:<10}"
+            .encode() + b"`\n")
+
+
+def synth_archive(members: list[tuple[str, list[str]]]) -> bytes:
+    """Build a GNU `ar` archive whose symbol index says exactly this.
+
+    Written out here rather than shelled out to `ar` on purpose: this gate's
+    subject *is* the archive format, so a fixture produced by the same family
+    of tool that produced the real file would leave the parser's own reading of
+    the layout untested. Two passes, because the index has to name member
+    offsets that only exist once the index's own length is known.
+    """
+    all_syms = [s for _n, syms in members for s in syms]
+    index_size = 4 + 4 * len(all_syms) + sum(len(s) + 1 for s in all_syms)
+    pos = len(AR_MAGIC) + 60 + index_size + (index_size % 2)
+
+    offsets, blobs = [], []
+    for name, _syms in members:
+        offsets.append(pos)
+        body = b""  # nothing reads a member's contents, only its header
+        blobs.append(_ar_header(name + "/", len(body)) + body)
+        pos += 60 + len(body)
+
+    sym_offsets = [off for off, (_n, syms) in zip(offsets, members)
+                   for _ in syms]
+    index = (struct.pack(">I", len(all_syms))
+             + b"".join(struct.pack(">I", o) for o in sym_offsets)
+             + b"".join(s.encode() + b"\0" for s in all_syms))
+    pad = b"\n" if index_size % 2 else b""
+    return (AR_MAGIC + _ar_header("/", index_size) + index + pad
+            + b"".join(blobs))
+
+
+def _selftest() -> int:
+    """Drive the parser and the three shape checks against synthetic archives.
+
+    Needs no `libc.a`, which is the whole point: this gate is wired
+    `--may-skip` and declines on any tree whose sysroot has not been built, so
+    a self-test that needed the artifact would be absent from exactly the runs
+    where the gate was absent too -- covering nothing, on every machine where
+    the coverage was the only thing left.
+
+    The fixtures are graded against the module's own REAL symbol tables rather
+    than injected ones. That is deliberate and buys a second thing: a clean
+    fixture can only be constructed if STRICT_FAMILIES, REPLACEABLE and
+    UNAVOIDABLE are mutually consistent, so a name added to two of them at once
+    turns this red without anyone having to think of it as a case.
+    """
+    import tempfile
+
+    checks = bad = 0
+
+    def check_(label, ok):
+        nonlocal checks, bad
+        checks += 1
+        if ok:
+            print(f"ok   {label}")
+        else:
+            print(f"selftest FAIL: {label}", file=sys.stderr)
+            bad += 1
+
+    tmp = Path(tempfile.mkdtemp(prefix="libcshape-"))
+
+    def graded(members):
+        """Violations for a synthetic archive with these members."""
+        p = tmp / "t.a"
+        p.write_bytes(synth_archive(members))
+        return check(p, False)
+
+    def tags(vs):
+        return sorted(v.split("]")[0] + "]" for v in vs)
+
+    # A clean archive: every strict family alone in its own member, one member
+    # of unavoidable names, and nothing sharing.
+    #
+    # Members are named after the family they hold rather than numbered. The
+    # numbered version coupled the fixtures to `STRICT_FAMILIES`' *insertion*
+    # order while the cases below pick their target by *sorted* order, so
+    # "fam0" silently meant getopt where the case said error -- and the two
+    # disagreed about which member they were talking about.
+    clean = [(family, sorted(syms)) for family, syms in STRICT_FAMILIES.items()]
+    clean.append(("core", sorted(UNAVOIDABLE)))
+
+    try:
+        # --- the format reader ------------------------------------------
+        p = tmp / "t.a"
+        p.write_bytes(synth_archive(clean))
+        idx = parse_symbol_index(p)
+        check_("a synthetic archive round-trips through the index reader",
+               len(idx) == len(clean))
+        check_("...with each member's symbols attributed to it",
+               sorted(sorted(s) for s in idx.values())
+               == sorted(sorted(s) for _n, s in clean))
+        check_("member names come back for the error messages",
+               {member_name(p, o) for o in idx} == {n for n, _s in clean})
+
+        p.write_bytes(b"not an archive at all")
+        try:
+            parse_symbol_index(p)
+        except ArchiveError as exc:
+            check_("a non-archive is an ArchiveError, not a violation",
+                   "not an ar archive" in str(exc))
+        else:
+            check_("a non-archive is an ArchiveError, not a violation", False)
+
+        # An archive whose first member is a real member rather than the index.
+        # This is the shape that must NOT be read as "no symbols, all clean":
+        # it is how an archive built without `ranlib` looks.
+        p.write_bytes(AR_MAGIC + _ar_header("foo.o/", 0))
+        try:
+            parse_symbol_index(p)
+        except ArchiveError as exc:
+            check_("an archive with no symbol index is refused, not read as "
+                   "empty", "no symbol index" in str(exc))
+        else:
+            check_("an archive with no symbol index is refused", False)
+
+        p.write_bytes(AR_MAGIC + _ar_header("/", 4000) + b"\0" * 4)
+        try:
+            parse_symbol_index(p)
+        except ArchiveError as exc:
+            check_("an index whose body is short is refused", "truncated" in str(exc))
+        else:
+            check_("an index whose body is short is refused", False)
+
+        # ...and the OTHER truncation, which the case above does not reach: a
+        # body of exactly the declared length whose name table runs out before
+        # the symbol count does. The case above trips the length guard and
+        # returns, so the name-table guard went untested -- mutation testing
+        # deleted `if len(names) < count` and the suite stayed green.
+        #
+        # count is 4 rather than 3 on purpose. `split(b"\0")` on a table of N
+        # NUL-*terminated* names yields N+1 fields (the last empty), so two
+        # names satisfy a count of three by accident and prove nothing.
+        body = struct.pack(">I", 4) + struct.pack(">4I", 100, 100, 100, 100) + b"a\0b\0"
+        p.write_bytes(AR_MAGIC + _ar_header("/", len(body)) + body)
+        try:
+            parse_symbol_index(p)
+        except ArchiveError as exc:
+            check_("...as is one whose name table is shorter than its count",
+                   "claims 4 names" in str(exc))
+        else:
+            check_("...as is one whose name table is shorter than its count", False)
+
+        # --- the three checks, each seen to pass and to fire -------------
+        check_("a well-shaped archive yields no violations", graded(clean) == [])
+
+        first = sorted(STRICT_FAMILIES)[0]
+        fam = sorted(STRICT_FAMILIES[first])
+
+        # CHECK 1 [coarse]: the family's member also exports something a C
+        # program could define. This is the GNU make failure of S339.
+        #
+        # The expected tag set is DERIVED from the tables, not written down: a
+        # plain-C rider always earns [coarse], and additionally earns [rider]
+        # exactly when the family's own names are replaceable, because then the
+        # member holds a replaceable name beside an ordinary one. Every strict
+        # family is wholly replaceable today, so today this is always both --
+        # but hardcoding ["[coarse]", "[rider]"] would encode that coincidence
+        # as a requirement and turn red on the first family that isn't.
+        rider_too = ["[rider]"] if STRICT_FAMILIES[first] & REPLACEABLE else []
+        vs = graded([(n, s + ["some_unrelated_c_function"] if n == first else s)
+                     for n, s in clean])
+        check_(f"[coarse] a rider on the {first} member is caught",
+               tags(vs) == sorted(["[coarse]"] + rider_too))
+
+        # ...and that a Rust-mangled or .llvm. rider is NOT caught, which is
+        # what is_collidable is for -- a check that cried wolf on the
+        # compiler's own plumbing would be turned off.
+        vs = graded([(n, s + ["_ZN5posix6getopt4findE",
+                              "helper.llvm.12345"] if n == first else s)
+                     for n, s in clean])
+        check_("...but a Rust-mangled or .llvm. rider is not a violation",
+               vs == [])
+
+        # CHECK 1 [split]: the family lives in two members.
+        vs = graded([(n, s) for n, s in clean if n != first]
+                    + [("split_a", fam[:1]), ("split_b", fam[1:])]
+                    if len(fam) > 1 else clean)
+        check_(f"[split] the {first} family in two members is caught",
+               tags(vs) == ["[split]"] if len(fam) > 1 else True)
+
+        # CHECK 1 [missing]: the family is absent entirely. "No member defines
+        # getopt" would otherwise satisfy the loop trivially.
+        vs = graded([(n, s) for n, s in clean if n != first])
+        check_(f"[missing] the {first} family absent is caught, not passed",
+               tags(vs) == ["[missing]"])
+
+        # CHECK 2 [mixed]: a replaceable name in the same member as one every
+        # program needs, so the member is always extracted.
+        repl = sorted(REPLACEABLE - {s for f in STRICT_FAMILIES.values()
+                                     for s in f})[0]
+        vs = graded([(n, s + [repl] if n == "core" else s) for n, s in clean])
+        check_(f"[mixed] {repl} beside an unavoidable name is caught",
+               "[mixed]" in tags(vs))
+
+        # CHECK 3 [rider]: a replaceable name beside an ordinary one. Weaker
+        # than [mixed], and reported only where [mixed] did not already speak.
+        vs = graded(clean + [("mix", [repl, "some_other_c_function"])])
+        check_(f"[rider] {repl} beside a plain C name is caught",
+               tags(vs) == ["[rider]"])
+        check_("...and a member of only replaceable names is not",
+               graded(clean + [("ok", [repl])]) == [])
+
+        # --- is_collidable, which the two above depend on ----------------
+        check_("C names are collidable", is_collidable("getopt"))
+        check_("Rust-mangled names are not",
+               not is_collidable("_ZN5posix7fnmatch8do_matchE"))
+        check_("...nor are LLVM-promoted internals",
+               not is_collidable("do_match.llvm.9876"))
+
+        # --- the floor, driven through main() rather than asserted -------
+        # The first two are about the constants: a fixture-sized archive must
+        # sit below both halves, or the floor could not fire on the misparse it
+        # exists to catch. `MIN_SYMBOLS > 0` used to stand in for the second and
+        # was worth nothing -- gutting MIN_SYMBOLS to 1 satisfied it, and
+        # mutation testing duly walked out with that survivor.
+        clean_symbols = sum(len(s) for _n, s in clean)
+        check_("a fixture-sized archive is below the member floor",
+               len(clean) < MIN_MEMBERS)
+        check_("...and below the symbol floor",
+               clean_symbols < MIN_SYMBOLS)
+
+        # ...and these two are about whether anything CONSULTS them. The pair
+        # above pins the constants; neither shows that main() ever reads one. A
+        # main() with the floor block deleted passes both with the numbers
+        # perfectly intact -- the same shape of hole as an escape alphabet that
+        # is verified against its source and then never looked at. So drive the
+        # real entry point, in both directions: it must refuse the small archive
+        # and accept a large one, or "refuses everything" would pass as well.
+        #
+        # main() age-checks only its DEFAULT archive, so an explicit path here
+        # needs no --ignore-age and cannot be turned red by a stale sysroot.
+        def run_main(members) -> tuple[int, str]:
+            p = tmp / "t.a"
+            p.write_bytes(synth_archive(members))
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = main([str(p)])
+            return rc, out.getvalue() + err.getvalue()
+
+        # Filler members. The names are Rust-mangled on purpose: is_collidable
+        # rejects them, so they add bulk without adding violations, and these
+        # cases stay about the floor.
+        def pad(n_members: int, per_member: int):
+            return [(f"pad{i}", [f"_ZN5posix3pad{i}_{j}E" for j in range(per_member)])
+                    for i in range(n_members)]
+
+        rc, text = run_main(clean)
+        check_("main() refuses a fixture-sized archive rather than passing it",
+               rc == 2 and "below the floor" in text)
+
+        rc, text = run_main(clean + pad(MIN_MEMBERS + 1, 6))
+        check_("...and grades one that clears the floor",
+               rc == 0 and "shape OK" in text)
+
+        # The two halves are also driven APART. Both cases above sit below both
+        # floors or above both, so an `and` where the code says `or` -- a floor
+        # that checks only one half -- passes them unchanged. Mutation testing
+        # found exactly that: dropping either half left the suite green. These
+        # two fixtures each breach one half only, so each is refused by one
+        # half and would be waved through by the other.
+        few_members = MIN_MEMBERS - 1 - len(clean)
+        rc, text = run_main(clean + pad(few_members, MIN_SYMBOLS // few_members + 2))
+        check_("...refuses too-few members even when the symbols are plentiful",
+               rc == 2 and "below the floor" in text)
+
+        rc, text = run_main(clean + pad(MIN_MEMBERS + 1, 1))
+        check_("...and too-few symbols even when the members are plentiful",
+               rc == 2 and "below the floor" in text)
+    finally:
+        for f in tmp.iterdir():
+            f.unlink()
+        tmp.rmdir()
+
+    if bad:
+        print(f"selftest: {bad} of {checks} cases FAILED", file=sys.stderr)
+        return 1
+    print(f"selftest: {checks}/{checks} cases pass")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
@@ -614,6 +909,41 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     try:
+        members = parse_symbol_index(path)
+    except ArchiveError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    # A floor on discovery, asked BEFORE the shape checks rather than after,
+    # because it is a question about whether the archive could be judged at all
+    # and not about whether it passed. `check()` returning no violations is
+    # spelled identically whether it read 615 members or three, and an index
+    # that yielded almost nothing satisfies most of it trivially: CHECK 2 and
+    # CHECK 3 iterate over what was found, so an empty `members` passes both.
+    # Only CHECK 1 objects, via [missing] -- and only while STRICT_FAMILIES
+    # stays non-empty, which is not a property this check should rely on
+    # another list to supply.
+    #
+    # It exits 2, not 1: a misparse means the question was not answered, not
+    # that the answer was no. That also keeps it out of the skip channel --
+    # `--may-skip` accepts a decline, and this one is a decline, so the call
+    # site in boot-test.sh will report it as a skip with this text as the
+    # reason. That is the correct outcome and the reason the text says which
+    # numbers it saw.
+    n_symbols = sum(len(s) for s in members.values())
+    if len(members) < MIN_MEMBERS or n_symbols < MIN_SYMBOLS:
+        print(f"ERROR: the symbol index of {path} yielded only {len(members)} "
+              f"member(s) and {n_symbols} symbol(s), below the floor of "
+              f"{MIN_MEMBERS}/{MIN_SYMBOLS}.", file=sys.stderr)
+        print("       A real libc.a has hundreds of both (615 and 3251 when "
+              "this floor was set), so this is a", file=sys.stderr)
+        print("       misparse or a truncated archive rather than a clean bill "
+              "of health.", file=sys.stderr)
+        print("       (This is exit 2, 'could not check', not a pass.)",
+              file=sys.stderr)
+        return 2
+
+    try:
         violations = check(path, args.verbose)
     except ArchiveError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -646,9 +976,12 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
         return 1
 
-    print(f"libc.a shape OK: {path}")
+    print(f"libc.a shape OK: {path} ({len(members)} members, "
+          f"{n_symbols} symbols)")
     return 0
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:] or "--selftest" in sys.argv[1:]:
+        sys.exit(_selftest())
     sys.exit(main())

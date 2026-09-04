@@ -23,6 +23,9 @@ use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::wheel;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::path::PathBuf;
 
@@ -159,42 +162,60 @@ pub fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
     }
 
     // Find fmt chunk
-    let mut offset = 12;
+    let mut offset: usize = 12;
     let mut sample_rate = 0u32;
     let mut channels = 0u16;
     let mut bits_per_sample = 0u16;
     let mut data_size = 0u32;
     let mut found_fmt = false;
 
-    while offset + 8 <= data.len() {
-        let chunk_id = data.get(offset..offset + 4)?;
+    // Every offset below is `checked_add`, and that is not a lint formality:
+    // this reads a file the user was handed, and `chunk_size` is four bytes out
+    // of it. The advance at the bottom of the loop used to be
+    // `offset += 8 + chunk_size as usize`, which on a crafted size wraps
+    // `offset` back to a small number — and a small offset passes the loop
+    // guard, so the parser reads the same chunks again forever. A media player
+    // that hangs on a malformed file is the cheapest denial of service there
+    // is, and it needs no privileges to deliver: it is an email attachment.
+    let byte = |i: usize| -> Option<u8> { data.get(i).copied() };
+    while offset.checked_add(8).is_some_and(|end| end <= data.len()) {
+        let chunk_id = data.get(offset..offset.checked_add(4)?)?;
         let chunk_size = u32::from_le_bytes([
-            *data.get(offset + 4)?,
-            *data.get(offset + 5)?,
-            *data.get(offset + 6)?,
-            *data.get(offset + 7)?,
+            byte(offset.checked_add(4)?)?,
+            byte(offset.checked_add(5)?)?,
+            byte(offset.checked_add(6)?)?,
+            byte(offset.checked_add(7)?)?,
         ]);
 
         if chunk_id == b"fmt " && chunk_size >= 16 {
-            let fmt_start = offset + 8;
-            channels = u16::from_le_bytes([*data.get(fmt_start + 2)?, *data.get(fmt_start + 3)?]);
-            sample_rate = u32::from_le_bytes([
-                *data.get(fmt_start + 4)?,
-                *data.get(fmt_start + 5)?,
-                *data.get(fmt_start + 6)?,
-                *data.get(fmt_start + 7)?,
+            let fmt_start = offset.checked_add(8)?;
+            channels = u16::from_le_bytes([
+                byte(fmt_start.checked_add(2)?)?,
+                byte(fmt_start.checked_add(3)?)?,
             ]);
-            bits_per_sample =
-                u16::from_le_bytes([*data.get(fmt_start + 14)?, *data.get(fmt_start + 15)?]);
+            sample_rate = u32::from_le_bytes([
+                byte(fmt_start.checked_add(4)?)?,
+                byte(fmt_start.checked_add(5)?)?,
+                byte(fmt_start.checked_add(6)?)?,
+                byte(fmt_start.checked_add(7)?)?,
+            ]);
+            bits_per_sample = u16::from_le_bytes([
+                byte(fmt_start.checked_add(14)?)?,
+                byte(fmt_start.checked_add(15)?)?,
+            ]);
             found_fmt = true;
         } else if chunk_id == b"data" {
             data_size = chunk_size;
         }
 
-        offset += 8 + chunk_size as usize;
-        // Chunks are word-aligned
-        if offset % 2 != 0 {
-            offset += 1;
+        // A chunk that would carry the cursor past the end of `usize` ends the
+        // parse rather than wrapping it. `None` and not `break`, because a
+        // size that large means the file is lying about its own structure and
+        // whatever was read before it is not to be trusted either.
+        offset = offset.checked_add(8)?.checked_add(chunk_size as usize)?;
+        // Chunks are word-aligned.
+        if !offset.is_multiple_of(2) {
+            offset = offset.checked_add(1)?;
         }
     }
 
@@ -202,12 +223,13 @@ pub fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
         return None;
     }
 
-    let bytes_per_sample = bits_per_sample as u32 / 8;
-    let total_samples = if bytes_per_sample > 0 && channels > 0 {
-        data_size / (bytes_per_sample * channels as u32)
-    } else {
-        0
-    };
+    let bytes_per_sample = u32::from(bits_per_sample) / 8;
+    // `checked_div` rather than a `> 0` test two lines up: the guard and the
+    // division are then the same expression, which is what stops them drifting
+    // apart. Both operands come out of the file.
+    let total_samples = data_size
+        .checked_div(bytes_per_sample.saturating_mul(u32::from(channels)))
+        .unwrap_or(0);
     let duration_secs = if sample_rate > 0 {
         total_samples as f32 / sample_rate as f32
     } else {
@@ -253,12 +275,15 @@ pub fn parse_flac_header(data: &[u8]) -> Option<FlacInfo> {
     // Block size: 3 bytes at offset 5
     let block_size =
         ((*data.get(5)? as u32) << 16) | ((*data.get(6)? as u32) << 8) | (*data.get(7)? as u32);
-    if block_size < 34 || data.len() < 8 + block_size as usize {
+    // STREAMINFO starts at offset 8. `checked_add` and `get` rather than `+`
+    // and `[a..b]`: `block_size` is three bytes out of the file, and a length
+    // check standing two statements away from the slice it licenses is a
+    // guarantee that stops holding the moment someone moves either one.
+    let si_end = 8usize.checked_add(block_size as usize)?;
+    if block_size < 34 || data.len() < si_end {
         return None;
     }
-
-    // STREAMINFO starts at offset 8
-    let si = &data[8..8 + block_size as usize];
+    let si = data.get(8..si_end)?;
     if si.len() < 34 {
         return None;
     }
@@ -270,10 +295,10 @@ pub fn parse_flac_header(data: &[u8]) -> Option<FlacInfo> {
     let sr_lo = (*si.get(12)? as u32) >> 4;
     let sample_rate = sr_hi | sr_mid | sr_lo;
 
-    let channels = ((*si.get(12)? >> 1) & 0x07) + 1;
+    let channels = ((*si.get(12)? >> 1) & 0x07).saturating_add(1);
     let bps_hi = (*si.get(12)? & 0x01) << 4;
     let bps_lo = *si.get(13)? >> 4;
-    let bits_per_sample = bps_hi | (bps_lo + 1);
+    let bits_per_sample = bps_hi | bps_lo.saturating_add(1);
 
     let total_hi = ((*si.get(13)? & 0x0F) as u64) << 32;
     let total_lo = ((*si.get(14)? as u64) << 24)
@@ -320,50 +345,56 @@ pub fn parse_id3v2(data: &[u8]) -> Option<Id3Tags> {
 
     let version_major = *data.get(3)?;
     // ID3v2 size: 4 bytes synchsafe integer (7 bits per byte)
-    let size = synchsafe_u32(&data[6..10])?;
-    let header_end = 10 + size as usize;
+    let size = synchsafe_u32(data.get(6..10)?)?;
+    let header_end = 10usize.checked_add(size as usize)?;
 
     if data.len() < header_end {
         return None;
     }
 
     let mut tags = Id3Tags::default();
-    let mut pos = 10;
+    let mut pos: usize = 10;
 
     // Skip extended header if present (ID3v2.3+)
     let flags = *data.get(5)?;
     if version_major >= 3 && flags & 0x40 != 0 {
-        if pos + 4 > header_end {
+        if pos.checked_add(4)? > header_end {
             return Some(tags);
         }
         let ext_size = u32::from_be_bytes([
             *data.get(pos)?,
-            *data.get(pos + 1)?,
-            *data.get(pos + 2)?,
-            *data.get(pos + 3)?,
+            *data.get(pos.checked_add(1)?)?,
+            *data.get(pos.checked_add(2)?)?,
+            *data.get(pos.checked_add(3)?)?,
         ]) as usize;
-        pos += 4 + ext_size;
+        // `ext_size` is a full 32-bit field out of the file. Unchecked, the
+        // advance wraps `pos` back to a small number, and a small `pos` passes
+        // the loop guard below — so the parser walks the same frames forever.
+        pos = pos.checked_add(4)?.checked_add(ext_size)?;
     }
 
-    while pos + 10 <= header_end {
-        let frame_id = data.get(pos..pos + 4)?;
-        if frame_id[0] == 0 {
+    while pos.checked_add(10).is_some_and(|end| end <= header_end) {
+        let frame_id = data.get(pos..pos.checked_add(4)?)?;
+        if frame_id.first() == Some(&0) {
             break; // Padding
         }
 
         let frame_size = if version_major >= 4 {
-            synchsafe_u32(&data[pos + 4..pos + 8])? as usize
+            synchsafe_u32(data.get(pos.checked_add(4)?..pos.checked_add(8)?)?)? as usize
         } else {
             u32::from_be_bytes([
-                *data.get(pos + 4)?,
-                *data.get(pos + 5)?,
-                *data.get(pos + 6)?,
-                *data.get(pos + 7)?,
+                *data.get(pos.checked_add(4)?)?,
+                *data.get(pos.checked_add(5)?)?,
+                *data.get(pos.checked_add(6)?)?,
+                *data.get(pos.checked_add(7)?)?,
             ]) as usize
         };
 
-        let frame_data_start = pos + 10;
-        let frame_data_end = frame_data_start + frame_size;
+        let frame_data_start = pos.checked_add(10)?;
+        // Checked before the comparison below, not after: a sum that has
+        // already wrapped compares as *smaller* than `header_end`, so the
+        // bounds check would wave through a frame that runs off the end.
+        let frame_data_end = frame_data_start.checked_add(frame_size)?;
 
         if frame_data_end > header_end || frame_size == 0 {
             break;
@@ -433,11 +464,19 @@ fn decode_id3_text(data: &[u8]) -> Option<String> {
             let pairs = text_bytes.get(start..)?;
             let u16_vec: Vec<u16> = pairs
                 .chunks_exact(2)
+                // `chunks_exact(2)` guarantees both bytes, but the guarantee
+                // is in the iterator's name rather than in this expression, so
+                // it is spelled out: a chunk that somehow had one byte reads as
+                // a NUL, which `take_while` then treats as end-of-string.
                 .map(|chunk| {
+                    let (a, b) = (
+                        chunk.first().copied().unwrap_or(0),
+                        chunk.get(1).copied().unwrap_or(0),
+                    );
                     if le {
-                        u16::from_le_bytes([chunk[0], chunk[1]])
+                        u16::from_le_bytes([a, b])
                     } else {
-                        u16::from_be_bytes([chunk[0], chunk[1]])
+                        u16::from_be_bytes([a, b])
                     }
                 })
                 .take_while(|&c| c != 0)
@@ -607,6 +646,21 @@ pub enum Tab {
 // ============================================================================
 
 /// Complete player state.
+/// How fast a visualiser bar eases towards its new target, as a time constant.
+///
+/// Solved from the per-call blend this replaced: 0.4 of the way in 33 ms means
+/// `1 - exp(-0.033 / tau) = 0.4`, so `tau = 0.033 / -ln(0.6)` = 0.0646 s. The
+/// bars therefore look exactly as they did, and now do so at any tick rate.
+const VISUALIZER_TAU_SECS: f32 = 0.0646;
+
+/// How often the player asks to be woken while a track is playing.
+///
+/// 30 Hz: fast enough that the visualiser reads as motion rather than as a
+/// stutter, slow enough that a music player is not the reason a laptop's fan
+/// runs. The position readout only needs a second, but the bars are what
+/// decide this.
+const PLAYING_TICK_MS: u64 = 33;
+
 pub struct PlayerState {
     // Playback
     pub current_track_index: Option<usize>,
@@ -766,7 +820,7 @@ impl PlayerState {
                         }
                     }
                 } else {
-                    let next = idx + 1;
+                    let next = idx.saturating_add(1);
                     if next >= len {
                         match self.repeat_mode {
                             RepeatMode::All => self.current_track_index = Some(0),
@@ -801,13 +855,28 @@ impl PlayerState {
     /// `position_secs` evaluated in the renderer, both so that they can be
     /// random at all -- rendering takes `&PlayerState` -- and so that the
     /// animation does not stall whenever the position happens not to change.
-    fn advance_visualizer(&mut self) {
+    fn advance_visualizer(&mut self, elapsed_secs: f32) {
+        // Eased towards a new target rather than snapped to it: a bar that
+        // jumps to an independent height every frame flickers, which reads as
+        // noise rather than as an audio level.
+        //
+        // **The easing is a rate, not a per-call blend.** It used to be a flat
+        // `bar * 0.6 + target * 0.4` every time this was called, which makes
+        // the animation speed a function of how often the caller runs. That is
+        // harmless while nothing calls it and wrong the moment something does:
+        // `App::tick_interval` is a *floor*, so ticks arrive irregularly, and
+        // a busy frame would have eased the bars twice as far as a quiet one.
+        // It is the defect `apps/mixer` shipped in its peak meters
+        // (`known-issues.md` lesson 47), one call site over.
+        //
+        // `VISUALIZER_TAU_SECS` is chosen so that at the 33 ms the player asks
+        // for, `alpha` comes out at 0.4 — the same look as before, now
+        // independent of when the clock happens to fire.
+        let alpha = 1.0 - (-elapsed_secs / VISUALIZER_TAU_SECS).exp();
+        let alpha = alpha.clamp(0.0, 1.0);
         for bar in &mut self.visualizer_bars {
-            // Eased towards a new target rather than snapped to it: a bar that
-            // jumps to an independent height every frame flickers, which reads
-            // as noise rather than as an audio level.
             let target = self.rng.unit_f32();
-            *bar = bar.mul_add(0.6, target * 0.4);
+            *bar += (target - *bar) * alpha;
         }
     }
 
@@ -868,9 +937,9 @@ impl PlayerState {
         match self.current_track_index {
             Some(idx) => {
                 if idx == 0 {
-                    self.current_track_index = Some(len - 1);
+                    self.current_track_index = Some(len.saturating_sub(1));
                 } else {
-                    self.current_track_index = Some(idx - 1);
+                    self.current_track_index = idx.checked_sub(1);
                 }
             }
             None => self.current_track_index = Some(0),
@@ -908,7 +977,7 @@ impl PlayerState {
         if !self.playing {
             return;
         }
-        self.advance_visualizer();
+        self.advance_visualizer(elapsed_secs);
         let dur = self.current_duration();
         if dur <= 0.0 {
             return;
@@ -943,10 +1012,10 @@ impl PlayerState {
                 if self.playlist.is_empty() {
                     self.current_track_index = None;
                 } else if cur >= self.playlist.len() {
-                    self.current_track_index = Some(self.playlist.len() - 1);
+                    self.current_track_index = self.playlist.len().checked_sub(1);
                 }
             } else if index < cur {
-                self.current_track_index = Some(cur - 1);
+                self.current_track_index = cur.checked_sub(1);
             }
         }
     }
@@ -956,11 +1025,14 @@ impl PlayerState {
         if index == 0 || index >= self.playlist.len() {
             return;
         }
-        self.playlist.swap(index, index - 1);
+        let Some(above) = index.checked_sub(1) else {
+            return;
+        };
+        self.playlist.swap(index, above);
         if let Some(cur) = self.current_track_index {
             if cur == index {
-                self.current_track_index = Some(index - 1);
-            } else if cur == index - 1 {
+                self.current_track_index = Some(above);
+            } else if cur == above {
                 self.current_track_index = Some(index);
             }
         }
@@ -968,14 +1040,15 @@ impl PlayerState {
 
     /// Move track down in playlist.
     pub fn move_track_down(&mut self, index: usize) {
-        if index + 1 >= self.playlist.len() {
+        let below = index.saturating_add(1);
+        if below >= self.playlist.len() {
             return;
         }
-        self.playlist.swap(index, index + 1);
+        self.playlist.swap(index, below);
         if let Some(cur) = self.current_track_index {
             if cur == index {
-                self.current_track_index = Some(index + 1);
-            } else if cur == index + 1 {
+                self.current_track_index = Some(below);
+            } else if cur == below {
                 self.current_track_index = Some(index);
             }
         }
@@ -1490,7 +1563,9 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
             None => break,
         };
 
-        let is_playing = state.current_track().map(|ct| ct.path == track.path) == Some(true);
+        let is_playing = state
+            .current_track()
+            .is_some_and(|ct| ct.path == track.path);
         let is_selected = state.selected_index == Some(track_idx);
 
         // Striped by *track* index, not by visible slot: the stripes belong
@@ -1658,7 +1733,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
         tree.push(RenderCommand::Text {
             x: 16.0,
             y: text_y,
-            text: format!("{}.", track_idx + 1),
+            text: format!("{}.", track_idx.saturating_add(1)),
             color: SURFACE2,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -2190,7 +2265,7 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
         Key::Up => {
             if let Some(idx) = state.selected_index {
                 if idx > 0 {
-                    state.selected_index = Some(idx - 1);
+                    state.selected_index = idx.checked_sub(1);
                 }
             } else if !state.playlist.is_empty() {
                 state.selected_index = Some(0);
@@ -2201,11 +2276,13 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
             let max_idx = match state.active_tab {
                 Tab::Library => state.filtered_library().len(),
                 Tab::Playlists => state.playlist.len(),
-                _ => 0,
+                // Named rather than `_`, so a tab added later is a compile
+                // error here instead of silently arrowing over nothing.
+                Tab::NowPlaying => 0,
             };
             if let Some(idx) = state.selected_index {
-                if idx + 1 < max_idx {
-                    state.selected_index = Some(idx + 1);
+                if idx.saturating_add(1) < max_idx {
+                    state.selected_index = Some(idx.saturating_add(1));
                 }
             } else if max_idx > 0 {
                 state.selected_index = Some(0);
@@ -2226,7 +2303,7 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
                             } else {
                                 let track_clone = (*track).clone();
                                 state.playlist.push(track_clone);
-                                state.current_track_index = Some(state.playlist.len() - 1);
+                                state.current_track_index = state.playlist.len().checked_sub(1);
                             }
                             state.position_secs = 0.0;
                             state.playing = true;
@@ -2251,7 +2328,7 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
                 if state.playlist.is_empty() {
                     state.selected_index = None;
                 } else if idx >= state.playlist.len() {
-                    state.selected_index = Some(state.playlist.len() - 1);
+                    state.selected_index = state.playlist.len().checked_sub(1);
                 }
             }
             true
@@ -2499,14 +2576,20 @@ fn album_color(album: &str) -> Color {
     let palette = [
         MAUVE, BLUE, SAPPHIRE, GREEN, PEACH, PINK, LAVENDER, YELLOW, RED,
     ];
-    let idx = (hash as usize) % palette.len();
-    let base_color = palette[idx];
+    // The table is a non-empty literal three lines up, so neither the modulo
+    // nor the lookup can fail — but that is an argument about the code above
+    // rather than a property of this expression, and this function returns a
+    // `Color` with nowhere to report a failure. `unwrap_or` names the fallback
+    // instead of asserting the argument.
+    #[allow(clippy::cast_possible_truncation)]
+    let idx = (hash as usize).checked_rem(palette.len()).unwrap_or(0);
+    let base_color = palette.get(idx).copied().unwrap_or(BLUE);
 
     // Darken slightly for album art background
     Color::rgba(
-        (base_color.r as u16 * 180 / 255) as u8,
-        (base_color.g as u16 * 180 / 255) as u8,
-        (base_color.b as u16 * 180 / 255) as u8,
+        (u16::from(base_color.r).saturating_mul(180) / 255) as u8,
+        (u16::from(base_color.g).saturating_mul(180) / 255) as u8,
+        (u16::from(base_color.b).saturating_mul(180) / 255) as u8,
         255,
     )
 }
@@ -2515,9 +2598,65 @@ fn album_color(album: &str) -> Color {
 // Application Entry Point
 // ============================================================================
 
-fn main() {
-    let mut state = PlayerState::new();
+impl App for PlayerState {
+    fn title(&self) -> String {
+        "Music Player".to_string()
+    }
 
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// A clock only while something is playing.
+    ///
+    /// Gated on `playing` rather than returned unconditionally, because
+    /// `PlayerState::tick` returns immediately when paused — so an
+    /// unconditional interval would wake the machine thirty times a second to
+    /// do nothing, for as long as the window is open. The recipe in
+    /// `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` asks for exactly this: gate it on
+    /// what is actually moving, so an idle desktop can park.
+    ///
+    /// The other half matters too: returning `None` while playing would ship a
+    /// player whose position never advances and whose visualiser never moves,
+    /// with its tests still green (lesson 47).
+    fn tick_interval(&self) -> Option<Duration> {
+        self.playing.then(|| Duration::from_millis(PLAYING_TICK_MS))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        if handle_event(self, event) {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed: a compositor may grant a size
+        // that was never requested, and the first frame is drawn before any
+        // `Resize` arrives.
+        self.width = width;
+        self.height = height;
+        render(self)
+    }
+}
+
+fn main() -> ExitCode {
+    let mut state = PlayerState::new();
+    load_demo_library(&mut state);
+    app::launch("musicplayer", &mut state)
+}
+
+/// The library the window opens on.
+///
+/// Until there is a filesystem to scan, this is what there is to show, and
+/// the window is worth opening on it: an empty library would read as a
+/// broken player rather than an unimplemented one.
+fn load_demo_library(state: &mut PlayerState) {
     // Add some demo tracks to show the UI populated
     let demo_tracks = [
         (
@@ -2614,13 +2753,6 @@ fn main() {
 
     // Set first track as current
     state.current_track_index = Some(0);
-
-    // Main event loop (placeholder — in real Slate OS, this would receive events from compositor)
-    let _tree = render(&state);
-
-    // Simulate a tick
-    state.tick(1.0);
-    let _tree = render(&state);
 }
 
 // ============================================================================
@@ -3205,7 +3337,7 @@ mod tests {
         let mut state = shuffling_player(0x0BAD_C0DE_0BAD_C0DE, 3);
         state.playing = true;
         for _ in 0..30 {
-            state.advance_visualizer();
+            state.advance_visualizer(TICK_SECS);
         }
         let bars = state.visualizer_bars().to_vec();
         // Bucketed to a hundredth, the resolution the old ramp itself worked
@@ -3229,7 +3361,7 @@ mod tests {
         state.playing = true;
         let mut history: Vec<Vec<f32>> = Vec::new();
         for _ in 0..40 {
-            state.advance_visualizer();
+            state.advance_visualizer(TICK_SECS);
             history.push(state.visualizer_bars().to_vec());
         }
         for i in 0..VISUALIZATION_BARS {
@@ -3622,5 +3754,168 @@ mod tests {
         state.sort_library(SortBy::Title);
         assert_eq!(state.library[0].title, "Apple");
         assert_eq!(state.library[1].title, "Zebra");
+    }
+
+    /// One tick's worth of time, at the rate `tick_interval` asks for.
+    #[allow(clippy::cast_precision_loss)]
+    const TICK_SECS: f32 = PLAYING_TICK_MS as f32 / 1000.0;
+
+    /// The visualiser eases by elapsed *time*, not by how often it is called.
+    ///
+    /// `App::tick_interval` is a floor rather than a promise — a busy frame
+    /// delivers one long tick where a quiet one delivers two short ones — so a
+    /// per-call blend makes the animation speed a function of the machine's
+    /// load. This is `apps/mixer`'s peak-meter defect (`known-issues.md`
+    /// lesson 47) one call site over, and it only became reachable when the
+    /// player was given a real clock.
+    ///
+    /// Two short ticks must land within a whisker of one long one. Not exactly
+    /// equal: each call draws a fresh random target, so the paths differ even
+    /// when the total easing does. The assertion is on the *amount eased*,
+    /// which is what the time constant governs, using a fixed target so the
+    /// randomness is out of it.
+    #[test]
+    fn the_visualizer_eases_by_time_and_not_by_call_count() {
+        let alpha = |secs: f32| 1.0 - (-secs / VISUALIZER_TAU_SECS).exp();
+
+        // Easing 33ms once and 16.5ms twice must reach the same place, which
+        // is the defining property of an exponential rate.
+        let once = alpha(0.033);
+        let twice = 1.0 - (1.0 - alpha(0.0165)) * (1.0 - alpha(0.0165));
+        assert!(
+            (once - twice).abs() < 1e-5,
+            "one 33ms step eased {once} and two 16.5ms steps eased {twice};              the easing is not a rate"
+        );
+
+        // And the constant is the one that reproduces the old look: 0.4 of the
+        // way in a 33ms tick, which is what the per-call blend did.
+        assert!(
+            (alpha(TICK_SECS) - 0.4).abs() < 0.005,
+            "at the player's own tick rate the easing is {}, not the 0.4 the              blend it replaced used",
+            alpha(TICK_SECS)
+        );
+    }
+
+    /// The player asks for a clock only while it is playing.
+    ///
+    /// Both halves matter. Returning `None` while playing ships a player whose
+    /// position never advances, with its tests still green. Returning `Some`
+    /// while paused wakes the machine thirty times a second to call a `tick`
+    /// that returns immediately, for as long as the window is open.
+    #[test]
+    fn the_player_asks_for_a_clock_only_while_playing() {
+        let mut state = PlayerState::new();
+        state.playing = false;
+        assert_eq!(
+            state.tick_interval(),
+            None,
+            "a paused player must let the desktop park"
+        );
+        state.playing = true;
+        assert_eq!(
+            state.tick_interval(),
+            Some(Duration::from_millis(PLAYING_TICK_MS)),
+            "a playing player must be given a clock"
+        );
+    }
+
+    // ---- Malformed input ----
+
+    /// A WAV whose chunk size is enormous ends the parse instead of looping.
+    ///
+    /// The advance used to be `offset += 8 + chunk_size as usize`, and
+    /// `chunk_size` is four bytes out of the file. A size near `usize::MAX`
+    /// wraps `offset` back to a small number, a small offset passes the loop
+    /// guard, and the parser walks the same chunks forever. A media player that
+    /// hangs on a malformed file is the cheapest denial of service there is,
+    /// and it arrives as an email attachment.
+    ///
+    /// This test would not fail on the old code — it would *never finish*,
+    /// which is the point.
+    #[test]
+    fn a_wav_with_an_absurd_chunk_size_does_not_loop_forever() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(b"WAVE");
+        // A chunk claiming the whole address space.
+        data.extend_from_slice(b"fmt ");
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+        data.resize(64, 0);
+
+        // Returns rather than hangs. What it returns is not the claim —
+        // `None` is the honest answer for a file that lies about its shape.
+        assert!(parse_wav_header(&data).is_none());
+    }
+
+    /// An ID3 extended header claiming a huge size ends the parse.
+    ///
+    /// Same shape as the WAV case, in a different parser: `pos += 4 + ext_size`
+    /// with `ext_size` a full 32-bit field, wrapping `pos` back below the frame
+    /// loop's guard.
+    #[test]
+    fn an_id3_extended_header_with_an_absurd_size_does_not_loop_forever() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"ID3");
+        data.push(4); // version major 4
+        data.push(0); // version minor
+        data.push(0x40); // extended-header flag
+        // Synchsafe size covering the rest.
+        data.extend_from_slice(&[0, 0, 0x01, 0x00]);
+        data.extend_from_slice(&u32::MAX.to_be_bytes()); // ext_size
+        data.resize(200, 0);
+
+        let _ = parse_id3v2(&data);
+    }
+
+    /// A FLAC block size larger than the data is refused, not sliced.
+    #[test]
+    fn a_flac_block_bigger_than_the_file_is_refused() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"fLaC");
+        data.push(0); // STREAMINFO
+        data.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // block size ~16MB
+        data.resize(64, 0);
+        assert!(parse_flac_header(&data).is_none());
+    }
+
+    /// Every truncation of a plausible header is refused rather than panicking.
+    ///
+    /// A sweep rather than a sample: the parsers read a dozen fixed offsets
+    /// each, and a missed bound shows up only at the length that reaches it.
+    #[test]
+    fn no_prefix_of_a_header_panics_any_parser() {
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&36u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&[1, 0, 2, 0]);
+        wav.extend_from_slice(&44_100u32.to_le_bytes());
+        wav.resize(80, 0);
+
+        let mut id3 = Vec::new();
+        id3.extend_from_slice(b"ID3");
+        id3.extend_from_slice(&[4, 0, 0, 0, 0, 0x01, 0x00]);
+        id3.extend_from_slice(b"TIT2");
+        id3.extend_from_slice(&8u32.to_be_bytes());
+        id3.extend_from_slice(&[0, 0]);
+        id3.extend_from_slice(b"Title");
+        id3.resize(200, 0);
+
+        let mut flac = Vec::new();
+        flac.extend_from_slice(b"fLaC");
+        flac.push(0);
+        flac.extend_from_slice(&[0, 0, 34]);
+        flac.resize(64, 0);
+
+        for source in [&wav, &id3, &flac] {
+            for len in 0..source.len() {
+                let prefix = source.get(..len).unwrap_or(&[]);
+                let _ = parse_wav_header(prefix);
+                let _ = parse_id3v2(prefix);
+                let _ = parse_flac_header(prefix);
+            }
+        }
     }
 }

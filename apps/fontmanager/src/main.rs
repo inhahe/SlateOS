@@ -7,19 +7,13 @@
 //!
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha).
 
-#[allow(unused_imports)]
 use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::event::{
-    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
-};
-#[allow(unused_imports)]
-use guitk::layout::{FlexAlign, FlexDirection, FlexWrap, Size};
-#[allow(unused_imports)]
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-#[allow(unused_imports)]
-use guitk::style::{CornerRadii, Edges};
+use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -320,7 +314,10 @@ impl FontCollection {
             .iter()
             .position(|f| f.id == id)
             .ok_or(FontError::NotFound)?;
-        if self.fonts[idx].system {
+        // `.get` rather than `[idx]`: the index came from `position` on this
+        // same vector so it is in range, but stating that in the operation
+        // survives an edit that moves the two apart, and a comment does not.
+        if self.fonts.get(idx).is_some_and(|f| f.system) {
             return Err(FontError::SystemFont);
         }
         self.fonts.remove(idx);
@@ -337,7 +334,7 @@ impl FontCollection {
     /// Return a sorted list of unique family names.
     pub fn families(&self) -> Vec<String> {
         let mut names: Vec<String> = self.fonts.iter().map(|f| f.family.clone()).collect();
-        names.sort();
+        names.sort_unstable();
         names.dedup();
         names
     }
@@ -699,6 +696,18 @@ impl Default for FontPreview {
 // Filter mode for the font list
 // ============================================================================
 
+/// One clickable row of the sidebar.
+///
+/// Exists so the renderer and the hit test can walk one list instead of two
+/// copies of the same arithmetic. See `FontManagerState::sidebar_rows`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarRow {
+    /// One of the three filter rows at the top.
+    Filter(FilterMode),
+    /// One of the category rows below the separator.
+    Category(FontCategory),
+}
+
 /// How the font list is filtered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilterMode {
@@ -800,7 +809,7 @@ impl FontManagerState {
             .iter()
             .map(|f| f.family.clone())
             .collect();
-        names.sort();
+        names.sort_unstable();
         names.dedup();
         names
     }
@@ -818,8 +827,129 @@ impl FontManagerState {
                 EventResult::Consumed
             }
             Event::Key(key_ev) if key_ev.pressed => self.handle_key(key_ev),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => EventResult::Ignored,
         }
+    }
+
+    /// What a sidebar row selects when it is clicked.
+    ///
+    /// The renderer and the hit test walk the same list, so a row cannot be
+    /// drawn in one place and clicked in another. Writing the y positions out
+    /// twice is the defect `apps/mixer` shipped — its slider handler took a
+    /// column index and a fraction that nothing in the program computed — and
+    /// the cheapest way not to have it is to have one list.
+    fn sidebar_rows() -> Vec<(f32, SidebarRow)> {
+        let mut rows = Vec::new();
+        // Filter heading.
+        let mut y = TOOLBAR_HEIGHT + SIDEBAR_PADDING + 24.0;
+        for row in [
+            SidebarRow::Filter(FilterMode::All),
+            SidebarRow::Filter(FilterMode::System),
+            SidebarRow::Filter(FilterMode::User),
+        ] {
+            rows.push((y, row));
+            y += CATEGORY_ITEM_HEIGHT;
+        }
+        // Separator (8 above, a line, 12 below) then the Categories heading.
+        y += 8.0 + 12.0 + 24.0;
+        for cat in FontCategory::ALL {
+            rows.push((y, SidebarRow::Category(*cat)));
+            y += CATEGORY_ITEM_HEIGHT;
+        }
+        rows
+    }
+
+    /// The y at which the first font family is drawn, scroll included.
+    ///
+    /// The count header sits above it and is 24px tall; both the renderer and
+    /// the hit test start from here.
+    fn font_list_top(&self) -> f32 {
+        TOOLBAR_HEIGHT + CONTENT_PADDING - self.list_scroll_y + 24.0
+    }
+
+    /// The sidebar row a point is over, if it is over one.
+    fn sidebar_row_at(x: f32, y: f32) -> Option<SidebarRow> {
+        if x < 0.0 || x >= SIDEBAR_WIDTH || y < TOOLBAR_HEIGHT {
+            return None;
+        }
+        Self::sidebar_rows()
+            .into_iter()
+            .find(|(top, _)| y >= *top && y < top + CATEGORY_ITEM_HEIGHT)
+            .map(|(_, row)| row)
+    }
+
+    /// The index into [`Self::visible_families`] a point is over.
+    fn font_row_at(&self, x: f32, y: f32) -> Option<usize> {
+        let list_right = self.window_width - PREVIEW_PANEL_WIDTH;
+        if x < SIDEBAR_WIDTH || x >= list_right || y < TOOLBAR_HEIGHT {
+            return None;
+        }
+        let offset = y - self.font_list_top();
+        if offset < 0.0 {
+            return None;
+        }
+        // `as usize` on a non-negative finite f32 is the floor, which is the
+        // row containing the point.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let index = (offset / FONT_LIST_ITEM_HEIGHT) as usize;
+        (index < self.visible_families().len()).then_some(index)
+    }
+
+    /// Handle a mouse event.
+    ///
+    /// **This app had no mouse handling at all until 2026-09-03.** `MouseEvent`,
+    /// `MouseButton` and `MouseEventKind` were imported and never named again,
+    /// which the file-wide `#[allow(unused_imports)]` is what kept quiet — a
+    /// font manager whose list of fonts could not be clicked, only arrowed
+    /// through. It was invisible because nothing had ever delivered it an
+    /// event: `main` rendered one frame and asserted it was non-empty. See
+    /// known-issues.md -> `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`, whose whole
+    /// point is that an app nothing drives is an app whose gaps nobody meets.
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        if !matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return EventResult::Ignored;
+        }
+        if let Some(row) = Self::sidebar_row_at(mouse.x, mouse.y) {
+            match row {
+                SidebarRow::Filter(mode) => {
+                    self.filter_mode = mode;
+                    self.selected_category = None;
+                }
+                SidebarRow::Category(cat) => {
+                    self.filter_mode = FilterMode::Category;
+                    self.selected_category = Some(cat);
+                }
+            }
+            // The visible list has just changed under the selection, so a font
+            // that is no longer in it must not stay selected: the preview panel
+            // would go on showing a font the list does not offer.
+            let still_visible = self
+                .selected_font
+                .is_some_and(|id| self.visible_fonts().iter().any(|f| f.id == id));
+            if !still_visible {
+                self.selected_font = self.visible_fonts().first().map(|f| f.id);
+            }
+            return EventResult::Consumed;
+        }
+        if let Some(index) = self.font_row_at(mouse.x, mouse.y) {
+            let families = self.visible_families();
+            let Some(family) = families.get(index) else {
+                return EventResult::Ignored;
+            };
+            // The list is drawn by family and the selection is a font id, so
+            // clicking a family selects its first visible variant — which is
+            // the one whose name is under the pointer.
+            if let Some(font) = self
+                .visible_fonts()
+                .into_iter()
+                .find(|f| &f.family == family)
+            {
+                self.selected_font = Some(font.id);
+                return EventResult::Consumed;
+            }
+        }
+        EventResult::Ignored
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
@@ -870,15 +1000,20 @@ impl FontManagerState {
         if visible.is_empty() {
             return;
         }
-        if let Some(current_id) = self.selected_font {
-            if let Some(pos) = visible.iter().position(|f| f.id == current_id) {
-                let next_pos = if pos + 1 < visible.len() { pos + 1 } else { 0 };
-                self.selected_font = Some(visible[next_pos].id);
-            } else {
-                self.selected_font = Some(visible[0].id);
-            }
-        } else {
-            self.selected_font = Some(visible[0].id);
+        // The whole body is written against `first`/`get` rather than `[0]`
+        // and `+ 1`: the emptiness check above makes every index below valid
+        // *today*, and that is exactly the kind of guarantee that survives
+        // until someone moves the check.
+        let next = self
+            .selected_font
+            .and_then(|id| visible.iter().position(|f| f.id == id))
+            .and_then(|pos| {
+                let after = pos.checked_add(1).filter(|n| *n < visible.len());
+                visible.get(after.unwrap_or(0))
+            })
+            .or_else(|| visible.first());
+        if let Some(font) = next {
+            self.selected_font = Some(font.id);
         }
     }
 
@@ -887,15 +1022,18 @@ impl FontManagerState {
         if visible.is_empty() {
             return;
         }
-        if let Some(current_id) = self.selected_font {
-            if let Some(pos) = visible.iter().position(|f| f.id == current_id) {
-                let prev_pos = if pos > 0 { pos - 1 } else { visible.len() - 1 };
-                self.selected_font = Some(visible[prev_pos].id);
-            } else {
-                self.selected_font = Some(visible[0].id);
-            }
-        } else if let Some(last) = visible.last() {
-            self.selected_font = Some(last.id);
+        let prev = self
+            .selected_font
+            .and_then(|id| visible.iter().position(|f| f.id == id))
+            .and_then(|pos| match pos.checked_sub(1) {
+                Some(before) => visible.get(before),
+                // Wrapping off the front lands on the last, which `last()`
+                // gives without a `len() - 1` that would underflow on empty.
+                None => visible.last(),
+            })
+            .or_else(|| visible.first());
+        if let Some(font) = prev {
+            self.selected_font = Some(font.id);
         }
     }
 
@@ -904,7 +1042,11 @@ impl FontManagerState {
     // ========================================================================
 
     /// Render the complete Font Manager UI frame.
-    pub fn render(&self) -> RenderTree {
+    ///
+    /// Named `render_tree` and not `render`: at equal arity an inherent method
+    /// silently wins method lookup over `oswindow::app::App::render`, so every
+    /// existing call would keep compiling while testing the other function.
+    pub fn render_tree(&self) -> RenderTree {
         let mut tree = RenderTree::new();
 
         // Window background
@@ -1009,65 +1151,62 @@ impl FontManagerState {
             width: 1.0,
         });
 
-        let mut y = sidebar_y + SIDEBAR_PADDING;
-
-        // Section: Filter
+        // The two headings and the separator are drawn relative to the rows
+        // themselves, so the labels cannot drift away from the things they
+        // label — `sidebar_rows` is the single source of both positions.
+        let rows = Self::sidebar_rows();
+        let filter_top = rows.first().map_or(sidebar_y, |(y, _)| *y);
         text_bold(
             tree,
             SIDEBAR_PADDING + 4.0,
-            y + 4.0,
+            filter_top - 24.0 + 4.0,
             "FILTER",
             COL_SUBTEXT0,
             10.0,
         );
-        y += 24.0;
 
-        // All Fonts
-        let all_selected = self.filter_mode == FilterMode::All;
-        render_sidebar_item(tree, y, "All Fonts", all_selected);
-        y += CATEGORY_ITEM_HEIGHT;
-
-        // System
-        let sys_selected = self.filter_mode == FilterMode::System;
-        render_sidebar_item(tree, y, "System", sys_selected);
-        y += CATEGORY_ITEM_HEIGHT;
-
-        // User
-        let usr_selected = self.filter_mode == FilterMode::User;
-        render_sidebar_item(tree, y, "User", usr_selected);
-        y += CATEGORY_ITEM_HEIGHT;
-
-        // Separator
-        y += 8.0;
+        let category_top = rows
+            .iter()
+            .find(|(_, row)| matches!(row, SidebarRow::Category(_)))
+            .map_or(sidebar_y, |(y, _)| *y);
+        // The separator sits 12px above the Categories heading, which is 24px
+        // above the first category row.
+        let separator_y = category_top - 24.0 - 12.0;
         tree.push(RenderCommand::Line {
             x1: SIDEBAR_PADDING,
-            y1: y,
+            y1: separator_y,
             x2: SIDEBAR_WIDTH - SIDEBAR_PADDING,
-            y2: y,
+            y2: separator_y,
             color: COL_SURFACE0,
             width: 1.0,
         });
-        y += 12.0;
-
-        // Section: Categories
         text_bold(
             tree,
             SIDEBAR_PADDING + 4.0,
-            y + 4.0,
+            category_top - 24.0 + 4.0,
             "CATEGORIES",
             COL_SUBTEXT0,
             10.0,
         );
-        y += 24.0;
 
-        for cat in FontCategory::ALL {
-            let is_selected =
-                self.filter_mode == FilterMode::Category && self.selected_category == Some(*cat);
-            let label = cat.label();
-            let icon = cat.icon();
-            let display = format!("{icon}  {label}");
-            render_sidebar_item(tree, y, &display, is_selected);
-            y += CATEGORY_ITEM_HEIGHT;
+        for (y, row) in rows {
+            match row {
+                SidebarRow::Filter(mode) => {
+                    let label = match mode {
+                        FilterMode::All => "All Fonts",
+                        FilterMode::System => "System",
+                        FilterMode::User => "User",
+                        FilterMode::Category => continue,
+                    };
+                    render_sidebar_item(tree, y, label, self.filter_mode == mode);
+                }
+                SidebarRow::Category(cat) => {
+                    let is_selected = self.filter_mode == FilterMode::Category
+                        && self.selected_category == Some(cat);
+                    let display = format!("{}  {}", cat.icon(), cat.label());
+                    render_sidebar_item(tree, y, &display, is_selected);
+                }
+            }
         }
     }
 
@@ -1082,7 +1221,9 @@ impl FontManagerState {
         tree.clip(list_x, list_y, list_w, list_h);
 
         let families = self.visible_families();
-        let mut y = list_y + CONTENT_PADDING - self.list_scroll_y;
+        // `- 24.0` because `font_list_top` is where the first *family* goes and
+        // the count header is drawn 24px above it; one number, two readers.
+        let mut y = self.font_list_top() - 24.0;
 
         // Font count header
         let count_str = format!("{} families", families.len());
@@ -1481,18 +1622,46 @@ fn render_setting_options<T: PartialEq + Copy>(
 // Application entry point
 // ============================================================================
 
-fn main() {
-    let state = FontManagerState::new();
+impl App for FontManagerState {
+    fn title(&self) -> String {
+        "Font Manager".to_string()
+    }
 
-    // In a real Slate OS environment, this would enter the compositor event loop.
-    // For now, render one frame to verify the UI builds correctly.
-    let tree = state.render();
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (DEFAULT_WINDOW_WIDTH as u32, DEFAULT_WINDOW_HEIGHT as u32)
+    }
 
-    // The render tree would be submitted to the compositor.
-    assert!(
-        !tree.is_empty(),
-        "Font Manager UI must produce render commands"
-    );
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are *handed*, not the one we remember: a
+        // compositor may grant a size that was never requested, and the first
+        // frame is drawn before any `Resize` event arrives. Without this the
+        // opening frame is laid out for 1000x700 whatever the window actually
+        // is.
+        self.window_width = width;
+        self.window_height = height;
+        self.render_tree()
+    }
+
+    // No `tick_interval`: this app ages nothing. There is no beat, blink,
+    // countdown or toast in it — checked, not assumed, by grepping for
+    // `Event::Tick` and `elapsed_ms` and finding neither. The default `None`
+    // is therefore right here, and returning one would wake an idle desktop
+    // to redraw an unchanged frame.
+}
+
+fn main() -> ExitCode {
+    app::launch("fontmanager", &mut FontManagerState::new())
 }
 
 // ============================================================================
@@ -1501,7 +1670,23 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it — that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
+    // Used only by the tests — the app itself reads modifiers off the
+    // `KeyEvent` it is handed and never builds one, so importing this at crate
+    // root left the binary with an unused import.
+    use guitk::event::Modifiers;
 
     // ====================================================================
     // Measured widths
@@ -1934,7 +2119,7 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let state = FontManagerState::new();
-        let tree = state.render();
+        let tree = state.render_tree();
         assert!(!tree.is_empty());
         assert!(tree.len() > 30, "Should produce many render commands");
     }
@@ -1943,10 +2128,10 @@ mod tests {
     fn test_render_with_settings_panel() {
         let mut state = FontManagerState::new();
         state.show_settings = true;
-        let tree = state.render();
+        let tree = state.render_tree();
         assert!(!tree.is_empty());
         // Settings panel adds many more commands.
-        let base_tree = FontManagerState::new().render();
+        let base_tree = FontManagerState::new().render_tree();
         assert!(
             tree.len() > base_tree.len(),
             "Settings overlay adds commands"
@@ -1964,7 +2149,7 @@ mod tests {
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(state.window_width, 1400.0);
         assert_eq!(state.window_height, 900.0);
-        let tree = state.render();
+        let tree = state.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -1972,7 +2157,7 @@ mod tests {
     fn test_render_no_selection() {
         let mut state = FontManagerState::new();
         state.selected_font = None;
-        let tree = state.render();
+        let tree = state.render_tree();
         assert!(!tree.is_empty(), "Should render even with no selection");
     }
 
@@ -2193,8 +2378,183 @@ mod tests {
         let coll = FontCollection::new_with_defaults();
         let ids: Vec<u64> = coll.fonts.iter().map(|f| f.id).collect();
         let mut unique_ids = ids.clone();
-        unique_ids.sort();
+        unique_ids.sort_unstable();
         unique_ids.dedup();
         assert_eq!(ids.len(), unique_ids.len(), "All IDs must be unique");
+    }
+
+    // ====================================================================
+    // Mouse — the layer this app did not have until it was wired
+    // ====================================================================
+
+    fn click(state: &mut FontManagerState, x: f32, y: f32) -> EventResult {
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    /// A click on a sidebar filter row selects that filter.
+    ///
+    /// **This app had no `Event::Mouse` arm at all until 2026-09-03** —
+    /// `MouseEvent` and friends were imported and never named again, hidden by
+    /// a file-wide `#[allow(unused_imports)]`, and nothing noticed because
+    /// `main` rendered one frame and asserted it was non-empty rather than
+    /// delivering an event. A font manager that can only be driven with the
+    /// arrow keys.
+    #[test]
+    fn a_click_on_a_sidebar_filter_selects_it() {
+        let mut state = FontManagerState::new();
+        assert_eq!(state.filter_mode, FilterMode::All, "fixture starts on All");
+
+        // Rows are taken from the same list the renderer walks, so this cannot
+        // pass against geometry the user never sees.
+        let rows = FontManagerState::sidebar_rows();
+        let (y, _) = rows
+            .iter()
+            .find(|(_, r)| matches!(r, SidebarRow::Filter(FilterMode::System)))
+            .expect("a System row is drawn");
+
+        assert_eq!(
+            click(&mut state, 40.0, y + 4.0),
+            EventResult::Consumed,
+            "the click was not handled"
+        );
+        assert_eq!(state.filter_mode, FilterMode::System);
+        assert_eq!(state.selected_category, None);
+    }
+
+    /// A click on a category row selects the category *and* switches the mode.
+    ///
+    /// Both, because a category with the filter left on `All` would highlight
+    /// a row and change nothing in the list beside it.
+    #[test]
+    fn a_click_on_a_category_selects_it_and_switches_the_filter() {
+        let mut state = FontManagerState::new();
+        let rows = FontManagerState::sidebar_rows();
+        let (y, row) = rows
+            .iter()
+            .find(|(_, r)| matches!(r, SidebarRow::Category(_)))
+            .expect("category rows are drawn");
+        let SidebarRow::Category(expected) = row else {
+            panic!("found a non-category row");
+        };
+
+        assert_eq!(click(&mut state, 40.0, y + 4.0), EventResult::Consumed);
+        assert_eq!(state.filter_mode, FilterMode::Category);
+        assert_eq!(state.selected_category, Some(*expected));
+    }
+
+    /// Every drawn sidebar row is clickable, and each selects a different thing.
+    ///
+    /// A sweep rather than a sample: the rows are laid out by an accumulator,
+    /// and an off-by-one in it would leave exactly one row unreachable —
+    /// which a test that clicks two of them would not notice.
+    #[test]
+    fn every_sidebar_row_can_be_clicked() {
+        for (y, row) in FontManagerState::sidebar_rows() {
+            let mut state = FontManagerState::new();
+            assert_eq!(
+                click(&mut state, 40.0, y + CATEGORY_ITEM_HEIGHT / 2.0),
+                EventResult::Consumed,
+                "the row at y={y} ({row:?}) is drawn but not clickable"
+            );
+            match row {
+                SidebarRow::Filter(mode) => assert_eq!(state.filter_mode, mode),
+                SidebarRow::Category(cat) => {
+                    assert_eq!(state.filter_mode, FilterMode::Category);
+                    assert_eq!(state.selected_category, Some(cat));
+                }
+            }
+        }
+    }
+
+    /// A click on a font row selects that family.
+    #[test]
+    fn a_click_on_a_font_row_selects_that_family() {
+        let mut state = FontManagerState::new();
+        let families = state.visible_families();
+        assert!(
+            families.len() >= 2,
+            "the fixture needs two families to tell a selection from a default"
+        );
+        let target = families[1].clone();
+
+        let y = state.font_list_top() + FONT_LIST_ITEM_HEIGHT + 4.0;
+        assert_eq!(
+            click(&mut state, SIDEBAR_WIDTH + 40.0, y),
+            EventResult::Consumed
+        );
+        let selected = state
+            .selected_font
+            .and_then(|id| state.collection.get(id))
+            .expect("something is selected");
+        assert_eq!(selected.family, target);
+    }
+
+    /// A click in the gutter above the first row, or past the last, selects
+    /// nothing.
+    ///
+    /// The failure this guards is a hit test that clamps: clicking the header
+    /// would select the first family and clicking empty space below the list
+    /// would select the last, both of which look like the program choosing for
+    /// you.
+    #[test]
+    fn a_click_outside_the_rows_selects_nothing() {
+        let mut state = FontManagerState::new();
+        let before = state.selected_font;
+
+        // Above the first family, where the count header is drawn.
+        let above = state.font_list_top() - 6.0;
+        assert_eq!(
+            click(&mut state, SIDEBAR_WIDTH + 40.0, above),
+            EventResult::Ignored
+        );
+        assert_eq!(state.selected_font, before);
+
+        // Below the last family.
+        let past = state.font_list_top()
+            + FONT_LIST_ITEM_HEIGHT * (state.visible_families().len() as f32 + 2.0);
+        assert_eq!(
+            click(&mut state, SIDEBAR_WIDTH + 40.0, past),
+            EventResult::Ignored
+        );
+        assert_eq!(state.selected_font, before);
+    }
+
+    /// Narrowing the filter does not leave a font selected that the list no
+    /// longer offers.
+    ///
+    /// Otherwise the preview panel goes on showing a font the user cannot see
+    /// in the list beside it, which reads as the list being wrong rather than
+    /// the selection being stale.
+    #[test]
+    fn narrowing_the_filter_does_not_leave_an_invisible_font_selected() {
+        for (y, row) in FontManagerState::sidebar_rows() {
+            let mut s = FontManagerState::new();
+            click(&mut s, 40.0, y + 4.0);
+            if let Some(id) = s.selected_font {
+                assert!(
+                    s.visible_fonts().iter().any(|f| f.id == id),
+                    "after selecting {row:?} the selected font is not in the visible list"
+                );
+            }
+        }
+    }
+
+    /// A press of a button other than the left one does nothing.
+    #[test]
+    fn a_right_click_does_not_select() {
+        let mut state = FontManagerState::new();
+        let before = state.filter_mode;
+        let (y, _) = FontManagerState::sidebar_rows()[1];
+        let result = state.handle_event(&Event::Mouse(MouseEvent {
+            x: 40.0,
+            y: y + 4.0,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(state.filter_mode, before);
     }
 }

@@ -136,41 +136,56 @@ PINNED: dict[str, str] = {
         "developer check, not part of the build. It exits 2 when capstone is "
         "absent (as of 2026-09-03; it used to exit 1, claiming the payload was "
         "wrong when it had not looked at it), so it is honest under pre-boot. "
-        "Now that run_checker has `--may-skip=2` this COULD be wired as a "
+        "Now that run_checker has `--may-skip` this COULD be wired as a "
         "skipping gate; lane C's decision to keep it out stands until lane C "
         "revisits it. Run it by hand after touching those byte literals. "
         "Decided by lane C 2026-09-03, answering "
         "requests/b-c-six-gui-gates-are-never-run-by-anything.md",
-    # Two of the four bash oracles.  The "requires WSL" reason all four carried
-    # until 2026-09-03 is GONE, and deliberately not replaced by a softer
-    # version of itself: `run_checker --may-skip=2` plus bashprobe's exit-2
-    # path made WSL-dependence wireable, and the other two oracles
-    # (check-shellquote-vs-bash.py, check-kshell-rungs-vs-bash.py) were wired
-    # into boot-test.sh on that basis, in the same commit as this edit.
+    # check-selftest-reinit.py was pinned here as "lane A (kernel/src); filed
+    # to lane A 2026-09-02". Lane A wired it on 2026-09-03 (boot-test.sh,
+    # check_selftest_reinit: the self-test first, then the gate), so the entry
+    # is deleted rather than carried, which is what this dict is for.
     #
-    # These two stay out for a different and more durable reason: **they do not
-    # read the kernel.**  Each compares a *Python table of expectations*
-    # against real bash and never opens a `.rs` file, so no change under
-    # kernel/src/ can make either fail.  Wiring them would cost ~23 s per boot
-    # and report OK forever -- an instrument presented as a gate, which is the
-    # confusion this whole list exists to prevent.
+    # check-libc-shape.py was pinned here with the reason "needs an opt-in skip
+    # channel in run-checker.sh first"; it was unpinned on 2026-09-03, when that
+    # channel came to exist. It is wired into boot-test.sh as check_libc_shape:
+    # the gate `--may-skip --ignore-age` -- the age flag so it answers on every
+    # host rather than declining whenever posix/ is newer than the sysroot,
+    # which is nearly always -- and the self-test unconditionally, since it
+    # builds its own archives and needs no sysroot. See known-issues.md ->
+    # TD-B-TEN-GATES-ARE-NEVER-ASKED.
     #
-    # They remain worth running by hand: they are how bash's answers are
-    # learned in the first place, before those answers are written into
-    # kshell's rungs -- and the rungs ARE gated, by check-kshell-rungs-vs-bash.
-    "check-kshell-pipeline-vs-bash.py":
-        "measures bash, not us: compares a Python table of expectations "
-        "against real bash and opens no .rs file, so no kernel change can red "
-        "it. Its own docstring says 'a disagreement means my model is wrong, "
-        "not bash.' Wire it if it ever grows an assertion against "
-        "kernel/src/kshell.rs.",
-    "check-ansic-quoting-vs-bash.py":
-        "measures bash, not us: pins bash's $'...' rules for "
-        "TD-SHELLQUOTE-NO-ANSI-C-QUOTING, a fourth quoting context that "
-        "shellquote.rs does not model at all, so there is nothing in the tree "
-        "for it to disagree with yet. UNPIN WHEN "
-        "TD-SHELLQUOTE-NO-ANSI-C-QUOTING is implemented -- it then starts "
-        "grading real code and belongs in boot-test.sh with --may-skip=2.",
+    # The four `check-*-vs-bash.py` oracles were pinned here from the day they
+    # were written and were unpinned on 2026-09-03, when both of the things
+    # their entry said had to change had changed: bashprobe now exits 2 (a
+    # declined verdict) rather than 1 (a finding) when WSL is absent, and
+    # run_checker grew the per-call-site `--may-skip` channel. They are wired
+    # into boot-test.sh as check_bash_oracles -- gates skippable, self-tests
+    # not. See known-issues.md -> TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED.
+    #
+    # Two lanes reached that conclusion independently and by different routes,
+    # and the merge is worth recording because the disagreement was real. Lane A
+    # wired two of the four and kept `check-kshell-pipeline-vs-bash.py` and
+    # `check-ansic-quoting-vs-bash.py` pinned on the ground that **they do not
+    # read the kernel**: each compares a Python table of expectations against
+    # real bash and opens no `.rs` file, so no change under kernel/src/ can
+    # make either fail. That claim was re-checked at merge time and is still
+    # true. It is no longer a reason to keep them *out*, because being unable
+    # to fail is not the same as being useless -- they are how bash's answers
+    # are learned before those answers are written into kshell's rungs, and
+    # running them in the boot test is what stops that reference drifting
+    # unnoticed. What the claim is a reason for is not mistaking them for
+    # gates, so the distinction now lives at the wiring site in boot-test.sh,
+    # where a reader meets it, rather than in a pin list they are absent from.
+    #
+    # The sharper lesson, learned the same day by mutating each gate's subject:
+    # "does it open a file in kernel/?" does not separate an instrument from a
+    # gate. `check-shellquote-vs-bash.py` opens shellquote.rs and, until it was
+    # re-tethered, read one `const` out of it -- so it answered yes while
+    # grading almost nothing. The question that discriminates is *how much of
+    # that file can change without this noticing*, and only mutation answers
+    # it. See design-decisions.md §905 and known-issues.md ->
+    # TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM.
 }
 
 _GATE = re.compile(r"(check-[A-Za-z0-9_.-]+\.py)")
@@ -285,9 +300,33 @@ def analyse(path: Path) -> tuple[set[str], set[str], list[str]]:
     return runs, selftested, unresolved
 
 
-def audit(root: Path,
-          pinned: dict[str, str] | None = None) -> tuple[list[str], list[str]]:
-    """Return (findings, notes). Findings are failures; notes are informational.
+def audit(root: Path, pinned: dict[str, str] | None = None
+          ) -> tuple[list[str], list[str], list[str]]:
+    """Return (findings, selftest_findings, notes).
+
+    Both finding lists are failures and both exit 1; `notes` are informational.
+    They are returned apart because they are not the same *kind* of defect, and
+    lane A asked for the distinction (requests/a-b-yes-to-the-self-test-rule-
+    and-one-half-it-does-not-cover.md §4) on a ground that is worth restating
+    here, because it is not obvious from the code:
+
+        **Running a gate's `--self-test` is always cross-lane safe; running the
+        gate is not.**
+
+    A self-test reads fixtures the checker carries in its own source, so it
+    cannot fail because of anything in anyone's tree -- wiring one can never
+    turn another lane's boot test red. Wiring the *gate* can. So "self-test not
+    run" is a defect any lane may fix unilaterally, on the spot, and "gate not
+    run" may need the owning lane's agreement first. Reported as one
+    undifferentiated list, the cheap fix hides among the expensive ones.
+
+    Note what does NOT follow from that, since the asymmetry invites it: the
+    self-test arm gets no `PINNED` equivalent. `PINNED` exists because wiring a
+    gate can legitimately be the wrong thing to do -- it would make WSL or a
+    pip package a hard requirement of every lane's build. There is no matching
+    excuse for an unrun self-test, precisely *because* it is always safe to
+    wire. An exemption list for a defect with no legitimate excuse is just a
+    place to put the ones nobody wants to fix.
 
     `pinned` is a parameter rather than a direct read of the module constant so
     the self-test can grade a synthetic tree against a synthetic exemption list.
@@ -298,6 +337,7 @@ def audit(root: Path,
     """
     pinned = PINNED if pinned is None else pinned
     findings: list[str] = []
+    selftest_findings: list[str] = []
     notes: list[str] = []
 
     wired: set[str] = set()
@@ -322,7 +362,7 @@ def audit(root: Path,
     if not gates:
         findings.append("scripts/: no check-*.py found -- nothing to judge, "
                         "which is not the same as a clean tree")
-        return findings, notes
+        return findings, selftest_findings, notes
 
     unwired = [g for g in gates if g not in wired]
 
@@ -352,6 +392,10 @@ def audit(root: Path,
     # Reported only for gates that ARE wired. For an unwired gate the unrun
     # self-test is a consequence of the wiring finding above, and saying it
     # twice trains the reader to skim.
+    #
+    # Graded into its own list rather than into `findings`, because the two
+    # defects do not cost the same to fix -- see audit()'s docstring on lane A's
+    # cross-lane asymmetry.
     for g in gates:
         if g in unwired or g in selftested:
             continue
@@ -362,15 +406,16 @@ def audit(root: Path,
             findings.append(f"{g}: could not be read: {exc}")
             continue
         if _SELFTEST_FLAG.search(text):
-            findings.append(
+            selftest_findings.append(
                 f"{g}: ships a self-test that nothing runs. Add a "
                 f"`run_checker {g[:-3]}-selftest ... --self-test` call beside "
                 f"the gate's own call, so a scanner that has stopped scanning "
                 f"is reported as one.")
 
     notes.append(f"{len(gates)} gate(s); {len(unwired)} unwired, "
-                 f"{len(pinned)} pinned; {len(selftested)} self-tested")
-    return findings, notes
+                 f"{len(pinned)} pinned; {len(selftested)} self-tested; "
+                 f"{len(selftest_findings)} self-test(s) shipped but unrun")
+    return findings, selftest_findings, notes
 
 
 _FIXTURE_CALLER = """\
@@ -473,18 +518,22 @@ def selftest() -> int:
         (fake / "scripts" / "boot-test.sh").write_text("", encoding="utf-8")
         (fake / "scripts" / "hooks" / "pre-push").write_text("", encoding="utf-8")
 
-        findings, _ = audit(fake, {})
+        findings, _, _ = audit(fake, {})
         check(any("check-orphan.py" in f for f in findings),
               "an unwired, unpinned gate must be reported")
 
         real_argv = sys.argv
         try:
-            def run(argv: list[str]) -> int:
+            def run_out(argv: list[str]) -> tuple[int, str]:
                 sys.argv = argv
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), \
                         contextlib.redirect_stderr(err):
-                    return main(_root=fake, _pinned={})
+                    rc = main(_root=fake, _pinned={})
+                return rc, out.getvalue() + err.getvalue()
+
+            def run(argv: list[str]) -> int:
+                return run_out(argv)[0]
 
             check(run(["x"]) == 1, "a bare run with a finding must exit 1")
             check(run(["x", "--list"]) == 0, "--list reports without failing")
@@ -516,25 +565,62 @@ def selftest() -> int:
             # runs it. Live case when this was written: check-option-refusal.py.
             (fake / "scripts" / "check-orphan.py").write_text(
                 'if "--self-test" in sys.argv:\n    pass\n', encoding="utf-8")
-            check(any("nothing runs" in f
-                      for f in audit(fake, {})[0]),
+            gate_f, self_f, _ = audit(fake, {})
+            check(any("nothing runs" in f for f in self_f),
                   "a wired gate whose self-test nothing runs must be reported")
+            # The split itself, asserted in both directions. Appending to both
+            # lists would satisfy the case above and defeat the whole point of
+            # separating them, so the absence is the load-bearing half.
+            check(not any("ships a self-test" in f for f in gate_f),
+                  "an unrun self-test must not also be reported as a gate "
+                  "that nothing runs -- that is the distinction, not a label")
+            check(gate_f == [],
+                  f"an unrun self-test alone must leave the gate list empty, "
+                  f"got {gate_f!r}")
+
+            # And the split must survive the trip through main(): a caller
+            # reading only the report, not the tuple, has to be able to tell
+            # which half is safe to fix without asking another lane.
+            rc, text = run_out(["x"])
+            check(rc == 1, "an unrun self-test alone must still fail the run")
+            check("-- self-test not run" in text,
+                  f"the report must name the self-test group, got {text!r}")
+            check("fix unilaterally" in text,
+                  "the self-test heading must say it needs nobody's agreement")
+            check("0 gate(s) not run, 1 self-test(s) not run" in text,
+                  f"the summary must count the two apart, got {text!r}")
+            check("-- gate not run" not in text,
+                  "an empty group must not print its heading")
 
             (fake / "scripts" / "boot-test.sh").write_text(
                 'run_checker orphan "$py" "$r/scripts/check-orphan.py"\n'
                 'run_checker orphan-selftest "$py" '
                 '"$r/scripts/check-orphan.py" --self-test\n',
                 encoding="utf-8")
-            check(run(["x"]) == 0,
-                  "adding the self-test call must clear it")
+            rc, text = run_out(["x"])
+            check(rc == 0, "adding the self-test call must clear it")
+            # A clean run prints neither heading. Asserted because the split
+            # doubled the number of headings that could be emitted over an
+            # empty list, and a report that announces a group with nothing in
+            # it is exactly the noise this checker refuses to produce
+            # elsewhere -- see the PINNED-pruning rationale above.
+            check("-- self-test not run" not in text and
+                  "-- gate not run" not in text,
+                  f"a clean run must announce no groups at all, got {text!r}")
 
             # And the arm must not fire for an unwired gate, where it would
-            # merely restate the wiring finding.
+            # merely restate the wiring finding. Checked against BOTH lists:
+            # the split creates a new way for this to rot, since a message
+            # that moved to the list this case does not read looks identical
+            # to a message that was correctly suppressed.
             (fake / "scripts" / "boot-test.sh").write_text("", encoding="utf-8")
-            found = audit(fake, {})[0]
-            check(not any("nothing runs it. Add" in f or
-                          "ships a self-test" in f for f in found),
+            gate_f, self_f, _ = audit(fake, {})
+            check(not any("ships a self-test" in f
+                          for f in gate_f + self_f),
                   "an unwired gate's unrun self-test must not be said twice")
+            check(any("nothing runs it. Wire it" in f for f in gate_f),
+                  "...but the wiring finding itself must still be reported, "
+                  "or the case above passes on an empty audit")
         finally:
             sys.argv = real_argv
 
@@ -558,24 +644,47 @@ def main(_root: Path | None = None,
         return selftest()
 
     root = _root if _root is not None else ROOT
-    findings, notes = audit(root, _pinned)
+    findings, selftest_findings, notes = audit(root, _pinned)
 
     for n in notes:
         print(n)
-    for f in findings:
-        print(f)
+    # The two groups are printed under separate headings, with separate counts
+    # and separate advice, because they are not equally actionable. Wiring a
+    # gate can turn another lane's build red and so may need that lane's
+    # agreement; wiring a gate's --self-test cannot, because a self-test reads
+    # only fixtures the checker carries in its own source. Whoever reads this
+    # output should be able to see, without knowing the rule, which half they
+    # are allowed to fix on the spot.
+    if findings:
+        print("\n-- gate not run "
+              "(may need the owning lane's agreement: running a gate can fail "
+              "on that lane's tree) --")
+        for f in findings:
+            print(f)
+    if selftest_findings:
+        print("\n-- self-test not run "
+              "(safe for any lane to fix unilaterally: a self-test reads only "
+              "fixtures the checker carries in its own source, so wiring it "
+              "cannot fail on anyone else's tree) --")
+        for f in selftest_findings:
+            print(f)
     # Flush before stderr: run_checker merges both streams into one log, and
     # Python block-buffers stdout to a file while stderr is unbuffered, so the
     # summary would otherwise overtake the findings it refers to.
     sys.stdout.flush()
 
+    total = len(findings) + len(selftest_findings)
     if args.list:
-        print(f"\n{len(findings)} finding(s).")
+        print(f"\n{total} finding(s): {len(findings)} gate(s) not run, "
+              f"{len(selftest_findings)} self-test(s) not run.")
         return 0
-    if findings:
-        print(f"\n{len(findings)} gate-wiring finding(s).", file=sys.stderr)
+    if total:
+        print(f"\n{total} gate-wiring finding(s): {len(findings)} gate(s) not "
+              f"run, {len(selftest_findings)} self-test(s) not run.",
+              file=sys.stderr)
         return 1
-    print("ok -- every gate is either run by something or pinned with a reason.")
+    print("ok -- every gate is either run by something or pinned with a "
+          "reason, and every self-test that exists is run.")
     return 0
 
 

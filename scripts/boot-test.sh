@@ -3996,6 +3996,198 @@ check_selftest_rung_numbers() {
 
 check_selftest_rung_numbers
 
+# The four bash oracles: where kshell's quoting rules actually come from.
+#
+# Every other shell gate here reads kshell's source and checks it against a rule
+# written down in this repository.  These four check the *rule* -- they hand the
+# same bytes to real bash through WSL and compare.  A disagreement means our
+# model of the shell is wrong, which no amount of internal consistency would
+# ever reveal: the rest of the gates would go on agreeing with each other about
+# the wrong answer.
+#
+# They were pinned as unwired from the day they were written, for a good reason
+# that has now been dealt with: the boot test must run on a host carrying only
+# the Rust toolchain and QEMU, and on a host without WSL these gates cannot ask
+# bash anything at all.  Aborting the build there would make a quoting checker
+# the reason all three lanes could not build.  Two things had to land first, and
+# both have (2026-09-03): bashprobe now *declines* (exit 2) rather than
+# reporting a finding (exit 1) when WSL is absent, and `run_checker` grew the
+# per-call-site `--may-skip` channel that turns that decline into a loud skip.
+#
+# So the gates are `--may-skip` and the self-tests are NOT, and that asymmetry
+# is the whole design rather than an oversight.  A self-test needs no WSL by
+# construction -- it reads only fixtures the checker carries in its own source
+# (lane A's rule, requests/a-b-yes-to-the-self-test-rule-and-one-half-it-does-
+# not-cover.md §4) -- so on a WSL-less host these four still check their own
+# tables, their floors, the port of shellquote.rs, and the transcription of the
+# rung literals.  That is most of what can go wrong with them, and it is checked
+# on every host.  What skips is only the half that genuinely requires bash.
+check_bash_oracles() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== bash oracles: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # A self-test failure is never skippable: it means the checker disagrees
+    # with fixtures it carries itself, so its verdict on anything else is
+    # worthless -- and unlike the gate, it cannot have been prevented from
+    # looking by a missing tool.
+    echo "=== Checking the four bash oracles against their own fixtures ==="
+    if ! run_checker check-shellquote-vs-bash-selftest "$py" "$PROJECT_ROOT/scripts/check-shellquote-vs-bash.py" --self-test; then
+        _bash_oracle_selftest_died check-shellquote-vs-bash.py
+    fi
+    if ! run_checker check-ansic-quoting-vs-bash-selftest "$py" "$PROJECT_ROOT/scripts/check-ansic-quoting-vs-bash.py" --self-test; then
+        _bash_oracle_selftest_died check-ansic-quoting-vs-bash.py
+    fi
+    if ! run_checker check-kshell-pipeline-vs-bash-selftest "$py" "$PROJECT_ROOT/scripts/check-kshell-pipeline-vs-bash.py" --self-test; then
+        _bash_oracle_selftest_died check-kshell-pipeline-vs-bash.py
+    fi
+    if ! run_checker check-kshell-rungs-vs-bash-selftest "$py" "$PROJECT_ROOT/scripts/check-kshell-rungs-vs-bash.py" --self-test; then
+        _bash_oracle_selftest_died check-kshell-rungs-vs-bash.py
+    fi
+
+    local ran=0 skipped=0
+    echo "=== Asking real bash whether these are bash's rules ==="
+    if run_checker --may-skip check-shellquote-vs-bash "$py" "$PROJECT_ROOT/scripts/check-shellquote-vs-bash.py"; then
+        if [ -n "$RUN_CHECKER_SKIPPED" ]; then skipped=$((skipped + 1)); else ran=$((ran + 1)); fi
+    else
+        _bash_oracle_disagreed check-shellquote-vs-bash.py "kernel/src/shellquote.rs"
+    fi
+    if run_checker --may-skip check-ansic-quoting-vs-bash "$py" "$PROJECT_ROOT/scripts/check-ansic-quoting-vs-bash.py"; then
+        if [ -n "$RUN_CHECKER_SKIPPED" ]; then skipped=$((skipped + 1)); else ran=$((ran + 1)); fi
+    else
+        _bash_oracle_disagreed check-ansic-quoting-vs-bash.py "the \$'...' rules recorded in its own docstring"
+    fi
+    if run_checker --may-skip check-kshell-pipeline-vs-bash "$py" "$PROJECT_ROOT/scripts/check-kshell-pipeline-vs-bash.py"; then
+        if [ -n "$RUN_CHECKER_SKIPPED" ]; then skipped=$((skipped + 1)); else ran=$((ran + 1)); fi
+    else
+        _bash_oracle_disagreed check-kshell-pipeline-vs-bash.py "kshell's expansion pipeline (sites 4/5/6/7)"
+    fi
+    if run_checker --may-skip check-kshell-rungs-vs-bash "$py" "$PROJECT_ROOT/scripts/check-kshell-rungs-vs-bash.py"; then
+        if [ -n "$RUN_CHECKER_SKIPPED" ]; then skipped=$((skipped + 1)); else ran=$((ran + 1)); fi
+    else
+        _bash_oracle_disagreed check-kshell-rungs-vs-bash.py "the assertions in kshell self-test rungs 115 and 117"
+    fi
+
+    if [ "$skipped" -gt 0 ]; then
+        echo "=== bash oracles: $ran asked bash, $skipped skipped (no WSL on this host) ==="
+    else
+        echo "=== bash oracles: all $ran agree with real bash ==="
+    fi
+}
+
+_bash_oracle_selftest_died() {
+    echo "" >&2
+    echo "ERROR: refusing to build.  $1 no longer agrees with the" >&2
+    echo "fixtures it carries in its own source." >&2
+    echo "" >&2
+    echo "This is not a WSL problem and skipping it would be wrong: a self-test" >&2
+    echo "needs no bash, so it did look, and what it found was that the checker" >&2
+    echo "is broken.  Until it is fixed, that gate's verdict about kshell -- on" >&2
+    echo "every host, including the ones that do have WSL -- means nothing." >&2
+    exit 1
+}
+
+_bash_oracle_disagreed() {
+    echo "" >&2
+    echo "ERROR: refusing to build.  Real bash disagrees with $1." >&2
+    echo "" >&2
+    echo "Read the direction of this carefully before changing anything: bash is" >&2
+    echo "the oracle here, not the subject.  A failure means $2" >&2
+    echo "is wrong, and the expectation written in the gate was our belief about" >&2
+    echo "the shell rather than a fact about it.  Fix the Rust, or -- if the" >&2
+    echo "divergence is deliberate -- move the case into that file's DIVERGENCES" >&2
+    echo "list, where BOTH answers are pinned and it starts failing again if" >&2
+    echo "either side changes.  Do not adjust the expectation to match our code:" >&2
+    echo "that converts the one gate measuring reality into another one agreeing" >&2
+    echo "with us." >&2
+    echo "" >&2
+    echo "If instead the gate says the transport is not faithful, nothing about" >&2
+    echo "kshell has been tested at all -- the bytes reaching bash were not the" >&2
+    echo "bytes written down.  See scripts/bashprobe.py." >&2
+    exit 1
+}
+
+check_bash_oracles
+
+# Is `libc.a` carved finely enough that a program can bring its own `getopt`?
+#
+# This is the GNU make failure of design-decisions.md S339: a member that
+# defines `getopt` *and* something every program needs is a member no program
+# can decline, so a program supplying its own `getopt` gets a duplicate symbol
+# and does not link.  The gate reads the archive's symbol index directly and
+# asks three questions of it -- each strict family owns its member outright, no
+# member mixes a replaceable name with an unavoidable one, and no replaceable
+# name shares a member with an ordinary one.
+#
+# It was pinned in check-gates-are-wired.py from the day it was written, with
+# the reason "needs an opt-in skip channel in run-checker.sh first".  That
+# channel now exists (`--may-skip`), so the pin is retired here.
+#
+# `--ignore-age` is load-bearing, not a convenience.  Bare, the gate declines
+# whenever `posix/` is newer than the sysroot -- which is nearly always, since
+# the sysroot is rebuilt by hand and posix/ is edited every day.  A gate that
+# declines on every run is the failure mode already logged as OPEN in
+# known-issues.md, and it would be self-inflicted here: we would have wired a
+# gate that never answers.  With the flag it always answers a sound but weaker
+# question -- is the archive *on disk* shaped correctly? -- and the staleness
+# it stops reporting is not lost, because the fixture-freshness block above
+# already prints a loud WARNING naming the newer posix/ sources.  Better a true
+# answer about a slightly old archive than no answer about a current one.
+#
+# So what is `--may-skip` still for?  The archive being absent entirely, on a
+# fresh checkout whose sysroot has never been built, and a symbol index that
+# yielded so little the gate refuses to grade it.  Both are declines -- "could
+# not look", exit 2 -- and neither is a pass.
+#
+# The self-test is NOT skippable, for the same reason the bash oracles' are
+# not: it builds its own `ar` archives in memory and needs no sysroot at all,
+# so on a machine with no `libc.a` it is the only thing still checking that
+# this gate can tell a bad archive from a good one.
+check_libc_shape() {
+    local py=""
+    py="$(find_python)" || return 0
+
+    echo "=== Checking libc.a member granularity ==="
+    if ! run_checker check-libc-shape-selftest "$py" "$PROJECT_ROOT/scripts/check-libc-shape.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-libc-shape.py no longer agrees" >&2
+        echo "with the synthetic archives it builds in its own source." >&2
+        echo "" >&2
+        echo "This needs no sysroot, so it did look, and what it found is that" >&2
+        echo "the checker is broken -- which makes its verdict about the real" >&2
+        echo "libc.a meaningless on every host, including this one." >&2
+        exit 1
+    fi
+
+    if run_checker --may-skip check-libc-shape "$py" "$PROJECT_ROOT/scripts/check-libc-shape.py" --ignore-age; then
+        if [ -n "$RUN_CHECKER_SKIPPED" ]; then
+            echo "=== libc.a shape: skipped (no archive to grade on this host) ==="
+        fi
+    else
+        echo "" >&2
+        echo "ERROR: refusing to build.  libc.a is carved too coarsely." >&2
+        echo "" >&2
+        echo "A program that defines its own copy of one of the names above" >&2
+        echo "cannot decline the member that also defines it, so it gets a" >&2
+        echo "duplicate definition and fails to link.  This is exactly how the" >&2
+        echo "GNU make port broke -- see design-decisions.md S339." >&2
+        echo "" >&2
+        echo "The fix is in how posix/ is compiled, not in this list: raising" >&2
+        echo "codegen-units will NOT split a member, because rustc partitions" >&2
+        echo "by module and a ceiling does not force a floor.  Move the named" >&2
+        echo "symbols into a module of their own." >&2
+        exit 1
+    fi
+}
+
+check_libc_shape
+
 # A diagnostic that names the wrong command is caught by nothing else.
 #
 # The operand helpers are handed their command's name as a bare string literal:
@@ -5303,132 +5495,6 @@ check_selftest_reinit() {
 }
 
 check_selftest_reinit
-
-# Ask real bash whether kshell's quoting rules are still bash's rules.
-#
-# kshell's quoting is not ours to invent -- it is bash's -- so the only way to
-# know a rule in `kernel/src/shellquote.rs` is right is to ask bash. Until now
-# that asking happened only when someone remembered to run these by hand, which
-# is close to not having them: a rule that drifts between two manual runs is a
-# rule nobody is checking.
-#
-# Only TWO of the four `*-vs-bash.py` oracles are wired here, and the split is
-# not arbitrary -- it is whether the gate reads the kernel:
-#
-#   * `check-shellquote-vs-bash.py` ports `DQ_ESCAPABLE` out of shellquote.rs
-#     and reds if the Rust alphabet stops matching the ported one.
-#   * `check-kshell-rungs-vs-bash.py` requires 13 literals to occur verbatim in
-#     kshell.rs, so editing a rung without editing the oracle is a finding.
-#
-# The other two (`check-kshell-pipeline-vs-bash.py`,
-# `check-ansic-quoting-vs-bash.py`) compare a *Python table of expectations*
-# against bash and never open a `.rs` file. `check-kshell-pipeline-vs-bash.py`
-# says so itself: "a disagreement means my model is wrong, not bash." No kernel
-# change can make either fail, so wiring them would spend ~23 s per boot to
-# guard nothing -- and, worse, would read as coverage while providing none.
-# They stay pinned in `check-gates-are-wired.py` with that as the reason.
-#
-# `--may-skip=2` is what makes this wireable at all. Both shell out through
-# `bashprobe.py`, which needs WSL, and the boot test must run on a host
-# carrying only the Rust toolchain and QEMU. bashprobe exits 2 -- "I could not
-# look" -- when there is no bash to ask, and run_checker turns that into a loud
-# SKIP rather than a pass or an abort. A *broken* harness still raises, and
-# run_checker refuses to skip anything whose output carries a traceback, so the
-# channel that waves through a missing bash cannot wave through a broken one.
-#
-# Cheap (~19 s for the pair on a host with WSL), so it sits with the document
-# gates, ahead of clippy.
-check_kshell_vs_bash() {
-    local py=""
-    if command -v python &>/dev/null; then
-        py=python
-    elif command -v python3 &>/dev/null; then
-        py=python3
-    else
-        echo "=== kshell-vs-bash checks: skipped (no python) ===" >&2
-        return 0
-    fi
-
-    echo "=== Cross-checking shellquote.rs's rules against real bash ==="
-    if ! run_checker --may-skip=2 check-shellquote-vs-bash "$py" -u \
-        "$PROJECT_ROOT/scripts/check-shellquote-vs-bash.py"; then
-        echo "" >&2
-        echo "ERROR: refusing to build.  kernel/src/shellquote.rs disagrees" >&2
-        echo "with bash, or its escape alphabet has drifted from the port this" >&2
-        echo "checker validates.  kshell's quoting rules are bash's; a rule we" >&2
-        echo "invent is a rule that breaks a script someone pasted in." >&2
-        exit 1
-    fi
-
-    echo "=== Cross-checking kshell's quoting rungs against real bash ==="
-    if run_checker --may-skip=2 check-kshell-rungs-vs-bash "$py" -u \
-        "$PROJECT_ROOT/scripts/check-kshell-rungs-vs-bash.py"; then
-        return 0
-    fi
-
-    echo "" >&2
-    echo "ERROR: refusing to build.  A self-test rung in kernel/src/kshell.rs" >&2
-    echo "asserts something bash does not do, or a rung was edited without" >&2
-    echo "editing the oracle that pins its literals." >&2
-    echo "" >&2
-    echo "The rungs are how bash's answers survive onto a host with no bash," >&2
-    echo "so a rung that has drifted is worse than no rung: it is a wrong" >&2
-    echo "answer carrying a passing test's authority." >&2
-    exit 1
-}
-
-check_kshell_vs_bash
-
-# Grade the shape of the sysroot's `libc.a`, if there is a current one to grade.
-#
-# This is lane B's gate and lane B's tech debt (TD-B-TEN-GATES-ARE-NEVER-ASKED);
-# it is wired from here because `scripts/boot-test.sh` is lane A's file and the
-# thing that had blocked it was lane A's to build.  It was pinned as
-# `MUST NOT be wired as things stand` for one reason: it returns 2 -- meaning
-# "I could not look" -- on a fresh checkout with no sysroot, and `run_checker`
-# aborted the build on any exit but 0/1.  `--may-skip=2` is exactly that
-# missing channel, so the pin is now spent and goes with this commit.
-#
-# It has three ways to reach exit 2, and all three are honestly "could not
-# look" rather than "looked and found nothing": no `libc.a` at all, a `libc.a`
-# older than the `posix/src/*.rs` it was built from, and an archive it cannot
-# parse.  The middle one is the common case -- this worktree hits it right now,
-# with an archive from Aug 31 and seven newer inputs -- and it is the reason
-# wiring this had to wait for a skip channel rather than a `[ -f ... ]` guard.
-# A file-exists test would have called that stale archive present and graded
-# it, reporting on a `libc.a` the tree no longer produces.
-#
-# The skip is loud: `run_checker` prints the gate's last line as the reason and
-# records it in the skiplog, so a worktree that never builds a sysroot is told
-# every boot that this check is not being made, instead of accumulating green
-# runs that never opened the file.
-check_libc_shape() {
-    local py=""
-    if command -v python &>/dev/null; then
-        py=python
-    elif command -v python3 &>/dev/null; then
-        py=python3
-    else
-        echo "=== libc.a shape check: skipped (no python) ===" >&2
-        return 0
-    fi
-
-    echo "=== Checking the shape of toolchain/sysroot/lib/libc.a ==="
-    if run_checker --may-skip=2 check-libc-shape "$py" -u \
-        "$PROJECT_ROOT/scripts/check-libc-shape.py"; then
-        return 0
-    fi
-
-    echo "" >&2
-    echo "ERROR: refusing to build.  libc.a's object partitioning is wrong." >&2
-    echo "The gate's own output above names the offending symbols and says" >&2
-    echo "which of the two causes it is.  Both break gnulib-using ports at" >&2
-    echo "link time, not at compile time, so nothing downstream of here will" >&2
-    echo "tell you about it in terms you can act on." >&2
-    exit 1
-}
-
-check_libc_shape
 
 check_kernel_clippy
 

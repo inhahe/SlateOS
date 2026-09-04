@@ -34067,6 +34067,142 @@ one is a judgement call rather than a forced move: pick an app whose state type
 already exists and already has a `handle_event`, since that is most of the work,
 and expect roughly one live defect per app (three conversions, three defects).
 
+**Count corrected 2026-09-03 — and moved somewhere it cannot go stale again.**
+The line above said "135 to go". It was written on 2026-08-25 and never revised
+while the conversions continued; by 2026-09-03 the true figure was 55, and three
+conversions that same day took it to 52. A number maintained by hand in prose is
+a number that is wrong most of the time, which is the same defect as the
+hand-written palettes this file is full of, one medium over.
+
+**Do not read a count from this entry. Ask the ratchet.**
+`scripts/check-window-wiring.py` already measures it on every boot test and
+prints it: "N program(s) open a window, M do not". `BASELINE` in that file is
+the current M, and it is lowered in the same commit as each conversion — so it
+is both the count and the thing that stops the count going back up. As of
+2026-09-03 it is 46, against 92 programs that do open a window.
+
+(The two figures do not have to sum to 143. `check-window-wiring` counts
+*programs that draw*, which is not the same set as crates under `apps/`, and it
+is the more useful denominator: a crate with no renderer has no window to open.)
+
+**`apps/fontmanager` is number 88, and the "one live defect per app" rule held.**
+The defect: **there was no `Event::Mouse` arm anywhere in the file.** A font
+manager whose list of fonts could not be clicked — only arrowed through.
+`MouseEvent`, `MouseButton` and `MouseEventKind` were imported and never named
+again, and a file-wide `#[allow(unused_imports)]` is what kept that quiet. It
+was invisible for the reason this entry exists: `main` rendered one frame and
+asserted it was non-empty, so nothing had ever delivered the app an event.
+
+Mouse handling now selects a sidebar filter, a category, or a font family. The
+row geometry was inline in the renderer, so it was extracted to
+`sidebar_rows()`/`font_list_top()` which the renderer and the hit test both
+walk — hand-writing a second copy of the arithmetic is how `apps/mixer` got a
+slider handler taking arguments nothing in the program computed. Seven tests,
+including a sweep asserting *every* drawn row is clickable (an off-by-one in the
+accumulator would strand exactly one row, which sampling two would miss) and one
+asserting a click above or below the list selects nothing, since a hit test that
+clamps looks like the program choosing for you. Mutation-checked: deleting the
+`Event::Mouse` arm fails exactly the four click tests.
+
+Three other things the conversion turned up, all pre-existing:
+
+- **Two latent panic sites in production code.** `select_next_font` and
+  `select_prev_font` indexed `visible[0]`, `visible[next_pos]` and computed
+  `visible.len() - 1`; `uninstall` indexed `self.fonts[idx]`. Each is in range
+  today because of a check a few lines above it, which is the guarantee that
+  stops holding the moment someone moves the check. All are now `get`/`first`/
+  `last`/`checked_sub`.
+- **The `render()` name collision the recipe warns about, from the other side.**
+  Renaming the inherent `render` to `render_tree` made five *test* call sites
+  resolve to the trait's `render(&mut self, w, h)` instead — the compiler found
+  every one, which is the argument for renaming rather than relying on care.
+- **A tail of hidden lint debt**: `float_cmp`, `unwrap_used` and
+  `indexing_slicing` in the test module (now carrying the standard allow block),
+  and three `sort()` on primitives (now `sort_unstable`).
+
+`check-window-wiring.py`'s baseline went 49 → 48 in the same commit, which is
+what a ratchet is for: ground gained and not held is ground that can be lost
+again without anything objecting.
+
+**`apps/procexplorer` is number 89**, and its defect was the other one the
+recipe singles out. It already handled mouse, resize *and* `Event::Tick` — so
+the conversion was mechanical except for `tick_interval`, which defaults to
+`None`, which means no tick is ever delivered. Shipping that default would have
+given a **process explorer whose numbers never change**: a system monitor that
+monitors nothing, with all 67 of its existing tests still green, because a model
+test can assert the refresh works without asserting anything ever asks for it.
+That is lesson 47 again, and the recipe calls `tick_interval` "the one to get
+right" for exactly this reason.
+
+It returns the *user's* refresh interval rather than a constant or a frame rate,
+so changing the setting changes the clock, and an idle desktop parks between
+refreshes instead of being woken sixty times a second to redraw the same
+numbers. Three tests: the clock follows the setting; the refresh is driven by
+*elapsed time* rather than tick count (the interval is a floor, not a promise —
+`Event::Tick` carries what actually elapsed); and one long tick after a busy
+loop still refreshes. Mutation-checked: returning `None` fails exactly the first.
+
+Pre-existing debt this one exposed was larger than fontmanager's, and in a file
+the conversion did not otherwise touch: **31 clippy findings under
+`-D warnings`**, across `main.rs` and `features.rs`. Seven were latent
+production sites — `(1u64 << count) - 1` in two places, `cpu % cols` and
+`cpu / cols`, `scroll_offset + i`, `current + delta` before a clamp that cannot
+rescue an addition that already overflowed, and `handles.len() - max_handles`
+guarded by a `>` three lines above it. Each is safe today because of a check
+somewhere nearby, which is the guarantee that stops holding when someone moves
+the check. The rest were the two test modules, which now carry the standard
+allow block.
+
+Baseline 48 → 47.
+
+**A note for the next conversion:** budget for the lint tail. Both apps so far
+were clippy-dirty under `-D warnings` *before* being touched, and the debt is
+not visible until the crate is looked at. It is worth fixing — these are real
+overflow and panic sites — but it is most of the work, not a footnote to it.
+
+**Corrected 2026-09-03, after measuring instead of extrapolating.** Three apps
+for three looked like a tree-wide condition and I wrote it up as one. It is not:
+**114 of the 143 crates are clean**, and the debt is 588 production findings
+concentrated in 26. The apps left to convert are the ones nobody has been into
+recently, which is the same property that predicts lint debt — a biased sample,
+not a tree-wide fact. Full numbers, and the command to re-measure them, are in
+`TD-C-APPS-CARRY-1812-CLIPPY-FINDINGS-AND-588-OF-THEM-ARE-IN-PRODUCTION`. The
+advice stands; the scale was wrong.
+
+**`apps/musicplayer` is number 90, and it is why that note is there.** Its
+conversion was small; its lint tail was **71 findings, every one in production
+code**, and the bulk of them were in `parse_wav_header`, `parse_flac_header`,
+`parse_id3v2` and `decode_id3_text` — three audio-format parsers reading
+untrusted file bytes with unchecked arithmetic on offsets taken *from those
+bytes*.
+
+**One of them was a hang, not a lint.** The WAV chunk loop advanced with
+`offset += 8 + chunk_size as usize`, and `chunk_size` is four bytes out of the
+file. A crafted size wraps `offset` back to a small number, a small offset
+passes the loop guard, and the parser reads the same chunks forever. The ID3
+extended-header advance (`pos += 4 + ext_size`, a full 32-bit field) has the
+identical shape. A media player that hangs on a malformed file is the cheapest
+denial of service there is and it arrives as an email attachment.
+`a_wav_with_an_absurd_chunk_size_does_not_loop_forever` pins it, and the
+mutation check is unusual: restoring the wrapping advance does not fail the
+test, it **times out at 120 s**, which is the finding.
+
+Four tests, including a sweep that feeds every truncation of a plausible WAV,
+ID3 and FLAC header to all three parsers — a missed bound shows up only at the
+length that reaches it, so sampling would not do.
+
+The conversion's own defect was the visualiser: `advance_visualizer` eased the
+bars by a flat per-*call* blend, ignoring the `elapsed_secs` it was handed. That
+is `apps/mixer`'s peak-meter defect one call site over, and it only becomes
+reachable when the app is given a real clock — `tick_interval` is a floor, so
+ticks arrive irregularly and a busy frame would ease twice as far as a quiet
+one. It is now an exponential rate whose time constant is solved to reproduce
+the old look at the rate the player asks for. `tick_interval` is gated on
+`playing`, so a paused player lets the desktop park.
+
+Baseline 47 → 46. Running total: three conversions today, three live defects,
+and 102 clippy findings cleared across them.
+
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY
@@ -56621,6 +56757,114 @@ else.
 That entry's account of the `SKY` transposition names `gui/toolkit/src/theme.rs`
 among the files spelling `0x89DCEB`; as of today it spells nothing.
 ---
+
+### TD-C-APPS-CARRY-1812-CLIPPY-FINDINGS-AND-588-OF-THEM-ARE-IN-PRODUCTION — 2026-09-03 — OPEN
+
+**In short.** Running the project's own lint settings across every application
+turns up 1,812 complaints. Two thirds are in test code and are noise a
+three-line annotation silences. The remaining **588 are in real code**, and
+most of them are arithmetic that could overflow or an array read that could run
+off the end — the kind that turns a malformed input file into a crash or a
+hang. They are spread over 26 of the 143 applications, so this is a pile in a
+few places rather than a thin film everywhere.
+
+**Why this was measured.** Three applications were wired to the compositor on
+2026-09-03 and each was already failing `cargo clippy -- -D warnings` before it
+was touched: a handful in `fontmanager`, 31 in `procexplorer`, 71 in
+`musicplayer`. Three for three looks like a tree-wide condition, and I wrote it
+up as one. **It is not**, and the difference matters for planning:
+
+| | |
+|---|---|
+| crates under `apps/` | 143 |
+| with any finding | **29** |
+| with a *production* finding | **26** |
+| **clean** | **114** |
+
+The impression came from a biased sample. The apps left to convert are the ones
+nobody has been into recently, and "nobody has been into it recently" is the
+same property that predicts lint debt. Measuring is what separated the two.
+
+**The numbers.** `cargo clippy -p <every app> --all-targets` on 2026-09-03:
+
+| | count |
+|---|---|
+| total findings | 1,812 |
+| in `#[cfg(test)]` modules | 1,163 |
+| **in production code** | **588** |
+
+Production findings by lint:
+
+| lint | count |
+|---|---|
+| `arithmetic_side_effects` | 410 |
+| `indexing_slicing` (indexing) | 133 |
+| `indexing_slicing` (slicing) | 15 |
+| everything else | 30 |
+
+Worst crates by *production* findings: `paint` 135, `soundrecorder` 55,
+`habits` 43, `markdowneditor` 40, `regextester` 39, `installer` 33,
+`explorer` 33, `finance` 23, `metronome` 21, `weather` 21, `reminders` 21.
+
+**Note that `metronome` is on that list**, and it is one of the three apps that
+were *already* converted before today. Wiring an app to the compositor does not
+imply anyone looked at its lints; the two jobs are independent.
+
+**Why the test-module two thirds are not the interesting part.** A test that
+indexes out of range should fail loudly and point at the line that did it —
+that is the diagnosis, and `CLAUDE.md` says as much. Those 1,163 are closed by
+adding the standard allow block to each test module, which is mechanical and
+carries no risk.
+
+**Why the 588 are worth real work.** They are not stylistic. The three fixed on
+2026-09-03 are the argument:
+
+- `musicplayer`'s WAV chunk loop advanced by `offset += 8 + chunk_size`, with
+  `chunk_size` read out of the file. A crafted size wraps the cursor back to a
+  small number, which passes the loop guard, and the parser reads the same
+  chunks **forever**. `parse_id3v2` had the identical shape. A media player
+  that hangs on a malformed file is a denial of service delivered as an email
+  attachment.
+- `procexplorer` indexed `visible[0]` and computed `visible.len() - 1` under a
+  guard three lines away.
+- `fontmanager`'s `uninstall` indexed `self.fonts[idx]` the same way.
+
+Each was safe *on the day it was written*, because of a check somewhere nearby.
+That is precisely the guarantee that stops holding when someone moves the check,
+and it is why the workspace turns these lints on at all.
+
+**Proper fix.** Per crate, in this order, because the ratio is roughly 2:1 in
+favour of the cheap half:
+
+1. Add the standard allow block to the crate's `#[cfg(test)]` modules. Closes
+   about two thirds of any crate's count for three lines.
+2. Fix the production findings properly — `checked_add`/`saturating_*`/`get`,
+   with the bound stated in the operation rather than in a guard a few lines
+   away. Do **not** blanket-allow these; a crate-wide allow is what
+   `C-CREDMANAGER-ALLOWS-DEAD-CODE-CRATE-WIDE` is about, one lint over.
+3. Look hardest at anything parsing a file or a network response. That is where
+   the 410 arithmetic findings stop being theoretical.
+
+**Reproduce**, and re-measure rather than trusting the numbers above:
+
+```bash
+pkgs=$(for d in apps/*/; do printf -- "-p %s " "$(basename "$d")"; done)
+cargo clippy $pkgs --all-targets --target x86_64-pc-windows-gnu 2>&1 \
+  | tee /tmp/clippy-all.log | grep -c '^warning:'
+```
+
+Splitting production from test needs the first `#[cfg(test)]` line of each file;
+the throwaway script that did it is not kept, because a script kept without a
+caller is the other defect this file is full of.
+
+**Trigger:** take a crate's debt when converting that crate to `oswindow::app`
+— the two passes touch the same files and the lint tail is most of the work
+either way (see `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`). `paint` at 135 is the
+one worth doing on its own.
+
+**If never fixed:** 143 applications ship with 588 unchecked operations, mostly
+arithmetic, in code that reads user files. Most will never be reached. The ones
+that are will be reached by whoever is looking for them.
 
 ### TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO — 2026-08-22 — OPEN
 
@@ -110142,6 +110386,48 @@ produced every wrong number above.
 
 ### One of the nine must NOT be wired, and that is not an oversight
 
+**RESOLVED 2026-09-03 — it is now wired, and the reasoning below is kept
+because its *general* claim is still true and its *specific* conclusion is
+not.** The generalisation ("a gate that can legitimately answer 'I could not
+look' cannot be wired as things stand") was correct and is what motivated
+`--may-skip`. What it did not anticipate is that the skip channel alone would
+not have been enough here: wiring this gate with `--may-skip` and nothing else
+would have made it decline on nearly every run, since the sysroot is rebuilt by
+hand and `posix/` changes daily — a wired gate that never answers, which is the
+*other* failure this entry warns about and is still OPEN as a general problem.
+
+What made it wirable was pairing the skip channel with `--ignore-age`, which
+changes the question rather than the answer: instead of "is the archive both
+current *and* well-shaped?", the boot test now asks "is the archive on disk
+well-shaped?" — weaker, but soundly answerable on every host. Nothing is lost,
+because staleness was already reported: `boot-test.sh`'s fixture-freshness
+block prints a loud WARNING naming the newer `posix/` sources, and deliberately
+warns rather than fails because repairing it means rebuilding lane B's tree.
+`--may-skip` still earns its place for the two declines that remain — no
+archive at all, and an index too small to grade.
+
+Wired as `check_libc_shape` in `boot-test.sh`; `PINNED` entry deleted in the
+same commit. The gate got a `--self-test` first (24 cases, run unconditionally
+because it builds its own `ar` archives in memory and so still checks the
+checker on a host with no sysroot) and a discovery floor of 100 members / 500
+symbols, an order of magnitude below the 615/3251 a real build produces.
+
+Two things worth keeping from doing it:
+
+- **A floor that nothing consults is decoration.** The floor's constants were
+  pinned by the self-test from the start; that nothing proved `main()` ever
+  *read* them was invisible until mutation testing deleted the floor block and
+  the suite stayed green. The same shape of hole as the shellquote gate's
+  verified-then-unused escape alphabet, found the same way. The fix was to
+  drive `main()` end to end, in both directions — it must refuse a small
+  archive *and* accept a large one, or "refuses everything" would pass too.
+- **A two-part condition needs its parts driven apart.** With the floor's
+  halves only ever tested together (fixtures below both floors, or above both),
+  a floor that checked only members, or only symbols, passed every case.
+  Killing those two mutants took fixtures that breach exactly one half each.
+
+The original reasoning follows.
+
 `check-libc-shape.py` grades a **build artifact** (`libc.a`), and since
 `533e34e00` it returns **2 — "could not look"** when the archive predates its
 own sources. `run_checker` (`scripts/run-checker.sh:105-128`) treats any exit
@@ -110171,8 +110457,28 @@ else (see the header comment at `boot-test.sh:1168-1183`).
    Filed as a request; not lane B's to change, because a gate that fails on
    lane C's tree blocks all three lanes.
 3. **Lane A: wire `check-selftest-reinit.py`** (`kernel/src/**`), same caveat.
-4. **Give `run_checker` an opt-in skip channel,** then wire
-   `check-libc-shape.py`. Until then it is correctly excluded, not forgotten.
+4. ~~**Give `run_checker` an opt-in skip channel,** then wire
+   `check-libc-shape.py`.~~ — **done.** The channel landed 2026-09-03
+   (design-decisions.md §753) and the gate was wired the same day, with
+   `--may-skip --ignore-age`; see the RESOLVED note above for why the age flag
+   was needed as well as the skip channel, and its `PINNED` entry is gone.
+
+   **The channel is DONE as of 2026-09-03:** `run_checker --may-skip <label> …`
+   treats exit 2 as a loud skip that returns 0 and sets `RUN_CHECKER_SKIPPED`,
+   while an *unflagged* exit 2 keeps aborting (lane A's stated constraint — a
+   floor must still stop the run). See design-decisions.md §753, and
+   `scripts/test-pre-push-run-checker.py` group 9. ~~**Wiring the gates is the
+   half still outstanding**~~ — done for lane B's five (the four bash oracles,
+   `e891b2216`, and `check-libc-shape.py`); items 2 and 3 above, which are
+   lane C's and lane A's, are what remain.
+
+   The caution that came with the channel stands and is why `--ignore-age` was
+   needed here: a gate wired with `--may-skip` whose tool is missing everywhere
+   is back to being an unrun gate *without the ratchet reporting it as one*,
+   because it now counts as wired. That visibility regression is named in §753
+   and is **not solved** — it is only avoided, one call site at a time, by
+   arranging that each skippable gate can in fact answer on this host. Nothing
+   yet notices a gate that skips on every run.
 
 ### Why this was not caught by the meta-gate that found it
 
@@ -110257,6 +110563,47 @@ If that request is never answered, nothing breaks and nothing improves: lane B
 applies the rule to its own new gates, the fifteen stay untested, and the count
 drifts upward as gates are added — which is the status quo, and is exactly how
 it reached fifteen.
+
+**Answered 2026-09-03 by lane A: yes, unnarrowed** — see
+`requests/a-b-yes-to-the-self-test-rule-and-one-half-it-does-not-cover.md`. Lane
+A declined the offered narrowing to source-parsing gates on the grounds that the
+narrowing describes where the failures happened rather than where the failure
+mode lives, and reported two real bugs that its own *markdown*-reading gate's
+fixtures caught before it ever ran on the real document.
+
+### The two defects are now graded apart — and what is left after that
+
+**Done 2026-09-03, `75af74e0b`,** on lane A's §4. "Gate not run" and "self-test
+not run" print under separate headings with separate counts, because they are
+not equally actionable: **wiring a gate can turn another lane's build red and so
+may need that lane's agreement; wiring a gate's `--self-test` cannot**, since a
+self-test reads only fixtures the checker carries in its own source. The heading
+states that reason inline rather than pointing at it — a reader of a red build
+has not read this file.
+
+Both halves still exit 1, and the self-test arm deliberately has **no `PINNED`
+equivalent**: `PINNED` is justified by excuses that genuinely exist for wiring a
+gate (WSL, a stale build artifact), and by lane A's own argument no such excuse
+can exist for wiring a self-test. Rationale, and the alternative I rejected, are
+in design-decisions.md §754.
+
+**What remains open in this entry after §753 and §754** — listed together
+because the three are easy to mistake for one:
+
+| | status |
+|---|---|
+| a gate nothing runs | **closed** — reported; `PINNED` requires a written reason; pruning enforced both ways |
+| a wired gate whose self-test nothing runs | **closed** — reported, and unsilenceable except by wiring it |
+| a wired gate that **declines on every host** | **OPEN — and the ratchet cannot close it** |
+
+The third is the visibility regression `--may-skip` introduced. It cannot be a
+fourth arm of `check-gates-are-wired.py`: that script is a static reader of
+script *text*, and "did this call skip?" is a fact about a *run*. A checker that
+answers a question it cannot see is the precise defect this entry is about. The
+per-run evidence exists (`RUN_CHECKER_SKIPPED`, and the spoken `SKIPPED` line);
+what is missing is anything that accumulates it across runs, which needs a
+record of past runs this tree does not keep. **That is the remaining work item
+under this heading**, and it is a larger thing than a gate.
 
 ---
 ## TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH
@@ -112503,6 +112850,36 @@ report produced by a check that was not performed.
 
 ## TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED (lane B, 2026-09-03)
 
+**RESOLVED 2026-09-03.** All four steps of the proper fix below landed, in the
+order it prescribed, and the four `PINNED` entries were deleted in the same
+commit that wired the gates. `boot-test.sh` now runs them as
+`check_bash_oracles`: the **gates** carry `--may-skip`, so a host without WSL
+skips them loudly instead of failing the build, and the **self-tests do not**,
+because a self-test reads only fixtures the checker carries in its own source
+and therefore needs no WSL by construction. That asymmetry is the point — on a
+WSL-less host these four still check their own tables, their floors, the port
+of `shellquote.rs` and the transcription of the rung literals. Only the half
+that genuinely requires bash skips.
+
+Two things were learned doing it that were not in the plan:
+
+- **A floor breach must not be skippable, and is not.** `--may-skip` only
+  accepts exit 2; a gutted table raises `SystemExit` and exits 1, so it still
+  aborts the build with the flag present. Verified for all four.
+- **The decline must be the checker's *first* line of output**, because
+  `run_checker` takes that line as the reason it skipped. Two of the four
+  printed a success line ("port verified against shellquote.rs") before the
+  transport check, which would have made the reason a gate did not run read
+  like a pass. It survived by accident — stdout block-buffers into the log and
+  stderr does not — which is the kind of accident that ends the day someone
+  adds `-u`. Both now print their preconditions' success *after* the transport
+  check, while still *running* them before it, so a drifted port is still a
+  finding on a host that cannot ask bash anything.
+
+Kept rather than deleted because the reasoning below is what a future pin
+should be argued against, and because the "three defects" list is the record of
+why an unrun gate was preferred to a wrongly-wired one for as long as it was.
+
 **In short:** four checkers that verify kshell's quoting rules against *real
 bash* are not run by anything. They are now pinned as deliberately-unwired so
 the build is honest about it, but pinned is not the destination — they should
@@ -112524,7 +112901,10 @@ entry is the other half of it.
 
 **Why they cannot simply be wired.** Three defects, in the order they bite:
 
-1. **An absent WSL is reported as a finding.** `bashprobe.assert_transport_is_faithful()`
+1. ~~**An absent WSL is reported as a finding.**~~ **DONE 2026-09-03.**
+   `bashprobe` now raises `NoBash` and declines via exit 2 with a spoken
+   reason that does not begin `usage:`. Original text follows.
+   `bashprobe.assert_transport_is_faithful()`
    leaves via `raise SystemExit(msg)`, which exits **1**. So "this host has no
    WSL, I could not ask bash" arrives in the same channel as "bash disagrees
    with kshell" — a machine with no WSL is told its shell quoting is wrong. This
@@ -112532,13 +112912,20 @@ entry is the other half of it.
    were converted away from (`TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH`),
    and it is the first thing to fix regardless of wiring, because it is wrong
    even when the gate is run by hand. It must exit **2**.
-2. **`run_checker` aborts the build on any exit but 0 or 1.** Once (1) is fixed,
-   a WSL-less host aborts instead of skipping. The fix is the opt-in
-   `run_checker --may-skip <name>` channel that lane A asked for in
-   `requests/a-b-yes-to-the-self-test-rule-and-one-half-it-does-not-cover.md` §3,
-   which `check-libc-shape.py` is also waiting on — five pinned gates now turn
-   on that one change.
-3. **None of the four has a `--self-test`.** Lane C's request flags this from
+2. ~~**`run_checker` aborts the build on any exit but 0 or 1.**~~ **DONE
+   2026-09-03.** `run_checker --may-skip <label> …` is in, with group 9 of
+   `scripts/test-pre-push-run-checker.py` behind it and design-decisions.md
+   §753 recording the tradeoff. An unflagged exit 2 still aborts, which is what
+   lane A asked to keep. Note for step (1): the skip arm rejects a decline whose
+   output carries a `usage:` banner, because **argparse also exits 2** — so
+   whatever bashprobe prints on a missing WSL must not begin `usage:`, or the
+   gate will abort rather than skip.
+3. ~~**None of the four has a `--self-test`.**~~ **DONE 2026-09-03.** All four
+   have one, each with a true-positive fixture and a floor; the shellquote
+   one found a real hole while being mutation-tested — the file pinned
+   `DQ_ESCAPABLE` against the Rust and nothing checked that the scanner ever
+   *read* it. Original text follows.
+   Lane C's request flags this from
    direct experience: three of the five gates it wired the same day shipped an
    unrun `--self-test`, and a scanner that has stopped scanning reports zero
    findings exactly as a clean tree does. These four scan `kernel/src/kshell.rs`

@@ -24,8 +24,17 @@ import bashprobe
 KSHELL = pathlib.Path(__file__).resolve().parent.parent / "kernel" / "src" / "kshell.rs"
 
 
-def assert_rust_src_is_verbatim():
+def assert_rust_src_is_verbatim(src: str | None = None, cases=None):
     """Every `rust_src` must occur in kshell.rs, byte for byte.
+
+    `src` and `cases` are injectable so the self-test can drive this against a
+    fixture rather than against the real `kshell.rs`. That matters more than it
+    looks: `kshell.rs` is **lane A's file**, so a self-test that read it would
+    be a lane-B test that lane A can turn red by editing its own code -- which
+    is the one thing lane A's cross-lane rule says a self-test must never be
+    able to do (`requests/a-b-yes-to-the-self-test-rule-and-one-half-it-does-
+    not-cover.md` §4: a self-test reads only fixtures the checker carries in
+    its own source).
 
     Without this the field is decoration.  The docstring above says this file
     exists because "the case transcribed into Rust can still be a different
@@ -45,8 +54,11 @@ def assert_rust_src_is_verbatim():
     This doubles as the discovery floor.  A renamed or truncated kshell.rs
     fails every lookup instead of quietly leaving the transcription unchecked.
     """
-    src = KSHELL.read_text(encoding="utf-8", errors="surrogateescape")
-    missing = [c[0] for c in CASES if c[0] not in src]
+    if src is None:
+        src = KSHELL.read_text(encoding="utf-8", errors="surrogateescape")
+    if cases is None:
+        cases = CASES
+    missing = [c[0] for c in cases if c[0] not in src]
     if not missing:
         return
     hint = ""
@@ -56,7 +68,7 @@ def assert_rust_src_is_verbatim():
             "  escape an apostrophe inside a string literal -- drop the backslash."
         )
     raise SystemExit(
-        f"{len(missing)} of {len(CASES)} rust_src literal(s) do not occur in\n"
+        f"{len(missing)} of {len(cases)} rust_src literal(s) do not occur in\n"
         f"  {KSHELL}\n"
         "Either the rung was edited and this file was not, or the "
         "transcription is wrong.\n"
@@ -147,12 +159,131 @@ def check_awk():
     return fails
 
 
+#: Floors on discovery. Not targets -- set where a gutted table or a merge
+#: that took one side of a conflict trips them and ordinary editing does not.
+MIN_CASES = 10
+MIN_AWK_CASES = 2
+
+
+def _assert_tables_are_not_gutted() -> None:
+    """Refuse to grade tables too thin to be the ones this file was written on.
+
+    `assert_rust_src_is_verbatim` is already a discovery floor on *kshell.rs*
+    -- a renamed or truncated file fails every lookup. This is the floor on the
+    other input, the tables themselves, which that check cannot see: an empty
+    `CASES` has nothing to look up, so it passes, and then the scoring loop
+    prints `0 rung assertion(s) disagree` over nothing at all.
+    """
+    if len(CASES) < MIN_CASES:
+        raise SystemExit(
+            f"only {len(CASES)} case(s) in CASES, below the floor of "
+            f"{MIN_CASES}. Reporting '0 disagreements' over a table this thin "
+            f"would be the failure this checker exists to prevent -- and note "
+            f"that assert_rust_src_is_verbatim cannot catch it, because an "
+            f"empty table has nothing to fail to find.")
+    if len(AWK_CASES) < MIN_AWK_CASES:
+        raise SystemExit(
+            f"only {len(AWK_CASES)} case(s) in AWK_CASES, below the floor of "
+            f"{MIN_AWK_CASES}. Rung 117 would be reported as agreeing with awk "
+            f"without awk having been asked anything.")
+
+
+def _selftest() -> int:
+    """Drive the two guards against fixtures, never against the real tree.
+
+    `kshell.rs` is lane A's file. A self-test that read it would be a lane-B
+    test that lane A can turn red by editing its own code, which is precisely
+    what lane A's rule says a self-test must never be able to do. So the
+    verbatim check is driven through its injected `src`, and the floors through
+    a temporarily shortened table.
+    """
+    checks = bad = 0
+
+    def check(label, ok):
+        nonlocal checks, bad
+        checks += 1
+        if ok:
+            print(f"ok   {label}")
+        else:
+            print(f"selftest FAIL: {label}", file=sys.stderr)
+            bad += 1
+
+    fixture = [("\"a'b\"", "a'b", [b"a'b"])]
+
+    # True negative: the literal is there, so nothing is reported.
+    try:
+        assert_rust_src_is_verbatim("let x = \"a'b\";\n", fixture)
+    except SystemExit as exc:
+        check(f"a literal that IS present passes ({exc})", False)
+    else:
+        check("a literal that is present passes", True)
+
+    # True positive: it is not there, and the failure says which.
+    try:
+        assert_rust_src_is_verbatim("let x = \"nothing like it\";\n", fixture)
+    except SystemExit as exc:
+        check("a missing literal is reported", "do not occur in" in str(exc))
+        check("...and the message names the literal, not just a count",
+              "a'b" in str(exc))
+    else:
+        check("a missing literal is reported", False)
+
+    # The specific historical fault this guard was added for: Python's `\'`
+    # escaping leaking into a field that must be a verbatim copy of Rust, which
+    # does not escape an apostrophe inside a string literal. The hint is the
+    # whole value of the check -- without it the failure is thirteen lines of
+    # backslashes and no diagnosis.
+    try:
+        assert_rust_src_is_verbatim("let x = \"a'b\";\n",
+                                    [("\"a\\'b\"", "a'b", [b"a'b"])])
+    except SystemExit as exc:
+        check("a spurious backslash before an apostrophe is diagnosed, "
+              "not merely reported", "drop the backslash" in str(exc))
+    else:
+        check("a spurious backslash before an apostrophe is diagnosed", False)
+
+    check(f"the {len(CASES)} real literals are all present in kshell.rs",
+          assert_rust_src_is_verbatim() is None)
+
+    # The floors, seen to fire in both directions.
+    real_cases, real_awk = CASES, AWK_CASES
+    for name, short in (("CASES", "CASES"), ("AWK_CASES", "AWK_CASES")):
+        try:
+            globals()[short] = globals()[short][:1]
+            try:
+                _assert_tables_are_not_gutted()
+            except SystemExit as exc:
+                check(f"a gutted {name} refuses to return a verdict",
+                      "below the floor" in str(exc))
+            else:
+                check(f"a gutted {name} refuses to return a verdict", False)
+        finally:
+            globals()["CASES"], globals()["AWK_CASES"] = real_cases, real_awk
+    check("...and the real tables pass the same guard",
+          _assert_tables_are_not_gutted() is None)
+
+    if bad:
+        print(f"selftest: {bad} of {checks} cases FAILED", file=sys.stderr)
+        return 1
+    print(f"selftest: {checks}/{checks} cases pass")
+    return 0
+
+
 def main():
     # Before bash is asked anything: the cases must be the ones the rung
     # actually contains, or every answer below is about a different string.
+    _assert_tables_are_not_gutted()
     assert_rust_src_is_verbatim()
-    print(f"all {len(CASES)} rust_src literals found verbatim in kshell.rs")
+    # Both checks above run before the transport check and neither needs WSL:
+    # a gutted table or a mistranscribed literal is worth reporting on a host
+    # that cannot run the rest of this file, and both exit 1, which is a
+    # finding. Their *success* lines are printed after it, because `run_checker
+    # --may-skip` takes the checker's FIRST line of output as the reason it
+    # skipped -- and "all 13 rust_src literals found verbatim" as the reason a
+    # gate did not run reads like a pass, in the one place whose job is to say
+    # that nothing was checked.
     bashprobe.assert_transport_is_faithful()
+    print(f"all {len(CASES)} rust_src literals found verbatim in kshell.rs")
     print("transport verified faithful\n")
     fails = 0
     for rust_src, line, want in CASES:
@@ -170,4 +301,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:] or "--selftest" in sys.argv[1:]:
+        sys.exit(_selftest())
     sys.exit(main())

@@ -3180,6 +3180,70 @@ check_eol() {
 
 check_eol
 
+# `check_eol` above catches the *consequence* -- a file declared `text eol=lf`
+# sitting CRLF on disk.  This one catches the cause, immediately after it, on
+# purpose: the 2026-09-03 incident was thirteen files corrupted by one writer,
+# and repairing the thirteen without disarming the writer only schedules the
+# next thirteen.  On Windows `open(p, "w")` turns every `\n` into `\r\n`,
+# silently, by documented default -- so the most obvious spelling of "write
+# this text" is the wrong one on the platform this tree is developed on.
+#
+# It grades `scripts/` only, because that is lane A's tree; `--all` surveys the
+# rest without grading it, which is the evidence a cross-lane request needs.
+# It is a static AST walk over 169 files and costs well under a second, so it
+# belongs here in the pre-build block rather than anywhere later.
+check_text_mode_writes() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== text-mode write check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Its own cases first, and they are not optional bookkeeping.  Every way
+    # this gate breaks -- an AST walk that stops matching `Call`, a mode rule
+    # that stops recognising `"w"`, a keyword lookup pointed at the wrong field
+    # -- empties the finding list, and an empty finding list is printed in
+    # exactly the words of a clean tree.  The self-test therefore drives
+    # `report` for real, over a finding list it made up, because "finds the
+    # defect, prints it, returns 0 anyway" is the one mutation no component
+    # assertion can see.  It also re-runs the detector over this tree's real
+    # bytes, so a detector that only works on its own fixture cannot pass.
+    echo "=== Checking the text-mode-write gate against the tree it grades ==="
+    if ! run_checker check-text-mode-writes-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-text-mode-writes.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The text-mode-write gate fails its own" >&2
+        echo "cases, so its verdict means nothing -- every failure mode it has" >&2
+        echo "empties its own finding set, which it reports exactly the way it" >&2
+        echo "reports a clean tree." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that every text-mode write under scripts/ names its line endings ==="
+    if run_checker check-text-mode-writes "$py" \
+            "$PROJECT_ROOT/scripts/check-text-mode-writes.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A call above opens a file for writing in" >&2
+    echo "TEXT mode without saying what it wants line endings to be.  On Windows" >&2
+    echo "that rewrites every \\n it emits as \\r\\n, and no git command will show" >&2
+    echo "you the result -- a file declared \`text eol=lf\` that is CRLF on disk" >&2
+    echo "is identical to the index as far as git is concerned." >&2
+    echo "" >&2
+    echo "The fix at each site is one keyword: \`newline=\"\"\`.  If the file is" >&2
+    echo "not text, say \`\"wb\"\` instead; binary is not graded here.  The" >&2
+    echo "checker's own output above says which call and which line." >&2
+    exit 1
+}
+
+check_text_mode_writes
+
 # `check_libc_shape` began, from the day it was wired until 2026-09-04, with
 # `py="$(find_python)" || return 0`.  `find_python` is defined nowhere -- not
 # here, not in run-checker.sh, not on PATH -- so the substitution exited 127,

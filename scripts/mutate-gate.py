@@ -68,7 +68,6 @@ anything has been done to it. That is the check.
 """
 
 import ast
-import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -133,25 +132,90 @@ def find_selftest_flag(gate: Path) -> str | None:
     return None
 
 
-def load_table(gate: Path) -> list[tuple[str, str, str]] | None:
-    """The gate's `SELFTEST_MUTANTS`, or None if it declares none.
+class BadTable(Exception):
+    """The `SELFTEST_MUTANTS` assignment exists but cannot be read as a table."""
 
-    `runpy` rather than `import`: a gate is named `check-doc-links.py`, and a
-    hyphen is not a legal module name. Executing the module is safe because
-    every gate here puts its work behind `if __name__ == "__main__"` -- and
-    `runpy.run_path` sets `__name__` to something else, so nothing runs.
+
+def table_from_source(source: str) -> list[tuple[str, str, str]] | None:
+    """The `SELFTEST_MUTANTS` a gate's source declares, or None if it declares none.
+
+    Read as a *literal*, not by executing the gate. The first version ran
+    `runpy.run_path` -- `import` is unavailable because a gate is named
+    `check-doc-links.py` and a hyphen is not a legal module name -- and that
+    works, but it makes reading the table cost whatever importing the gate
+    costs, which is the wrong price for `check-mutation-needles.py` to pay on
+    every boot test just to find out what the rows say.
+
+    Requiring a literal is a rule worth having on its own: a table assembled at
+    runtime is one this file and that gate could read differently, and two
+    readings of the same table is precisely the failure the table exists to
+    prevent. `ast.literal_eval` refusing is therefore a finding, not a reason
+    to fall back to executing anything.
     """
-    ns = runpy.run_path(str(gate))
-    table = ns.get("SELFTEST_MUTANTS")
-    if table is None:
-        return None
-    return [tuple(row) for row in table]
+    tree = ast.parse(source)
+    for node in tree.body:
+        targets = getattr(node, "targets", [])
+        if not isinstance(node, ast.Assign) or len(targets) != 1:
+            continue
+        t = targets[0]
+        if isinstance(t, ast.Name) and t.id == "SELFTEST_MUTANTS":
+            try:
+                value = ast.literal_eval(node.value)
+            except (ValueError, SyntaxError) as exc:
+                raise BadTable(f"not a literal ({exc})") from exc
+            if not isinstance(value, list):
+                raise BadTable(f"is a {type(value).__name__}, want a list")
+            rows = []
+            for i, row in enumerate(value):
+                if (not isinstance(row, tuple) or len(row) != 3
+                        or not all(isinstance(x, str) for x in row)):
+                    raise BadTable(
+                        f"row {i} is not a 3-tuple of strings: {row!r}")
+                rows.append(row)
+            return rows
+    return None
+
+
+def needle_problems(
+        source: str,
+        table: list[tuple[str, str, str]]) -> list[tuple[int, str, str]]:
+    """Every reason a row could not ask its question, as `(row, label, reason)`.
+
+    Keyed by row index rather than by label because two rows may legitimately
+    carry the same label, and skipping a good row because a namesake was bad
+    would be the same silent hole this function exists to report.
+
+    This is the half of the sweep that needs no mutation to run, and it is
+    split out because it is the half that can be automated. The sweep itself
+    rewrites the gate on disk, so it can never be wired into a boot test in a
+    tree three lanes share -- the dirty-start guard exists because two sweeps
+    at once already happened once. A stale needle, though, is exactly as fatal
+    and entirely static: it matches nothing, gets skipped, and leaves a hole
+    that reads as coverage. `check-mutation-needles.py` runs this on every
+    boot test for that reason.
+    """
+    lo, hi = table_span(source)
+    head, tail = source[:lo], source[hi:]
+    problems = []
+    for i, (label, old, new) in enumerate(table):
+        n = head.count(old) + tail.count(old)
+        if n != 1:
+            problems.append(
+                (i, label,
+                 f"needle matches {n} time(s) outside the table, want 1"))
+        elif old == new:
+            problems.append((i, label, "replacement is identical to the needle"))
+    return problems
 
 
 def sweep(gate: Path) -> int:
     original = gate.read_text(encoding="utf-8")
 
-    table = load_table(gate)
+    try:
+        table = table_from_source(original)
+    except BadTable as exc:
+        print(f"ABORT: {gate.name}'s SELFTEST_MUTANTS {exc}.")
+        return 2
     if table is None:
         print(f"{gate.name}: declares no SELFTEST_MUTANTS -- nothing to sweep.")
         return 0
@@ -172,22 +236,21 @@ def sweep(gate: Path) -> int:
     lo, hi = table_span(original)
     head, body, tail = original[:lo], original[lo:hi], original[hi:]
 
+    # Not survivors and not kills: the sweep could not ask the question at all.
+    # Counted as failures anyway, because a needle that matches nothing is a
+    # hole that reads as coverage.
+    problems = needle_problems(original, table)
+    dead = {i for i, _, _ in problems}
     survivors: list[str] = []
+    for _, label, reason in problems:
+        print(f"[BAD NEEDLE] {label}: {reason}")
+        survivors.append(f"{label} ({reason})")
+
     try:
-        for label, old, new in table:
-            n = head.count(old) + tail.count(old)
-            if n != 1:
-                # Not a survivor and not a kill: the sweep could not ask the
-                # question. Counted as a failure anyway, because a needle that
-                # matches nothing is a hole that reads as coverage.
-                print(f"[BAD NEEDLE] {label}: {n} occurrence(s) of {old!r}")
-                survivors.append(f"{label} (needle matches {n} times, want 1)")
+        for i, (label, old, new) in enumerate(table):
+            if i in dead:
                 continue
             mutated = head.replace(old, new) + body + tail.replace(old, new)
-            if mutated == original:
-                print(f"[BAD NEEDLE] {label}: replacement changes nothing")
-                survivors.append(f"{label} (no-op mutant)")
-                continue
             gate.write_text(mutated, encoding="utf-8")
             if selftest_passes(gate, flag):
                 print(f"[SURVIVED] {label}")

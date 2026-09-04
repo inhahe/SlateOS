@@ -746,76 +746,135 @@ fi
 gopt="${repo_root:-.}/scripts/getopt-ambiguity-check.py"
 [ -f "$gopt" ] || skip_getopt=1
 
-# The bin files this push would newly publish.
+# The bin files one pushed ref would newly publish. Sets `gs_run_all` (the
+# shared resolution logic itself moved, so every table's verdicts move with it)
+# and `gs_bins` (the utility names to check), rather than printing them: a
+# printed list needs a sentinel word to mean "all", and any sentinel is a name
+# some future bin could legitimately have.
 #
-# This is a *diff* across the whole range rather than `git log --name-only`,
-# because `--name-only` prints nothing for a merge commit: a bin change arriving
-# in this branch through a merge would be invisible to it, and merging is how
-# lanes integrate here. Take the oldest commit the remote does not have, and
-# diff its parent against HEAD.
-oldest_new=$(git rev-list HEAD --not --remotes="$remote_name" 2>/dev/null | tail -n 1)
-changed=""
-if [ -n "$oldest_new" ]; then
-    scope="userspace/coreutils/src/bin/ userspace/coreutils/src/getopt.rs"
-    if base=$(git rev-parse --verify -q "$oldest_new^" 2>/dev/null); then
+# DERIVED FROM THE SHA BEING PUSHED, NOT FROM `HEAD`. Those are the same commit
+# only when the branch being pushed is the one checked out. `git push origin
+# feature` from `main`, a push from a detached HEAD, or a push of two refs at
+# once all name a different commit, and the `HEAD` spelling then scoped this
+# gate to the files some *other* commit changed -- in the common case none at
+# all, which skipped the gate outright and published the branch unjudged.
+#
+# That is the same working-tree read the `--head` conversion removed, one level
+# up, and it is worth naming as its own defect: it is no use reading the right
+# commit's table if the *list* of tables to read came from somewhere else. A
+# gate can be pointed at exactly the right commit and still be asked the wrong
+# question. Gate 11 records the same reasoning for its own scope.
+#
+# This is a *diff* across the range rather than `git log --name-only`, because
+# `--name-only` prints nothing for a merge commit: a bin change arriving in this
+# branch through a merge would be invisible to it, and merging is how lanes
+# integrate here. Take the oldest commit the remote does not have, and diff its
+# parent against the ref's tip.
+getopt_scope_for() {
+    gs_run_all=0
+    gs_bins=""
+    gs_oldest=$(git rev-list "$1" --not --remotes="$remote_name" 2>/dev/null \
+                | tail -n 1)
+    [ -n "$gs_oldest" ] || return 0
+    gs_scope="userspace/coreutils/src/bin/ userspace/coreutils/src/getopt.rs"
+    if gs_base=$(git rev-parse --verify -q "$gs_oldest^" 2>/dev/null); then
         # shellcheck disable=SC2086
-        changed=$(git diff --name-only "$base" HEAD -- $scope 2>/dev/null | sort -u)
+        gs_changed=$(git diff --name-only "$gs_base" "$1" -- $gs_scope \
+                     2>/dev/null | sort -u)
     else
         # Pushing a root commit: everything in it is new.
         # shellcheck disable=SC2086
-        changed=$(git ls-tree -r --name-only HEAD -- $scope 2>/dev/null | sort -u)
+        gs_changed=$(git ls-tree -r --name-only "$1" -- $gs_scope \
+                     2>/dev/null | sort -u)
     fi
-fi
+    case "$gs_changed" in
+        # Shared resolution logic: every table's verdicts depend on it, so a
+        # change here is not scoped to any one bin.
+        *userspace/coreutils/src/getopt.rs*) gs_run_all=1 ;;
+        *)
+            # `bin/foo.rs` -> `foo`, `bin/foo/main.rs` -> `foo`, matching how the
+            # checker names a utility.
+            gs_bins=$(printf '%s\n' "$gs_changed" \
+                      | sed -n 's|^userspace/coreutils/src/bin/||p' \
+                      | sed 's|/main\.rs$||; s|\.rs$||' \
+                      | sort -u | tr '\n' ' ')
+            ;;
+    esac
+}
 
-run_all=0
-bins=""
-case "$changed" in
-    # Shared resolution logic: every table's verdicts depend on it, so a change
-    # here is not scoped to any one bin.
-    *userspace/coreutils/src/getopt.rs*) run_all=1 ;;
-    *)
-        # `bin/foo.rs` -> `foo`, `bin/foo/main.rs` -> `foo`, matching how the
-        # checker names a utility.
-        bins=$(printf '%s\n' "$changed" \
-               | sed -n 's|^userspace/coreutils/src/bin/||p' \
-               | sed 's|/main\.rs$||; s|\.rs$||' \
-               | sort -u | tr '\n' ' ')
-        ;;
-esac
-
-# The effective skip is wider than $skip_getopt: a push that changed no
-# coreutils bin has nothing for this gate to compare, and both blocks below
-# are no-ops. Report that as a skip rather than as a silent run.
-skip_getopt_eff=1
-if [ "$skip_getopt" != "1" ] && { [ "$run_all" = "1" ] || [ -n "$bins" ]; }; then
-    skip_getopt_eff=0
-fi
-note_gate getopt-table "$skip_getopt_eff"
+# Nothing being published is nothing to judge — and this is also what stops the
+# `--head` loop below from silently degrading to zero runs while `note_gate` had
+# already reported the gate as having run.
+[ -n "${pushed_shas# }" ] || skip_getopt=1
 
 getopt_failed=0
-if [ "$skip_getopt_eff" != "1" ]; then
-    # Check the checker before believing it. One utility (GNU ed) parses long
-    # options with its own parser rather than glibc's, so its table is compared
-    # through a second path -- names scraped from `--help`, plus a probe that
-    # keeps an undocumented-but-parsed option from being reported as a defect.
-    # That path cannot be exercised by the sweep: `ed` agrees with GNU today,
-    # and a broken comparison would look exactly like that agreement.
-    # --selftest is the only thing that tells the two apart.
-    if ! run_checker getopt-table-selftest "$py" "$gopt" --selftest; then
-        echo "pre-push: getopt-ambiguity-check.py --selftest failed" >&2
-        exit 1
-    fi
-fi
+getopt_ran=0
 if [ "$skip_getopt" != "1" ]; then
-    if [ "$run_all" = "1" ]; then
-        run_checker getopt-table "$py" "$gopt" || getopt_failed=1
-    elif [ -n "$bins" ]; then
-        # Deliberately unquoted: `$bins` is a list of utility names to pass as
-        # separate arguments, and they are shell-safe by construction (they are
-        # Rust source file stems).
-        # shellcheck disable=SC2086
-        run_checker getopt-table "$py" "$gopt" $bins || getopt_failed=1
-    fi
+    # WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. The scope is taken from the
+    # pushed range -- `getopt_scope_for` names the bins this ref rewrites -- and
+    # before `--head` the gate then compared whichever table happened to be
+    # lying on the disk. That is the gate-7 shape: commit a table with an entry
+    # dropped, repair it in the worktree, push, and the gate reads the repair
+    # and publishes the break. The mirror image blocks a clean push over a
+    # half-finished edit to the same file.
+    #
+    # Only our side of the comparison moves. The GNU side is the live host,
+    # which is a measurement of the machine and has no revision to read.
+    #
+    # One run per ref being pushed, not per commit: `pushed_shas` carries one
+    # sha per ref, and a table is a *state* rather than a diff, so only each
+    # ref's tip matters. In the ordinary single-branch push that is one run.
+    # The scope is per ref for the same reason -- two refs pushed together
+    # rewrite different bins, and judging either against the other's list is
+    # both wasted WSL round trips and a refusal over a table this ref did not
+    # touch.
+    for sha in $pushed_shas; do
+        getopt_scope_for "$sha"
+        # This ref rewrites no table: nothing to compare, and the WSL round
+        # trips a sweep would cost are the reason the gate is scoped at all.
+        [ "$gs_run_all" = "1" ] || [ -n "$gs_bins" ] || continue
+
+        if [ "$getopt_ran" = "0" ]; then
+            getopt_ran=1
+            # Check the checker before believing it -- once, however many refs
+            # follow. One utility (GNU ed) parses long options with its own
+            # parser rather than glibc's, so its table is compared through a
+            # second path: names scraped from `--help`, plus a probe that keeps
+            # an undocumented-but-parsed option from being reported as a defect.
+            # That path cannot be exercised by the sweep -- `ed` agrees with GNU
+            # today, and a broken comparison would look exactly like that
+            # agreement. --selftest is the only thing that tells the two apart.
+            if ! run_checker getopt-table-selftest "$py" "$gopt" --selftest; then
+                echo "pre-push: getopt-ambiguity-check.py --selftest failed" >&2
+                exit 1
+            fi
+        fi
+
+        # Per-sha gate name, for gate 9's reason: a shared name lets a later
+        # clean sha delete the kept log of an earlier failing one.
+        if [ "$gs_run_all" = "1" ]; then
+            run_checker "getopt-table-$sha" "$py" "$gopt" \
+                        --head "$sha" || getopt_failed=1
+        else
+            # Deliberately unquoted: `$gs_bins` is a list of utility names to
+            # pass as separate arguments, and they are shell-safe by
+            # construction (they are Rust source file stems).
+            # shellcheck disable=SC2086
+            run_checker "getopt-table-$sha" "$py" "$gopt" \
+                        --head "$sha" $gs_bins || getopt_failed=1
+        fi
+    done
+fi
+
+# Reported after the fact rather than predicted. The scope is per ref, so
+# whether this gate had anything to compare is only known once every pushed ref
+# has been looked at -- and a tally that reports what actually ran cannot
+# disagree with what actually ran, which is the failure the guard above exists
+# to prevent, in the one place it could still occur.
+if [ "$getopt_ran" = "1" ]; then
+    note_gate getopt-table 0
+else
+    note_gate getopt-table 1
 fi
 
 if [ "$getopt_failed" = "1" ]; then

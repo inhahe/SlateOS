@@ -87,11 +87,36 @@ only after GNU has been asked directly and answered "unrecognized option".
 Without that second step every undocumented alias we correctly carry would read
 as a defect to be deleted.
 
+Which tree it reads, and why that is a flag
+-------------------------------------------
+
+By default it reads the working tree, which is what a person running it by hand
+means and what the boot test means.  ``--head <rev>`` reads a git revision
+instead, through the ``Tree`` seam in ``scripts/gittree.py``.
+
+The push hook passes it, and there the difference is the gate's whole point.
+The gate already names the bins a push rewrites *from the pushed commit range*
+and then, before this flag existed, compared whatever table was lying on the
+disk.  Both halves of that are wrong in the ways this gate exists to catch:
+
+* **False pass.**  Commit a table with ``--verbose`` dropped from ``rm``, fix it
+  in the worktree, push without committing the fix.  The gate reads the fix and
+  approves the commit, and ``rm --v file`` prints a version banner and deletes
+  nothing for everyone who pulls it.
+* **False fail.**  Commit a correct table, start editing the same file, push.
+  The gate reads the half-finished edit and blocks a commit that is fine.
+
+The GNU side of every comparison is still the live host — that is a measurement
+of the machine, not of a tree, and there is no revision of it to read.  What
+``--head`` changes is only the side that is ours.  See ``known-issues.md`` ->
+``TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH``.
+
 Running it
 ----------
 
     python scripts/getopt-ambiguity-check.py            # check every bin
     python scripts/getopt-ambiguity-check.py cp rmdir   # just these
+    python scripts/getopt-ambiguity-check.py --head HEAD  # ...as of a commit
     python scripts/getopt-ambiguity-check.py --selftest # check the checker
 
 It needs a GNU userland to compare against.  On this Windows host that means
@@ -99,11 +124,16 @@ WSL, which it finds itself; on a Linux host it runs the utilities directly.  If
 neither is available it exits 0 with a note, because a check that cannot run is
 not a failure — it just has nothing to say.
 
-Exit codes: 0 agreed (or could not run), 1 disagreements found, 2 bad usage.
+Exit codes: 0 agreed (or could not run), 1 disagreements found, 2 bad usage or a
+revision that cannot be read.  Those two share a code deliberately: exit 1 is
+read by ``scripts/run-checker.sh`` as "the checker found something", and the
+gate prints its refusal text over it.  A revision that will not open is not a
+finding against anyone's table, and must not be dressed as one.
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import shutil
 import subprocess
@@ -111,8 +141,15 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-SRC_DIR = Path(__file__).resolve().parent.parent / "userspace" / "coreutils" / "src"
-BIN_DIR = SRC_DIR / "bin"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gittree  # noqa: E402  (path must be set first)
+
+ROOT = Path(__file__).resolve().parent.parent
+
+# Repo-relative, `/`-separated: these index a `Tree`, which is either the disk
+# or a git revision, and only one spelling of a path works on both.
+SRC_REL = "userspace/coreutils/src"
+BIN_REL = SRC_REL + "/bin"
 
 # Bins whose name is ours rather than GNU's, or which GNU has no equivalent of.
 # Comparing these against whatever the host happens to have under that name
@@ -311,28 +348,49 @@ def strip_comments(body: str) -> str:
     return "\n".join(re.sub(r"//.*$", "", line) for line in body.splitlines())
 
 
-def parse_table(path: Path) -> Table | None:
-    text = path.read_text(encoding="utf-8", errors="replace")
+def stem_of(rel: str) -> str:
+    """The utility a bin source belongs to.
+
+    `bin/foo.rs` -> `foo`, `bin/foo/main.rs` -> `foo`, matching how the hook
+    names the bins a push rewrote. Spelled once here rather than inline at each
+    of the three enumeration sites, which is how the two forms came to be
+    handled in two different ways in the first place.
+    """
+    base = rel.rsplit("/", 1)[-1]
+    name = base[:-3] if base.endswith(".rs") else base
+    if name != "main":
+        return name
+    parent = rel.rsplit("/", 2)
+    return parent[-2] if len(parent) >= 2 else name
+
+
+def parse_table(tree: gittree.Tree, rel: str) -> Table | None:
+    text = tree.read_text(rel)
+    if text is None:
+        # A path the tree does not have. `Tree` answers `None` rather than
+        # raising precisely so this is an answer -- a bin that exists on disk
+        # but not in the revision being judged is simply not in that push.
+        return None
     m = TABLE_HEAD_RE.search(text)
     body = slice_body(text, m.end()) if m else None
     if body is None:
         d = DELEGATE_RE.search(text)
-        if d and path.is_relative_to(BIN_DIR):
-            shared = SRC_DIR / f"{d.group(1)}.rs"
-            if shared.is_file():
+        if d and rel.startswith(BIN_REL + "/"):
+            shared = f"{SRC_REL}/{d.group(1)}.rs"
+            if tree.is_file(shared):
                 # Named for the *bin*, not the module: two programs share this
                 # table, and each is compared against its own GNU binary. That
                 # is not redundant — it is the only thing that would catch a
                 # table right for one algorithm and wrong for the other.
-                t = parse_table(shared)
+                t = parse_table(tree, shared)
                 if t:
-                    t.util = path.stem
+                    t.util = stem_of(rel)
                 return t
         return None
     names = ENTRY_RE.findall(strip_comments(body))
     if not names:
         return None
-    table = Table(util=path.stem, names=names)
+    table = Table(util=stem_of(rel), names=names)
     a = ALIAS_HEAD_RE.search(text)
     abody = slice_body(text, a.end()) if a else None
     if abody is not None:
@@ -729,22 +787,62 @@ def selftest() -> int:
 
 
 def main() -> int:
-    args = sys.argv[1:]
-    if "--selftest" in args:
+    ap = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0] if __doc__ else None,
+        add_help=True,
+    )
+    ap.add_argument("bins", nargs="*", metavar="BIN",
+                    help="check only these utilities (default: all of them)")
+    ap.add_argument("--selftest", action="store_true",
+                    help="check the checker against recorded GNU behaviour")
+    ap.add_argument(
+        "--head", default=None,
+        help="judge this commit instead of the working tree. The push hook "
+             "passes the commit being published, so a table a commit breaks "
+             "cannot be hidden by a repaired worktree -- nor a half-finished "
+             "edit block a push of unrelated clean commits.",
+    )
+    args = ap.parse_args()
+    if args.selftest:
+        # No tree is opened for the selftest, deliberately: it runs recorded
+        # rules against string literals in this file and has no business
+        # reading any revision of the repository.
         return selftest()
-    wanted = set(args)
+    wanted = set(args.bins)
     runner = find_runner()
     if runner is None:
         # ASCII only: this console's code page is not UTF-8 and mangles the rest.
         print("no GNU userland available (no WSL, not Linux); nothing to check")
         return 0
 
+    try:
+        tree = gittree.open_tree(str(ROOT), args.head)
+    except gittree.GitTreeError as exc:
+        # Exit 2, not 1: see the docstring's exit-code note. `run-checker.sh`
+        # reads 1 as a finding and the gate prints its refusal over it, and a
+        # revision that will not open is not a finding against a table.
+        print(f"getopt-ambiguity-check: cannot read {args.head!r}: {exc}",
+              file=sys.stderr)
+        return 2
+    with tree:
+        return sweep(tree, wanted, runner)
+
+
+def sweep(tree: gittree.Tree, wanted: set[str], runner: list[str]) -> int:
+    """One whole comparison of `tree`'s tables against the host's GNU ones."""
+    # Enumerated ONCE and reused by all three passes below. On the disk that
+    # was three cheap directory walks; against a revision each one is a `git
+    # ls-tree`, and the two stale-entry sweeps below deliberately look at the
+    # whole tree rather than just `wanted`, so the walk they share is the
+    # widest one there is.
+    sources = [p for p in tree.files_under(BIN_REL) if p.endswith(".rs")]
+
     tables = []
-    for path in sorted(BIN_DIR.rglob("*.rs")):
-        stem = path.stem if path.stem != "main" else path.parent.name
+    for rel in sources:
+        stem = stem_of(rel)
         if stem in NOT_GNU or (wanted and stem not in wanted):
             continue
-        t = parse_table(path)
+        t = parse_table(tree, rel)
         if t:
             t.util = stem
             tables.append(t)
@@ -758,9 +856,8 @@ def main() -> int:
     stale_exemptions = [
         name
         for name in sorted(NOT_GETOPT)
-        for p in BIN_DIR.rglob("*.rs")
-        if (p.stem if p.stem != "main" else p.parent.name) == name
-        and parse_table(p) is not None
+        for rel in sources
+        if stem_of(rel) == name and parse_table(tree, rel) is not None
     ]
 
     # An OWN_PARSER entry can go stale the same way, in the other direction: if
@@ -782,10 +879,7 @@ def main() -> int:
         # about those would train the reader to ignore the warnings.
         missing = wanted - {t.util for t in tables} - NOT_GNU
         for m in sorted(missing):
-            if not any(
-                p.stem == m or (p.stem == "main" and p.parent.name == m)
-                for p in BIN_DIR.rglob("*.rs")
-            ):
+            if not any(stem_of(rel) == m for rel in sources):
                 continue  # not a coreutils bin at all
             if m in NOT_GETOPT:
                 print(

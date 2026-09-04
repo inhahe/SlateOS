@@ -111211,8 +111211,8 @@ read the disk:
 | 4 argv-utf8 | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 6 host-errmsg | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-03** |
 | 11 doc-links | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-03** |
-| 5 getopt-table | working tree | `--check`, checker walks the filesystem |
-| 8 quote-names | working tree | same |
+| 5 getopt-table | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-04** |
+| 8 quote-names | working tree | `--check`, checker walks the filesystem |
 
 Gate 7 is not on that list any more, and it is the proof the rest matter: it had
 exactly this defect and it published two unformatted commits (`861f4d80e`,
@@ -111315,7 +111315,11 @@ the regression test all exist. The work is:
    to reach the disk. `--selftest` reports 57/57, `--check` on the working tree
    and `--check --head HEAD` both exit 0 on the real tree, and an unopenable
    revision exits 2.
-   Two to go: gates 5 and 8.
+   Gate 5's `getopt-ambiguity-check.py` converted 2026-09-04 (step 11): it is
+   the only checker here whose comparison has just *one* tree in it — the other
+   side is the live host's GNU utilities — so `--head` selects our half and the
+   measurement stays a measurement.
+   One to go: gate 8.
 3. Pass `--head` from the hook, and extend `test-pre-push-gates.py`'s existing
    assertion to all eight gates instead of just gate 9. **In progress.** The
    assertion is now a table (`HEAD_GATES`) rather than a gate-9 special case,
@@ -111325,7 +111329,16 @@ the regression test all exist. The work is:
    also guard on that list being non-empty, because a loop over nothing runs
    the checker zero times while `note_gate` has already reported the gate as
    having run. Gates 3 and 4 joined both assertions 2026-09-02, gate 6
-   2026-09-03.
+   2026-09-03, gates 8 and 11 backfilled 2026-09-04 and gate 5 on conversion the
+   same day. The backfill is the point: 8 and 11 were wired with `--head "$sha"`
+   on 2026-09-02 and 2026-09-03 and simply never added to `HEAD_GATES`, so for
+   two days the assertion covered five of the seven converted gates and said
+   nothing about the other two — an unlisted gate is not failed, it is never
+   asked about, which reads exactly like a gate that passed. They were found by
+   grepping the hook for `--head` and diffing that against the table by hand,
+   which is the comparison the table exists to make unnecessary. The table now
+   carries that history in a comment, above the rule that the commit adding
+   `--head` to a gate adds its checker to the table.
 4. Behavioural coverage, per `test-pre-push-fmt-gate.py`: for each gate, the
    false-pass and false-fail cases specifically. **Baseline cases are worthless
    here** — committed-clean-passes and committed-dirty-is-refused are green
@@ -111689,6 +111702,63 @@ the regression test all exist. The work is:
     which now copies `gittree.py` into its fixture repos alongside the checker.
     The suite's floors moved with them — 61 cases overall, 11 for gate 11 — so
     deleting a case is as loud as deleting the wiring it covers.
+
+11. **Gate 5 converted, 2026-09-04.** `getopt-ambiguity-check.py` now takes
+    `--head` and reads both of its tree-derived inputs through the seam: the
+    enumeration of `userspace/coreutils/src/bin` and each table's source text.
+
+    **It is the odd one out, and worth saying why.** Every other checker in this
+    entry compares a tree against a *file* — a baseline, a manifest, another
+    module's text — so both sides of the comparison move together when `--head`
+    selects a revision. This one compares a tree against **the machine**: it
+    reads GNU's own option table out of `<util> --=x` over WSL. Only our side
+    has a revision to read, and that asymmetry is the whole content of the
+    conversion. It also bounds what the flag can break: a wrong answer here is
+    always "we judged the wrong copy of *our* table", never a mismeasurement of
+    GNU's.
+
+    **The scope had the same defect as the content, and it outlived it.** Gate 5
+    is scoped by utility *name* rather than by path — each name is a WSL round
+    trip, ~2 s against ~35 s for a full sweep — so it never went through
+    `touches()` and kept its own private copy of `git rev-list HEAD --not
+    --remotes`. Step 5 fixed `touches()` on 2026-09-02 and this copy went on
+    asking about HEAD for two more days. Here the consequence is worse than a
+    wrong answer, because an empty scope is this gate's **skip** condition:
+    `git push origin feature` while standing on `main` produced an empty list,
+    which read as "this push rewrites no table", so the gate stood down and
+    said so in the tally — while being correctly wired to `--head` and pointed
+    at exactly the right commit. **Reading the right revision does not help when
+    the list of things to read in it came from somewhere else.** The derivation
+    is now `getopt_scope_for <sha>`, called per pushed ref inside the same loop
+    that judges it, and pinned by `test_gate_5_derives_its_own_scope_from_the_push_too`
+    (the helper must name `"$1"` and must not mention HEAD at all).
+
+    Two structural consequences of making the scope per-ref rather than
+    per-push. The `--selftest` run moved *inside* the loop behind a
+    `getopt_ran` flag, so it runs once when there is anything to judge and not
+    at all when there is not; and `note_gate` moved *after* the loop, reporting
+    what ran rather than predicting it. The prediction was a second place the
+    tally could disagree with reality, which is the failure the
+    `[ -n "${pushed_shas# }" ]` guard exists to prevent — a tally derived from
+    the run cannot drift from it.
+
+    Seven behavioural cases in `test-checkers-honour-head.py`, three of them
+    end-to-end through the real hook including the off-branch push step 6
+    requires. The off-branch case is the one that earns its keep: with the
+    scope reverted to HEAD it reports `allowed` for a branch carrying a table
+    with `--version` deleted, which is the defect above, observed rather than
+    argued. `yes` is the fixture utility because its table is two entries that
+    have not moved in decades, so a red case means the seam broke rather than
+    that a distribution shipped a different coreutils; a host with no GNU
+    userland skips the group loudly instead of passing it vacuously.
+
+    Floors moved to 68 overall and 7 for gate 5. **Gates 8 and 9 are
+    deliberately absent from that per-gate table**, and a comment there says so:
+    both are wired with `--head` and both are in `HEAD_GATES`, but no case has
+    ever pushed a fixture past either, so nothing shows the flag changes what
+    they decide. A checker can accept `--head`, be called with it correctly, and
+    ignore it. Adding a floor for them would make the table look complete while
+    guarding nothing.
 
 ### Why it is not done yet
 

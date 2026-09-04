@@ -996,6 +996,132 @@ def case_gate4_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# Gate 5 -- getopt-ambiguity-check.py
+#
+# The defect it looks for: a `LONG_OPTIONS` table that disagrees with the one
+# the real GNU utility carries. The table -- not the set of options we handle
+# -- is what decides whether an abbreviation like `--v` is ambiguous, so a
+# dropped entry silently changes what `yes --v` does.
+#
+# WHY THIS GATE'S CASES LOOK DIFFERENT FROM THE OTHERS'. Every other checker
+# here compares a tree against a baseline file, so both sides of the comparison
+# can be written into the fixture. This one compares a tree against *the host*:
+# it asks the machine's own GNU `yes` what its table is, over WSL. Only one
+# side is ours, and only that side is what `--head` selects. So the fixture
+# carries a real utility's real table, and the mutation is a name removed from
+# it -- which is the shape of four of the five defects that motivated the gate
+# (`mv` lacked `--no-copy`, `rm` and `split` were each missing an entry).
+#
+# `yes` is the utility chosen because its table is two entries that have not
+# moved in decades, so a case failing means the seam broke and not that a
+# distribution shipped a different coreutils.
+_YES_OK = """\
+const LONG_OPTIONS: &[(&str, Takes)] = &[("help", Takes::Nothing), \
+("version", Takes::Nothing)];
+"""
+
+# `--version` dropped. GNU has it and we would not, which is the dangerous
+# direction: the abbreviation `--v` resolves against a table that no longer
+# lists it.
+_YES_BROKEN = """\
+const LONG_OPTIONS: &[(&str, Takes)] = &[("help", Takes::Nothing)];
+"""
+
+
+def _getopt_repo(tmp: str, name: str) -> str:
+    return new_repo(tmp, name, ("getopt-ambiguity-check.py",))
+
+
+_NO_GNU: list[bool] = []
+
+
+def _gnu_userland_missing(root: str) -> bool:
+    """Whether this host has no GNU utilities to compare against.
+
+    The checker exits 0 with a note in that case -- correctly; a comparison
+    that cannot be made has nothing to say -- but that makes both arms of every
+    case below agree for a reason that has nothing to do with `--head`. Rather
+    than let the group pass vacuously, it is detected and announced.
+
+    Cached: the answer is a property of the host, and asking costs a WSL probe.
+    """
+    if not _NO_GNU:
+        out = run_checker(root, "getopt-ambiguity-check.py", "yes")
+        _NO_GNU.append("no GNU userland available" in out.stdout + out.stderr)
+    return _NO_GNU[0]
+
+
+def case_gate5_a_tidied_worktree_cannot_hide_a_committed_table(tmp: str) -> None:
+    """The silent half: the commit drops an option, the disk has it back."""
+    root = _getopt_repo(tmp, "g5a")
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+    sha = commit(root)
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+
+    if _gnu_userland_missing(root):
+        print("  SKIP gate 5: no GNU userland on this host to compare against")
+        return
+    disk = run_checker(root, "getopt-ambiguity-check.py", "yes")
+    rev = run_checker(root, "getopt-ambiguity-check.py", "yes", "--head", sha)
+    check("gate 5: the disk sees nothing wrong", disk.returncode, 0)
+    check("gate 5: ...and the commit is refused anyway", rev.returncode, 1)
+    check("gate 5: ...naming the option the commit dropped",
+          "version" in rev.stdout + rev.stderr, True)
+
+
+def case_gate5_an_uncommitted_edit_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: work in progress on the disk, nothing wrong in the commit."""
+    root = _getopt_repo(tmp, "g5b")
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+    sha = commit(root)
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+
+    if _gnu_userland_missing(root):
+        print("  SKIP gate 5: no GNU userland on this host to compare against")
+        return
+    disk = run_checker(root, "getopt-ambiguity-check.py", "yes")
+    rev = run_checker(root, "getopt-ambiguity-check.py", "yes", "--head", sha)
+    check("gate 5: the disk refuses the uncommitted edit", disk.returncode, 1)
+    check("gate 5: ...but the commit being pushed is clean", rev.returncode, 0)
+
+
+def case_gate5_a_bin_absent_from_the_disk_is_still_judged(tmp: str) -> None:
+    """Enumeration, not just reading, must come from the revision.
+
+    A checker that listed the disk and read the revision would find no bin at
+    all here and report a clean tree -- the same "found nothing, called it
+    clean" failure the floor in `main` exists for, one level down.
+    """
+    root = _getopt_repo(tmp, "g5c")
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+    sha = commit(root)
+    remove(root, "userspace/coreutils/src/bin/yes.rs")
+
+    if _gnu_userland_missing(root):
+        print("  SKIP gate 5: no GNU userland on this host to compare against")
+        return
+    disk = run_checker(root, "getopt-ambiguity-check.py", "yes")
+    rev = run_checker(root, "getopt-ambiguity-check.py", "yes", "--head", sha)
+    check("gate 5: a deleted bin leaves the disk with nothing to say",
+          disk.returncode, 0)
+    check("gate 5: ...but the revision still carries it", rev.returncode, 1)
+    check("gate 5: ...and it is counted as a table that was checked",
+          "1 table(s) checked" in rev.stdout, True)
+
+
+def case_gate5_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
+    """Exit 2, not 1: `run-checker.sh` reads 1 as a finding about a table."""
+    root = _getopt_repo(tmp, "g5d")
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+    commit(root)
+
+    proc = run_checker(root, "getopt-ambiguity-check.py", "--head", "nosuchrev")
+    check("gate 5: an unopenable revision exits 2", proc.returncode, 2)
+    check("gate 5: ...naming the revision it could not read",
+          "nosuchrev" in proc.stderr, True)
+
+
+# --------------------------------------------------------------------------
 # Gate 6 -- host-errmsg.py
 #
 # The defect it looks for: a diagnostic that interpolates an `io::Error` with
@@ -1412,6 +1538,10 @@ def _push_fixture(tmp: str, name: str,
 _G2_REFUSAL = "command name exists that nothing can run"
 _G3_REFUSAL = "is raced by its own tests"
 _G4_REFUSAL = "dies on a legal filename"
+# Gate 5's second line, not its first: the first is "REFUSING to push — a
+# long-option table disagrees with GNU's", and the em dash in it is the thing
+# the comment above rules out.
+_G5_REFUSAL = "does not match the one the real utility carries"
 # Gate 6's own refusal sentence, not its summary line: "prints the host's error
 # text" also occurs in the *checker's* FIX advice, which is printed by a
 # `--check` run that the hook then goes on to allow. Matching it would call a
@@ -1833,6 +1963,96 @@ def case_gate6_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
           "tool.rs" in blob, True)
 
 
+def _g5_push_fixture(tmp: str, name: str) -> str:
+    """A push fixture for gate 5, with nothing under `bin/` yet.
+
+    Seeded deliberately *outside* `userspace/coreutils/src/bin/`, which is the
+    gate's scope: at seed time the gate must find nothing to compare and stand
+    down, so the seed push cannot be refused by the gate under test. A fixture
+    whose setup is refused does not fail, it lies -- it pushes nothing, and the
+    seed commit then rides along inside the case's own push and widens it.
+    """
+    return _push_fixture(
+        tmp, name, checkers=("getopt-ambiguity-check.py",),
+        seed={"userspace/coreutils/src/notes.txt": "not a bin\n"},
+    )
+
+
+def case_gate5_the_hook_refuses_a_commit_the_worktree_no_longer_shows(
+        tmp: str) -> None:
+    """End to end: gate 5's own wiring, not another gate's.
+
+    Each gate is a separate block with its own guard, its own loop and its own
+    `--head "$sha"`. Dropping the flag from *this* invocation leaves every
+    other case in this file green, which is why the proof is per gate.
+    """
+    work = _g5_push_fixture(tmp, "g5push-hide")
+    write(work, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a table with an option dropped")
+    # The tidy-up that makes the disk lie.
+    write(work, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+
+    if _gnu_userland_missing(work):
+        print("  SKIP gate 5 end to end: no GNU userland on this host")
+        return
+    verdict, blob = _push(work, marker=_G5_REFUSAL)
+    check("gate 5 end to end: the push is refused", verdict, "refused")
+    check("gate 5 end to end: ...naming the option only the commit drops",
+          "version" in blob, True)
+
+
+def case_gate5_the_hook_allows_a_clean_commit_under_a_dirty_worktree(
+        tmp: str) -> None:
+    """End to end, the other direction -- and the one that checks it ran.
+
+    A gate that had skipped itself would allow this, and would have allowed the
+    case above too if that refusal came from elsewhere. The hook's own tally is
+    what separates "gate 5 passed" from "gate 5 was never asked", and this gate
+    has three ways to skip: no GNU userland, a scope that names no bin, and an
+    empty pushed-sha list.
+    """
+    work = _g5_push_fixture(tmp, "g5push-wip")
+    write(work, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a table that agrees with GNU")
+    write(work, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+
+    if _gnu_userland_missing(work):
+        print("  SKIP gate 5 end to end: no GNU userland on this host")
+        return
+    verdict, blob = _push(work, marker=_G5_REFUSAL)
+    check("gate 5 end to end: an uncommitted table edit does not block",
+          verdict, "allowed")
+    check("gate 5 end to end: ...and the gate actually ran",
+          "getopt-table" in _tally(blob)[0], True)
+
+
+def case_gate5_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` from `main`, for gate 5's loop.
+
+    Every case that pushes the branch it is standing on has `HEAD` and the sha
+    being pushed as the same commit, so `--head "$sha"` there is
+    indistinguishable from `git rev-parse HEAD`. It is per gate: gate 6's
+    off-branch case says nothing about gate 5's loop.
+    """
+    work = _g5_push_fixture(tmp, "g5push-elsewhere")
+    git(work, "checkout", "--quiet", "-b", "feature")
+    write(work, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a dropped option on a branch we leave")
+    git(work, "checkout", "--quiet", "main")
+
+    if _gnu_userland_missing(work):
+        print("  SKIP gate 5 end to end: no GNU userland on this host")
+        return
+    verdict, blob = _push(work, "feature", marker=_G5_REFUSAL)
+    check("gate 5 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    check("gate 5 end to end: ...naming the option on that other branch",
+          "version" in blob, True)
+
+
 def case_gate2_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
     """Exit 2, not 1.
 
@@ -2223,6 +2443,13 @@ CASES = (
     case_gate4_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate4_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate4_the_hook_judges_a_branch_it_is_not_standing_on,
+    case_gate5_a_tidied_worktree_cannot_hide_a_committed_table,
+    case_gate5_an_uncommitted_edit_does_not_block_a_clean_push,
+    case_gate5_a_bin_absent_from_the_disk_is_still_judged,
+    case_gate5_an_unopenable_revision_is_not_a_finding,
+    case_gate5_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate5_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate5_the_hook_judges_a_branch_it_is_not_standing_on,
     case_gate6_a_tidied_worktree_cannot_hide_a_committed_host_message,
     case_gate6_an_uncommitted_host_message_does_not_block_a_clean_push,
     case_gate6_the_baseline_is_read_from_the_same_tree,
@@ -2254,9 +2481,9 @@ CASES = (
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 61:
+    if len(CASES) < 68:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 61. The list is broken, not the code.")
+              f"least 68. The list is broken, not the code.")
         return 1
     # ...and each converted gate must be represented, through the real hook as
     # well as directly. A floor on the count alone would be met by any number of
@@ -2264,9 +2491,18 @@ def main() -> int:
     # gate 3 was converted at all -- so both are counted per gate. Raise these
     # as each remaining checker is converted; they are the thing that notices a
     # gate's cases being deleted along with the gate's own wiring.
+    #
+    # GATES 8 AND 9 ARE ABSENT FROM THIS TABLE BECAUSE THEY ARE ABSENT FROM THE
+    # SUITE. Both are wired with `--head "$sha"` and both are listed in
+    # `test-pre-push-gates.py`'s HEAD_GATES, so the *shape* of their wiring is
+    # guarded -- but nothing here has ever pushed a fixture past either one, so
+    # no evidence exists that the flag changes what they decide. A checker can
+    # accept `--head`, be called with it correctly, and ignore it. Do not add a
+    # floor for them here to make the table look complete; add the cases, and
+    # the floor with them.
     for gate, floor, e2e_floor in (("gate2", 10, 3), ("gate3", 13, 4),
-                                   ("gate4", 13, 3), ("gate6", 14, 3),
-                                   ("gate11", 11, 3)):
+                                   ("gate4", 13, 3), ("gate5", 7, 3),
+                                   ("gate6", 14, 3), ("gate11", 11, 3)):
         named = [c for c in CASES if c.__name__.startswith(f"case_{gate}_")]
         hooked = [c for c in named if "the_hook" in c.__name__]
         if len(named) < floor or len(hooked) < e2e_floor:

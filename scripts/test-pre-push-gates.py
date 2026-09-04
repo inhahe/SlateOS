@@ -241,6 +241,7 @@ HEAD_GATES = {
     "multicall-aliases.py": "gate 2, unreachable command names",
     "raced-globals.py": "gate 3, raced process-globals",
     "argv-utf8.py": "gate 4, argv read as String",
+    "getopt-ambiguity-check.py": "gate 5, long-option tables",
     "host-errmsg.py": "gate 6, host error text",
     "quote-names.py": "gate 8, file names in diagnostics",
     "check-requests-not-deleted.py": "gate 9, request deletion",
@@ -332,6 +333,40 @@ def test_the_path_scope_is_taken_from_the_push_not_from_head(text):
     # Not merely "does it mention pushed_shas": a helper that passed both would
     # still be answering about HEAD, since `rev-list A B` unions the two.
     check("...and not from whichever branch happens to be checked out",
+          re.search(r"\bHEAD\b", inner) is not None, False)
+
+
+def test_gate_5_derives_its_own_scope_from_the_push_too(text):
+    """`touches()` is not the only place a scope is computed.
+
+    Gate 5 is scoped by utility name rather than by path — each name costs a WSL
+    round trip, so it checks the bins the push rewrites and not all 24 — and it
+    therefore derives its own file list instead of going through `touches()`.
+    That put a second copy of the same defect in the file, and the second copy
+    outlived the first: `touches()` was converted to `$pushed_shas`, and this
+    helper went on asking `git rev-list HEAD` for another two days.
+
+    The consequence is worse here than a wrong answer, because an empty scope is
+    this gate's *skip* condition. Pushing `feature` from `main` left the list
+    empty, which read as "this push rewrites no table" — so the gate stood down
+    and said so in the tally, and the table went out unjudged by a gate that was
+    correctly wired to `--head` and pointed at exactly the right commit. Reading
+    the right revision does not help when the list of things to read in it came
+    from somewhere else.
+    """
+    code = _joined(code_only(text))
+    body = re.search(r"^getopt_scope_for\(\)\s*\{(.*?)^\}", code,
+                     re.MULTILINE | re.DOTALL)
+    check("gate 5 still derives its scope in one named helper",
+          body is not None, True)
+    if body is None:
+        return
+    inner = body.group(1)
+    # It is handed the sha, and every git command in it must be asking about
+    # that sha. `"$1"` is the only spelling that reaches the caller's loop.
+    check("gate 5's scope is asked about the sha being pushed",
+          '"$1"' in inner, True)
+    check("...and not about whichever branch happens to be checked out",
           re.search(r"\bHEAD\b", inner) is not None, False)
 
 

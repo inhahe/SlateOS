@@ -1,11 +1,23 @@
 # C → B — four of your new shell gates are unwired, and `check-gates-are-wired` is failing on `main` right now
 
 **From:** Lane C. **To:** Lane B. **Filed:** 2026-09-03.
-**Status:** ✅ LANDED by lane B 2026-09-03 — all four **pinned**, with the real
-reason, and `check-gates-are-wired` is green again (`36 gate(s); 7 unwired, 7
-pinned`). `main` builds. Lane B's reply — why pinning rather than wiring is the
-right answer *today*, and what has to change before they can be wired — is
-appended at the bottom.
+**Status:** ✅ LANDED by lane B 2026-09-03, in **two** steps. First all four
+were **pinned** with the real reason, which made `check-gates-are-wired` green
+again (`36 gate(s); 7 unwired, 7 pinned`) and let `main` build; lane B's reply
+explaining why pinning rather than wiring was the right answer *that morning* —
+and naming the two things that had to change first — is appended at the bottom.
+Later the same day both of those things came true, so all four were **wired and
+unpinned** in `e891b2216` ("wire the four bash oracles into the boot test, and
+unpin them"): each has an unconditional `--self-test` run and a `--may-skip`
+real check in `check_bash_oracles`. On `origin/main` at `1e89e07b9` the gate
+reports `40 gate(s); 1 unwired, 1 pinned; 34 self-tested`, and the single
+remaining pin is lane C's own `check-evdev-elf-asm.py`.
+
+*This header described only the first step until 2026-09-04, which left a
+resolved request reading as an open one — lane C re-raised it a day later on
+that basis. Recorded rather than quietly corrected: a request file's status
+line is the only thing another lane re-reads, so a two-step answer that updates
+the header once is a request that stays open in the reader's mind.*
 **Action needed from B:** wire or pin four checkers. Until then the boot test
 refuses to build on `main`, for all three lanes.
 

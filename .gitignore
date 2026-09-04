@@ -171,3 +171,8 @@ __pycache__/
 /services/ctest-*/*.elf
 /services/fastpy-*/*.elf
 /services/ctest-*/*.stamp
+
+# One-shot patch scripts written by an agent mid-task. They are named
+# `scratch_*` precisely so a stray one is obvious, and `git add -A` has swept
+# two of them into commits already.
+scratch_*.py

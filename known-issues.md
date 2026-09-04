@@ -113998,3 +113998,36 @@ antivirus exclusion question in `open-questions.md`). An exclusion for the
 worktree would likely make the `rmdir` stop failing in the first place — but the
 retry is correct regardless, since the fix must not depend on an operator having
 configured a scanner.
+
+### Watched it happen, 2026-09-04 03:27 — it is deterministic, not intermittent
+
+The entry above was written from fourteen directories found after the fact. The
+boot test running at the time then reached `test-boot-test.py` in its self-test
+sweep, which gave a live observation instead of a reconstruction:
+
+| | before | after |
+|---|---|---|
+| leaked fixture directories | 14 | **21** |
+| all empty | yes | yes, 21 of 21 |
+| `build/tmp` (the real, unrelated one) | 1 entry | 1 entry, untouched |
+
+**Exactly seven more, all empty, in one run.** Three suite runs have now each
+leaked exactly seven, so this is not an intermittent race that occasionally
+loses — every fixture teardown in the file fails its final `os.rmdir`, every
+time, and has been doing so for as long as anyone has looked. The suite reported
+`PASSED` while doing it, which is the whole complaint.
+
+That also sharpens the fix. A failure rate of 100% is not "the handle is
+occasionally still open"; it is "the handle is *always* still open at the moment
+we ask". So the bounded retry in step 2 must actually sleep between attempts
+rather than spin — a zero-delay retry loop would fail all its attempts just as
+reliably as the single try does now — and while the fix is being developed it
+should print how many attempts it actually took. If that number turns out to be
+larger than a handful, the assumption that this is a milliseconds-long window is
+wrong, and the diagnosis needs revisiting before the retry is called a fix.
+
+The three creation sites sit in helpers — `_run_clippy_gate` (`:506`),
+`_run_prune_hook` (`:694`) and `_run_python_suites` (`:829`) — each invoked once
+per test case, so the seven leaks are seven cases spread across the three, and
+repairing the three `mkdtemp`/`rmtree` pairs covers all of them. There is no
+fourth site: these are the only `mkdtemp(dir=…)` calls anywhere in `scripts/`.

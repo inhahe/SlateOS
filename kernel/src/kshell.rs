@@ -14751,10 +14751,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // turns on is between an empty operand and a missing one.
         let out = piped("sed", b"a\n");
         assert_eq!(last_exit(), 1, "sed with no script is still refused");
+        // `Usage: cmd | sed`, not `Usage: sed`: the banner leads with the pipe
+        // because every form sed accepts here reads from one.  The first
+        // spelling of this assertion was written from what the usage *ought* to
+        // say rather than from what it does say, so it could never match -- and
+        // because this rung had never executed, nothing said so until now.  The
+        // point of the check is only that the failure produced the usage rather
+        // than an empty-script diagnostic, so anchor on the longest prefix that
+        // is actually there.
         assert_output_contains(
             "with the usage, not a diagnostic about an empty script",
             &out,
-            b"Usage: sed",
+            b"Usage: cmd | sed",
         );
     }
 

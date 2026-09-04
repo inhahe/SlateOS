@@ -9,10 +9,14 @@
 
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::event::{Event, Key, KeyEvent};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::collections::VecDeque;
 
@@ -132,12 +136,12 @@ impl SampleRate {
 
     /// Bytes per second for mono 16-bit PCM at this rate.
     pub fn bytes_per_second_mono(self) -> u32 {
-        self.hz() * 2 // 16 bits = 2 bytes per sample
+        self.hz().saturating_mul(2) // 16 bits = 2 bytes per sample
     }
 
     /// Bytes per second for stereo 16-bit PCM at this rate.
     pub fn bytes_per_second_stereo(self) -> u32 {
-        self.hz() * 4 // 2 channels * 2 bytes per sample
+        self.hz().saturating_mul(4) // 2 channels * 2 bytes per sample
     }
 }
 
@@ -189,7 +193,10 @@ impl QualityPreset {
     /// Bytes per second at this preset's settings.
     pub fn bytes_per_second(self) -> u32 {
         let sample_bytes: u32 = 2; // 16 bits
-        self.sample_rate().hz() * u32::from(self.channels()) * sample_bytes
+        self.sample_rate()
+            .hz()
+            .saturating_mul(u32::from(self.channels()))
+            .saturating_mul(sample_bytes)
     }
 }
 
@@ -288,7 +295,7 @@ impl WavFile {
         if ch == 0 {
             return 0;
         }
-        self.samples.len() / ch
+        self.samples.len().checked_div(ch).unwrap_or(0)
     }
 
     /// Duration in seconds.
@@ -301,17 +308,18 @@ impl WavFile {
 
     /// Block align: channels * (bits_per_sample / 8).
     pub fn block_align(&self) -> u16 {
-        self.channels * (self.bits_per_sample / 8)
+        self.channels.saturating_mul(self.bits_per_sample / 8)
     }
 
     /// Byte rate: sample_rate * block_align.
     pub fn byte_rate(&self) -> u32 {
-        self.sample_rate * u32::from(self.block_align())
+        self.sample_rate
+            .saturating_mul(u32::from(self.block_align()))
     }
 
     /// Size of the raw PCM data in bytes.
     pub fn data_size(&self) -> u32 {
-        (self.samples.len() * 2) as u32
+        u32::try_from(self.samples.len().saturating_mul(2)).unwrap_or(u32::MAX)
     }
 
     /// Generate the complete WAV file as a byte vector.
@@ -323,9 +331,9 @@ impl WavFile {
     pub fn to_bytes(&self) -> Vec<u8> {
         let data_size = self.data_size();
         // Total RIFF chunk size = 4 (WAVE) + 24 (fmt) + 8 (data header) + data_size
-        let riff_size = 4 + 24 + 8 + data_size;
+        let riff_size = data_size.saturating_add(36);
 
-        let mut buf = Vec::with_capacity(44 + data_size as usize);
+        let mut buf = Vec::with_capacity((data_size as usize).saturating_add(44));
 
         // RIFF header
         buf.extend_from_slice(b"RIFF");
@@ -354,41 +362,60 @@ impl WavFile {
 
     /// Parse a WAV file from bytes. Returns `None` on invalid data.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 44 {
-            return None;
-        }
+        // Every read below is `get`, not `[i]`. They were all indexed, and all
+        // safe, on the strength of a single `data.len() < 44` twenty lines
+        // above the last of them — a guarantee that stops holding the moment
+        // someone moves that check or adds a field past byte 43. This parses a
+        // file the user was handed, so the failure mode of getting it wrong is
+        // a panic on a malformed download.
+        let at2 =
+            |i: usize| -> Option<[u8; 2]> { Some([*data.get(i)?, *data.get(i.checked_add(1)?)?]) };
+        let at4 = |i: usize| -> Option<[u8; 4]> {
+            Some([
+                *data.get(i)?,
+                *data.get(i.checked_add(1)?)?,
+                *data.get(i.checked_add(2)?)?,
+                *data.get(i.checked_add(3)?)?,
+            ])
+        };
+
         // Validate RIFF header
-        if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        if data.get(0..4)? != b"RIFF" || data.get(8..12)? != b"WAVE" {
             return None;
         }
         // Validate fmt sub-chunk
-        if &data[12..16] != b"fmt " {
+        if data.get(12..16)? != b"fmt " {
             return None;
         }
-        let format_tag = u16::from_le_bytes([data[20], data[21]]);
+        let format_tag = u16::from_le_bytes(at2(20)?);
         if format_tag != 1 {
             return None; // Only PCM supported
         }
-        let channels = u16::from_le_bytes([data[22], data[23]]);
-        let sample_rate = u32::from_le_bytes([data[24], data[25], data[26], data[27]]);
-        let bits_per_sample = u16::from_le_bytes([data[34], data[35]]);
+        let channels = u16::from_le_bytes(at2(22)?);
+        let sample_rate = u32::from_le_bytes(at4(24)?);
+        let bits_per_sample = u16::from_le_bytes(at2(34)?);
 
         // Find data sub-chunk
-        if &data[36..40] != b"data" {
+        if data.get(36..40)? != b"data" {
             return None;
         }
-        let data_size = u32::from_le_bytes([data[40], data[41], data[42], data[43]]) as usize;
+        let data_size = u32::from_le_bytes(at4(40)?) as usize;
 
-        if data.len() < 44 + data_size {
-            return None;
-        }
+        // `checked_add`: `data_size` is four bytes out of the file, and on a
+        // 32-bit target `44 + data_size` wraps to a *small* number that sails
+        // through the length check below — which is the check that exists to
+        // reject it.
+        let pcm_end = 44usize.checked_add(data_size)?;
+        let pcm_data = data.get(44..pcm_end)?;
 
-        let pcm_data = &data[44..44 + data_size];
         let mut samples = Vec::with_capacity(data_size / 2);
-        let mut i = 0;
-        while i + 1 < pcm_data.len() {
-            samples.push(i16::from_le_bytes([pcm_data[i], pcm_data[i + 1]]));
-            i += 2;
+        for pair in pcm_data.chunks_exact(2) {
+            // `chunks_exact` guarantees two bytes; taking them through `get`
+            // says so in the expression rather than in the iterator's name.
+            samples.push(i16::from_le_bytes([
+                *pair.first()?,
+                *pair.get(1).copied().as_ref().unwrap_or(&0),
+            ]));
         }
 
         Some(Self {
@@ -444,7 +471,10 @@ impl WaveformDisplay {
         if samples.is_empty() {
             return 0.0;
         }
-        let peak = samples.iter().map(|&s| (s as f32).abs()).fold(0.0f32, f32::max);
+        let peak = samples
+            .iter()
+            .map(|&s| (s as f32).abs())
+            .fold(0.0f32, f32::max);
         (peak / 32768.0).clamp(0.0, 1.0)
     }
 
@@ -493,7 +523,7 @@ impl WaveformDisplay {
         if col_count > 0 {
             let bar_width = self.width / self.max_columns as f32;
             let max_bar_height = self.height / 2.0 - 2.0;
-            let start_offset = (self.max_columns - col_count) as f32 * bar_width;
+            let start_offset = self.max_columns.saturating_sub(col_count) as f32 * bar_width;
 
             for (i, &amp) in self.amplitudes.iter().enumerate() {
                 let bar_h = amp * max_bar_height;
@@ -583,7 +613,7 @@ impl VuMeter {
             self.peak_level = amp;
             self.peak_hold_ticks = self.peak_hold_duration;
         } else if self.peak_hold_ticks > 0 {
-            self.peak_hold_ticks -= 1;
+            self.peak_hold_ticks = self.peak_hold_ticks.saturating_sub(1);
         } else {
             self.peak_level *= self.decay_rate;
         }
@@ -806,7 +836,7 @@ impl MarkerList {
     /// Add a marker at the given frame position.
     pub fn add(&mut self, frame_position: u64, label: String) -> u32 {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         let color_index = id as usize % 4;
         let color = match color_index {
             0 => colors::BLUE,
@@ -943,7 +973,7 @@ impl TrimRegion {
     /// Set the end point (clamped to valid range).
     pub fn set_end(&mut self, frame: u64) {
         let clamped = frame.min(self.total_frames);
-        self.end_frame = clamped.max(self.start_frame + 1);
+        self.end_frame = clamped.max(self.start_frame.saturating_add(1));
     }
 
     /// Number of frames in the trimmed region.
@@ -970,12 +1000,17 @@ impl TrimRegion {
         if ch == 0 {
             return Vec::new();
         }
-        let start_idx = self.start_frame as usize * ch;
-        let end_idx = (self.end_frame as usize * ch).min(samples.len());
+        let start_idx = (self.start_frame as usize).saturating_mul(ch);
+        let end_idx = (self.end_frame as usize)
+            .saturating_mul(ch)
+            .min(samples.len());
         if start_idx >= samples.len() || start_idx >= end_idx {
             return Vec::new();
         }
-        samples[start_idx..end_idx].to_vec()
+        samples
+            .get(start_idx..end_idx)
+            .map(<[i16]>::to_vec)
+            .unwrap_or_default()
     }
 
     /// Render the trim handles on a waveform region.
@@ -1101,7 +1136,7 @@ impl NoiseGate {
                 any_passed = true;
             } else if self.release_counter > 0 {
                 // In release period: keep gate open
-                self.release_counter -= 1;
+                self.release_counter = self.release_counter.saturating_sub(1);
                 any_passed = true;
             } else {
                 // Gate closed: zero the sample
@@ -1256,7 +1291,9 @@ impl PlaybackController {
     /// Seek by a time offset in seconds (positive = forward, negative = backward).
     pub fn seek_relative(&mut self, delta_secs: f64) {
         let delta_frames = (delta_secs * self.sample_rate as f64) as i64;
-        let new_pos = (self.position_frames as i64 + delta_frames).max(0) as u64;
+        let new_pos = (self.position_frames as i64)
+            .saturating_add(delta_frames)
+            .max(0) as u64;
         self.position_frames = new_pos.min(self.total_frames);
     }
 
@@ -1288,7 +1325,10 @@ impl PlaybackController {
         if self.sample_rate == 0 {
             return "00:00".into();
         }
-        let secs = (self.position_frames / self.sample_rate as u64) as u32;
+        let secs = self
+            .position_frames
+            .checked_div(u64::from(self.sample_rate))
+            .unwrap_or(0) as u32;
         let minutes = secs / 60;
         let seconds = secs % 60;
         format!("{minutes:02}:{seconds:02}")
@@ -1299,7 +1339,10 @@ impl PlaybackController {
         if self.sample_rate == 0 {
             return "00:00".into();
         }
-        let secs = (self.total_frames / self.sample_rate as u64) as u32;
+        let secs = self
+            .total_frames
+            .checked_div(u64::from(self.sample_rate))
+            .unwrap_or(0) as u32;
         let minutes = secs / 60;
         let seconds = secs % 60;
         format!("{minutes:02}:{seconds:02}")
@@ -1397,7 +1440,7 @@ impl AutoSave {
     /// Create with the given interval in seconds.
     pub fn new(interval_secs: u32) -> Self {
         Self {
-            interval_ms: interval_secs as u64 * 1000,
+            interval_ms: (interval_secs as u64).saturating_mul(1000),
             elapsed_since_save_ms: 0,
             enabled: interval_secs > 0,
             save_count: 0,
@@ -1411,8 +1454,9 @@ impl AutoSave {
         }
         self.elapsed_since_save_ms = self.elapsed_since_save_ms.saturating_add(delta_ms);
         if self.elapsed_since_save_ms >= self.interval_ms {
-            self.elapsed_since_save_ms -= self.interval_ms;
-            self.save_count += 1;
+            self.elapsed_since_save_ms =
+                self.elapsed_since_save_ms.saturating_sub(self.interval_ms);
+            self.save_count = self.save_count.saturating_add(1);
             return true;
         }
         false
@@ -1425,7 +1469,7 @@ impl AutoSave {
 
     /// Set the interval in seconds.
     pub fn set_interval_secs(&mut self, secs: u32) {
-        self.interval_ms = secs as u64 * 1000;
+        self.interval_ms = (secs as u64).saturating_mul(1000);
         self.enabled = secs > 0;
     }
 }
@@ -1490,7 +1534,7 @@ impl RecordingHistory {
     /// Add a recording entry.
     pub fn add(&mut self, entry: RecordingEntry) -> u32 {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         let mut e = entry;
         e.id = id;
         self.entries.push(e);
@@ -1504,13 +1548,14 @@ impl RecordingHistory {
         if self.entries.len() < before {
             // Fix selected index
             if let Some(sel) = self.selected
-                && sel >= self.entries.len() {
-                    self.selected = if self.entries.is_empty() {
-                        None
-                    } else {
-                        Some(self.entries.len() - 1)
-                    };
-                }
+                && sel >= self.entries.len()
+            {
+                self.selected = if self.entries.is_empty() {
+                    None
+                } else {
+                    self.entries.len().checked_sub(1)
+                };
+            }
             true
         } else {
             false
@@ -1548,7 +1593,7 @@ impl RecordingHistory {
             return;
         }
         self.selected = Some(match self.selected {
-            Some(i) if i + 1 < self.entries.len() => i + 1,
+            Some(i) if i.saturating_add(1) < self.entries.len() => i.saturating_add(1),
             _ => 0,
         });
     }
@@ -1560,7 +1605,7 @@ impl RecordingHistory {
         }
         self.selected = Some(match self.selected {
             Some(0) | None => self.entries.len().saturating_sub(1),
-            Some(i) => i - 1,
+            Some(i) => i.saturating_sub(1),
         });
     }
 
@@ -1760,8 +1805,7 @@ impl SoundRecorderApp {
     pub fn set_preset(&mut self, preset: QualityPreset) {
         self.preset = preset;
         self.sample_rate = preset.sample_rate();
-        self.timer
-            .set_bytes_per_second(preset.bytes_per_second());
+        self.timer.set_bytes_per_second(preset.bytes_per_second());
     }
 
     /// Select an input device by index.
@@ -1861,7 +1905,67 @@ impl SoundRecorderApp {
     }
 
     /// Render the full application UI.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    /// Route one event.
+    ///
+    /// **This app had no event handling of any kind until 2026-09-03** — the
+    /// same gap `apps/paint` had, and for the same reason: `main` constructed
+    /// the app and returned. `tick`, `transition_to`, `process_samples` and
+    /// `check_auto_save` were all written and tested against arguments handed
+    /// in by the tests themselves.
+    ///
+    /// Returns whether anything changed, which `App::on_event` turns into a
+    /// repaint.
+    pub fn handle_event(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Resize { width, height } => {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                true
+            }
+            Event::Tick { elapsed_ms } => {
+                // `elapsed_ms`, never the interval asked for: the interval is a
+                // floor and a busy frame delivers one long tick. A recorder
+                // that counted ticks rather than milliseconds would report a
+                // duration that drifts from the audio it actually captured,
+                // which is the one number a recording has to get right.
+                self.tick(*elapsed_ms);
+                let saved = self.check_auto_save(*elapsed_ms);
+                self.state == RecordingState::Recording || saved
+            }
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            _ => false,
+        }
+    }
+
+    /// Keyboard control.
+    ///
+    /// Space is the transport, as it is in every recorder: it starts, pauses
+    /// and resumes. Stop is separate because it is the destructive one — it
+    /// ends the take — and a key that both pauses and ends depending on state
+    /// is how a take gets lost.
+    fn handle_key(&mut self, key: &KeyEvent) -> bool {
+        match key.key {
+            Key::Space => match self.state {
+                RecordingState::Idle | RecordingState::Stopped => {
+                    self.transition_to(RecordingState::Recording)
+                }
+                RecordingState::Recording => self.transition_to(RecordingState::Paused),
+                RecordingState::Paused => self.transition_to(RecordingState::Recording),
+            },
+            Key::S if !key.modifiers.ctrl => self.transition_to(RecordingState::Stopped),
+            Key::M => self
+                .add_marker(format!("Marker {}", self.markers.len().saturating_add(1)))
+                .is_some(),
+            _ => false,
+        }
+    }
+
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Window background
@@ -1991,28 +2095,12 @@ impl SoundRecorderApp {
             RecordingState::Recording => {
                 self.render_button(cmds, x, y, 80.0, 32.0, "Pause", colors::YELLOW);
                 self.render_button(cmds, x + 90.0, y, 80.0, 32.0, "Stop", colors::PEACH);
-                self.render_button(
-                    cmds,
-                    x + 180.0,
-                    y,
-                    100.0,
-                    32.0,
-                    "Marker",
-                    colors::BLUE,
-                );
+                self.render_button(cmds, x + 180.0, y, 100.0, 32.0, "Marker", colors::BLUE);
             }
             RecordingState::Paused => {
                 self.render_button(cmds, x, y, 80.0, 32.0, "Resume", colors::GREEN);
                 self.render_button(cmds, x + 90.0, y, 80.0, 32.0, "Stop", colors::PEACH);
-                self.render_button(
-                    cmds,
-                    x + 180.0,
-                    y,
-                    100.0,
-                    32.0,
-                    "Marker",
-                    colors::BLUE,
-                );
+                self.render_button(cmds, x + 180.0, y, 100.0, 32.0, "Marker", colors::BLUE);
             }
             RecordingState::Stopped => {
                 self.render_button(cmds, x, y, 80.0, 32.0, "New", colors::GREEN);
@@ -2064,11 +2152,53 @@ impl Default for SoundRecorderApp {
 // Entry point
 // ============================================================================
 
-fn main() {
-    // Placeholder: the actual event loop will be provided by the OS
-    // windowing system. For now this just validates that the application
-    // compiles and the types are wired together correctly.
-    let _app = SoundRecorderApp::new();
+impl App for SoundRecorderApp {
+    fn title(&self) -> String {
+        "Sound Recorder".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (self.window_width as u32, self.window_height as u32)
+    }
+
+    /// A clock only while recording.
+    ///
+    /// Gated on the state rather than returned unconditionally, because `tick`
+    /// and `check_auto_save` both return immediately unless recording — so an
+    /// unconditional interval would wake the machine ten times a second to do
+    /// nothing for as long as the window is open. The recipe in
+    /// `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` asks for exactly this.
+    ///
+    /// 100 ms: the elapsed readout shows tenths, and the auto-save deadline is
+    /// measured in minutes. Anything faster would be redrawing a digit that has
+    /// not changed.
+    fn tick_interval(&self) -> Option<Duration> {
+        (self.state == RecordingState::Recording).then(|| Duration::from_millis(100))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        if self.handle_event(event) {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.window_width = width;
+        self.window_height = height;
+        let mut tree = RenderTree::new();
+        tree.commands = self.render_commands();
+        tree
+    }
+}
+
+fn main() -> ExitCode {
+    app::launch("soundrecorder", &mut SoundRecorderApp::new())
 }
 
 // ============================================================================
@@ -2077,6 +2207,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that overflows or indexes out of range should fail loudly and
+    // point at the line that did it — that is the diagnosis. The defensive
+    // lints exist to keep panics out of code that runs on a user's data.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     // -- RecordingState tests ------------------------------------------------
@@ -2867,9 +3009,14 @@ mod tests {
     #[test]
     fn test_entry_format_size_bytes() {
         let e = RecordingEntry {
-            id: 0, filename: "x".into(), path: "x".into(),
-            duration_secs: 0.0, size_bytes: 512,
-            sample_rate: 48000, channels: 1, created_timestamp: 0,
+            id: 0,
+            filename: "x".into(),
+            path: "x".into(),
+            duration_secs: 0.0,
+            size_bytes: 512,
+            sample_rate: 48000,
+            channels: 1,
+            created_timestamp: 0,
         };
         assert_eq!(e.format_size(), "512 B");
     }
@@ -2877,9 +3024,14 @@ mod tests {
     #[test]
     fn test_entry_format_size_kb() {
         let e = RecordingEntry {
-            id: 0, filename: "x".into(), path: "x".into(),
-            duration_secs: 0.0, size_bytes: 2048,
-            sample_rate: 48000, channels: 1, created_timestamp: 0,
+            id: 0,
+            filename: "x".into(),
+            path: "x".into(),
+            duration_secs: 0.0,
+            size_bytes: 2048,
+            sample_rate: 48000,
+            channels: 1,
+            created_timestamp: 0,
         };
         assert_eq!(e.format_size(), "2.0 KiB");
     }
@@ -2887,9 +3039,14 @@ mod tests {
     #[test]
     fn test_entry_format_size_mb() {
         let e = RecordingEntry {
-            id: 0, filename: "x".into(), path: "x".into(),
-            duration_secs: 0.0, size_bytes: 5_242_880,
-            sample_rate: 48000, channels: 1, created_timestamp: 0,
+            id: 0,
+            filename: "x".into(),
+            path: "x".into(),
+            duration_secs: 0.0,
+            size_bytes: 5_242_880,
+            sample_rate: 48000,
+            channels: 1,
+            created_timestamp: 0,
         };
         assert_eq!(e.format_size(), "5.0 MiB");
     }
@@ -2908,9 +3065,14 @@ mod tests {
     fn test_history_add_and_get() {
         let mut h = RecordingHistory::new();
         let entry = RecordingEntry {
-            id: 0, filename: "rec1.wav".into(), path: "/rec1.wav".into(),
-            duration_secs: 10.0, size_bytes: 1000,
-            sample_rate: 48000, channels: 2, created_timestamp: 0,
+            id: 0,
+            filename: "rec1.wav".into(),
+            path: "/rec1.wav".into(),
+            duration_secs: 10.0,
+            size_bytes: 1000,
+            sample_rate: 48000,
+            channels: 2,
+            created_timestamp: 0,
         };
         let id = h.add(entry);
         assert_eq!(h.len(), 1);
@@ -2921,9 +3083,14 @@ mod tests {
     fn test_history_remove() {
         let mut h = RecordingHistory::new();
         let entry = RecordingEntry {
-            id: 0, filename: "x.wav".into(), path: "/x.wav".into(),
-            duration_secs: 1.0, size_bytes: 100,
-            sample_rate: 48000, channels: 1, created_timestamp: 0,
+            id: 0,
+            filename: "x.wav".into(),
+            path: "/x.wav".into(),
+            duration_secs: 1.0,
+            size_bytes: 100,
+            sample_rate: 48000,
+            channels: 1,
+            created_timestamp: 0,
         };
         let id = h.add(entry);
         assert!(h.remove(id));
@@ -2935,9 +3102,14 @@ mod tests {
         let mut h = RecordingHistory::new();
         for i in 0..3 {
             h.add(RecordingEntry {
-                id: 0, filename: format!("rec{i}.wav"), path: format!("/rec{i}.wav"),
-                duration_secs: 1.0, size_bytes: 100,
-                sample_rate: 48000, channels: 1, created_timestamp: 0,
+                id: 0,
+                filename: format!("rec{i}.wav"),
+                path: format!("/rec{i}.wav"),
+                duration_secs: 1.0,
+                size_bytes: 100,
+                sample_rate: 48000,
+                channels: 1,
+                created_timestamp: 0,
             });
         }
         h.select_next(); // -> 0
@@ -2952,9 +3124,14 @@ mod tests {
         let mut h = RecordingHistory::new();
         for i in 0..3 {
             h.add(RecordingEntry {
-                id: 0, filename: format!("rec{i}.wav"), path: format!("/rec{i}.wav"),
-                duration_secs: 1.0, size_bytes: 100,
-                sample_rate: 48000, channels: 1, created_timestamp: 0,
+                id: 0,
+                filename: format!("rec{i}.wav"),
+                path: format!("/rec{i}.wav"),
+                duration_secs: 1.0,
+                size_bytes: 100,
+                sample_rate: 48000,
+                channels: 1,
+                created_timestamp: 0,
             });
         }
         h.select_prev(); // None -> last (2)
@@ -3086,7 +3263,7 @@ mod tests {
     #[test]
     fn test_app_render_produces_commands() {
         let app = SoundRecorderApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3096,7 +3273,7 @@ mod tests {
         app.transition_to(RecordingState::Recording);
         app.process_samples(&[1000; 100]);
         app.transition_to(RecordingState::Stopped);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Should have more commands due to playback bar + trim handles
         assert!(cmds.len() > 10);
     }
@@ -3122,5 +3299,169 @@ mod tests {
         let mut app = SoundRecorderApp::new();
         app.auto_save.set_interval_secs(1);
         assert!(!app.check_auto_save(5000));
+    }
+
+    // -- Events, and the parser they reach -----------------------------------
+
+    fn key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// Space is the transport: start, pause, resume.
+    ///
+    /// This app had no event handling at all until 2026-09-03, so every one of
+    /// its transitions was exercised by tests calling `transition_to` directly
+    /// — which proves the state machine and says nothing about whether a
+    /// keystroke can reach it.
+    #[test]
+    fn space_starts_pauses_and_resumes() {
+        let mut app = SoundRecorderApp::new();
+        assert_eq!(app.state, RecordingState::Idle);
+        assert!(app.handle_event(&key(Key::Space)));
+        assert_eq!(app.state, RecordingState::Recording);
+        assert!(app.handle_event(&key(Key::Space)));
+        assert_eq!(app.state, RecordingState::Paused);
+        assert!(app.handle_event(&key(Key::Space)));
+        assert_eq!(app.state, RecordingState::Recording);
+    }
+
+    /// Stop is its own key, because it is the destructive one.
+    ///
+    /// A single key that pauses or ends depending on state is how a take gets
+    /// lost: the user means "hold on a moment" and the app hears "finish".
+    #[test]
+    fn stop_is_a_separate_key_from_pause() {
+        let mut app = SoundRecorderApp::new();
+        app.handle_event(&key(Key::Space));
+        assert_eq!(app.state, RecordingState::Recording);
+        assert!(app.handle_event(&key(Key::S)));
+        assert_eq!(app.state, RecordingState::Stopped);
+    }
+
+    /// The clock is asked for only while recording.
+    ///
+    /// Both halves matter. `None` while recording ships a recorder whose
+    /// elapsed time never advances and whose auto-save never fires, with its
+    /// tests still green. `Some` while idle wakes the machine ten times a
+    /// second to call a `tick` that returns immediately.
+    #[test]
+    fn the_recorder_asks_for_a_clock_only_while_recording() {
+        let mut app = SoundRecorderApp::new();
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "an idle recorder must let the desktop park"
+        );
+        app.handle_event(&key(Key::Space));
+        assert_eq!(app.tick_interval(), Some(Duration::from_millis(100)));
+        app.handle_event(&key(Key::S));
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "a stopped recorder must park too"
+        );
+    }
+
+    /// Elapsed time follows the milliseconds delivered, not the tick count.
+    ///
+    /// The interval is a floor: a busy frame delivers one long tick where a
+    /// quiet one delivers two short ones. A recorder that counted ticks would
+    /// report a duration that drifts from the audio it captured, which is the
+    /// one number a recording has to get right.
+    #[test]
+    fn elapsed_time_follows_milliseconds_and_not_tick_count() {
+        let mut app = SoundRecorderApp::new();
+        app.handle_event(&key(Key::Space));
+
+        for _ in 0..3 {
+            app.handle_event(&Event::Tick { elapsed_ms: 100 });
+        }
+        let after_three_short = app.timer.elapsed_secs();
+
+        let mut other = SoundRecorderApp::new();
+        other.handle_event(&key(Key::Space));
+        other.handle_event(&Event::Tick { elapsed_ms: 300 });
+
+        assert_eq!(
+            after_three_short,
+            other.timer.elapsed_secs(),
+            "three 100ms ticks and one 300ms tick must agree"
+        );
+    }
+
+    /// A paused recorder does not accumulate time.
+    #[test]
+    fn a_paused_recorder_does_not_count_time() {
+        let mut app = SoundRecorderApp::new();
+        app.handle_event(&key(Key::Space));
+        app.handle_event(&Event::Tick { elapsed_ms: 500 });
+        let while_recording = app.timer.elapsed_secs();
+        app.handle_event(&key(Key::Space)); // pause
+        app.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert_eq!(
+            app.timer.elapsed_secs(),
+            while_recording,
+            "a paused recorder counted time"
+        );
+    }
+
+    /// No prefix of a WAV header panics the parser.
+    ///
+    /// Every read in `WavFile::from_bytes` was a bare `data[i]`, safe on the
+    /// strength of a single `data.len() < 44` twenty lines above the last of
+    /// them. They are all `get` now, and this is the sweep that says so: a
+    /// missed bound shows up only at the length that reaches it, so sampling
+    /// would not find one.
+    #[test]
+    fn no_prefix_of_a_wav_header_panics_the_parser() {
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&100u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&44_100u32.to_le_bytes());
+        wav.extend_from_slice(&88_200u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&8u32.to_le_bytes());
+        wav.extend_from_slice(&[0u8; 8]);
+
+        for len in 0..=wav.len() {
+            let _ = WavFile::from_bytes(wav.get(..len).unwrap_or(&[]));
+        }
+        // The whole thing still parses, or the fixture is not a WAV and the
+        // sweep above proved nothing.
+        assert!(
+            WavFile::from_bytes(&wav).is_some(),
+            "the fixture is not a valid WAV"
+        );
+    }
+
+    /// A WAV claiming more data than it carries is refused, not sliced.
+    #[test]
+    fn a_wav_that_lies_about_its_length_is_refused() {
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&100u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&44_100u32.to_le_bytes());
+        wav.extend_from_slice(&88_200u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&u32::MAX.to_le_bytes()); // claims 4 GB
+        wav.extend_from_slice(&[0u8; 8]);
+        assert!(WavFile::from_bytes(&wav).is_none());
     }
 }

@@ -3237,6 +3237,87 @@ check_gates_are_wired() {
 
 check_gates_are_wired
 
+# The third arm of the same family, one level in.  The two above ask whether a
+# gate *can* refuse and whether anything *asks* it to; this asks whether the
+# thing that answers the harder question -- is each individual guard inside a
+# gate load-bearing, or decoration? -- is still able to answer it at all.
+#
+# That question is not academic.  Twice now the answer has been "decoration":
+# check-libc-shape.py pinned MIN_MEMBERS/MIN_SYMBOLS that main() never read,
+# and check-doc-links.py grew a five-part coverage floor whose fixtures were
+# derived from the constants under test, so gutting three of them shrank the
+# fixtures to match and all 74 cases stayed green.  Nothing but a mutation
+# sweep finds that shape: a green suite is the symptom, not the diagnosis.
+#
+# The sweep itself -- scripts/mutate-gate.py -- is NOT wired here, and that is
+# a measured decision rather than an oversight.  On 2026-09-03, on a host busy
+# with a boot test, sweeping the three tables took 9m38s against 24s for this
+# gate, because the sweep is one subprocess per needle and each runs a gate's
+# whole suite.  That figure grows with every row anyone adds, so the cost of
+# catching a survivor rises in proportion to how much anyone tests.  Nine
+# minutes per boot on a run that already spends forty on gates buys a gate
+# people are tempted to skip, which is worse than no gate.
+#
+# What runs every time is the half that is static and is the half that rots.
+# A needle is a *quotation* of the gate's source; reword the line it quotes and
+# the needle matches nothing.  It does not fail -- it is skipped, and it leaves
+# a row that reads as coverage over a guard that is once again untested.  The
+# only thing that would say so is the sweep nobody has run since.
+check_mutation_needles() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== mutation-needle check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Its own cases first, for this family's usual reason and one of its own:
+    # a scan that has stopped finding tables reports an empty finding list,
+    # which is spelled exactly like a directory of live needles.  The gate
+    # answers that with an absolute floor, and the floor is only worth what its
+    # own cases are -- so they run before its verdict is believed.
+    if ! run_checker check-mutation-needles-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-mutation-needles.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The mutation-needle gate fails its" >&2
+        echo "own cases, so its verdict on every mutation table is worthless" >&2
+        echo "-- and its failure mode is an empty report, which reads as a" >&2
+        echo "directory in which every needle is live." >&2
+        return 1
+    fi
+
+    echo "=== Checking that every mutation needle still quotes something ==="
+    if run_checker check-mutation-needles "$py" \
+            "$PROJECT_ROOT/scripts/check-mutation-needles.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A SELFTEST_MUTANTS row named above no" >&2
+    echo "longer asks anything.  Each is one of:" >&2
+    echo "" >&2
+    echo "  * a needle quoting a line that has been reworded or deleted, so" >&2
+    echo "    the sweep skips the row and the guard it covered is untested" >&2
+    echo "    while the table still reads as coverage;" >&2
+    echo "  * a needle now matching two sites, which cannot say which one it" >&2
+    echo "    meant and which the sweep refuses to guess at;" >&2
+    echo "  * a replacement identical to its needle, which mutates nothing" >&2
+    echo "    and is indistinguishable from a mutant every case killed;" >&2
+    echo "  * a table on a gate with no self-test for a sweep to run, which" >&2
+    echo "    is decoration of exactly the kind the table detects." >&2
+    echo "" >&2
+    echo "Re-quote the row against the line as it now reads, or delete it." >&2
+    echo "Then run scripts/mutate-gate.py on that gate to confirm the row" >&2
+    echo "still kills -- this gate checks that the question is asked, not" >&2
+    echo "that the answer is right." >&2
+    exit 1
+}
+
+check_mutation_needles
+
 # A self-test that nothing calls is not a test.  It compiles, it reads as
 # coverage, it gets cited in a commit message as "tested" -- and it has never
 # executed.  `evdev::self_test` sat uncalled for exactly one commit, and the

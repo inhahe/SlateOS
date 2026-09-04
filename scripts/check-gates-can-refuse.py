@@ -73,6 +73,67 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 
 
+def wired_gates() -> tuple[list[Path], str | None]:
+    """Scripts a caller runs through `run_checker`, whatever they are named.
+
+    Returns `(paths, why_not)`; `why_not` is a sentence if the set could not be
+    determined, and the caller must decline rather than fall back to the glob.
+
+    THE GLOB IS NOT THE CORPUS.  `scripts/check-*.py` finds a gate by how it is
+    spelled, and three of this tree's gates are not spelled that way:
+    `boot-test.sh` runs `scan-unwrap.py`, `scan-orphan-modules.py` and
+    `rustscan.py` through `run_checker`, each of which can refuse the build.
+    Judged by the glob alone they were exempt from the one question this file
+    asks -- *can you refuse at all?* -- and the exemption was invisible, since
+    a corpus that omits a file reports the same "ok" as one that includes it
+    and finds nothing wrong.  That is `check-doc-links.py`'s original defect,
+    which is why this file exists, reappearing in the file itself.
+
+    THE PARSER IS IMPORTED, NOT COPIED.  Deciding what a shell script runs is
+    genuinely hard -- `\\` continuations, `var=path.py` bindings two hundred
+    lines from the call, names spliced together at run time -- and
+    `check-gates-are-wired.py` has that parser, with four documented wrong
+    answers behind its current shape.  A second copy here would start correct
+    and drift, and the drift would show up as this file quietly grading a
+    corpus that no longer matches the build's.  One parser, one home.
+    """
+    import importlib.util
+
+    # Located next to THIS FILE, not under `SCRIPTS`. The two are the same
+    # directory in normal use and deliberately are not under `--selftest`,
+    # which repoints `SCRIPTS` at a temp dir holding one known-bad fixture in
+    # order to grade this file's own exit-code contract. The parser's location
+    # is a fact about the installation; `SCRIPTS` is the corpus root being
+    # varied. Reading the first from the second made a bare run decline with
+    # exit 2 under the selftest -- which the selftest caught, and which is the
+    # reason it asserts the contract by running `main()` rather than by reading
+    # it.
+    src = Path(__file__).resolve().parent / "check-gates-are-wired.py"
+    spec = importlib.util.spec_from_file_location("_gates_are_wired", src)
+    if spec is None or spec.loader is None:
+        return [], f"cannot determine the gate corpus: {src.name} is not importable"
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:  # noqa: BLE001 -- any failure here is a decline
+        return [], (f"cannot determine the gate corpus: {src.name} would not "
+                    f"load ({exc})")
+
+    names: set[str] = set()
+    for rel in mod.CALLERS:
+        caller = ROOT / rel
+        if not caller.is_file():
+            # A missing caller means the corpus is unknown, not empty.  Falling
+            # back to the glob here would silently restore the exemption this
+            # function exists to remove.
+            return [], (f"cannot determine the gate corpus: {rel.as_posix()} "
+                        f"is missing, so what it runs cannot be read")
+        runs, tested, _ = mod.analyse(caller)
+        names |= runs | tested
+
+    return [SCRIPTS / n for n in sorted(names) if (SCRIPTS / n).is_file()], None
+
+
 def _bare_values(tree: ast.AST) -> dict[str, object]:
     """Each flag's value in a bare run: `False` for store_true, `None` else.
 
@@ -398,11 +459,35 @@ def main() -> int:
     # satisfy its own rule -- an analyser that exempts itself is the first
     # exemption, and this file's header argues that exemptions are the failure
     # mode to avoid.
-    paths = args.paths or sorted(SCRIPTS.glob("check-*.py"))
+    # The corpus is the union of two questions, because either alone omits
+    # gates. The glob finds a gate written but never called -- the only way to
+    # find one, since nothing names it. `wired_gates()` finds a gate a caller
+    # actually runs whatever it is called, which the glob cannot see; see its
+    # docstring for the three this tree has and why omitting them was the same
+    # defect as the one this file was written to catch.
+    paths = list(args.paths)
+    if not paths:
+        wired, why_not = wired_gates()
+        if why_not is not None:
+            # Declining, not falling back. A fallback to the glob would be a
+            # smaller corpus reported in the same words as the full one, which
+            # is the failure this whole file is about.
+            print(why_not, file=sys.stderr)
+            print("", file=sys.stderr)
+            print("The set of gates comes from what scripts/boot-test.sh and "
+                  "the hooks actually run, parsed by check-gates-are-wired.py. "
+                  "Without it this could still grade scripts/check-*.py, but "
+                  "that is a strictly smaller corpus reported in identical "
+                  "words -- so it stops instead.", file=sys.stderr)
+            return 2
+        seen = {p.name for p in wired}
+        paths = sorted(wired + [p for p in SCRIPTS.glob("check-*.py")
+                                if p.name not in seen],
+                       key=lambda p: p.name)
     if not paths:
         # No corpus is not a clean result. Same reasoning as the other gates:
         # "nothing to judge" must not be able to look like "judged, and fine".
-        print("check-gates-can-refuse: no check-*.py found -- nothing to "
+        print("check-gates-can-refuse: no gates found -- nothing to "
               "judge, which is not the same as a clean tree.", file=sys.stderr)
         return 2
 

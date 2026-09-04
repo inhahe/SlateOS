@@ -188,7 +188,16 @@ PINNED: dict[str, str] = {
     # TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM.
 }
 
-_GATE = re.compile(r"(check-[A-Za-z0-9_.-]+\.py)")
+# The naming convention, which is how an *unwired* gate is found: there is no
+# other way to notice a file nothing calls than to recognise it by its name.
+#
+# It is deliberately NOT how a *wired* gate is found. See `analyse`, which used
+# to filter its results through this and thereby under-counted for the third
+# time in this file's history -- `scan-unwrap.py`, `scan-orphan-modules.py` and
+# `rustscan.py` are all run through `run_checker` by `boot-test.sh`, are all
+# gates in the only sense that matters (each can refuse the build), and were
+# all invisible here because of how they are spelled.
+_GATE_NAME = re.compile(r"(check-[A-Za-z0-9_.-]+\.py)")
 _ANY_SCRIPT = re.compile(r"[A-Za-z0-9_.-]+\.py")
 _ASSIGN = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
 # `run_checker` in command position: line start, after a separator, or after
@@ -280,7 +289,27 @@ def analyse(path: Path) -> tuple[set[str], set[str], list[str]]:
         literal = _ANY_SCRIPT.findall(line)
         named = ([] if literal
                  else [bound[v] for v in _VARREF.findall(line) if v in bound])
-        scripts = [n for n in (literal or named) if _GATE.fullmatch(n)]
+        # No name filter. What makes something a gate here is that a caller
+        # runs it through `run_checker` -- that is the whole definition, and it
+        # is the one the build obeys: whatever this line names can refuse the
+        # build, whatever it is called.
+        #
+        # This used to read `if _GATE_NAME.fullmatch(n)`, and that was the same
+        # mistake as method 4 in the docstring above, made a second time in the
+        # same expression. Method 4 dropped `$g.py` for not matching the
+        # convention; this dropped `scan-unwrap.py`, `scan-orphan-modules.py`
+        # and `rustscan.py` for the same reason -- three gates `boot-test.sh`
+        # genuinely runs, two of which ship self-tests. The consequence was the
+        # exact sentence this file exists to prevent anyone from believing:
+        # "0 self-test(s) shipped but unrun", true of the subset it looked at,
+        # printed as though it were true of the tree.
+        #
+        # Naming still matters for the *other* question -- an unwired gate can
+        # only be found by its name, because nothing calls it -- so `_GATE_NAME`
+        # is still what builds the subject set in `audit`. The two questions
+        # need two different definitions, and collapsing them into one filter
+        # is what went wrong.
+        scripts = list(literal or named)
 
         if _SELFTEST_FLAG.search(line):
             # Recorded separately, never as wiring. A gate's own cases are not
@@ -358,7 +387,8 @@ def audit(root: Path, pinned: dict[str, str] | None = None
         notes.append(f"{rel.as_posix()}: runs {len(runs)} gate(s), "
                      f"self-tests {len(tested)}")
 
-    gates = sorted(p.name for p in (root / "scripts").glob("check-*.py"))
+    gates = sorted(p.name for p in (root / "scripts").glob("check-*.py")
+                   if _GATE_NAME.fullmatch(p.name))
     if not gates:
         findings.append("scripts/: no check-*.py found -- nothing to judge, "
                         "which is not the same as a clean tree")
@@ -396,7 +426,13 @@ def audit(root: Path, pinned: dict[str, str] | None = None
     # Graded into its own list rather than into `findings`, because the two
     # defects do not cost the same to fix -- see audit()'s docstring on lane A's
     # cross-lane asymmetry.
-    for g in gates:
+    # The subject is every gate this knows of, by *either* route: the ones the
+    # naming convention finds on disk, and the ones a caller demonstrably runs
+    # whatever they are called. The union is the point -- `scan-unwrap.py` is
+    # in the second set only, and it is the case that showed the first set was
+    # never the right subject for this question. Everything in `wired` is wired
+    # by construction, so widening here cannot produce a false wiring finding.
+    for g in sorted(set(gates) | wired):
         if g in unwired or g in selftested:
             continue
         try:

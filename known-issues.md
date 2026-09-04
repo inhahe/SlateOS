@@ -115099,3 +115099,75 @@ what makes it testable, so the tests land with it rather than after it.
 stays correct; the panic needs a non-ASCII option string, the field shift needs
 whitespace in a mount point, and the empty table needs a non-UTF-8 path. All
 three become reachable the moment the OS mounts anything a user named.
+
+## TD-B-THE-THIRTY-TWO-SUITES-THAT-VERIFY-THE-CHECKERS-ARE-THEMSELVES-RUN-BY-NOTHING
+
+**Filed:** 2026-09-04 by lane B. **Where:** `scripts/test-*.py` (32 files),
+against `scripts/boot-test.sh` and `scripts/hooks/pre-push`. **Status:** open;
+found while repairing `quote-names.py --selftest`, which is the defect this
+would have caught.
+
+**In short:** This tree has two layers of automated checking. The lower one —
+the `scripts/check-*.py` gates — is watched closely: `check-gates-are-wired.py`
+fails the build if a gate exists that nothing runs, and `check-gates-can-refuse.py`
+fails it if a gate exists that can never say no. The upper layer is the 32
+`scripts/test-*.py` suites that verify *those gates work*. **Nothing runs any of
+them.** They execute only when a person types the filename.
+
+### The measurement
+
+`boot-test.sh` and `hooks/pre-push` between them mention exactly two suites,
+`test-checkers-honour-head.py` and `test-pre-push-gates.py`, and both mentions
+are **prose in comments** — `pre-push:20`, `pre-push:41`, `pre-push:267`. No
+`run_checker` call, no `python` invocation, no CI workflow (there is no
+`.github/workflows`), no Makefile. Grepped for every suite name across `*.sh`,
+`*.yml`, `*.yaml`, `*.toml` and `Makefile`: no runner exists.
+
+### Why the existing ratchet cannot see this
+
+`check-gates-are-wired.py` globs `scripts/check-*.py`. That is the right scope
+for what it was built to do and it is why the gap is invisible: the suites are
+not gates, so they are not in the population being audited, so the audit is
+green while a third of the testing apparatus never executes. The blind spot is
+structural, not an oversight in the glob — "is this gate run?" and "is the thing
+that verifies this gate run?" are different questions and only the first is
+asked.
+
+### That this is not theoretical
+
+`quote-names.py`'s `--head` support was verified by exactly one thing: case 11
+of its own `--selftest`, which is wired and does run. The dedicated suite that
+exists to verify `--head` flags — `test-checkers-honour-head.py`, which builds
+disagreement fixtures far more carefully than case 11 did — has cases for gates
+2, 3, 4 and 6 and would have been the natural home for it. It was not used,
+because a suite nothing runs is a suite nobody remembers to extend. Case 11 was
+then written in isolation and reproduced the `GIT_DIR` bug that
+`scripts/gitenv.py` documents in full, committing twice onto `lane-b` on its
+first real invocation.
+
+Two of the suites are, separately, the only coverage of their subject:
+`test-gittree.py` is the sole check on the seam every `--head` checker reads
+through, and `test-pre-push-run-checker.py` the sole check on the label
+discipline `boot-test.sh:3483` calls a gate failure.
+
+### The proper fix
+
+Not "wire all 32 into `boot-test.sh`" — some are slow, and the boot test is
+already ~90 minutes. In order:
+
+1. **Measure each suite's runtime.** The decision is entirely about cost; it
+   cannot be made from the file list. Several are pure string manipulation and
+   will be under a second.
+2. **Wire the fast ones into `boot-test.sh`'s pre-build gate block** via
+   `run_checker`, alongside the `check-*` gates they verify. A suite that
+   verifies a gate belongs next to that gate, so the two are read together.
+3. **For the slow ones, decide deliberately and record it** — a
+   `--quick`/`--full` split, or a documented "runs on merge to `main` only".
+   What must not happen is the current state, which is neither.
+4. **Extend `check-gates-are-wired.py`, or add a sibling, to cover
+   `scripts/test-*.py`** with the same `PINNED`-with-a-reason discipline. Until
+   the population is audited, step 2 decays exactly as the gates did before
+   that script existed — measured then at nine of thirty-one unwired.
+
+Step 4 is the one that makes the others stay done. Steps 1-3 without it are a
+one-time cleanup of a list that will drift again.

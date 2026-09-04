@@ -56921,6 +56921,87 @@ clone with a `filter-repo` history in it.
 a work tree", while the same commands work fine in `os-lane-a/b/c`. The check is
 `git -C "…/os" config --get core.bare`; the answer should be `false` or absent.
 
+### TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING — 2026-09-04 — OPEN
+
+**In short.** The bulk renamer can now be given files and rules, and can
+actually rename. What it still cannot do is add any rule that needs a *string*
+typed in — find/replace, insert, remove-at, regex, replace-extension — because
+the app draws no text field anywhere.
+
+**Where it was.** Before 2026-09-04 the window would have opened completely
+empty and stayed that way: `add_file` and `add_operation` had no caller outside
+the tests, so there was no file to rename and no rule to rename it by. Every
+preview showed the name unchanged and the program's whole purpose did nothing.
+A `#![allow(dead_code)]` at the top of the file is why nobody noticed.
+
+**What is reachable now.** A sample file list at startup, and the rules that
+need nothing typed, each on a key: five of the eight case modes (lower, upper,
+title, snake, kebab), trim, sequential numbering, lowercase-extension,
+remove-extension, plus clearing the rules or the list, undo, redo, and the
+rename itself.
+
+**What is not, and why.**
+
+| still unreachable | needs |
+|---|---|
+| find/replace, insert, remove-at, regex, replace-extension, add-extension | a text field to type the string into |
+| the other three case modes, the date-stamp formats, the other trim modes, insert-at-position | a menu — the keyboard is out of letters that read naturally |
+| `FileEntry::modified_ms` | a file chooser to read a real modification time from |
+| `RenameRecord::timestamp_ms` | a history panel that shows *when*, not just what |
+
+**The fix is one control, not many.** Every row above is waiting on the same
+missing thing: somewhere to type, and somewhere to choose. `INPUT_HEIGHT` is
+already defined and unused, which is the shape of a text field that was planned
+and never drawn. Once it exists, each remaining rule is a match arm.
+
+**No data is at risk.** The rename operates on an in-memory list seeded at
+startup; there is no filesystem access at all yet, which is its own gap and the
+reason `add_file` takes a path as a string.
+
+### TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE — 2026-09-04 — OPEN
+
+**In short.** About half of the kanban app's model is written, tested, and
+cannot be reached from the keyboard. A complete JSON exporter and a complete
+JSON importer (ten tests each), swimlanes modelled end to end, three sort
+orders, un-archiving, column removal, checklist ticking, and six of the eight
+text-input modes. None of it is broken; none of it is reachable.
+
+**How it stayed invisible.** The file opened with `#![allow(dead_code)]`. That
+one line is the reason twenty-odd unreachable items accumulated without anyone
+noticing — the compiler had the answer the whole time and had been told not to
+say it. Deleting it on 2026-09-04 is what produced this list.
+
+**What was done instead of putting the line back.** Every item now carries a
+*scoped* `#[allow(dead_code, reason = "…")]` naming the specific thing it is
+waiting for, so a **new** piece of dead code still warns. The reasons group into
+five:
+
+| waiting for | items |
+|---|---|
+| somewhere to write a file | the whole `JsonExporter`, `KanbanApp::export_json` |
+| a file chooser to read one | the whole `JsonImporter` |
+| a lane layout mode in the board renderer | `Card::swimlane`, `with_swimlane`, `swimlane_cards`, `swimlanes_enabled`, `swimlane_names` |
+| a control to pick one | the three `SortBy` variants and its `label`/`all`, `Priority::all`, `Column::collapsed` |
+| a UI to type into | six `InputMode` variants — board name, card description, comment, checklist item, card title edit, column rename |
+| a key | `unarchive_card`, `remove_column`, `toggle_checklist_item` |
+
+**One was fixed rather than annotated.** `switch_board` had a test and no
+caller, so `Alt+4` opened a list of every board and no key chose one — a chooser
+that was only a list. Arrows and Enter now work there. That is the shape to look
+for in the rest: several of the entries above need one call and a key, not a
+design.
+
+**Ranked by what a user would miss first**, if this is picked up later: export
+(a board you cannot back up), checklist ticking (drawn and inert, so it reads as
+broken rather than absent), un-archiving (archiving is one-way), then the input
+modes. Swimlanes are the largest and the least missed — nobody expects them
+unless they are drawn.
+
+**Nothing here loses data**, because nothing here writes any. The cost is that
+the app looks more finished from the outside than it is, and that the next
+person to open the file sees twenty scoped allows rather than one blanket — the
+scoped ones being the point.
+
 ### TD-C-JSONVIEWER-CAN-EDIT-A-VALUE-BUT-NOT-ADD-ONE — 2026-09-04 — OPEN
 
 **In short.** The JSON viewer can now change a value that already exists — click

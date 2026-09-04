@@ -65926,3 +65926,201 @@ than a check people route around.
 being published, do not silently substitute the nearest available tree. Either
 make the substitution provably identical first, or decline. The one thing not
 available is answering a different question in the same words.
+
+## 764. A carriage return stops the build only where a machine executes the bytes; everywhere else it is reported and the build goes on
+
+**Lane:** B
+**Date:** 2026-09-04
+**Decided by:** Claude (autonomous)
+
+**In short:** a gate checks that files git promises to store with Unix line
+endings really have them on disk. It used to refuse to build if *any* such file
+had a Windows line ending. But that set includes every `.txt` and `.md` in the
+tree — including the operator's own notes file — and when the operator types
+into one in a Windows editor, the file picks up Windows endings and all three
+agents' builds stop. That happened twice in twenty minutes on 2026-09-04, for a
+notes file in which nothing was wrong. The gate now reports every such file as
+before, but only *stops* the build when the file is one something actually runs:
+a shell script, or any file starting with `#!`.
+
+### What forced it
+
+`.gitattributes` says `*.txt text eol=lf`, so `todo3.txt` — the operator's
+personal scratch notes — is in scope. On 2026-09-04 it was repaired to LF, and
+four minutes later it was CRLF again, because a human was typing into it and
+saving. Two boot tests, 187 s and 259 s, were thrown away for it. The same rule
+covers `design.txt`, `todo.txt`, `scheduler.txt`, `ipc.txt` and every `.md`, so
+this is not one file's quirk: it is every lane's build blocked whenever the
+operator edits prose on a Windows box.
+
+The gate's own docstring had argued for the wide scope, and its argument was
+good — the 2026-09-03 event corrupted thirteen files at once and a `.sh`-only
+gate would have reported one and hidden twelve. What the argument assumed,
+without saying so, is that *the writer is a tool*. Here it was a person, editing
+their own file, correctly. There is no tooling bug to find and no repair that
+stays repaired.
+
+### The options
+
+| | *What changes:* |
+|---|---|
+| **A. Leave it** | Builds keep stopping whenever the operator saves a text file. |
+| **B. Drop `*.txt`/`*.md` from `.gitattributes`** | Git stops normalising prose on commit too, so CRLF starts reaching history — a much bigger change than the problem, and it touches a file all three lanes share. |
+| **C. Exempt `todo3.txt` by name** | This one file stops blocking; `design.txt` and the next notes file still do. Treats the instance, not the cause. |
+| **D. Report everything, refuse only for files a machine executes** *(chosen)* | Prose with CRLF prints a note and the build continues; a `.sh` or a `#!` file with CRLF still stops it dead. |
+
+### Why D
+
+Because it keeps every property the 2026-09-03 event actually asks for. Replay
+that event against D: `scripts/boot-test.sh` was among the thirteen corrupted
+files, so the build still stops, and the report still names all thirteen, so the
+size of the cause is still visible — which was the whole objection to a
+`.sh`-scoped gate. The only case whose outcome changes is the one where the
+answer is "a human saved a text file", and that is not a defect.
+
+The line is drawn at *execution*, not at *looking like code*, and that is
+deliberate: `.py` is not on the fatal side. CPython decodes CRLF source
+correctly, so an imported module is unharmed; a `.py` that is actually run is
+caught by its shebang, which is the property that matters. Keying on the suffix
+would refuse builds over library files where nothing is wrong — reintroducing
+the false positive one file type to the left.
+
+Against D: a tool that corrupts only prose files is now a note rather than a
+refusal, so it could persist. That is accepted, and it is bounded — the note
+prints on every run, and the docstring's own point stands that such a tool
+reaches a `.sh` eventually, which is the run that stops the build. A gate that
+halts three agents over a harmless byte gets bypassed, and a bypassed gate is
+not protecting the `.sh` files either.
+
+**The generalisable rule.** Severity is not scope. A gate can be right to *look*
+at everything and wrong to *refuse* on everything, and collapsing the two
+questions into one is what turns a correct detector into one people route
+around. Ask separately: what do I report, and what do I stop the world for.
+
+
+## 765. A gate that needs one file out of a commit reads the blob, not the tree — the shared seam is `GitTree.read`, and `open_tree` is for gates that need a listing
+
+**Lane:** B
+**Date:** 2026-09-04
+**Decided by:** Claude (autonomous)
+
+**In short:** Eight checks run when you `git push` and can stop the push. They
+used to look at the files sitting in your directory; they were changed one by
+one to look at the *commits you are actually sending*, which is not the same
+thing if you edited something after committing. There is a shared helper for
+doing that. Used the obvious way, the helper first asks git for a list of every
+file in the project — about 14,000 of them, roughly four seconds — because most
+of these checks want to walk a whole directory. One of them (gate 9, which stops
+you deleting a filed request) needs exactly one small file, and usually that
+file does not exist at all. The decision is whether it pays the four seconds for
+the sake of every check looking the same, or uses the cheaper half of the same
+helper. It uses the cheaper half.
+
+**The two things that were weighed.**
+
+| | `open_tree(root, head)` | `GitTree.read(head, path)` |
+|---|---|---|
+| *What changes:* | every converted checker opens its tree the same way, and the shape is copyable without thought | gate 9 keeps the push about as fast as it was; the reader has to notice why this one is spelled differently |
+| Cost per push | one `git ls-tree -r` of the whole repository — 13,821 paths, ~3.8 s measured | one `git cat-file --batch` request, for a path that is absent on almost every push |
+| What it buys | listings, `is_file`, `files_under` — none of which gate 9 asks for | nothing beyond the blob |
+
+**Why the cheaper half won.** Uniformity is worth paying for when it buys the
+reader something, and here it would buy an index that is discarded unread. The
+seam's actual promise is that a checker asks git rather than the disk; both of
+these keep it. `RevTree`'s docstring already says why it builds the index — "a
+checker asks about several prefixes and the per-call cost of `ls-tree` is the
+whole cost" — and that reasoning inverts exactly when the checker asks about one
+path. Four seconds on every push, by every lane, to answer a question that is
+usually "the file is not there" is the kind of cost that gets a gate switched
+off, and this project has already argued (§763, and `run-checker.sh`'s whole
+premise) that a gate people route around protects nothing.
+
+**Why it is not simply "use whichever is faster".** The one real argument for
+`open_tree` is that the next person converting a gate copies the last one, and a
+gate spelled differently invites a wrong copy in either direction — someone
+using `GitTree.read` in a loop over a whole crate would reintroduce the
+per-file cost the seam exists to remove (measured at ~27 minutes for `posix/src`
+before batching). So the choice is only defensible with the rule written down
+next to it, which is what this entry is: **`open_tree` when you need to know
+what is in a tree; `GitTree.read` when you already know the path and want the
+bytes.** Gate 9 is currently the only gate on the second side of that line.
+
+**What it does not decide.** Nothing about correctness — both readers answer
+from the commit, and the defect that prompted this (gate 9 reading its waiver
+list off the disk while reading its deletions from the commit) is fixed either
+way. This is a cost decision layered on top of a correctness fix, and if gate 9
+ever needs a listing it should switch to `open_tree` without ceremony.
+
+## 811. An application's window title is re-read every batch, and a spreadsheet sort aimed at one cell covers the block around it
+
+**Date:** 2026-09-04. **Decided by:** Claude (autonomous).
+
+**In short:** Two small choices made while connecting `apps/spreadsheet` to a
+window. First: until today, the words in a window's title bar were read from the
+program once, when the window opened, and never again -- so a program whose
+title named the file it was editing showed the *first* file for ever. That is
+now re-read as the program runs. Second: in the spreadsheet, clicking the "A-Z"
+sort button while a single cell was selected did nothing at all, because the
+program sorted exactly the cells you had selected and one cell is already in
+order. It now sorts the run of filled rows around that cell.
+
+### The title
+
+`oswindow::app::App::title` was documented as read-once, with the reasoning
+written into the trait: making it live "would mean re-reading it on every event
+to find out whether it had changed, which is a round trip per mouse move to
+answer no".
+
+The premise is wrong on the facts. Re-reading is a local call that builds a
+`String`; only a *difference* costs a round trip, because `set_title` is sent
+only when the new title differs from the recorded one. And the cost is per
+*batch*, not per event -- a drag of two hundred mouse moves is one batch
+boundary, so it is one `String` against a frame that has just been laid out and
+serialised.
+
+What the old rule actually bought was a fleet of programs whose titles were true
+for one instant. `apps/slides` -- wired an hour before this entry was written --
+opened saying "slide 1 of 6" and went on saying it on slide six. Its test
+asserted that the title followed the current slide, and passed, because the test
+called `title()` itself. That is this window's recurring shape: a check that
+runs, passes, and is about the wrong thing.
+
+| | *What changes* |
+|---|---|
+| Read once (before) | The title names whatever the document was at startup. Cheapest possible; wrong for nearly every app. |
+| Re-read per batch (now) | The title follows the document. One `String` per batch; one round trip per actual change. |
+| Re-read per event | Same result, hundreds of times the cost during a drag, for no additional correctness. |
+
+A failure to rename is deliberately *not* fatal, unlike the frame path. A window
+that cannot be drawn has nothing to show; a window that cannot be renamed still
+works, and killing the program over the label above it would trade a cosmetic
+fault for a lost document.
+
+### The sort
+
+`SpreadsheetApp::sort_column` sorted `selection.primary_range()`, and
+`Sheet::sort_by_column` returns immediately when `start_row >= end_row`. A
+single-cell selection is a range of one row. So the ordinary way to sort a
+column -- click a cell in it, press A-Z -- did nothing, with no message, and the
+two sort buttons looked exactly like the ten other toolbar buttons that turned
+out to be genuinely unwired.
+
+The options, none of them obviously right:
+
+| | *What changes* |
+|---|---|
+| Leave it | Sorting requires selecting the rows first. Two buttons that do nothing in the common case. |
+| Whole column | A-Z sorts every filled row in the column, jumping any blank gap. Two unrelated tables get merged. |
+| **The block around the cell (chosen)** | A-Z sorts the run of filled rows containing the cell, stopping at a blank row. |
+| Guess the header | As above, but the first row is held back when it "looks like" a heading. |
+
+The block rule is what LibreOffice and Excel do, and a blank row is where anyone
+would say one table ends. The header guess was rejected outright: it is right
+most of the time and silently scrambles a table the rest of it, and a wrong
+sort is not visibly wrong -- the data is still there, in an order nobody chose.
+The escape hatch is the behaviour that already existed: select the rows to sort
+and the selection is obeyed literally, which is how a header is kept out.
+
+The cost is that sorting the seeded sample sheet descending sinks its "Item"
+header to the bottom. That is undoable with one Ctrl+Z, and it is what the user
+asked for with a header they did not exclude.

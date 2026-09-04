@@ -57268,8 +57268,18 @@ and that is exactly the shape that survives a reading.
 screenful of information that is a constant compiled into the program. The
 drawing is real, the filtering and sorting and searching are real, the parsing
 is real — and there is no source. This entry names the pattern, because it has
-now been found five times and writing it up five times separately would train
+now been found six times and writing it up six times separately would train
 the reader to skim it.
+
+**`spreadsheet` is the mirror image and belongs here for the same reason.**
+It is not short of a source — the user types the data — it is short of a
+*sink*. `Sheet::export_csv` returns a `String` and `Sheet::import_csv` takes
+one, both implemented and tested, and there is nowhere for that string to come
+from or go: no file dialog, no command line, and no system clipboard (the app's
+`clipboard` field is its own internal cell buffer). The shape is the same — a
+capability that is complete except for the one end that touches the world — and
+the fix is the same shape too: `gui/toolkit` has a file chooser
+(`guitk::dialog`), so this one is nearer than the rest.
 
 **The apps, and what each one is missing.** Every one of these was wired to the
 compositor between 2026-09-03 and 2026-09-04; the wiring is what made the gap
@@ -57283,6 +57293,7 @@ promise to break.
 | `sysinfo` | CPU, memory, disks, uptime | any read at all — uptime is the string `"4h 23m 17s"` | `None`, documented |
 | `sysmonitor` | processes, live graphs, alerts | a real process source, but the *clock* is now real | the refresh interval |
 | `finance` | accounts, budgets, transactions | both a source and a way to enter anything; see its own entry | `None`, documented |
+| `spreadsheet` | a sheet a user can actually fill in | nothing to *show* — the gap is the other way round: `import_csv`/`export_csv` work on a `String` and there is no file dialog, command line or system clipboard to carry one | `None`, documented |
 
 **The rule that came out of it, and it is not "wire a tick".** In each case the
 tempting fix is to return a poll interval from `tick_interval` so the app "feels
@@ -111435,15 +111446,37 @@ read the disk:
 | Gate | Reads | How |
 |---|---|---|
 | 1 private-file | pushed tip | `git cat-file -e "$local_sha:$path"` |
-| 9 request-deletion | pushed tip | checker takes `--head "$sha"` |
+| 9 request-deletion | pushed tip | checker takes `--head "$sha"` — the *waiver* half only from 2026-09-04, see step 14 |
 | 7 rustfmt | pushed tip | mirror of pushed blobs — **fixed 2026-09-02** |
 | 2 unreachable-command | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 3 raced-global | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 4 argv-utf8 | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
 | 6 host-errmsg | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-03** |
 | 11 doc-links | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-03** |
-| 5 getopt-table | working tree | `--check`, checker walks the filesystem |
-| 8 quote-names | working tree | same |
+| 5 getopt-table | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-04** |
+| 8 quote-names | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
+
+**Every gate in the table now reads the pushed tip.** The column above was
+itself stale in both directions on 2026-09-04: it listed gate 8 as reading the
+working tree two days after `f129bd5e0` and `bfe200154` converted it, and step 2
+below said "one to go: gate 8" on the strength of that row. A table maintained
+by hand alongside the thing it describes will do this; what saves it is that
+step 3's `HEAD_GATES` is executable and cannot go stale the same way, which is
+why the backfill described there is worth more than this row is.
+
+The *conversion* half of this debt is therefore closed, and so, as of
+2026-09-04, is step 4's — **every converted gate now has behavioural cases**,
+checker-level and end-to-end (91 of them, across eight gates).
+
+The paragraph that stood here said gates 8 and 9 were "wired correctly and
+asserted to be wired correctly, but nothing has ever pushed a fixture past
+either one, so there is no evidence that the flag changes what they *decide*.
+A checker can accept `--head`, be called with it correctly, and ignore it."
+Both were then covered on the same day and **both came back red on the first
+run** — gate 8 over a missing baseline (step 13), gate 9 over a waiver read
+from the wrong tree (step 14). Neither defect was predicted; both were found by
+asking the gate a question with the commit and the worktree disagreeing. Two of
+two is a small sample and still the whole argument for step 4.
 
 Gate 7 is not on that list any more, and it is the proof the rest matter: it had
 exactly this defect and it published two unformatted commits (`861f4d80e`,
@@ -111496,11 +111529,22 @@ Unacceptable at the push boundary.
 
 ### What the proper fix looks like
 
-Give the checkers the seam gate 9's checker already has. `check-request-deletion.py`
-takes `--head <sha>` and reads blobs out of git rather than off the disk, and
-`test-pre-push-gates.py` has a test asserting it is passed (`gate 9 passes
---head so it judges the pushed commit`) — so the pattern, the precedent and even
-the regression test all exist. The work is:
+Give the checkers the seam gate 9's checker already has.
+`check-requests-not-deleted.py` takes `--head <sha>` and asks git about the
+pushed commit rather than about the disk, and `test-pre-push-gates.py` has a
+test asserting it is passed (`gate 9 passes --head so it judges the pushed
+commit`) — so the pattern, the precedent and even the regression test all
+exist. The work is:
+
+> **Correction, 2026-09-04 (step 14).** Two things in that paragraph were
+> wrong, and both mattered. The script is `check-requests-not-deleted.py`, not
+> `check-request-deletion.py` — a name typed from memory into the document that
+> nominates it as the model. And the precedent was only half a precedent: gate
+> 9 read its *deletions* from the commit and its *waivers* off the disk, so the
+> pattern being copied here had the very defect this task exists to remove. It
+> was found by writing gate 9's own behavioural cases, months of pushes after
+> the paragraph above called it the model to follow. A precedent nobody has
+> tested is a claim, not a precedent.
 
 1. ~~A shared helper — `scripts/gittree.py` — exposing `list(rev, pathspec)` and
    `read(rev, path)` over one long-lived `git cat-file --batch`, so N files cost
@@ -111546,7 +111590,16 @@ the regression test all exist. The work is:
    to reach the disk. `--selftest` reports 57/57, `--check` on the working tree
    and `--check --head HEAD` both exit 0 on the real tree, and an unopenable
    revision exits 2.
-   Two to go: gates 5 and 8.
+   Gate 5's `getopt-ambiguity-check.py` converted 2026-09-04 (step 11): it is
+   the only checker here whose comparison has just *one* tree in it — the other
+   side is the live host's GNU utilities — so `--head` selects our half and the
+   measurement stays a measurement.
+   **Done — all eight are converted.** This line read "one to go: gate 8" until
+   2026-09-04, when checking `git log` on the file rather than trusting the note
+   showed gate 8 had been converted on 2026-09-02 by `f129bd5e0`/`bfe200154`.
+   The note was written from the gate table above, which was stale, so the two
+   agreed with each other and were both wrong — the reason the fix for *that* is
+   step 3's executable table rather than a more carefully maintained prose one.
 3. Pass `--head` from the hook, and extend `test-pre-push-gates.py`'s existing
    assertion to all eight gates instead of just gate 9. **In progress.** The
    assertion is now a table (`HEAD_GATES`) rather than a gate-9 special case,
@@ -111556,7 +111609,16 @@ the regression test all exist. The work is:
    also guard on that list being non-empty, because a loop over nothing runs
    the checker zero times while `note_gate` has already reported the gate as
    having run. Gates 3 and 4 joined both assertions 2026-09-02, gate 6
-   2026-09-03.
+   2026-09-03, gates 8 and 11 backfilled 2026-09-04 and gate 5 on conversion the
+   same day. The backfill is the point: 8 and 11 were wired with `--head "$sha"`
+   on 2026-09-02 and 2026-09-03 and simply never added to `HEAD_GATES`, so for
+   two days the assertion covered five of the seven converted gates and said
+   nothing about the other two — an unlisted gate is not failed, it is never
+   asked about, which reads exactly like a gate that passed. They were found by
+   grepping the hook for `--head` and diffing that against the table by hand,
+   which is the comparison the table exists to make unnecessary. The table now
+   carries that history in a comment, above the rule that the commit adding
+   `--head` to a gate adds its checker to the table.
 4. Behavioural coverage, per `test-pre-push-fmt-gate.py`: for each gate, the
    false-pass and false-fail cases specifically. **Baseline cases are worthless
    here** — committed-clean-passes and committed-dirty-is-refused are green
@@ -111583,6 +111645,12 @@ the regression test all exist. The work is:
    empty directories), and a fixture whose *directory name* contains the alias
    makes `"<alias>" in output` true while the gate has skipped — `_push` now
    redacts the fixture's paths so no case can pass that way.
+   **Gates 8 and 9 covered 2026-09-04** (steps 13 and 14), which completes the
+   set: **every converted gate now has behavioural cases, checker-level and
+   end-to-end.** The per-gate floors in `test-checkers-honour-head.py` are the
+   live record of which gates are covered, and they are executable, so unlike
+   the hand-maintained table in step 2 they cannot quietly go stale; the count
+   is 91 across eight gates.
 
 5. **The path scope itself had the same defect, one level up.** Six gates decide
    whether to run at all through the hook's `touches()` helper, which asked
@@ -111920,6 +111988,229 @@ the regression test all exist. The work is:
     which now copies `gittree.py` into its fixture repos alongside the checker.
     The suite's floors moved with them — 61 cases overall, 11 for gate 11 — so
     deleting a case is as loud as deleting the wiring it covers.
+
+11. **Gate 5 converted, 2026-09-04.** `getopt-ambiguity-check.py` now takes
+    `--head` and reads both of its tree-derived inputs through the seam: the
+    enumeration of `userspace/coreutils/src/bin` and each table's source text.
+
+    **It is the odd one out, and worth saying why.** Every other checker in this
+    entry compares a tree against a *file* — a baseline, a manifest, another
+    module's text — so both sides of the comparison move together when `--head`
+    selects a revision. This one compares a tree against **the machine**: it
+    reads GNU's own option table out of `<util> --=x` over WSL. Only our side
+    has a revision to read, and that asymmetry is the whole content of the
+    conversion. It also bounds what the flag can break: a wrong answer here is
+    always "we judged the wrong copy of *our* table", never a mismeasurement of
+    GNU's.
+
+    **The scope had the same defect as the content, and it outlived it.** Gate 5
+    is scoped by utility *name* rather than by path — each name is a WSL round
+    trip, ~2 s against ~35 s for a full sweep — so it never went through
+    `touches()` and kept its own private copy of `git rev-list HEAD --not
+    --remotes`. Step 5 fixed `touches()` on 2026-09-02 and this copy went on
+    asking about HEAD for two more days. Here the consequence is worse than a
+    wrong answer, because an empty scope is this gate's **skip** condition:
+    `git push origin feature` while standing on `main` produced an empty list,
+    which read as "this push rewrites no table", so the gate stood down and
+    said so in the tally — while being correctly wired to `--head` and pointed
+    at exactly the right commit. **Reading the right revision does not help when
+    the list of things to read in it came from somewhere else.** The derivation
+    is now `getopt_scope_for <sha>`, called per pushed ref inside the same loop
+    that judges it, and pinned by `test_gate_5_derives_its_own_scope_from_the_push_too`
+    (the helper must name `"$1"` and must not mention HEAD at all).
+
+    Two structural consequences of making the scope per-ref rather than
+    per-push. The `--selftest` run moved *inside* the loop behind a
+    `getopt_ran` flag, so it runs once when there is anything to judge and not
+    at all when there is not; and `note_gate` moved *after* the loop, reporting
+    what ran rather than predicting it. The prediction was a second place the
+    tally could disagree with reality, which is the failure the
+    `[ -n "${pushed_shas# }" ]` guard exists to prevent — a tally derived from
+    the run cannot drift from it.
+
+    Seven behavioural cases in `test-checkers-honour-head.py`, three of them
+    end-to-end through the real hook including the off-branch push step 6
+    requires. The off-branch case is the one that earns its keep: with the
+    scope reverted to HEAD it reports `allowed` for a branch carrying a table
+    with `--version` deleted, which is the defect above, observed rather than
+    argued. `yes` is the fixture utility because its table is two entries that
+    have not moved in decades, so a red case means the seam broke rather than
+    that a distribution shipped a different coreutils; a host with no GNU
+    userland skips the group loudly instead of passing it vacuously.
+
+    Floors moved to 68 overall and 7 for gate 5. **Gates 8 and 9 are
+    deliberately absent from that per-gate table**, and a comment there says so:
+    both are wired with `--head` and both are in `HEAD_GATES`, but no case has
+    ever pushed a fixture past either, so nothing shows the flag changes what
+    they decide. A checker can accept `--head`, be called with it correctly, and
+    ignore it. Adding a floor for them would make the table look complete while
+    guarding nothing.
+
+12. **Gate 8 could not tell a clean tree from an empty one, 2026-09-04.** Found
+    while going to *convert* gate 8 and discovering it had been converted two
+    days earlier (see step 2). With the conversion already done, the useful
+    question became whether the converted gate was correct, and it was not, in a
+    way the conversion had made reachable: `--head` can now be pointed at any
+    revision, including one where lane B's zone does not exist.
+
+    `survey()` returned only the findings, so an empty result had two causes
+    that were indistinguishable from outside — a tree with no defects, and a
+    tree with no *sources*. Measured on a commit that renamed `userspace/` away,
+    against a baseline that still listed a file in it:
+
+    ```
+    fixed: userspace/coreutils/src/bin/cut.rs 1 -> 0
+    ok -- 0 known sites in 0 files (1 improved)
+    ```
+
+    exit 0. Note what that is worse than: it is not merely a bad push passing.
+    The gate reported the disappearance of its own subject as a *burn-down*, and
+    the wording (`run --write-baseline to record it`) invites the reader to
+    discard every site the ratchet was guarding. A ratchet that offers to forget
+    its own backlog is the worst available failure for a ratchet.
+
+    The fix is `Survey(found, scanned)` — the count of files actually read comes
+    back from the same walk that produced the findings, because deriving it from
+    a second walk would be a second answer to one question, which is the exact
+    shape of drift the `Tree` seam was introduced to remove. `_no_corpus` then
+    refuses on both the `--head` and the working-tree path, with **exit 2**: 1 is
+    `run-checker.sh`'s "the checker found something in your code", and printing
+    gate 8's refusal for an empty tree would tell an author their diagnostics
+    leak file names when nothing whatever was observed.
+
+    Deliberately not a heuristic threshold. Gate 4's equivalent originally
+    asserted `> 50` files, which is a claim about the size of *this* checkout and
+    made the rule unrunnable anywhere else; this asks for one file, which is a
+    claim about the gate having a subject and holds in a three-file fixture.
+    That is what let the five new self-test cases exercise it for real rather
+    than assert it in the abstract.
+
+    Two of those cases are worth naming. The **control** — a fixture tree that
+    has a source and no violations must *not* trip the guard — carries as much
+    weight as the experiment, because the failure it excludes is the one that
+    gets a gate switched off: a gate that refuses on every host. And the last
+    case pins, on purpose, that `check()` on its own still reads an emptied
+    corpus as `1 improved` and exits 0; if that is ever fixed inside `check`, the
+    case fails and its comment says to delete itself *and* `_no_corpus` together
+    rather than leave two answers standing.
+
+    End to end on a real revision rather than only a fixture: this repository's
+    own root commit (`7527d40a0`) predates all four of `ROOTS`, and
+    `--check --head 7527d40a0` now exits 2 with the refusal where it would have
+    exited 0 with a pass.
+
+    This is a defect in *correctness*, not coverage — it does not close step 4's
+    gap. Gate 8 still has no case proving `--head` changes what it decides.
+
+13. **Gate 8 given behavioural coverage, 2026-09-04 — and the first run was
+    red.** Fourteen cases in `test-checkers-honour-head.py`, eleven at the
+    checker and three through the real hook, each input made to differ between
+    the commit and the worktree separately: the `.rs` enumeration, each file's
+    text, the baseline's entries, the baseline's *counts*, the `fixed:`
+    direction, the `target/` skip, both routes to exit 2, and an off-branch
+    push. The count case is the one that is particular to this gate — its
+    ratchet's granularity is a digit per file rather than a named finding, so a
+    case that only swaps entries in and out never reaches the value that
+    actually decides the verdict.
+
+    Two of the fourteen failed on the first run, and what they found is the
+    point of the exercise. `read_baseline_from` returned `{}` for a baseline
+    that was **not in the tree**, under a comment calling that "the safe
+    direction — it can only over-report". Over-reporting is not the safe
+    direction. A commit that moved `quote-names-baseline.txt` would have been
+    refused with gate 8's whole refusal over every site the real file forgives —
+    1798 diagnostics across 777 files nobody touched — which is the false
+    accusation `scripts/run-checker.sh` exists to argue is the worst thing a
+    gate can do, and the reliable way to get a gate bypassed. On a clean tree
+    the same read calls every entry stale instead, printing "the backlog is
+    fixed" over a commit that fixed nothing. Gates 4 and 6 both carry this
+    guard; gate 8 shipped its conversion with the corpus half and not this half.
+
+    Fixed by making absence `None` rather than `{}` — the live baseline is
+    legitimately *empty of entries*, so the two states must be distinguishable —
+    and adding `_no_baseline` beside `_no_corpus`, exit 2 for the same reason.
+    `check()`'s `baseline` argument became required in the same change: its old
+    `None` default meant "read it yourself", which would now be the same
+    sentinel as "there is nothing there" at a single call site. The guard sits
+    after `--write-baseline` (the mode whose job is to create the file) and
+    after the plain `report` path (which does not consult the ratchet and exists
+    to survey trees nobody has ratcheted yet).
+
+    **The lesson is about the two kinds of assertion, and it is the reason this
+    is written down rather than just fixed.** Gate 8 was wired on 2026-09-02,
+    listed in `HEAD_GATES`, and green for two days. That assertion is about the
+    *shape* of the invocation and it was telling the truth the whole time. It
+    simply cannot see a checker that takes `--head`, is handed the right sha,
+    and then answers from somewhere else — or, as here, one that reads the right
+    tree and mishandles what it finds. A summary that says "gate 8: wired and
+    asserted" reads as covered and is not. The floors table in
+    `test-checkers-honour-head.py` now carries this history where the next
+    person to add a gate will read it.
+
+    Gate 9 was the only converted gate left with no behavioural case at all, and
+    the same caveat applied to it verbatim. Step 14 is what happened when it was
+    finally asked.
+
+14. **Gate 9 covered, 2026-09-04 — and its `--head` conversion turned out to
+    have carried only one of its two inputs.** Nine checker-level cases and
+    three end-to-end, written on the same day and for the same reason as gate
+    8's. One came back red on the first run:
+
+    ```
+    FAIL  gate 9: an uncommitted waiver does not excuse a committed deletion
+            got : 0
+            want: 1
+    ```
+
+    `check-requests-not-deleted.py` asks one question — "does this tree delete a
+    request it does not waive?" — and it has two inputs. `deleted_since` took
+    `head` in the 2026-09-02 conversion and read the deletions from the commit
+    being pushed. `load_allowlist` did not, and went on reading
+    `requests/.deletions-allowed` off the disk through a module-level
+    `ALLOWLIST` path bound at import time. So for two days the gate read its
+    deletions from the commit and its *permissions* from the working tree.
+
+    **That is a worse hole than the one `--head` was added to close.** The
+    staged-restore false negative at least leaves the file present somewhere; a
+    disk-only waiver leaves nothing at all. Write the basename into
+    `.deletions-allowed`, push the deletion, `git checkout` the waiver away, and
+    the request is gone from shared history with no record that an override was
+    ever claimed — which defeats the exact property the escape hatch is *for*,
+    since "a deliberate, reviewable act" is a claim about something published.
+    The hook already argued the point and enforced the wrong half of it: gate 9's
+    `touches` scope includes `requests/.deletions-allowed` so that "editing the
+    waiver list must be the push that re-verifies it". Re-verifying it against
+    the working tree's copy is not that.
+
+    Fixed by giving `load_allowlist` the same `head` parameter its sibling has,
+    reading the blob through `gittree.GitTree.read` — *not* `open_tree`: this is
+    one small file, and `RevTree` would build a `git ls-tree -r` index of all
+    13,821 paths (~3.8 s) on every push to answer about one path that is usually
+    absent. `GitTree.read` is the same seam without the index and already spells
+    absence as `None`. The parse was split into `_parse_allowlist` so a waiver
+    cannot mean one thing on the disk and another in a commit, and the
+    module-level `ALLOWLIST` path became a repo-relative `ALLOWLIST_REL`
+    constant — a `ROOT /` path can only ever name the disk, and it was also the
+    second global the self-test had to repoint, which is one more way for a
+    fixture to read the real repository.
+
+    Note the asymmetry with gate 8, since it is deliberate: an absent allowlist
+    waives nothing and so fails *toward strict*, whereas an absent
+    `quote-names-baseline.txt` would forgive nothing and therefore accuse
+    everything. That is why gate 8 refuses to return a verdict without its file
+    (step 13) and gate 9 is content to carry on without its own.
+
+    Four self-test cases pin the provenance: an uncommitted waiver is invisible
+    to `--head`; a committed one is not (the control, without which a reader
+    returning `{}` for every revision would pass while refusing every legitimate
+    sweep); a waiver is not backdated onto the commit before it; and a tree with
+    no allowlist waives nothing.
+
+    Gate 9's end-to-end cases are worth their cost for a reason unique to it: it
+    is the only gate in the hook that calls its checker **once per pushed sha**,
+    so it has a failure mode no other gate's case can see — a `$pushed_shas`
+    loop that iterates zero times prints nothing, refuses nothing, and still
+    reports the gate as having run.
 
 ### Why it is not done yet
 
@@ -116369,3 +116660,97 @@ outer number fit; that trades a harness timeout for a real one.
 Filed rather than fixed because the tree was mid-re-run when it was found, and
 because option 1 touches the gate/boot seam, which deserves its own change
 rather than a rider on a rebooted test.
+### Lesson 110: a control that is drawn from live state looks more wired than one that is not (lane C, 2026-09-04)
+
+`apps/spreadsheet` drew a toolbar of twelve buttons. The bold button was filled
+in when the selected cell was bold; the alignment buttons showed which of the
+three was in force; the border button lit when the cell had borders; the freeze
+button lit when panes were frozen. All of that was read from the live document
+on every frame, and all of it was correct.
+
+None of the twelve could be clicked. `handle_left_click` had no hit test for the
+toolbar at all -- the renderer walked a private `bx` accumulator that existed
+only inside `render_toolbar`, so nothing outside it knew where any button was.
+The handler's own comment said so, and said what to do about it:
+
+> Not a cell: the toolbar, the formula bar, the scrollbars. Left unconsumed so
+> that whatever eventually handles those can see it
+
+Nothing ever did. The same file's find-and-replace panel drew a "Replace:" field
+that no key could type into and three buttons -- Find Next, Replace, Replace All
+-- that no click could press; `replace_current` and `replace_all` were written,
+tested, and had no caller anywhere. Five of the nine features the file's own
+module header advertised were reachable by no key and no click.
+
+**The lesson is about how this hides.** An unwired control that is drawn from a
+constant looks dead: the border button would have been permanently unlit and
+someone would have asked why. An unwired control drawn from *live state* looks
+alive. Select a bold cell and the B button lights up; the panel is clearly
+tracking the document, so the natural conclusion is that it works. Every signal
+the eye uses to check "is this connected?" is present, and all of them are
+answering a different question -- whether the *renderer* can see the state, not
+whether the *handler* can see the click.
+
+The repair is the same one this tree has reached for repeatedly (`ScrollbarGeometry`,
+`col_screen_x`): **one geometry function, two callers.** `toolbar_buttons()`
+returns where each button is, what it does, and how it is drawn;
+`render_toolbar` draws that list and `toolbar_button_at` hit-tests it. A button
+that is drawn is a button that can be pressed, by construction, and a new button
+cannot be added to one without the other.
+
+The corollary for reviewing: to check whether a control is wired, do not look at
+what it draws. Search for its *action* and count callers outside the test
+module. Fifteen functions in this file had none.
+
+### Lesson 111: two copies of a rule agree on whichever one was written second (lane C, 2026-09-04)
+
+`Sheet::set_cell_input` and `Sheet::set_cell` each ended with the same four
+lines: if the cell has no value and no raw input, remove it from the map,
+otherwise insert it. Not stored blank is a real optimisation -- an empty sheet
+costs nothing and `export_csv` derives its bounds from the key set.
+
+The rule was wrong, in both copies, in the same way: **a cell's formatting is
+also something worth keeping.** Selecting an empty column and making it currency
+-- which is how anyone lays out a sheet before typing into it -- built a cell
+with a format and no text, which both copies dropped. The format vanished with
+no error, nothing on screen, and no test noticing, because the two callers
+agreed with each other perfectly.
+
+It stayed invisible for as long as the toolbar was unclickable (lesson 110):
+there was no way to ask for the thing that did not work. Wiring the toolbar made
+it a bug you could hit in the first ten seconds. Two defects that each conceal
+the other are not twice the work to find; they are indefinitely hidden until one
+of them is fixed.
+
+Both copies are now one private `store`, whose doc comment states the rule and
+why formatting counts. The same invariant was broken at the other end --
+`delete_selection` wrote `Cell::empty()`, resetting the format along with the
+contents -- so Delete now clears what is in a cell and not how it is drawn,
+which is what every spreadsheet does.
+
+### Lesson 112: a getter the harness calls once is a getter the app cannot use to report anything (lane C, 2026-09-04)
+
+`oswindow::app::App::title` was read exactly once, when the window was created.
+The trait said so, with a reason: making it live "would mean re-reading it on
+every event to find out whether it had changed, which is a round trip per mouse
+move to answer no".
+
+Every part of that is either wrong or avoidable. Re-reading is a local call that
+builds a `String` -- no round trip. Only a *difference* costs one, because the
+loop compares against the title it last sent. And the natural place to do it is
+the batch boundary, not the event: a drag of two hundred mouse moves is one
+boundary.
+
+What the rule bought was a fleet of applications whose titles were true for one
+instant. `apps/slides` was wired an hour before this was noticed; it opens saying
+"slide 1 of 6" and says it on slide six. Its test asserts that the title follows
+the current slide -- and passes, because the test calls `title()` itself. That is
+the shape this window has hit five times now: **a check that runs, passes, and is
+about the wrong thing.** The test was not wrong about the app; it was wrong about
+who its reader is.
+
+The general form: when a trait method's contract is "called once", every
+implementor that computes it from mutable state has written a latent bug, and no
+test of that implementor can find it, because the fault is in the *frequency of
+the call* and the implementor does not make the call. Look for these by grepping
+the harness for the call site, not the implementors for correctness.

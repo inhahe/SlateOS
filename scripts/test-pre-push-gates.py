@@ -224,12 +224,28 @@ def test_the_request_deletion_gate_judges_the_commit(text):
 # the conversion is seven separate edits to one file, and "did gate 6 get the
 # flag too?" is exactly the question a reader of the hook cannot answer by
 # looking, because a gate that dropped it looks like every other gate.
+#
+# ADDING TO IT IS PART OF CONVERTING, and that is not a nicety -- it was missed
+# twice. Gates 8 and 11 were converted on 2026-09-02 and 2026-09-03, wired with
+# `--head "$sha"` in the hook, and *not* listed here until 2026-09-04. So for
+# two days the guard covered five of the seven converted gates and nothing said
+# so: an unlisted gate does not fail this suite, it is simply never asked
+# about, which reads exactly like a gate that passed. They were found by
+# grepping the hook for `--head` and diffing that against this dict -- by hand,
+# which is the comparison this dict exists to make unnecessary.
+#
+# So: the commit that adds `--head` to a gate adds its checker here. A guard
+# that has to be remembered is only as good as the memory of whoever last
+# extended it, and the evidence above is that the memory is not good enough.
 HEAD_GATES = {
     "multicall-aliases.py": "gate 2, unreachable command names",
     "raced-globals.py": "gate 3, raced process-globals",
     "argv-utf8.py": "gate 4, argv read as String",
+    "getopt-ambiguity-check.py": "gate 5, long-option tables",
     "host-errmsg.py": "gate 6, host error text",
+    "quote-names.py": "gate 8, file names in diagnostics",
     "check-requests-not-deleted.py": "gate 9, request deletion",
+    "check-doc-links.py": "gate 11, dead doc links",
 }
 
 
@@ -317,6 +333,40 @@ def test_the_path_scope_is_taken_from_the_push_not_from_head(text):
     # Not merely "does it mention pushed_shas": a helper that passed both would
     # still be answering about HEAD, since `rev-list A B` unions the two.
     check("...and not from whichever branch happens to be checked out",
+          re.search(r"\bHEAD\b", inner) is not None, False)
+
+
+def test_gate_5_derives_its_own_scope_from_the_push_too(text):
+    """`touches()` is not the only place a scope is computed.
+
+    Gate 5 is scoped by utility name rather than by path — each name costs a WSL
+    round trip, so it checks the bins the push rewrites and not all 24 — and it
+    therefore derives its own file list instead of going through `touches()`.
+    That put a second copy of the same defect in the file, and the second copy
+    outlived the first: `touches()` was converted to `$pushed_shas`, and this
+    helper went on asking `git rev-list HEAD` for another two days.
+
+    The consequence is worse here than a wrong answer, because an empty scope is
+    this gate's *skip* condition. Pushing `feature` from `main` left the list
+    empty, which read as "this push rewrites no table" — so the gate stood down
+    and said so in the tally, and the table went out unjudged by a gate that was
+    correctly wired to `--head` and pointed at exactly the right commit. Reading
+    the right revision does not help when the list of things to read in it came
+    from somewhere else.
+    """
+    code = _joined(code_only(text))
+    body = re.search(r"^getopt_scope_for\(\)\s*\{(.*?)^\}", code,
+                     re.MULTILINE | re.DOTALL)
+    check("gate 5 still derives its scope in one named helper",
+          body is not None, True)
+    if body is None:
+        return
+    inner = body.group(1)
+    # It is handed the sha, and every git command in it must be asking about
+    # that sha. `"$1"` is the only spelling that reaches the caller's loop.
+    check("gate 5's scope is asked about the sha being pushed",
+          '"$1"' in inner, True)
+    check("...and not about whichever branch happens to be checked out",
           re.search(r"\bHEAD\b", inner) is not None, False)
 
 

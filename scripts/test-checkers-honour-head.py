@@ -996,6 +996,132 @@ def case_gate4_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# Gate 5 -- getopt-ambiguity-check.py
+#
+# The defect it looks for: a `LONG_OPTIONS` table that disagrees with the one
+# the real GNU utility carries. The table -- not the set of options we handle
+# -- is what decides whether an abbreviation like `--v` is ambiguous, so a
+# dropped entry silently changes what `yes --v` does.
+#
+# WHY THIS GATE'S CASES LOOK DIFFERENT FROM THE OTHERS'. Every other checker
+# here compares a tree against a baseline file, so both sides of the comparison
+# can be written into the fixture. This one compares a tree against *the host*:
+# it asks the machine's own GNU `yes` what its table is, over WSL. Only one
+# side is ours, and only that side is what `--head` selects. So the fixture
+# carries a real utility's real table, and the mutation is a name removed from
+# it -- which is the shape of four of the five defects that motivated the gate
+# (`mv` lacked `--no-copy`, `rm` and `split` were each missing an entry).
+#
+# `yes` is the utility chosen because its table is two entries that have not
+# moved in decades, so a case failing means the seam broke and not that a
+# distribution shipped a different coreutils.
+_YES_OK = """\
+const LONG_OPTIONS: &[(&str, Takes)] = &[("help", Takes::Nothing), \
+("version", Takes::Nothing)];
+"""
+
+# `--version` dropped. GNU has it and we would not, which is the dangerous
+# direction: the abbreviation `--v` resolves against a table that no longer
+# lists it.
+_YES_BROKEN = """\
+const LONG_OPTIONS: &[(&str, Takes)] = &[("help", Takes::Nothing)];
+"""
+
+
+def _getopt_repo(tmp: str, name: str) -> str:
+    return new_repo(tmp, name, ("getopt-ambiguity-check.py",))
+
+
+_NO_GNU: list[bool] = []
+
+
+def _gnu_userland_missing(root: str) -> bool:
+    """Whether this host has no GNU utilities to compare against.
+
+    The checker exits 0 with a note in that case -- correctly; a comparison
+    that cannot be made has nothing to say -- but that makes both arms of every
+    case below agree for a reason that has nothing to do with `--head`. Rather
+    than let the group pass vacuously, it is detected and announced.
+
+    Cached: the answer is a property of the host, and asking costs a WSL probe.
+    """
+    if not _NO_GNU:
+        out = run_checker(root, "getopt-ambiguity-check.py", "yes")
+        _NO_GNU.append("no GNU userland available" in out.stdout + out.stderr)
+    return _NO_GNU[0]
+
+
+def case_gate5_a_tidied_worktree_cannot_hide_a_committed_table(tmp: str) -> None:
+    """The silent half: the commit drops an option, the disk has it back."""
+    root = _getopt_repo(tmp, "g5a")
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+    sha = commit(root)
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+
+    if _gnu_userland_missing(root):
+        print("  SKIP gate 5: no GNU userland on this host to compare against")
+        return
+    disk = run_checker(root, "getopt-ambiguity-check.py", "yes")
+    rev = run_checker(root, "getopt-ambiguity-check.py", "yes", "--head", sha)
+    check("gate 5: the disk sees nothing wrong", disk.returncode, 0)
+    check("gate 5: ...and the commit is refused anyway", rev.returncode, 1)
+    check("gate 5: ...naming the option the commit dropped",
+          "version" in rev.stdout + rev.stderr, True)
+
+
+def case_gate5_an_uncommitted_edit_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: work in progress on the disk, nothing wrong in the commit."""
+    root = _getopt_repo(tmp, "g5b")
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+    sha = commit(root)
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+
+    if _gnu_userland_missing(root):
+        print("  SKIP gate 5: no GNU userland on this host to compare against")
+        return
+    disk = run_checker(root, "getopt-ambiguity-check.py", "yes")
+    rev = run_checker(root, "getopt-ambiguity-check.py", "yes", "--head", sha)
+    check("gate 5: the disk refuses the uncommitted edit", disk.returncode, 1)
+    check("gate 5: ...but the commit being pushed is clean", rev.returncode, 0)
+
+
+def case_gate5_a_bin_absent_from_the_disk_is_still_judged(tmp: str) -> None:
+    """Enumeration, not just reading, must come from the revision.
+
+    A checker that listed the disk and read the revision would find no bin at
+    all here and report a clean tree -- the same "found nothing, called it
+    clean" failure the floor in `main` exists for, one level down.
+    """
+    root = _getopt_repo(tmp, "g5c")
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+    sha = commit(root)
+    remove(root, "userspace/coreutils/src/bin/yes.rs")
+
+    if _gnu_userland_missing(root):
+        print("  SKIP gate 5: no GNU userland on this host to compare against")
+        return
+    disk = run_checker(root, "getopt-ambiguity-check.py", "yes")
+    rev = run_checker(root, "getopt-ambiguity-check.py", "yes", "--head", sha)
+    check("gate 5: a deleted bin leaves the disk with nothing to say",
+          disk.returncode, 0)
+    check("gate 5: ...but the revision still carries it", rev.returncode, 1)
+    check("gate 5: ...and it is counted as a table that was checked",
+          "1 table(s) checked" in rev.stdout, True)
+
+
+def case_gate5_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
+    """Exit 2, not 1: `run-checker.sh` reads 1 as a finding about a table."""
+    root = _getopt_repo(tmp, "g5d")
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+    commit(root)
+
+    proc = run_checker(root, "getopt-ambiguity-check.py", "--head", "nosuchrev")
+    check("gate 5: an unopenable revision exits 2", proc.returncode, 2)
+    check("gate 5: ...naming the revision it could not read",
+          "nosuchrev" in proc.stderr, True)
+
+
+# --------------------------------------------------------------------------
 # Gate 6 -- host-errmsg.py
 #
 # The defect it looks for: a diagnostic that interpolates an `io::Error` with
@@ -1341,6 +1467,557 @@ def case_gate6_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# Gate 8 -- quote-names.py
+#
+# The defect it looks for: a diagnostic that interpolates a file name straight
+# into its message, so a name containing a newline forges a line of the
+# program's stderr.
+#
+# Converted on 2026-09-02 and given no behavioural cases at all until
+# 2026-09-04 -- it was wired with `--head "$sha"`, listed in
+# `test-pre-push-gates.py`'s HEAD_GATES, and therefore *asserted to be wired*
+# for two days without one line of evidence that the flag changed what it
+# decided. That is the gap this block closes, and it is worth naming because
+# the two kinds of assertion look interchangeable in a summary and are not: a
+# checker can accept `--head`, be called with it correctly, and ignore it, and
+# only a fixture whose commit and worktree disagree can tell.
+# --------------------------------------------------------------------------
+
+_QN_LEAK = '''\
+fn f(p: &std::path::Path) {
+    eprintln!("cut: {p}: no such file");
+}
+'''
+
+_QN_OK = '''\
+fn f(p: &std::path::Path) {
+    eprintln!("cut: {}: no such file", quotef_os(&p));
+}
+'''
+
+# The baseline's key, spelled the way `quote-names-baseline.txt` spells it:
+# `<path>:<count>`. The count is what makes this ratchet different from gates
+# 4 and 6, whose baselines name findings -- so a case that wants to loosen the
+# allowance raises a number rather than adding a line.
+_QN_FILE = "userspace/coreutils/src/bin/tool.rs"
+_QN_BASELINE = "# nothing known-unquoted yet\n"
+
+
+def _quote_repo(tmp: str, name: str) -> str:
+    """A repository with lane B's zone present and nothing leaking a name in it.
+
+    `clean.rs` is in every fixture, committed, in both trees, and is not part
+    of any case's argument. It is there so that "the checker found nothing" can
+    never be reached by the checker finding no *files* -- which, for this gate
+    in particular, is not hypothetical: reporting an empty corpus as a clean
+    tree is the defect fixed the same day these cases were written.
+    """
+    root = new_repo(tmp, name, ("quote-names.py",))
+    write(root, "scripts/quote-names-baseline.txt", _QN_BASELINE)
+    write(root, "userspace/coreutils/src/bin/clean.rs", _QN_OK)
+    return root
+
+
+def case_gate8_a_tidied_worktree_cannot_hide_a_committed_leak(tmp: str) -> None:
+    """The silent half: the commit interpolates a name, the disk quotes it."""
+    root = _quote_repo(tmp, "g8a")
+    write(root, _QN_FILE, _QN_LEAK)
+    sha = commit(root)
+    write(root, _QN_FILE, _QN_OK)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk sees nothing unquoted", disk.returncode, 0)
+    check("gate 8: ...and the commit is refused anyway", rev.returncode, 1)
+    check("gate 8: ...naming the file the commit leaks from",
+          "tool.rs" in rev.stdout + rev.stderr, True)
+
+
+def case_gate8_an_uncommitted_leak_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: an unfinished edit on the disk, nothing wrong in the commit."""
+    root = _quote_repo(tmp, "g8b")
+    sha = commit(root)
+    write(root, _QN_FILE, _QN_LEAK)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk refuses the uncommitted leak", disk.returncode, 1)
+    check("gate 8: ...but the commit being pushed is clean", rev.returncode, 0)
+
+
+def case_gate8_the_baseline_is_read_from_the_same_tree(tmp: str) -> None:
+    """The ratchet must not be loosened by a number nobody is publishing.
+
+    This baseline is a *count* per file rather than a list of findings, which
+    makes the failure quieter than gates 4 and 6: loosening it is editing a
+    digit, not adding a line, and a digit changed in the working tree and not
+    committed is invisible in review by construction. If the count came off the
+    disk, an author could raise it, push the leak, and drop the edit -- and the
+    hook's own advice not to raise a number would be enforced against a file
+    nobody was publishing.
+    """
+    root = _quote_repo(tmp, "g8c")
+    write(root, _QN_FILE, _QN_LEAK)
+    sha = commit(root)
+    check("gate 8: the fixture starts refused",
+          run_checker(root, "quote-names.py", "--check",
+                      "--head", sha).returncode, 1)
+
+    # Forgive it in a *commit*, and un-forgive it on the *disk*.
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+    sha = commit(root, "baseline it")
+    write(root, "scripts/quote-names-baseline.txt", _QN_BASELINE)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk's baseline forgives nothing", disk.returncode, 1)
+    check("gate 8: the commit's baseline forgives it, and passes",
+          rev.returncode, 0)
+
+
+def case_gate8_a_raised_count_is_read_from_the_same_tree(tmp: str) -> None:
+    """The count, not merely the presence of the line.
+
+    The case above swaps a baseline *entry* in and out, which a checker reading
+    the disk's file but the commit's entry-set would still pass. This one keeps
+    the same entry in both trees and changes only the number: the commit
+    forgives two sites, the disk forgives one, and the commit has two. There is
+    no version of this that a per-file granularity can answer -- the difference
+    between the trees is a single digit, which is exactly the granularity this
+    ratchet chose and therefore exactly what has to move with the tree.
+    """
+    root = _quote_repo(tmp, "g8n")
+    write(root, _QN_FILE, _QN_LEAK.replace(
+        '    eprintln!("cut: {p}: no such file");\n',
+        '    eprintln!("cut: {p}: no such file");\n'
+        '    eprintln!("cut: {p}: is a directory");\n'))
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:2\n")
+    sha = commit(root)
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk's lower count makes the second site new",
+          disk.returncode, 1)
+    check("gate 8: the commit's own count forgives both", rev.returncode, 0)
+
+
+def case_gate8_a_file_absent_from_the_disk_is_still_judged(tmp: str) -> None:
+    """The third input: the enumeration, not only the contents.
+
+    Every case above edits a file that exists on both sides, so a checker
+    listing `.rs` files from the disk and reading their text from the revision
+    passes all of them. Here the leaking file is gone from the working tree
+    entirely -- a branch since tidied, or a file that exists only in what is
+    being pushed.
+    """
+    root = _quote_repo(tmp, "g8d")
+    write(root, _QN_FILE, _QN_LEAK)
+    sha = commit(root)
+    remove(root, _QN_FILE)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk has no such file to judge", disk.returncode, 0)
+    check("gate 8: the commit still has it, and is refused", rev.returncode, 1)
+    check("gate 8: ...naming the file the disk lacks",
+          "tool.rs" in rev.stdout + rev.stderr, True)
+
+
+def case_gate8_the_shrunk_half_of_the_ratchet_describes_the_commit(tmp: str) -> None:
+    """The other direction through the same two inputs.
+
+    Unlike gates 4 and 6, a stale baseline entry does not *fail* here -- it
+    prints `fixed: <path> N -> M` and the run still exits 0, because this
+    ratchet's entries are counts that shrink one site at a time rather than
+    findings that are either present or not. That makes the report the only
+    observable, and it is worth pinning for the reason the corpus guard exists:
+    `fixed:` is an invitation to run `--write-baseline`, so it had better be
+    describing the tree being published rather than whatever the author has
+    open.
+
+    Here the repair is committed and the disk still has the defect. The
+    commit's entry is the stale one and must be reported; the disk's is live
+    and must not be.
+    """
+    root = _quote_repo(tmp, "g8f")
+    write(root, _QN_FILE, _QN_LEAK)
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+    commit(root)
+    write(root, _QN_FILE, _QN_OK)
+    sha = commit(root, "repair it")
+    write(root, _QN_FILE, _QN_LEAK)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk's site is still there, so nothing is reported fixed",
+          "fixed:" in disk.stdout, False)
+    check("gate 8: ...and the disk run passes on its own baseline",
+          disk.returncode, 0)
+    check("gate 8: the commit's baseline entry is dead and is reported so",
+          "fixed:" in rev.stdout, True)
+    check("gate 8: ...naming the file whose count the commit dropped",
+          "tool.rs" in rev.stdout, True)
+
+
+def case_gate8_build_output_is_skipped_on_the_side_that_can_see_it(tmp: str) -> None:
+    """The rule only the disk arm can break, so only it can pin.
+
+    A revision never lists `target/`, so the skip is unobservable there. The
+    working-tree arm reaches the disk through `gittree.WorkTree`, which prunes
+    build directories by path component; if that is ever swapped back for a
+    plain walk, this gate starts reporting generated sources in a directory of
+    tens of gigabytes and becomes something people bypass rather than fix.
+
+    The control carries the weight: the same bytes one directory across must
+    still be found, or "nothing reported" would be satisfied by a checker that
+    had stopped reading the disk at all.
+    """
+    root = _quote_repo(tmp, "g8g")
+    sha = commit(root)
+    # After the commit, so it is on the disk and in no revision -- which is
+    # what build output is.
+    write(root, "userspace/coreutils/target/debug/build/gen.rs", _QN_LEAK)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: generated sources under target/ are not judged",
+          (disk.returncode, rev.returncode), (0, 0))
+
+    write(root, "userspace/coreutils/notes/gen.rs", _QN_LEAK)
+    disk2 = run_checker(root, "quote-names.py", "--check")
+    check("gate 8: ...while the same bytes elsewhere on the disk are",
+          disk2.returncode, 1)
+
+
+def case_gate8_a_tree_with_no_corpus_is_not_a_clean_tree(tmp: str) -> None:
+    """The measured defect, as a per-tree question.
+
+    Reported clean -- and worse than clean. Against a baseline still listing a
+    file, an emptied corpus printed `fixed: ... 1 -> 0` and
+    `ok -- 0 known sites in 0 files (1 improved)` and exited 0: the loss of the
+    gate's own subject read as a burn-down, over wording that invites a
+    `--write-baseline` discarding every site the ratchet guards.
+
+    It belongs in *this* suite rather than only in the checker's self-test
+    because it is a question about which tree is being read. The commit is what
+    disarms the gate; the working tree -- where the author is mid-rename, or
+    has simply not deleted the old directory yet -- still has the corpus and
+    answers that all is well. Exit 2, not 1: the gate has lost its subject
+    rather than found a defect, and gate 8's refusal tells an author their
+    diagnostics leak names.
+    """
+    root = _quote_repo(tmp, "g8h")
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+    write(root, _QN_FILE, _QN_LEAK)
+    commit(root)
+    remove(root, _QN_FILE)
+    remove(root, "userspace/coreutils/src/bin/clean.rs")
+    sha = commit(root, "lane B's zone goes somewhere else")
+    write(root, "userspace/coreutils/src/bin/clean.rs", _QN_OK)
+    write(root, _QN_FILE, _QN_LEAK)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk still has a corpus and is judged normally",
+          disk.returncode, 0)
+    check("gate 8: the commit has none, which is no verdict rather than a pass",
+          rev.returncode, 2)
+    check("gate 8: ...saying so, rather than exiting quietly",
+          "lost its subject" in rev.stderr, True)
+    # The load-bearing negative, and the exact shape of the measured failure:
+    # the run must not congratulate anyone on a burn-down it did not observe.
+    check("gate 8: ...and the vanished corpus is not reported as progress",
+          "improved" in rev.stdout, False)
+
+
+def case_gate8_a_baseline_absent_from_the_tree_is_not_a_pile_of_new_findings(
+        tmp: str) -> None:
+    """The second input's version of the guard above, failing the other way.
+
+    A missing corpus goes silent; a missing *baseline* goes loud and wrong. It
+    reads back as an empty allowance rather than as an error, so every site the
+    real file forgives becomes a NEW finding and the push is refused with gate
+    8's whole refusal over diagnostics nobody touched. On the real tree that is
+    1798 sites across 777 files.
+
+    The checker's comment argued the empty read was "the safe direction -- it
+    can only over-report". That is the argument `run-checker.sh` exists to
+    reject: a false accusation is not the safe direction, it is the failure
+    that gets a gate bypassed, and a bypassed gate protects nothing. Gates 4
+    and 6 both exit 2 here; gate 8 shipped its conversion without the guard,
+    and this case is the one that was missing transposed across.
+
+    Per-tree for the corpus guard's reason: a commit moves the baseline, and
+    the disk still has it.
+    """
+    # The allowance must be non-empty, or this case cannot see the failure it
+    # is named for. Against an empty baseline a missing one is merely a silent
+    # false pass -- so the fixture forgives a real site, and taking the
+    # baseline away turns that forgiven site into an accusation.
+    root = _quote_repo(tmp, "g8i")
+    write(root, _QN_FILE, _QN_LEAK)
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+    commit(root)
+    remove(root, "scripts/quote-names-baseline.txt")
+    sha = commit(root, "the baseline goes somewhere else")
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk's baseline still forgives the site it names",
+          disk.returncode, 0)
+    check("gate 8: the commit's is gone, which is no verdict", rev.returncode, 2)
+    check("gate 8: ...naming the file rather than blaming a diagnostic",
+          "quote-names-baseline.txt" in rev.stderr, True)
+    # Without the guard this run does not go quiet, it goes wrong: the forgiven
+    # site reads as new and the author is told a file they never touched leaks
+    # names into stderr.
+    check("gate 8: ...and the forgiven site is not accused of being new",
+          "NEW diagnostic" in rev.stdout + rev.stderr, False)
+    # The guard must not stop the one mode whose job is to create the file.
+    # Checked on the disk arm: `--write-baseline` writes the working tree and
+    # is refused outright with `--head`, so the revision arm cannot say this.
+    remove(root, "scripts/quote-names-baseline.txt")
+    boot = run_checker(root, "quote-names.py", "--write-baseline")
+    check("gate 8: a bootstrap run still creates the baseline it lacks",
+          boot.returncode, 0)
+
+
+def case_gate8_a_baseline_cannot_be_written_from_a_revision(tmp: str) -> None:
+    """`--write-baseline --head` is refused, not quietly resolved either way.
+
+    Recording a past commit's counts as the current allowance would un-fix
+    everything repaired since; writing the *worktree's* counts while claiming
+    to have read a revision would be worse, because the output would name a sha
+    it did not use. Refusing is the only answer that is not a lie, and it is
+    asserted here so a later tidy-up cannot pick one of the other two.
+    """
+    root = _quote_repo(tmp, "g8j")
+    sha = commit(root)
+    proc = run_checker(root, "quote-names.py", "--write-baseline", "--head", sha)
+    check("gate 8: --write-baseline with --head is refused", proc.returncode, 2)
+    check("gate 8: ...saying which two flags cannot be combined",
+          "--write-baseline" in proc.stderr, True)
+
+
+def case_gate8_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
+    """Exit 2, not 1 -- the contract every converted gate has with run-checker.sh.
+
+    Exit 1 gets gate 8's refusal printed over it, which tells the author a
+    diagnostic of theirs hands a file name control of stderr and offers the
+    bypass. A revision that could not be read says nothing about anybody's
+    diagnostics.
+
+    The message is asserted as well as the status, and here that matters more
+    than usual: this gate now has *two* routes to exit 2 -- an unreadable
+    revision and a tree with no corpus -- and they want opposite responses from
+    whoever reads the log. Naming the revision is what separates them.
+    """
+    root = _quote_repo(tmp, "g8k")
+    commit(root)
+    proc = run_checker(root, "quote-names.py", "--check", "--head", "nosuchrev")
+    check("gate 8: an unreadable --head exits 2, not 1", proc.returncode, 2)
+    check("gate 8: ...naming the revision it could not read",
+          "nosuchrev" in proc.stderr, True)
+
+
+# --------------------------------------------------------------------------
+# Gate 9 -- check-requests-not-deleted.py
+#
+# The defect it looks for: a request file removed rather than stamped. Unlike
+# every gate above it there is no corpus and no ratchet -- its subject is a
+# *diff*, `base..head` under `requests/`, so the shape of a case is a two-commit
+# history rather than a tree that disagrees with the disk about its contents.
+#
+# `--base` is passed explicitly throughout. Left to itself the checker resolves
+# a merge base against `origin/main` or `main`, which in a fixture depends on
+# what `init.defaultBranch` happens to be on the host; pinning it keeps every
+# case below about the two inputs that are actually under test -- which commit
+# is judged, and where the waiver list comes from.
+# --------------------------------------------------------------------------
+
+_G9_CHECKER = "check-requests-not-deleted.py"
+_G9_REQ = "requests/a-b-one.md"
+_G9_KEEP = "requests/a-b-two.md"
+
+
+def _reqdel_repo(tmp: str, name: str) -> tuple[str, str]:
+    """A repository with two requests committed. Returns (root, base sha).
+
+    `a-b-two.md` is in every fixture and is never the subject of a case. It is
+    there so that "no deletions found" can never be reached by `requests/`
+    being empty or unmatched by the path filter -- the failure mode this
+    checker's own docstring calls out as reading exactly like a healthy tree.
+    """
+    root = new_repo(tmp, name, (_G9_CHECKER,))
+    write(root, _G9_REQ, "# a request\n\n**Status:** OPEN\n")
+    write(root, _G9_KEEP, "# another request\n\n**Status:** OPEN\n")
+    return root, commit(root)
+
+
+def case_gate9_a_staged_restore_cannot_hide_a_committed_deletion(tmp: str) -> None:
+    """The silent half, and the reason `--head` was added to this gate.
+
+    A *staged* restore, not merely a present file: `git diff <base>` compares
+    against the index-plus-worktree view, so an untracked file is simply absent
+    and hides nothing. `git add` is the ordinary way to put a file back, and a
+    merge that reintroduces one stages it for you -- which is what makes this
+    reachable by accident rather than only by intent.
+    """
+    root, base = _reqdel_repo(tmp, "g9a")
+    remove(root, _G9_REQ)
+    sha = commit(root, "delete a request")
+    write(root, _G9_REQ, "# restored, uncommitted\n")
+    git(root, "add", _G9_REQ)
+
+    disk = run_checker(root, _G9_CHECKER, "--base", base)
+    rev = run_checker(root, _G9_CHECKER, "--base", base, "--head", sha)
+    check("gate 9: the staged restore hides the deletion from the disk",
+          disk.returncode, 0)
+    check("gate 9: ...and the commit being pushed is refused anyway",
+          rev.returncode, 1)
+    check("gate 9: ...naming the request the commit removes",
+          "a-b-one.md" in rev.stdout + rev.stderr, True)
+
+
+def case_gate9_an_uncommitted_deletion_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: a file removed on the disk, nothing removed in the commit.
+
+    The mirror image matters as much as the case above. A gate that blocks a
+    push of unrelated clean commits over a local `rm` is a gate whose bypass
+    variable gets exported in a shell profile, after which it protects nothing.
+    """
+    root, base = _reqdel_repo(tmp, "g9b")
+    write(root, "requests/a-b-three.md", "# a third request\n")
+    sha = commit(root, "file another request")
+    remove(root, _G9_REQ)
+
+    disk = run_checker(root, _G9_CHECKER, "--base", base)
+    rev = run_checker(root, _G9_CHECKER, "--base", base, "--head", sha)
+    check("gate 9: the disk refuses the uncommitted deletion", disk.returncode, 1)
+    check("gate 9: ...but the commit being pushed removes nothing",
+          rev.returncode, 0)
+
+
+def case_gate9_the_allowlist_is_read_from_the_same_tree(tmp: str) -> None:
+    """The second input, and the one the conversion left behind.
+
+    `requests/.deletions-allowed` is a *waiver* list: a basename in it turns
+    this gate's refusal into a note. Read off the disk while the diff is read
+    from the commit, an author can waive a deletion in a file nobody is
+    publishing -- write the basename, push the deletion, drop the edit -- and
+    the request is gone from shared history with no record that a waiver was
+    ever claimed. That is worse than the staged-restore hole this gate's
+    `--head` was added for, because a staged restore leaves the file present
+    somewhere and this leaves nothing at all.
+
+    The hook already argues the point and enforces the wrong half of it: gate
+    9's `touches` includes `requests/.deletions-allowed` so that "editing the
+    waiver list must be the push that re-verifies it". Re-verifying it against
+    the working tree's copy is not that.
+    """
+    root, base = _reqdel_repo(tmp, "g9c")
+    remove(root, _G9_REQ)
+    sha = commit(root, "delete a request, waiving nothing")
+    check("gate 9: the fixture starts refused",
+          run_checker(root, _G9_CHECKER, "--base", base,
+                      "--head", sha).returncode, 1)
+
+    # The waiver that exists only on the disk.
+    write(root, "requests/.deletions-allowed",
+          "# waivers\na-b-one.md  # folded into a-b-two.md\n")
+
+    rev = run_checker(root, _G9_CHECKER, "--base", base, "--head", sha)
+    check("gate 9: an uncommitted waiver does not excuse a committed deletion",
+          rev.returncode, 1)
+
+    # The control: committed, the same waiver must work. Without this the
+    # assertion above is met by a checker that ignores the allowlist entirely,
+    # which would be a different bug with the same green.
+    committed = commit(root, "record the waiver")
+    ok = run_checker(root, _G9_CHECKER, "--base", base, "--head", committed)
+    check("gate 9: ...while a committed waiver does", ok.returncode, 0)
+    check("gate 9: ...quoting the reason it was given",
+          "folded into a-b-two.md" in ok.stdout, True)
+
+
+def case_gate9_a_rename_is_not_a_deletion_in_either_tree(tmp: str) -> None:
+    """The control on `-M`, per tree.
+
+    Fixing a slug or sweeping into an archive directory must pass, or the gate
+    makes tidying impossible and gets bypassed for the wrong reason. It is
+    per-tree because `-M` is computed over the pair of trees being diffed: a
+    checker that took the rename detection from one pair and the deletion list
+    from another would report the move as a disappearance.
+    """
+    root, base = _reqdel_repo(tmp, "g9d")
+    git(root, "mv", _G9_REQ, "requests/a-b-one-renamed.md")
+    sha = commit(root, "fix the slug")
+
+    disk = run_checker(root, _G9_CHECKER, "--base", base)
+    rev = run_checker(root, _G9_CHECKER, "--base", base, "--head", sha)
+    check("gate 9: a rename is not a deletion, on either side",
+          (disk.returncode, rev.returncode), (0, 0))
+
+
+def case_gate9_the_merge_base_is_taken_against_the_commit_being_judged(
+        tmp: str) -> None:
+    """The third input: the base, when nobody passes one.
+
+    Every case above pins `--base`, so none of them can see this. Left to
+    itself the checker resolves a merge base -- and it must resolve it against
+    the commit it is *judging*, not against `HEAD`. Using HEAD's merge base
+    while diffing another commit compares two unrelated points and reports
+    every request that differs between them, which on a real branch is a list
+    of other people's files.
+
+    The fixture is the off-branch push in miniature: `main` carries a request
+    that the branch under judgement never had, so a base taken from HEAD would
+    make that request look deleted by a commit that never touched it.
+    """
+    root, _ = _reqdel_repo(tmp, "g9e")
+    git(root, "branch", "-M", "main")
+    git(root, "checkout", "--quiet", "-b", "feature")
+    write(root, "requests/a-b-four.md", "# filed on the branch\n")
+    sha = commit(root, "file a request on the branch")
+    git(root, "checkout", "--quiet", "main")
+    # A request that exists only on `main`. If the base came from HEAD -- which
+    # is `main` -- the diff against `feature` would call this one deleted.
+    write(root, "requests/a-b-five.md", "# filed on main\n")
+    commit(root, "file a request on main")
+
+    rev = run_checker(root, _G9_CHECKER, "--head", sha)
+    check("gate 9: a branch other than HEAD is judged against its own base",
+          rev.returncode, 0)
+    check("gate 9: ...so main's own request is not reported as deleted by it",
+          "a-b-five" in rev.stdout + rev.stderr, False)
+
+
+def case_gate9_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
+    """Exit 2, not 1 -- the contract every converted gate has with run-checker.sh.
+
+    Exit 1 gets gate 9's refusal printed over it, which tells the author they
+    deleted a request, offers a `git checkout` to restore it, and explains how
+    to stamp it. A revision that could not be read says nothing about anybody's
+    requests, and the restore command it would print names a base it never
+    resolved.
+    """
+    root, base = _reqdel_repo(tmp, "g9f")
+    proc = run_checker(root, _G9_CHECKER, "--base", base, "--head", "nosuchrev")
+    check("gate 9: an unreadable --head exits 2, not 1", proc.returncode, 2)
+    check("gate 9: ...naming the revision it could not read",
+          "nosuchrev" in proc.stderr, True)
+
+
+# --------------------------------------------------------------------------
 # The hook, not the checker.
 #
 # Everything above runs the checker directly, which leaves the seam between the
@@ -1412,11 +2089,28 @@ def _push_fixture(tmp: str, name: str,
 _G2_REFUSAL = "command name exists that nothing can run"
 _G3_REFUSAL = "is raced by its own tests"
 _G4_REFUSAL = "dies on a legal filename"
+# Gate 5's second line, not its first: the first is "REFUSING to push — a
+# long-option table disagrees with GNU's", and the em dash in it is the thing
+# the comment above rules out.
+_G5_REFUSAL = "does not match the one the real utility carries"
 # Gate 6's own refusal sentence, not its summary line: "prints the host's error
 # text" also occurs in the *checker's* FIX advice, which is printed by a
 # `--check` run that the hook then goes on to allow. Matching it would call a
 # fixture refused on the strength of text from a gate that did not refuse it.
 _G6_REFUSAL = "The message is an interface. Anything that greps"
+# Gate 8's refusal sentence, not its summary line. The summary is "REFUSING to
+# push — a diagnostic above puts a file name straight into its message", whose
+# em dash the comment above rules out; and the shorter phrases in it recur in
+# the *checker's* own advice, which a run that the hook then allows still
+# prints. "hands the name control of stderr" occurs once, in the hook, in the
+# block that exits 1.
+_G8_REFUSAL = "hands the name control of stderr"
+# Gate 9's refusal paragraph, not its summary line. The summary is "REFUSING to
+# push — a commit being published deletes a file under requests/", em dash and
+# all; and "was deleted" is printed by the *checker*, which says it once per
+# violation whether or not the hook goes on to refuse. This clause is in the
+# heredoc that precedes `exit 1`, and nowhere else in the hook.
+_G9_REFUSAL = "the argument that settled something"
 
 
 def _push(work: str, ref: str = "main",
@@ -1833,6 +2527,279 @@ def case_gate6_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
           "tool.rs" in blob, True)
 
 
+def _g8_push_fixture(tmp: str, name: str) -> str:
+    """A push fixture for gate 8, with lane B's zone already published.
+
+    Only `quote-names.py` is installed, so every other gate stands down and a
+    refusal here can only have come from gate 8. `clean.rs` is in the seed for
+    the checker-level fixtures' reason -- so that a green run can never be
+    reached by the gate finding no corpus -- and the baseline is seeded with it
+    because gate 8 now refuses a tree that has no baseline at all, which would
+    otherwise make the seed push itself the thing that fails.
+    """
+    return _push_fixture(
+        tmp, name, checkers=("quote-names.py",),
+        seed={"scripts/quote-names-baseline.txt": _QN_BASELINE,
+              "userspace/coreutils/src/bin/clean.rs": _QN_OK},
+    )
+
+
+def case_gate8_the_hook_refuses_a_commit_the_worktree_no_longer_shows(
+        tmp: str) -> None:
+    """End to end: gate 8's own wiring, not some other gate's.
+
+    Each gate is a separate block with its own guard, its own loop and its own
+    `--head "$sha"`, so dropping the flag from *this* invocation leaves every
+    other case in this file green. That is the argument for a per-gate
+    end-to-end case, and gate 8 is the reason the argument is not theoretical:
+    it was converted on 2026-09-02, wired correctly, asserted to be wired by
+    `test-pre-push-gates.py`, and had no case like this one until 2026-09-04.
+    """
+    work = _g8_push_fixture(tmp, "g8push-hide")
+    write(work, _QN_FILE, _QN_LEAK)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a bin that interpolates a name")
+    # The tidy-up that makes the disk lie.
+    write(work, _QN_FILE, _QN_OK)
+
+    verdict, blob = _push(work, marker=_G8_REFUSAL)
+    check("gate 8 end to end: the push is refused", verdict, "refused")
+    check("gate 8 end to end: ...naming the file only the commit breaks",
+          "tool.rs" in blob, True)
+
+
+def case_gate8_the_hook_allows_a_clean_commit_under_a_dirty_worktree(
+        tmp: str) -> None:
+    """End to end, the other direction -- and the one that checks it ran.
+
+    A gate that had skipped itself would allow this, and would have allowed the
+    case above too if that refusal came from elsewhere. The hook's own tally is
+    the only thing separating "gate 8 passed" from "gate 8 was never asked", and
+    gate 8 has three ways to stand down: the `ALLOW_UNQUOTED_NAMES` bypass, a
+    `touches` scope that no file in the push matched, and an empty pushed-sha
+    list.
+    """
+    work = _g8_push_fixture(tmp, "g8push-wip")
+    write(work, "userspace/coreutils/src/bin/other.rs", _QN_OK)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a bin that quotes the name properly")
+    write(work, _QN_FILE, _QN_LEAK)
+
+    verdict, blob = _push(work, marker=_G8_REFUSAL)
+    check("gate 8 end to end: an uncommitted leak does not block",
+          verdict, "allowed")
+    check("gate 8 end to end: ...and the gate actually ran",
+          "quote-names" in _tally(blob)[0], True)
+
+
+def case_gate8_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` from `main`, for gate 8's loop.
+
+    Every case that pushes the branch it is standing on has `HEAD` and the sha
+    being pushed as the same commit, so `--head "$sha"` there is
+    indistinguishable from `git rev-parse HEAD` -- the blind spot that hid the
+    `touches` defect until 2026-09-02 and gate 5's private scope until
+    2026-09-04. It is per gate: gate 6's off-branch case says nothing about
+    gate 8's loop.
+    """
+    work = _g8_push_fixture(tmp, "g8push-elsewhere")
+    git(work, "checkout", "--quiet", "-b", "feature")
+    write(work, _QN_FILE, _QN_LEAK)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "an unquoted name on a branch we leave")
+    git(work, "checkout", "--quiet", "main")
+
+    verdict, blob = _push(work, "feature", marker=_G8_REFUSAL)
+    check("gate 8 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    check("gate 8 end to end: ...naming the file on that other branch",
+          "tool.rs" in blob, True)
+
+
+def _g9_push_fixture(tmp: str, name: str) -> str:
+    """A push fixture for gate 9, with two requests already published.
+
+    Only `check-requests-not-deleted.py` is installed, so a refusal here can
+    only be gate 9's. Two requests rather than one for the checker-level
+    fixtures' reason: `a-b-two.md` is never the subject of a case, so "no
+    deletions found" can never be reached by `requests/` being empty or
+    unmatched by the path filter -- the failure mode that reads exactly like a
+    healthy tree.
+
+    The requests are published in the seed commit, which matters more here than
+    in the other fixtures: this gate diffs against the merge base with
+    `origin/main`, so a request that was never pushed is not a request the base
+    has, and deleting it would be invisible rather than refused.
+    """
+    return _push_fixture(
+        tmp, name, checkers=("check-requests-not-deleted.py",),
+        seed={_G9_REQ: "# a request\n\n**Status:** OPEN\n",
+              _G9_KEEP: "# another request\n\n**Status:** OPEN\n"},
+    )
+
+
+def case_gate9_the_hook_refuses_a_commit_the_worktree_no_longer_shows(
+        tmp: str) -> None:
+    """End to end: gate 9's own wiring, and its own loop.
+
+    Gate 9 is the only gate in the hook that calls its checker once per pushed
+    sha -- the others hand their checker a single revision. So it has a way to
+    be wrong that no other gate's end-to-end case can see: a loop that iterates
+    zero times prints nothing, refuses nothing, and still reports the gate as
+    having run.
+    """
+    work = _g9_push_fixture(tmp, "g9push-hide")
+    remove(work, _G9_REQ)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "delete a landed request")
+    # The tidy-up that makes the disk lie. Staged, because `git diff <base>`
+    # cannot see an untracked file and an unstaged restore would hide nothing.
+    write(work, _G9_REQ, "# restored, uncommitted\n")
+    git(work, "add", _G9_REQ)
+
+    verdict, blob = _push(work, marker=_G9_REFUSAL)
+    check("gate 9 end to end: the push is refused", verdict, "refused")
+    check("gate 9 end to end: ...naming the request only the commit removes",
+          "a-b-one.md" in blob, True)
+
+
+def case_gate9_the_hook_allows_a_clean_commit_under_a_dirty_worktree(
+        tmp: str) -> None:
+    """End to end, the other direction -- and the one that checks it ran.
+
+    Gate 9 has four ways to stand down: the `ALLOW_REQUEST_DELETION` bypass, a
+    `touches` scope matching neither `requests/` nor the checker nor the
+    allowlist, an empty pushed-sha list, and the checker's own self-test
+    failing. Any of them allows this push, and three of them would have allowed
+    the case above too.
+    """
+    work = _g9_push_fixture(tmp, "g9push-wip")
+    write(work, "requests/a-b-three.md", "# a third request\n")
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "file another request")
+    remove(work, _G9_REQ)
+
+    verdict, blob = _push(work, marker=_G9_REFUSAL)
+    check("gate 9 end to end: an uncommitted deletion does not block",
+          verdict, "allowed")
+    check("gate 9 end to end: ...and the gate actually ran",
+          "request-deletion" in _tally(blob)[0], True)
+
+
+def case_gate9_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` from `main`, for gate 9's loop.
+
+    Every case that pushes the branch it is standing on has `HEAD` and the sha
+    being pushed as the same commit, so `--head "$sha"` there is
+    indistinguishable from reading `HEAD` -- and for this gate the merge base is
+    a second thing that would silently come from the wrong place. The checker
+    resolves it against whatever it is judging; if that were `HEAD` instead, the
+    diff would compare two unrelated points and report `main`'s own files.
+    """
+    work = _g9_push_fixture(tmp, "g9push-elsewhere")
+    git(work, "checkout", "--quiet", "-b", "feature")
+    remove(work, _G9_REQ)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "delete a request on a branch we leave")
+    git(work, "checkout", "--quiet", "main")
+
+    verdict, blob = _push(work, "feature", marker=_G9_REFUSAL)
+    check("gate 9 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    check("gate 9 end to end: ...naming the request on that other branch",
+          "a-b-one.md" in blob, True)
+
+
+def _g5_push_fixture(tmp: str, name: str) -> str:
+    """A push fixture for gate 5, with nothing under `bin/` yet.
+
+    Seeded deliberately *outside* `userspace/coreutils/src/bin/`, which is the
+    gate's scope: at seed time the gate must find nothing to compare and stand
+    down, so the seed push cannot be refused by the gate under test. A fixture
+    whose setup is refused does not fail, it lies -- it pushes nothing, and the
+    seed commit then rides along inside the case's own push and widens it.
+    """
+    return _push_fixture(
+        tmp, name, checkers=("getopt-ambiguity-check.py",),
+        seed={"userspace/coreutils/src/notes.txt": "not a bin\n"},
+    )
+
+
+def case_gate5_the_hook_refuses_a_commit_the_worktree_no_longer_shows(
+        tmp: str) -> None:
+    """End to end: gate 5's own wiring, not another gate's.
+
+    Each gate is a separate block with its own guard, its own loop and its own
+    `--head "$sha"`. Dropping the flag from *this* invocation leaves every
+    other case in this file green, which is why the proof is per gate.
+    """
+    work = _g5_push_fixture(tmp, "g5push-hide")
+    write(work, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a table with an option dropped")
+    # The tidy-up that makes the disk lie.
+    write(work, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+
+    if _gnu_userland_missing(work):
+        print("  SKIP gate 5 end to end: no GNU userland on this host")
+        return
+    verdict, blob = _push(work, marker=_G5_REFUSAL)
+    check("gate 5 end to end: the push is refused", verdict, "refused")
+    check("gate 5 end to end: ...naming the option only the commit drops",
+          "version" in blob, True)
+
+
+def case_gate5_the_hook_allows_a_clean_commit_under_a_dirty_worktree(
+        tmp: str) -> None:
+    """End to end, the other direction -- and the one that checks it ran.
+
+    A gate that had skipped itself would allow this, and would have allowed the
+    case above too if that refusal came from elsewhere. The hook's own tally is
+    what separates "gate 5 passed" from "gate 5 was never asked", and this gate
+    has three ways to skip: no GNU userland, a scope that names no bin, and an
+    empty pushed-sha list.
+    """
+    work = _g5_push_fixture(tmp, "g5push-wip")
+    write(work, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a table that agrees with GNU")
+    write(work, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+
+    if _gnu_userland_missing(work):
+        print("  SKIP gate 5 end to end: no GNU userland on this host")
+        return
+    verdict, blob = _push(work, marker=_G5_REFUSAL)
+    check("gate 5 end to end: an uncommitted table edit does not block",
+          verdict, "allowed")
+    check("gate 5 end to end: ...and the gate actually ran",
+          "getopt-table" in _tally(blob)[0], True)
+
+
+def case_gate5_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` from `main`, for gate 5's loop.
+
+    Every case that pushes the branch it is standing on has `HEAD` and the sha
+    being pushed as the same commit, so `--head "$sha"` there is
+    indistinguishable from `git rev-parse HEAD`. It is per gate: gate 6's
+    off-branch case says nothing about gate 5's loop.
+    """
+    work = _g5_push_fixture(tmp, "g5push-elsewhere")
+    git(work, "checkout", "--quiet", "-b", "feature")
+    write(work, "userspace/coreutils/src/bin/yes.rs", _YES_BROKEN)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a dropped option on a branch we leave")
+    git(work, "checkout", "--quiet", "main")
+
+    if _gnu_userland_missing(work):
+        print("  SKIP gate 5 end to end: no GNU userland on this host")
+        return
+    verdict, blob = _push(work, "feature", marker=_G5_REFUSAL)
+    check("gate 5 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    check("gate 5 end to end: ...naming the option on that other branch",
+          "version" in blob, True)
+
+
 def case_gate2_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
     """Exit 2, not 1.
 
@@ -2223,6 +3190,13 @@ CASES = (
     case_gate4_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate4_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate4_the_hook_judges_a_branch_it_is_not_standing_on,
+    case_gate5_a_tidied_worktree_cannot_hide_a_committed_table,
+    case_gate5_an_uncommitted_edit_does_not_block_a_clean_push,
+    case_gate5_a_bin_absent_from_the_disk_is_still_judged,
+    case_gate5_an_unopenable_revision_is_not_a_finding,
+    case_gate5_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate5_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate5_the_hook_judges_a_branch_it_is_not_standing_on,
     case_gate6_a_tidied_worktree_cannot_hide_a_committed_host_message,
     case_gate6_an_uncommitted_host_message_does_not_block_a_clean_push,
     case_gate6_the_baseline_is_read_from_the_same_tree,
@@ -2237,6 +3211,29 @@ CASES = (
     case_gate6_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate6_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate6_the_hook_judges_a_branch_it_is_not_standing_on,
+    case_gate8_a_tidied_worktree_cannot_hide_a_committed_leak,
+    case_gate8_an_uncommitted_leak_does_not_block_a_clean_push,
+    case_gate8_the_baseline_is_read_from_the_same_tree,
+    case_gate8_a_raised_count_is_read_from_the_same_tree,
+    case_gate8_a_file_absent_from_the_disk_is_still_judged,
+    case_gate8_the_shrunk_half_of_the_ratchet_describes_the_commit,
+    case_gate8_build_output_is_skipped_on_the_side_that_can_see_it,
+    case_gate8_a_tree_with_no_corpus_is_not_a_clean_tree,
+    case_gate8_a_baseline_absent_from_the_tree_is_not_a_pile_of_new_findings,
+    case_gate8_a_baseline_cannot_be_written_from_a_revision,
+    case_gate8_an_unopenable_revision_is_not_a_finding,
+    case_gate8_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate8_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate8_the_hook_judges_a_branch_it_is_not_standing_on,
+    case_gate9_a_staged_restore_cannot_hide_a_committed_deletion,
+    case_gate9_an_uncommitted_deletion_does_not_block_a_clean_push,
+    case_gate9_the_allowlist_is_read_from_the_same_tree,
+    case_gate9_a_rename_is_not_a_deletion_in_either_tree,
+    case_gate9_the_merge_base_is_taken_against_the_commit_being_judged,
+    case_gate9_an_unopenable_revision_is_not_a_finding,
+    case_gate9_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate9_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate9_the_hook_judges_a_branch_it_is_not_standing_on,
     case_gate11_a_tidied_worktree_cannot_hide_a_committed_dead_link,
     case_gate11_an_uncommitted_dead_link_does_not_block_a_clean_push,
     case_gate11_the_manifest_is_read_from_the_same_tree,
@@ -2254,9 +3251,9 @@ CASES = (
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 61:
+    if len(CASES) < 91:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 61. The list is broken, not the code.")
+              f"least 91. The list is broken, not the code.")
         return 1
     # ...and each converted gate must be represented, through the real hook as
     # well as directly. A floor on the count alone would be met by any number of
@@ -2264,9 +3261,31 @@ def main() -> int:
     # gate 3 was converted at all -- so both are counted per gate. Raise these
     # as each remaining checker is converted; they are the thing that notices a
     # gate's cases being deleted along with the gate's own wiring.
+    #
+    # EVERY CONVERTED GATE IS NOW IN THIS TABLE. Gates 8 and 9 were the last two
+    # out, on 2026-09-04, and both of them are the argument for why "wired" was
+    # never the same claim as "covered": each had been converted, wired with
+    # `--head "$sha"`, and asserted to be wired by `test-pre-push-gates.py`'s
+    # HEAD_GATES since 2026-09-02 -- and each came back RED on the first run of
+    # its own cases. A checker can accept `--head`, be called with it correctly,
+    # and still not honour it.
+    #
+    # * Gate 8 had shipped without the missing-baseline guard gates 4 and 6 both
+    #   carry, so a commit that moved `quote-names-baseline.txt` would have been
+    #   refused with gate 8's full refusal over 1798 diagnostics nobody touched.
+    # * Gate 9 read its *deletions* from the commit and its *permissions* --
+    #   `requests/.deletions-allowed` -- from the working tree, so a waiver could
+    #   be written, used and dropped without ever being published. Worse than
+    #   the hole `--head` was added for, and reachable only by asking the gate a
+    #   question with the two trees disagreeing.
+    #
+    # So: when the next checker is converted, raise the overall floor and add
+    # its row here. Do not add a row for a gate whose cases do not exist yet to
+    # make the table look complete; add the cases, and the floor with them.
     for gate, floor, e2e_floor in (("gate2", 10, 3), ("gate3", 13, 4),
-                                   ("gate4", 13, 3), ("gate6", 14, 3),
-                                   ("gate11", 11, 3)):
+                                   ("gate4", 13, 3), ("gate5", 7, 3),
+                                   ("gate6", 14, 3), ("gate8", 14, 3),
+                                   ("gate9", 9, 3), ("gate11", 11, 3)):
         named = [c for c in CASES if c.__name__.startswith(f"case_{gate}_")]
         hooked = [c for c in named if "the_hook" in c.__name__]
         if len(named) < floor or len(hooked) < e2e_floor:

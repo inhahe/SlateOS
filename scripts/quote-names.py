@@ -677,8 +677,8 @@ def survey_at(sha: str, root: Path = ROOT) -> Survey:
         return survey_tree(tree)
 
 
-def read_baseline_from(tree: gittree.Tree) -> dict[str, int]:
-    """The baseline as it stands in `tree`, whichever tree that is.
+def read_baseline_from(tree: gittree.Tree) -> dict[str, int] | None:
+    """The baseline as it stands in `tree`, or `None` if that tree has none.
 
     It has to move with the tree. The baseline is the ratchet, so judging a
     commit's files against a *different* commit's baseline reports the
@@ -686,25 +686,67 @@ def read_baseline_from(tree: gittree.Tree) -> dict[str, int]:
     -- which is loudest exactly when it is least useful: a push whose first
     commit fixes sites and whose second records them in the baseline would have
     the first commit judged against the not-yet-updated numbers.
+
+    `None` rather than `{}` for an absent file, and the distinction is the
+    whole of `_no_baseline` below. This used to return `{}` with a comment
+    calling it "the safe direction -- it can only over-report", which is the
+    argument `run-checker.sh` exists to reject: over-reporting is not the safe
+    direction, it is a false accusation, and it is what gets a gate bypassed.
+    An empty allowance and a missing one are also not distinguishable after the
+    fact -- the live baseline is currently empty of entries, so `{}` is a real
+    and correct value that the caller must be able to tell apart from a file
+    that was never read.
     """
     text = _decode(tree.read_bytes(BASELINE_REL))
     if text is None:
-        # No baseline in that tree means no allowance in that tree: every site
-        # is new. That is the safe direction -- it can only over-report.
-        return {}
+        return None
     return _parse_baseline(text)
 
 
-def read_baseline_at(sha: str, root: Path = ROOT) -> dict[str, int]:
+def _no_baseline(baseline: dict[str, int] | None, head: str | None) -> bool:
+    """Whether the ratchet's own record is missing from the tree -- and say so.
+
+    The mirror of `_no_corpus`, failing the other way round. A missing corpus
+    goes silent; a missing baseline goes *loud and wrong*: every site the real
+    file forgives reads as brand new, and the author is handed gate 8's whole
+    refusal over 1798 diagnostics across 777 files they did not touch. On a
+    clean tree the same read calls every entry stale instead, which prints as
+    "the backlog is fixed" over a commit that fixed nothing.
+
+    Exit 2 for `_no_corpus`'s reason: 1 is "the checker found something in your
+    code", and nothing here was found in anybody's code.
+
+    Gates 4 and 6 both carry this guard. Gate 8 shipped its `--head`
+    conversion on 2026-09-02 with the corpus half and not this half, and it
+    stayed that way until a behavioural case was finally written for the gate
+    on 2026-09-04 and came back red. That is the argument for the case, not
+    just for the guard: the defect had been asserted-around for two days by a
+    test that checked the *wiring* and never the verdict.
+    """
+    if baseline is not None:
+        return False
+    where = f"the tree at {head}" if head else "the working tree"
+    print(
+        f"quote-names: {BASELINE_REL} does not exist in {where}.\n"
+        "That file is the ratchet itself, and reading it as an empty allowance\n"
+        "would accuse every already-known site of being new. Refusing to\n"
+        "report a verdict rather than report that one.\n"
+        "(To create it from scratch: --write-baseline, without --head.)",
+        file=sys.stderr,
+    )
+    return True
+
+
+def read_baseline_at(sha: str, root: Path = ROOT) -> dict[str, int] | None:
     """The baseline recorded at `sha`."""
     with gittree.RevTree(sha, str(root)) as tree:
         return read_baseline_from(tree)
 
 
-def read_baseline() -> dict[str, int]:
+def read_baseline() -> dict[str, int] | None:
     """`path -> count` from the baseline file, `#` comments stripped."""
     if not BASELINE.is_file():
-        return {}
+        return None
     return _parse_baseline(BASELINE.read_text(encoding="utf-8"))
 
 
@@ -1276,9 +1318,17 @@ def report(found: dict[str, list[tuple[int, str, str]]], show_lines: bool) -> in
 
 def check(
     found: dict[str, list[tuple[int, str, str]]],
-    baseline: dict[str, int] | None = None,
+    baseline: dict[str, int],
 ) -> int:
-    baseline = read_baseline() if baseline is None else baseline
+    """The ratchet. `baseline` is required, and that is deliberate.
+
+    It used to default to `None` meaning "go and read it yourself", which was
+    fine while a missing file read back as `{}`. Now that absence is `None`, the
+    same sentinel would mean two opposite things at one call site -- "I did not
+    look" and "I looked and there is nothing there". Making the caller pass it
+    is what stops that ambiguity existing to be resolved wrongly later; the
+    guard belongs in `main`, once, beside `_no_corpus`.
+    """
     now = {path: len(hits) for path, hits in found.items()}
 
     grew = sorted(p for p, n in now.items() if n > baseline.get(p, 0))
@@ -1422,17 +1472,31 @@ def main() -> int:
             return 2
         if _no_corpus(seen, head):
             return 2
-        return (check(seen.found, baseline) if "--check" in args
-                else report(seen.found, "--list" in args))
+        if "--check" not in args:
+            # `report` does not consult the ratchet, so a tree without one is
+            # still perfectly reportable. Guarding it here anyway would make
+            # the plain listing -- the one mode whose job is to survey a tree
+            # nobody has ratcheted yet -- refuse the trees it exists for.
+            return report(seen.found, "--list" in args)
+        if _no_baseline(baseline, head):
+            return 2
+        return check(seen.found, baseline)
 
     seen = survey()
     if _no_corpus(seen, None):
         return 2
     if "--write-baseline" in args or "--update-baseline" in args:
+        # Before `_no_baseline`, and it has to be: this is the mode that
+        # *creates* the file. A bootstrap that refused to bootstrap would be
+        # found only by whoever next moved the baseline, who is precisely the
+        # person the guard is protecting.
         write_baseline(seen.found)
         return 0
     if "--check" in args:
-        return check(seen.found)
+        disk_baseline = read_baseline()
+        if _no_baseline(disk_baseline, None):
+            return 2
+        return check(seen.found, disk_baseline)
     return report(seen.found, "--list" in args)
 
 

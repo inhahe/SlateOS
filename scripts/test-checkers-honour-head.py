@@ -1467,6 +1467,369 @@ def case_gate6_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# Gate 8 -- quote-names.py
+#
+# The defect it looks for: a diagnostic that interpolates a file name straight
+# into its message, so a name containing a newline forges a line of the
+# program's stderr.
+#
+# Converted on 2026-09-02 and given no behavioural cases at all until
+# 2026-09-04 -- it was wired with `--head "$sha"`, listed in
+# `test-pre-push-gates.py`'s HEAD_GATES, and therefore *asserted to be wired*
+# for two days without one line of evidence that the flag changed what it
+# decided. That is the gap this block closes, and it is worth naming because
+# the two kinds of assertion look interchangeable in a summary and are not: a
+# checker can accept `--head`, be called with it correctly, and ignore it, and
+# only a fixture whose commit and worktree disagree can tell.
+# --------------------------------------------------------------------------
+
+_QN_LEAK = '''\
+fn f(p: &std::path::Path) {
+    eprintln!("cut: {p}: no such file");
+}
+'''
+
+_QN_OK = '''\
+fn f(p: &std::path::Path) {
+    eprintln!("cut: {}: no such file", quotef_os(&p));
+}
+'''
+
+# The baseline's key, spelled the way `quote-names-baseline.txt` spells it:
+# `<path>:<count>`. The count is what makes this ratchet different from gates
+# 4 and 6, whose baselines name findings -- so a case that wants to loosen the
+# allowance raises a number rather than adding a line.
+_QN_FILE = "userspace/coreutils/src/bin/tool.rs"
+_QN_BASELINE = "# nothing known-unquoted yet\n"
+
+
+def _quote_repo(tmp: str, name: str) -> str:
+    """A repository with lane B's zone present and nothing leaking a name in it.
+
+    `clean.rs` is in every fixture, committed, in both trees, and is not part
+    of any case's argument. It is there so that "the checker found nothing" can
+    never be reached by the checker finding no *files* -- which, for this gate
+    in particular, is not hypothetical: reporting an empty corpus as a clean
+    tree is the defect fixed the same day these cases were written.
+    """
+    root = new_repo(tmp, name, ("quote-names.py",))
+    write(root, "scripts/quote-names-baseline.txt", _QN_BASELINE)
+    write(root, "userspace/coreutils/src/bin/clean.rs", _QN_OK)
+    return root
+
+
+def case_gate8_a_tidied_worktree_cannot_hide_a_committed_leak(tmp: str) -> None:
+    """The silent half: the commit interpolates a name, the disk quotes it."""
+    root = _quote_repo(tmp, "g8a")
+    write(root, _QN_FILE, _QN_LEAK)
+    sha = commit(root)
+    write(root, _QN_FILE, _QN_OK)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk sees nothing unquoted", disk.returncode, 0)
+    check("gate 8: ...and the commit is refused anyway", rev.returncode, 1)
+    check("gate 8: ...naming the file the commit leaks from",
+          "tool.rs" in rev.stdout + rev.stderr, True)
+
+
+def case_gate8_an_uncommitted_leak_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: an unfinished edit on the disk, nothing wrong in the commit."""
+    root = _quote_repo(tmp, "g8b")
+    sha = commit(root)
+    write(root, _QN_FILE, _QN_LEAK)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk refuses the uncommitted leak", disk.returncode, 1)
+    check("gate 8: ...but the commit being pushed is clean", rev.returncode, 0)
+
+
+def case_gate8_the_baseline_is_read_from_the_same_tree(tmp: str) -> None:
+    """The ratchet must not be loosened by a number nobody is publishing.
+
+    This baseline is a *count* per file rather than a list of findings, which
+    makes the failure quieter than gates 4 and 6: loosening it is editing a
+    digit, not adding a line, and a digit changed in the working tree and not
+    committed is invisible in review by construction. If the count came off the
+    disk, an author could raise it, push the leak, and drop the edit -- and the
+    hook's own advice not to raise a number would be enforced against a file
+    nobody was publishing.
+    """
+    root = _quote_repo(tmp, "g8c")
+    write(root, _QN_FILE, _QN_LEAK)
+    sha = commit(root)
+    check("gate 8: the fixture starts refused",
+          run_checker(root, "quote-names.py", "--check",
+                      "--head", sha).returncode, 1)
+
+    # Forgive it in a *commit*, and un-forgive it on the *disk*.
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+    sha = commit(root, "baseline it")
+    write(root, "scripts/quote-names-baseline.txt", _QN_BASELINE)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk's baseline forgives nothing", disk.returncode, 1)
+    check("gate 8: the commit's baseline forgives it, and passes",
+          rev.returncode, 0)
+
+
+def case_gate8_a_raised_count_is_read_from_the_same_tree(tmp: str) -> None:
+    """The count, not merely the presence of the line.
+
+    The case above swaps a baseline *entry* in and out, which a checker reading
+    the disk's file but the commit's entry-set would still pass. This one keeps
+    the same entry in both trees and changes only the number: the commit
+    forgives two sites, the disk forgives one, and the commit has two. There is
+    no version of this that a per-file granularity can answer -- the difference
+    between the trees is a single digit, which is exactly the granularity this
+    ratchet chose and therefore exactly what has to move with the tree.
+    """
+    root = _quote_repo(tmp, "g8n")
+    write(root, _QN_FILE, _QN_LEAK.replace(
+        '    eprintln!("cut: {p}: no such file");\n',
+        '    eprintln!("cut: {p}: no such file");\n'
+        '    eprintln!("cut: {p}: is a directory");\n'))
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:2\n")
+    sha = commit(root)
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk's lower count makes the second site new",
+          disk.returncode, 1)
+    check("gate 8: the commit's own count forgives both", rev.returncode, 0)
+
+
+def case_gate8_a_file_absent_from_the_disk_is_still_judged(tmp: str) -> None:
+    """The third input: the enumeration, not only the contents.
+
+    Every case above edits a file that exists on both sides, so a checker
+    listing `.rs` files from the disk and reading their text from the revision
+    passes all of them. Here the leaking file is gone from the working tree
+    entirely -- a branch since tidied, or a file that exists only in what is
+    being pushed.
+    """
+    root = _quote_repo(tmp, "g8d")
+    write(root, _QN_FILE, _QN_LEAK)
+    sha = commit(root)
+    remove(root, _QN_FILE)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk has no such file to judge", disk.returncode, 0)
+    check("gate 8: the commit still has it, and is refused", rev.returncode, 1)
+    check("gate 8: ...naming the file the disk lacks",
+          "tool.rs" in rev.stdout + rev.stderr, True)
+
+
+def case_gate8_the_shrunk_half_of_the_ratchet_describes_the_commit(tmp: str) -> None:
+    """The other direction through the same two inputs.
+
+    Unlike gates 4 and 6, a stale baseline entry does not *fail* here -- it
+    prints `fixed: <path> N -> M` and the run still exits 0, because this
+    ratchet's entries are counts that shrink one site at a time rather than
+    findings that are either present or not. That makes the report the only
+    observable, and it is worth pinning for the reason the corpus guard exists:
+    `fixed:` is an invitation to run `--write-baseline`, so it had better be
+    describing the tree being published rather than whatever the author has
+    open.
+
+    Here the repair is committed and the disk still has the defect. The
+    commit's entry is the stale one and must be reported; the disk's is live
+    and must not be.
+    """
+    root = _quote_repo(tmp, "g8f")
+    write(root, _QN_FILE, _QN_LEAK)
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+    commit(root)
+    write(root, _QN_FILE, _QN_OK)
+    sha = commit(root, "repair it")
+    write(root, _QN_FILE, _QN_LEAK)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk's site is still there, so nothing is reported fixed",
+          "fixed:" in disk.stdout, False)
+    check("gate 8: ...and the disk run passes on its own baseline",
+          disk.returncode, 0)
+    check("gate 8: the commit's baseline entry is dead and is reported so",
+          "fixed:" in rev.stdout, True)
+    check("gate 8: ...naming the file whose count the commit dropped",
+          "tool.rs" in rev.stdout, True)
+
+
+def case_gate8_build_output_is_skipped_on_the_side_that_can_see_it(tmp: str) -> None:
+    """The rule only the disk arm can break, so only it can pin.
+
+    A revision never lists `target/`, so the skip is unobservable there. The
+    working-tree arm reaches the disk through `gittree.WorkTree`, which prunes
+    build directories by path component; if that is ever swapped back for a
+    plain walk, this gate starts reporting generated sources in a directory of
+    tens of gigabytes and becomes something people bypass rather than fix.
+
+    The control carries the weight: the same bytes one directory across must
+    still be found, or "nothing reported" would be satisfied by a checker that
+    had stopped reading the disk at all.
+    """
+    root = _quote_repo(tmp, "g8g")
+    sha = commit(root)
+    # After the commit, so it is on the disk and in no revision -- which is
+    # what build output is.
+    write(root, "userspace/coreutils/target/debug/build/gen.rs", _QN_LEAK)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: generated sources under target/ are not judged",
+          (disk.returncode, rev.returncode), (0, 0))
+
+    write(root, "userspace/coreutils/notes/gen.rs", _QN_LEAK)
+    disk2 = run_checker(root, "quote-names.py", "--check")
+    check("gate 8: ...while the same bytes elsewhere on the disk are",
+          disk2.returncode, 1)
+
+
+def case_gate8_a_tree_with_no_corpus_is_not_a_clean_tree(tmp: str) -> None:
+    """The measured defect, as a per-tree question.
+
+    Reported clean -- and worse than clean. Against a baseline still listing a
+    file, an emptied corpus printed `fixed: ... 1 -> 0` and
+    `ok -- 0 known sites in 0 files (1 improved)` and exited 0: the loss of the
+    gate's own subject read as a burn-down, over wording that invites a
+    `--write-baseline` discarding every site the ratchet guards.
+
+    It belongs in *this* suite rather than only in the checker's self-test
+    because it is a question about which tree is being read. The commit is what
+    disarms the gate; the working tree -- where the author is mid-rename, or
+    has simply not deleted the old directory yet -- still has the corpus and
+    answers that all is well. Exit 2, not 1: the gate has lost its subject
+    rather than found a defect, and gate 8's refusal tells an author their
+    diagnostics leak names.
+    """
+    root = _quote_repo(tmp, "g8h")
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+    write(root, _QN_FILE, _QN_LEAK)
+    commit(root)
+    remove(root, _QN_FILE)
+    remove(root, "userspace/coreutils/src/bin/clean.rs")
+    sha = commit(root, "lane B's zone goes somewhere else")
+    write(root, "userspace/coreutils/src/bin/clean.rs", _QN_OK)
+    write(root, _QN_FILE, _QN_LEAK)
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk still has a corpus and is judged normally",
+          disk.returncode, 0)
+    check("gate 8: the commit has none, which is no verdict rather than a pass",
+          rev.returncode, 2)
+    check("gate 8: ...saying so, rather than exiting quietly",
+          "lost its subject" in rev.stderr, True)
+    # The load-bearing negative, and the exact shape of the measured failure:
+    # the run must not congratulate anyone on a burn-down it did not observe.
+    check("gate 8: ...and the vanished corpus is not reported as progress",
+          "improved" in rev.stdout, False)
+
+
+def case_gate8_a_baseline_absent_from_the_tree_is_not_a_pile_of_new_findings(
+        tmp: str) -> None:
+    """The second input's version of the guard above, failing the other way.
+
+    A missing corpus goes silent; a missing *baseline* goes loud and wrong. It
+    reads back as an empty allowance rather than as an error, so every site the
+    real file forgives becomes a NEW finding and the push is refused with gate
+    8's whole refusal over diagnostics nobody touched. On the real tree that is
+    1798 sites across 777 files.
+
+    The checker's comment argued the empty read was "the safe direction -- it
+    can only over-report". That is the argument `run-checker.sh` exists to
+    reject: a false accusation is not the safe direction, it is the failure
+    that gets a gate bypassed, and a bypassed gate protects nothing. Gates 4
+    and 6 both exit 2 here; gate 8 shipped its conversion without the guard,
+    and this case is the one that was missing transposed across.
+
+    Per-tree for the corpus guard's reason: a commit moves the baseline, and
+    the disk still has it.
+    """
+    # The allowance must be non-empty, or this case cannot see the failure it
+    # is named for. Against an empty baseline a missing one is merely a silent
+    # false pass -- so the fixture forgives a real site, and taking the
+    # baseline away turns that forgiven site into an accusation.
+    root = _quote_repo(tmp, "g8i")
+    write(root, _QN_FILE, _QN_LEAK)
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+    commit(root)
+    remove(root, "scripts/quote-names-baseline.txt")
+    sha = commit(root, "the baseline goes somewhere else")
+    write(root, "scripts/quote-names-baseline.txt",
+          _QN_BASELINE + f"{_QN_FILE}:1\n")
+
+    disk = run_checker(root, "quote-names.py", "--check")
+    rev = run_checker(root, "quote-names.py", "--check", "--head", sha)
+    check("gate 8: the disk's baseline still forgives the site it names",
+          disk.returncode, 0)
+    check("gate 8: the commit's is gone, which is no verdict", rev.returncode, 2)
+    check("gate 8: ...naming the file rather than blaming a diagnostic",
+          "quote-names-baseline.txt" in rev.stderr, True)
+    # Without the guard this run does not go quiet, it goes wrong: the forgiven
+    # site reads as new and the author is told a file they never touched leaks
+    # names into stderr.
+    check("gate 8: ...and the forgiven site is not accused of being new",
+          "NEW diagnostic" in rev.stdout + rev.stderr, False)
+    # The guard must not stop the one mode whose job is to create the file.
+    # Checked on the disk arm: `--write-baseline` writes the working tree and
+    # is refused outright with `--head`, so the revision arm cannot say this.
+    remove(root, "scripts/quote-names-baseline.txt")
+    boot = run_checker(root, "quote-names.py", "--write-baseline")
+    check("gate 8: a bootstrap run still creates the baseline it lacks",
+          boot.returncode, 0)
+
+
+def case_gate8_a_baseline_cannot_be_written_from_a_revision(tmp: str) -> None:
+    """`--write-baseline --head` is refused, not quietly resolved either way.
+
+    Recording a past commit's counts as the current allowance would un-fix
+    everything repaired since; writing the *worktree's* counts while claiming
+    to have read a revision would be worse, because the output would name a sha
+    it did not use. Refusing is the only answer that is not a lie, and it is
+    asserted here so a later tidy-up cannot pick one of the other two.
+    """
+    root = _quote_repo(tmp, "g8j")
+    sha = commit(root)
+    proc = run_checker(root, "quote-names.py", "--write-baseline", "--head", sha)
+    check("gate 8: --write-baseline with --head is refused", proc.returncode, 2)
+    check("gate 8: ...saying which two flags cannot be combined",
+          "--write-baseline" in proc.stderr, True)
+
+
+def case_gate8_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
+    """Exit 2, not 1 -- the contract every converted gate has with run-checker.sh.
+
+    Exit 1 gets gate 8's refusal printed over it, which tells the author a
+    diagnostic of theirs hands a file name control of stderr and offers the
+    bypass. A revision that could not be read says nothing about anybody's
+    diagnostics.
+
+    The message is asserted as well as the status, and here that matters more
+    than usual: this gate now has *two* routes to exit 2 -- an unreadable
+    revision and a tree with no corpus -- and they want opposite responses from
+    whoever reads the log. Naming the revision is what separates them.
+    """
+    root = _quote_repo(tmp, "g8k")
+    commit(root)
+    proc = run_checker(root, "quote-names.py", "--check", "--head", "nosuchrev")
+    check("gate 8: an unreadable --head exits 2, not 1", proc.returncode, 2)
+    check("gate 8: ...naming the revision it could not read",
+          "nosuchrev" in proc.stderr, True)
+
+
+# --------------------------------------------------------------------------
 # The hook, not the checker.
 #
 # Everything above runs the checker directly, which leaves the seam between the
@@ -1547,6 +1910,13 @@ _G5_REFUSAL = "does not match the one the real utility carries"
 # `--check` run that the hook then goes on to allow. Matching it would call a
 # fixture refused on the strength of text from a gate that did not refuse it.
 _G6_REFUSAL = "The message is an interface. Anything that greps"
+# Gate 8's refusal sentence, not its summary line. The summary is "REFUSING to
+# push — a diagnostic above puts a file name straight into its message", whose
+# em dash the comment above rules out; and the shorter phrases in it recur in
+# the *checker's* own advice, which a run that the hook then allows still
+# prints. "hands the name control of stderr" occurs once, in the hook, in the
+# block that exits 1.
+_G8_REFUSAL = "hands the name control of stderr"
 
 
 def _push(work: str, ref: str = "main",
@@ -1960,6 +2330,95 @@ def case_gate6_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
     check("gate 6 end to end: a branch other than HEAD is still judged",
           verdict, "refused")
     check("gate 6 end to end: ...naming the bin on that other branch",
+          "tool.rs" in blob, True)
+
+
+def _g8_push_fixture(tmp: str, name: str) -> str:
+    """A push fixture for gate 8, with lane B's zone already published.
+
+    Only `quote-names.py` is installed, so every other gate stands down and a
+    refusal here can only have come from gate 8. `clean.rs` is in the seed for
+    the checker-level fixtures' reason -- so that a green run can never be
+    reached by the gate finding no corpus -- and the baseline is seeded with it
+    because gate 8 now refuses a tree that has no baseline at all, which would
+    otherwise make the seed push itself the thing that fails.
+    """
+    return _push_fixture(
+        tmp, name, checkers=("quote-names.py",),
+        seed={"scripts/quote-names-baseline.txt": _QN_BASELINE,
+              "userspace/coreutils/src/bin/clean.rs": _QN_OK},
+    )
+
+
+def case_gate8_the_hook_refuses_a_commit_the_worktree_no_longer_shows(
+        tmp: str) -> None:
+    """End to end: gate 8's own wiring, not some other gate's.
+
+    Each gate is a separate block with its own guard, its own loop and its own
+    `--head "$sha"`, so dropping the flag from *this* invocation leaves every
+    other case in this file green. That is the argument for a per-gate
+    end-to-end case, and gate 8 is the reason the argument is not theoretical:
+    it was converted on 2026-09-02, wired correctly, asserted to be wired by
+    `test-pre-push-gates.py`, and had no case like this one until 2026-09-04.
+    """
+    work = _g8_push_fixture(tmp, "g8push-hide")
+    write(work, _QN_FILE, _QN_LEAK)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a bin that interpolates a name")
+    # The tidy-up that makes the disk lie.
+    write(work, _QN_FILE, _QN_OK)
+
+    verdict, blob = _push(work, marker=_G8_REFUSAL)
+    check("gate 8 end to end: the push is refused", verdict, "refused")
+    check("gate 8 end to end: ...naming the file only the commit breaks",
+          "tool.rs" in blob, True)
+
+
+def case_gate8_the_hook_allows_a_clean_commit_under_a_dirty_worktree(
+        tmp: str) -> None:
+    """End to end, the other direction -- and the one that checks it ran.
+
+    A gate that had skipped itself would allow this, and would have allowed the
+    case above too if that refusal came from elsewhere. The hook's own tally is
+    the only thing separating "gate 8 passed" from "gate 8 was never asked", and
+    gate 8 has three ways to stand down: the `ALLOW_UNQUOTED_NAMES` bypass, a
+    `touches` scope that no file in the push matched, and an empty pushed-sha
+    list.
+    """
+    work = _g8_push_fixture(tmp, "g8push-wip")
+    write(work, "userspace/coreutils/src/bin/other.rs", _QN_OK)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a bin that quotes the name properly")
+    write(work, _QN_FILE, _QN_LEAK)
+
+    verdict, blob = _push(work, marker=_G8_REFUSAL)
+    check("gate 8 end to end: an uncommitted leak does not block",
+          verdict, "allowed")
+    check("gate 8 end to end: ...and the gate actually ran",
+          "quote-names" in _tally(blob)[0], True)
+
+
+def case_gate8_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` from `main`, for gate 8's loop.
+
+    Every case that pushes the branch it is standing on has `HEAD` and the sha
+    being pushed as the same commit, so `--head "$sha"` there is
+    indistinguishable from `git rev-parse HEAD` -- the blind spot that hid the
+    `touches` defect until 2026-09-02 and gate 5's private scope until
+    2026-09-04. It is per gate: gate 6's off-branch case says nothing about
+    gate 8's loop.
+    """
+    work = _g8_push_fixture(tmp, "g8push-elsewhere")
+    git(work, "checkout", "--quiet", "-b", "feature")
+    write(work, _QN_FILE, _QN_LEAK)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "an unquoted name on a branch we leave")
+    git(work, "checkout", "--quiet", "main")
+
+    verdict, blob = _push(work, "feature", marker=_G8_REFUSAL)
+    check("gate 8 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    check("gate 8 end to end: ...naming the file on that other branch",
           "tool.rs" in blob, True)
 
 
@@ -2464,6 +2923,20 @@ CASES = (
     case_gate6_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate6_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate6_the_hook_judges_a_branch_it_is_not_standing_on,
+    case_gate8_a_tidied_worktree_cannot_hide_a_committed_leak,
+    case_gate8_an_uncommitted_leak_does_not_block_a_clean_push,
+    case_gate8_the_baseline_is_read_from_the_same_tree,
+    case_gate8_a_raised_count_is_read_from_the_same_tree,
+    case_gate8_a_file_absent_from_the_disk_is_still_judged,
+    case_gate8_the_shrunk_half_of_the_ratchet_describes_the_commit,
+    case_gate8_build_output_is_skipped_on_the_side_that_can_see_it,
+    case_gate8_a_tree_with_no_corpus_is_not_a_clean_tree,
+    case_gate8_a_baseline_absent_from_the_tree_is_not_a_pile_of_new_findings,
+    case_gate8_a_baseline_cannot_be_written_from_a_revision,
+    case_gate8_an_unopenable_revision_is_not_a_finding,
+    case_gate8_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate8_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate8_the_hook_judges_a_branch_it_is_not_standing_on,
     case_gate11_a_tidied_worktree_cannot_hide_a_committed_dead_link,
     case_gate11_an_uncommitted_dead_link_does_not_block_a_clean_push,
     case_gate11_the_manifest_is_read_from_the_same_tree,
@@ -2481,9 +2954,9 @@ CASES = (
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 68:
+    if len(CASES) < 82:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 68. The list is broken, not the code.")
+              f"least 82. The list is broken, not the code.")
         return 1
     # ...and each converted gate must be represented, through the real hook as
     # well as directly. A floor on the count alone would be met by any number of
@@ -2492,17 +2965,27 @@ def main() -> int:
     # as each remaining checker is converted; they are the thing that notices a
     # gate's cases being deleted along with the gate's own wiring.
     #
-    # GATES 8 AND 9 ARE ABSENT FROM THIS TABLE BECAUSE THEY ARE ABSENT FROM THE
-    # SUITE. Both are wired with `--head "$sha"` and both are listed in
-    # `test-pre-push-gates.py`'s HEAD_GATES, so the *shape* of their wiring is
-    # guarded -- but nothing here has ever pushed a fixture past either one, so
-    # no evidence exists that the flag changes what they decide. A checker can
+    # GATE 9 IS ABSENT FROM THIS TABLE BECAUSE IT IS ABSENT FROM THE SUITE. It
+    # is wired with `--head "$sha"` and it is listed in
+    # `test-pre-push-gates.py`'s HEAD_GATES, so the *shape* of its wiring is
+    # guarded -- but nothing here has ever pushed a fixture past it, so no
+    # evidence exists that the flag changes what it decides. A checker can
     # accept `--head`, be called with it correctly, and ignore it. Do not add a
-    # floor for them here to make the table look complete; add the cases, and
-    # the floor with them.
+    # floor for it here to make the table look complete; add the cases, and the
+    # floor with them.
+    #
+    # Gate 8 was in that sentence until 2026-09-04, and what happened when the
+    # cases were finally written is the argument for this whole paragraph: the
+    # first run came back red. The gate had been converted, wired, and asserted
+    # to be wired since 2026-09-02, and had shipped without the missing-baseline
+    # guard gates 4 and 6 both carry -- so a commit that moved
+    # `quote-names-baseline.txt` would have been refused with gate 8's full
+    # refusal over 1798 diagnostics nobody touched. Two days of a green
+    # wiring assertion said nothing about it.
     for gate, floor, e2e_floor in (("gate2", 10, 3), ("gate3", 13, 4),
                                    ("gate4", 13, 3), ("gate5", 7, 3),
-                                   ("gate6", 14, 3), ("gate11", 11, 3)):
+                                   ("gate6", 14, 3), ("gate8", 14, 3),
+                                   ("gate11", 11, 3)):
         named = [c for c in CASES if c.__name__.startswith(f"case_{gate}_")]
         hooked = [c for c in named if "the_hook" in c.__name__]
         if len(named) < floor or len(hooked) < e2e_floor:

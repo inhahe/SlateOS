@@ -4228,8 +4228,33 @@ check_bash_oracles
 # so on a machine with no `libc.a` it is the only thing still checking that
 # this gate can tell a bad archive from a good one.
 check_libc_shape() {
+    # This block was `py="$(find_python)" || return 0` from the day the gate was
+    # wired (e3e72d4bf) until 2026-09-04.  `find_python` was never written --
+    # not here, not in run-checker.sh, not on PATH -- so the substitution failed
+    # 127, the `|| return 0` turned that into "passed", and neither this gate
+    # nor its self-test had ever executed on any host.  It announced itself once
+    # per run as a single stderr line reading `line 4232: find_python: command
+    # not found`, between two banners in a 60k-line log, carrying no ERROR and
+    # not touching the exit status.  See known-issues.md ->
+    # A-A-THE-LIBC-SHAPE-GATE-WAS-BORN-DEAD-AND-THE-WIRING-GATE-CALLS-IT-WIRED.
+    #
+    # Two things are deliberate in the replacement.  It is the same inline
+    # `command -v` block the other ~20 gates use, rather than a helper: there is
+    # no helper to call, and inventing one here would put the only caller of a
+    # new abstraction in the file that just demonstrated why an uncalled name is
+    # dangerous.  And the no-python arm *announces* the skip.  The old line
+    # returned silently, which is a second defect that would have survived
+    # merely defining `find_python` -- a gate that declines without saying so is
+    # indistinguishable from one that looked and found nothing.
     local py=""
-    py="$(find_python)" || return 0
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== libc.a shape: skipped (no python) ===" >&2
+        return 0
+    fi
 
     echo "=== Checking libc.a member granularity ==="
     if ! run_checker check-libc-shape-selftest "$py" "$PROJECT_ROOT/scripts/check-libc-shape.py" --self-test; then

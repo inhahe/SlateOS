@@ -102051,7 +102051,11 @@ is no descriptor above it — GNU's position too.
 Two follow-ups, tracked separately:
 `TD-B-TAR-AND-RM-CARRY-TWO-DESCRIPTOR-WALKS` (convert `tar.rs` onto the shared
 module, deleting its private copy) and
-`TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS` (`rm`'s and `mv`'s).
+`TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS` (`rm`'s and `mv`'s). **Both
+are now FIXED, 2026-09-03.** The `Loc` described above no longer lives in
+`rm.rs` either: the walk moved to `userspace/coreutils/src/remove.rs`, which
+`mv` calls too, so `mv`'s path-resolved removal inherited this module's
+guarantee rather than needing its own copy of it.
 
 ## TD-B-TAR-AND-RM-CARRY-TWO-DESCRIPTOR-WALKS (lane B, 2026-09-03)
 
@@ -112948,7 +112952,7 @@ is untouched by this change and remains open.
 
 ---
 
-## TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS (lane B, 2026-09-03)
+## TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS (lane B, 2026-09-03) — FIXED 2026-09-03 (lane B)
 
 **In short:** deleting a directory and everything inside it is now written out
 twice in our coreutils — once in `rm`, and once in `mv`. `mv` grew its copy on
@@ -113062,16 +113066,99 @@ smaller — but it is the same bug, and it is now the *only* place in coreutils
 that still has it. Sharing `rm`'s walk is what fixes it, which makes the
 extraction a security fix rather than only a tidiness one.
 
-**What is done and what is left.** The module exists and holds the rule the two
-provably disagreed about; the walk itself is still written twice.
+**What is done and what is left.** Nothing is left; the last two rows closed on
+the same day the first three did.
 
 | | state |
 |---|---|
 | `remove.rs` exists | done — `is_uninformative`, `blame`, 4 tests |
 | the errno-substitution rule is shared | done — both binaries call `remove::blame` |
 | `rm` implements GNU's inaccessible-directory rule | done — 15 harness cases |
-| the *walk* is shared | **not done** — this is the remainder |
-| `mv`'s walk stops following a mid-walk symlink swap | **not done**, and follows from the row above |
+| the *walk* is shared | **done** — `remove::Remover`, called by both |
+| `mv`'s walk stops following a mid-walk symlink swap | **done**, and it followed from the row above exactly as predicted |
+
+### How the extraction came out
+
+`userspace/coreutils/src/remove.rs` now holds the whole walk, growing from 170
+lines to 888. `rm.rs` went from 2,432 lines to 1,934, but that headline number
+undersells it: the cut is entirely above the `#[cfg(test)]` line, where `rm.rs`
+went from 1,262 lines to 744 — it lost **41% of its production code**. The test
+module is unchanged in size (1,169 → 1,189), because the tests that belonged to
+the walk moved into `remove.rs` alongside it and the ones that stayed are the
+ones that test what `rm` still does. `mv.rs` lost `remove_tree`,
+`report_unremovable` and `announce_removed` outright. There is one `Verdict`,
+one `Loc`, one `Interactive`, one set of three prompts and one `-v` sentence
+pair in the zone, where the day before there were two of each.
+
+The shape is the one this entry prescribed, and it is `copy.rs`'s:
+
+| | `cp` → `copy.rs` | `rm` → `remove.rs` |
+|---|---|---|
+| the parsed command line | `CpFlags` | `rm::Options` (9 fields) |
+| what it hands the engine | `copy::Opts` | `remove::Opts` (6 fields) |
+| the streams | `copy::Run` | `remove::Remover` |
+
+`rm::Options::walk_opts` is the projection. Six of the nine fields go through
+unchanged; the three that do not — `preserve_root`, `preserve_all_root`,
+`presume_tty` — are precisely the three that are decided **per command-line
+operand** and have no meaning for an entry found by walking, and they are
+precisely the three `Rm` keeps for itself. Between the two halves every parsed
+option is accounted for once and once only, which is the property that stops
+the drift recurring: handing the walk a struct with three fields it must
+remember never to read is how the two copies came apart the first time.
+
+The dividing line, stated once so the next reader does not have to infer it: a
+command-line operand. `--preserve-root`, the `.`/`..` refusal, `-I`'s single
+up-front question and gnulib `fts`'s trailing-slash rule all apply to *the thing
+the user typed*, and `mv` has no such thing to apply them to. Everything above
+that line stayed in `rm.rs`; everything below it moved.
+
+**What `mv` gained by inheriting the walk**, beyond no longer being a second
+copy:
+
+* **The symlink-swap fix.** The old walk called `fs::read_dir`,
+  `fs::remove_file` and `fs::remove_dir` on joined path strings; the shared one
+  resolves every syscall through an open parent descriptor (`coreutils::dirfd`),
+  which a swapped component cannot redirect. This was the last place in
+  coreutils that still walked by path.
+* **The listing is read in full before any removal**, as `fts` does, instead of
+  being interleaved with `readdir` — strictly the safer order.
+* **A `readdir` iteration error is now blamed on the child** rather than the
+  parent, which is GNU's behaviour and was not `mv`'s.
+* **One fewer `lstat`.** `remove_source` is handed the `symlink_metadata`
+  `move_one` already took (`Stat::from_metadata`) instead of taking a second.
+  All seven call sites pass an `lstat`, so the second lookup bought nothing but
+  a window in which the answer could change — and the field it decides is
+  whether the source is a directory. Reusing the earlier stat closes that window
+  in the only safe direction: a source swapped for a directory after the copy is
+  unlinked rather than descended, so a tree the user never named survives.
+
+**What did not change, checked rather than assumed:** child paths are now joined
+with `/` rather than the host separator, which is harmless — the target is unix,
+the host tests assert suffixes only, `mv-diff` runs on Linux, and `rm.rs` had
+always behaved this way. `mv`'s `Opts` are `mv.c:87`'s `rm_option_init` verbatim
+(`recursive` on, `interactive` never, `ignore_missing_files` off,
+`one_file_system` off) with `verbose` from `x.verbose` at `mv.c:238`, and
+`answers` is `None` rather than `mv`'s `-i` channel, because `-i` is a question
+about *overwriting a destination* and is already settled by the time the source
+is removed.
+
+**Certified by** the two differential harnesses that certified the half before
+it — `scripts/rm-diff.sh` and `scripts/mv-diff.sh`, both against GNU 9.4 — plus
+`scripts/coreutils-check.sh` (host clippy, host tests, Linux tests). `mv-diff`
+is the load-bearing one: it is what says a walk that now resolves through
+descriptors behaves identically to the one that resolved through strings.
+
+**Tests moved with the code they test.** `joining_drops_one_trailing_slash_only`
+went from `rm.rs` to `remove.rs` because `join` did, and `remove.rs` gained
+`worse_is_a_symmetric_maximum` — `worse` is a max over a three-valued lattice
+folded in `readdir` order, so a `worse` that answered differently for
+`(Declined, Abandoned)` than for the reverse would make a parent's fate depend
+on the order the filesystem happened to list its contents. In `mv.rs`, the two
+tests that had asserted against the deleted `announce_removed` shim were
+rewritten to drive real `remove_source` calls against real files, so the
+coverage lands on the code that actually prints rather than on a helper that no
+longer exists.
 
 ---
 
@@ -113525,6 +113612,56 @@ through because it had no opinion; the shared module had an opinion, and the
 opinion was wrong. Extraction is not only a diff about call sites — it is a diff
 about which layer is allowed to have opinions, and every opinion the new layer
 adds is a behaviour change that has to be certified, not assumed.
+
+### Lesson 112: cancelling a background task kills the shell, not the build — and the orphans come back as a compiler error (lane B, 2026-09-03)
+
+**In short:** eight coreutils binaries failed to build with
+`STATUS_DLL_INIT_FAILED` (`0xc0000142`), which reads exactly like a broken
+linker invocation or a corrupt toolchain. It was neither. It was that the
+machine had **611 processes** on it, because every long `cargo` run I had
+stopped over the preceding hour was still running. `TaskStop` had killed the
+wrapper shell each time and nothing else; `cargo`, `rustc` and `clippy-driver`
+are grandchildren, and they were orphaned, not killed. Windows fails
+`DLL_PROCESS_ATTACH` when a process cannot get the resources to initialise, so
+the symptom surfaced in the newest process rather than in the ones causing it.
+
+**The two failure modes, and why the first one hides the second.** An orphaned
+`cargo` still holds the flock on the build directory, so the *visible* symptom
+is a new run sitting at `Blocking waiting for file lock on build directory`
+forever. That one is at least self-describing. The invisible symptom is the
+resource ceiling: nothing in the 0xc0000142 message mentions process count, so
+the natural reading is that the *code* or the *toolchain* is broken, and the
+natural response is to start bisecting a source tree that is fine. I lost time
+to exactly that reading before running `wmic` and seeing the process table.
+
+**What actually diagnoses it.** `wmic process get
+ProcessId,ParentProcessId,CreationDate,CommandLine` — the creation dates are the
+tell, because orphans from a run you stopped forty minutes ago have timestamps
+that no longer correspond to anything you are running now. Kill only your own,
+**by PID**: `taskkill //PID <n> //T //F`. (From MSYS the slashes must be
+doubled, or the shell rewrites `/PID` into `C:/Program Files/Git/PID` and
+`taskkill` rejects it as a filename.) Never by image name — another lane's
+`cargo test -p mindmap` was in that same list, and a `taskkill /IM cargo.exe`
+would have destroyed their run to fix mine.
+
+**The fix is not discipline, it is the job object.** `scripts/run-timeout.py`
+exists precisely for this: it puts the child in a Windows Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so a timeout, a Ctrl-C, or the runner
+itself dying tears down the **entire tree**, grandchildren included. Every long
+run in this session went through it afterwards and the orphan problem did not
+recur. `CLAUDE.md` already said to use it for anything that might hang; what
+this incident adds is that it is equally required for anything you might
+*cancel*, which is a much larger set — a cancellable run is any run long enough
+that you would want to stop it, i.e. every run worth backgrounding.
+
+**The generalisable shape.** A cancel that only reaches the process you have a
+handle on is not a cancel; it is a detach. Whenever a tool offers to stop
+something, ask what it has a handle on, because that — not the thing you asked
+it to stop — is the extent of what dies. And when a build fails with an error
+that names no file of yours, check the machine before you check the code: the
+first hypothesis should not be "my program is wrong" when the evidence is
+equally consistent with "there is no room to run it."
+
 ## TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM (lane A, 2026-09-03)
 
 **In short:** the two checkers wired by the entry above were switched on because

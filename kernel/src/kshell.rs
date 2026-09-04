@@ -1508,16 +1508,7 @@ fn remove_quotes(s: &str) -> String {
 fn command_parses_own_quotes(cmd: &str) -> bool {
     matches!(
         cmd,
-        "trap"
-            | "awk"
-            | "fold"
-            | "base64"
-            | "cut"
-            | "tr"
-            | "sed"
-            | "column"
-            | "touch"
-            | "printf"
+        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed" | "column" | "touch" | "printf"
     )
 }
 

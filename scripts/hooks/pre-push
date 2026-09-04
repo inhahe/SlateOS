@@ -1,5 +1,5 @@
 #!/bin/sh
-# Eleven gates at the push boundary. Any one of them aborts the push.
+# Twelve gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -13,6 +13,7 @@
 #   9. Refuse to publish the deletion of a file under `requests/`.
 #  10. Refuse to publish a commit authored by a test fixture's identity.
 #  11. Refuse to publish a doc comment whose `[`link`]` names nothing.
+#  12. Refuse to publish coreutils whose unix half was never compiled.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented. A list in a comment beside the code it lists is a second
@@ -24,31 +25,46 @@
 # tree that can introduce it, so a lane that cannot cause a given defect never
 # pays for the check or is blocked by it.
 #
+# Gates 1-11 are static checkers and the whole set costs seconds. Gate 12 is a
+# compiler, and costs minutes when it runs at all; its scope is correspondingly
+# narrow (one crate's own tree) and its comment argues the price.
+#
 # They are unrelated to each other on purpose. A single `ALLOW_EVERYTHING`
 # would be one variable away from turning the push boundary off entirely.
 #
 # EDITING THIS FILE? RUN `scripts/test-pre-push-*.py` BEFORE YOU COMMIT.
 # ---------------------------------------------------------------------
-# Four suites test this file, and two of them -- test-pre-push-identity-gate.py
-# and test-pre-push-fmt-gate.py -- install it into a throwaway repository and
+# Five suites test this file, and four of them -- test-pre-push-identity-gate.py,
+# test-pre-push-fmt-gate.py, test-pre-push-doclinks-gate.py and
+# test-pre-push-unixhalf-gate.py -- install it into a throwaway repository and
 # drive real `git push` calls through it end to end. That coupling is invisible
 # from here, and on 2026-09-01 it cost two boot-test cycles: a change to how the
 # file locates `run-checker.sh` was correct for the trampoline install and left
 # a *copied* install refusing every push, which only the identity suite
-# exercises. The four together take about two minutes.
+# exercises. Together they take about eight minutes (measured 2026-09-04: 152s
+# doc-links, 230s fmt, 61s unix-half, 43s identity, and ~1s for the shape suite).
+# The boot test runs them by globbing `scripts/test-*.py`, so a new one is picked
+# up without being registered anywhere -- but that glob runs ~2800s into a build,
+# which is the whole reason for the habit this heading states.
 #
-# The newest of them is worth a sentence on why, because it is the argument for
-# the other three. test-pre-push-gates.py checks this file's *shape*, and gate 7
+# One of them is worth a sentence on why, because it is the argument for all the
+# behavioural ones. test-pre-push-gates.py checks this file's *shape*, and gate 7
 # kept its shape perfectly while reading the working tree instead of the commit
 # being pushed -- which put two unformatted commits on origin/lane-b. A gate can
 # be structurally impeccable and answer the wrong question. Each suite added
-# since has been a behavioural one for that reason.
+# since has been a behavioural one for that reason -- most recently gate 12's,
+# whose entire correctness argument is a run-time property (does it decline when
+# the working tree is not the push?) that the shape suite cannot see.
 #
-# There is deliberately no twelfth gate running them at push time. The boot test
+# There is deliberately no gate here that runs them at push time. The boot test
 # already runs every tooling suite and is required before any merge to `main`,
 # so a gate here would buy only earlier notice on a lane push -- at the cost of
 # more surface, and another bypass variable, on the boundary whose whole value
 # is that it is small and each piece is independent.
+#
+# (Gate 12 is not that gate, and adding it did not reopen this. It compiles a
+# crate the boot test never compiles at all -- see its own comment -- so it buys
+# a verdict that exists nowhere else rather than an earlier copy of one.)
 #
 # That decision stands, but its stated cost was a guess, so here is a
 # measurement. On 2026-09-03, 034dffe2c taught `boot-history.py` to read
@@ -64,7 +80,7 @@
 # is a habit, not a gate: **if you change `scripts/X.py`, run `scripts/test-X.py`
 # before you commit.** That needs no bypass variable and closes the case that
 # actually happened. Recorded here rather than made into a gate because the
-# argument above is still right; a future reader weighing a twelfth gate should
+# argument above is still right; a future reader weighing such a gate should
 # have this data point instead of the guess it replaces.
 #
 # Gate 1 — why this exists
@@ -126,8 +142,8 @@ fi
 # every path-gated check legitimately skips. Silence therefore cannot be read
 # either way, and "no news is good news" is precisely the reading that failed.
 #
-# A tally the hook had to compute fixes that: `11 ran, 0 skipped` and
-# `0 ran, 11 skipped` are different lines, and *no line at all* means the hook
+# A tally the hook had to compute fixes that: `12 ran, 0 skipped` and
+# `0 ran, 12 skipped` are different lines, and *no line at all* means the hook
 # did not execute. It also makes an over-narrow `touches` pattern visible —
 # a gate that skips on a push it should have judged now says so by name,
 # instead of being silently absent.
@@ -1891,12 +1907,179 @@ EOF
     exit 1
 fi
 
+# Gate 12 — refuse to publish coreutils whose unix half was never compiled
+# ------------------------------------------------------------------------
+# Every other build in this repository compiles coreutils for a Windows host.
+# That host is not a unix, so `cfg(unix)` is false in it, and every
+# `#[cfg(unix)]` arm in the crate — the arms that are the only ones that ever
+# ship — is skipped by the compiler entirely. Not "compiled and unused": never
+# parsed past the attribute. The same is true of `#[cfg(unix)]` tests, which is
+# why the Linux run finds 405 tests where the host finds 361, and 59 where the
+# host finds 53.
+#
+# So the ordinary green build is a green build of the arm that does not ship,
+# and a `cfg(unix)` arm could carry a type error for weeks without one line of
+# output anywhere saying so. `scripts/coreutils-check.sh --only linux` compiles
+# and tests the other arm through WSL; this gate is the thing that makes it
+# happen without being remembered.
+#
+# THE COST, MEASURED RATHER THAN GUESSED. The reason this was not wired up
+# earlier was a figure of "89 minutes", recorded in known-issues.md and in the
+# script's own header. That figure was real but was measured from a *host*
+# `clippy --all-targets` run, which builds the zone's integration tests and dev
+# dependencies. `coreutils-check.sh` scopes itself to `--lib --bins`, and the
+# measured cost of `--only linux` on 2026-09-04 was 2m16s against a warm shared
+# target directory (clippy 1m12s, test 1m04s). Against a cold or contended one
+# it is nearer 6 minutes. That is the true price of this gate, and it is the
+# only gate here priced in minutes.
+#
+# WHY THIS GATE READS THE WORKING TREE, AND WHAT MAKES THAT HONEST. Every other
+# gate judges the commits being pushed, with `--head "$sha"`, because judging
+# what happens to be on disk is this file's own canonical bug: gate 7 kept its
+# shape perfectly while reading the working tree instead of the commit being
+# sent, and put two unformatted commits on origin. A compiler cannot be told to
+# read a revision — cargo builds files — so this gate cannot be converted the
+# same way without checking out the sha somewhere, which would mean a second
+# target directory and a cold build every time.
+#
+# It therefore does not pretend. It first establishes that the working tree
+# *is* the thing being pushed — one ref, its sha equal to HEAD, no modified
+# tracked file, no untracked file — and if any of those is false it declines by
+# name and checks nothing. That is the same answer gate 7 should have given and
+# did not: a gate that cannot ask its question about the right tree must say
+# so, not answer it about a different one.
+#
+# The decline is cheap to avoid (commit before you push, which is the normal
+# order anyway) and loud when it happens, so it does not quietly become the
+# usual path. If it ever does, the tally will say so on every push.
+#
+# NOT WRAPPED IN run-timeout.py, unlike the long runs in boot-test.sh. Two
+# reasons. This hook is interactive — it runs in the terminal of whoever typed
+# `git push`, where a hang is visible and interruptible, unlike a backgrounded
+# boot test. And the wrapper prints `[run-timeout] launching …` as its first
+# line, which is precisely the line `run_checker` quotes as the reason a gate
+# declined, so wrapping would replace "no WSL on this host" with a banner in
+# every skip message this gate ever prints.
+#
+# SCOPE: pushes that touch `userspace/coreutils` or the checker itself. Not the
+# crate's path dependencies (`ere`, `quoting`, `bignum`, …): a dependency whose
+# API changes breaks the host build too, which everything else already catches,
+# and the arms this gate exists for are coreutils' own. Not `userspace/`
+# wholesale, which every lane B push touches and would put minutes on all of
+# them for a crate they did not edit.
+#
+# Bypass: ALLOW_UNCHECKED_UNIX_HALF=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_UNCHECKED_UNIX_HALF:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNCHECKED_UNIX_HALF=1 set — the unix half was not compiled." >&2
+    skip_unixhalf=1
+else
+    skip_unixhalf=0
+fi
+
+cucheck="${repo_root:-.}/scripts/coreutils-check.sh"
+[ -f "$cucheck" ] || skip_unixhalf=1
+# The script is bash (it uses arrays); `sh` here may be dash on a Linux host.
+command -v bash >/dev/null 2>&1 || skip_unixhalf=1
+if [ "$skip_unixhalf" != "1" ]; then
+    touches userspace/coreutils scripts/coreutils-check.sh || skip_unixhalf=1
+fi
+
+# The working-tree-identity precondition described above. Each condition names
+# itself when it fails, because "gate 12 skipped" without a reason is exactly
+# the unreadable silence the tally exists to end — and unlike the path scope,
+# these are conditions the author can fix in one command.
+if [ "$skip_unixhalf" != "1" ]; then
+    _uh_n=0
+    for _uh_s in $pushed_shas; do _uh_n=$((_uh_n + 1)); done
+    _uh_head=$(git rev-parse HEAD 2>/dev/null) || _uh_head=""
+    if [ "$_uh_n" != "1" ]; then
+        echo "pre-push: gate 12 declines — this push sends $_uh_n refs, and a compiler" >&2
+        echo "  can only be pointed at one tree. The unix half was NOT checked." >&2
+        skip_unixhalf=1
+    elif [ "${pushed_shas# }" != "$_uh_head" ]; then
+        echo "pre-push: gate 12 declines — the commit being pushed is not the one" >&2
+        echo "  checked out, so compiling this directory would judge a different tree." >&2
+        echo "  The unix half was NOT checked." >&2
+        skip_unixhalf=1
+    elif ! git diff --quiet HEAD 2>/dev/null; then
+        echo "pre-push: gate 12 declines — the working tree has uncommitted changes," >&2
+        echo "  so a build here judges them and not what is being pushed. Commit or" >&2
+        echo "  stash them and push again. The unix half was NOT checked." >&2
+        skip_unixhalf=1
+    elif [ -n "$(git ls-files --others --exclude-standard 2>/dev/null | head -n 1)" ]; then
+        echo "pre-push: gate 12 declines — there are untracked files in the tree, and" >&2
+        echo "  a new module file is a build input that is not in the commit. Commit" >&2
+        echo "  or remove them. The unix half was NOT checked." >&2
+        skip_unixhalf=1
+    fi
+fi
+
+note_gate coreutils-unix-half "$skip_unixhalf"
+
+unixhalf_failed=0
+if [ "$skip_unixhalf" != "1" ]; then
+    echo "pre-push: compiling coreutils for linux through WSL — this takes minutes." >&2
+    # --may-skip: on a host with no WSL, or no cargo inside it, the script exits
+    # 2 and says why on its first line, and that is a decline rather than a
+    # failure — refusing every push on such a host would get this hook
+    # uninstalled. Usage errors here exit 64, not 2, so a future renamed flag
+    # cannot be read as that decline; see the script's "## Exit codes".
+    if ! run_checker --may-skip coreutils-unix-half \
+                     bash "$cucheck" --only linux -p coreutils; then
+        unixhalf_failed=1
+    fi
+    # run_checker returns 0 for an allowed skip, so the gate has to correct its
+    # own tally: it was recorded as having run, and it did not. Same shape as
+    # boot-test.sh's --may-skip call sites.
+    if [ -n "${RUN_CHECKER_SKIPPED:-}" ]; then
+        gates_ran=${gates_ran% coreutils-unix-half}
+        gates_skipped="$gates_skipped coreutils-unix-half"
+    fi
+fi
+
+if [ "$unixhalf_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — coreutils does not compile, or does not pass its
+tests, for a unix target.
+
+This is not a duplicate of the build you just ran. That build targeted a Windows
+host, where \`cfg(unix)\` is false, so every
+
+    #[cfg(unix)]
+    fn chown_impl(...) { ... }
+
+in the crate was skipped by the compiler before it was type-checked — including
+the \`#[cfg(unix)]\` tests, which is why the linux run has 405 tests where the
+host has 361. The arms that failed above are the only ones that will ever run on
+SlateOS; the ones that passed on the host never ship.
+
+Reproduce and iterate with:
+
+    bash scripts/coreutils-check.sh --only linux -p coreutils
+
+and narrow it while fixing:
+
+    bash scripts/coreutils-check.sh --only linux --no-test -p coreutils
+    bash scripts/coreutils-check.sh --only linux --no-clippy -p coreutils -- chown
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_UNCHECKED_UNIX_HALF=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # The tally. Unconditional, and on stderr with the rest of the hook's output.
 #
 # This is the line whose absence means "the hook did not run" — the one reading
 # that silence could never carry. It is deliberately printed even when every
-# gate skipped, because `0 ran, 11 skipped` is the interesting case, not the
+# gate skipped, because `0 ran, 12 skipped` is the interesting case, not the
 # boring one: it says the push was judged by nothing, which for a push that
 # edits only documentation is correct, and for a push that edits a utility is a
 # bug in a `touches` pattern. Naming the skipped gates is what makes the second

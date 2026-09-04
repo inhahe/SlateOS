@@ -3180,6 +3180,80 @@ check_eol() {
 
 check_eol
 
+# `check_libc_shape` began, from the day it was wired until 2026-09-04, with
+# `py="$(find_python)" || return 0`.  `find_python` is defined nowhere -- not
+# here, not in run-checker.sh, not on PATH -- so the substitution exited 127,
+# the `|| return 0` turned that into a pass, and the gate together with its
+# 24-case self-test had never executed once, on any host, in its life.
+#
+# Nothing in this script could have told us.  `set -e` does not fire, because
+# `||` is an explicit handler and that is what it is for.  `bash -n` accepts the
+# line, because the syntax is valid and the failure is at run time.  shellcheck
+# is looking for unset *variables*, and this is a command.  And
+# `check-gates-are-wired.py` counted the gate as wired, correctly by its own
+# rule, because the `run_checker` call site is right there in the text -- which
+# is the lesson, and the next term past design-decisions.md §907: a gate is
+# what `run_checker` runs, not what it is named -- and *a call site that exists
+# is not a call site that executes*.
+#
+# So this gate asks the question no other one does: does every literal command
+# substitution in the tree's shell call something that exists?  Across the 104
+# graded files it found exactly one defect, the one above.  That measured blast
+# radius of one is the whole argument for its narrow shape -- it fires on real
+# bugs and not on working code, so it will still be on next month.  Costs ~14
+# seconds.  See known-issues.md ->
+# A-A-THE-LIBC-SHAPE-GATE-WAS-BORN-DEAD-AND-THE-WIRING-GATE-CALLS-IT-WIRED.
+check_shell_callables() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== shell callee check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Graded against the real tree first, for the same reason check_eol is.
+    # Every way this checker breaks -- a runaway heredoc that swallows a file,
+    # an over-eager escape rule, a `command -v` batch whose framing drifted --
+    # makes its *candidate* set go empty, and an empty candidate set is
+    # reported in precisely the words of a clean tree.  A `<<<` here-string
+    # read as a `<<` opener did exactly that during development: boot-test.sh
+    # silently dropped from 114 command substitutions to 46, with no other
+    # symptom.  The self-test counts what the real boot-test.sh yields, so that
+    # failure cannot pass.
+    echo "=== Checking the shell-callee gate against the tree it grades ==="
+    if ! run_checker check-shell-callables-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-shell-callables.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The shell-callee gate no longer agrees" >&2
+        echo "with the tree it grades, so its verdict means nothing -- every" >&2
+        echo "failure mode it has empties its own candidate set, which it" >&2
+        echo "reports exactly the way it reports a clean tree." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that every shell command substitution calls something real ==="
+    if run_checker check-shell-callables "$py" \
+            "$PROJECT_ROOT/scripts/check-shell-callables.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A command substitution above calls a name" >&2
+    echo "that nothing in reach defines.  At run time it exits 127 and yields" >&2
+    echo "the empty string; if it is guarded by \`||\`, wrapped in \`if\`, or" >&2
+    echo "assigned with \`local\`, that status is swallowed and the caller" >&2
+    echo "proceeds with an empty value believing it succeeded." >&2
+    echo "" >&2
+    echo "That is how this script shipped a gate that never ran once.  The" >&2
+    echo "checker's own output above says which name and which line." >&2
+    exit 1
+}
+
+check_shell_callables
+
 # Every gate in this script trusts that a checker which finds a problem will
 # *say so* by exiting non-zero.  `check-doc-links.py` did not.  A bare run of it
 # fell through to `ap.print_help(); return 0` while every refusal sat behind

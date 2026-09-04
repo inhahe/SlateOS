@@ -43,13 +43,16 @@
 // only obscure the parser without changing observable behaviour.
 #![allow(clippy::arithmetic_side_effects)]
 #![allow(clippy::indexing_slicing)]
-#![allow(dead_code)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, MouseEventKind};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use oswindow::app::{self, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -60,10 +63,8 @@ const MANTLE: Color = Color::from_hex(0x181825);
 const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
 const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
 const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
@@ -1000,7 +1001,6 @@ struct TreeViewNode {
     /// Path segments to this node.
     path: Vec<PathSegment>,
     /// Number of children (for summary).
-    child_count: usize,
     /// Whether this node matches a search.
     search_match: bool,
 }
@@ -1064,7 +1064,6 @@ fn build_tree_recursive(
                 expandable: true,
                 expanded: is_expanded,
                 path: path.to_vec(),
-                child_count: obj.len(),
                 search_match: is_match,
             });
             if is_expanded {
@@ -1095,7 +1094,6 @@ fn build_tree_recursive(
                 expandable: true,
                 expanded: is_expanded,
                 path: path.to_vec(),
-                child_count: arr.len(),
                 search_match: is_match,
             });
             if is_expanded {
@@ -1127,7 +1125,6 @@ fn build_tree_recursive(
                 expandable: false,
                 expanded: false,
                 path: path.to_vec(),
-                child_count: 0,
                 search_match: is_match,
             });
         }
@@ -1497,6 +1494,16 @@ fn delete_at_path(root: &mut JsonValue, path: &[PathSegment]) -> bool {
 }
 
 /// Add a new key to an object at a given path.
+/// Add a key to an object at `path`.
+///
+/// Nothing calls this yet, and that is a statement about the UI rather than
+/// about the function: adding a key needs somewhere for the user to type the
+/// name, and this program has no such field. Editing an *existing* value works
+/// (`set_value_at_path`, wired in the same commit that wrote this comment);
+/// creating a new one does not. It keeps its test, which is what makes wiring
+/// it later a small job rather than a rewrite.
+/// See known-issues.md -> TD-C-JSONVIEWER-CAN-EDIT-A-VALUE-BUT-NOT-ADD-ONE.
+#[allow(dead_code, reason = "the editor's add-a-key half has no UI yet")]
 fn add_key_at_path(
     root: &mut JsonValue,
     path: &[PathSegment],
@@ -1512,6 +1519,11 @@ fn add_key_at_path(
     }
 }
 
+/// The value at `path`, mutably.
+///
+/// Used only by [`add_key_at_path`], and therefore reachable exactly when that
+/// is.
+#[allow(dead_code, reason = "used only by `add_key_at_path`")]
 fn get_value_at_path_mut<'a>(
     root: &'a mut JsonValue,
     path: &[PathSegment],
@@ -1528,24 +1540,6 @@ fn get_value_at_path_mut<'a>(
         (JsonValue::Array(arr), PathSegment::Index(i)) => {
             let val = arr.get_mut(*i)?;
             get_value_at_path_mut(val, rest)
-        }
-        _ => None,
-    }
-}
-
-fn get_value_at_path<'a>(root: &'a JsonValue, path: &[PathSegment]) -> Option<&'a JsonValue> {
-    if path.is_empty() {
-        return Some(root);
-    }
-    let (head, rest) = path.split_first()?;
-    match (root, head) {
-        (JsonValue::Object(obj), PathSegment::Key(k)) => {
-            let (_, val) = obj.iter().find(|(key, _)| key == k)?;
-            get_value_at_path(val, rest)
-        }
-        (JsonValue::Array(arr), PathSegment::Index(i)) => {
-            let val = arr.get(*i)?;
-            get_value_at_path(val, rest)
         }
         _ => None,
     }
@@ -1769,6 +1763,14 @@ const VIEW_MODES: [ViewMode; 5] = [
 /// A single JSON document tab.
 struct Document {
     /// Tab identifier.
+    ///
+    /// Assigned and, at present, never read: tabs are addressed by index
+    /// throughout, which is the arrangement that made the selection in three
+    /// other apps point at the wrong thing after a deletion. It is kept rather
+    /// than deleted because it is the thing to switch to when that is fixed
+    /// here, and `next_tab_id` already maintains it correctly.
+    /// See known-issues.md -> TD-C-JSONVIEWER-ADDRESSES-TABS-BY-INDEX.
+    #[allow(dead_code, reason = "the identity tabs should be addressed by")]
     id: u64,
     /// Tab title.
     title: String,
@@ -1945,6 +1947,14 @@ struct App {
     edit_mode: bool,
     /// Edit buffer for value editing.
     edit_buffer: String,
+    /// The node the edit buffer belongs to, if an edit is in progress.
+    ///
+    /// `edit_mode` says the user has *enabled* editing; this says a particular
+    /// value is being typed over. Without it a commit has no address to write
+    /// to, which is why `set_value_at_path` — written and covered by four
+    /// tests — had no caller at all: Enter loaded a value into the buffer and
+    /// nothing ever wrote it back.
+    editing_path: Option<Vec<PathSegment>>,
     /// Whether the app is focused on the input area.
     input_focused: bool,
     /// Cursor position in input.
@@ -2061,6 +2071,7 @@ impl App {
             search_visible: false,
             edit_mode: false,
             edit_buffer: String::new(),
+            editing_path: None,
             input_focused: false,
             cursor_pos: 0,
             width: WINDOW_WIDTH,
@@ -2072,16 +2083,12 @@ impl App {
         self.documents.get(self.active_tab)
     }
 
-    fn active_doc_mut(&mut self) -> Option<&mut Document> {
-        self.documents.get_mut(self.active_tab)
-    }
-
     fn new_tab(&mut self) {
         if self.documents.len() >= MAX_TABS {
             return;
         }
         let id = self.next_tab_id;
-        self.next_tab_id += 1;
+        self.next_tab_id = self.next_tab_id.saturating_add(1);
         let title = format!("Untitled {id}");
         self.documents.push(Document::new(id, title));
         self.active_tab = self.documents.len() - 1;
@@ -2219,6 +2226,34 @@ impl App {
             return;
         }
 
+        // An edit in progress takes every printable key, for the same reason
+        // the search bar below does: while a value is being typed over, "5" is
+        // the character five and not the shortcut for the diff view.
+        if self.editing_path.is_some() {
+            match key {
+                Key::Escape => {
+                    self.cancel_edit();
+                    return;
+                }
+                Key::Enter => {
+                    self.commit_edit();
+                    return;
+                }
+                Key::Backspace => {
+                    self.edit_buffer.pop();
+                    return;
+                }
+                _ => {
+                    if let Some(ch) = text
+                        && self.edit_buffer.len() < MAX_SEARCH_LEN
+                    {
+                        self.edit_buffer.push(ch);
+                    }
+                    return;
+                }
+            }
+        }
+
         // Search bar handling
         if self.search_visible {
             match key {
@@ -2304,6 +2339,76 @@ impl App {
                 _ => {}
             }
         }
+        // Entering the diff view is the moment the comparison is wanted, and
+        // until this call existed nothing in the program ever ran one: the
+        // differ, its four kinds, `Document::run_diff` and a whole
+        // `render_diff_view` were written and tested, and the *one* thing
+        // missing was anything that filled `diff_source`. The view drew
+        // "0 difference(s)" for every document, always.
+        if matches!(key, Key::Num5) && !modifiers.ctrl {
+            self.prepare_diff_against_next_tab();
+        }
+    }
+
+    /// Point the active document's diff at the next open tab, and run it.
+    ///
+    /// The next tab rather than a file chooser, because tabs are what this
+    /// program already has: comparing the document you are looking at with the
+    /// one beside it is the comparison a two-tab window is asking for. With
+    /// only one document open there is nothing to compare against, and the
+    /// diff view already says so.
+    fn prepare_diff_against_next_tab(&mut self) {
+        if self.documents.len() < 2 {
+            return;
+        }
+        let next = self
+            .active_tab
+            .checked_add(1)
+            .map_or(0, |n| if n < self.documents.len() { n } else { 0 });
+        let Some(source) = self.documents.get(next).map(|d| d.input.clone()) else {
+            return;
+        };
+        if let Some(doc) = self.documents.get_mut(self.active_tab) {
+            doc.diff_source = source;
+            doc.run_diff();
+        }
+    }
+
+    /// Write the edit buffer back into the document.
+    ///
+    /// The buffer is parsed as JSON first, so `123` becomes a number and
+    /// `"123"` a string — which is the distinction this program exists to show,
+    /// and would be lost by storing every edit as text. A buffer that is not
+    /// valid JSON on its own is taken as a string, because that is what a user
+    /// typing `hello` into a string field means.
+    fn commit_edit(&mut self) {
+        let Some(path) = self.editing_path.take() else {
+            return;
+        };
+        let text = self.edit_buffer.clone();
+        let new_value =
+            parse_json(&text).unwrap_or_else(|_| JsonValue::Str(text.trim_matches('"').to_owned()));
+        let Some(doc) = self.documents.get_mut(self.active_tab) else {
+            return;
+        };
+        let written = doc
+            .parsed
+            .as_mut()
+            .is_some_and(|root| set_value_at_path(root, &path, new_value));
+        if written {
+            doc.dirty = true;
+            doc.invalidate_caches();
+            if let Some(ref value) = doc.parsed {
+                doc.input = format_json(value, doc.indent);
+            }
+        }
+        self.edit_buffer.clear();
+    }
+
+    /// Abandon an edit in progress, leaving the document alone.
+    fn cancel_edit(&mut self) {
+        self.editing_path = None;
+        self.edit_buffer.clear();
     }
 
     fn handle_tree_key(&mut self, key: guitk::event::Key, modifiers: guitk::event::Modifiers) {
@@ -2362,13 +2467,18 @@ impl App {
                 }
             }
             Key::Enter | Key::Space => {
-                if let Some(node) = nodes.get(doc.selected_node) {
+                // A commit first: with an edit in progress, Enter means "keep
+                // what I typed", not "start again".
+                if self.editing_path.is_some() {
+                    self.commit_edit();
+                } else if let Some(node) = nodes.get(doc.selected_node) {
                     if node.expandable {
                         let path = node.path.clone();
                         self.toggle_expand(&path);
                     } else if self.edit_mode {
-                        // Start editing this value
+                        // Start editing this value.
                         self.edit_buffer = node.value_display.clone();
+                        self.editing_path = Some(node.path.clone());
                     }
                 }
             }
@@ -2578,7 +2688,104 @@ impl App {
     // Rendering
     // ========================================================================
 
-    fn render(&mut self) -> Vec<RenderCommand> {
+    /// Route a compositor event into the app.
+    ///
+    /// `handle_key` below already existed and was already tested; nothing
+    /// dispatched to it, because nothing delivered an event. This is that
+    /// dispatch, and the translation of a `KeyEvent` into the three arguments
+    /// `handle_key` takes.
+    fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => {
+                if !key_ev.pressed {
+                    return EventResult::Ignored;
+                }
+                // `handle_key` reports nothing about whether it did anything,
+                // and an app that answers `Consumed` to every key redraws on
+                // the ones it ignored. Comparing the state around the call
+                // beats making every arm of a long match remember to report.
+                let before = self.state_fingerprint();
+                self.handle_key(key_ev.key, key_ev.modifiers, key_ev.text.chars().next());
+                if self.state_fingerprint() == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
+            }
+            Event::Mouse(mouse_ev) => {
+                // The click and scroll handlers below were in the same position
+                // as `handle_key`: written, and called by nothing.
+                let before = self.state_fingerprint();
+                match mouse_ev.kind {
+                    MouseEventKind::Press(button) => {
+                        self.handle_mouse(mouse_ev.x, mouse_ev.y, button);
+                    }
+                    MouseEventKind::Scroll { dy, .. } => {
+                        self.handle_scroll(mouse_ev.x, mouse_ev.y, dy);
+                    }
+                    _ => return EventResult::Ignored,
+                }
+                if self.state_fingerprint() == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
+            }
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.width = *width as f32;
+                    self.height = *height as f32;
+                }
+                // Not `Consumed`: a resize is not by itself a reason to redraw.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A cheap summary of everything a keystroke can change.
+    ///
+    /// A tuple of small copies rather than a hash: a hash could collide and
+    /// silently drop a redraw.
+    fn state_fingerprint(
+        &self,
+    ) -> (
+        usize,
+        String,
+        usize,
+        bool,
+        bool,
+        bool,
+        String,
+        usize,
+        usize,
+        ViewMode,
+    ) {
+        let doc = self.documents.get(self.active_tab);
+        (
+            self.active_tab,
+            self.search_query.clone(),
+            self.search_index,
+            self.search_visible,
+            self.edit_mode,
+            self.input_focused,
+            self.edit_buffer.clone(),
+            self.cursor_pos,
+            // Scrolling and expanding are document state, and a wheel event
+            // that moved the view has to read as a redraw.
+            doc.map_or(0, |d| d.selected_node),
+            doc.map_or(ViewMode::Tree, |d| d.view_mode),
+        )
+    }
+
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`, so
+    /// an app that keeps the name draws nothing and reports no error.
+    fn render_commands(&mut self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
@@ -4111,11 +4318,56 @@ const SAMPLE_JSON: &str = r#"{
 // Entry point
 // ============================================================================
 
-fn main() {
-    let _app = App::new();
-    // In the real OS, this would enter the event loop:
-    // app.run()
-    // For now, the app struct + rendering methods demonstrate the full feature set.
+impl oswindow::app::App for App {
+    fn title(&self) -> String {
+        "JSON Viewer".to_owned()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.width as u32, self.height as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// Nothing here advances on its own: the tree expands when it is expanded
+    /// and the view scrolls when it is scrolled. There is no animation and no
+    /// data that ages, so a tick would redraw an identical frame.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.width = width;
+        self.height = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = App::new();
+    app::launch("jsonviewer", &mut app)
 }
 
 // ============================================================================
@@ -4131,6 +4383,257 @@ fn main() {
     clippy::single_char_pattern
 )]
 mod tests {
+
+    // ------------------------------------------------------------------
+    // Compositor routing, and the two features it made reachable
+    // ------------------------------------------------------------------
+
+    use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent};
+    // The trait, so `app.render(w, h)` resolves: this app'"'"'s state type is also
+    // called `App`, which is why the impl names the trait in full.
+    use oswindow::app::App as _;
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn typed(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    /// Two tabs holding documents that differ in one field.
+    fn two_tabs() -> App {
+        let mut app = App::new();
+        app.documents.clear();
+        for (title, text) in [
+            ("left", r#"{"a":1,"b":"x"}"#),
+            ("right", r#"{"a":2,"b":"x"}"#),
+        ] {
+            let mut doc = Document::new(0, title.to_owned());
+            doc.input = text.to_owned();
+            doc.parsed = parse_json(text).ok();
+            app.documents.push(doc);
+        }
+        app.active_tab = 0;
+        app
+    }
+
+    #[test]
+    fn a_key_event_reaches_the_key_handler() {
+        // The dispatch is what was missing; `handle_key` itself was tested.
+        let mut app = two_tabs();
+        assert_eq!(app.handle_event(&press(Key::Num2)), EventResult::Consumed);
+        assert_eq!(
+            app.documents.first().map(|d| d.view_mode),
+            Some(ViewMode::Raw)
+        );
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = two_tabs();
+        let release = Event::Key(KeyEvent {
+            key: Key::Num2,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert_eq!(
+            app.documents.first().map(|d| d.view_mode),
+            Some(ViewMode::Tree)
+        );
+    }
+
+    #[test]
+    fn the_diff_view_actually_diffs_something() {
+        // `diff_json`, its four kinds, `run_diff` and a whole `render_diff_view`
+        // were written and tested, and nothing ever filled `diff_source` — so
+        // the view reported "0 difference(s)" for every document, always.
+        let mut app = two_tabs();
+        assert!(
+            app.documents
+                .first()
+                .is_some_and(|d| d.diff_results.is_empty()),
+            "nothing is diffed until the view is opened"
+        );
+        assert_eq!(app.handle_event(&press(Key::Num5)), EventResult::Consumed);
+        assert_eq!(
+            app.documents.first().map(|d| d.view_mode),
+            Some(ViewMode::Diff)
+        );
+        let results = app
+            .documents
+            .first()
+            .map(|d| d.diff_results.len())
+            .unwrap_or_default();
+        assert_eq!(results, 1, "the two tabs differ in exactly one field");
+    }
+
+    #[test]
+    fn one_tab_alone_has_nothing_to_diff_against() {
+        let mut app = two_tabs();
+        app.documents.truncate(1);
+        let _ = app.handle_event(&press(Key::Num5));
+        // The count would be zero either way — a document compared with
+        // itself has no differences. What the guard actually decides is
+        // whether `diff_source` is filled at all, and that is what the diff
+        // view reads to choose between "no source" and "0 difference(s)".
+        // The second is a lie when there was nothing to compare against.
+        assert!(
+            app.documents
+                .first()
+                .is_some_and(|d| d.diff_source.is_empty()),
+            "a single document should not be pointed at itself as a source"
+        );
+        assert!(
+            app.documents
+                .first()
+                .is_some_and(|d| d.diff_results.is_empty()),
+            "and so it has no differences to show"
+        );
+    }
+
+    #[test]
+    fn an_edited_value_is_written_back_into_the_document() {
+        // `set_value_at_path` had four tests and no caller: Enter loaded a value
+        // into the buffer and nothing ever wrote it back, so every edit was
+        // discarded silently.
+        let mut app = two_tabs();
+        app.edit_mode = true;
+        app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
+        app.edit_buffer = "42".to_owned();
+        app.commit_edit();
+        let value = app
+            .documents
+            .first()
+            .and_then(|d| d.parsed.as_ref())
+            .and_then(|v| match v {
+                JsonValue::Object(o) => o.iter().find(|(k, _)| k == "a").map(|(_, v)| v.clone()),
+                _ => None,
+            });
+        assert!(
+            matches!(value, Some(JsonValue::Number(n)) if (n - 42.0).abs() < f64::EPSILON),
+            "expected the number 42, got {value:?}"
+        );
+        assert!(
+            app.documents.first().is_some_and(|d| d.dirty),
+            "an edit should mark the document dirty"
+        );
+    }
+
+    #[test]
+    fn an_edit_keeps_the_difference_between_a_number_and_a_string() {
+        // Which is the distinction this program exists to show, and would be
+        // lost by storing every edit as text.
+        let mut app = two_tabs();
+        app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
+        app.edit_buffer = "\"42\"".to_owned();
+        app.commit_edit();
+        let value = app
+            .documents
+            .first()
+            .and_then(|d| d.parsed.as_ref())
+            .and_then(|v| match v {
+                JsonValue::Object(o) => o.iter().find(|(k, _)| k == "a").map(|(_, v)| v.clone()),
+                _ => None,
+            });
+        assert!(
+            matches!(value, Some(JsonValue::Str(ref s)) if s == "42"),
+            "expected the string \"42\", got {value:?}"
+        );
+    }
+
+    #[test]
+    fn typing_during_an_edit_is_text_and_not_a_shortcut() {
+        // "5" is the diff view outside an edit and the character five inside
+        // one.
+        let mut app = two_tabs();
+        app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
+        app.edit_buffer.clear();
+        let _ = app.handle_event(&typed('5'));
+        assert_eq!(app.edit_buffer, "5");
+        assert_eq!(
+            app.documents.first().map(|d| d.view_mode),
+            Some(ViewMode::Tree),
+            "typing during an edit switched the view"
+        );
+    }
+
+    #[test]
+    fn escape_abandons_an_edit_and_leaves_the_document_alone() {
+        let mut app = two_tabs();
+        let before = app.documents.first().and_then(|d| d.parsed.clone());
+        app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
+        app.edit_buffer = "999".to_owned();
+        let _ = app.handle_event(&press(Key::Escape));
+        assert!(app.editing_path.is_none(), "Escape should end the edit");
+        assert!(app.edit_buffer.is_empty());
+        assert_eq!(
+            app.documents.first().and_then(|d| d.parsed.clone()),
+            before,
+            "an abandoned edit changed the document"
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_tab_bar_switches_tabs() {
+        // The mouse layer — tab clicks, view-mode clicks, scrolling — was in
+        // the same position as the keys: written, and called by nothing. The
+        // tab bar is the part with geometry a test can aim at exactly.
+        let mut app = two_tabs();
+        assert_eq!(app.active_tab, 0);
+        let first_width = app.documents.first().map(tab_width).unwrap_or(0.0);
+        let second_tab_x = PADDING + first_width + 4.0 + 2.0;
+        let click = Event::Mouse(MouseEvent {
+            x: second_tab_x,
+            y: TOOLBAR_HEIGHT + 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(app.handle_event(&click), EventResult::Consumed);
+        assert_eq!(
+            app.active_tab, 1,
+            "the click did not reach handle_tab_click"
+        );
+    }
+
+    #[test]
+    fn a_resize_is_taken_but_is_not_itself_a_redraw() {
+        let mut app = two_tabs();
+        assert_eq!(
+            app.handle_event(&Event::Resize {
+                width: 1600,
+                height: 900
+            }),
+            EventResult::Ignored
+        );
+        assert!((app.width - 1600.0).abs() < f32::EPSILON);
+        assert!((app.height - 900.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rendering_draws_something_in_every_view_at_an_awkward_size() {
+        let mut app = two_tabs();
+        for k in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5] {
+            let _ = app.handle_event(&press(k));
+            for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+                assert!(
+                    !app.render(w, h).commands.is_empty(),
+                    "drew nothing at {w}x{h}"
+                );
+            }
+        }
+    }
     use super::*;
 
     // --- Parser tests ---
@@ -4851,7 +5354,7 @@ mod tests {
     #[test]
     fn app_render_produces_commands() {
         let mut app = App::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 

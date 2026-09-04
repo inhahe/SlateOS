@@ -143,11 +143,11 @@ def main_line(text: str) -> int:
 # whenever apps are wired; the check fails if it is ever exceeded. It is a
 # ceiling, not a target -- see the module docstring on why it is not zero.
 #
-# 49 -> 44 as fontmanager, procexplorer, musicplayer, paint and soundrecorder
-# were wired onto `oswindow::app`. Lowering it
+# 49 -> 43 across 2026-09-03: fontmanager, procexplorer, musicplayer, paint,
+# soundrecorder and habits wired onto `oswindow::app`. Lowering it
 # in the same commit is the point of a ratchet: ground gained and not held is
 # ground that can be lost again without anything objecting.
-BASELINE = 44
+BASELINE = 43
 
 
 # --------------------------------------------------------------------------

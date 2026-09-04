@@ -113430,20 +113430,48 @@ write files that are actually in the repository:
 
 | Site | Target | Tracked? | Declared `eol=lf`? |
 |---|---|---|---|
-| `check-selftest-reinit.py:327` | `scripts/selftest-reinit-baseline.txt`, on `--pin` | yes | **yes** |
+| `check-selftest-reinit.py:327` | `scripts/selftest-reinit-baseline.txt`, on `--pin` | **not yet** | **yes**, on creation |
 | `scan-orphan-modules.py:602` | `scripts/orphan-modules-baseline.txt`, on `pin` | yes | **yes** |
 | `strip-workspace-sections.py:80` | `{apps,userspace,gui,init,net}/*/Cargo.toml`, **in place** | yes | **no** |
 
-The first two are the exact signature of this entry: a declared-LF tracked file
-rewritten after checkout, with git silent about it. Both are `--pin` paths — run
-deliberately, then committed — which is precisely how a corrupted worktree
+*Corrected 2026-09-04.* The first row originally read "Tracked? yes". It is not:
+`git ls-files scripts/selftest-reinit-baseline*` is empty and the path does not
+exist on disk — nobody has run `--pin` yet. `.gitattributes:41` (`*.txt text
+eol=lf`) covers it in advance, so `git check-attr` already answers `text: set,
+eol: lf` for a file that does not exist. Verified by direct query, not inferred.
+
+That distinction changes what happens, so it is worth stating rather than
+patching over:
+
+| | `orphan-modules-baseline.txt` (tracked) | `selftest-reinit-baseline.txt` (not yet) |
+|---|---|---|
+| born CRLF by `write_text` on Windows | yes | yes |
+| in `check-eol.py`'s subject set | **yes** — declared ∩ tracked | **no** — declared but untracked |
+| so a CRLF rewrite is | caught on the next run | invisible until someone `git add`s it |
+
+Which means row 2 is the one this entry's fix already covers, and row 1 is a
+**latent** instance: it is fine precisely because the feature has never been
+used. The first `--pin` writes CRLF; the first `git add` of that output hides it
+(the clean filter normalises the index copy, so `git status`/`git diff` stay
+silent); and only then does the file enter `check-eol.py`'s subject set and the
+gate start reporting it — after the corruption, not before. Being caught late
+still beats not being caught, but the ordering is worth knowing: this gate
+detects, it does not prevent.
+
+Both rows are the exact signature of this entry — a declared-LF file rewritten
+after checkout with git silent about it — and both are `--pin` paths, run
+deliberately then committed, which is precisely how a corrupted worktree
 survives a commit and still looks clean.
 
 The third is worse in kind and lower in risk. It is a `read_text` → `write_text`
 round trip, so it is **not idempotent on Windows**: the read normalises CRLF to
 `\n` and the write turns every `\n` back into CRLF, converting an LF file to CRLF
 whenever the script changes anything at all. It aims at `*.toml`, which is *not*
-declared `eol=lf`, so `check-eol.py` cannot see the damage it does. It is also
+declared `eol=lf` — `git check-attr text eol -- apps/calc/Cargo.toml` answers
+`unspecified` for both, checked 2026-09-04 — so its targets are tracked but
+outside `check-eol.py`'s subject set, and the gate cannot see the damage it
+does. That is the third row's real hazard: unlike rows 1 and 2, nothing would
+ever report it. It is also
 **orphaned** — no reference to it exists anywhere under `scripts/`, nor in any
 tracked `.md`, `.txt`, `.sh` or `.toml` — and it is a one-shot migration script
 from the original workspace setup.

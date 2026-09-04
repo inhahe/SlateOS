@@ -31,12 +31,15 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cognitive_complexity)]
-#![allow(dead_code)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -46,7 +49,6 @@ const BASE: Color = Color::from_hex(0x1E1E2E);
 const MANTLE: Color = Color::from_hex(0x181825);
 const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
 const TEXT: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
@@ -85,7 +87,12 @@ const TITLE_TEXT: f32 = 18.0;
 const SOURCE_WIDTH: f32 = 100.0;
 
 const MAX_LOG_ENTRIES: usize = 100_000;
-const MAX_BOOKMARKS: usize = 500;
+// There is deliberately no `MAX_BOOKMARKS`. One sat here, unenforced, between
+// two caps that are enforced — which made it read as a bound that held. It
+// cannot be one: a bookmark is a `bool` on a `LogEntry`, so the number of them
+// is already bounded by `MAX_LOG_ENTRIES` and there is no separate storage to
+// limit. A cap here would be a policy ("you may not mark more than 500 lines")
+// with nothing behind it.
 const MAX_SEARCH_RESULTS: usize = 10_000;
 
 // ============================================================================
@@ -328,7 +335,9 @@ fn parse_json_object(s: &str) -> Option<Vec<(String, String)>> {
 }
 
 fn skip_ws(chars: &[char], i: &mut usize) {
-    while *i < chars.len() && chars[*i].is_ascii_whitespace() {
+    // `get` rather than a length test plus an index: one expression that
+    // cannot disagree with itself, over input this program did not write.
+    while chars.get(*i).is_some_and(char::is_ascii_whitespace) {
         *i = i.saturating_add(1);
     }
 }
@@ -340,8 +349,8 @@ fn parse_json_string(chars: &[char], i: &mut usize) -> Option<String> {
     *i = i.saturating_add(1);
 
     let mut s = String::new();
-    while *i < chars.len() {
-        match chars[*i] {
+    while let Some(&ch) = chars.get(*i) {
+        match ch {
             '"' => {
                 *i = i.saturating_add(1);
                 return Some(s);
@@ -389,15 +398,11 @@ fn parse_json_value(chars: &[char], i: &mut usize) -> Option<String> {
         Some('"') => parse_json_string(chars, i),
         Some(c) if c.is_ascii_digit() || *c == '-' => {
             let mut n = String::new();
-            while *i < chars.len()
-                && (chars[*i].is_ascii_digit()
-                    || chars[*i] == '.'
-                    || chars[*i] == '-'
-                    || chars[*i] == 'e'
-                    || chars[*i] == 'E'
-                    || chars[*i] == '+')
-            {
-                n.push(chars[*i]);
+            while let Some(&ch) = chars.get(*i) {
+                if !(ch.is_ascii_digit() || matches!(ch, '.' | '-' | 'e' | 'E' | '+')) {
+                    break;
+                }
+                n.push(ch);
                 *i = i.saturating_add(1);
             }
             Some(n)
@@ -444,15 +449,23 @@ fn parse_json_value(chars: &[char], i: &mut usize) -> Option<String> {
         Some('[' | '{') => {
             // Skip nested structures (arrays/objects) as a single string
             let start = *i;
-            let open = chars[*i];
+            let open = *chars.get(*i)?;
             let close = if open == '[' { ']' } else { '}' };
             let mut depth: u32 = 1;
             *i = i.saturating_add(1);
-            while *i < chars.len() && depth > 0 {
-                match chars[*i] {
+            while depth > 0 {
+                let Some(&ch) = chars.get(*i) else {
+                    // Ran off the end with the structure still open: the line
+                    // is truncated, which is a thing a log file being written
+                    // to genuinely is at the moment it is read.
+                    break;
+                };
+                match ch {
                     c if c == open => depth = depth.saturating_add(1),
                     c if c == close => depth = depth.saturating_sub(1),
                     '"' => {
+                        // The nested string moves `i` past its closing quote,
+                        // so this must not advance again.
                         let _ = parse_json_string(chars, i);
                         continue;
                     }
@@ -460,7 +473,7 @@ fn parse_json_value(chars: &[char], i: &mut usize) -> Option<String> {
                 }
                 *i = i.saturating_add(1);
             }
-            Some(chars[start..*i].iter().collect())
+            Some(chars.get(start..*i)?.iter().collect())
         }
         _ => None,
     }
@@ -598,7 +611,7 @@ impl LogFile {
 // Filter State
 // ============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct FilterState {
     min_level: LogLevel,
     search_query: String,
@@ -721,6 +734,12 @@ struct App {
     // Search
     search_results: Vec<usize>,
     current_search_result: usize,
+    /// Whether typing goes to the search box rather than to the shortcuts.
+    ///
+    /// Without it, typing "w" to look for a warning would set the severity
+    /// floor to Warn instead — the app had no input at all, so nothing had ever
+    /// needed to make the distinction.
+    search_focused: bool,
 }
 
 impl App {
@@ -766,6 +785,7 @@ impl App {
             show_line_numbers: true,
             search_results: Vec::new(),
             current_search_result: 0,
+            search_focused: false,
         }
     }
 
@@ -818,8 +838,11 @@ impl App {
 
     fn next_search_result(&mut self) {
         if !self.search_results.is_empty() {
-            self.current_search_result =
-                (self.current_search_result.saturating_add(1)) % self.search_results.len();
+            self.current_search_result = self
+                .current_search_result
+                .saturating_add(1)
+                .checked_rem(self.search_results.len())
+                .unwrap_or(0);
         }
     }
 
@@ -833,7 +856,231 @@ impl App {
         }
     }
 
-    fn render(&self) -> Vec<RenderCommand> {
+    // ========================================================================
+    // Events
+    // ========================================================================
+
+    /// Route a compositor event into the app.
+    fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Resize { .. } => {
+                // This app lays out from constants rather than from a stored
+                // size, so there is nothing to reconcile and nothing to redraw.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a key press.
+    ///
+    /// While the search box has text being typed into it every printable key is
+    /// search text — which is why the search branch comes first, and why typing
+    /// "w" to look for a warning does not toggle line wrapping.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        if self.search_focused {
+            return self.handle_key_search(key);
+        }
+        match key.key {
+            // Views.
+            Key::Num1 => self.set_view(ViewMode::List),
+            Key::Num2 => self.set_view(ViewMode::Stats),
+            Key::Num3 => self.set_view(ViewMode::Detail),
+            // Severity floor, on the initial of the level it admits.
+            Key::T => self.set_min_level(LogLevel::Trace),
+            Key::D => self.set_min_level(LogLevel::Debug),
+            Key::I => self.set_min_level(LogLevel::Info),
+            Key::W => self.set_min_level(LogLevel::Warn),
+            Key::E => self.set_min_level(LogLevel::Error),
+            Key::F => self.set_min_level(LogLevel::Fatal),
+            // Selection, over the entries the filter is actually showing.
+            Key::Up => self.step_selection(-1),
+            Key::Down => self.step_selection(1),
+            Key::Home => self.select_edge(true),
+            Key::End => self.select_edge(false),
+            Key::Space => self.toggle_selected_bookmark(),
+            Key::B => {
+                self.filter.show_bookmarked_only = !self.filter.show_bookmarked_only;
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            Key::Slash => {
+                self.search_focused = true;
+                EventResult::Consumed
+            }
+            Key::N => self.step_search(true),
+            Key::P => self.step_search(false),
+            // Display toggles.
+            Key::L => {
+                self.wrap_lines = !self.wrap_lines;
+                EventResult::Consumed
+            }
+            Key::A => {
+                self.auto_scroll = !self.auto_scroll;
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                if self.filter == FilterState::default() {
+                    return EventResult::Ignored;
+                }
+                self.filter = FilterState::default();
+                self.update_search();
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Keys while the search box has focus.
+    fn handle_key_search(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape | Key::Enter => {
+                self.search_focused = false;
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                if self.filter.search_query.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+                self.update_search();
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            _ => {
+                if key.text.is_empty() || key.modifiers.ctrl {
+                    return EventResult::Ignored;
+                }
+                self.filter.search_query.push_str(&key.text);
+                self.update_search();
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Switch views, reporting whether anything changed.
+    fn set_view(&mut self, mode: ViewMode) -> EventResult {
+        if self.view_mode == mode {
+            return EventResult::Ignored;
+        }
+        self.view_mode = mode;
+        EventResult::Consumed
+    }
+
+    /// Raise or lower the severity floor.
+    fn set_min_level(&mut self, level: LogLevel) -> EventResult {
+        if self.filter.min_level == level {
+            return EventResult::Ignored;
+        }
+        self.filter.min_level = level;
+        // Changing the floor changes which entries exist on screen, and the
+        // selection is an index into that list.
+        self.reanchor_selection();
+        EventResult::Consumed
+    }
+
+    /// Move the selection through the entries the filter is showing.
+    ///
+    /// Over `filtered_entries` and not the whole file: stepping by raw index
+    /// would walk through entries the current severity floor is hiding, so the
+    /// highlight would vanish for several presses and then reappear elsewhere.
+    fn step_selection(&mut self, delta: isize) -> EventResult {
+        let visible: Vec<usize> = self.filtered_entries().iter().map(|(i, _)| *i).collect();
+        if visible.is_empty() {
+            if self.selected_entry.is_none() {
+                return EventResult::Ignored;
+            }
+            self.selected_entry = None;
+            return EventResult::Consumed;
+        }
+        let current = self
+            .selected_entry
+            .and_then(|i| visible.iter().position(|&v| v == i));
+        let next = match current {
+            None => 0,
+            Some(pos) => {
+                let Ok(pos) = isize::try_from(pos) else {
+                    return EventResult::Ignored;
+                };
+                let Some(moved) = pos.checked_add(delta) else {
+                    return EventResult::Ignored;
+                };
+                let Ok(moved) = usize::try_from(moved) else {
+                    return EventResult::Ignored; // off the top; stay put
+                };
+                if moved >= visible.len() {
+                    return EventResult::Ignored; // off the bottom; stay put
+                }
+                moved
+            }
+        };
+        let Some(&idx) = visible.get(next) else {
+            return EventResult::Ignored;
+        };
+        if Some(idx) == self.selected_entry {
+            return EventResult::Ignored;
+        }
+        self.selected_entry = Some(idx);
+        EventResult::Consumed
+    }
+
+    /// Jump to the first or last visible entry.
+    fn select_edge(&mut self, first: bool) -> EventResult {
+        let visible: Vec<usize> = self.filtered_entries().iter().map(|(i, _)| *i).collect();
+        let target = if first {
+            visible.first().copied()
+        } else {
+            visible.last().copied()
+        };
+        if target == self.selected_entry {
+            return EventResult::Ignored;
+        }
+        self.selected_entry = target;
+        EventResult::Consumed
+    }
+
+    /// Put the selection back on a visible entry after the filter changed.
+    fn reanchor_selection(&mut self) {
+        let visible: Vec<usize> = self.filtered_entries().iter().map(|(i, _)| *i).collect();
+        if !self.selected_entry.is_some_and(|i| visible.contains(&i)) {
+            self.selected_entry = visible.first().copied();
+        }
+    }
+
+    /// Bookmark or un-bookmark whatever is selected.
+    fn toggle_selected_bookmark(&mut self) -> EventResult {
+        let Some(idx) = self.selected_entry else {
+            return EventResult::Ignored;
+        };
+        self.toggle_bookmark(idx);
+        // Un-bookmarking while showing bookmarks only removes the entry from
+        // the list it was selected in.
+        self.reanchor_selection();
+        EventResult::Consumed
+    }
+
+    /// Step through the search hits.
+    fn step_search(&mut self, forward: bool) -> EventResult {
+        if self.search_results.is_empty() {
+            return EventResult::Ignored;
+        }
+        if forward {
+            self.next_search_result();
+        } else {
+            self.prev_search_result();
+        }
+        EventResult::Consumed
+    }
+
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`, so
+    /// an app that keeps the name draws nothing and reports no error.
+    fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
@@ -1100,7 +1347,7 @@ impl App {
 
         for (vi, (original_idx, entry)) in entries.iter().enumerate().skip(scroll).take(max_visible)
         {
-            let ey = y + ((vi - scroll) as f32) * LINE_HEIGHT;
+            let ey = y + (vi.saturating_sub(scroll) as f32) * LINE_HEIGHT;
             let selected = self.selected_entry == Some(*original_idx);
             let is_search_hit = self.search_results.contains(original_idx);
 
@@ -1718,9 +1965,60 @@ impl App {
 // Main
 // ============================================================================
 
-fn main() {
-    let app = App::new();
-    let _cmds = app.render();
+// The trait and this app's own state type are both called `App`, so the impl
+// names the trait in full rather than importing it under an alias.
+impl oswindow::app::App for App {
+    fn title(&self) -> String {
+        self.active_log().map_or_else(
+            || "Log Viewer".to_owned(),
+            |log| format!("Log Viewer — {}", log.name),
+        )
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        // The crate already allows the cast lints at module level; both are
+        // positive constants well inside u32 regardless.
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// No clock — and for this app that is a statement worth reading twice.
+    ///
+    /// The module header promises "real-time log tailing with auto-scroll", and
+    /// `auto_scroll` is a real toggle drawn in the status bar. There is nothing
+    /// behind either: the only log this app has is a sample string compiled
+    /// into the binary, and nothing reads a file. A tick would re-render an
+    /// unchanging buffer on a timer.
+    ///
+    /// When a log source exists, this returns the poll interval and the tick
+    /// re-reads the file — and only then does `auto_scroll` mean anything. See
+    /// known-issues.md -> TD-C-LOGVIEWER-TAILS-A-STRING-COMPILED-INTO-ITSELF.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
+        // The size is ignored rather than stored: this app lays out from
+        // constants, so there is no stored dimension to reconcile. Saying so
+        // here beats a field nothing reads.
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut viewer = App::new();
+    app::launch("logviewer", &mut viewer)
 }
 
 // ============================================================================
@@ -1729,6 +2027,314 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range or unwraps a `None` should fail loudly
+    // and point at the line that did it — that is the diagnosis. The defensive
+    // lints exist to keep panics out of code that runs on a user'"'"'s data,
+    // which this is not.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
+    #[test]
+    fn no_prefix_of_a_log_line_panics_or_hangs_the_parser() {
+        // A log file being appended to *is* truncated at the moment it is
+        // read, so a half-written last line is the normal case rather than a
+        // hostile one. Every prefix has to be refused or parsed, never
+        // panic and never loop.
+        let line = concat!(
+            r#"{"timestamp":1716000000000,"level":"INFO","source":"kernel","#,
+            r#""message":"hello \"world\"","tags":["a","b"],"nested":{"k":1},"#,
+            r#""n":-1.5e+3,"ok":true}"#
+        );
+        for end in 0..=line.len() {
+            let Some(prefix) = line.get(..end) else {
+                continue;
+            };
+            let mut file = LogFile::new("t.log", "/t.log");
+            file.parse_content(prefix);
+        }
+    }
+
+    #[test]
+    fn a_truncated_nested_value_does_not_swallow_the_rest_of_the_file() {
+        // The nested-structure scanner stops at the end of input with the
+        // structure still open. It must not then report success over text it
+        // never saw.
+        let mut file = LogFile::new("t.log", "/t.log");
+        file.parse_content(r#"{"timestamp":1,"level":"INFO","message":"a","x":{"y":"#);
+        // Whatever it decides about this line, the next one must still parse.
+        let mut file2 = LogFile::new("t.log", "/t.log");
+        file2.parse_content(concat!(
+            r#"{"timestamp":1,"level":"INFO","message":"a","x":{"y":"#,
+            "\n",
+            r#"{"timestamp":2,"level":"WARN","message":"b"}"#
+        ));
+        assert!(
+            file2.entries.iter().any(|e| e.message == "b"),
+            "the line after a truncated one should still be read"
+        );
+    }
+
+    #[test]
+    fn a_string_containing_braces_does_not_end_a_nested_value_early() {
+        // The scanner hands a quote to `parse_json_string`, which is what
+        // stops a `}` inside a message from closing the object around it.
+        let mut file = LogFile::new("t.log", "/t.log");
+        file.parse_content(
+            r#"{"timestamp":1,"level":"INFO","message":"m","x":{"k":"}}}"},"after":"seen"}"#,
+        );
+        let entry = file.entries.first().expect("the line should parse");
+        assert_eq!(
+            entry
+                .fields
+                .iter()
+                .find(|(k, _)| k == "after")
+                .map(|(_, v)| v.as_str()),
+            Some("seen"),
+            "the field after the brace-laden string was lost: {:?}",
+            entry.fields
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Events
+    //
+    // The app had no input handling until it was wired to the compositor.
+    // ------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn typed(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    #[test]
+    fn the_number_row_reaches_every_view() {
+        let mut app = App::new();
+        for (k, mode) in [
+            (Key::Num2, ViewMode::Stats),
+            (Key::Num3, ViewMode::Detail),
+            (Key::Num1, ViewMode::List),
+        ] {
+            assert_eq!(app.handle_event(&press(k)), EventResult::Consumed);
+            assert_eq!(app.view_mode, mode, "{k:?} went to the wrong view");
+        }
+    }
+
+    #[test]
+    fn asking_for_the_view_already_shown_is_not_a_redraw() {
+        let mut app = App::new();
+        assert_eq!(app.view_mode, ViewMode::List);
+        assert_eq!(app.handle_event(&press(Key::Num1)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn the_severity_keys_raise_the_floor_and_hide_the_quieter_lines() {
+        let mut app = App::new();
+        let all = app.filtered_entries().len();
+        assert_eq!(app.handle_event(&press(Key::E)), EventResult::Consumed);
+        assert_eq!(app.filter.min_level, LogLevel::Error);
+        let errors = app.filtered_entries().len();
+        assert!(errors > 0, "the sample log has errors");
+        assert!(errors < all, "a floor of Error should hide the info lines");
+        // Every surviving line is at least as severe as the floor.
+        for (_, e) in app.filtered_entries() {
+            assert!(
+                e.level >= LogLevel::Error,
+                "{:?} survived a floor of Error",
+                e.level
+            );
+        }
+        assert_eq!(app.handle_event(&press(Key::T)), EventResult::Consumed);
+        assert_eq!(app.filtered_entries().len(), all, "Trace admits everything");
+    }
+
+    #[test]
+    fn raising_the_floor_moves_the_selection_onto_a_line_still_shown() {
+        // The selection is an index into the whole file while the screen lists
+        // only what passes the filter, so a floor change can strand it.
+        let mut app = App::new();
+        app.handle_event(&press(Key::Down));
+        assert!(app.selected_entry.is_some());
+        app.handle_event(&press(Key::F)); // Fatal only
+        let shown: Vec<usize> = app.filtered_entries().iter().map(|(i, _)| *i).collect();
+        match app.selected_entry {
+            Some(i) => assert!(shown.contains(&i), "selection left the visible list"),
+            None => assert!(shown.is_empty()),
+        }
+    }
+
+    #[test]
+    fn the_arrows_walk_the_visible_lines_and_stop_at_the_ends() {
+        let mut app = App::new();
+        app.handle_event(&press(Key::E)); // a short list, quick to walk
+        let shown: Vec<usize> = app.filtered_entries().iter().map(|(i, _)| *i).collect();
+        assert!(shown.len() >= 2, "the sample log has several errors");
+        app.selected_entry = shown.first().copied();
+        assert_eq!(
+            app.handle_event(&press(Key::Up)),
+            EventResult::Ignored,
+            "Up at the top should stay put"
+        );
+        for id in shown.iter().skip(1) {
+            assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Consumed);
+            assert_eq!(app.selected_entry, Some(*id));
+        }
+        assert_eq!(
+            app.handle_event(&press(Key::Down)),
+            EventResult::Ignored,
+            "Down at the bottom should stay put"
+        );
+    }
+
+    #[test]
+    fn home_and_end_jump_within_the_filtered_list() {
+        let mut app = App::new();
+        app.handle_event(&press(Key::W)); // hide the chatter
+        let shown: Vec<usize> = app.filtered_entries().iter().map(|(i, _)| *i).collect();
+        assert!(!shown.is_empty());
+        app.handle_event(&press(Key::End));
+        assert_eq!(app.selected_entry, shown.last().copied());
+        app.handle_event(&press(Key::Home));
+        assert_eq!(app.selected_entry, shown.first().copied());
+        // And once there, Home is not a redraw.
+        assert_eq!(app.handle_event(&press(Key::Home)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn typing_a_search_does_not_run_the_shortcuts_those_letters_name() {
+        // "w" is the Warn floor outside the search box and a letter inside it.
+        let mut app = App::new();
+        let floor = app.filter.min_level;
+        assert_eq!(app.handle_event(&press(Key::Slash)), EventResult::Consumed);
+        assert!(app.search_focused);
+        app.handle_event(&typed('w'));
+        app.handle_event(&typed('a'));
+        assert_eq!(app.filter.search_query, "wa");
+        assert_eq!(app.filter.min_level, floor, "the floor moved while typing");
+        app.handle_event(&press(Key::Enter));
+        assert!(!app.search_focused);
+        // And now the same key is a shortcut again.
+        app.handle_event(&press(Key::W));
+        assert_eq!(app.filter.min_level, LogLevel::Warn);
+    }
+
+    #[test]
+    fn a_search_finds_lines_and_backspace_gives_them_back() {
+        let mut app = App::new();
+        let all = app.filtered_entries().len();
+        app.handle_event(&press(Key::Slash));
+        for c in "dhcp".chars() {
+            app.handle_event(&typed(c));
+        }
+        let hits = app.filtered_entries().len();
+        assert!(hits > 0, "the sample log mentions dhcp");
+        assert!(hits < all, "a search should narrow the list");
+        for _ in 0..4 {
+            app.handle_event(&press(Key::Backspace));
+        }
+        assert_eq!(app.filter.search_query, "");
+        assert_eq!(app.filtered_entries().len(), all);
+        assert_eq!(
+            app.handle_event(&press(Key::Backspace)),
+            EventResult::Ignored,
+            "backspace on an empty query is not a redraw"
+        );
+    }
+
+    #[test]
+    fn space_bookmarks_the_selected_line_and_b_shows_only_those() {
+        let mut app = App::new();
+        app.handle_event(&press(Key::Down));
+        let idx = app.selected_entry.expect("something is selected");
+        assert_eq!(app.handle_event(&press(Key::Space)), EventResult::Consumed);
+        assert!(
+            app.active_log()
+                .and_then(|l| l.entries.get(idx))
+                .is_some_and(|e| e.bookmarked),
+            "the line should be bookmarked"
+        );
+        assert_eq!(app.handle_event(&press(Key::B)), EventResult::Consumed);
+        assert!(app.filter.show_bookmarked_only);
+        let shown = app.filtered_entries();
+        assert_eq!(shown.len(), 1, "only the bookmarked line should be listed");
+        assert_eq!(shown.first().map(|(i, _)| *i), Some(idx));
+
+        // Un-bookmarking the last one empties the list the selection was in,
+        // and a selection pointing at a line the view no longer shows is a
+        // highlight the user cannot see.
+        assert_eq!(app.handle_event(&press(Key::Space)), EventResult::Consumed);
+        assert!(
+            app.filtered_entries().is_empty(),
+            "nothing is bookmarked now"
+        );
+        assert_eq!(
+            app.selected_entry, None,
+            "the selection should not survive onto a line the view hides"
+        );
+    }
+
+    #[test]
+    fn escape_clears_the_filters_and_does_nothing_when_they_are_already_clear() {
+        let mut app = App::new();
+        assert_eq!(
+            app.handle_event(&press(Key::Escape)),
+            EventResult::Ignored,
+            "nothing is filtered yet"
+        );
+        app.handle_event(&press(Key::E));
+        assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Consumed);
+        assert_eq!(app.filter.min_level, LogLevel::Trace);
+    }
+
+    #[test]
+    fn a_key_the_app_has_no_use_for_is_not_consumed() {
+        let mut app = App::new();
+        assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = App::new();
+        let release = Event::Key(KeyEvent {
+            key: Key::Num2,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert_eq!(app.view_mode, ViewMode::List);
+    }
+
+    #[test]
+    fn the_display_toggles_flip() {
+        let mut app = App::new();
+        let (wrap, auto) = (app.wrap_lines, app.auto_scroll);
+        app.handle_event(&press(Key::L));
+        assert_ne!(app.wrap_lines, wrap);
+        assert_eq!(app.auto_scroll, auto, "L should not touch auto-scroll");
+        app.handle_event(&press(Key::A));
+        assert_ne!(app.auto_scroll, auto);
+    }
     use super::*;
 
     // --- Log level tests ---
@@ -2087,7 +2693,7 @@ mod tests {
     #[test]
     fn test_app_render_list_view() {
         let app = App::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2095,7 +2701,7 @@ mod tests {
     fn test_app_render_stats_view() {
         let mut app = App::new();
         app.view_mode = ViewMode::Stats;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2104,7 +2710,7 @@ mod tests {
         let mut app = App::new();
         app.view_mode = ViewMode::Detail;
         app.selected_entry = Some(0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2112,7 +2718,7 @@ mod tests {
     fn test_app_render_detail_no_selection() {
         let mut app = App::new();
         app.view_mode = ViewMode::Detail;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 

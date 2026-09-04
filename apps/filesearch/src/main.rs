@@ -897,9 +897,13 @@ impl fmt::Display for SortColumn {
 
 // ─── Application ─────────────────────────────────────────────────────
 
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 mod colors {
     use guitk::Color;
@@ -1127,9 +1131,163 @@ impl FileSearchApp {
             .and_then(|&idx| self.index.entries.get(idx))
     }
 
-    /// Render the UI
+    // ------------------------------------------------------------------
+    // Events
+    // ------------------------------------------------------------------
+
+    /// Route a compositor event into the app.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Resize { .. } => {
+                // The layout is computed from the size it is handed at render
+                // time, so there is nothing to store and nothing to redraw for.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a key press.
+    ///
+    /// The query box has focus by default, because a search program that needs
+    /// a keystroke before it will accept a query is a search program with an
+    /// extra step. The shortcuts are therefore on Ctrl, and every plain
+    /// printable key is query text.
+    pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        let ctrl = key.modifiers.ctrl;
+        match key.key {
+            Key::Up => self.step_selection(-1),
+            Key::Down => self.step_selection(1),
+            Key::Home => self.select_edge(true),
+            Key::End => self.select_edge(false),
+            Key::Backspace => {
+                if self.criteria.query.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+                self.execute_search();
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                if self.criteria.query.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.criteria.query.clear();
+                self.execute_search();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.execute_search();
+                EventResult::Consumed
+            }
+            // Sorting, on Ctrl so the bare letters stay available as query
+            // text. Pressing the current column again reverses it, which is
+            // what a column header does everywhere else.
+            Key::N if ctrl => self.sort_by(SortColumn::Name),
+            Key::S if ctrl => self.sort_by(SortColumn::Size),
+            Key::M if ctrl => self.sort_by(SortColumn::Modified),
+            Key::E if ctrl => self.sort_by(SortColumn::Extension),
+            Key::C if ctrl => self.sort_by(SortColumn::Category),
+            Key::A if ctrl => self.sort_by(SortColumn::Path),
+            Key::F if ctrl => {
+                self.show_filters = !self.show_filters;
+                EventResult::Consumed
+            }
+            Key::P if ctrl => {
+                self.show_preview = !self.show_preview;
+                EventResult::Consumed
+            }
+            _ => {
+                if key.text.is_empty() || ctrl {
+                    return EventResult::Ignored;
+                }
+                self.criteria.query.push_str(&key.text);
+                self.execute_search();
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Sort by a column, reversing it if it is already the sort column.
+    fn sort_by(&mut self, column: SortColumn) -> EventResult {
+        if self.sort_column == column {
+            self.sort_ascending = !self.sort_ascending;
+        } else {
+            self.sort_column = column;
+            self.sort_ascending = true;
+        }
+        // The results are re-sorted by the search, and the selection is an
+        // index into them.
+        let selected = self
+            .selected_result
+            .and_then(|i| self.results.get(i).copied());
+        self.execute_search();
+        self.selected_result = selected.and_then(|e| self.results.iter().position(|&r| r == e));
+        EventResult::Consumed
+    }
+
+    /// Move the selection through the results.
+    fn step_selection(&mut self, delta: isize) -> EventResult {
+        if self.results.is_empty() {
+            if self.selected_result.is_none() {
+                return EventResult::Ignored;
+            }
+            self.selected_result = None;
+            return EventResult::Consumed;
+        }
+        let next = match self.selected_result {
+            None => 0,
+            Some(pos) => {
+                let Ok(pos) = isize::try_from(pos) else {
+                    return EventResult::Ignored;
+                };
+                let Some(moved) = pos.checked_add(delta) else {
+                    return EventResult::Ignored;
+                };
+                let Ok(moved) = usize::try_from(moved) else {
+                    return EventResult::Ignored; // off the top; stay put
+                };
+                if moved >= self.results.len() {
+                    return EventResult::Ignored; // off the bottom; stay put
+                }
+                moved
+            }
+        };
+        if Some(next) == self.selected_result {
+            return EventResult::Ignored;
+        }
+        self.selected_result = Some(next);
+        EventResult::Consumed
+    }
+
+    /// Jump to the first or last result.
+    fn select_edge(&mut self, first: bool) -> EventResult {
+        if self.results.is_empty() {
+            return EventResult::Ignored;
+        }
+        let target = if first {
+            Some(0)
+        } else {
+            self.results.len().checked_sub(1)
+        };
+        if target == self.selected_result {
+            return EventResult::Ignored;
+        }
+        self.selected_result = target;
+        EventResult::Consumed
+    }
+
+    /// Named `render_commands` and not `render`: this takes a width and a
+    /// height, exactly as `oswindow::app::App::render` does, and at equal arity
+    /// an inherent method silently wins method lookup over the trait's — so an
+    /// app that keeps the name draws nothing and reports no error.
+    ///
+    /// Renders the UI.
     #[must_use]
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let header_h = 60.0;
         let sidebar_w = if self.show_filters { 200.0 } else { 0.0 };
@@ -1721,18 +1879,67 @@ pub fn format_relative_time(seconds: u64) -> String {
 
 // ─── Main ────────────────────────────────────────────────────────────
 
-fn main() {
+impl App for FileSearchApp {
+    fn title(&self) -> String {
+        if self.criteria.query.is_empty() {
+            "File Search".to_owned()
+        } else {
+            format!(
+                "File Search — {} ({} result{})",
+                self.criteria.query,
+                self.results.len(),
+                if self.results.len() == 1 { "" } else { "s" }
+            )
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    /// No clock.
+    ///
+    /// The index is a fixed sample built at startup; nothing watches a
+    /// filesystem, so there is nothing for a tick to notice. When a real
+    /// indexer exists — `userspace/indexer` and `apps/indexer` are both about
+    /// this — a tick would re-run the query against a changed index, and that
+    /// is when this returns an interval. See known-issues.md ->
+    /// TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        RenderTree {
+            commands: self.render_commands(width, height),
+        }
+    }
+}
+
+/// The size the window opens at.
+///
+/// The layout is computed from whatever size `render` is handed, so these are
+/// only the opening request rather than an assumption the drawing depends on.
+const WINDOW_WIDTH: u32 = 1280;
+const WINDOW_HEIGHT: u32 = 800;
+
+fn main() -> ExitCode {
     let mut app = FileSearchApp::new();
-
-    // Populate index with sample files
+    // Until a real index exists this is what there is to search. It is one call
+    // so that the moment `indexer` can be asked, this is the line that changes.
     populate_sample_index(&mut app.index);
-
-    // Execute a sample search
-    app.criteria.query = "config".to_string();
     app.execute_search();
-
-    let cmds = app.render(1280.0, 800.0);
-    let _ = cmds;
+    app::launch("filesearch", &mut app)
 }
 
 fn populate_sample_index(index: &mut FileIndex) {
@@ -1895,6 +2102,269 @@ fn populate_sample_index(index: &mut FileIndex) {
     clippy::indexing_slicing
 )]
 mod tests {
+
+    // ------------------------------------------------------------------
+    // Events
+    //
+    // The app had no input handling at all until it was wired to the
+    // compositor: the query was set by a caller assigning the field.
+    // ------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+
+    fn indexed() -> FileSearchApp {
+        let mut app = FileSearchApp::new();
+        populate_sample_index(&mut app.index);
+        app.execute_search();
+        app
+    }
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn press_ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    fn typed(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    #[test]
+    fn typing_searches_without_a_keystroke_to_get_started() {
+        // A search program that needs focus moved to its own query box before
+        // it will accept a query is a search program with an extra step.
+        let mut app = indexed();
+        let all = app.results.len();
+        assert!(all > 0, "the sample index should match an empty query");
+        for c in "config".chars() {
+            assert_eq!(app.handle_event(&typed(c)), EventResult::Consumed);
+        }
+        assert_eq!(app.criteria.query, "config");
+        assert!(
+            app.results.len() < all,
+            "a query should narrow the results ({} of {all})",
+            app.results.len()
+        );
+        assert!(
+            !app.results.is_empty(),
+            "the sample index has a config file"
+        );
+    }
+
+    #[test]
+    fn backspace_gives_the_results_back_and_stops_at_an_empty_query() {
+        let mut app = indexed();
+        let all = app.results.len();
+        for c in "config".chars() {
+            let _ = app.handle_event(&typed(c));
+        }
+        for _ in 0.."config".len() {
+            let _ = app.handle_event(&press(Key::Backspace));
+        }
+        assert_eq!(app.criteria.query, "");
+        assert_eq!(app.results.len(), all);
+        assert_eq!(
+            app.handle_event(&press(Key::Backspace)),
+            EventResult::Ignored,
+            "backspace on an empty query is not a redraw"
+        );
+    }
+
+    #[test]
+    fn escape_clears_the_query_and_does_nothing_when_it_is_already_clear() {
+        let mut app = indexed();
+        assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Ignored);
+        let _ = app.handle_event(&typed('c'));
+        assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Consumed);
+        assert!(app.criteria.query.is_empty());
+    }
+
+    #[test]
+    fn a_ctrl_shortcut_is_not_typed_into_the_query() {
+        // Every bare printable key is query text, so the shortcuts have to be
+        // on Ctrl — and Ctrl+S must not put an "s" in the box.
+        let mut app = indexed();
+        assert_eq!(app.handle_event(&press_ctrl(Key::S)), EventResult::Consumed);
+        assert_eq!(app.criteria.query, "", "a shortcut leaked into the query");
+        assert_eq!(app.sort_column, SortColumn::Size);
+    }
+
+    #[test]
+    fn a_ctrl_chord_that_carries_text_is_still_not_query_text() {
+        // A `press_ctrl` built here has empty `text`, which is not the only
+        // way a Ctrl chord arrives: a keyboard layer that fills in a control
+        // character sends one with text, and *that* is the case the `|| ctrl`
+        // guard in the fallback arm exists for. Without it this key would be
+        // appended to the query.
+        let mut app = indexed();
+        let chord = Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: "\u{13}".to_owned(), // Ctrl+S as a control character
+        });
+        assert_eq!(app.handle_event(&chord), EventResult::Ignored);
+        assert_eq!(
+            app.criteria.query, "",
+            "a Ctrl chord control character was typed into the query"
+        );
+    }
+
+    #[test]
+    fn sorting_by_the_same_column_twice_reverses_it() {
+        // Which is what a column header does everywhere else.
+        let mut app = indexed();
+        let _ = app.handle_event(&press_ctrl(Key::N));
+        assert_eq!(app.sort_column, SortColumn::Name);
+        let first = app.sort_ascending;
+        let _ = app.handle_event(&press_ctrl(Key::N));
+        assert_eq!(app.sort_column, SortColumn::Name);
+        assert_ne!(
+            app.sort_ascending, first,
+            "the second press did not reverse"
+        );
+        // A different column starts ascending again rather than inheriting.
+        let _ = app.handle_event(&press_ctrl(Key::S));
+        assert_eq!(app.sort_column, SortColumn::Size);
+        assert!(app.sort_ascending, "a new column should start ascending");
+    }
+
+    #[test]
+    fn sorting_keeps_the_selection_on_the_same_file() {
+        // The selection is an index into the result list, and sorting rebuilds
+        // that list — so an index kept across a sort points at a different
+        // file, which is the same defect fixed in finance and reminders.
+        let mut app = indexed();
+        let _ = app.handle_event(&press(Key::Down));
+        let _ = app.handle_event(&press(Key::Down));
+        let before = app
+            .selected_result
+            .and_then(|i| app.results.get(i).copied())
+            .expect("something is selected");
+        let _ = app.handle_event(&press_ctrl(Key::S));
+        let after = app
+            .selected_result
+            .and_then(|i| app.results.get(i).copied());
+        assert_eq!(
+            after,
+            Some(before),
+            "sorting moved the selection to another file"
+        );
+    }
+
+    #[test]
+    fn the_arrows_walk_the_results_and_stop_at_the_ends() {
+        let mut app = indexed();
+        assert!(app.results.len() >= 3);
+        assert_eq!(app.selected_result, None);
+        // The first press lands on the first row rather than the second.
+        assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Consumed);
+        assert_eq!(app.selected_result, Some(0));
+        assert_eq!(
+            app.handle_event(&press(Key::Up)),
+            EventResult::Ignored,
+            "Up at the top should stay put"
+        );
+        let _ = app.handle_event(&press(Key::End));
+        assert_eq!(app.selected_result, app.results.len().checked_sub(1));
+        assert_eq!(
+            app.handle_event(&press(Key::Down)),
+            EventResult::Ignored,
+            "Down at the bottom should stay put"
+        );
+        let _ = app.handle_event(&press(Key::Home));
+        assert_eq!(app.selected_result, Some(0));
+    }
+
+    #[test]
+    fn a_query_that_matches_nothing_leaves_nothing_selected() {
+        let mut app = indexed();
+        let _ = app.handle_event(&press(Key::Down));
+        assert!(app.selected_result.is_some());
+        for c in "zzzz-no-such-file".chars() {
+            let _ = app.handle_event(&typed(c));
+        }
+        assert!(app.results.is_empty(), "that query should match nothing");
+        // Set deliberately, because the search may or may not have cleared
+        // it and the point here is what the *arrow* does with an empty list.
+        app.selected_result = Some(3);
+        assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Consumed);
+        assert_eq!(
+            app.selected_result, None,
+            "a selection into an empty result list points at nothing"
+        );
+        // And once it is gone, moving again is not a redraw.
+        assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn the_panel_toggles_flip_and_do_not_touch_the_query() {
+        let mut app = indexed();
+        let (filters, preview) = (app.show_filters, app.show_preview);
+        let _ = app.handle_event(&press_ctrl(Key::F));
+        assert_ne!(app.show_filters, filters);
+        assert_eq!(app.show_preview, preview, "Ctrl+F touched the preview");
+        let _ = app.handle_event(&press_ctrl(Key::P));
+        assert_ne!(app.show_preview, preview);
+        assert_eq!(app.criteria.query, "");
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = indexed();
+        let release = Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: "x".to_owned(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert_eq!(app.criteria.query, "");
+    }
+
+    #[test]
+    fn the_title_reports_the_query_and_how_many_it_found() {
+        // A minimised search window is a taskbar entry and nothing else.
+        let mut app = indexed();
+        assert_eq!(app.title(), "File Search");
+        for c in "config".chars() {
+            let _ = app.handle_event(&typed(c));
+        }
+        let title = app.title();
+        assert!(title.contains("config"), "title {title:?} omits the query");
+        assert!(
+            title.contains(&app.results.len().to_string()),
+            "title {title:?} omits the result count"
+        );
+    }
+
+    #[test]
+    fn rendering_draws_something_at_an_awkward_size() {
+        let mut app = indexed();
+        for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+            assert!(
+                !app.render(w, h).commands.is_empty(),
+                "drew nothing at {w}x{h}"
+            );
+        }
+    }
     use super::*;
 
     // Glob matching tests
@@ -2363,7 +2833,7 @@ mod tests {
     fn test_render_produces_commands() {
         let mut app = FileSearchApp::new();
         populate_sample_index(&mut app.index);
-        let cmds = app.render(1280.0, 800.0);
+        let cmds = app.render_commands(1280.0, 800.0);
         assert!(!cmds.is_empty());
     }
 

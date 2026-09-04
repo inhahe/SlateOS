@@ -4915,6 +4915,29 @@ check_lane_c_gui_gates() {
         return 1
     fi
 
+    # Four crates under apps/ carry an `-app` suffix because a crate of the
+    # bare name already exists under userspace/.  `cargo ... -p <directory>`
+    # therefore addresses a different crate, in a different lane -- and says
+    # nothing about it.  On 2026-09-04 `cargo test -p sysinfo` reported
+    # "0 passed; ok" about userspace/sysinfo while apps/sysinfo had 62 tests.
+    if ! run_checker check-crate-names-selftest "$py"         "$PROJECT_ROOT/scripts/check-crate-names.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  scripts/check-crate-names.py no longer" >&2
+        echo "agrees with its own cases, so its verdict on the tree means" >&2
+        echo "nothing." >&2
+        return 1
+    fi
+
+    if ! run_checker check-crate-names "$py"         "$PROJECT_ROOT/scripts/check-crate-names.py" apps userspace; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A crate's package name no longer" >&2
+        echo "matches its directory, and is not recorded in that script's" >&2
+        echo "KNOWN table.  Either record it with the reason it cannot be" >&2
+        echo "renamed, or rename it -- an unrecorded mismatch means" >&2
+        echo "  cargo ... -p <directory> silently addresses something else." >&2
+        return 1
+    fi
+
     return 0
 }
 

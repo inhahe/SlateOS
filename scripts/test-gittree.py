@@ -902,6 +902,86 @@ def case_open_tree_chooses(work: str) -> None:
               present.rev, "HEAD")
 
 
+def case_an_ambient_git_dir_does_not_redirect_the_read(work: str) -> None:
+    """`-C` / `cwd` name a repository only until `GIT_DIR` disagrees.
+
+    Every caller here selects its repository positionally -- `GitTree(repo)`
+    passes `cwd=repo`, `list_paths` does the same -- and that is correct right
+    up to the moment something in the environment has already chosen one. Git
+    exports `GIT_DIR` into every hook, into `git bisect run`, into
+    `git rebase --exec`; `scripts/gitenv.py` documents the full list and the
+    2026-08-29 post-mortem behind it.
+
+    The module docstring used to answer this with "nothing here writes to the
+    repository: `cat-file` and `ls-tree` are reads." That is true and it is not
+    the point. A read of the *wrong* repository does not corrupt anything; it
+    silently answers a different question, and a self-test that builds a
+    fixture and then reads the ambient repo through it does not fail -- it
+    passes, for the wrong reason, which is strictly worse than failing. That is
+    what happened to `quote-names.py --selftest` on 2026-09-04: its assertions
+    held against a repository it had not built.
+
+    So: a decoy repository, pointed at by `GIT_DIR` exactly as a hook would,
+    with a file at the same path and different content. Both git-touching
+    routes are exercised -- `read_bytes` goes through the `cat-file --batch`
+    pipe, `files_under`/`is_file` through `ls-tree` -- because cleaning one
+    and not the other leaves half the seam redirected.
+    """
+    decoy = os.path.join(os.path.dirname(work), "decoy-" + os.path.basename(work))
+    os.makedirs(decoy, exist_ok=True)
+    git(decoy, "init", "--quiet", "-b", "main", ".")
+    git(decoy, "config", "user.name", "Real Person")
+    git(decoy, "config", "user.email", "real@example.org.uk")
+    git(decoy, "config", "commit.gpgsign", "false")
+    for rel, body in (("src/lib.rs", b"//! DECOY. Never the right answer.\n"),
+                      ("decoy-only.txt", b"only the decoy has this\n")):
+        path = os.path.join(decoy, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(body)
+    git(decoy, "add", "--all")
+    git(decoy, "commit", "--quiet", "-m", "decoy")
+
+    saved = {k: os.environ.get(k) for k in ("GIT_DIR", "GIT_WORK_TREE")}
+    os.environ["GIT_DIR"] = os.path.join(decoy, ".git")
+    os.environ["GIT_WORK_TREE"] = decoy
+    try:
+        # The fixture is what a hook-run self-test would be handed, and the
+        # environment is what the hook would have set behind its back.
+        check("the decoy is genuinely a different repository",
+              _decoy_head_differs(work, decoy), True)
+
+        with gittree.RevTree("HEAD", work) as rev:
+            check("cat-file reads the repository it was handed",
+                  rev.read_text("src/lib.rs"), "//! Root.\npub fn a() {}\n")
+            check("...not the one GIT_DIR names",
+                  "DECOY" in (rev.read_text("src/lib.rs") or ""), False)
+            check("ls-tree reads it too: the decoy's file is absent",
+                  rev.is_file("decoy-only.txt"), False)
+            check("...and the fixture's own files are listed",
+                  rev.is_file("posix/src/deep/b.rs"), True)
+
+        # `WorkTree` never runs git, so it cannot be redirected -- asserted
+        # rather than assumed, because that is the property that makes the two
+        # sides of the seam agree under a hook.
+        with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+            check("the two sides still agree with GIT_DIR set",
+                  disk.files_under("posix/src"), rev.files_under("posix/src"))
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _decoy_head_differs(work: str, decoy: str) -> bool:
+    """Guard against a fixture that would pass without the fix."""
+    a = git(work, "rev-parse", "HEAD").stdout.strip()
+    b = git(decoy, "rev-parse", "HEAD").stdout.strip()
+    return bool(a) and bool(b) and a != b
+
+
 def _raises(fn: object) -> bool:
     try:
         fn()
@@ -930,7 +1010,8 @@ def main() -> int:
                                    case_the_walk_never_descends_into_build_output,
                                    case_a_callers_own_prune_list_reaches_both_sides,
                                    case_tree_agrees_in_a_linked_worktree,
-                                   case_tree_reads_the_commit_not_the_disk)):
+                                   case_tree_reads_the_commit_not_the_disk,
+                                   case_an_ambient_git_dir_does_not_redirect_the_read)):
             tcase(build_tree_repo(tmp, f"t{i}"))
 
     if failures:

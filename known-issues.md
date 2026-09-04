@@ -112898,13 +112898,52 @@ in full as `design-decisions.md` §751; the short version is three facts:
 | prompts before deleting | yes, under `-i`/`-I` | never — the copy already succeeded |
 | `--one-file-system` | honoured | not applicable; the source is one device by construction |
 | what `-v` prints | `removed 'f'` / `removed directory 'd'` | the same two sentences |
-| a child that cannot be removed | reports it, keeps going, and reports the parent too | reports it, keeps going, and stays **silent** about every ancestor |
+| a child that cannot be removed | reports it, keeps going, and stays **silent** about every ancestor | the same |
+| an *empty* directory that cannot be **read** | held the read error, reported it, and stopped — GNU removes it | held it, called `rmdir` anyway, GNU's rule |
 
-That last row is the interesting one and is not an accident on either side: it
-is GNU's `mark_ancestor_dirs` behaviour, which `mv.rs` reproduces by returning
-from `remove_tree` before the `rmdir` when any child failed. `rm.rs` predates
-that reasoning and has not been checked against it — which is exactly the kind
-of divergence this entry exists to flag.
+**The drift this entry was filed to catch arrived within the day, and the
+second row is it.** As first written this table claimed the divergence was
+ancestor silence — that `rm` "reports the parent too" while `mv` does not.
+That was wrong: `rm.rs` already had the rule (`Rm::remove_tree`, "Silence,
+deliberately"), and it is GNU's `mark_ancestor_dirs` behaviour on both sides.
+Comparing the two walks properly instead turned up a real one, and in the
+opposite direction from the guess — the *younger* walk had the rule and the
+older one did not.
+
+`mv.rs` carried `is_uninformative`, upstream's list of errnos an `rmdir` may
+answer that say less than an earlier `opendir` failure did (`remove.c:424`).
+`rm.rs` had no such notion, because it never got as far as the `rmdir`: a
+directory it could not list was reported and abandoned. But listing a directory
+needs `r`, while removing an empty one needs only `w`+`x` on its *parent*, so
+`chmod 300 d` on an empty `d` is a directory nobody can read and anybody can
+delete — and GNU deletes it. Measured against GNU 9.4 on 2026-09-03:
+
+```text
+$ mkdir d && chmod 300 d && rm -rv d
+GNU : rc=0  removed directory 'd'
+OURS: rc=1  rm: cannot remove 'd': Permission denied     (directory still there)
+```
+
+Fixed the same day, and the fix is what created the shared module this entry
+asks for: `userspace/coreutils/src/remove.rs` now holds `is_uninformative` and
+a `blame(held, failure)` that states the substitution rule once for both
+binaries. `rm` gained `Rm::remove_inaccessible_directory` and upstream's third
+prompt, `attempt removal of inaccessible directory 'd'? `, which it had never
+implemented at all. `-r` and `-d` part company there: under `-d` the question
+can be asked, because there is nothing to descend into; under `-r` the question
+would have to be `descend into …?` or `remove …?` and *which one it is* depends
+on the listing that just failed, so a question that comes due is fatal — but
+with no question due, the `rmdir` still runs.
+
+**Why the harness missed it, which is the part worth keeping.** `rm-diff.sh`
+section 15 had nine cases for unreadable directories and every one of them used
+a *non-empty* one (`tree/sub` holds `b.txt`). There GNU's `rmdir` fails too, and
+prints the same substituted `Permission denied` — so a remover that never
+attempted the `rmdir` at all is indistinguishable from one that did. The
+missing case was not an exotic one; it was the *simpler* one. Fifteen cases were
+added, and against the pre-fix binary eleven of them differ (the other four pin
+the boundary from the other side: modes 0100/0000/0500, where erroring is
+correct, so a future over-eager fix is caught too).
 
 **Proper fix.** Lift the walk out of both binaries into a
 `userspace/coreutils/src/remove.rs`, shaped the way `copy.rs` already is after
@@ -112915,16 +112954,33 @@ became a producer of `copy::Opts`; `mv.rs` passes an `Opts` with the prompting
 and the `--one-file-system` knobs off. The ancestor-silence rule then lives in
 one place and both binaries get it.
 
-**Sequencing.** Do this *after*, not before,
-`TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL` is understood,
-because that entry's fix changes the walk's *signature* — it threads a
-`(dirfd, path_for_messages)` pair through every level instead of a path. Doing
-the extraction first means doing it twice. Note that `mv.rs`'s new walk has the
-same weakness for the same reason: it calls `fs::read_dir`, `fs::remove_file`
-and `fs::remove_dir` on joined path strings, so a symlink swapped in mid-walk
-is followed. It is narrower there — the tree being removed is one the user just
-successfully copied, so the window is smaller — but it is the same bug, and the
-shared module is what makes fixing it once fix it everywhere.
+**Sequencing — the blocker is gone.** This was to wait on
+`TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL`, because that
+entry's fix changes the walk's *signature* — it threads a
+`(dirfd, path_for_messages)` pair through every level instead of a path, so
+extracting first meant extracting twice. That entry was **FIXED 2026-09-03**:
+`rm`'s walk now carries `Loc { dir, path }`, the descriptor for the syscalls and
+the string only for the messages. The signature the shared module has to take is
+therefore known, and the extraction is unblocked.
+
+`mv.rs`'s walk still has the weakness `rm`'s no longer does: it calls
+`fs::read_dir`, `fs::remove_file` and `fs::remove_dir` on joined path strings,
+so a symlink swapped in mid-walk is followed. It is narrower there — the tree
+being removed is one the user just successfully copied, so the window is
+smaller — but it is the same bug, and it is now the *only* place in coreutils
+that still has it. Sharing `rm`'s walk is what fixes it, which makes the
+extraction a security fix rather than only a tidiness one.
+
+**What is done and what is left.** The module exists and holds the rule the two
+provably disagreed about; the walk itself is still written twice.
+
+| | state |
+|---|---|
+| `remove.rs` exists | done — `is_uninformative`, `blame`, 4 tests |
+| the errno-substitution rule is shared | done — both binaries call `remove::blame` |
+| `rm` implements GNU's inaccessible-directory rule | done — 15 harness cases |
+| the *walk* is shared | **not done** — this is the remainder |
+| `mv`'s walk stops following a mid-walk symlink swap | **not done**, and follows from the row above |
 
 ---
 
@@ -113299,6 +113355,77 @@ the errno in the comment a plausible-sounding one? Within `dirfd` the audit is
 now clean — `c_name`'s refusals (empty, `/`, NUL) are not errno-equivalence
 claims at all; they are the module's own contract that a name is one lookup, and
 the comment says so rather than appealing to what `openat` would have done.
+
+---
+
+### Lesson 111: a fixture chosen so both sides fail cannot tell which side tried (lane B, 2026-09-03)
+
+**In short:** `rm -r` refused to delete an empty directory it could not read,
+where GNU deletes it. Two separate checks were supposed to catch that and both
+were pointed at the same blind spot: nine differential cases and one unit test,
+every one of them built on a directory that had a file in it. With a file in it
+GNU fails too, and prints the same error for a different reason — so a program
+that never attempted the removal at all looked identical to one that attempted
+it and was refused. The missing fixture was not an exotic one. It was the
+*simpler* one: the same directory, empty.
+
+**The rule that was missed.** Reading a directory needs `r`. Removing an empty
+one needs `w`+`x` on its **parent** and nothing at all on the directory itself.
+So `chmod 300 d` on an empty `d` is a directory nobody can list and anybody can
+delete, and GNU deletes it — `fts` hands the entry over as `FTS_DNR` and
+`remove.c:571` calls `excise` on it anyway. Our walk reported the read failure
+and stopped:
+
+```text
+$ mkdir d && chmod 300 d && rm -rv d
+GNU : rc=0  removed directory 'd'
+OURS: rc=1  rm: cannot remove 'd': Permission denied
+```
+
+**Why nine cases and a unit test all missed it.** `rm-diff.sh` section 15 had
+nine cases for "directories that cannot be read or emptied", and all nine used
+`tree/sub`, which holds `b.txt`. There GNU's `rmdir` *also* fails, with
+`ENOTEMPTY` — which upstream then throws away in favour of the held read error,
+printing `Permission denied`. That is character-for-character what we printed by
+never calling `rmdir` at all. **The non-empty fixture makes the two behaviours
+converge on the same output**, so nine cases pinned an output that two different
+programs produce, and could not distinguish them however many of them there
+were. Adding a tenth of the same shape would not have helped; the count was
+never the problem.
+
+The unit test was worse, because it was not merely blind but confirming: it
+built an *empty* 0000 directory, ran `rm -r`, and asserted `!r.ok`. That is the
+correct fixture with the wrong expectation — written from what the code did
+rather than from what GNU does, so it converted the bug into a *requirement*.
+Anyone who later fixed the walk would have been told by the suite that they had
+broken it. This is Lesson 65's shape (a check that reuses the assumption it is
+checking will agree with itself) in its most direct form: the assertion's source
+was the program under test.
+
+**The tell.** In both cases the fixture had a property that was not needed for
+the thing being tested, and that property was what hid the bug. Section 15's
+comment says it is about "directories that cannot be read"; the file inside
+`tree/sub` is not part of that description, it is an incidental of the shared
+`mktree` helper being reused. Whenever a fixture is inherited rather than
+chosen, ask which of its properties the test actually needs — and then build the
+one with only those properties, because that is the case the suite does not
+have.
+
+**How it was fixed, and how the fix was checked.** Fifteen cases added for the
+empty-unreadable directory across `-r`, `-d`, `-f`, `-i`, `-I` and
+`---presume-input-tty`, and the unit test split in two: the non-empty one keeps
+the ancestor-silence rule it was named for (with a child added so the `rmdir`
+genuinely fails, plus an assertion that `not empty` does *not* appear, which is
+what proves the substitution ran), and a new one asserts the empty one is
+removed **silently and successfully** — success being the part a walk that
+skipped the directory cannot fake.
+
+Then the whole section was run against the *pre-fix* binary, which is the step
+that distinguishes a test suite from a description of current behaviour:
+**eleven of the fifteen differ**, and the four that do not are modes
+0100/0000/0500 where erroring is correct, so they pin the boundary from the
+other side and would catch an over-eager fix. A new case that passes before and
+after the change it was written for is not a regression test; it is a comment.
 
 **And the wider point about the conversion that found it.** A shared module
 absorbing a caller inherits every one of that caller's edge cases, including the

@@ -43,8 +43,12 @@
 #![allow(clippy::wildcard_imports)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::collections::VecDeque;
 
@@ -697,12 +701,15 @@ impl UndoManager {
         Some(next)
     }
 
-    #[cfg(test)]
+    /// Whether there is anything to undo.
+    ///
+    /// This was `#[cfg(test)]` until the app grew a keyboard: a predicate the
+    /// UI needs in order to answer "nothing happened" is not a test helper.
     fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
 
-    #[cfg(test)]
+    /// Whether there is anything to redo.
     fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
     }
@@ -770,6 +777,12 @@ pub struct DiagramApp {
     pub pan_y: f32,
     /// Active layer ID for new elements.
     pub active_layer_id: LayerId,
+    /// Where the current drag started, in canvas coordinates.
+    ///
+    /// `None` when nothing is being dragged. It is canvas rather than screen
+    /// coordinates so that a drag stays correct across a zoom or a pan that
+    /// happens mid-drag.
+    pub drag_from: Option<(f32, f32)>,
     /// ID generator.
     id_gen: IdGen,
     /// Undo/redo manager.
@@ -819,6 +832,7 @@ impl DiagramApp {
             active_layer_id: default_layer_id,
             id_gen,
             undo: UndoManager::new(MAX_UNDO),
+            drag_from: None,
             clipboard: Clipboard::default(),
             show_properties: true,
             current_template: DiagramTemplate::Blank,
@@ -1880,8 +1894,173 @@ impl DiagramApp {
     // Rendering: full frame
     // ========================================================================
 
-    /// Render the entire application UI and return draw commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    // ------------------------------------------------------------------
+    // Events
+    // ------------------------------------------------------------------
+
+    /// Route a compositor event into the app.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.window_w = *width as f32;
+                    self.window_h = *height as f32;
+                }
+                // Not `Consumed`: a resize is not by itself a reason to redraw.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a mouse event.
+    ///
+    /// Screen coordinates arrive here and canvas coordinates leave. Mixing the
+    /// two is invisible at the default zoom of 1.0 with no pan, and flings a
+    /// node across the diagram at any other — which is why both mouse tests run
+    /// at a zoom and a pan that are not the identity.
+    fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        let (cx, cy) = self.screen_to_canvas(ev.x, ev.y);
+        match ev.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                if let Some(id) = self.node_at(cx, cy) {
+                    self.selection.select_single_node(id);
+                    self.drag_from = Some((cx, cy));
+                } else {
+                    self.selection.clear();
+                    self.drag_from = None;
+                }
+                EventResult::Consumed
+            }
+            MouseEventKind::Move => {
+                let Some((fx, fy)) = self.drag_from else {
+                    // Not dragging: a bare pointer move changes nothing, and
+                    // answering `Consumed` would redraw on every pixel crossed.
+                    return EventResult::Ignored;
+                };
+                let ids: Vec<NodeId> = self.selection.nodes.clone();
+                if ids.is_empty() {
+                    return EventResult::Ignored;
+                }
+                for id in ids {
+                    self.move_node(id, cx - fx, cy - fy);
+                }
+                self.drag_from = Some((cx, cy));
+                EventResult::Consumed
+            }
+            MouseEventKind::Release(MouseButton::Left) => {
+                if self.drag_from.take().is_none() {
+                    return EventResult::Ignored;
+                }
+                EventResult::Consumed
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                if dy > 0.0 {
+                    self.zoom_in();
+                } else if dy < 0.0 {
+                    self.zoom_out();
+                } else {
+                    return EventResult::Ignored;
+                }
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a key press.
+    ///
+    /// The app had no input handling at all: every shape, edge, layer, group,
+    /// the undo stack and both exporters were reachable only by a caller.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        let ctrl = key.modifiers.ctrl;
+        match key.key {
+            Key::Z if ctrl => {
+                if !self.undo.can_undo() {
+                    return EventResult::Ignored;
+                }
+                self.undo();
+                EventResult::Consumed
+            }
+            Key::Y if ctrl => {
+                if !self.undo.can_redo() {
+                    return EventResult::Ignored;
+                }
+                self.redo();
+                EventResult::Consumed
+            }
+            Key::Delete | Key::Backspace => self.delete_selection_reporting(),
+            // Zoom.
+            Key::Equals => {
+                self.zoom_in();
+                EventResult::Consumed
+            }
+            Key::Minus => {
+                self.zoom_out();
+                EventResult::Consumed
+            }
+            Key::Num0 if ctrl => {
+                // A hundred percent, without walking the step table: this is
+                // the "show me it at actual size" key.
+                if (self.zoom - 1.0).abs() < f32::EPSILON {
+                    return EventResult::Ignored;
+                }
+                self.zoom = 1.0;
+                EventResult::Consumed
+            }
+            // The canvas.
+            Key::G => {
+                self.show_grid = !self.show_grid;
+                EventResult::Consumed
+            }
+            Key::S => {
+                self.snap_to_grid = !self.snap_to_grid;
+                EventResult::Consumed
+            }
+            // New shapes, at the middle of the view so they land somewhere
+            // visible rather than at the canvas origin.
+            Key::R => self.add_shape_in_view(NodeShape::Rectangle),
+            Key::E => self.add_shape_in_view(NodeShape::Ellipse),
+            Key::D => self.add_shape_in_view(NodeShape::Diamond),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Delete whatever is selected, reporting whether anything went.
+    ///
+    /// `delete_selection` above returns nothing, and a key that answers
+    /// `Consumed` with an empty selection redraws an unchanged frame.
+    fn delete_selection_reporting(&mut self) -> EventResult {
+        if self.selection.nodes.is_empty() && self.selection.edges.is_empty() {
+            return EventResult::Ignored;
+        }
+        self.delete_selection();
+        EventResult::Consumed
+    }
+
+    /// Add a shape at the middle of what is currently on screen.
+    fn add_shape_in_view(&mut self, shape: NodeShape) -> EventResult {
+        let (cx, cy) = self.screen_to_canvas(self.window_w / 2.0, self.window_h / 2.0);
+        let id = self.add_node(shape, cx, cy);
+        self.selection.select_single_node(id);
+        EventResult::Consumed
+    }
+
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`, so
+    /// an app that keeps the name draws nothing and reports no error.
+    ///
+    /// Renders the entire application UI and returns draw commands.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds: Vec<RenderCommand> = Vec::with_capacity(512);
 
         // Background.
@@ -3176,36 +3355,58 @@ fn escape_json(s: &str) -> String {
 // Entry point
 // ============================================================================
 
-fn main() {
+impl App for DiagramApp {
+    fn title(&self) -> String {
+        "Diagram".to_owned()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.window_w as u32, self.window_h as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// A node moves when it is dragged and the view zooms when it is zoomed.
+    /// There is no animation and no data that ages, so a tick would redraw an
+    /// identical frame.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.window_w = width;
+        self.window_h = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
     let mut app = DiagramApp::new(1280.0, 800.0);
-
-    // Load a sample template.
+    // Until a document can be opened this is what there is to edit.
     app.load_template(DiagramTemplate::Flowchart);
-
-    // Render one frame to verify everything works.
-    let cmds = app.render();
-    let _ = cmds.len();
-
-    // Test zoom.
-    app.zoom_in();
-    let _ = app.zoom_percent_str();
-
-    // Test export.
-    let _svg = app.export_svg();
-    let _json = app.export_json();
-
-    // Test shortcuts reference.
-    let _ = DiagramApp::shortcuts_list();
-
-    // In a real OS environment, we would enter the event loop here:
-    // loop {
-    //     let event = wait_for_event();
-    //     match event { ... }
-    //     let cmds = app.render();
-    //     submit_render_commands(cmds);
-    // }
-
-    let _ = app.should_quit;
+    app::launch("diagram", &mut app)
 }
 
 // ============================================================================
@@ -3222,6 +3423,251 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Events
+    //
+    // The app had no input handling at all until it was wired to the
+    // compositor.
+    // ------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+
+    fn loaded() -> DiagramApp {
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        app.load_template(DiagramTemplate::Flowchart);
+        app
+    }
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn press_ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    fn mouse(kind: MouseEventKind, x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    #[test]
+    fn a_click_selects_the_node_under_it_at_a_zoom_that_is_not_one() {
+        // The hit test works in canvas space and the mouse arrives in screen
+        // space. At zoom 1.0 with no pan the two are identical, so a test at
+        // the default view proves nothing about the conversion.
+        let mut app = loaded();
+        app.zoom = 2.0;
+        app.pan_x = 37.0;
+        app.pan_y = -19.0;
+        let node = app.nodes.first().expect("the template has nodes");
+        let (nx, ny, id) = (node.x, node.y, node.id);
+        let (sx, sy) = app.canvas_to_screen(nx, ny);
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), sx, sy)),
+            EventResult::Consumed
+        );
+        assert!(
+            app.selection.has_node(id),
+            "the click missed the node it was aimed at"
+        );
+    }
+
+    #[test]
+    fn dragging_moves_the_node_by_the_distance_dragged_in_canvas_units() {
+        // At zoom 2.0 a 100-pixel drag is a 50-unit move.
+        let mut app = loaded();
+        app.zoom = 2.0;
+        app.snap_to_grid = false;
+        let node = app.nodes.first().expect("the template has nodes");
+        let (nx, ny, id) = (node.x, node.y, node.id);
+        let (sx, sy) = app.canvas_to_screen(nx, ny);
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), sx, sy));
+        app.handle_event(&mouse(MouseEventKind::Move, sx + 100.0, sy));
+        let moved = app
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.x)
+            .expect("still there");
+        assert!(
+            (moved - (nx + 50.0)).abs() < 0.51,
+            "expected a 50-unit move at zoom 2, got {}",
+            moved - nx
+        );
+        assert_eq!(
+            app.handle_event(&mouse(
+                MouseEventKind::Release(MouseButton::Left),
+                sx + 100.0,
+                sy
+            )),
+            EventResult::Consumed
+        );
+        // And a release with nothing being dragged is not a redraw.
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Release(MouseButton::Left), sx, sy)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn a_pointer_move_with_no_button_down_is_not_a_redraw() {
+        let mut app = loaded();
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Move, 100.0, 100.0)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn clicking_empty_canvas_clears_the_selection() {
+        let mut app = loaded();
+        let id = app.nodes.first().map(|n| n.id).expect("nodes");
+        app.selection.select_single_node(id);
+        app.handle_event(&mouse(
+            MouseEventKind::Press(MouseButton::Left),
+            -9000.0,
+            -9000.0,
+        ));
+        assert!(
+            app.selection.nodes.is_empty(),
+            "clicking away should deselect"
+        );
+    }
+
+    #[test]
+    fn the_wheel_zooms_and_a_zero_delta_does_nothing() {
+        let mut app = loaded();
+        let start = app.zoom;
+        app.handle_event(&mouse(
+            MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+            0.0,
+            0.0,
+        ));
+        assert!(app.zoom > start);
+        app.handle_event(&mouse(
+            MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+            0.0,
+            0.0,
+        ));
+        assert!((app.zoom - start).abs() < 0.001);
+        assert_eq!(
+            app.handle_event(&mouse(
+                MouseEventKind::Scroll { dx: 0.0, dy: 0.0 },
+                0.0,
+                0.0
+            )),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn ctrl_0_returns_to_actual_size_and_then_does_nothing() {
+        let mut app = loaded();
+        app.zoom_in();
+        assert!((app.zoom - 1.0).abs() > f32::EPSILON);
+        assert_eq!(
+            app.handle_event(&press_ctrl(Key::Num0)),
+            EventResult::Consumed
+        );
+        assert!((app.zoom - 1.0).abs() < f32::EPSILON);
+        assert_eq!(
+            app.handle_event(&press_ctrl(Key::Num0)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn each_shape_key_adds_its_own_shape_where_it_can_be_seen() {
+        let mut app = loaded();
+        for (k, shape) in [
+            (Key::R, NodeShape::Rectangle),
+            (Key::E, NodeShape::Ellipse),
+            (Key::D, NodeShape::Diamond),
+        ] {
+            let before = app.nodes.len();
+            assert_eq!(app.handle_event(&press(k)), EventResult::Consumed);
+            assert_eq!(app.nodes.len(), before + 1, "{k:?} added nothing");
+            let (mx, my) = app.screen_to_canvas(app.window_w / 2.0, app.window_h / 2.0);
+            let added = app.nodes.last().expect("just added");
+            assert_eq!(added.shape, shape, "{k:?} added the wrong shape");
+            // At the middle of the view, not at the canvas origin.
+            assert!(
+                (added.x - mx).abs() < 1.0 && (added.y - my).abs() < 1.0,
+                "the new shape landed at {},{} rather than the view centre",
+                added.x,
+                added.y
+            );
+        }
+    }
+
+    #[test]
+    fn delete_with_nothing_selected_is_not_a_redraw() {
+        let mut app = loaded();
+        app.selection.clear();
+        assert_eq!(app.handle_event(&press(Key::Delete)), EventResult::Ignored);
+        let id = app.nodes.first().map(|n| n.id).expect("nodes");
+        app.selection.select_single_node(id);
+        let before = app.nodes.len();
+        assert_eq!(app.handle_event(&press(Key::Delete)), EventResult::Consumed);
+        assert_eq!(app.nodes.len(), before - 1);
+    }
+
+    #[test]
+    fn undo_with_nothing_to_undo_is_not_a_redraw() {
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        assert_eq!(app.handle_event(&press_ctrl(Key::Z)), EventResult::Ignored);
+        app.handle_event(&press(Key::R));
+        let with_shape = app.nodes.len();
+        assert_eq!(app.handle_event(&press_ctrl(Key::Z)), EventResult::Consumed);
+        assert_eq!(app.nodes.len(), with_shape - 1, "undo did not undo");
+    }
+
+    #[test]
+    fn the_canvas_toggles_flip_independently() {
+        let mut app = loaded();
+        let (grid, snap) = (app.show_grid, app.snap_to_grid);
+        app.handle_event(&press(Key::G));
+        assert_ne!(app.show_grid, grid);
+        assert_eq!(app.snap_to_grid, snap, "G touched snapping");
+        app.handle_event(&press(Key::S));
+        assert_ne!(app.snap_to_grid, snap);
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = loaded();
+        let before = app.nodes.len();
+        let release = Event::Key(KeyEvent {
+            key: Key::R,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert_eq!(app.nodes.len(), before);
+    }
+
+    #[test]
+    fn rendering_draws_something_at_an_awkward_size() {
+        let mut app = loaded();
+        for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+            assert!(
+                !app.render(w, h).commands.is_empty(),
+                "drew nothing at {w}x{h}"
+            );
+        }
+    }
 
     // ---- IdGen tests -------------------------------------------------------
 
@@ -3878,7 +4324,7 @@ mod tests {
     #[test]
     fn test_render_empty_app() {
         let app = DiagramApp::new(1280.0, 800.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3886,7 +4332,7 @@ mod tests {
     fn test_render_with_content() {
         let mut app = DiagramApp::new(1280.0, 800.0);
         app.load_template(DiagramTemplate::Flowchart);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 50); // Should have many commands for toolbar + palette + nodes + edges.
     }
 
@@ -3895,7 +4341,7 @@ mod tests {
         let mut app = DiagramApp::new(1280.0, 800.0);
         let n1 = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
         app.selection.select_single_node(n1);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 

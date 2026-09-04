@@ -62,10 +62,20 @@ per-file antivirus interception rather than bandwidth (see `open-questions.md`
 A-Q7, which is about exactly that tax). The pool is why this is affordable at
 all; if A-Q7 is ever answered the whole thing drops into the noise.
 
-It earns that by running *first*. The equivalent evidence exists inside
-`check_shellcheck`, which sits some forty-five minutes into the sweep and only
-covers `.sh` -- so a CR discovered there costs a whole boot test, which is what
-it cost on 2026-09-03.
+It earns that by running before anything is compiled or booted. The two gates
+ahead of it in `boot-test.sh` -- `check_prerequisites` (are the tools present)
+and `check_requests_not_deleted` (one git query) -- cost seconds between them,
+so a CR found here is found within the first minute and costs only itself. The
+equivalent evidence exists inside `check_shellcheck`, which sits some forty-five
+minutes into the sweep and only covers `.sh` -- so a CR discovered *there* costs
+a whole boot test, which is what it cost on 2026-09-03.
+
+Stated as "before anything is compiled" rather than as a position in the list on
+purpose. This paragraph said "by running *first*" until 2026-09-04, by which
+time two gates had been inserted above it and the sentence was simply false --
+an ordinal is a claim about every other gate in the file, so it goes stale when
+any of them moves and nothing rechecks it. What actually matters is not being
+third or first; it is being on the cheap side of the first `cargo` invocation.
 
 ## `--self-test` grades the gate against real files
 

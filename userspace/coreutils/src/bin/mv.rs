@@ -217,6 +217,7 @@ use coreutils::hardlink;
 use coreutils::overwrite::{self, Interactive};
 use coreutils::pathname::strip_trailing_slashes;
 use coreutils::quote::{os_bytes, os_from_bytes, quoteaf_os, quotef_os};
+use coreutils::remove;
 use coreutils::stdfd::{self, Stream};
 use coreutils::utimecmp;
 use coreutils::yesno::{Answers, StdinAnswers};
@@ -2926,14 +2927,7 @@ fn remove_tree<O: Write, E: Write>(job: &mut Job<'_, O, E>, path: &Path, is_dir:
             true
         }
         Err(e) => {
-            report_unremovable(
-                job,
-                path,
-                unreadable
-                    .filter(|_| is_uninformative(&e))
-                    .as_ref()
-                    .unwrap_or(&e),
-            );
+            report_unremovable(job, path, remove::blame(unreadable.as_ref(), &e));
             false
         }
     }
@@ -2944,39 +2938,6 @@ fn remove_tree<O: Write, E: Write>(job: &mut Job<'_, O, E>, path: &Path, is_dir:
 fn report_unremovable<O: Write, E: Write>(job: &mut Job<'_, O, E>, path: &Path, err: &io::Error) {
     let why = strerror(err);
     let _ = writeln!(job.err, "mv: cannot remove {}: {why}", quoteaf_os(path));
-}
-
-/// Whether a failed `rmdir`'s errno is one of the ones upstream throws away in
-/// favour of the earlier `opendir` failure (`remove.c:424`).
-///
-/// The list is upstream's verbatim, oddities included: `EISDIR` and `ENOTDIR`
-/// are there because kernels have been observed to return them from `rmdir` on
-/// an unreadable directory, and `EEXIST` because Solaris 10 spells `ENOTEMPTY`
-/// that way.
-fn is_uninformative(err: &io::Error) -> bool {
-    /// `ENOTEMPTY`, `EISDIR`, `ENOTDIR`, `EEXIST` — Linux's numbers, in the
-    /// order `remove.c` lists them. See [`blames_the_destination`] for why the
-    /// values are open-coded and why the host takes the `ErrorKind` arm below.
-    const UNINFORMATIVE_CODES: &[i32] = &[
-        39, // ENOTEMPTY
-        21, // EISDIR
-        20, // ENOTDIR
-        17, // EEXIST
-    ];
-    if cfg!(unix)
-        && err
-            .raw_os_error()
-            .is_some_and(|n| UNINFORMATIVE_CODES.contains(&n))
-    {
-        return true;
-    }
-    matches!(
-        err.kind(),
-        io::ErrorKind::DirectoryNotEmpty
-            | io::ErrorKind::IsADirectory
-            | io::ErrorKind::NotADirectory
-            | io::ErrorKind::AlreadyExists
-    )
 }
 
 #[cfg(unix)]

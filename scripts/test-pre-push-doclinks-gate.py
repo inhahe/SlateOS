@@ -63,6 +63,13 @@ CHECKER = os.path.join(REPO_ROOT, "scripts", "check-doc-links.py")
 # and a `gittree` resolved from outside it would be reading a `ROOT` that is
 # not the tree the gate is judging.
 GITTREE = os.path.join(REPO_ROOT, "scripts", "gittree.py")
+# And `gittree` imports this by name from *its* own directory, by the same
+# argument one level down: in a fixture that directory is the copy above. A
+# missing `gitenv.py` does not make the gate read the wrong repository, it
+# stops the gate starting at all -- and an import traceback exits 1, which the
+# hook reads as a finding and refuses the push over, so the symptom arrives
+# disguised as a verdict.
+GITENV = os.path.join(REPO_ROOT, "scripts", "gitenv.py")
 
 # Windows' CreateProcess command line cannot exceed 32,767 characters. The
 # fixture aims comfortably past it rather than at it: the point is to be over
@@ -154,6 +161,7 @@ def build_fixture(tmp: str) -> str:
         (LIB, os.path.join(work, "scripts", "run-checker.sh")),
         (CHECKER, os.path.join(work, "scripts", "check-doc-links.py")),
         (GITTREE, os.path.join(work, "scripts", "gittree.py")),
+        (GITENV, os.path.join(work, "scripts", "gitenv.py")),
     ):
         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
         with open(src_path, "r", encoding="utf-8", newline="") as src:

@@ -112860,27 +112860,46 @@ to abandon it.
 
 **Proper fix**, roughly in order of value:
 
-1. A `scripts/coreutils-check.sh` that runs `cargo clippy` and `cargo test` for
-   **both** `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu` (the latter
-   through WSL, reusing `diff-wsl.sh`'s existing toolchain discovery and its
-   `~/.cache/slateos-diff-target` target dir, so it costs no extra disk).
-   Nothing today runs the Linux side except the `*-diff.sh` harnesses, and they
-   run it for a different reason and swallow the output.
+1. ~~A `scripts/coreutils-check.sh` that runs `cargo clippy` and `cargo test`
+   for **both** `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu`.~~
+   **LANDED 2026-09-03.** `scripts/coreutils-check.sh` does exactly that, into
+   the harnesses' `~/.cache/slateos-diff-target`, so it costs no extra disk.
+   `--only host|linux`, `--no-clippy`, `--no-test`, `-p PKG` and pass-through
+   cargo arguments after `--`. It exits **2**, never 0, when a requested half
+   could not run — the failure being guarded against here is precisely a check
+   that did not happen reading as one that passed, so "no WSL on this host" is
+   a decline and the summary names which halves actually ran.
+
+   Two findings from building it, both worth knowing before running it:
+
+   * The Linux half must run from the **workspace root**, not from
+     `userspace/`. That zone's config sets `build-std = [… "panic_abort"]` for
+     the SlateOS target, and asking for a host target underneath it dies with
+     ``the crate `panic_abort` does not have the panic strategy `abort` `` — a
+     message about a mismatch nobody asked for. The root config sets no
+     `build-std`, which is why the zone was given its own.
+   * WSL already had a Rust toolchain (the `*-diff.sh` harnesses need one), but
+     it is invisible to `command -v cargo` even under `bash -lc`, because
+     `~/.cargo/env` is sourced from `.bashrc` and a non-interactive login shell
+     does not read it. Name `$HOME/.cargo/bin/cargo` explicitly, as the
+     harnesses and this script do, rather than concluding there is no cargo.
 2. Wire the Linux side into the pre-push gates, or at least into the boot
    test's pre-build tooling suite, so a `#[cfg(unix)]` regression cannot be
    pushed. Note the cost before doing this: the host clippy run over
    `-p coreutils --all-targets` took 89 minutes, so a second full pass is not
    free and probably wants to be scoped to the crates a push touches, exactly
    as gate 11 scopes itself.
-3. Until then, **run the Linux build by hand after touching any `#[cfg(unix)]`
-   code**:
+3. Until step 2 lands, **run step 1's script by hand after touching any
+   `#[cfg(unix)]` arm**:
 
    ```sh
-   wsl -e sh -c 'cd "$(wslpath -u "D:\visual studio projects\os-lane-b")" && \
-     ~/.cargo/bin/cargo test -p coreutils --lib --bin <bin> \
-       --target x86_64-unknown-linux-gnu \
-       --target-dir ~/.cache/slateos-diff-target'
+   scripts/coreutils-check.sh --only linux            # both halves by default
+   scripts/coreutils-check.sh --only linux --no-clippy -- dirfd   # while iterating
    ```
+
+   First measured run, 2026-09-03: the whole `coreutils` lib reports **416**
+   passing tests on the Linux target, `dirfd` alone **24** — against 0 of
+   either on the host, since `dirfd`'s unix arm does not compile there at all.
 
 **If it is never fixed:** warnings and dead code accumulate in the unix half
 where nobody sees them, and — much worse — a unix-only test can rot into a

@@ -30,20 +30,20 @@
 // computed from QR-version metadata, all bounded by the matrix
 // dimension; arithmetic is on small u8/u16 finite-field values. Allow
 // the lints file-wide; workspace discipline stays in place elsewhere.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::struct_excessive_bools)]
-#![allow(dead_code)]
 
 use core::num::NonZeroUsize;
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -232,7 +232,15 @@ impl EcLevel {
 /// compares the two for every row — and it is what caught sixteen of the forty
 /// rows carrying a block count that did not match their own capacity.
 struct VersionInfo {
+    // `version` and `ec_level` are read only by `byte_mode_capacity` and the
+    // test that calls it. That is the point rather than an oversight: the
+    // redundancy between a row's stated capacity and the capacity its own
+    // block counts imply is the transcription's only proofreader, and it
+    // caught sixteen of the forty rows. `dead_code` is a per-target analysis,
+    // so a test-only reader does not count for the binary.
+    #[allow(dead_code, reason = "read by the table's proofreading test")]
     version: u8,
+    #[allow(dead_code, reason = "read by the table's proofreading test")]
     ec_level: EcLevel,
     data_capacity_bytes: usize,
     ec_codewords_per_block: usize,
@@ -262,6 +270,10 @@ impl VersionInfo {
     /// The 4-bit mode indicator and the character-count indicator come out of
     /// the data codewords before any payload does; the remainder rounds down
     /// to whole bytes because a partial byte cannot hold a character.
+    #[allow(
+        dead_code,
+        reason = "the table's proofreader; called by the test that compares                   every row's stated capacity against its implied one"
+    )]
     fn byte_mode_capacity(&self) -> usize {
         let header_bits = 4_usize.saturating_add(count_indicator_bits(self.version));
         self.data_codewords()
@@ -448,42 +460,6 @@ impl QrMatrix {
                     Module::FunctionLight
                 };
                 self.set(row.saturating_add(r), col.saturating_add(c), module);
-            }
-        }
-    }
-
-    /// Place separator (light) around a finder pattern.
-    fn place_separator(&mut self, row: usize, col: usize, h_dir: i32, v_dir: i32) {
-        // Horizontal separator
-        for c in 0..8 {
-            let sr = if v_dir > 0 {
-                row.saturating_add(7)
-            } else {
-                row.saturating_sub(1)
-            };
-            let sc = if h_dir > 0 {
-                col.saturating_add(c)
-            } else {
-                col.wrapping_add(c).wrapping_sub(1)
-            };
-            if sr < self.size && sc < self.size {
-                self.set(sr, sc, Module::FunctionLight);
-            }
-        }
-        // Vertical separator
-        for r in 0..8 {
-            let sr = if v_dir > 0 {
-                row.saturating_add(r)
-            } else {
-                row.wrapping_add(r).wrapping_sub(1)
-            };
-            let sc = if h_dir > 0 {
-                col.saturating_add(7)
-            } else {
-                col.saturating_sub(1)
-            };
-            if sr < self.size && sc < self.size {
-                self.set(sr, sc, Module::FunctionLight);
             }
         }
     }
@@ -1647,7 +1623,118 @@ impl QrApp {
     // Rendering
     // -----------------------------------------------------------------------
 
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    // ------------------------------------------------------------------
+    // Events
+    // ------------------------------------------------------------------
+
+    /// Route a compositor event into the app.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                // Not `Consumed`: a resize is not by itself a reason to redraw.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a key press.
+    ///
+    /// The text field always has focus, because a program whose entire input is
+    /// "the thing to encode" should not need a keystroke before it will accept
+    /// it. Everything else is therefore on Ctrl.
+    pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        let ctrl = key.modifiers.ctrl;
+        match key.key {
+            Key::Backspace => {
+                let mut text = self.input_text.clone();
+                if text.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+                self.set_input(&text);
+                self.generate();
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                if self.input_text.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.set_input("");
+                self.generate();
+                EventResult::Consumed
+            }
+            // Ctrl+Q and Ctrl+B pick what kind of code to make.
+            Key::Q if ctrl => self.set_code_type(CodeType::QrCode),
+            Key::B if ctrl => self.set_code_type(CodeType::Barcode128),
+            // Ctrl+E cycles the error-correction level, which is the setting
+            // that changes the picture rather than the data.
+            Key::E if ctrl => {
+                self.ec_level = match self.ec_level {
+                    EcLevel::L => EcLevel::M,
+                    EcLevel::M => EcLevel::Q,
+                    EcLevel::Q => EcLevel::H,
+                    EcLevel::H => EcLevel::L,
+                };
+                self.generate();
+                EventResult::Consumed
+            }
+            Key::M if ctrl => {
+                self.module_size = match self.module_size {
+                    ModuleSize::Small => ModuleSize::Medium,
+                    ModuleSize::Medium => ModuleSize::Large,
+                    ModuleSize::Large => ModuleSize::Small,
+                };
+                // The module size is how big each square is drawn; the code
+                // itself does not change, so there is nothing to regenerate.
+                EventResult::Consumed
+            }
+            Key::K if ctrl => {
+                if self.history.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.clear_history();
+                EventResult::Consumed
+            }
+            _ => {
+                if key.text.is_empty() || ctrl {
+                    return EventResult::Ignored;
+                }
+                let mut text = self.input_text.clone();
+                text.push_str(&key.text);
+                self.set_input(&text);
+                self.generate();
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Switch between a QR code and a barcode, regenerating from the same text.
+    fn set_code_type(&mut self, code_type: CodeType) -> EventResult {
+        if self.code_type == code_type {
+            return EventResult::Ignored;
+        }
+        self.code_type = code_type;
+        self.generate();
+        EventResult::Consumed
+    }
+
+    /// Named `render_commands` and not `render`: this takes a width and a
+    /// height, exactly as `oswindow::app::App::render` does, and at equal arity
+    /// an inherent method silently wins method lookup over the trait's — so an
+    /// app that keeps the name draws nothing and reports no error.
+    pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
@@ -2620,32 +2707,61 @@ impl QrApp {
 // Main
 // ============================================================================
 
-fn main() {
-    let mut app = QrApp::new();
+impl App for QrApp {
+    fn title(&self) -> String {
+        match self.code_type {
+            CodeType::QrCode => "QR Code".to_owned(),
+            CodeType::Barcode128 => "Barcode".to_owned(),
+        }
+    }
 
-    // Generate a sample QR code
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.window_width as u32, self.window_height as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// A code is produced when the text changes. Nothing here ages, so a tick
+    /// would redraw an identical frame.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.window_width = width;
+        self.window_height = height;
+        RenderTree {
+            commands: self.render_commands(width, height),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = QrApp::new();
+    // So the first frame shows a code rather than an empty square.
     app.set_input("Hello, Slate OS!");
     app.generate();
-
-    // Generate a URL example
-    app.input_mode = InputMode::Url;
-    app.set_input("example.com");
-    app.generate();
-
-    // Switch to barcode
-    app.code_type = CodeType::Barcode128;
-    app.input_mode = InputMode::Text;
-    app.set_input("CODE128-TEST");
-    app.generate();
-
-    // Back to QR
-    app.code_type = CodeType::QrCode;
-    app.input_mode = InputMode::Text;
-    app.set_input("QR Code Generator for Slate OS");
-    app.generate();
-
-    let cmds = app.render(1100.0, 700.0);
-    let _ = cmds.len();
+    app::launch("qrcode", &mut app)
 }
 
 // ============================================================================
@@ -2661,6 +2777,190 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Events
+    //
+    // The app had no input handling at all until it was wired to the
+    // compositor: the text to encode was set by a caller.
+    // ------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn press_ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    fn typed(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    #[test]
+    fn typing_encodes_without_a_keystroke_to_get_started() {
+        // The text field always has focus: a program whose entire input is
+        // "the thing to encode" should not need a key pressed first.
+        let mut app = QrApp::new();
+        for c in "HI".chars() {
+            assert_eq!(app.handle_event(&typed(c)), EventResult::Consumed);
+        }
+        assert_eq!(app.input_text, "HI");
+        assert!(
+            app.current_qr.is_some(),
+            "typing should have produced a code"
+        );
+    }
+
+    #[test]
+    fn backspace_re_encodes_and_stops_at_an_empty_field() {
+        let mut app = QrApp::new();
+        for c in "HI".chars() {
+            app.handle_event(&typed(c));
+        }
+        assert_eq!(
+            app.handle_event(&press(Key::Backspace)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.input_text, "H");
+        app.handle_event(&press(Key::Backspace));
+        assert_eq!(app.input_text, "");
+        assert_eq!(
+            app.handle_event(&press(Key::Backspace)),
+            EventResult::Ignored,
+            "backspace on an empty field is not a redraw"
+        );
+    }
+
+    #[test]
+    fn escape_clears_the_field_and_does_nothing_when_it_is_clear() {
+        let mut app = QrApp::new();
+        assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Ignored);
+        app.handle_event(&typed('X'));
+        assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Consumed);
+        assert!(app.input_text.is_empty());
+    }
+
+    #[test]
+    fn ctrl_b_makes_a_barcode_from_the_same_text_and_ctrl_q_a_qr_code() {
+        let mut app = QrApp::new();
+        for c in "ABC123".chars() {
+            app.handle_event(&typed(c));
+        }
+        assert!(app.current_qr.is_some());
+        assert_eq!(app.handle_event(&press_ctrl(Key::B)), EventResult::Consumed);
+        assert_eq!(app.code_type, CodeType::Barcode128);
+        assert!(
+            app.current_barcode.is_some(),
+            "switching should have re-encoded the same text as a barcode"
+        );
+        assert_eq!(app.input_text, "ABC123", "the text should be untouched");
+        // Asking again for the kind already showing is not a redraw.
+        assert_eq!(app.handle_event(&press_ctrl(Key::B)), EventResult::Ignored);
+        assert_eq!(app.handle_event(&press_ctrl(Key::Q)), EventResult::Consumed);
+        assert_eq!(app.code_type, CodeType::QrCode);
+    }
+
+    #[test]
+    fn a_ctrl_chord_is_not_typed_into_the_field() {
+        // Every bare printable key is text, so a chord that carried one would
+        // otherwise be encoded along with it.
+        let mut app = QrApp::new();
+        let chord = Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: "q".to_owned(),
+        });
+        assert_eq!(app.handle_event(&chord), EventResult::Ignored);
+        assert!(
+            app.input_text.is_empty(),
+            "a chord was typed into the field"
+        );
+    }
+
+    #[test]
+    fn cycling_the_error_correction_level_comes_back_round() {
+        let mut app = QrApp::new();
+        app.handle_event(&typed('A'));
+        let first = app.ec_level;
+        let mut seen = vec![first];
+        for _ in 0..3 {
+            assert_eq!(app.handle_event(&press_ctrl(Key::E)), EventResult::Consumed);
+            seen.push(app.ec_level);
+        }
+        for (i, a) in seen.iter().enumerate() {
+            for b in seen.iter().skip(i + 1) {
+                assert_ne!(a, b, "the cycle repeated before visiting all four");
+            }
+        }
+        app.handle_event(&press_ctrl(Key::E));
+        assert_eq!(app.ec_level, first, "the cycle should return to the start");
+    }
+
+    #[test]
+    fn the_module_size_key_does_not_re_encode() {
+        // How big each square is drawn is a rendering choice; the code itself
+        // is the same, and regenerating would be work for nothing.
+        let mut app = QrApp::new();
+        app.handle_event(&typed('A'));
+        let before = app.history.len();
+        let size = app.module_size;
+        assert_eq!(app.handle_event(&press_ctrl(Key::M)), EventResult::Consumed);
+        assert_ne!(app.module_size, size);
+        assert_eq!(app.history.len(), before, "changing the size re-encoded");
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = QrApp::new();
+        let release = Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: "z".to_owned(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert!(app.input_text.is_empty());
+    }
+
+    #[test]
+    fn the_title_says_which_kind_of_code_is_showing() {
+        let mut app = QrApp::new();
+        assert!(app.title().contains("QR"));
+        app.handle_event(&press_ctrl(Key::B));
+        assert!(app.title().contains("Barcode"), "title: {:?}", app.title());
+    }
+
+    #[test]
+    fn rendering_draws_something_at_an_awkward_size() {
+        let mut app = QrApp::new();
+        app.set_input("Hello");
+        app.generate();
+        for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+            assert!(
+                !app.render(w, h).commands.is_empty(),
+                "drew nothing at {w}x{h}"
+            );
+        }
+    }
 
     // --- GF(2^8) tests ---
 
@@ -3226,7 +3526,7 @@ mod tests {
     #[test]
     fn test_app_render_empty() {
         let app = QrApp::new();
-        let cmds = app.render(1100.0, 700.0);
+        let cmds = app.render_commands(1100.0, 700.0);
         assert!(!cmds.is_empty());
     }
 

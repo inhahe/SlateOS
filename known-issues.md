@@ -114784,3 +114784,74 @@ The three creation sites sit in helpers — `_run_clippy_gate` (`:506`),
 per test case, so the seven leaks are seven cases spread across the three, and
 repairing the three `mkdtemp`/`rmtree` pairs covers all of them. There is no
 fourth site: these are the only `mkdtemp(dir=…)` calls anywhere in `scripts/`.
+
+## TD-B-SIX-TRACKED-FILES-HELD-CRLF-IN-THE-LANE-B-WORKTREE-AND-THE-WRITER-IS-UNIDENTIFIED (lane B, 2026-09-04)
+
+**In short:** the boot test refused to build because six files declared
+`text eol=lf` in `.gitattributes` had Windows line endings (CRLF) on disk. The
+bytes are repaired. **What wrote them is not known**, and this entry exists
+because repairing bytes without finding the writer only schedules the next
+occurrence — as `check-eol`'s own refusal message says.
+
+**Why no git command showed it.** `text eol=lf` installs a *clean filter*: git
+converts CRLF to LF before every comparison, so `git status`, `git diff` and
+`git add` all called the tree clean, and staging the repair produced a
+zero-byte diff. `git ls-files --eol` is the only view that shows it, and it
+read `i/lf w/crlf` — index correct, working tree corrupt. This is why
+`scripts/boot-test.sh`'s `check-eol` gate reads the bytes itself rather than
+asking git, and it is the reason the gate is worth its runtime.
+
+**The six, with the mtimes that bound when it happened:**
+
+| file | CRs | mtime |
+|---|---|---|
+| `requests/a-b-run-ki-dupes-after-merges.md` | 105 | 2026-08-16 15:45 |
+| `requests/a-b-set-credentials-right.md` | 151 | 2026-08-16 15:46 |
+| `scripts/getopt-ambiguity-check.py` | 837 | 2026-08-30 08:08 |
+| `scripts/check-libc-shape.py` | 1032 | 2026-09-03 21:41 |
+| `scripts/check-mutation-needles.py` | 400 | 2026-09-03 22:22 |
+| `scripts/check-doc-links.py` | 1505 | 2026-09-03 23:03 |
+
+Four distinct dates over nineteen days: this is recurring, not one event.
+
+**What has been ruled out.**
+
+- **Not the blobs.** `git ls-files --eol` reports `i/lf` for all six; the
+  repository content is correct and always was. Only the working tree was
+  wrong, so nothing was ever pushed in this state.
+- **Not `git checkout`.** `core.autocrlf` is `input` — set at *system* scope,
+  unset at local, global and worktree — and `core.eol` is unset everywhere.
+  `input` means convert on commit, never on checkout, so checkout writes the
+  blob verbatim.
+- **Not my edits this session.** All six mtimes predate 2026-09-04, and an
+  `Edit`-tool write to one of them afterwards left it `w/lf`.
+- **Not a tree-wide tool.** The `os` integration worktree has **0** CRLF files
+  across the same 1,065 tracked files. Whatever did this ran in the *lane-b
+  worktree specifically*, which is the fact that points away from the shared
+  `scripts/` checkers and back at something local.
+- **Not the obvious text-mode write.** `check-doc-links.py:1221` does open a
+  file `"w"` without `newline=""`, which on Windows is exactly the CRLF-making
+  pattern — but its path is inside a `tempfile.TemporaryDirectory()`, so it
+  cannot touch a tracked file. Named here so the next reader does not spend
+  the same twenty minutes on it. `check-libc-shape.py` and
+  `getopt-ambiguity-check.py` contain no writes at all, and
+  `check-mutation-needles.py:314` also writes only into a temp dir.
+
+**The one partial explanation.** The two `requests/` files share a commit:
+`6caf6467e`, *"repair: restore the tree that the buggy `--selftest` deleted, on
+lane-b too"*. A repair that restores deleted files by writing them through
+Python's default text mode would produce exactly this, and it targeted the
+lane-b worktree by name — which fits the lane-b-only scope. That accounts for
+2 of 6 and for the 2026-08-16 pair. **It does not account for the four
+`scripts/*.py` files**, and no hypothesis tested so far does.
+
+**How to find it if it recurs.** The mtime is the timestamp of the write, so
+`ls -l --time-style=full-iso` on the offenders gives the minute; correlate that
+against what was run then. Do not repair before recording the mtimes — the
+repair overwrites the only evidence of when it happened, which is what makes
+this entry thinner than it should be.
+
+**If it is never fixed:** every recurrence blocks `scripts/boot-test.sh` for
+whichever lane hits it, and the gate refuses the *whole build*, so it blocks
+merging too. It is loud and self-repairing-by-hand, not silent — the failure
+mode is lost time, not lost correctness.

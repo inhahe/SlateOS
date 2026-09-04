@@ -110758,6 +110758,55 @@ Corrected the two places that stated the false claim (module docstring Usage
 section, and the `--quick` argparse help) rather than leaving the measurement
 only here — but the numbers above are the debt, not the wording.
 
+### Update, 2026-09-04: the same gates cost more in `boot-test.sh`, where it is not optional
+
+The measurement above was taken on `pre-boot.py`, which nobody is obliged to
+run. The same gate suite runs inside `scripts/boot-test.sh` — the blocking one,
+the one every merge waits on — and there it is longer, because `boot-test.sh`
+also runs `check_python_suites()`, a gate `pre-boot.py` does not have.
+
+Measured on `lane-b`, 2026-09-04, from `/tmp/boot.log` (`run-timeout.py`
+heartbeats give the clock to ±60 s):
+
+| Phase | Starts at | Length |
+|---|---|---|
+| checker gates (`check-*.py`, shellcheck, …) | 0s | **~2400s (~41 min)** |
+| `check_python_suites` (32 `scripts/test-*.py`) | ~2400s | **≥ 480s, unfinished** |
+| build | never reached | — |
+| QEMU | never reached | — |
+
+The run was killed at 2880 s (48 min) with the build not yet begun. In the
+480 s the suite gate did get, it finished **12 of 32** suites, alphabetically
+through `test-check-self-tests-wired.py`. The next one in order is
+`test-checkers-honour-head.py`, which is **582 s standalone** — measured this
+same day — so the suite gate alone is plainly a further 20–35 minutes, and the
+whole pre-build phase is **on the order of 75 minutes** before a single crate
+is compiled. Build (~6.5 min) and QEMU (~7 min) come after that.
+
+Three things follow that the entry above did not say:
+
+1. **A 3600 s timeout on `boot-test.sh` cannot pass on this tree**, regardless
+   of whether the tree is good. That is not a hypothesis — it is what killed
+   the run measured here. Any `run-timeout.py` budget for a full boot test
+   must now be **≥ 10800 s**. A too-short budget does not merely waste 60
+   minutes; it returns exit 124, which is indistinguishable at a glance from a
+   real failure, and the two previous kills recorded at the top of this entry
+   are the same mistake made twice already.
+2. **`check_python_suites` is the right design and should not be trimmed.** It
+   globs deliberately (`boot-test.sh:5159`, and see the retracted entry
+   `TD-B-THE-THIRTY-TWO-SUITES-…` below for why the glob defeated a search for
+   the names). The fix for its cost is to make it *concurrent*, exactly as fix
+   2 above proposes for the checker gates — the 32 suites are independent
+   processes over disjoint temp dirs, and the gate's wall clock would collapse
+   to roughly its longest member (~582 s) rather than their sum. Do not
+   respond to the cost by dropping suites from the glob.
+3. **The two fixes now have a much larger payoff than when they were filed.**
+   Concurrency over ~29 checker gates plus 32 suites turns ~75 minutes into
+   roughly the longest single member — `check-variant-lists.py` at 834 s or
+   `test-checkers-honour-head.py` at 582 s, so call it 15 minutes. That is the
+   difference between a boot test a lane can run per task and one it runs once
+   a day, and the serialisation lock means the cost is paid by all three lanes.
+
 ---
 ## TD-B-TEN-GATES-ARE-NEVER-ASKED
 
@@ -115260,74 +115309,84 @@ stays correct; the panic needs a non-ASCII option string, the field shift needs
 whitespace in a mount point, and the empty table needs a non-UTF-8 path. All
 three become reachable the moment the OS mounts anything a user named.
 
-## TD-B-THE-THIRTY-TWO-SUITES-THAT-VERIFY-THE-CHECKERS-ARE-THEMSELVES-RUN-BY-NOTHING
+## TD-B-THE-THIRTY-TWO-SUITES-THAT-VERIFY-THE-CHECKERS-ARE-THEMSELVES-RUN-BY-NOTHING — **RETRACTED, THE CLAIM WAS FALSE**
 
-**Filed:** 2026-09-04 by lane B. **Where:** `scripts/test-*.py` (32 files),
-against `scripts/boot-test.sh` and `scripts/hooks/pre-push`. **Status:** open;
-found while repairing `quote-names.py --selftest`, which is the defect this
-would have caught.
+**Filed:** 2026-09-04 by lane B. **Retracted the same day, by the same lane,
+on observing the thing it said did not exist.** Kept rather than deleted: the
+entry was wrong for a reason worth having written down, and a tracking file
+that quietly loses its own false entries teaches nobody.
 
-**In short:** This tree has two layers of automated checking. The lower one —
-the `scripts/check-*.py` gates — is watched closely: `check-gates-are-wired.py`
-fails the build if a gate exists that nothing runs, and `check-gates-can-refuse.py`
-fails it if a gate exists that can never say no. The upper layer is the 32
-`scripts/test-*.py` suites that verify *those gates work*. **Nothing runs any of
-them.** They execute only when a person types the filename.
+**In short:** I wrote that the 32 `scripts/test-*.py` suites — the ones that
+verify the `check-*.py` gates actually work — were run by nothing, and would
+execute only when a person typed the filename. **That was false.**
+`scripts/boot-test.sh` has run every one of them on every boot test since
+2026-08-29 (`bc98c61cb`), in `check_python_suites()` at `boot-test.sh:5159`.
+Observed directly on 2026-09-04: a boot test on `lane-b` printed
+`=== Running the tooling's own test suites (scripts/test-*.py) ===` and a
+per-suite pass line for each, in alphabetical order, before building anything.
 
-### The measurement
+### Why the claim was wrong, which is the part worth keeping
 
-`boot-test.sh` and `hooks/pre-push` between them mention exactly two suites,
-`test-checkers-honour-head.py` and `test-pre-push-gates.py`, and both mentions
-are **prose in comments** — `pre-push:20`, `pre-push:41`, `pre-push:267`. No
-`run_checker` call, no `python` invocation, no CI workflow (there is no
-`.github/workflows`), no Makefile. Grepped for every suite name across `*.sh`,
-`*.yml`, `*.yaml`, `*.toml` and `Makefile`: no runner exists.
+The retracted measurement read: *"Grepped for every suite name across `*.sh`,
+`*.yml`, `*.yaml`, `*.toml` and `Makefile`: no runner exists."* The grep was
+accurate. The inference from it was not.
 
-### Why the existing ratchet cannot see this
+`check_python_suites` does not name a single suite. It globs
+`"$PROJECT_ROOT"/scripts/test-*.py` and runs whatever it finds — and its own
+comment says why, in terms that are precisely the refutation of my method:
 
-`check-gates-are-wired.py` globs `scripts/check-*.py`. That is the right scope
-for what it was built to do and it is why the gap is invisible: the suites are
-not gates, so they are not in the population being audited, so the audit is
-green while a third of the testing apparatus never executes. The blind spot is
-structural, not an oversight in the glob — "is this gate run?" and "is the thing
-that verifies this gate run?" are different questions and only the first is
-asked.
+> WHY IT DISCOVERS RATHER THAN LISTS. A hand-written list is a second place a
+> new suite must be registered, and forgetting is silent: the suite passes by
+> not running, which is indistinguishable from passing. So the glob is the
+> list […]
 
-### That this is not theoretical
+So the design decision that makes the wiring *robust* — never writing the names
+down — is exactly what made a search for the names come back empty. **A grep for
+a list cannot find a discovery**, and "I searched for every name and found no
+runner" is not evidence that nothing runs them; it is evidence of nothing at
+all when the runner is a glob. The general lesson, and the reason this is
+retained: when a search returns "nothing anywhere runs this", the next step is
+to *run the thing that would run it* and watch, not to file the finding. One
+boot test would have refuted this entry in the eleven minutes it took to reach
+that gate.
 
-`quote-names.py`'s `--head` support was verified by exactly one thing: case 11
-of its own `--selftest`, which is wired and does run. The dedicated suite that
-exists to verify `--head` flags — `test-checkers-honour-head.py`, which builds
-disagreement fixtures far more carefully than case 11 did — has cases for gates
-2, 3, 4 and 6 and would have been the natural home for it. It was not used,
-because a suite nothing runs is a suite nobody remembers to extend. Case 11 was
-then written in isolation and reproduced the `GIT_DIR` bug that
-`scripts/gitenv.py` documents in full, committing twice onto `lane-b` on its
-first real invocation.
+There is a second-order irony worth noting, since it is the same mistake twice
+in one entry: the retracted text proposed, as its step 2, to "wire the fast
+ones into `boot-test.sh`'s pre-build gate block" — that is, to replace a
+working glob with a hand-written list, which is the arrangement the glob's
+author had already rejected in writing at the top of the function I had not
+read.
 
-Two of the suites are, separately, the only coverage of their subject:
-`test-gittree.py` is the sole check on the seam every `--head` checker reads
-through, and `test-pre-push-run-checker.py` the sole check on the label
-discipline `boot-test.sh:3483` calls a gate failure.
+### What survives the retraction
 
-### The proper fix
+Two smaller claims were true and are re-filed here at their real size, rather
+than left inside a retracted entry where nobody would trust them:
 
-Not "wire all 32 into `boot-test.sh`" — some are slow, and the boot test is
-already ~90 minutes. In order:
+1. **`check-gates-are-wired.py` really does glob `scripts/check-*.py` only**, so
+   the suites are not in *its* audited population. But they are not unaudited:
+   `check_python_suites` guards its own discovery with a floor — it refuses to
+   build if fewer than 10 suites are found, on the stated grounds that "a gate
+   that discovers nothing reports no failures, which reads exactly like a pass."
+   That floor is weak (32 suites could fall to 10 unnoticed) but it is not
+   absent, and a sharper ratchet here is a *nice-to-have*, not the hole the
+   retracted entry described. Not currently tracked as debt; noted here.
+2. **Case 11 of `quote-names.py --selftest` really was written in isolation**
+   rather than as a case in `test-checkers-honour-head.py`, which is the suite
+   built for exactly that question and which would have caught the `GIT_DIR`
+   bug. That remains a genuine miss — but the reason I gave for it ("a suite
+   nothing runs is a suite nobody remembers to extend") was a rationalisation
+   built on the false premise. The real reason is that I did not look for an
+   existing home before writing a new one.
 
-1. **Measure each suite's runtime.** The decision is entirely about cost; it
-   cannot be made from the file list. Several are pure string manipulation and
-   will be under a second.
-2. **Wire the fast ones into `boot-test.sh`'s pre-build gate block** via
-   `run_checker`, alongside the `check-*` gates they verify. A suite that
-   verifies a gate belongs next to that gate, so the two are read together.
-3. **For the slow ones, decide deliberately and record it** — a
-   `--quick`/`--full` split, or a documented "runs on merge to `main` only".
-   What must not happen is the current state, which is neither.
-4. **Extend `check-gates-are-wired.py`, or add a sibling, to cover
-   `scripts/test-*.py`** with the same `PINNED`-with-a-reason discipline. Until
-   the population is audited, step 2 decays exactly as the gates did before
-   that script existed — measured then at nine of thirty-one unwired.
+### The one real finding, which belongs elsewhere
 
-Step 4 is the one that makes the others stay done. Steps 1-3 without it are a
-one-time cleanup of a list that will drift again.
+This gate is a large part of why the pre-build phase is long. Measured on
+2026-09-04 on `lane-b`: **~41 minutes of gates before `check_python_suites`
+even started**, and the suite gate was still running 6 minutes later, having
+reached `test-check-self-tests-wired.py` — with `test-checkers-honour-head.py`
+(~10 minutes standalone, measured 582 s) next in alphabetical order and 19
+suites after it. The run was killed at 47 minutes, before the build began.
+
+That cost is real and is worth a deliberate decision, but it belongs to
+`TD-B-PRE-BOOT-QUICK-IS-NOT-QUICK` — where the question is "what should a quick
+run skip", not "is this wired". Recorded there, not here.

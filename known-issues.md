@@ -56921,6 +56921,43 @@ clone with a `filter-repo` history in it.
 a work tree", while the same commands work fine in `os-lane-a/b/c`. The check is
 `git -C "…/os" config --get core.bare`; the answer should be `false` or absent.
 
+### TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING — 2026-09-04 — OPEN
+
+**In short.** The bulk renamer can now be given files and rules, and can
+actually rename. What it still cannot do is add any rule that needs a *string*
+typed in — find/replace, insert, remove-at, regex, replace-extension — because
+the app draws no text field anywhere.
+
+**Where it was.** Before 2026-09-04 the window would have opened completely
+empty and stayed that way: `add_file` and `add_operation` had no caller outside
+the tests, so there was no file to rename and no rule to rename it by. Every
+preview showed the name unchanged and the program's whole purpose did nothing.
+A `#![allow(dead_code)]` at the top of the file is why nobody noticed.
+
+**What is reachable now.** A sample file list at startup, and the rules that
+need nothing typed, each on a key: five of the eight case modes (lower, upper,
+title, snake, kebab), trim, sequential numbering, lowercase-extension,
+remove-extension, plus clearing the rules or the list, undo, redo, and the
+rename itself.
+
+**What is not, and why.**
+
+| still unreachable | needs |
+|---|---|
+| find/replace, insert, remove-at, regex, replace-extension, add-extension | a text field to type the string into |
+| the other three case modes, the date-stamp formats, the other trim modes, insert-at-position | a menu — the keyboard is out of letters that read naturally |
+| `FileEntry::modified_ms` | a file chooser to read a real modification time from |
+| `RenameRecord::timestamp_ms` | a history panel that shows *when*, not just what |
+
+**The fix is one control, not many.** Every row above is waiting on the same
+missing thing: somewhere to type, and somewhere to choose. `INPUT_HEIGHT` is
+already defined and unused, which is the shape of a text field that was planned
+and never drawn. Once it exists, each remaining rule is a match arm.
+
+**No data is at risk.** The rename operates on an in-memory list seeded at
+startup; there is no filesystem access at all yet, which is its own gap and the
+reason `add_file` takes a path as a string.
+
 ### TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE — 2026-09-04 — OPEN
 
 **In short.** About half of the kanban app's model is written, tested, and

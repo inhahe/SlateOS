@@ -259,7 +259,7 @@ def run_mutants(gate: Path, source: str, table: list[tuple[str, str, str]],
                 continue
             mutant.write_text(
                 head.replace(old, new) + body + tail.replace(old, new),
-                encoding="utf-8")
+                encoding="utf-8", newline="")
             if selftest_passes(mutant, flag):
                 say(f"[SURVIVED] {label}")
                 survivors.append(label)

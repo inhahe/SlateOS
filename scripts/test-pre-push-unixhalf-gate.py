@@ -168,7 +168,8 @@ def build_fixture(tmp: str) -> tuple[str, str]:
     # have to be: this gate declines on an untracked file, so a fixture that
     # left them lying loose would take the decline path in every case and the
     # suite would pass without ever running the checker.
-    with open(os.path.join(work, "a.txt"), "w", encoding="utf-8") as fh:
+    with open(os.path.join(work, "a.txt"), "w", encoding="utf-8",
+              newline="") as fh:
         fh.write("one\n")
     git(work, "add", "a.txt", "scripts")
     git(work, "commit", "--quiet", "-m", "clean commit")
@@ -192,7 +193,7 @@ def build_fixture(tmp: str) -> tuple[str, str]:
 def commit_file(work: str, path: str, body: str = "x\n") -> None:
     full = os.path.join(work, path)
     os.makedirs(os.path.dirname(full), exist_ok=True)
-    with open(full, "w", encoding="utf-8") as fh:
+    with open(full, "w", encoding="utf-8", newline="") as fh:
         fh.write(body)
     git(work, "add", path)
     git(work, "commit", "--quiet", "-m", f"commit adding {path}")
@@ -277,7 +278,8 @@ def main() -> int:
         # not the push, the gate must decline instead of answering about the
         # wrong tree. A gate missing this arm would report a pass here.
         commit_file(work, "userspace/coreutils/note.txt", "three\n")
-        with open(os.path.join(work, "a.txt"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(work, "a.txt"), "w", encoding="utf-8",
+                  newline="") as fh:
             fh.write("edited, not committed\n")
         verdict, blob, runs = push(work, log)
         check("an uncommitted edit makes the gate decline", runs, 0)
@@ -291,7 +293,7 @@ def main() -> int:
         # compiler would read something the remote will never receive.
         commit_file(work, "userspace/coreutils/note.txt", "four\n")
         with open(os.path.join(work, "userspace", "coreutils", "extra.txt"),
-                  "w", encoding="utf-8") as fh:
+                  "w", encoding="utf-8", newline="") as fh:
             fh.write("not committed\n")
         verdict, blob, runs = push(work, log)
         check("an untracked file makes the gate decline", runs, 0)

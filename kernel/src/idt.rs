@@ -2074,6 +2074,57 @@ static HARDLOCKUP_DUMPED: core::sync::atomic::AtomicBool =
 static FATAL_FAULT_IN_PROGRESS: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Commit to the unrecoverable-kernel-fault path: mask interrupts and latch the
+/// re-entrancy guard.  Returns only if this is the *first* fatal fault; a nested
+/// one prints a single stack-cheap line and halts inside this function.
+///
+/// Call this as the first statement of a fatal handler's kernel branch — after
+/// its ring-3 early return, never before, because a userspace fault of the same
+/// vector is routine (a ring-3 `#UD` is raised by CFI traps and by the
+/// deliberate-compiler-trap self-test) and must not mask interrupts or arm a
+/// guard that makes every later kernel fault print one line and halt.
+///
+/// # Why this is a shared function rather than a paragraph in each handler
+///
+/// The three hardening lessons this encodes were each learned the expensive
+/// way, on `handle_page_fault`, and then not copied to its siblings:
+///
+/// * a re-entrancy guard, after a nested fault recursed ~2 KiB per level until
+///   the kernel stack overflowed and buried the real report under a 4400-line
+///   `#DF`/`#UD` cascade (soak-20260715-235730-iter40);
+/// * an early `cli()`, after the fatal path was found running *interruptible* —
+///   a timer tick faulted mid-report, tripped the guard, and halted us before
+///   the diagnostics printed (2026-07-16);
+/// * running the raw stack scan before any diagnostic that dereferences
+///   possibly-corrupted state (2026-07-22).
+///
+/// On 2026-09-04 that omission cost a capture outright.  Whether a wild jump
+/// reports `#PF` or `#UD` or `#GP` is decided by nothing more interesting than
+/// whether the garbage address is unmapped, mapped, or non-canonical — the same
+/// bug, sorted into three handlers by an accident of the address.  B-KNULLJUMP's
+/// hijack landed on `ktrace::CATEGORY_MASK`, a mapped `.data` address, so it
+/// raised `#UD` and reached a handler with none of the above; it produced a
+/// two-frame backtrace of the fault handler's own frames and nothing that named
+/// the caller.  A shared entry point is what stops the fourth handler from
+/// having to learn it a fourth time.
+fn begin_fatal_kernel_fault(what: &str, frame: &InterruptStackFrame) {
+    // SAFETY: every caller is on a path that ends in `halt_loop()`.  Masking
+    // interrupts cannot lose state we still need (any error code and CR2 are
+    // captured at handler entry) and only serializes the final diagnostics.
+    unsafe {
+        cpu::cli();
+    }
+    if FATAL_FAULT_IN_PROGRESS.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        serial_println!(
+            "NESTED {} during fatal diagnostics: rip={:#x} rsp={:#x} — halting.",
+            what,
+            frame.rip,
+            frame.rsp
+        );
+        cpu::halt_loop();
+    }
+}
+
 /// Lowest canonical higher-half address. Used to sanity-check stack/frame
 /// pointers before dereferencing them in the NMI backtrace. Kernel *stacks* are
 /// not confined to the top −2 GiB (where the kernel image / `.text` lives):
@@ -2886,6 +2937,24 @@ extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
         );
         return;
     }
+    // Everything from here down is unrecoverable and ends in `halt_loop()`, so
+    // it mirrors the hardened fatal-`#PF` branch below.  A kernel `#UD` is not a
+    // different bug from a kernel `#PF` on an instruction fetch — it is the same
+    // control-flow hijack landing on a *mapped* page instead of an unmapped one.
+    // Whether a wild jump reports `#PF` or `#UD` is decided by nothing more
+    // interesting than whether the garbage address happens to be mapped, so the
+    // two handlers must diagnose it equally well.
+    //
+    // They did not.  B-KNULLJUMP's 2026-07-15 capture jumped to `RIP=0x0`, took
+    // the `#PF` path, and drove three rounds of hardening there; the 2026-09-04
+    // capture jumped to `ktrace::CATEGORY_MASK` — a real, mapped `.data` address
+    // whose bytes simply are not a valid encoding — and arrived *here*, where
+    // none of that hardening had been copied.  It produced two frames of RBP
+    // walk, both of them this handler's own, and no return-address candidates:
+    // precisely the dead end the `#PF` work existed to eliminate.
+    //
+    begin_fatal_kernel_fault("#UD", frame);
+
     serial_println!("EXCEPTION: Invalid Opcode (#UD) at {:#x}", frame.rip);
     serial_println!(
         "  CS={:#x} RFLAGS={:#x} RSP={:#x}",
@@ -2893,6 +2962,17 @@ extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
         frame.rflags,
         frame.rsp
     );
+
+    // The raw stack scan runs before every other diagnostic, for the same
+    // reason it does on the `#PF` path: it is the only one that survives this
+    // class of fault.  `panic_diagnostics()` takes a lock on scheduler state,
+    // and the scheduler `BTreeMap` is B-KNULLJUMP's *pinned* corruption victim;
+    // `print_current()` walks an RBP chain that a control-flow hijack has by
+    // definition broken.  The scan validates every slot against known kstack
+    // regions before dereferencing, and it is the one diagnostic that can name
+    // the hijacked caller — which is the single fact every capture of this bug
+    // has so far failed to record.
+    crate::backtrace::dump_stack_scan(frame.rsp, 64);
 
     // Dump the bytes at the faulting instruction for post-mortem decode.
     if frame.rip >= 0xFFFF_8000_0000_0000 {
@@ -3143,6 +3223,8 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
         );
         return;
     }
+    begin_fatal_kernel_fault("#GP", frame);
+
     serial_println!(
         "EXCEPTION: General Protection Fault (#GP) at {:#x}, error={:#x}",
         frame.rip,
@@ -3155,6 +3237,14 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
         frame.rsp,
         frame.ss
     );
+
+    // Before `panic_diagnostics()` / the RBP walk, for the reason given in
+    // `begin_fatal_kernel_fault`.  `#GP` is the third landing mode of a
+    // control-flow hijack: a garbage code pointer that is neither mapped (`#PF`)
+    // nor a bad encoding at a mapped address (`#UD`) but simply non-canonical
+    // faults here, and the raw scan is again the only diagnostic that can name
+    // the caller once the RBP chain is broken.
+    crate::backtrace::dump_stack_scan(frame.rsp, 64);
 
     // Decode the error code: for #GP, it's a selector index.
     // Bits [15:3] = selector index, bit [2] = TI (0=GDT, 1=LDT/IDT),

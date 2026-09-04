@@ -111212,7 +111212,22 @@ read the disk:
 | 6 host-errmsg | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-03** |
 | 11 doc-links | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-03** |
 | 5 getopt-table | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-04** |
-| 8 quote-names | working tree | `--check`, checker walks the filesystem |
+| 8 quote-names | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
+
+**Every gate in the table now reads the pushed tip.** The column above was
+itself stale in both directions on 2026-09-04: it listed gate 8 as reading the
+working tree two days after `f129bd5e0` and `bfe200154` converted it, and step 2
+below said "one to go: gate 8" on the strength of that row. A table maintained
+by hand alongside the thing it describes will do this; what saves it is that
+step 3's `HEAD_GATES` is executable and cannot go stale the same way, which is
+why the backfill described there is worth more than this row is.
+
+The *conversion* half of this debt is therefore closed. The half that remains is
+step 4's, and it is not bookkeeping: gates 8 and 9 have no behavioural coverage
+at all. Both are wired correctly and both are asserted to be wired correctly,
+but nothing has ever pushed a fixture past either one, so there is no evidence
+that the flag changes what they *decide*. A checker can accept `--head`, be
+called with it correctly, and ignore it.
 
 Gate 7 is not on that list any more, and it is the proof the rest matter: it had
 exactly this defect and it published two unformatted commits (`861f4d80e`,
@@ -111319,7 +111334,12 @@ the regression test all exist. The work is:
    the only checker here whose comparison has just *one* tree in it — the other
    side is the live host's GNU utilities — so `--head` selects our half and the
    measurement stays a measurement.
-   One to go: gate 8.
+   **Done — all eight are converted.** This line read "one to go: gate 8" until
+   2026-09-04, when checking `git log` on the file rather than trusting the note
+   showed gate 8 had been converted on 2026-09-02 by `f129bd5e0`/`bfe200154`.
+   The note was written from the gate table above, which was stale, so the two
+   agreed with each other and were both wrong — the reason the fix for *that* is
+   step 3's executable table rather than a more carefully maintained prose one.
 3. Pass `--head` from the hook, and extend `test-pre-push-gates.py`'s existing
    assertion to all eight gates instead of just gate 9. **In progress.** The
    assertion is now a table (`HEAD_GATES`) rather than a gate-9 special case,
@@ -111759,6 +111779,62 @@ the regression test all exist. The work is:
     they decide. A checker can accept `--head`, be called with it correctly, and
     ignore it. Adding a floor for them would make the table look complete while
     guarding nothing.
+
+12. **Gate 8 could not tell a clean tree from an empty one, 2026-09-04.** Found
+    while going to *convert* gate 8 and discovering it had been converted two
+    days earlier (see step 2). With the conversion already done, the useful
+    question became whether the converted gate was correct, and it was not, in a
+    way the conversion had made reachable: `--head` can now be pointed at any
+    revision, including one where lane B's zone does not exist.
+
+    `survey()` returned only the findings, so an empty result had two causes
+    that were indistinguishable from outside — a tree with no defects, and a
+    tree with no *sources*. Measured on a commit that renamed `userspace/` away,
+    against a baseline that still listed a file in it:
+
+    ```
+    fixed: userspace/coreutils/src/bin/cut.rs 1 -> 0
+    ok -- 0 known sites in 0 files (1 improved)
+    ```
+
+    exit 0. Note what that is worse than: it is not merely a bad push passing.
+    The gate reported the disappearance of its own subject as a *burn-down*, and
+    the wording (`run --write-baseline to record it`) invites the reader to
+    discard every site the ratchet was guarding. A ratchet that offers to forget
+    its own backlog is the worst available failure for a ratchet.
+
+    The fix is `Survey(found, scanned)` — the count of files actually read comes
+    back from the same walk that produced the findings, because deriving it from
+    a second walk would be a second answer to one question, which is the exact
+    shape of drift the `Tree` seam was introduced to remove. `_no_corpus` then
+    refuses on both the `--head` and the working-tree path, with **exit 2**: 1 is
+    `run-checker.sh`'s "the checker found something in your code", and printing
+    gate 8's refusal for an empty tree would tell an author their diagnostics
+    leak file names when nothing whatever was observed.
+
+    Deliberately not a heuristic threshold. Gate 4's equivalent originally
+    asserted `> 50` files, which is a claim about the size of *this* checkout and
+    made the rule unrunnable anywhere else; this asks for one file, which is a
+    claim about the gate having a subject and holds in a three-file fixture.
+    That is what let the five new self-test cases exercise it for real rather
+    than assert it in the abstract.
+
+    Two of those cases are worth naming. The **control** — a fixture tree that
+    has a source and no violations must *not* trip the guard — carries as much
+    weight as the experiment, because the failure it excludes is the one that
+    gets a gate switched off: a gate that refuses on every host. And the last
+    case pins, on purpose, that `check()` on its own still reads an emptied
+    corpus as `1 improved` and exits 0; if that is ever fixed inside `check`, the
+    case fails and its comment says to delete itself *and* `_no_corpus` together
+    rather than leave two answers standing.
+
+    End to end on a real revision rather than only a fixture: this repository's
+    own root commit (`7527d40a0`) predates all four of `ROOTS`, and
+    `--check --head 7527d40a0` now exits 2 with the refusal where it would have
+    exited 0 with a pass.
+
+    This is a defect in *correctness*, not coverage — it does not close step 4's
+    gap. Gate 8 still has no case proving `--head` changes what it decides.
 
 ### Why it is not done yet
 

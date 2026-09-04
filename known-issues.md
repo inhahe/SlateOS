@@ -114865,27 +114865,76 @@ produced it queried three worktrees, only the `os` result returned before I
 drew the conclusion — the other two auto-backgrounded — and I read "os is
 clean" as "only lane-b is dirty". The full result:
 
-| worktree | files with CRLF |
-|---|---|
-| `os` (integration; nobody develops in it) | **0** |
-| `os-lane-a` | **~50**, of which **44** are in `kernel/src/fs` |
-| `os-lane-c` | **66** |
-| `os-lane-b` | 6 (repaired) |
+| worktree | tracked files with CRLF | of those, declared `eol=lf` |
+|---|---|---|
+| `os` (integration; nobody develops in it) | **0** | 0 of 1444 |
+| `os-lane-a` | **168** (166 `.rs`, 1 `.ads`, 1 `.atp`) | **0** of 1443 |
+| `os-lane-b` | 6 | 6 — the six above; now 0 of 1446 |
+| `os-lane-c` | 66 | **31** of 1433 |
 
 **The true shape is the inverse of what I wrote: every worked-in tree has it;
 the one tree nobody develops in is clean.** And the corruption sits in each
-lane's *active area* — lane A's in `kernel/src/fs`, which is exactly what lane
-A is working on; mine in files that had just arrived from lane A. A checkout,
-a merge, or one lane's script would not produce that distribution. Something in
+lane's *active area* — lane A's under `kernel/`, which is exactly what lane A
+is working on; mine in files that had just arrived from lane A. A checkout, a
+merge, or one lane's script would not produce that distribution. Something in
 the development loop itself writes tracked files through a text-mode handle.
-The agent `Edit` tool is excluded for lane B at least: an `Edit` applied to one
-of the six afterwards left it `w/lf`.
+Both agent file-writing tools are excluded for lane B at least: an `Edit`
+applied to one of the six afterwards left it `w/lf`, and a `Write` creating a
+new `requests/*.md` — a path covered by `eol=lf`, in the same worktree, the same
+session — also produced `w/lf` with zero CRs. Whatever writes these is not the
+agent's own editor.
 
-**Two things follow that need acting on.** Lane A's 44 dirty files under
-`kernel/src/fs` mean `check-eol` will refuse *their* build too — they are
-positioned to lose the same hour I did, without the diagnosis. And a lane that
-repairs only its own tree will see it come back, because whatever writes these
-is still running in all three.
+### The correction needed a correction: the second column is the one that matters
+
+Everything above the table survived; the table's first version did not. It read
+`os-lane-a` = "~50, of which 44 in `kernel/src/fs`" — wrong twice over, and I
+had *already flagged* a 169-vs-50 discrepancy between two measurements and
+published the smaller number anyway. The real count is **168**, and the
+`~50` came from a `head`-limited view of a per-directory breakdown. When two
+measurements of one quantity disagree, the disagreement is the finding; picking
+one and moving on is not a resolution.
+
+The consequence I drew from it was also false, and more expensively so. I wrote
+that lane A's dirty files "mean `check-eol` will refuse *their* build too."
+**They do not.** `check-eol.py` does not look for CRLF; it looks for CRLF *in
+files `.gitattributes` declares `text eol=lf`*, which is `*.sh`, `*.py`,
+`*.yaml`, `*.yml`, `*.md`, `*.txt` — **and not `*.rs`**. All 168 of lane A's
+report `attr/` empty. Lane A's build is not at risk and never was.
+
+**The lane that is actually blocked is lane C**, which I had written off with a
+bare "66". Thirty-one of those 66 are declared `eol=lf` — 17 `requests/*.md`,
+8 `apps/*/mutate.py`, 6 `scripts/*.py` — so `scripts/boot-test.sh` will refuse
+lane C's build at `check-eol`, and lane C has no `known-issues.md` entry and
+nothing in `open-questions.md` about line endings. Filed as
+`requests/b-c-thirty-one-crlf-files-will-refuse-your-next-boot-test.md`.
+
+**The error underneath both of these is one conflation:** "has CRLF" is not
+"violates the promise". The gate's scope *is* `.gitattributes`' promise, by
+design and by its own docstring — so a census of CRLF files answers a different
+question than the one I was asking, and ranking the lanes by it put them in
+very nearly the reverse order. Counting the right population would have cost
+one extra pathspec on the same command.
+
+**This is not new, and lane A wrote it down seventeen days ago.**
+`A-27-KERNEL-SOURCES-ARE-CRLF-IN-THE-WORKING-TREE-WHILE-EVERY-BLOB-IS-LF`
+(2026-08-18) is the same phenomenon, diagnosed to the same cause — "written by
+something that opened them in Python text mode on Windows" — and marked
+**"tooling fixed; the divergence itself remains."** It listed **27** files. The
+same population today is **166**. It also named the durable fix (a root
+`.gitattributes` carrying `*.rs text eol=lf`) and deferred it on one stated
+objection: that `.gitattributes` is a shared root file and "needs to be
+coordinated, not dropped in by one lane — file a request or raise it in
+`open-questions.md` first." No request was ever filed, and the objection has
+since expired without anyone noticing: a root `.gitattributes` **now exists**
+and already carries six rules that three lanes depend on. What A-27 was waiting
+for arrived; nothing re-checked the entry that was waiting for it.
+
+That is its own lesson, and a more useful one than the arithmetic: **a deferral
+whose trigger condition is written in prose is a deferral nobody will notice
+has fired.** A-27's condition ("once a shared `.gitattributes` exists") became
+true and the file grew 6× behind it. This is exactly the shape
+`deferred-questions.md` exists to hold — an explicit trigger, in a file that
+gets re-read — and A-27 predates that file, so it never got one.
 
 **The lesson is the same one as Lesson 112's postscript, and I had already
 written that postscript before making this mistake.** There the truncated view

@@ -114825,10 +114825,10 @@ Four distinct dates over nineteen days: this is recurring, not one event.
   blob verbatim.
 - **Not my edits this session.** All six mtimes predate 2026-09-04, and an
   `Edit`-tool write to one of them afterwards left it `w/lf`.
-- **Not a tree-wide tool.** The `os` integration worktree has **0** CRLF files
-  across the same 1,065 tracked files. Whatever did this ran in the *lane-b
-  worktree specifically*, which is the fact that points away from the shared
-  `scripts/` checkers and back at something local.
+- ~~**Not a tree-wide tool.** The `os` integration worktree has **0** CRLF
+  files across the same 1,065 tracked files. Whatever did this ran in the
+  *lane-b worktree specifically*.~~ **Wrong — struck out, see the correction
+  at the end of this entry. It is not lane-b-specific.**
 - **Not the obvious text-mode write.** `check-doc-links.py:1221` does open a
   file `"w"` without `newline=""`, which on Windows is exactly the CRLF-making
   pattern — but its path is inside a `tempfile.TemporaryDirectory()`, so it
@@ -114855,3 +114855,44 @@ this entry thinner than it should be.
 whichever lane hits it, and the gate refuses the *whole build*, so it blocks
 merging too. It is loud and self-repairing-by-hand, not silent — the failure
 mode is lost time, not lost correctness.
+
+### CORRECTION, before this entry was an hour old: it is not lane-b-specific
+
+The "Not a tree-wide tool" bullet above is **struck out because it was false**,
+and it is left visible rather than deleted because how it got here matters more
+than the claim. It was published on a partial reading: the command that
+produced it queried three worktrees, only the `os` result returned before I
+drew the conclusion — the other two auto-backgrounded — and I read "os is
+clean" as "only lane-b is dirty". The full result:
+
+| worktree | files with CRLF |
+|---|---|
+| `os` (integration; nobody develops in it) | **0** |
+| `os-lane-a` | **~50**, of which **44** are in `kernel/src/fs` |
+| `os-lane-c` | **66** |
+| `os-lane-b` | 6 (repaired) |
+
+**The true shape is the inverse of what I wrote: every worked-in tree has it;
+the one tree nobody develops in is clean.** And the corruption sits in each
+lane's *active area* — lane A's in `kernel/src/fs`, which is exactly what lane
+A is working on; mine in files that had just arrived from lane A. A checkout,
+a merge, or one lane's script would not produce that distribution. Something in
+the development loop itself writes tracked files through a text-mode handle.
+The agent `Edit` tool is excluded for lane B at least: an `Edit` applied to one
+of the six afterwards left it `w/lf`.
+
+**Two things follow that need acting on.** Lane A's 44 dirty files under
+`kernel/src/fs` mean `check-eol` will refuse *their* build too — they are
+positioned to lose the same hour I did, without the diagnosis. And a lane that
+repairs only its own tree will see it come back, because whatever writes these
+is still running in all three.
+
+**The lesson is the same one as Lesson 112's postscript, and I had already
+written that postscript before making this mistake.** There the truncated view
+was `| head` on a process query; here it was an auto-backgrounded command whose
+first line arrived and whose remaining two did not. Both times the partial
+output was *coherent* — it read like a complete answer — and both times I drew
+a confident conclusion from it and acted. The rule generalises past process
+queries: **when a command surveys N things, do not conclude anything until you
+have counted N results.** A survey that returns 1 of 3 rows is not weak
+evidence for the other two; it is no evidence at all.

@@ -544,6 +544,36 @@ MIN_TREE_DOC_LINES = 10000
 MIN_TREE_TARGETS = 200
 MIN_TREE_JUDGED = 200
 
+#: Top-level files that identify THIS repository, and therefore the corpus the
+#: floors above were measured against.
+#:
+#: The floors are absolute counts of a specific tree. Applying them to a tree
+#: that is not that one is applying a calibration outside its domain, and the
+#: refusal it produces is not merely useless but *false*: it says the scan
+#: collapsed when in truth the tree really is that small. That is not
+#: hypothetical -- it turned fourteen cases of
+#: `test-checkers-honour-head.py` red the day the floors landed, because that
+#: suite runs this gate against synthetic one-crate repositories, which is the
+#: only honest way to make a commit and a worktree disagree on demand.
+#:
+#: Three markers, all required, chosen so that neither direction can happen by
+#: accident: a scratch repository will not have any of them, and this one
+#: cannot lose all three without a commit that would be obvious on sight.
+#: `design.txt` is the spec `CLAUDE.md` calls the authority where documents
+#: disagree, `roadmap.md` is the live status source of truth, and `CLAUDE.md`
+#: is the standards file every session is required to read first.
+TREE_MARKERS = ("design.txt", "roadmap.md", "CLAUDE.md")
+
+
+def is_calibrated_corpus(tree: str) -> bool:
+    """Whether `tree` is the repository `MIN_TREE_*` was measured against.
+
+    All three markers, not any one: `any` would let a fixture that happens to
+    carry a `CLAUDE.md` inherit floors calibrated for a tree five hundred times
+    its size, and the failure would be a refusal blaming the scan.
+    """
+    return all(os.path.isfile(os.path.join(tree, m)) for m in TREE_MARKERS)
+
 #: What `scripts/mutate-gate.py` breaks to check that the floor above is
 #: load-bearing rather than decorative. Each row is (label, exact source text,
 #: replacement); the sweep applies one at a time and requires `--selftest` to
@@ -587,6 +617,25 @@ SELFTEST_MUTANTS = [
     ("a whole-tree run is mistaken for a subset run",
      "\n        whole_tree = not paths\n", "\n        whole_tree = False\n"),
 
+    # The corpus premise. `not calibrated` must gate the absolute floors and
+    # ONLY the absolute floors: too eager and a foreign tree is falsely
+    # accused, too lax and this tree's floors quietly stop applying -- which
+    # is the exact decoration failure the rest of this table exists to catch,
+    # so it gets driven from both sides like the regime split above.
+    ("the corpus check never fires, so any tree gets absolute floors",
+     "if not calibrated:", "if False:"),
+    ("the corpus check always fires, so NO tree gets absolute floors",
+     "if not calibrated:", "if True:"),
+    ("every tree is taken for the calibrated corpus",
+     "\n        calibrated = is_calibrated_corpus(ROOT)\n",
+     "\n        calibrated = True\n"),
+    ("no tree is taken for the calibrated corpus",
+     "\n        calibrated = is_calibrated_corpus(ROOT)\n",
+     "\n        calibrated = False\n"),
+    ("one marker is enough to claim the corpus",
+     "return all(os.path.isfile(os.path.join(tree, m)) for m in TREE_MARKERS)",
+     "return any(os.path.isfile(os.path.join(tree, m)) for m in TREE_MARKERS)"),
+
     # The wiring in main(): is the breach acted on?
     ("main() computes the breach and ignores it", "        if breach:",
      "        if False:"),
@@ -601,7 +650,8 @@ SELFTEST_MUTANTS = [
 ]
 
 
-def coverage_breach(cov: Coverage, whole_tree: bool) -> str | None:
+def coverage_breach(cov: Coverage, whole_tree: bool,
+                    calibrated: bool) -> str | None:
     """Why this scan is too small to be worth a verdict, or None if it is fine.
 
     Two regimes, because the gate is invoked two ways and a single set of
@@ -656,6 +706,12 @@ def coverage_breach(cov: Coverage, whole_tree: bool) -> str | None:
     if not whole_tree:
         # Everything below is an absolute count, and a one-crate push is
         # allowed to be tiny. The structural floors above already ran.
+        return None
+    if not calibrated:
+        # Same reasoning one step out: an absolute count is a statement about
+        # a particular corpus, and this is not that corpus. See `TREE_MARKERS`
+        # -- refusing here would be a false accusation, not a cautious one.
+        # The caller announces the omission so it cannot pass unnoticed.
         return None
     for got, floor, what in (
         (cov.crates, MIN_TREE_CRATES, "crate(s)"),
@@ -956,6 +1012,50 @@ def selftest() -> int:
         globals()["scan"] = real_scan
         sys.argv = real_argv
 
+    # ...and the same contract for the corpus premise, which `main()` decides
+    # and `coverage_breach` merely obeys. Unit-testing the function proves it
+    # can be *told* the tree is foreign; only this proves main() ever works it
+    # out. The predicate is swapped the way `scan` is above -- a module global
+    # read at call time -- so one scan, far below every floor, can be replayed
+    # as a refusal here and a verdict in a tree without the markers.
+    #
+    # The predicate rather than `ROOT` itself: `ROOT` is also what
+    # `gittree.open_tree` and `crate_roots` read, so pointing it at a scratch
+    # directory would fail at "cannot read" or "no crate found" long before
+    # reaching the line under test, and the case would pass for a reason that
+    # has nothing to do with the corpus.
+    real_predicate = globals()["is_calibrated_corpus"]
+
+    def tiny() -> Coverage:
+        """One of everything: structurally sound, absolutely far too small."""
+        c = Coverage()
+        c.crates = c.units = c.files = 1
+        c.doc_lines = c.targets = c.judged = 1
+        return c
+
+    try:
+        for verdict, want, why in (
+            (True, 2, "a collapsed whole-tree scan of THIS tree is refused"),
+            (False, 0, "the same scan of an uncalibrated tree is a verdict"),
+        ):
+            globals()["is_calibrated_corpus"] = lambda _t, _v=verdict: _v
+            globals()["scan"] = lambda repo, only: ([], tiny())
+            sys.argv = ["x"]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), \
+                    contextlib.redirect_stderr(buf):
+                got = main()
+            check(got == want, f"{why}: exit {got}, want {want}")
+            # The skip is announced rather than silent, in the direction that
+            # skips: a floor that quietly stops applying cannot be told from
+            # one that never applied.
+            check(("not the corpus" in buf.getvalue()) == (not verdict),
+                  f"...and the skip is {'announced' if not verdict else 'not claimed'}")
+    finally:
+        globals()["is_calibrated_corpus"] = real_predicate
+        globals()["scan"] = real_scan
+        sys.argv = real_argv
+
     # `coverage_breach` itself, layer by layer. Each case keeps every other
     # count plausible so the message names the layer that actually broke --
     # a floor that reports the wrong layer sends the reader to the wrong file.
@@ -965,23 +1065,23 @@ def selftest() -> int:
             setattr(c, k, v)
         return c
 
-    check(coverage_breach(plausible(), True) is None,
+    check(coverage_breach(plausible(), True, True) is None,
           "a plausible whole-tree scan is not a breach")
-    check(coverage_breach(plausible(), False) is None,
+    check(coverage_breach(plausible(), False, True) is None,
           "...nor is it one as a subset run")
-    check(coverage_breach(Coverage(), True) is not None,
+    check(coverage_breach(Coverage(), True, True) is not None,
           "an empty whole-tree scan is a breach")
-    check(coverage_breach(Coverage(), False) is not None,
+    check(coverage_breach(Coverage(), False, True) is not None,
           "an empty subset run is a breach too -- it has no crates")
 
     # The structural floors bite in BOTH regimes, which is the whole reason a
     # subset run is safe to exempt from the absolute ones.
     for mode in (True, False):
         where = "whole-tree" if mode else "subset"
-        b = coverage_breach(cov_with(units=1), mode)
+        b = coverage_breach(cov_with(units=1), mode, True)
         check(b is not None and "compilation unit" in b,
               f"{where}: crates without units is a breach naming that layer")
-        b = coverage_breach(cov_with(files=0), mode)
+        b = coverage_breach(cov_with(files=0), mode, True)
         check(b is not None and "readable file" in b,
               f"{where}: units without files is a breach naming that layer")
 
@@ -1000,10 +1100,10 @@ def selftest() -> int:
         c = cov_with(**{field: floor - 1})
         c.units = min(c.units, c.files)
         c.crates = min(c.crates, c.units)
-        b = coverage_breach(c, True)
+        b = coverage_breach(c, True, True)
         check(b is not None and layer in b,
               f"whole-tree: {field} below its floor is a breach naming it")
-        check(coverage_breach(c, False) is None,
+        check(coverage_breach(c, False, True) is None,
               f"subset: {field} below the whole-tree floor is NOT a breach")
 
     # ...and now the same floors asserted against ABSOLUTE numbers rather than
@@ -1026,7 +1126,7 @@ def selftest() -> int:
     collapsed = Coverage()
     (collapsed.crates, collapsed.units, collapsed.files) = 5, 5, 10
     (collapsed.doc_lines, collapsed.targets, collapsed.judged) = 50, 10, 5
-    check(coverage_breach(collapsed, True) is not None,
+    check(coverage_breach(collapsed, True, True) is not None,
           "a whole-tree scan of 10 files/50 doc lines is refused outright")
     # Each floor is then shown to be the one doing that work, by handing it a
     # scan that is generous in every other dimension. Gut any single constant
@@ -1050,9 +1150,54 @@ def selftest() -> int:
         # reason.
         c.units = min(c.units, c.files)
         c.crates = min(c.crates, c.units)
-        b = coverage_breach(c, True)
+        b = coverage_breach(c, True, True)
         check(b is not None and layer in b,
               f"whole-tree: {small} {layer}(s) is below any defensible floor")
+
+    # THE CORPUS PREMISE. The absolute floors are counts of a particular tree,
+    # and on 2026-09-03 they were applied to every tree: fourteen cases of
+    # `test-checkers-honour-head.py` turned red because that suite runs this
+    # gate against synthetic one-crate repositories, and each got a refusal
+    # saying the scan had collapsed when in truth the tree was simply small.
+    #
+    # Both directions, for the regime split's reason: skipping the floors for
+    # a foreign tree is correct, and skipping them for THIS tree would be the
+    # decoration the rest of this suite exists to catch.
+    check(coverage_breach(collapsed, True, False) is None,
+          "an uncalibrated tree gets no absolute floor, however small")
+    check(coverage_breach(collapsed, True, True) is not None,
+          "...and the calibrated one still gets it")
+    check(coverage_breach(cov_with(units=1), True, False) is not None,
+          "an uncalibrated tree still gets the STRUCTURAL floors")
+
+    # `is_calibrated_corpus` itself. The marker set is conjunctive, and the
+    # partial case is the one that matters: `any` would let a scratch repo
+    # holding a lone `CLAUDE.md` -- which is not unusual -- inherit floors
+    # measured against a tree five hundred times its size.
+    with tempfile.TemporaryDirectory() as td:
+        check(not is_calibrated_corpus(td), "an empty dir is not the corpus")
+        for i, marker in enumerate(TREE_MARKERS):
+            open(os.path.join(td, marker), "w", encoding="utf-8").close()
+            want = i == len(TREE_MARKERS) - 1
+            check(is_calibrated_corpus(td) == want,
+                  f"{i + 1} of {len(TREE_MARKERS)} marker(s) -> {want}")
+
+    # There is deliberately NO case here asserting `is_calibrated_corpus(ROOT)`.
+    #
+    # It was written, and it broke three end-to-end cases of
+    # `test-checkers-honour-head.py` within the hour. A self-test is not run
+    # only where the file is committed: `pre-push` copies the gate into the
+    # repository it is guarding and runs `--selftest` there before trusting its
+    # verdict, and that repository is a fixture with no `design.txt` in it. The
+    # case failed, the hook read "this gate cannot be trusted", and refused a
+    # push it should have allowed.
+    #
+    # The rule that follows is general and worth more than the case was: a
+    # gate's `--selftest` must assert about the GATE and never about the tree
+    # it happens to be sitting in, because it will be sat somewhere else. The
+    # markers going missing from the real tree is a real risk, and it is
+    # covered where it belongs -- `main()` prints the skip to stderr on every
+    # whole-tree run that takes it, so the boot test would say so out loud.
 
     # THE COVERAGE ITSELF, over a real tree on disk.
     #
@@ -1092,6 +1237,16 @@ def selftest() -> int:
               "///\n"
               "/// See [`Thing`].\n"
               "pub struct Thing;\n")
+
+        # This fixture stands in for the whole tree -- it is about to have
+        # `ROOT` pointed at it -- so it has to stand in for it completely, and
+        # `TREE_MARKERS` is part of what "the whole tree" means since the
+        # absolute floors became a statement about *this* corpus rather than
+        # about any corpus. Without them the whole-tree case below would take
+        # the uncalibrated path and pass with exit 0, which is a green light
+        # for both directions of the `whole_tree` routing it exists to pin.
+        for marker in TREE_MARKERS:
+            write(marker, "stand-in for the real tree's copy\n")
 
         real_root = globals()["ROOT"]
         try:
@@ -1283,7 +1438,18 @@ def main() -> int:
             crates = all_crates
         findings, cov = scan(tree, crates)
         whole_tree = not paths
-        breach = coverage_breach(cov, whole_tree)
+        calibrated = is_calibrated_corpus(ROOT)
+        if whole_tree and not calibrated:
+            # Said out loud, every time. A floor that quietly stops applying is
+            # the decoration this gate's mutation table exists to catch, so the
+            # one path that legitimately skips it has to announce itself -- in
+            # the real tree this line never prints, and if it ever does, that
+            # is the finding.
+            print(f"check-doc-links: {ROOT} is missing "
+                  f"{', '.join(TREE_MARKERS)}, so it is not the corpus the "
+                  f"absolute floors were measured against; structural floors "
+                  f"only.", file=sys.stderr)
+        breach = coverage_breach(cov, whole_tree, calibrated)
         if breach:
             # Exit 2, not 1: nothing was established about anyone's links, so
             # this is "could not look", not "looked and found something". The

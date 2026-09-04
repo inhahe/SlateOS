@@ -113037,3 +113037,71 @@ because the message accuses the harness, the reflex is to re-run rather than
 investigate. The live cases are the part of the canary that checks the canary,
 so switching them off would be a worse outcome than the flakiness — the fix has
 to keep them running somewhere.
+
+---
+
+## B-A-COVERAGE-FLOOR-CALIBRATED-ON-THIS-TREE-WAS-APPLIED-TO-EVERY-TREE — FIXED 2026-09-03 (lane B)
+
+**In short:** a gate learned to refuse a verdict when it had inspected
+implausibly little of the project. The numbers it compares against were
+measured from *this* repository. Nothing stopped it applying them to a
+different repository, and another test suite runs that gate against tiny
+synthetic repositories on purpose — so fourteen of its cases went red with a
+message accusing the scan of collapsing when the tree really was that small.
+
+### How it got in
+
+`d50a4b97e check-doc-links: refuse a verdict on a scan that inspected too
+little` added five absolute floors (`MIN_TREE_CRATES` and friends) and routed
+them with `whole_tree = not paths`. That expression is a property of the
+*invocation* — "the caller did not narrow the scope". The floors are a property
+of the *corpus* — "this scan saw less than this project irreducibly holds".
+The two were treated as one, and they are not: a whole-tree run of somebody
+else's tree satisfies the first and says nothing about the second.
+
+`test-checkers-honour-head.py` builds one-crate repositories in a temp dir,
+copies the gate into their `scripts/`, and runs it. The gate then computes
+`ROOT` as its own parent's parent, concludes it is looking at the whole tree,
+and measures a two-file fixture against a floor of 200 files.
+
+### Why the gate's own self-test did not catch it
+
+It nearly did, and the near miss is the instructive part. There *is* an
+end-to-end case that points `ROOT` at a fixture tree — but its fixture was
+built for a different question (does `whole_tree = not paths` route both ways),
+so it wanted the refusal and got it. Every other floor case called
+`coverage_breach` directly as a pure function, where the corpus never comes up.
+A premise that only exists in `main()` cannot be found by cases that never run
+`main()`.
+
+### The remedy
+
+`TREE_MARKERS = ("design.txt", "roadmap.md", "CLAUDE.md")` and
+`is_calibrated_corpus(tree)`. The absolute floors apply only when the tree the
+gate is installed in carries all three; the *structural* floors (a crate yields
+a unit, a unit yields a file) still apply everywhere, because those hold for
+any real crate at any size and are what actually catch a collapsed scan.
+
+Three markers and `all`, not one and `any`: a scratch repository with a stray
+`CLAUDE.md` in it is not unusual, and inheriting floors measured against a tree
+five hundred times its size is the failure being fixed, not a smaller version
+of it.
+
+The skip is **printed to stderr every time it happens**. A floor that silently
+stops applying is exactly the decoration `scripts/mutate-gate.py` exists to
+find, so the one path that legitimately skips it announces itself. In this tree
+that line never prints; if it ever does, that is the finding.
+
+Five mutation needles were added for the new branch (both directions of the
+corpus check, both directions of the `main()` derivation, and `all` → `any`),
+plus self-test cases that drive `main()` with the predicate stubbed both ways —
+because a premise decided in `main()` is invisible to a suite that only unit-
+tests the function obeying it.
+
+### The general lesson
+
+**A floor derived from a measurement carries the corpus it was measured on as
+an unwritten premise, and that premise has to be written down and checked.**
+The calibration comment named the tree, the date and the counts; what it did
+not do was make the code ask whether it was still looking at that tree. Any
+constant justified by "measured here" has the same hole.

@@ -5,6 +5,10 @@ edition = "2024"
 description = "SlateOS File Diff/Compare Tool — side-by-side, unified, and inline diff views with merge support"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+# The app-facing compositor client. An app names `oswindow` and never
+# `guiremote`, for the reason a Unix program does not name the socket layer.
+oswindow = { path = "../../gui/window" }
 diffcore = { path = "../diffcore" }
 
 [lints]

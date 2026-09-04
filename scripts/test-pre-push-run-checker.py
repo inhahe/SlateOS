@@ -922,6 +922,67 @@ def main() -> int:
               "a skip has to say what it could not do" in flat)
         log.unlink(missing_ok=True)
 
+        # A decline whose *first line* is blank, with the reason on the second.
+        # This is the silent-decline case wearing clothes: the log has bytes in
+        # it, so the `[ -s "$_rc_log" ]` this used to test says "it printed
+        # something" -- and then the reason quoted to the operator is
+        # `(it printed nothing)`, a sentence run-checker.sh wrote about the
+        # checker, presented as the checker's own account of why it gave up.
+        # The gate skips on every host and the transcript explains nothing.
+        #
+        # It is not a contrived shape. Until PYTHONUNBUFFERED was restored just
+        # above, a Python checker that printed its reason to stdout and anything
+        # at all to stderr produced exactly this log, because the merged file
+        # gets stderr first and stdout only at exit. Both halves are tested:
+        # this case proves the guard, the next proves the ordering.
+        blankfirst = fake_checker(
+            tmp_root, "blankfirst",
+            "import sys\nprint()\nprint('libc.a is stale')\nsys.exit(2)\n")
+        r = run(tmp_root, func, blankfirst, may_skip=True)
+        out = r.stdout + r.stderr
+        flat = flatten(out)
+        check("a decline whose first line is blank is not a skip",
+              "MARKER-RETURNED" not in out and r.returncode == 1,
+              out.strip()[-300:])
+        check("and it is not reported as one", "SKIPPED" not in out)
+        check("and the operator is never told the reason is a line we wrote",
+              "MARKER-REASON=[(it printed nothing)]" not in out,
+              out.strip()[-300:])
+
+        # The ordering itself. `two` writes its reason to stdout and its detail
+        # to stderr and never flushes; with stdout block-buffered into the log
+        # the reason lands last and `head -n 1` quotes the detail -- the gate
+        # then skips citing a sentence that is not why it skipped. The driver
+        # unsets PYTHONUNBUFFERED first so this asserts that run-checker.sh sets
+        # it, not that this suite happened to be launched with it set.
+        two = fake_checker(
+            tmp_root, "twostreams",
+            "import sys\n"
+            "sys.stdout.write('libc.a is stale\\n')\n"
+            "sys.stderr.write('rebuild it with make -C posix\\n')\n"
+            "sys.exit(2)\n")
+        order_driver = tmp_root / "driver-twostreams.sh"
+        order_driver.write_text(
+            "set -u\n"
+            + "unset PYTHONUNBUFFERED\n"
+            + preamble(tmp_root, True)
+            + f"{func}\n"
+            + f'run_checker --may-skip testgate "{sys.executable}" '
+            + f'"{two.as_posix()}"\n'
+            + 'echo "MARKER-RETURNED rc=$?"\n'
+            + 'echo "MARKER-REASON=[${RUN_CHECKER_SKIP_REASON:-}]"\n',
+            encoding="utf-8",
+        )
+        r = subprocess.run(["sh", str(order_driver)], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           env=child_env())
+        out = r.stdout + r.stderr
+        check("a two-stream decline is still a skip",
+              "MARKER-RETURNED rc=0" in out, out.strip()[-300:])
+        check("and the reason quoted is the one the checker wrote first",
+              "MARKER-REASON=[libc.a is stale]" in out, out.strip()[-300:])
+        log.unlink(missing_ok=True)
+
         # --- the flag loosens exit 2 and nothing else -----------------------
         r = run(tmp_root, func, found_checker_for_skip_group := fake_checker(
             tmp_root, "found2", "import sys\nprint('src/a.rs: 3 sites')\n"

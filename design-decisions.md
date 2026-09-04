@@ -65107,8 +65107,7 @@ unless escapes are blanked. Budget the lexer; the matching is free.
 
 ## §910 — An empty operand is an operand: kshell follows the reference tools rather than refusing what it cannot previously see
 
-**Date:** 2026-09-04
-**Decided by:** Claude (autonomous)
+**Date:** 2026-09-04. **Decided by:** Claude (autonomous). **Lane:** A.
 
 **In short:** the kernel shell used to throw away an argument written as `''`
 (two quote marks with nothing between them — the empty string). Bash passes that

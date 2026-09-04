@@ -116,6 +116,16 @@
 #     0  every requested half ran, and passed
 #     1  a requested half ran and failed
 #     2  a requested half could not run at all
+#    64  this script was invoked wrongly (usage error)
+#
+# 64 is separated from 2 for the sake of callers that are wired to tolerate a
+# decline -- pre-push gate 12 passes `--may-skip`, which turns exit 2 into a
+# reported skip. If a usage error also exited 2, then the day someone renames a
+# flag here, that gate would read argparse-style breakage as a legitimate
+# "no WSL on this host" and skip on every push, forever, and nothing would say
+# so. `run-checker.sh` guards the same trap for Python checkers by sniffing for
+# `usage:`; a shell script has no such banner to sniff, so it must say it in the
+# exit code instead.
 #
 # 2 is distinct from 0 deliberately, and it is the whole point of the file: the
 # defect being guarded against is a check that did not happen reading as a
@@ -150,17 +160,19 @@ while [ $# -gt 0 ]; do
     --no-test) run_test=0; shift ;;
     --) shift; extra=("$@"); break ;;
     -h|--help) sed -n '/^# ## Usage/,/^# 2 is distinct/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "coreutils-check: unknown argument: $1" >&2; exit 2 ;;
+    # 64, not 2: see "## Exit codes". A usage error must not be spellable as a
+    # decline, or a caller wired to tolerate declines tolerates its own typo.
+    *) echo "coreutils-check: unknown argument: $1" >&2; exit 64 ;;
   esac
 done
 if [ ${#pkgs[@]} -eq 0 ]; then pkgs=(coreutils); fi
 case "$only" in
   both|host|linux) ;;
-  *) echo "coreutils-check: --only takes host, linux or both" >&2; exit 2 ;;
+  *) echo "coreutils-check: --only takes host, linux or both" >&2; exit 64 ;;
 esac
 if [ "$run_clippy" -eq 0 ] && [ "$run_test" -eq 0 ]; then
   echo "coreutils-check: --no-clippy and --no-test together ask for nothing" >&2
-  exit 2
+  exit 64
 fi
 
 pkg_args=()

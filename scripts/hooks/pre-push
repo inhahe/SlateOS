@@ -1398,6 +1398,10 @@ quote="${repo_root:-.}/scripts/quote-names.py"
 # be the push that re-verifies it, or lowering a number is unattended.
 touches userspace/ services/ init/ posix/ \
         scripts/quote-names.py scripts/quote-names-baseline.txt || skip_quote=1
+# Nothing being published is nothing to judge. This is also what stops the
+# `--head` loop below from silently degrading to zero runs while `note_gate`
+# reported the gate as having run.
+[ -n "${pushed_shas# }" ] || skip_quote=1
 note_gate quote-names "$skip_quote"
 
 quote_failed=0
@@ -1405,11 +1409,35 @@ if [ "$skip_quote" != "1" ]; then
     # As with gate 6, check the checker first: this detector's signal is also
     # inside a string literal, so a rewrite that reached for a Rust lexer would
     # blank out the very text it searches and report a clean tree.
+    #
+    # No `--head` on the selftest, deliberately, for gates 3 and 4's reason: it
+    # builds its own fixture repository and has no business reading this one.
     if ! run_checker quote-names-selftest "$py" "$quote" --selftest; then
         echo "pre-push: quote-names.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         quote_failed=1
-    elif ! run_checker quote-names "$py" "$quote" --check; then
-        quote_failed=1
+    else
+        # WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. `--head "$sha"` is what
+        # makes this gate answer the question the hook is for. Without it a
+        # commit that adds `eprintln!("cut: '{p}': ...")` passes whenever the
+        # worktree has since been repaired, and it is published anyway; the
+        # mirror image blocks a clean push over an unrelated dirty edit. Both
+        # are the staged-restore shape, and both are what case 11 of the
+        # self-test pins.
+        #
+        # One run per ref being pushed, not per commit: `pushed_shas` carries
+        # one sha per ref, and this asks about a *state* rather than a diff, so
+        # only each ref's tip matters. In the ordinary single-branch push that
+        # is one run, and cheaper than the call it replaces -- measured at
+        # 1m43s against 3m48s for the disk walk, because `ls-tree` plus one
+        # `cat-file --batch` beats stat()ing the whole tree.
+        for sha in $pushed_shas; do
+            # Per-sha gate name, for gate 9's reason: a shared name lets a
+            # later clean sha delete the kept log of an earlier failing one.
+            if ! run_checker "quote-names-$sha" "$py" "$quote" \
+                             --check --head "$sha"; then
+                quote_failed=1
+            fi
+        done
     fi
 fi
 

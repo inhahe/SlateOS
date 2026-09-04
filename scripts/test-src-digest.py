@@ -422,16 +422,123 @@ def test_exclusions_cannot_reach_into_a_build_tree():
           excluded > 0, True)
 
 
+def _worktree_witness():
+    """A cheap fingerprint of everything `src_digest_worktree` reads.
+
+    HEAD plus `git status --porcelain`: between them they move whenever a
+    commit lands, a file is staged, or a tracked file is edited, which is the
+    complete set of things that legitimately change the worktree digest.
+    """
+    try:
+        head = subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+                              capture_output=True, check=True).stdout
+        status = subprocess.run(["git", "-C", str(REPO_ROOT), "status", "--porcelain"],
+                                capture_output=True, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return head + b"\0" + status
+
+
 def test_real_worktree_digest_is_stable():
-    """Two calls in a row must agree, or nothing downstream can group at all."""
+    """Two calls in a row must agree, or nothing downstream can group at all.
+
+    Bracketed by a witness of the worktree's mutable state, because this
+    assertion has a precondition it cannot otherwise state: the tree must hold
+    still. It does not always. On 2026-09-04 this failed during a sweep purely
+    because a `git commit` landed in another shell between the two calls, and
+    the digest is *supposed* to move when that happens -- it covers uncommitted
+    state, that is the entire point of the `worktree` flavour.
+
+    What made that worth fixing is not the flake. It is that the failure was
+    reported as `the worktree digest is stable across calls -- got X, want Y`,
+    which names the digest as the suspect when the digest was working exactly
+    as designed. A test that reports a violated precondition in the words of a
+    defect sends the reader to the wrong file, and this suite exists to catch
+    checks that describe something other than what they looked at.
+
+    So: if the witness moved, the tree moved, and the honest verdict is that
+    the assertion could not be made -- not that it failed. If the witness held
+    still and the digests still disagree, that is a real determinism defect and
+    it fails as before.
+    """
+    before = _worktree_witness()
     try:
         first = sd.src_digest_worktree(REPO_ROOT)
+        second = sd.src_digest_worktree(REPO_ROOT)
     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         print(f"SKIP  real worktree digest ({exc})")
         return
-    check("the worktree digest is stable across calls",
-          first, sd.src_digest_worktree(REPO_ROOT))
+    after = _worktree_witness()
+
+    verdict = stability_verdict(before, after, first, second)
+    if verdict == "no-witness":
+        print("SKIP  worktree stability (cannot witness the tree)")
+    elif verdict == "moved":
+        print("SKIP  the worktree digest is stable across calls "
+              "(the tree changed under the test -- a commit or an edit landed "
+              "between the two calls, so the digests are correctly different)")
+    else:
+        check("the worktree digest is stable across calls", first, second)
+
     check("the worktree digest is tagged", first.startswith("full:"), True)
+
+
+def stability_verdict(before, after, first, second):
+    """`"no-witness"`, `"moved"`, or `"assert"` -- which of the three to do.
+
+    Split out as a pure function precisely because the two skip arms are
+    otherwise unreachable on a quiet tree, and an arm that never executes is
+    the thing this suite is about. `test_the_stability_verdict_*` below drives
+    all four combinations directly; monkeypatching the module to reach them
+    would test the patch as much as the rule.
+    """
+    if before is None or after is None:
+        return "no-witness"
+    # Only "moved" when the tree actually moved AND the digests disagree. A
+    # moving tree whose digests happen to match is not evidence of anything
+    # wrong, so it is asserted normally rather than waved through -- skipping
+    # it would throw away a real observation to avoid a failure that is not
+    # happening.
+    if before != after and first != second:
+        return "moved"
+    return "assert"
+
+
+def test_the_stability_verdict_distinguishes_a_moving_tree_from_a_broken_digest():
+    """The rule that decides skip-vs-assert, over all four combinations.
+
+    The one that matters is the third: a tree that held still whose digests
+    disagree must still be a failure. A precondition guard that also swallows
+    the defect it was guarding against is worse than no guard, because it
+    turns a loud failure into a silent skip -- and it would pass every test
+    that only checked the flake had stopped flaking.
+    """
+    cases = [
+        ("a moving tree with differing digests is not a failure",
+         (b"A", b"B", "full:1", "full:2"), "moved"),
+        ("a moving tree whose digests still agree is asserted anyway",
+         (b"A", b"B", "full:1", "full:1"), "assert"),
+        ("a STILL tree with differing digests is still a real failure",
+         (b"A", b"A", "full:1", "full:2"), "assert"),
+        ("a still tree with agreeing digests is asserted",
+         (b"A", b"A", "full:1", "full:1"), "assert"),
+        ("an unwitnessable tree cannot be asserted about",
+         (None, b"A", "full:1", "full:2"), "no-witness"),
+        ("...in either position",
+         (b"A", None, "full:1", "full:2"), "no-witness"),
+    ]
+    for label, args, want in cases:
+        check(label, stability_verdict(*args), want)
+
+    # The witness must be able to tell this tree apart from a changed one, or
+    # the guard above is a constant `"assert"` wearing a rule's clothes.
+    here = _worktree_witness()
+    if here is None:
+        print("SKIP  witness sensitivity (git unavailable)")
+        return
+    check("the witness reads something", bool(here), True)
+    check("the witness carries HEAD and the porcelain status",
+          here.count(b"\0") >= 1, True)
 
 
 def main():

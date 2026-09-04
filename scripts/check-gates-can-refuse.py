@@ -220,21 +220,84 @@ def _is_bare_false(test: ast.expr, dests: dict[str, object]) -> bool:
     return False
 
 
-def _could_be_nonzero(node: ast.AST) -> bool:
+def _could_be_nonzero(node: ast.AST,
+                      funcs: dict[str, ast.FunctionDef] | None = None,
+                      seen: frozenset[str] = frozenset()) -> bool:
     """Does this `return`/`sys.exit` possibly hand back a non-zero status?"""
     if isinstance(node, ast.Return):
         value = node.value
     else:  # a Call to sys.exit
         value = node.args[0] if node.args else None
+    return _value_could_be_nonzero(value, funcs or {}, seen)
+
+
+def _value_could_be_nonzero(value: ast.expr | None,
+                            funcs: dict[str, ast.FunctionDef],
+                            seen: frozenset[str]) -> bool:
+    """Can this expression evaluate to a non-zero exit status?
+
+    `funcs` is the module's own top-level functions, and the reason it exists
+    is that "delegated, so assume it can refuse" was letting every gate in this
+    tree through on a single line.
+
+    The idiom that exposed it is `return _decline(reason, detail)` -- a helper
+    that prints a no-verdict message and returns 2, defined thirty lines up in
+    the same file.  Treating that as unanalysable is not conservatism, it is
+    declining to read a function that is right there; and once one such call
+    appears anywhere in `main`, the whole file clears regardless of what every
+    other path does.  Measured before this change: a mutant of
+    `scan-unwrap.py` with *every* non-zero return rewritten to 0 -- a gate that
+    provably cannot refuse anything -- was reported as able to refuse, because
+    of its two `return _decline(...)` lines alone.
+
+    So a call to a function defined in this module is resolved by analysing
+    that function.  A call to anything else -- imported, a method, a value
+    built at run time -- keeps the old benefit of the doubt, which is where
+    that rule was always right.
+
+    `seen` breaks recursion by treating a re-entrant call as contributing
+    nothing.  That errs toward reporting a finding rather than toward silence,
+    which is this file's stated direction: a function whose only non-zero
+    return is reached by recursing into itself still has a base case, and the
+    base case is analysed on its own terms.
+    """
     if value is None:
         return False  # `return` / `sys.exit()` are both a zero status
     if isinstance(value, ast.Constant):
         return value.value not in (0, None)
-    return True  # computed or delegated: assume it can refuse
+    # `return 1 if findings else 0` -- both arms are right here, and reading
+    # them is strictly better than assuming. This is the single most common
+    # refusal shape in the tree, and it used to clear on the `IfExp` node type
+    # alone, which means `return 0 if findings else 0` would have cleared too.
+    if isinstance(value, ast.IfExp):
+        return (_value_could_be_nonzero(value.body, funcs, seen)
+                or _value_could_be_nonzero(value.orelse, funcs, seen))
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+        name = value.func.id
+        if name in seen:
+            return False
+        callee = funcs.get(name)
+        if callee is not None:
+            # No `dests`: inside a helper, nothing is known about the caller's
+            # parsed arguments, so no branch is treated as unreachable. The
+            # question here is "can this function ever hand back non-zero",
+            # not "does it on a bare run" -- the bare-run part was already
+            # decided at the call site.
+            return _refusal_reachable_bare(callee, {}, funcs, seen | {name})
+    return True  # genuinely computed or external: assume it can refuse
 
 
-def _refusal_reachable_bare(fn: ast.FunctionDef, dests: dict[str, object]) -> bool:
-    """Is any non-zero exit in `fn` reachable with no arguments passed?"""
+def _refusal_reachable_bare(fn: ast.FunctionDef, dests: dict[str, object],
+                            funcs: dict[str, ast.FunctionDef] | None = None,
+                            seen: frozenset[str] = frozenset()) -> bool:
+    """Is any non-zero exit in `fn` reachable with no arguments passed?
+
+    `funcs`/`seen` are only used to resolve a delegated return -- see
+    `_value_could_be_nonzero`. They default to empty so this stays callable as
+    a two-argument function, which is how the fixtures and the callers below
+    that do not care about delegation still read.
+    """
+    funcs = funcs or {}
     found = False
 
     def walk(body: list[ast.stmt], blocked: bool) -> None:
@@ -248,7 +311,7 @@ def _refusal_reachable_bare(fn: ast.FunctionDef, dests: dict[str, object]) -> bo
                 walk(stmt.orelse, blocked)
                 continue
             if isinstance(stmt, (ast.Return,)) and not blocked:
-                if _could_be_nonzero(stmt):
+                if _could_be_nonzero(stmt, funcs, seen):
                     found = True
                 continue
             for sub in ast.walk(stmt):
@@ -258,10 +321,10 @@ def _refusal_reachable_bare(fn: ast.FunctionDef, dests: dict[str, object]) -> bo
                         and isinstance(sub.func, ast.Attribute)
                         and sub.func.attr == "exit"
                         and not blocked
-                        and _could_be_nonzero(sub)):
+                        and _could_be_nonzero(sub, funcs, seen)):
                     found = True
                 elif isinstance(sub, ast.Return) and not blocked:
-                    if _could_be_nonzero(sub):
+                    if _could_be_nonzero(sub, funcs, seen):
                         found = True
             # Recurse into compound statements that are not `if`.
             for field in ("body", "orelse", "finalbody"):
@@ -291,7 +354,13 @@ def audit(paths: list[Path]) -> list[tuple[str, str]]:
                     posonlyargs=[], args=[], kwonlyargs=[],
                     kw_defaults=[], defaults=[]),
                 body=tree.body, decorator_list=[])
-        if not _refusal_reachable_bare(main, _bare_values(tree)):
+        # This module's own top-level functions, so a `return _decline(...)`
+        # can be followed instead of waved through. Nested defs are left out
+        # deliberately: a closure's status depends on where it was built, and
+        # guessing is what this change is removing.
+        funcs = {n.name: n for n in tree.body
+                 if isinstance(n, ast.FunctionDef)}
+        if not _refusal_reachable_bare(main, _bare_values(tree), funcs):
             findings.append((
                 path.name,
                 "no non-zero exit is reachable from a bare run -- "
@@ -362,6 +431,69 @@ def main():
         return 1
     return 0
 """, True, "an omitted positional is None, so its branch is unreachable"),
+
+    # -- delegation to a function defined right here is followed, not assumed.
+    # The pair below is the whole point: identical at the call site, opposite
+    # in fact, and before this was resolved BOTH cleared. `_decline` is the
+    # real idiom -- a helper that prints a no-verdict message and returns 2 --
+    # and it appears in most gates in this tree, which meant most gates were
+    # clearing this check on one line regardless of everything else they did.
+    ("""
+import argparse
+def _decline(reason):
+    print(reason)
+    return 2
+def main():
+    ap = argparse.ArgumentParser()
+    args = ap.parse_args()
+    if broken():
+        return _decline("cannot look")
+    return 0
+""", False, "a helper that returns 2 is followed, and clears"),
+    ("""
+import argparse
+def _decline(reason):
+    print(reason)
+    return 0
+def main():
+    ap = argparse.ArgumentParser()
+    args = ap.parse_args()
+    if broken():
+        return _decline("cannot look")
+    return 0
+""", True, "a helper that returns 0 is followed, and is reported"),
+
+    # Both arms of a conditional return are read. `return 1 if x else 0` is the
+    # commonest refusal shape in the tree and used to clear on being an IfExp,
+    # which means the second of these cleared as well -- a gate that computes
+    # findings and returns 0 either way.
+    ("""
+import argparse
+def main():
+    ap = argparse.ArgumentParser()
+    args = ap.parse_args()
+    findings = scan()
+    return 1 if findings else 0
+""", False, "a conditional return with a non-zero arm clears"),
+    ("""
+import argparse
+def main():
+    ap = argparse.ArgumentParser()
+    args = ap.parse_args()
+    findings = scan()
+    return 0 if findings else 0
+""", True, "a conditional return with two zero arms is reported"),
+
+    # The old benefit of the doubt survives where it was always right: a
+    # callee this file cannot see is not a callee it may assume things about.
+    ("""
+import argparse
+from helpers import run_everything
+def main():
+    ap = argparse.ArgumentParser()
+    args = ap.parse_args()
+    return run_everything()
+""", False, "an imported callee is still unanalysable, so it clears"),
 )
 
 

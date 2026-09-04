@@ -32,9 +32,13 @@
 #![allow(clippy::missing_errors_doc)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::collections::HashMap;
 
@@ -1279,6 +1283,11 @@ pub struct NotesApp {
     pub sort_order: SortOrder,
     pub active_panel: ActivePanel,
     pub show_favorites_only: bool,
+    /// Whether typing goes to the search box rather than to the shortcuts.
+    ///
+    /// Without it, typing "s" to search would re-sort the list under the box.
+    /// The app had no input at all, so nothing had needed the distinction.
+    pub searching: bool,
     pub window_width: f32,
     pub window_height: f32,
     note_id_gen: IdGen,
@@ -1305,6 +1314,7 @@ impl NotesApp {
             sort_order: SortOrder::DateModified,
             active_panel: ActivePanel::NoteList,
             show_favorites_only: false,
+            searching: false,
             window_width: 1280.0,
             window_height: 800.0,
             note_id_gen: IdGen::new(1),
@@ -1699,8 +1709,299 @@ impl NotesApp {
     // Rendering
     // -----------------------------------------------------------------------
 
-    /// Render the full application frame, returning drawing commands.
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    /// Fill the app with the notebooks and notes a first run shows.
+    ///
+    /// This was the body of `main` before the app was wired to the
+    /// compositor: it built a sample library, rendered one frame and exited.
+    /// It is a method so that the moment a store on disk exists, the caller
+    /// in `main` is the one line that changes.
+    pub fn seed_sample_content(&mut self) {
+        // Create sample notebooks
+        let personal = self.create_notebook("Personal");
+        let work = self.create_notebook("Work");
+        let projects = self.create_child_notebook("Projects", work);
+        let _meetings = self.create_child_notebook("Meetings", work);
+        let _journal = self.create_child_notebook("Journal", personal);
+
+        // Create sample notes
+        let n1 = self.create_note("Welcome to Notes", personal);
+        self.update_note_content(
+            n1,
+            "# Welcome\n\nThis is the **Notes & Wiki** application.\n\n\
+         You can create notes in different formats:\n\
+         - Plain text\n- Markdown\n- Checklists\n- Tables\n\n\
+         Try linking to other notes with [[Project Ideas]].",
+        );
+        if let Some(note) = self.find_note_mut(n1) {
+            note.kind = NoteKind::Markdown;
+            note.add_tag("intro");
+            note.add_tag("wiki");
+            note.favorited = true;
+        }
+
+        let n2 = self.create_note("Project Ideas", projects);
+        self.update_note_content(
+            n2,
+            "# Project Ideas\n\n## Web Framework\nBuild a fast async web framework in Rust.\n\n\
+         ## Game Engine\nA 2D game engine with ECS architecture.\n\n\
+         See also: [[Welcome to Notes]]",
+        );
+        if let Some(note) = self.find_note_mut(n2) {
+            note.kind = NoteKind::Markdown;
+            note.add_tag("projects");
+            note.add_tag("ideas");
+            note.pinned = true;
+        }
+
+        // Create a checklist note
+        let n3 = self.create_note_from_template(NoteTemplate::TodoList, work);
+        if let Some(note) = self.find_note_mut(n3) {
+            note.title = "Sprint Tasks".to_owned();
+            note.checklist.clear();
+            note.add_checklist_item("Review PR #42");
+            note.add_checklist_item("Fix build pipeline");
+            note.add_checklist_item("Write unit tests");
+            note.add_checklist_item("Deploy to staging");
+            note.toggle_checklist_item(0);
+            note.add_tag("sprint");
+            note.add_tag("work");
+        }
+
+        // Create a table note
+        let n4 = self.create_note("API Endpoints", projects);
+        if let Some(note) = self.find_note_mut(n4) {
+            note.kind = NoteKind::Table;
+            let mut table = TableData::new(vec![
+                "Method".to_owned(),
+                "Path".to_owned(),
+                "Description".to_owned(),
+            ]);
+            table.add_row(vec![
+                "GET".to_owned(),
+                "/api/notes".to_owned(),
+                "List all notes".to_owned(),
+            ]);
+            table.add_row(vec![
+                "POST".to_owned(),
+                "/api/notes".to_owned(),
+                "Create a note".to_owned(),
+            ]);
+            table.add_row(vec![
+                "PUT".to_owned(),
+                "/api/notes/:id".to_owned(),
+                "Update a note".to_owned(),
+            ]);
+            table.add_row(vec![
+                "DELETE".to_owned(),
+                "/api/notes/:id".to_owned(),
+                "Delete a note".to_owned(),
+            ]);
+            note.table = Some(table);
+            note.add_tag("api");
+            note.add_tag("projects");
+        }
+
+        // Create from template
+        let _n5 = self.create_note_from_template(NoteTemplate::MeetingNotes, _meetings);
+        let _n6 = self.create_note_from_template(NoteTemplate::Journal, _journal);
+        let _n7 = self.create_note_from_template(NoteTemplate::CodeSnippet, projects);
+
+        // Select a note for display
+        self.selected_notebook = Some(work);
+        self.selected_note = Some(n2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Events
+    // -----------------------------------------------------------------------
+
+    /// Route a compositor event into the app.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                // Not `Consumed`: a resize is not by itself a reason to redraw.
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Apply a key press.
+    ///
+    /// The app had no input handling at all before it was wired to the
+    /// compositor: every notebook, note, tag filter and sort order it can show
+    /// was reachable only by a caller invoking the method directly.
+    pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        if self.searching {
+            return self.handle_key_search(key);
+        }
+        let ctrl = key.modifiers.ctrl;
+        match key.key {
+            // Panels. Tab moves rightwards through them, which is the
+            // direction they are drawn in.
+            Key::Tab => {
+                let next = match self.active_panel {
+                    ActivePanel::NotebookSidebar => ActivePanel::NoteList,
+                    ActivePanel::NoteList => ActivePanel::Editor,
+                    ActivePanel::Editor => ActivePanel::NotebookSidebar,
+                };
+                self.active_panel = next;
+                EventResult::Consumed
+            }
+            // Selection within whichever panel has focus.
+            Key::Up => self.step_selection(-1),
+            Key::Down => self.step_selection(1),
+            // Two arms and not `Key::Slash | Key::F if ctrl`: a guard on an
+            // or-pattern applies to the whole of it, so that spelling made
+            // plain `/` require Ctrl as well, and the search box could not be
+            // opened the way every other program opens it.
+            Key::Slash => {
+                self.searching = true;
+                EventResult::Consumed
+            }
+            Key::F if ctrl => {
+                self.searching = true;
+                EventResult::Consumed
+            }
+            Key::S => {
+                self.sort_order = self.sort_order.next();
+                EventResult::Consumed
+            }
+            Key::P => self.on_selected_note(Note::toggle_pin),
+            Key::V => self.on_selected_note(Note::toggle_favorite),
+            Key::B => {
+                self.show_favorites_only = !self.show_favorites_only;
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                if self.search_query.is_empty() && self.active_tag_filter.is_none() {
+                    return EventResult::Ignored;
+                }
+                self.search_query.clear();
+                self.active_tag_filter = None;
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Keys while the search box has focus.
+    ///
+    /// It comes first in `handle_key` because otherwise typing "s" to search
+    /// for something would re-sort the list under the search box.
+    fn handle_key_search(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape | Key::Enter => {
+                self.searching = false;
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                if self.search_query.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            _ => {
+                if key.text.is_empty() || key.modifiers.ctrl {
+                    return EventResult::Ignored;
+                }
+                self.search_query.push_str(&key.text);
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Run something on the selected note, reporting whether there was one.
+    fn on_selected_note(&mut self, f: fn(&mut Note)) -> EventResult {
+        let Some(id) = self.selected_note else {
+            return EventResult::Ignored;
+        };
+        let Some(note) = self.find_note_mut(id) else {
+            return EventResult::Ignored;
+        };
+        f(note);
+        // Pinning changes the order and favouriting can change the set, so the
+        // selection may no longer be where it was.
+        self.reanchor_selection();
+        EventResult::Consumed
+    }
+
+    /// Move the selection through the notes currently listed.
+    ///
+    /// Over `visible_notes` and not `notes`: stepping by raw index would walk
+    /// through notes the search or the favourites filter is hiding, so the
+    /// highlight would vanish for several presses.
+    fn step_selection(&mut self, delta: isize) -> EventResult {
+        let visible = self.visible_notes();
+        if visible.is_empty() {
+            if self.selected_note.is_none() {
+                return EventResult::Ignored;
+            }
+            self.selected_note = None;
+            return EventResult::Consumed;
+        }
+        let current = self
+            .selected_note
+            .and_then(|id| visible.iter().position(|&v| v == id));
+        let next = match current {
+            None => 0,
+            Some(pos) => {
+                let Ok(pos) = isize::try_from(pos) else {
+                    return EventResult::Ignored;
+                };
+                let Some(moved) = pos.checked_add(delta) else {
+                    return EventResult::Ignored;
+                };
+                let Ok(moved) = usize::try_from(moved) else {
+                    return EventResult::Ignored; // off the top; stay put
+                };
+                if moved >= visible.len() {
+                    return EventResult::Ignored; // off the bottom; stay put
+                }
+                moved
+            }
+        };
+        let Some(&id) = visible.get(next) else {
+            return EventResult::Ignored;
+        };
+        if Some(id) == self.selected_note {
+            return EventResult::Ignored;
+        }
+        self.selected_note = Some(id);
+        EventResult::Consumed
+    }
+
+    /// Put the selection back on a listed note after the filter changed.
+    fn reanchor_selection(&mut self) {
+        let visible = self.visible_notes();
+        if !self.selected_note.is_some_and(|id| visible.contains(&id)) {
+            self.selected_note = visible.first().copied();
+        }
+    }
+
+    /// Named `render_commands` and not `render`: this takes a width and a
+    /// height, exactly as `oswindow::app::App::render` does, and at equal arity
+    /// an inherent method silently wins method lookup over the trait's — so an
+    /// app that keeps the name draws nothing and reports no error.
+    ///
+    /// Renders the full application frame, returning drawing commands.
+    pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Full window background.
@@ -2930,105 +3231,64 @@ pub struct NoteStats {
 // Main entry point
 // ============================================================================
 
-fn main() {
-    let mut app = NotesApp::new();
-
-    // Create sample notebooks
-    let personal = app.create_notebook("Personal");
-    let work = app.create_notebook("Work");
-    let projects = app.create_child_notebook("Projects", work);
-    let _meetings = app.create_child_notebook("Meetings", work);
-    let _journal = app.create_child_notebook("Journal", personal);
-
-    // Create sample notes
-    let n1 = app.create_note("Welcome to Notes", personal);
-    app.update_note_content(
-        n1,
-        "# Welcome\n\nThis is the **Notes & Wiki** application.\n\n\
-         You can create notes in different formats:\n\
-         - Plain text\n- Markdown\n- Checklists\n- Tables\n\n\
-         Try linking to other notes with [[Project Ideas]].",
-    );
-    if let Some(note) = app.find_note_mut(n1) {
-        note.kind = NoteKind::Markdown;
-        note.add_tag("intro");
-        note.add_tag("wiki");
-        note.favorited = true;
+impl App for NotesApp {
+    fn title(&self) -> String {
+        self.selected_note
+            .and_then(|id| self.notes.iter().find(|n| n.id == id))
+            .map_or_else(|| "Notes".to_owned(), |n| format!("Notes — {}", n.title))
     }
 
-    let n2 = app.create_note("Project Ideas", projects);
-    app.update_note_content(
-        n2,
-        "# Project Ideas\n\n## Web Framework\nBuild a fast async web framework in Rust.\n\n\
-         ## Game Engine\nA 2D game engine with ECS architecture.\n\n\
-         See also: [[Welcome to Notes]]",
-    );
-    if let Some(note) = app.find_note_mut(n2) {
-        note.kind = NoteKind::Markdown;
-        note.add_tag("projects");
-        note.add_tag("ideas");
-        note.pinned = true;
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.window_width as u32, self.window_height as u32)
+        }
     }
 
-    // Create a checklist note
-    let n3 = app.create_note_from_template(NoteTemplate::TodoList, work);
-    if let Some(note) = app.find_note_mut(n3) {
-        note.title = "Sprint Tasks".to_owned();
-        note.checklist.clear();
-        note.add_checklist_item("Review PR #42");
-        note.add_checklist_item("Fix build pipeline");
-        note.add_checklist_item("Write unit tests");
-        note.add_checklist_item("Deploy to staging");
-        note.toggle_checklist_item(0);
-        note.add_tag("sprint");
-        note.add_tag("work");
+    /// No clock.
+    ///
+    /// Nothing here ages: a note changes when it is edited and the list
+    /// reorders when the sort order does. The timestamps are a counter this app
+    /// advances itself on each edit, not a reading of any clock, so there is
+    /// nothing a tick could re-read. `known-issues.md` lesson 47's question
+    /// asked and answered the other way.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
     }
 
-    // Create a table note
-    let n4 = app.create_note("API Endpoints", projects);
-    if let Some(note) = app.find_note_mut(n4) {
-        note.kind = NoteKind::Table;
-        let mut table = TableData::new(vec![
-            "Method".to_owned(),
-            "Path".to_owned(),
-            "Description".to_owned(),
-        ]);
-        table.add_row(vec![
-            "GET".to_owned(),
-            "/api/notes".to_owned(),
-            "List all notes".to_owned(),
-        ]);
-        table.add_row(vec![
-            "POST".to_owned(),
-            "/api/notes".to_owned(),
-            "Create a note".to_owned(),
-        ]);
-        table.add_row(vec![
-            "PUT".to_owned(),
-            "/api/notes/:id".to_owned(),
-            "Update a note".to_owned(),
-        ]);
-        table.add_row(vec![
-            "DELETE".to_owned(),
-            "/api/notes/:id".to_owned(),
-            "Delete a note".to_owned(),
-        ]);
-        note.table = Some(table);
-        note.add_tag("api");
-        note.add_tag("projects");
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
     }
 
-    // Create from template
-    let _n5 = app.create_note_from_template(NoteTemplate::MeetingNotes, _meetings);
-    let _n6 = app.create_note_from_template(NoteTemplate::Journal, _journal);
-    let _n7 = app.create_note_from_template(NoteTemplate::CodeSnippet, projects);
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.window_width = width;
+        self.window_height = height;
+        RenderTree {
+            commands: self.render_commands(width, height),
+        }
+    }
+}
 
-    // Select a note for display
-    app.selected_notebook = Some(work);
-    app.selected_note = Some(n2);
-
-    // Render one frame
-    let _commands = app.render(1280.0, 800.0);
+fn main() -> ExitCode {
+    let mut notes = NotesApp::new();
+    // Until there is a store on disk this is what there is to show. It is
+    // seeded here rather than in `new` so that the moment a store exists, this
+    // is the one call that changes.
+    notes.seed_sample_content();
+    app::launch("notes", &mut notes)
 }
 
 // ============================================================================
@@ -3043,6 +3303,286 @@ mod tests {
         clippy::panic,
         clippy::indexing_slicing
     )]
+
+    // ------------------------------------------------------------------
+    // Events
+    //
+    // The app had no input handling at all until it was wired to the
+    // compositor.
+    // ------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+
+    fn seeded() -> NotesApp {
+        let mut app = NotesApp::new();
+        app.seed_sample_content();
+        app
+    }
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn typed(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    #[test]
+    fn the_sample_library_survived_becoming_a_method() {
+        // `seed_sample_content` is the old `main` body. If the extraction lost
+        // a call, the app opens emptier than it used to and nothing else says
+        // so.
+        let app = seeded();
+        assert!(
+            app.notebooks.len() >= 5,
+            "notebooks: {}",
+            app.notebooks.len()
+        );
+        assert!(app.notes.len() >= 7, "notes: {}", app.notes.len());
+        assert!(
+            app.notes.iter().any(|n| n.kind == NoteKind::Markdown),
+            "the markdown sample note is missing"
+        );
+        assert!(
+            app.notes.iter().any(|n| n.table.is_some()),
+            "the table sample note is missing"
+        );
+        assert!(
+            app.notes.iter().any(|n| !n.tags.is_empty()),
+            "the tagged sample notes are missing"
+        );
+    }
+
+    #[test]
+    fn tab_cycles_the_three_panels_and_returns() {
+        let mut app = seeded();
+        let first = app.active_panel;
+        let mut seen = vec![first];
+        for _ in 0..2 {
+            assert_eq!(app.handle_event(&press(Key::Tab)), EventResult::Consumed);
+            seen.push(app.active_panel);
+        }
+        assert_eq!(seen.len(), 3);
+        for (i, a) in seen.iter().enumerate() {
+            for b in seen.iter().skip(i + 1) {
+                assert_ne!(a, b, "Tab visited a panel twice before all three");
+            }
+        }
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(app.active_panel, first, "Tab should return to the start");
+    }
+
+    #[test]
+    fn the_arrows_walk_the_listed_notes_and_stop_at_the_ends() {
+        let mut app = seeded();
+        let listed = app.visible_notes();
+        assert!(listed.len() >= 3, "the sample library should fill the list");
+        app.selected_note = listed.first().copied();
+        assert_eq!(
+            app.handle_event(&press(Key::Up)),
+            EventResult::Ignored,
+            "Up at the top should stay put"
+        );
+        for id in listed.iter().skip(1) {
+            assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Consumed);
+            assert_eq!(app.selected_note, Some(*id));
+        }
+        assert_eq!(
+            app.handle_event(&press(Key::Down)),
+            EventResult::Ignored,
+            "Down at the bottom should stay put"
+        );
+    }
+
+    #[test]
+    fn the_arrows_never_select_a_note_the_filter_is_hiding() {
+        let mut app = seeded();
+        app.show_favorites_only = true;
+        app.reanchor_selection();
+        let listed = app.visible_notes();
+        for _ in 0..app.notes.len() {
+            app.handle_event(&press(Key::Down));
+            if let Some(id) = app.selected_note {
+                assert!(listed.contains(&id), "selection left the filtered list");
+            }
+        }
+    }
+
+    #[test]
+    fn typing_a_search_does_not_run_the_shortcuts_those_letters_name() {
+        // "s" re-sorts outside the search box and is a letter inside it.
+        let mut app = seeded();
+        let order = app.sort_order;
+        assert_eq!(app.handle_event(&press(Key::Slash)), EventResult::Consumed);
+        assert!(app.searching);
+        app.handle_event(&typed('s'));
+        app.handle_event(&typed('p'));
+        assert_eq!(app.search_query, "sp");
+        assert_eq!(app.sort_order, order, "the sort order changed while typing");
+        app.handle_event(&press(Key::Enter));
+        assert!(!app.searching);
+        // And now the same key sorts again.
+        app.handle_event(&press(Key::S));
+        assert_ne!(app.sort_order, order);
+    }
+
+    #[test]
+    fn a_search_narrows_the_list_and_backspace_gives_it_back() {
+        let mut app = seeded();
+        let all = app.visible_notes().len();
+        app.handle_event(&press(Key::Slash));
+        for c in "welcome".chars() {
+            app.handle_event(&typed(c));
+        }
+        let hits = app.visible_notes().len();
+        assert!(
+            hits < all,
+            "a search should narrow the list ({hits} of {all})"
+        );
+        for _ in 0.."welcome".len() {
+            app.handle_event(&press(Key::Backspace));
+        }
+        assert_eq!(app.search_query, "");
+        assert_eq!(app.visible_notes().len(), all);
+        assert_eq!(
+            app.handle_event(&press(Key::Backspace)),
+            EventResult::Ignored,
+            "backspace on an empty query is not a redraw"
+        );
+    }
+
+    #[test]
+    fn pinning_and_favouriting_reach_the_selected_note() {
+        let mut app = seeded();
+        let listed = app.visible_notes();
+        app.selected_note = listed.first().copied();
+        let id = app.selected_note.expect("something is listed");
+        let (pinned, fav) = {
+            let n = app.notes.iter().find(|n| n.id == id).expect("it exists");
+            (n.pinned, n.favorited)
+        };
+        assert_eq!(app.handle_event(&press(Key::P)), EventResult::Consumed);
+        assert_ne!(
+            app.notes
+                .iter()
+                .find(|n| n.id == id)
+                .expect("still there")
+                .pinned,
+            pinned
+        );
+        assert_eq!(app.handle_event(&press(Key::V)), EventResult::Consumed);
+        assert_ne!(
+            app.notes
+                .iter()
+                .find(|n| n.id == id)
+                .expect("still there")
+                .favorited,
+            fav
+        );
+    }
+
+    #[test]
+    fn pinning_with_nothing_selected_does_nothing() {
+        let mut app = seeded();
+        app.selected_note = None;
+        assert_eq!(app.handle_event(&press(Key::P)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn escape_clears_the_filters_and_does_nothing_when_they_are_clear() {
+        let mut app = seeded();
+        assert_eq!(
+            app.handle_event(&press(Key::Escape)),
+            EventResult::Ignored,
+            "nothing is filtered yet"
+        );
+        app.handle_event(&press(Key::Slash));
+        app.handle_event(&typed('w'));
+        app.handle_event(&press(Key::Enter));
+        assert!(!app.search_query.is_empty());
+        assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Consumed);
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn a_key_the_app_has_no_use_for_is_not_consumed() {
+        let mut app = seeded();
+        assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut app = seeded();
+        let panel = app.active_panel;
+        let release = Event::Key(KeyEvent {
+            key: Key::Tab,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(app.handle_event(&release), EventResult::Ignored);
+        assert_eq!(app.active_panel, panel);
+    }
+
+    #[test]
+    fn the_title_names_the_selected_note() {
+        let mut app = seeded();
+        app.selected_note = app.visible_notes().first().copied();
+        let id = app.selected_note.expect("something is listed");
+        let title = app
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .expect("it exists")
+            .title
+            .clone();
+        assert!(
+            app.title().contains(&title),
+            "the window title {:?} does not name the note {title:?}",
+            app.title()
+        );
+        app.selected_note = None;
+        assert_eq!(app.title(), "Notes");
+    }
+
+    #[test]
+    fn a_resize_is_taken_but_is_not_itself_a_redraw() {
+        let mut app = seeded();
+        assert_eq!(
+            app.handle_event(&Event::Resize {
+                width: 1600,
+                height: 900
+            }),
+            EventResult::Ignored
+        );
+        assert!((app.window_width - 1600.0).abs() < f32::EPSILON);
+        assert!((app.window_height - 900.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn every_panel_renders_without_panicking_at_an_awkward_size() {
+        let mut app = seeded();
+        for _ in 0..3 {
+            for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+                assert!(
+                    !app.render(w, h).commands.is_empty(),
+                    "{:?} drew nothing at {w}x{h}",
+                    app.active_panel
+                );
+            }
+            app.handle_event(&press(Key::Tab));
+        }
+    }
 
     use super::*;
 
@@ -3816,7 +4356,7 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let app = sample_app();
-        let cmds = app.render(1280.0, 800.0);
+        let cmds = app.render_commands(1280.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -3825,14 +4365,14 @@ mod tests {
         let mut app = sample_app();
         let first_note = app.notes[0].id;
         app.selected_note = Some(first_note);
-        let cmds = app.render(1280.0, 800.0);
+        let cmds = app.render_commands(1280.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_empty_app() {
         let app = NotesApp::new();
-        let cmds = app.render(1280.0, 800.0);
+        let cmds = app.render_commands(1280.0, 800.0);
         // Should at least have background and toolbar
         assert!(cmds.len() > 2);
     }

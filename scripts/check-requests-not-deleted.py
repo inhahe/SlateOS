@@ -44,10 +44,16 @@ What it checks
 --------------
 
 Every path under `requests/` that exists at the merge base with `origin/main`
-must still exist in the working tree. That base is the last commit this branch
-shares with the trunk, so the comparison sees exactly what *this lane* removed
-since diverging and nothing another lane did -- which is what makes it usable in
-three worktrees at once without one lane's history indicting another.
+must still exist in the tree being judged -- the working tree by default, or the
+commit named by `--head`, which is what the push hook passes. That base is the
+last commit the judged tree shares with the trunk, so the comparison sees
+exactly what *this lane* removed since diverging and nothing another lane did --
+which is what makes it usable in three worktrees at once without one lane's
+history indicting another.
+
+Both of this gate's inputs come from that one tree: the deletions and the
+waivers that excuse them. See "The escape hatch" below for why the second half
+matters as much as the first.
 
 Deletions are compared with rename detection on, so moving a file (fixing a
 slug, or sweeping an entry into an archive directory) is a rename and passes.
@@ -74,6 +80,16 @@ strong claim about a directory that has already had one archive sweep, and a
 gate with no override gets disabled rather than obeyed. Adding a line to it is a
 deliberate, reviewable act, which is all this gate is really asking for.
 
+**The waiver is read from the same tree as the deletion.** Under `--head` that
+is the commit being pushed, not the disk -- because "deliberate and reviewable"
+is a claim about something that is being published. A waiver read off the
+working tree while the deletion is read from the commit can be written, used,
+and dropped without ever being committed: add the basename, push the deletion,
+`git checkout` the waiver away, and the request is gone from shared history with
+no record that an override was ever claimed. That is a worse hole than the
+staged restore `--head` was added for, since a staged restore at least leaves
+the file present somewhere.
+
 What it cannot see
 ------------------
 
@@ -88,6 +104,9 @@ Usage
 
     python scripts/check-requests-not-deleted.py           # gate; 0 ok, 1 fail
     python scripts/check-requests-not-deleted.py --base X  # compare against X
+    python scripts/check-requests-not-deleted.py --head Y  # judge commit Y, not
+                                                          # the working tree
+    python scripts/check-requests-not-deleted.py --selftest
 
 Exit status: 0 clean (or skipped, see below), 1 a request was deleted, 2 the
 repository could not be read at all. A worktree with no `origin/main` and no
@@ -113,9 +132,23 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # repair.
 import gitenv  # noqa: E402
 
+# Only `GitTree` is wanted here, not `open_tree`: the allowlist is one small
+# file, and `RevTree` would build a `git ls-tree -r` index of the whole
+# repository (13,821 paths, ~3.8 s -- see its docstring) to answer a question
+# about one path. `GitTree.read` is the same seam without the index, and it
+# already returns `None` for "not in that tree", which is the answer this gate
+# gets almost every time it asks.
+import gittree  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 REQUESTS = "requests/"
-ALLOWLIST = ROOT / "requests" / ".deletions-allowed"
+
+# Repo-relative, and deliberately not a `ROOT /` path: this file has to be read
+# out of a *commit* as often as off the disk, and a path bound to ROOT at import
+# time can only name the disk. It is also one global rather than two, which the
+# self-test cares about -- it repoints ROOT, and a second global derived from
+# the old one is a self-test that silently reads the real repository.
+ALLOWLIST_REL = "requests/.deletions-allowed"
 
 # Files under `requests/` that are this gate's own plumbing rather than anyone's
 # argument. They are exempt because the advice this script gives is incoherent
@@ -155,16 +188,17 @@ def _rev_exists(rev: str) -> bool:
     return rc == 0
 
 
-def load_allowlist() -> dict[str, str]:
-    """Basenames that may be deleted, mapped to the stated reason.
+def _parse_allowlist(text: str) -> dict[str, str]:
+    """Basenames mapped to the stated reason. Shared by both readers below.
 
-    Missing file is not an error: the common case is that nothing is allowed,
-    and requiring an empty file to exist would be one more thing to forget.
+    One parser for both provenances, so that a waiver cannot mean one thing on
+    the disk and another in a commit. That is not hypothetical tidiness: the two
+    readers were one function until this file learned to read a revision, and
+    the whole defect that prompted the split was the two *inputs* disagreeing
+    about which tree they came from.
     """
     allowed: dict[str, str] = {}
-    if not ALLOWLIST.is_file():
-        return allowed
-    for raw in ALLOWLIST.read_text(encoding="utf-8", errors="replace").splitlines():
+    for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -173,6 +207,37 @@ def load_allowlist() -> dict[str, str]:
         if name:
             allowed[name] = reason.strip() or "(no reason given)"
     return allowed
+
+
+def load_allowlist(head: str | None = None) -> dict[str, str]:
+    """Basenames that may be deleted, mapped to the stated reason.
+
+    `head` selects the tree, and it must be the *same* tree `deleted_since` is
+    given. The two are one question -- "does this tree delete a request it does
+    not waive?" -- and answering its halves from different trees is what let a
+    waiver be claimed without being published; see "The escape hatch" above.
+
+    Missing file is not an error, on either side: the common case is that
+    nothing is allowed, and requiring an empty file to exist would be one more
+    thing to forget. `GitTree.read` already spells absence as `None`, and the
+    disk arm is written to match it rather than the other way round.
+
+    Note what a missing allowlist means here, since the sibling gates make the
+    opposite choice: absent waives nothing, so it fails *toward strict*. That is
+    the reverse of `quote-names`' baseline, where an absent file would forgive
+    nothing and therefore accuse everything -- which is why that gate refuses to
+    report a verdict without one, and this gate is content to carry on.
+    """
+    if head is None:
+        path = ROOT / ALLOWLIST_REL.replace("/", os.sep)
+        if not path.is_file():
+            return {}
+        return _parse_allowlist(path.read_text(encoding="utf-8", errors="replace"))
+    with gittree.GitTree(str(ROOT)) as git_tree:
+        raw = git_tree.read(head, ALLOWLIST_REL)
+    if raw is None:
+        return {}
+    return _parse_allowlist(raw.decode("utf-8", errors="replace"))
 
 
 def deleted_since(base: str, head: str | None = None) -> list[str]:
@@ -247,8 +312,8 @@ def selftest() -> int:
             print(f"  FAIL  {label}: got {got!r}, want {want!r}", file=sys.stderr)
             failures.append(label)
 
-    global ROOT, ALLOWLIST                       # noqa: PLW0603 - see below
-    saved_root, saved_allowlist = ROOT, ALLOWLIST
+    global ROOT                                  # noqa: PLW0603 - see below
+    saved_root = ROOT
     with tempfile.TemporaryDirectory(prefix="reqgate-") as tmp:
         run(tmp, "init", "--quiet", "-b", "main")
         run(tmp, "config", "user.email", "selftest@example.invalid")
@@ -271,10 +336,13 @@ def selftest() -> int:
         run(tmp, "commit", "--quiet", "-m", "base")
         base = run(tmp, "rev-parse", "HEAD").strip()
 
-        # `_git`, `deleted_since` and `load_allowlist` all read module globals.
-        # Repointing them is what lets the real code paths be exercised rather
-        # than a reimplementation of them -- a self-test that tested a copy of
-        # the logic would pass while the logic in use was broken.
+        # `_git`, `deleted_since` and `load_allowlist` all resolve the repository
+        # through `ROOT`. Repointing it is what lets the real code paths be
+        # exercised rather than a reimplementation of them -- a self-test that
+        # tested a copy of the logic would pass while the logic in use was
+        # broken. One global does it now; it used to be two, and the second
+        # (`ALLOWLIST`, bound to the old ROOT at import time) is exactly the
+        # kind of leftover that makes a fixture read the real repository.
         ROOT = Path(tmp)
 
         os.remove(os.path.join(reqs, "a-b-one.md"))
@@ -315,8 +383,8 @@ def selftest() -> int:
         expect("...but not from --head, which judges the commit being pushed",
                "requests/a-b-one.md" in deleted_since(base, head), True)
 
-        ALLOWLIST = Path(tmp) / "requests" / ".deletions-allowed"
-        with open(ALLOWLIST, "w", encoding="utf-8") as fh:
+        allowlist = Path(tmp) / "requests" / ".deletions-allowed"
+        with open(allowlist, "w", encoding="utf-8") as fh:
             fh.write("# a comment\na-b-one.md  # folded into a-b-two.md\n")
         allowed = load_allowlist()
         expect("the allowlist waives by basename", "a-b-one.md" in allowed, True)
@@ -325,7 +393,35 @@ def selftest() -> int:
         expect("a comment line is not a waiver",
                any(k.startswith("#") for k in allowed), False)
 
-    ROOT, ALLOWLIST = saved_root, saved_allowlist
+        # Provenance. The allowlist above exists only on the disk, and `head`
+        # is the commit that deleted the request -- so under `--head` the waiver
+        # must not be visible, or a waiver can be claimed without ever being
+        # published (see "The escape hatch" in the module docstring).
+        #
+        # This is the shape the sibling gates were converted for and this one
+        # was not: `deleted_since` took `head` on 2026-09-02 and `load_allowlist`
+        # did not, so for two days the gate read its deletions from the commit
+        # and its permissions from the working tree.
+        expect("an uncommitted waiver is invisible to --head",
+               "a-b-one.md" in load_allowlist(head), False)
+        run(tmp, "add", "-A")
+        run(tmp, "commit", "--quiet", "-m", "record the waiver")
+        waived_head = run(tmp, "rev-parse", "HEAD").strip()
+        # The control. Without it the assertion above is satisfied by a reader
+        # that returns `{}` for every revision, which is a different bug with
+        # the same green -- and one that would refuse every legitimate sweep.
+        expect("...and a committed one is not",
+               load_allowlist(waived_head).get("a-b-one.md"),
+               "folded into a-b-two.md")
+        # The earlier commit still does not carry it. `git cat-file` answering
+        # per-revision rather than "the newest version it can find" is the whole
+        # mechanism, and it is worth one assertion.
+        expect("a waiver is not backdated onto the commit before it",
+               "a-b-one.md" in load_allowlist(head), False)
+        expect("a tree with no allowlist at all waives nothing",
+               load_allowlist(base), {})
+
+    ROOT = saved_root
 
     if failures:
         print(f"\ncheck-requests-not-deleted: SELF-TEST FAILED "
@@ -413,7 +509,18 @@ def main() -> int:
         print(f"check-requests-not-deleted: git diff failed: {exc}", file=sys.stderr)
         return 2
 
-    allowed = load_allowlist()
+    try:
+        allowed = load_allowlist(args.head)
+    except gittree.GitTreeError as exc:
+        # `--head` was verified to be a commit above, so this is git itself
+        # failing to start, not a bad revision. Exit 2, because run-checker.sh
+        # reads 1 as "this gate found a deleted request" and would print the
+        # whole restore-it advice over a failure that says nothing about
+        # anybody's requests.
+        print(f"check-requests-not-deleted: cannot read {ALLOWLIST_REL} at "
+              f"{args.head}: {exc}", file=sys.stderr)
+        return 2
+
     machinery = [p for p in gone if Path(p).name in MACHINERY]
     rest = [p for p in gone if Path(p).name not in MACHINERY]
     waived = [p for p in rest if Path(p).name in allowed]

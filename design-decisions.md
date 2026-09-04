@@ -63994,6 +63994,332 @@ I made it about a table and missed it about the tree.
 
 ---
 
+## §906 — The end-of-line gate grades the promise rather than the tree, and runs second rather than first
+
+**Date:** 2026-09-03. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** A file that git has been told to keep with Unix line endings can be
+sitting on disk with Windows ones, and no git command anybody actually types will
+say so — `git status` is clean, `git diff` is empty, `git commit` says nothing.
+On 2026-09-03 thirteen files in this worktree were in exactly that state,
+`scripts/boot-test.sh` among them, and it cost a forty-seven-minute boot test to
+find out. `scripts/check-eol.py` is the gate that reads the files directly. Two
+things about it were judgement calls rather than obvious, and this entry is about
+those two: **which** files it grades, and **where** in the pre-build sweep it
+runs.
+
+### Why this needs a gate at all: git is not merely unhelpful here, it is confidently wrong
+
+`text eol=lf` installs a clean filter, and the filter runs *before* any
+comparison. A file that is CRLF on disk and LF in the index is therefore not
+"modified in a way git chooses to ignore" — it is, to git, byte-identical to the
+index.
+
+| Command | Sees the CRLF? |
+|---|---|
+| `git status` | no — reports a clean tree |
+| `git diff`, `git diff --quiet` | no — empty, exit 0 |
+| `git add`, `git commit` | no — stages nothing |
+| `git diff-files` | **yes** — compares raw bytes |
+| `git ls-files --eol` | **yes** — reports raw bytes |
+
+Only the bottom two rows look at the working tree's actual bytes, and nobody runs
+them. That is why this failure was *invisible* rather than merely *unreported*:
+every instrument on the desk agreed the tree was clean, and every one of them was
+answering a question about the index.
+
+The proof that nothing was ever going to point at it: repairing all thirteen
+files and staging the result produced a **zero-byte diff**. The bad bytes had
+never reached a commit and never would have.
+
+### Decision: the graded set is whatever `.gitattributes` declares — not a suffix list, and not the whole tree
+
+| | *What changes:* | Catches | Misses |
+|---|---|---|---|
+| Only `*.sh` | the gate fires only where a CR actually breaks something | the one file that broke | the other twelve — that is, the size of the cause |
+| Everything declared `eol=lf` (**chosen**) | the gate fires on any declared file whose bytes contradict the declaration | all thirteen | files about which no promise was made |
+| Every tracked file | the gate fires on any CR anywhere | everything | nothing — and it is red on day one |
+
+The `.sh`-only scope is the tempting one, because `.sh` is the only extension
+where a CR does observable harm today (`bash` folds the CR into the token it
+ends, so `set -u` becomes `set -u$'\r'`). It is wrong for a reason that
+generalises: **the thirteen files were corrupted by one event, and `.sh` was one
+of the thirteen.** A gate scoped to the harm would have reported the symptom and
+concealed the extent of the cause. What is worth learning from a CR in a `.md`
+file is not that the `.md` file is broken — visibly, it isn't — but that *a tool
+in this tree writes text files in the wrong mode*, and the count of affected
+files is the evidence for that.
+
+The whole-tree scope fails at the other end. On the order of 180 tracked files
+are CRLF in the worktree and carry no `eol` declaration at all — `kernel/src/fs/`
+`*.rs`, `kernel/src/crypto.rs`, `kernel/src/syscall/handlers.rs`,
+`kernel/build.rs`, `bench/baselines.toml`, the Ada sources. Grading those would
+make the gate red on its first run, over files against which no promise was ever
+made; and a gate that is red for reasons its own repository considers acceptable
+is a gate that gets switched off. Whether those files *should* be declared is a
+separate question, and a cross-lane one — see below.
+
+So the scope is the promise itself, read out of git via `git check-attr` rather
+than restated here as a list of suffixes. A suffix list would be a second copy of
+the policy, free to drift from the first, and the drift would surface as the gate
+quietly not covering a newly-declared file type — which is this entry's own
+failure mode, one level up.
+
+### Decision: second in the sweep, not first
+
+Prerequisites aside, `check_requests_not_deleted` keeps the head of the sweep and
+`check_eol` follows it. The argument is not about which check is cheaper:
+
+| | If it runs late | What is at stake |
+|---|---|---|
+| `check_requests_not_deleted` | a cross-lane request has already been destroyed | **information that cannot be recovered** |
+| `check_eol` | a build has already started against bad bytes | **one wasted cycle** |
+
+The head of the sweep is ordered by what a *late* detection costs, and only one
+thing in this tree costs something irreversible. Everything below that is ordered
+cheap-and-broad first, and `check_eol` is now the first of those. That is the
+whole point of the placement: the equivalent evidence already existed inside
+`check_shellcheck`, some forty-five minutes into the sweep and covering only
+`.sh`. That is where the CR was found on 2026-09-03, and finding it there is what
+threw the run away.
+
+### The floor, because this gate can fail in the exact way it exists to catch
+
+`DISCOVERY_FLOOR = 500`, against ~1,438 declared files in a tree of 13,884
+tracked ones. The fragile part of this gate is not "does `\r` appear in these
+bytes" — that cannot drift. It is the attribute query: a NUL-separated
+`git check-attr -z --stdin` stream walked three fields at a time. If that framing
+changes, or the invocation grows a typo, **the declared set becomes empty and the
+gate reports a clean tree in a fraction of a second, forever, on every host** —
+which is the identical failure it exists to catch elsewhere. The floor converts
+that into an exit 2.
+
+### The cost accepted
+
+~37 MB across ~1,438 files: 93 s single-threaded on this host, ~32 s across a
+16-thread pool. The cost is per-file antivirus interception rather than
+bandwidth, which is both why threads help this much and why the pool is what
+makes the gate affordable at all. `open-questions.md` A-Q7 asks about an
+exclusion; if it is ever answered, this drops into the noise.
+
+### What this deliberately does not settle
+
+Declaring `*.rs` and `*.toml` as `eol=lf` is the change that would make the
+undeclared set empty. It is a whole-tree normalisation touching all three lanes'
+files at once, so it wants a `requests/` file and the other two lanes' agreement,
+not a unilateral commit from lane A. Until then the undeclared files are out of
+scope by construction, and this section is the record of that being a choice
+rather than an oversight.
+
+### Reversing this
+
+Delete the `check_eol` call from `scripts/boot-test.sh`; the gate still works
+standalone. If it is the *scope* that turns out to be wrong, the change is one
+predicate in `declared_lf()` — but note that widening it to the whole tree
+without first declaring the `*.rs` files means adopting ~180 pre-existing
+findings on day one. The honest order is declaration first, gate second.
+
+---
+
+## §907 — A gate is what `run_checker` runs, not what it is named — and the two questions about a gate need two different definitions
+
+**Date:** 2026-09-03. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** Two of the checking programs in `scripts/` exist to grade the
+*other* checking programs. One asks "is this gate actually wired into a build,
+and is its self-test actually run?"; the other asks "if this gate found
+something, could it even fail?". Both decided what counted as a gate by looking
+at the **filename**. Nine real gates are spelled differently — `scan-unwrap.py`,
+`rustscan.py`, and six run only by the pre-push hook — so both meta-gates skipped
+them entirely and reported "ok". The fix is to define a gate by what a caller
+actually runs. This entry records why the two questions nevertheless still need
+two *different* definitions, which is the part that is easy to get wrong twice.
+
+### The failure, stated generally
+
+**A gate that discovers nothing reports no failures, and that reads exactly like
+a pass.** This shape turned up three times in one work session, at three
+different levels — a gate's subject set, a meta-gate's corpus, and an analyser's
+expression coverage. The meta-gate form is the nastiest, because a corpus that
+*omits* a file reports "ok" in the same words as one that includes it and finds
+nothing wrong. No wording, no exit code and no log line distinguishes them. Only
+counting the corpus does.
+
+The concrete symptom was a sentence `check-gates-are-wired.py` printed with total
+confidence:
+
+```
+0 self-test(s) shipped but unrun
+```
+
+True of the subset it looked at. Printed as though it were true of the tree.
+
+### The mistake was made twice in one expression
+
+`analyse()` collected call sites out of `scripts/boot-test.sh` and
+`scripts/hooks/pre-push`, reading the *actual* `run_checker` invocations — and
+then filtered the result through `if _GATE.fullmatch(n)`, a regex over the
+filename. Having done the hard and correct thing, it discarded the answer for
+anything that did not look the way a gate is supposed to look. The file's own
+docstring lists "matching filenames" as method 4, a known-bad approach, in the
+course of explaining why it does not use it.
+
+### Decision: define "a gate" as "a script some caller passes to `run_checker`"
+
+`scripts = list(literal or named)` — no name filter. The corpus is the union,
+over `CALLERS` (`scripts/boot-test.sh`, `scripts/hooks/pre-push`), of every
+script run through `run_checker`; plus, for the wiring question only, the
+filesystem glob.
+
+Measured effect:
+
+| | Before | After |
+|---|---|---|
+| `boot-test.sh` — gates run / self-tests run | 36 / 23 | **38 / 25** |
+| `pre-push` — gates run / self-tests run | 2 / 2 | **8 / 7** |
+| `check-gates-can-refuse.py` corpus | 38 | **47** |
+
+The nine that had been exempt purely by spelling: `scan-unwrap.py`,
+`scan-orphan-modules.py`, `rustscan.py`, and — all six from the pre-push hook —
+`argv-utf8.py`, `getopt-ambiguity-check.py`, `host-errmsg.py`,
+`multicall-aliases.py`, `quote-names.py`, `raced-globals.py`.
+
+### The subtle part: the two questions cannot share one definition
+
+Collapsing them is what produced the bug, and "just use the call sites
+everywhere" would produce its mirror image.
+
+| Question | Must be answered from | Because |
+|---|---|---|
+| *Is this gate wired at all?* | the **filesystem** — i.e. names | an unwired gate has **no call site to read**. Defining the corpus as "what callers run" makes the answer vacuously yes, always. |
+| *Is its self-test run? Can it refuse?* | the **call sites** — i.e. what is invoked | a gate's spelling is a habit; the build obeys the call, not the convention |
+
+So `check-gates-are-wired.py` keeps a name-shaped constant — renamed `_GATE_NAME`
+precisely so the next reader cannot mistake it for a definition of "gate" — and
+uses it *only* to enumerate candidates on disk. Everything downstream of that
+uses call sites. The self-test arm's subject became `sorted(set(gates) | wired)`:
+the union, because a script that is run but does not match the name is exactly
+the case that was being missed.
+
+### Decision: when the corpus cannot be determined, decline — do not fall back to the glob
+
+`check-gates-can-refuse.py` now imports the sibling parser rather than copying
+it, and if `scripts/boot-test.sh` or the pre-push hook is missing it returns a
+`why_not` and `main()` exits **2**.
+
+The rejected alternative was to fall back to the directory glob, on the grounds
+that it "still checks something". That is the identical defect one level up: a
+strictly smaller corpus, reported in identical words. Exit 2 is this tree's
+single code for "I did not reach a verdict" (§905), and this is precisely that
+situation.
+
+One implementation note worth keeping, because the self-test caught it: the
+sibling parser must be located via `Path(__file__).resolve().parent` and **not**
+the module-global `SCRIPTS`, which the self-test deliberately repoints at a
+temporary directory. Using `SCRIPTS` made the gate silently analyse a fixture
+directory instead of the real tree. That the self-test caught it is the argument
+for its asserting the contract by *calling* `main()` rather than by reading the
+source.
+
+### Reversing this
+
+Restore `if _GATE_NAME.fullmatch(n)` in `analyse()` and the counts return to
+36/23 and 2/2. There is no reason to; but the signal that the *definition* is
+wrong would be a script that `run_checker` runs which is genuinely not a gate — at
+which point the fix is an explicit exemption carrying a reason, in the style of
+the existing unwired list, and never a return to grading by filename.
+
+---
+
+## §908 — The refusal analyser assumes an unreadable expression can refuse, and the residue is documented rather than reported
+
+**Date:** 2026-09-03. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** `check-gates-can-refuse.py` reads each checking program's source and
+asks whether it could ever exit non-zero — a gate that physically cannot fail is
+worse than no gate, because it emits a reassuring line of output on every build.
+It was missing most of them: it cleared any file that used `return _decline(...)`,
+which is the commonest way a gate refuses in this tree. Fixing that took
+detection from 12 of 47 to 37 of 47. This entry records how that was measured,
+and the deliberate decision *not* to close the remaining ten by reporting
+everything the analyser cannot read.
+
+### How it was measured, because a checker's own "ok" is not evidence
+
+The gate printed "ok — all 47 gates can reach a non-zero exit bare" both before
+and after the fix. That sentence is worth nothing by itself; it is the sentence a
+broken gate prints too.
+
+The unit of evidence is a **mutation census**: neuter every subject mechanically
+— rewrite its verdict so it can only return 0 — and count how many the gate
+catches.
+
+| | Detected |
+|---|---|
+| Before | **12 / 47** |
+| After | **37 / 47** |
+
+Zero regressions: everything caught before is still caught.
+
+### The false negative: "delegated, so assume it can refuse"
+
+`_could_be_nonzero` treated a call as opaque and answered `True` — the
+conservative answer, on the reasoning that the callee is unknown. But the callee
+is usually thirty lines up in the same file. `return _decline(reason, detail)` is
+*the* refusal idiom here, and it cleared every file it appeared in, whether
+`_decline` returned 2 or returned 0.
+
+The fix resolves module-local calls: `audit()` builds `{name: FunctionDef}` for
+the module, and `_value_could_be_nonzero` recurses into a called function's own
+returns, with a `seen` set to bound recursion. **Conservatism is not conservative
+when the answer is in the file you have already parsed.**
+
+The self-test's decisive pair is two fixtures that are identical at the call site
+and opposite in fact: a `_decline` helper that returns 2 (must clear the gate)
+and one that returns 0 (must be reported). Nothing at `return _decline(...)`
+distinguishes them; only following the call does. Thirteen fixtures now, up from
+eight.
+
+### Decision: leave the remaining ten to `known-issues.md` rather than reporting them
+
+The tempting close is to invert the default and report anything the analyser
+cannot *prove* refuses. That would reach 47/47 by construction.
+
+| | *What changes:* | Cost |
+|---|---|---|
+| Report the unanalysable (rejected) | ten gates are flagged on every build until each is rewritten into a shape the analyser reads | a per-build gate that cries wolf gets ignored — and then it has also stopped working for the 37 cases where it is right |
+| Assume it can refuse (**chosen**) | the gate stays silent on shapes it cannot read; the residue is tracked in prose | ten known false negatives, invisible to the build |
+
+The decisive consideration is that this gate's output is one line inside a sweep
+of forty. Its value is entirely that the line is *trustworthy*. A gate that
+reports ten standing non-problems trains its reader to skim it, and the failure
+mode of a skimmed gate is that it gets skimmed on the day it is right.
+
+So the residue is written down with its measured shapes rather than guessed
+causes, in `known-issues.md` →
+`TD-A-A-GATE-THAT-CANNOT-REFUSE-IS-STILL-UNDETECTED-IN-10-OF-47-GATES`:
+
+| Shape | Gates |
+|---|---|
+| verdict is a returned local variable | `check-evdev-elf-asm.py`, `check-query-status.py`, `check-usage-status.py` |
+| verdict is a returned comparison / comprehension / subscript | `check-option-refusal.py`, `scan-orphan-modules.py` |
+| a call whose callee contains an unanalysable expression | `argv-utf8.py`, `check-selftest-reinit.py`, `host-errmsg.py`, `raced-globals.py` |
+| no `main()` at all | `rustscan.py` |
+
+The first two rows are one improvement away — single-assignment local dataflow,
+which is bounded work and is on the list. The last row is a defect in the
+subject, not in the analyser.
+
+### Reversing this
+
+Drop `funcs` from the three `_could_be_nonzero` call sites and the analyser
+returns to treating every call as opaque, i.e. to 12/47. The signal that the
+*default* should flip is the residue growing rather than shrinking: if new gates
+keep landing in shapes the analyser cannot read, then those shapes are the
+convention and the analyser is the outlier.
+
+---
+
 ## 806. The file chooser stores no size of its own, and lets an explicit scroll leave the selection off screen
 
 **Date:** 2026-09-03

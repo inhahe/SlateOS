@@ -6930,6 +6930,7 @@ name = "habits"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -10041,6 +10042,7 @@ version = "0.1.0"
 dependencies = [
  "diffcore",
  "guitk",
+ "oswindow",
  "safeio",
  "scratchdir",
 ]
@@ -12684,6 +12686,7 @@ version = "0.1.0"
 dependencies = [
  "byteread",
  "guitk",
+ "oswindow",
  "safeio",
  "scratchdir",
 ]
@@ -14606,6 +14609,7 @@ name = "regextester"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -16395,6 +16399,7 @@ name = "soundrecorder"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

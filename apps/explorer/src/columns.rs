@@ -459,8 +459,11 @@ impl ColumnManager {
         if len == 0 {
             return;
         }
-        let from = from.min(len - 1);
-        let to = to.min(len - 1);
+        // `saturating_sub` rather than `- 1` under the `len == 0` return
+        // above: the guard and the subtraction are then one expression.
+        let last = len.saturating_sub(1);
+        let from = from.min(last);
+        let to = to.min(last);
         if from == to {
             return;
         }
@@ -1269,7 +1272,7 @@ pub fn render_column_header(manager: &ColumnManager, total_width: f32) -> Vec<Re
         }
 
         // Column separator line.
-        if i + 1 < active.len() {
+        if i.saturating_add(1) < active.len() {
             cmds.push(RenderCommand::Line {
                 x1: x + w,
                 y1: 2.0,
@@ -1527,7 +1530,7 @@ fn resolve_widths(manager: &ColumnManager, total_width: f32) -> Vec<f32> {
                 }
                 ColumnWidth::Flexible { .. } => {
                     widths.push(0.0); // placeholder
-                    flex_count += 1;
+                    flex_count = flex_count.saturating_add(1);
                 }
             }
         } else {
@@ -1559,7 +1562,11 @@ fn path_extension(path: &str) -> String {
     // Only treat text after the last '.' as an extension if the path
     // actually contains a dot and the dot is not the first character.
     match path.rfind('.') {
-        Some(pos) if pos > 0 && pos + 1 < path.len() => path[pos + 1..].to_lowercase(),
+        Some(pos) if pos > 0 => pos
+            .checked_add(1)
+            .and_then(|start| path.get(start..))
+            .unwrap_or_default()
+            .to_lowercase(),
         _ => String::new(),
     }
 }
@@ -1579,7 +1586,7 @@ fn format_number(n: i64) -> String {
         return n.to_string();
     }
     let s = n.abs().to_string();
-    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    let mut result = String::with_capacity(s.len().saturating_add(s.len() / 3));
     for (i, ch) in s.chars().rev().enumerate() {
         if i > 0 && i % 3 == 0 {
             result.push(',');

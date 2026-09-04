@@ -25,6 +25,10 @@
 //! - 5 sample habits pre-loaded
 
 use guitk::color::Color;
+use guitk::event::{Event, Key, KeyEvent};
+use guitk::render::RenderTree;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
 // The shared civil-date arithmetic. This app used to carry its own copy: a
 // Zeller's congruence for the weekday, a *separate* Rata Die day number for
 // differences (offset by -307 rather than the -1 the same formula uses two
@@ -206,7 +210,7 @@ impl Date {
         // which is exactly the question, rather than reconstructing it from a
         // 0=Sunday index with a special case for Sunday itself.
         let back = self.weekday().days_since(Weekday::Monday);
-        self.add_days(-i32::try_from(back).unwrap_or(0))
+        self.add_days(i32::try_from(back).unwrap_or(0).saturating_neg())
     }
 
     fn format_short(self) -> String {
@@ -405,7 +409,7 @@ impl Habit {
         let mut d = today;
         loop {
             if self.is_checked_on(d) {
-                streak += 1;
+                streak = streak.saturating_add(1);
                 d = d.add_days(-1);
             } else if d == today {
                 // Today not yet checked in -- check yesterday
@@ -426,7 +430,7 @@ impl Habit {
         loop {
             let count = self.completions_in_week(week_start);
             if count >= target {
-                streak += 1;
+                streak = streak.saturating_add(1);
                 week_start = week_start.add_days(-7);
             } else if week_start == today.week_start_monday() {
                 // Current week is incomplete, check previous
@@ -443,7 +447,7 @@ impl Habit {
         for day_offset in 0..7 {
             let d = week_monday.add_days(day_offset);
             if self.is_checked_on(d) {
-                count += 1;
+                count = count.saturating_add(1);
             }
         }
         count
@@ -467,8 +471,13 @@ impl Habit {
         let mut best = 1u32;
         let mut current = 1u32;
         for i in 1..sorted.len() {
-            if sorted[i].days_since(sorted[i - 1]) == 1 {
-                current += 1;
+            let (Some(this), Some(prev)) =
+                (sorted.get(i), i.checked_sub(1).and_then(|j| sorted.get(j)))
+            else {
+                continue;
+            };
+            if this.days_since(*prev) == 1 {
+                current = current.saturating_add(1);
                 if current > best {
                     best = current;
                 }
@@ -494,7 +503,7 @@ impl Habit {
         while week_start.to_day_number() < end.to_day_number() {
             let count = self.completions_in_week(week_start);
             if count >= target {
-                current += 1;
+                current = current.saturating_add(1);
                 if current > best {
                     best = current;
                 }
@@ -515,7 +524,7 @@ impl Habit {
                 }
                 let mut completed = 0u32;
                 for i in 0..days {
-                    let d = today.add_days(-(i as i32));
+                    let d = today.add_days((i as i32).saturating_neg());
                     if d.to_day_number() < self.created.to_day_number() {
                         // Don't count days before creation
                         let actual_days = i;
@@ -526,7 +535,7 @@ impl Habit {
                         };
                     }
                     if self.is_checked_on(d) {
-                        completed += 1;
+                        completed = completed.saturating_add(1);
                     }
                 }
                 completed as f32 / days as f32
@@ -544,7 +553,7 @@ impl Habit {
                 for _ in 0..weeks {
                     let count = self.completions_in_week(ws);
                     if count >= target {
-                        met += 1;
+                        met = met.saturating_add(1);
                     }
                     ws = ws.add_days(-7);
                 }
@@ -555,7 +564,7 @@ impl Habit {
 
     /// Completion rate over all time since creation.
     fn completion_rate_alltime(&self, today: Date) -> f32 {
-        let total_days = today.days_since(self.created) + 1;
+        let total_days = today.days_since(self.created).saturating_add(1);
         if total_days <= 0 {
             return 0.0;
         }
@@ -665,7 +674,7 @@ impl HabitTrackerApp {
             Frequency::Daily,
             base,
         );
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         // Simulate some check-ins over the last 45 days (about 70% completion)
         for i in 0..45 {
             let d = base.add_days(i);
@@ -684,7 +693,7 @@ impl HabitTrackerApp {
             Frequency::Daily,
             base,
         );
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         for i in 0..45 {
             let d = base.add_days(i);
             if i % 3 != 2 {
@@ -702,7 +711,7 @@ impl HabitTrackerApp {
             Frequency::Daily,
             base,
         );
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         for i in 0..45 {
             let d = base.add_days(i);
             if i % 5 != 4 {
@@ -720,7 +729,7 @@ impl HabitTrackerApp {
             Frequency::Weekly(3),
             base,
         );
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         for i in 0..45 {
             let d = base.add_days(i);
             let dow = d.day_of_week();
@@ -739,7 +748,7 @@ impl HabitTrackerApp {
             Frequency::Daily,
             base,
         );
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         for i in 0..45 {
             let d = base.add_days(i);
             if i % 4 != 3 {
@@ -798,7 +807,7 @@ impl HabitTrackerApp {
             frequency,
             self.today,
         );
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         self.habits.push(habit);
         self.create_name.clear();
         self.create_description.clear();
@@ -811,10 +820,12 @@ impl HabitTrackerApp {
 
     fn delete_habit(&mut self, idx: usize) {
         if idx < self.habits.len() {
-            let name = self.habits[idx].name.clone();
+            let Some(name) = self.habits.get(idx).map(|h| h.name.clone()) else {
+                return;
+            };
             self.habits.remove(idx);
             if self.selected_habit >= self.active_habits().len() && self.selected_habit > 0 {
-                self.selected_habit -= 1;
+                self.selected_habit = self.selected_habit.saturating_sub(1);
             }
             self.status_msg = format!("Deleted: {name}");
         }
@@ -837,7 +848,9 @@ impl HabitTrackerApp {
     fn toggle_check_in_selected(&mut self) {
         let active = self.active_habits();
         if let Some(&habit_idx) = active.get(self.selected_habit) {
-            let date = self.today.add_days(-(self.selected_day_col as i32));
+            let date = self
+                .today
+                .add_days((self.selected_day_col as i32).saturating_neg());
             if let Some(h) = self.habits.get_mut(habit_idx) {
                 h.toggle_check_in(date);
                 let checked = h.is_checked_on(date);
@@ -878,7 +891,7 @@ impl HabitTrackerApp {
                 self.status_msg = String::from("New habit -- fill in details");
             }
             "Up" if self.selected_habit > 0 => {
-                self.selected_habit -= 1;
+                self.selected_habit = self.selected_habit.saturating_sub(1);
             }
             "Down" => {
                 let max = match self.screen {
@@ -886,26 +899,26 @@ impl HabitTrackerApp {
                     Screen::Archive => self.archived_habits().len(),
                     _ => 0,
                 };
-                if max > 0 && self.selected_habit < max - 1 {
-                    self.selected_habit += 1;
+                if self.selected_habit.saturating_add(1) < max {
+                    self.selected_habit = self.selected_habit.saturating_add(1);
                 }
             }
             "Left" => {
                 if self.screen == Screen::Dashboard && self.selected_day_col < 6 {
-                    self.selected_day_col += 1;
+                    self.selected_day_col = self.selected_day_col.saturating_add(1);
                 }
                 if self.screen == Screen::HeatMap && self.heatmap_habit_idx > 0 {
-                    self.heatmap_habit_idx -= 1;
+                    self.heatmap_habit_idx = self.heatmap_habit_idx.saturating_sub(1);
                 }
             }
             "Right" => {
                 if self.screen == Screen::Dashboard && self.selected_day_col > 0 {
-                    self.selected_day_col -= 1;
+                    self.selected_day_col = self.selected_day_col.saturating_sub(1);
                 }
                 if self.screen == Screen::HeatMap {
                     let active = self.active_habits();
-                    if !active.is_empty() && self.heatmap_habit_idx < active.len() - 1 {
-                        self.heatmap_habit_idx += 1;
+                    if self.heatmap_habit_idx.saturating_add(1) < active.len() {
+                        self.heatmap_habit_idx = self.heatmap_habit_idx.saturating_add(1);
                     }
                 }
             }
@@ -939,8 +952,8 @@ impl HabitTrackerApp {
                     None => Some(Category::ALL[0]),
                     Some(cat) => {
                         let idx = Category::ALL.iter().position(|&c| c == cat).unwrap_or(0);
-                        if idx + 1 < Category::ALL.len() {
-                            Some(Category::ALL[idx + 1])
+                        if let Some(next) = idx.checked_add(1) {
+                            Category::ALL.get(next).copied()
                         } else {
                             None
                         }
@@ -973,13 +986,21 @@ impl HabitTrackerApp {
             }
             "Tab" => {
                 // Cycle category
-                self.create_category_idx = (self.create_category_idx + 1) % Category::ALL.len();
+                self.create_category_idx = self
+                    .create_category_idx
+                    .saturating_add(1)
+                    .checked_rem(Category::ALL.len())
+                    .unwrap_or(0);
             }
             "F1" => {
                 self.create_frequency_daily = !self.create_frequency_daily;
             }
             "F2" => {
-                self.create_weekly_count = (self.create_weekly_count % 7) + 1;
+                self.create_weekly_count = self
+                    .create_weekly_count
+                    .checked_rem(7)
+                    .unwrap_or(0)
+                    .saturating_add(1);
             }
             "Backspace" => {
                 self.create_name.pop();
@@ -1002,7 +1023,7 @@ impl HabitTrackerApp {
             if let Some(h) = self.habits.get(idx)
                 && h.is_checked_on(self.today)
             {
-                done += 1;
+                done = done.saturating_add(1);
             }
         }
         (done, total)
@@ -1058,7 +1079,7 @@ impl HabitTrackerApp {
         let mut result = Vec::with_capacity(days as usize);
         if let Some(h) = self.habits.get(habit_idx) {
             for i in (0..days).rev() {
-                let d = self.today.add_days(-(i as i32));
+                let d = self.today.add_days((i as i32).saturating_neg());
                 result.push((d, h.is_checked_on(d)));
             }
         }
@@ -1076,7 +1097,78 @@ impl HabitTrackerApp {
 
     // ── Rendering ───────────────────────────────────────────────────
 
-    fn render(&self) -> Vec<RenderCommand> {
+    /// Route one event.
+    ///
+    /// **This app had no event handling of any kind until 2026-09-03.** Its
+    /// `handle_key` takes a `&str` — a third key vocabulary beside
+    /// `guitk::event::Key` and the wire's — and nothing in the program produced
+    /// one, so every keystroke test handed itself the string it wanted. The
+    /// same shape as `apps/paint` and `apps/soundrecorder`.
+    ///
+    /// Returns whether anything changed, which `App::on_event` turns into a
+    /// repaint.
+    fn handle_event(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Resize { width, height } => {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    self.width = *width as f32;
+                    self.height = *height as f32;
+                }
+                true
+            }
+            Event::Key(key) if key.pressed => {
+                let Some(name) = Self::key_name(key) else {
+                    return false;
+                };
+                if self.show_create_form {
+                    self.handle_create_form_key(&name, key.modifiers.ctrl);
+                } else {
+                    self.handle_key(&name, key.modifiers.ctrl, key.modifiers.shift);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The string this app's handlers speak, for a toolkit key.
+    ///
+    /// Translating at the seam rather than converting the handlers, for the
+    /// same reason `apps/paint` does: the handlers' meaning is "the user typed
+    /// `n`", which is a different question from "the N key went down", and the
+    /// two coincide only on a US layout. When `TD-ONLY-ONE-KEYBOARD-LAYOUT` is
+    /// closed this is the one function that has to learn about layouts.
+    ///
+    /// `text` first, so a shifted key and a dead-key sequence arrive correctly
+    /// spelled; the named keys are the ones that produce no text at all.
+    fn key_name(key: &KeyEvent) -> Option<String> {
+        let named = match key.key {
+            Key::Up => "Up",
+            Key::Down => "Down",
+            Key::Left => "Left",
+            Key::Right => "Right",
+            Key::Space => "Space",
+            Key::Escape => "Escape",
+            Key::Enter => "Return",
+            Key::Tab => "Tab",
+            Key::Backspace => "Backspace",
+            Key::PageUp => "PageUp",
+            Key::PageDown => "PageDown",
+            Key::F1 => "F1",
+            Key::F2 => "F2",
+            _ => {
+                // Anything else is only interesting as the character it typed.
+                let typed = key.text.chars().next()?;
+                return Some(typed.to_string());
+            }
+        };
+        Some(named.to_string())
+    }
+
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`.
+    fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(512);
 
         // Background
@@ -1245,7 +1337,7 @@ impl HabitTrackerApp {
             cmds.push(RenderCommand::Text {
                 x: tx + 8.0,
                 y: y + 10.0,
-                text: format!("{} {}", i + 1, tab.label()),
+                text: format!("{} {}", i.saturating_add(1), tab.label()),
                 font_size: 11.0,
                 color: fg,
                 font_weight: if selected {
@@ -1302,8 +1394,8 @@ impl HabitTrackerApp {
         let name_col_w = 200.0;
         let days_start_x = name_col_w + 80.0;
         for col in 0..7 {
-            let d = self.today.add_days(-(col as i32));
-            let cx = days_start_x + (6 - col) as f32 * Self::DAY_COL_W;
+            let d = self.today.add_days((col as i32).saturating_neg());
+            let cx = days_start_x + (6i32.saturating_sub(col as i32)) as f32 * Self::DAY_COL_W;
             let label = if col == 0 {
                 String::from("Today")
             } else {
@@ -1435,8 +1527,8 @@ impl HabitTrackerApp {
 
             // Check-in dots for last 7 days
             for col in 0..7 {
-                let d = self.today.add_days(-(col as i32));
-                let cx = days_start_x + (6 - col) as f32 * Self::DAY_COL_W;
+                let d = self.today.add_days((col as i32).saturating_neg());
+                let cx = days_start_x + (6i32.saturating_sub(col as i32)) as f32 * Self::DAY_COL_W;
                 let checked = habit.is_checked_on(d);
                 let cell_selected = is_selected && col == self.selected_day_col;
 
@@ -1475,7 +1567,7 @@ impl HabitTrackerApp {
                         height: dot_size + 4.0,
                         color: BLUE,
                         line_width: 2.0,
-                        corner_radii: CornerRadii::all((dot_size + 4.0) / 2.0),
+                        corner_radii: CornerRadii::all(dot_size.midpoint(4.0)),
                     });
                 }
             }
@@ -2252,14 +2344,61 @@ fn rate_color(rate: f32) -> Color {
     }
 }
 
-fn main() {
-    let _app = HabitTrackerApp::new();
+impl App for HabitTrackerApp {
+    fn title(&self) -> String {
+        "Habits".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (self.width as u32, self.height as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        if self.handle_event(event) {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.width = width;
+        self.height = height;
+        let mut tree = RenderTree::new();
+        tree.commands = self.render_commands();
+        tree
+    }
+
+    // No `tick_interval`: nothing here ages. The day advances by a keystroke
+    // (`d` / `a`), not by a clock — deliberately, since a habit tracker that
+    // rolled over at midnight while the window was open would move the user's
+    // check-ins under them. Checked by grepping for `elapsed` and finding none.
+}
+
+fn main() -> ExitCode {
+    app::launch("habits", &mut HabitTrackerApp::new())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
+    // A test that overflows or indexes out of range should fail loudly and
+    // point at the line that did it — that is the diagnosis. The defensive
+    // lints exist to keep panics out of code that runs on a user's data.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     // ── Date tests ──────────────────────────────────────────────────
@@ -2456,7 +2595,7 @@ mod tests {
     fn day_numbers_are_days_since_the_epoch() {
         for (year, month, day, want) in [
             (1970, 1, 1, 0),
-            (1969, 12, 31, -1), // before the epoch: negative, not clamped
+            (1969, 12, 31, -1),  // before the epoch: negative, not clamped
             (2000, 3, 1, 11017), // just past a leap day in a century-leap year
             (2026, 1, 1, 20454),
             (2026, 12, 31, 20818),
@@ -3347,7 +3486,7 @@ mod tests {
     #[test]
     fn test_render_dashboard() {
         let app = HabitTrackerApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
         assert!(cmds.len() > 20);
     }
@@ -3356,7 +3495,7 @@ mod tests {
     fn test_render_statistics() {
         let mut app = HabitTrackerApp::new();
         app.screen = Screen::Statistics;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3364,7 +3503,7 @@ mod tests {
     fn test_render_archive_empty() {
         let mut app = HabitTrackerApp::new();
         app.screen = Screen::Archive;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3374,7 +3513,7 @@ mod tests {
         app.screen = Screen::Archive;
         app.habits[0].archived = true;
         app.habits[1].archived = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10);
     }
 
@@ -3382,7 +3521,7 @@ mod tests {
     fn test_render_heatmap() {
         let mut app = HabitTrackerApp::new();
         app.screen = Screen::HeatMap;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3390,7 +3529,7 @@ mod tests {
     fn test_render_create_form() {
         let mut app = HabitTrackerApp::new();
         app.show_create_form = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 30);
     }
 
@@ -3398,7 +3537,7 @@ mod tests {
     fn test_render_empty_dashboard() {
         let mut app = HabitTrackerApp::new();
         app.habits.clear();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3407,7 +3546,7 @@ mod tests {
         let mut app = HabitTrackerApp::new();
         app.screen = Screen::HeatMap;
         app.habits.clear();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3415,7 +3554,7 @@ mod tests {
     fn test_render_with_category_filter() {
         let mut app = HabitTrackerApp::new();
         app.category_filter = Some(Category::Fitness);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3423,7 +3562,7 @@ mod tests {
     fn test_render_with_scroll() {
         let mut app = HabitTrackerApp::new();
         app.scroll_offset = 100.0;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3666,5 +3805,124 @@ mod tests {
                 "a name that did not fit must be marked as cut, got {name:?}"
             );
         }
+    }
+
+    // ── Events ──────────────────────────────────────────────────────
+
+    fn key(k: Key, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: text.to_string(),
+        })
+    }
+
+    /// A digit switches screens, through the real event path.
+    ///
+    /// This app had no event handling until 2026-09-03: `handle_key` takes a
+    /// `&str` and nothing produced one, so every keystroke test handed itself
+    /// the string it wanted. That proves the match arms and says nothing about
+    /// whether a keystroke can reach them.
+    #[test]
+    fn a_digit_switches_screens_through_the_event_path() {
+        let mut app = HabitTrackerApp::new();
+        assert!(app.handle_event(&key(Key::Num2, "2")));
+        assert_eq!(app.screen, Screen::Statistics);
+        assert!(app.handle_event(&key(Key::Num1, "1")));
+        assert_eq!(app.screen, Screen::Dashboard);
+    }
+
+    /// The named keys arrive under the names the handlers match on.
+    ///
+    /// The translation is the whole risk here: a key whose name does not match
+    /// what `handle_key` expects is silently ignored, and the app looks like it
+    /// has no arrow keys rather than like it has a typo.
+    #[test]
+    fn every_named_key_translates_to_the_string_the_handler_expects() {
+        for (k, want) in [
+            (Key::Up, "Up"),
+            (Key::Down, "Down"),
+            (Key::Left, "Left"),
+            (Key::Right, "Right"),
+            (Key::Space, "Space"),
+            (Key::Escape, "Escape"),
+            (Key::Enter, "Return"),
+            (Key::Tab, "Tab"),
+            (Key::Backspace, "Backspace"),
+            (Key::PageUp, "PageUp"),
+            (Key::PageDown, "PageDown"),
+            (Key::F1, "F1"),
+            (Key::F2, "F2"),
+        ] {
+            let ev = KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::new(),
+            };
+            assert_eq!(
+                HabitTrackerApp::key_name(&ev).as_deref(),
+                Some(want),
+                "{k:?} did not translate to {want}"
+            );
+        }
+    }
+
+    /// A printable key arrives as the character it typed, not as its key name.
+    ///
+    /// `text` first is what makes a shifted key and a dead-key sequence arrive
+    /// correctly spelled; asking the `Key` enum for a letter cannot.
+    #[test]
+    fn a_printable_key_arrives_as_the_character_it_typed() {
+        let ev = KeyEvent {
+            key: Key::N,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: "n".to_string(),
+        };
+        assert_eq!(HabitTrackerApp::key_name(&ev).as_deref(), Some("n"));
+    }
+
+    /// A key release is not a press.
+    #[test]
+    fn a_key_release_changes_nothing() {
+        let mut app = HabitTrackerApp::new();
+        let before = app.screen;
+        assert!(!app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Num2,
+            pressed: false,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: "2".to_string(),
+        })));
+        assert_eq!(app.screen, before);
+    }
+
+    /// Arrow keys move the selection and stop at both ends.
+    ///
+    /// The bounds were `self.selected_habit > 0` and
+    /// `self.selected_habit < max - 1` — a `- 1` on a `usize` guarded by a
+    /// separate `max > 0`. They are `saturating_*` now, and this pins that the
+    /// ends still hold.
+    #[test]
+    fn the_selection_stops_at_both_ends() {
+        let mut app = HabitTrackerApp::new();
+        let count = app.active_habits().len();
+        assert!(
+            count >= 2,
+            "the sample data needs two habits to move between"
+        );
+
+        app.selected_habit = 0;
+        app.handle_event(&key(Key::Up, ""));
+        assert_eq!(app.selected_habit, 0, "Up ran off the top");
+
+        app.selected_habit = count.saturating_sub(1);
+        app.handle_event(&key(Key::Down, ""));
+        assert_eq!(
+            app.selected_habit,
+            count.saturating_sub(1),
+            "Down ran off the bottom"
+        );
     }
 }

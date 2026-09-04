@@ -5,20 +5,45 @@
 //!
 //! ## Implementation
 //!
-//! Uses our dirent module for directory reading.  Recursion depth is
-//! limited by the `nopenfd` parameter (capped at 32 to prevent stack
-//! overflow in deeply nested trees).
+//! Both entry points drive one walker ([`Walker`]) over our dirent
+//! module, differing only in how an entry is delivered.  They used to be
+//! two near-identical recursions, which is exactly how they came to
+//! disagree: `nftw` parsed [`FTW_PHYS`] and then walked as if it had not
+//! been given.
+//!
+//! One directory stream is held open per level, and `nopenfd` is
+//! therefore both the descriptor budget and the depth at which the walk
+//! stops (capped at [`MAX_DEPTH`]).  The path is a single buffer in the
+//! walker, mutated in place as it descends and ascends, so recursion
+//! carries a few words per level rather than 4 KiB.
+//!
+//! ## Nothing is skipped in silence
+//!
+//! Every entry the walk cannot handle is *reported*, because a traversal
+//! that quietly omits files is worse than one that fails: the caller
+//! believes it saw everything.  All three of these used to be a bare
+//! `return 0` or `continue`:
+//!
+//! - A directory `opendir` refuses (typically `EACCES`) is reported
+//!   [`FTW_DNR`], which is what POSIX has always said and what this
+//!   module never once produced.
+//! - A directory below the descriptor budget is reported [`FTW_DNR`]
+//!   with `errno` = `ENOMEM` — a resource failure, not a property of the
+//!   directory.
+//! - A child whose path would exceed [`PATH_MAX`] ends the walk with -1
+//!   and `ENAMETOOLONG`, since POSIX has no type flag that could report
+//!   it per-entry.
 //!
 //! ## Limitations
 //!
 //! - Maximum path length is 4096 bytes.
-//! - `FTW_MOUNT` flag is not supported (cross-device traversal cannot
-//!   be detected without statvfs comparison).
-//! - Symbolic link detection depends on `lstat` (uses `stat` as
-//!   fallback, treating symlinks as regular files).
+//! - [`FTW_MOUNT`] and [`FTW_CHDIR`] are **rejected** with `EINVAL`
+//!   rather than accepted and ignored — see [`UNSUPPORTED_NFTW_FLAGS`].
+//! - No cycle detection: without [`FTW_PHYS`], a symlink loop walks
+//!   until it hits [`MAX_DEPTH`] and stops there with [`FTW_DNR`].
 
 use crate::errno;
-use crate::fcntl::{S_IFDIR, S_IFMT};
+use crate::fcntl::{S_IFDIR, S_IFLNK, S_IFMT};
 use crate::stat::Stat;
 
 // ---------------------------------------------------------------------------
@@ -65,6 +90,207 @@ const PATH_MAX: usize = 4096;
 const MAX_DEPTH: i32 = 32;
 
 // ---------------------------------------------------------------------------
+// The walk
+// ---------------------------------------------------------------------------
+
+/// What one walk was asked for, carried down the tree unchanged.
+#[derive(Clone, Copy)]
+struct Walk {
+    /// The deepest level at which a directory will be opened.  A
+    /// directory at this level is reported [`FTW_DNR`] instead of being
+    /// descended into — see [`Walker::entry`].
+    depth_limit: i32,
+    /// Report a directory *after* its children ([`FTW_DEPTH`]).
+    depth_first: bool,
+    /// Do not follow symbolic links ([`FTW_PHYS`]).
+    physical: bool,
+}
+
+/// One traversal in progress.
+///
+/// The path buffer lives here, **once**, and is mutated in place as the
+/// walk descends and ascends — the same discipline [`crate::fts`] uses.
+/// It used to be a `[u8; PATH_MAX]` local inside the recursive function,
+/// which meant 4 KiB of stack per level and 128 KiB at the depth cap; the
+/// module's own header cited stack overflow as the reason for the cap,
+/// while the code was what made the stack expensive.
+struct Walker<F> {
+    /// NUL-terminated path of the entry currently being considered.
+    path: [u8; PATH_MAX],
+    opts: Walk,
+    /// Where an entry is delivered.  Takes `(path, stat, typeflag,
+    /// level)`; `nftw` builds its [`FTW`] from the level and the path,
+    /// and `ftw` throws both away.
+    emit: F,
+}
+
+impl<F> Walker<F>
+where
+    F: FnMut(*const u8, *const Stat, i32, i32) -> i32,
+{
+    /// Deliver one entry to the caller's callback.
+    fn call(&mut self, sb: *const Stat, typeflag: i32, level: i32) -> i32 {
+        // `as_ptr` ends the borrow of `self.path` before `self.emit` is
+        // borrowed mutably, which is what lets both live on `self`.
+        let p = self.path.as_ptr();
+        (self.emit)(p, sb, typeflag, level)
+    }
+
+    /// Consider the entry currently named by `self.path[..len]`.
+    ///
+    /// Returns 0 when the walk should continue, the callback's non-zero
+    /// value when the caller asked to stop, or -1 with `errno` set on a
+    /// failure that ends the walk.
+    fn entry(&mut self, len: usize, level: i32) -> i32 {
+        let mut sb: Stat = unsafe { core::mem::zeroed() };
+        let p = self.path.as_ptr();
+
+        // FTW_PHYS is the difference between describing the link and
+        // describing what it points at — and, below, between walking
+        // into a linked directory and not.  It used to be parsed and
+        // then dropped on the floor, so `nftw(path, cb, n, FTW_PHYS)`
+        // followed every symlink it was explicitly told not to follow.
+        let rc = if self.opts.physical {
+            crate::file::lstat(p, &raw mut sb)
+        } else {
+            crate::file::stat(p, &raw mut sb)
+        };
+
+        if rc < 0 {
+            // Without FTW_PHYS the stat followed the link, so a failure
+            // here may be a link with nothing on the far end — which
+            // POSIX gives its own flag, because "this name is a dangling
+            // symlink" and "I could not find out what this name is" are
+            // different answers.
+            if !self.opts.physical {
+                let mut lb: Stat = unsafe { core::mem::zeroed() };
+                if crate::file::lstat(p, &raw mut lb) >= 0 && (lb.st_mode & S_IFMT) == S_IFLNK {
+                    return self.call(&raw const lb, FTW_SLN, level);
+                }
+            }
+            return self.call(&raw const sb, FTW_NS, level);
+        }
+
+        if self.opts.physical && (sb.st_mode & S_IFMT) == S_IFLNK {
+            return self.call(&raw const sb, FTW_SL, level);
+        }
+
+        if (sb.st_mode & S_IFMT) != S_IFDIR {
+            return self.call(&raw const sb, FTW_F, level);
+        }
+
+        // A directory.  Open it *before* announcing it: POSIX says an
+        // unreadable directory is reported as FTW_DNR, and FTW_DNR
+        // replaces FTW_D rather than following it.  Opening afterwards
+        // is what left `FTW_DNR` a constant this module defined, tested
+        // the numeric value of, and never once produced — an EACCES
+        // directory was skipped in silence, and a `du` built on this
+        // under-reported without a word.
+        let dir = if level >= self.opts.depth_limit {
+            // Out of descriptor budget.  Nothing is wrong with the
+            // directory, so this is a resource failure: ENOMEM, the same
+            // answer `fts` gives when it runs out of traversal stack.
+            // It used to `return 0` — the subtree vanished, and with
+            // FTW_DEPTH the FTW_DP still fired, so a caller doing a
+            // recursive delete removed the directory it had never
+            // emptied.
+            errno::set_errno(errno::ENOMEM);
+            core::ptr::null_mut()
+        } else {
+            crate::dirent::opendir(p)
+        };
+        if dir.is_null() {
+            return self.call(&raw const sb, FTW_DNR, level);
+        }
+
+        if !self.opts.depth_first {
+            let ret = self.call(&raw const sb, FTW_D, level);
+            if ret != 0 {
+                crate::dirent::closedir(dir);
+                return ret;
+            }
+        }
+
+        let ret = self.children(dir, len, level);
+        crate::dirent::closedir(dir);
+        if ret != 0 {
+            return ret;
+        }
+
+        if self.opts.depth_first {
+            return self.call(&raw const sb, FTW_DP, level);
+        }
+        0
+    }
+
+    /// Walk the children of the directory `dir`, whose path occupies
+    /// `self.path[..parent_len]`.
+    fn children(&mut self, dir: *mut crate::dirent::Dir, parent_len: usize, level: i32) -> i32 {
+        loop {
+            let ent = crate::dirent::readdir(dir);
+            if ent.is_null() {
+                // End of listing.  `readdir` reports errors the same
+                // way, but a `Dir` here is a snapshot taken at
+                // `opendir`, so there is no read left to fail.
+                return 0;
+            }
+            // SAFETY: readdir returned a valid entry pointer.
+            let name = unsafe { core::ptr::addr_of!((*ent).d_name).cast::<u8>() };
+            if is_dot_or_dotdot(name) {
+                continue;
+            }
+
+            let child_len = append_component(&mut self.path, parent_len, name);
+            if child_len == 0 {
+                // POSIX has no type flag for "the name is too long to
+                // build", so there is no way to report this entry and
+                // keep going.  glibc fails the whole walk; skipping it
+                // silently — which is what this did — turns a truncated
+                // traversal into a successful one.
+                errno::set_errno(errno::ENAMETOOLONG);
+                return -1;
+            }
+
+            let ret = self.entry(child_len, level.wrapping_add(1));
+            // Cut the path back to the parent before the next sibling.
+            // The recursion below us extended it; nothing else does.
+            if let Some(slot) = self.path.get_mut(parent_len) {
+                *slot = 0;
+            }
+            if ret != 0 {
+                return ret;
+            }
+        }
+    }
+}
+
+/// Seed a walker with `root` and run it.
+fn run<F>(root: *const u8, opts: Walk, emit: F) -> i32
+where
+    F: FnMut(*const u8, *const Stat, i32, i32) -> i32,
+{
+    let root_len = unsafe { crate::string::strlen(root) };
+    if root_len >= PATH_MAX {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    }
+    let mut w = Walker {
+        path: [0u8; PATH_MAX],
+        opts,
+        emit,
+    };
+    let mut i: usize = 0;
+    while i < root_len {
+        if let Some(slot) = w.path.get_mut(i) {
+            // SAFETY: i < strlen(root), so this byte is inside the string.
+            *slot = unsafe { *root.add(i) };
+        }
+        i = i.wrapping_add(1);
+    }
+    w.entry(root_len, 0)
+}
+
+// ---------------------------------------------------------------------------
 // ftw
 // ---------------------------------------------------------------------------
 
@@ -77,98 +303,42 @@ pub type FtwFn = extern "C" fn(*const u8, *const Stat, i32) -> i32;
 /// Walk a file tree, calling `callback` for each entry.
 ///
 /// `nopenfd` limits the number of simultaneously open directory
-/// handles (used to limit recursion depth).
+/// handles.  One is held per level, so it is also the depth at which the
+/// walk stops — a directory below it is reported [`FTW_DNR`] with
+/// `errno` = `ENOMEM` rather than silently skipped.  Capped at
+/// [`MAX_DEPTH`].
 ///
-/// Returns 0 on success, -1 on error, or the non-zero value
-/// returned by `callback`.
+/// Returns 0 on success, -1 with `errno` set on error, or the non-zero
+/// value returned by `callback`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ftw(dirpath: *const u8, callback: FtwFn, nopenfd: i32) -> i32 {
     if dirpath.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-
-    let depth_limit = nopenfd.min(MAX_DEPTH);
-    ftw_recurse(dirpath, callback, depth_limit, 0)
-}
-
-/// Internal recursive tree walk for `ftw`.
-fn ftw_recurse(path: *const u8, callback: FtwFn, depth_limit: i32, current_depth: i32) -> i32 {
-    // Stat the path.
-    let mut sb: Stat = unsafe { core::mem::zeroed() };
-    let stat_result = crate::file::stat(path, &raw mut sb);
-
-    if stat_result < 0 {
-        // stat failed — call with FTW_NS.
-        return callback(path, &raw const sb, FTW_NS);
+    if nopenfd < 1 {
+        // A walk that may open no directory cannot walk.
+        errno::set_errno(errno::EINVAL);
+        return -1;
     }
 
-    // Check if it's a directory.
-    let is_dir = (sb.st_mode & S_IFMT) == S_IFDIR;
-
-    if !is_dir {
-        // Regular file (or special file).
-        return callback(path, &raw const sb, FTW_F);
-    }
-
-    // It's a directory — call callback first (pre-order).
-    let ret = callback(path, &raw const sb, FTW_D);
-    if ret != 0 {
-        return ret;
-    }
-
-    // Don't recurse if we've hit the depth limit.
-    if current_depth >= depth_limit {
-        return 0;
-    }
-
-    // Open and iterate the directory.
-    walk_directory(path, callback, depth_limit, current_depth)
-}
-
-/// Open a directory and walk its children.
-fn walk_directory(path: *const u8, callback: FtwFn, depth_limit: i32, current_depth: i32) -> i32 {
-    let dir = crate::dirent::opendir(path);
-    if dir.is_null() {
-        return 0; // Can't open — skip (already called FTW_D above).
-    }
-
-    loop {
-        let entry = crate::dirent::readdir(dir);
-        if entry.is_null() {
-            break;
-        }
-
-        // Get entry name.
-        // SAFETY: readdir returned a valid entry.
-        let d_name_ptr = unsafe { core::ptr::addr_of!((*entry).d_name).cast::<u8>() };
-
-        // Skip "." and "..".
-        if is_dot_or_dotdot(d_name_ptr) {
-            continue;
-        }
-
-        // Build child path: path + "/" + d_name.
-        let mut child_path = [0u8; PATH_MAX];
-        let child_len = build_child_path(path, d_name_ptr, &mut child_path);
-        if child_len == 0 {
-            continue; // Path too long — skip.
-        }
-
-        let ret = ftw_recurse(
-            child_path.as_ptr(),
-            callback,
-            depth_limit,
-            current_depth.wrapping_add(1),
-        );
-        if ret != 0 {
-            crate::dirent::closedir(dir);
-            return ret;
-        }
-    }
-
-    crate::dirent::closedir(dir);
-    0
+    run(
+        dirpath,
+        Walk {
+            depth_limit: nopenfd.min(MAX_DEPTH),
+            depth_first: false,
+            physical: false,
+        },
+        // `ftw` has no FTW_SL/FTW_SLN/FTW_DP: those are `nftw`'s, and a
+        // caller written against `ftw` will not have a case for them.
+        // Only FTW_SLN can arise here (a dangling symlink, which `ftw`
+        // reports as a failed stat), and folding it here rather than
+        // suppressing it in the walker keeps the walker's answer true.
+        |p, sb, flag, _level| {
+            let flag = if flag == FTW_SLN { FTW_NS } else { flag };
+            callback(p, sb, flag)
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -180,124 +350,53 @@ fn walk_directory(path: *const u8, callback: FtwFn, depth_limit: i32, current_de
 /// Parameters: (pathname, stat_buf, typeflag, ftwbuf).
 pub type NftwFn = extern "C" fn(*const u8, *const Stat, i32, *mut FTW) -> i32;
 
+/// Flags `nftw` cannot honour, and therefore refuses.
+///
+/// Accepting a flag and ignoring it is the worst of the three options: a
+/// caller that passes [`FTW_CHDIR`] uses `ftwbuf->base` as a *relative*
+/// filename, so ignoring it silently points every callback at the wrong
+/// file; a caller that passes [`FTW_MOUNT`] is asking not to cross into
+/// another filesystem, and ignoring that is how a `--one-file-system`
+/// delete walks into a network mount.  Refusing is loud, is trivially
+/// reversible when the flags are implemented, and cannot corrupt
+/// anything.  See design-decisions.md §761.
+const UNSUPPORTED_NFTW_FLAGS: i32 = FTW_MOUNT | FTW_CHDIR;
+
 /// Walk a file tree with extended options.
 ///
-/// Like `ftw` but supports flags (`FTW_DEPTH`, `FTW_PHYS`, etc.)
-/// and provides an `FTW` struct with base offset and depth level.
+/// Supports [`FTW_PHYS`] and [`FTW_DEPTH`].  [`FTW_MOUNT`] and
+/// [`FTW_CHDIR`] are rejected with `EINVAL` — see
+/// [`UNSUPPORTED_NFTW_FLAGS`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nftw(dirpath: *const u8, callback: NftwFn, nopenfd: i32, flags: i32) -> i32 {
     if dirpath.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-
-    let depth_limit = nopenfd.min(MAX_DEPTH);
-    let depth_first = flags & FTW_DEPTH != 0;
-
-    nftw_recurse(dirpath, callback, depth_limit, 0, depth_first)
-}
-
-/// Internal recursive tree walk for `nftw`.
-fn nftw_recurse(
-    path: *const u8,
-    callback: NftwFn,
-    depth_limit: i32,
-    current_depth: i32,
-    depth_first: bool,
-) -> i32 {
-    let mut sb: Stat = unsafe { core::mem::zeroed() };
-    let stat_result = crate::file::stat(path, &raw mut sb);
-
-    let base_offset = find_basename_offset(path);
-    let mut ftw_info = FTW {
-        base: base_offset,
-        level: current_depth,
-    };
-
-    if stat_result < 0 {
-        return callback(path, &raw const sb, FTW_NS, &raw mut ftw_info);
+    if nopenfd < 1 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if flags & UNSUPPORTED_NFTW_FLAGS != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
     }
 
-    let is_dir = (sb.st_mode & S_IFMT) == S_IFDIR;
-
-    if !is_dir {
-        return callback(path, &raw const sb, FTW_F, &raw mut ftw_info);
-    }
-
-    // Pre-order: call before children.
-    if !depth_first {
-        let ret = callback(path, &raw const sb, FTW_D, &raw mut ftw_info);
-        if ret != 0 {
-            return ret;
-        }
-    }
-
-    // Recurse into children (if within depth limit).
-    if current_depth < depth_limit {
-        let ret = nftw_walk_directory(path, callback, depth_limit, current_depth, depth_first);
-        if ret != 0 {
-            return ret;
-        }
-    }
-
-    // Post-order: call after children.
-    if depth_first {
-        let mut dp_info = FTW {
-            base: base_offset,
-            level: current_depth,
-        };
-        return callback(path, &raw const sb, FTW_DP, &raw mut dp_info);
-    }
-
-    0
-}
-
-/// Walk directory children for `nftw`.
-fn nftw_walk_directory(
-    path: *const u8,
-    callback: NftwFn,
-    depth_limit: i32,
-    current_depth: i32,
-    depth_first: bool,
-) -> i32 {
-    let dir = crate::dirent::opendir(path);
-    if dir.is_null() {
-        return 0;
-    }
-
-    loop {
-        let entry = crate::dirent::readdir(dir);
-        if entry.is_null() {
-            break;
-        }
-
-        let d_name_ptr = unsafe { core::ptr::addr_of!((*entry).d_name).cast::<u8>() };
-
-        if is_dot_or_dotdot(d_name_ptr) {
-            continue;
-        }
-
-        let mut child_path = [0u8; PATH_MAX];
-        let child_len = build_child_path(path, d_name_ptr, &mut child_path);
-        if child_len == 0 {
-            continue;
-        }
-
-        let ret = nftw_recurse(
-            child_path.as_ptr(),
-            callback,
-            depth_limit,
-            current_depth.wrapping_add(1),
-            depth_first,
-        );
-        if ret != 0 {
-            crate::dirent::closedir(dir);
-            return ret;
-        }
-    }
-
-    crate::dirent::closedir(dir);
-    0
+    run(
+        dirpath,
+        Walk {
+            depth_limit: nopenfd.min(MAX_DEPTH),
+            depth_first: flags & FTW_DEPTH != 0,
+            physical: flags & FTW_PHYS != 0,
+        },
+        |p, sb, flag, level| {
+            let mut info = FTW {
+                base: find_basename_offset(p),
+                level,
+            };
+            callback(p, sb, flag, &raw mut info)
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -325,15 +424,21 @@ fn is_dot_or_dotdot(name: *const u8) -> bool {
     false
 }
 
-/// Build a child path: parent + "/" + name.
+/// Append `/name` to the path already in `buf[..parent_len]`.
 ///
-/// Returns the length of the resulting path, or 0 if it doesn't fit.
-fn build_child_path(parent: *const u8, name: *const u8, buf: &mut [u8; PATH_MAX]) -> usize {
-    let parent_len = unsafe { crate::string::strlen(parent) };
+/// Returns the new length, or 0 if it doesn't fit.  Writes in place
+/// rather than building into a second buffer, because the caller does
+/// this once per level and a per-level `[u8; PATH_MAX]` is 4 KiB of
+/// stack that the recursion has to carry all the way down.
+fn append_component(buf: &mut [u8; PATH_MAX], parent_len: usize, name: *const u8) -> usize {
+    // SAFETY: `name` is a NUL-terminated name from `readdir`.
     let name_len = unsafe { crate::string::strlen(name) };
 
     // parent + "/" + name + NUL must fit.
-    let needs_sep = parent_len > 0 && unsafe { *parent.add(parent_len.wrapping_sub(1)) } != b'/';
+    let needs_sep = parent_len > 0
+        && buf
+            .get(parent_len.wrapping_sub(1))
+            .is_some_and(|b| *b != b'/');
     let sep_len: usize = usize::from(needs_sep);
     // Use checked_add to prevent usize overflow on adversarially long paths.
     let Some(total) = parent_len
@@ -347,14 +452,7 @@ fn build_child_path(parent: *const u8, name: *const u8, buf: &mut [u8; PATH_MAX]
         return 0;
     }
 
-    // Copy parent.
-    let mut i: usize = 0;
-    while i < parent_len {
-        if let Some(slot) = buf.get_mut(i) {
-            *slot = unsafe { *parent.add(i) };
-        }
-        i = i.wrapping_add(1);
-    }
+    let mut i = parent_len;
 
     // Add separator if needed.
     if needs_sep {
@@ -368,6 +466,7 @@ fn build_child_path(parent: *const u8, name: *const u8, buf: &mut [u8; PATH_MAX]
     let mut j: usize = 0;
     while j < name_len {
         if let Some(slot) = buf.get_mut(i) {
+            // SAFETY: j < strlen(name), so this byte is inside the name.
             *slot = unsafe { *name.add(j) };
         }
         i = i.wrapping_add(1);
@@ -533,41 +632,63 @@ mod tests {
         assert_eq!(find_basename_offset(core::ptr::null()), 0);
     }
 
-    // -- build_child_path --
+    // -- append_component --
+    //
+    // The buffer is the walker's one path, seeded with the parent and
+    // extended in place, so each case sets up the parent bytes first.
+
+    fn seeded(parent: &[u8]) -> ([u8; PATH_MAX], usize) {
+        let mut buf = [0u8; PATH_MAX];
+        buf[..parent.len()].copy_from_slice(parent);
+        (buf, parent.len())
+    }
 
     #[test]
-    fn test_build_child_path_simple() {
-        let mut buf = [0u8; PATH_MAX];
-        let len = build_child_path(b"/foo\0".as_ptr(), b"bar\0".as_ptr(), &mut buf);
+    fn test_append_component_simple() {
+        let (mut buf, parent_len) = seeded(b"/foo");
+        let len = append_component(&mut buf, parent_len, b"bar\0".as_ptr());
         assert_eq!(len, 8); // "/foo/bar"
         assert_eq!(&buf[..8], b"/foo/bar");
         assert_eq!(buf[8], 0);
     }
 
     #[test]
-    fn test_build_child_path_trailing_slash() {
-        let mut buf = [0u8; PATH_MAX];
-        let len = build_child_path(b"/foo/\0".as_ptr(), b"bar\0".as_ptr(), &mut buf);
+    fn test_append_component_trailing_slash() {
+        let (mut buf, parent_len) = seeded(b"/foo/");
+        let len = append_component(&mut buf, parent_len, b"bar\0".as_ptr());
         // Parent already ends with '/', so no extra separator.
         assert_eq!(len, 8); // "/foo/bar"
         assert_eq!(&buf[..8], b"/foo/bar");
     }
 
     #[test]
-    fn test_build_child_path_root() {
-        let mut buf = [0u8; PATH_MAX];
-        let len = build_child_path(b"/\0".as_ptr(), b"etc\0".as_ptr(), &mut buf);
+    fn test_append_component_root() {
+        let (mut buf, parent_len) = seeded(b"/");
+        let len = append_component(&mut buf, parent_len, b"etc\0".as_ptr());
         assert_eq!(len, 4); // "/etc"
         assert_eq!(&buf[..4], b"/etc");
     }
 
     #[test]
-    fn test_build_child_path_empty_parent() {
-        let mut buf = [0u8; PATH_MAX];
-        let len = build_child_path(b"\0".as_ptr(), b"file\0".as_ptr(), &mut buf);
+    fn test_append_component_empty_parent() {
+        let (mut buf, parent_len) = seeded(b"");
+        let len = append_component(&mut buf, parent_len, b"file\0".as_ptr());
         // Empty parent, no separator needed (parent_len == 0).
         assert_eq!(len, 4);
         assert_eq!(&buf[..4], b"file");
+    }
+
+    #[test]
+    fn test_append_component_overwrites_the_previous_sibling() {
+        // The whole point of writing in place: the buffer is reused for
+        // every child of a directory, so a shorter name must not leave
+        // the tail of a longer one behind it.
+        let (mut buf, parent_len) = seeded(b"/d");
+        let long = append_component(&mut buf, parent_len, b"aaaaaaaa\0".as_ptr());
+        assert_eq!(&buf[..long], b"/d/aaaaaaaa");
+        let short = append_component(&mut buf, parent_len, b"b\0".as_ptr());
+        assert_eq!(&buf[..short], b"/d/b");
+        assert_eq!(buf[short], 0, "the name must end where it says it ends");
     }
 
     // -- FTW struct layout --
@@ -597,30 +718,27 @@ mod tests {
         assert_eq!(MAX_DEPTH, 32);
     }
 
-    // -- build_child_path overflow --
+    // -- append_component overflow --
 
     #[test]
-    fn test_build_child_path_near_limit() {
+    fn test_append_component_near_limit() {
         // A parent near PATH_MAX-2 with a 1-byte name should work.
-        let mut parent = [b'a'; PATH_MAX];
-        parent[PATH_MAX - 3] = 0; // 4093 bytes of 'a', null at 4093
-        let name = b"x\0";
-        let mut buf = [0u8; PATH_MAX];
-        let len = build_child_path(parent.as_ptr(), name.as_ptr(), &mut buf);
+        let mut buf = [b'a'; PATH_MAX];
+        let parent_len = PATH_MAX - 3; // 4093 bytes of 'a', null at 4093
+        buf[parent_len] = 0;
+        let len = append_component(&mut buf, parent_len, b"x\0".as_ptr());
         // 4093 + "/" + "x" = 4095 bytes, which fits in PATH_MAX (4096).
         assert!(len > 0, "should fit within PATH_MAX");
     }
 
     #[test]
-    fn test_build_child_path_at_limit() {
-        // Exactly at PATH_MAX: parent(4093) + "/" + name(1) + NUL = 4096
-        // But total must be < PATH_MAX, not <=, so this is at the edge.
-        let mut parent = [b'a'; PATH_MAX];
-        parent[PATH_MAX - 3] = 0; // length = 4093
-        // name = "xy" (2 bytes) → total = 4093+1+2 = 4096 → == PATH_MAX → returns 0
-        let name = b"xy\0";
-        let mut buf = [0u8; PATH_MAX];
-        let len = build_child_path(parent.as_ptr(), name.as_ptr(), &mut buf);
+    fn test_append_component_at_limit() {
+        // Exactly at PATH_MAX: parent(4093) + "/" + name(2) + NUL = 4097,
+        // so the 4096-byte buffer cannot hold it and the append must refuse.
+        let mut buf = [b'a'; PATH_MAX];
+        let parent_len = PATH_MAX - 3; // length = 4093
+        buf[parent_len] = 0;
+        let len = append_component(&mut buf, parent_len, b"xy\0".as_ptr());
         assert_eq!(len, 0, "should fail when result hits PATH_MAX");
     }
 
@@ -665,5 +783,104 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- argument validation --
+    //
+    // These reject before any syscall is attempted, so they are the part
+    // of the walk that is honestly testable on the host (where every raw
+    // syscall returns ENOSYS).
+
+    extern "C" fn never_called_ftw(_p: *const u8, _sb: *const Stat, _flag: i32) -> i32 {
+        panic!("callback must not run when the arguments are rejected");
+    }
+
+    extern "C" fn never_called_nftw(
+        _p: *const u8,
+        _sb: *const Stat,
+        _flag: i32,
+        _fb: *mut FTW,
+    ) -> i32 {
+        panic!("callback must not run when the arguments are rejected");
+    }
+
+    #[test]
+    fn test_ftw_null_path_efault() {
+        assert_eq!(ftw(core::ptr::null(), never_called_ftw, 4), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_nftw_null_path_efault() {
+        assert_eq!(nftw(core::ptr::null(), never_called_nftw, 4, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_ftw_zero_nopenfd_einval() {
+        // A walk allowed no open directory cannot descend at all, so the
+        // only honest answer is a refusal — not a walk that reports the
+        // root and calls the tree covered.
+        assert_eq!(ftw(b"/tmp\0".as_ptr(), never_called_ftw, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_nftw_zero_nopenfd_einval() {
+        assert_eq!(nftw(b"/tmp\0".as_ptr(), never_called_nftw, 0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_nftw_rejects_ftw_mount() {
+        // Accepted-and-ignored is how a --one-file-system delete walks
+        // into a network mount.  See UNSUPPORTED_NFTW_FLAGS.
+        assert_eq!(
+            nftw(b"/tmp\0".as_ptr(), never_called_nftw, 4, FTW_MOUNT),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_nftw_rejects_ftw_chdir() {
+        assert_eq!(
+            nftw(b"/tmp\0".as_ptr(), never_called_nftw, 4, FTW_CHDIR),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_nftw_accepts_the_flags_it_implements() {
+        // FTW_PHYS|FTW_DEPTH must *not* be refused: the rejection is a
+        // deliberate list, and a test that only checks the refusals would
+        // pass just as happily if the check rejected everything.
+        let rc = nftw(b"\0".as_ptr(), passthrough_nftw, 4, FTW_PHYS | FTW_DEPTH);
+        assert_ne!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "supported flags must not be refused (rc = {rc})"
+        );
+    }
+
+    extern "C" fn passthrough_nftw(
+        _p: *const u8,
+        _sb: *const Stat,
+        _flag: i32,
+        _fb: *mut FTW,
+    ) -> i32 {
+        0
+    }
+
+    #[test]
+    fn test_run_rejects_an_over_long_root() {
+        // strlen(root) >= PATH_MAX is refused before anything is copied
+        // into the walker's buffer — the copy loop's bound, not a check
+        // inside it, is what keeps that buffer intact.
+        let mut root = [b'a'; PATH_MAX + 9];
+        root[PATH_MAX + 8] = 0;
+        assert_eq!(ftw(root.as_ptr(), never_called_ftw, 4), -1);
+        assert_eq!(errno::get_errno(), errno::ENAMETOOLONG);
     }
 }

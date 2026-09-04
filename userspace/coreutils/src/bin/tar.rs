@@ -55,6 +55,12 @@
 //! be created, exits 2 (GNU's fatal-error status), not 0.
 
 use coreutils::diag;
+// The descriptor-relative primitives the extraction walk is built from. Unix
+// only, and so is everything here that calls it: the module's creating half is
+// deliberately absent off unix (see its own note), and this file's non-unix
+// `Dir` resolves lexically and creates by path instead.
+#[cfg(unix)]
+use coreutils::dirfd;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 // `escape`, not `quotef`, and that is a deliberate departure from the house
@@ -3642,101 +3648,6 @@ fn make_ancestors(root: &Dir, name: &[u8], status: &mut i32) {
     }
 }
 
-/// A path as a NUL-terminated byte string, or `None` if it contains a NUL.
-///
-/// Bytes throughout: the name came out of an archive header and nothing
-/// promises it is text, so converting through `str` would be the UTF-8
-/// assumption rule 7 forbids. A NUL inside is refused rather than truncated,
-/// because a C call handed one would act on the *prefix* — a member named
-/// `safe\0/../../etc/passwd` must not become `safe`.
-#[cfg(unix)]
-fn c_path(path: &Path) -> Option<Vec<u8>> {
-    let bytes = os_bytes(path.as_os_str());
-    if bytes.contains(&0) {
-        return None;
-    }
-    let mut buf = Vec::with_capacity(bytes.len().saturating_add(1));
-    buf.extend_from_slice(&bytes);
-    buf.push(0);
-    Some(buf)
-}
-
-/// The error a C call gets when the path it was handed cannot be expressed.
-#[cfg(unix)]
-fn embedded_nul() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
-}
-
-/// A single path component as a NUL-terminated byte string.
-#[cfg(unix)]
-fn c_name(component: &[u8]) -> io::Result<Vec<u8>> {
-    if component.contains(&0) {
-        return Err(embedded_nul());
-    }
-    let mut buf = Vec::with_capacity(component.len().saturating_add(1));
-    buf.extend_from_slice(component);
-    buf.push(0);
-    Ok(buf)
-}
-
-// The syscalls `std` does not wrap. Declared here, beside their callers, rather
-// than pulled from a libc binding — this crate depends on none, and the
-// signatures are short enough to check against `posix/src/file.rs` by eye.
-//
-// They are the `*at` forms, taking a directory descriptor and a single
-// component, and that is not a stylistic preference: it is half of the defence
-// described on [`Dir::locate`]. Creating by *path* would make the kernel
-// re-resolve every component, following any symlink it met, so no amount of
-// checking beforehand could stop somebody who swapped a component in between.
-#[cfg(unix)]
-unsafe extern "C" {
-    fn openat(dirfd: i32, path: *const u8, flags: i32, mode: u32) -> i32;
-    fn close(fd: i32) -> i32;
-    fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, bufsiz: usize) -> isize;
-    fn mkdirat(dirfd: i32, path: *const u8, mode: u32) -> i32;
-    fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u8) -> i32;
-    fn linkat(
-        olddirfd: i32,
-        oldpath: *const u8,
-        newdirfd: i32,
-        newpath: *const u8,
-        flags: i32,
-    ) -> i32;
-    fn mkfifoat(dirfd: i32, path: *const u8, mode: u32) -> i32;
-    fn mknodat(dirfd: i32, path: *const u8, mode: u32, dev: u64) -> i32;
-    fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32;
-    fn fchmodat(dirfd: i32, path: *const u8, mode: u32, flags: i32) -> i32;
-    fn utimensat(dirfd: i32, path: *const u8, times: *const CTimespec, flags: i32) -> i32;
-    fn fstatat(dirfd: i32, path: *const u8, buf: *mut CStat, flags: i32) -> i32;
-}
-
-/// The `open` flags used here, as Linux numbers them and as
-/// `posix/src/fcntl.rs` declares them.
-#[cfg(unix)]
-mod oflag {
-    pub const RDONLY: i32 = 0;
-    pub const WRONLY: i32 = 1;
-    pub const CREAT: i32 = 0o100;
-    pub const EXCL: i32 = 0o200;
-    pub const TRUNC: i32 = 0o1000;
-    pub const NONBLOCK: i32 = 0o4000;
-    pub const DIRECTORY: i32 = 0o200_000;
-    pub const NOFOLLOW: i32 = 0o400_000;
-    pub const CLOEXEC: i32 = 0o2_000_000;
-}
-
-/// `AT_REMOVEDIR` — `unlinkat` should `rmdir` rather than `unlink`.
-#[cfg(unix)]
-const AT_REMOVEDIR: i32 = 0x200;
-
-/// `AT_SYMLINK_NOFOLLOW` — act on the link, not on what it names.
-#[cfg(unix)]
-const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
-
-/// `AT_FDCWD` — resolve a relative path against the working directory.
-#[cfg(unix)]
-const AT_FDCWD: i32 = -100;
-
 /// `EXDEV`, which is what a resolution that would leave the destination reports.
 ///
 /// An odd errno for a symlink, and deliberately GNU's: `openat2` returns it for
@@ -3754,6 +3665,14 @@ const EXDEV: i32 = 18;
 /// against it on every host; off unix nothing produces the number, so the test
 /// is simply never true there.
 const ELOOP: i32 = 40;
+
+/// `ENOTDIR`, for a path component that exists and is not a directory.
+///
+/// Raised by hand now that [`Dir::locate`] stats a component before descending
+/// into it: the errno used to arrive from `O_DIRECTORY`, which is no longer the
+/// thing that decides. Linux's number, and the one `posix/src/errno.rs` uses.
+#[cfg(unix)]
+const ENOTDIR: i32 = 20;
 
 /// How many symlinks one member's parent may be resolved through.
 ///
@@ -3779,75 +3698,35 @@ fn components(name: &[u8]) -> Vec<Vec<u8>> {
 
 /// An open handle on a directory.
 ///
-/// It owns the descriptor and closes it on drop, which is the only reason this
-/// is a type rather than a bare `i32`: [`Dir::locate`] keeps a stack of these
-/// and unwinds it on every `..` and on every failure.
+/// A newtype over [`dirfd::Dir`] rather than the descriptor it used to hold.
+/// The wrapper earns its place by keeping this file's vocabulary — a root is
+/// opened with no `Stat` in hand, and [`Dir::locate`] is a `tar` rule that has
+/// no business in a shared module — while the descriptor, its `Drop`, and the
+/// eleven `*at` syscalls that used to be declared here live in one place that
+/// `rm` walks through too.
 #[cfg(unix)]
-struct Dir(i32);
-
-#[cfg(unix)]
-impl Drop for Dir {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` came from `openat` and is owned solely by this value
-        // — `Dir` is not `Copy` and never hands the number out — so this is the
-        // one and only close of it.
-        unsafe { close(self.0) };
-    }
-}
+struct Dir(dirfd::Dir);
 
 #[cfg(unix)]
 impl Dir {
     /// Open the destination root. The one place a directory is opened by path.
-    fn open_root(path: &Path) -> io::Result<Self> {
-        let Some(cpath) = c_path(path) else {
-            return Err(embedded_nul());
-        };
-        Self::open_child(AT_FDCWD, &cpath)
-    }
-
-    /// `openat` for a directory, refusing to follow a symlink.
     ///
-    /// `O_NOFOLLOW` is the load-bearing flag. Without it this walk would follow
-    /// exactly the links it exists to catch; with it, a symlink component fails
-    /// (`ELOOP` on Linux) and the caller gets to decide whether the target is
-    /// somewhere the extraction may go.
-    fn open_child(dirfd: i32, cname: &[u8]) -> io::Result<Self> {
-        // SAFETY: `cname` is NUL-terminated and outlives the call, which does
-        // not retain the pointer. The mode argument is unused without `O_CREAT`.
-        let fd = unsafe {
-            openat(
-                dirfd,
-                cname.as_ptr(),
-                oflag::RDONLY | oflag::DIRECTORY | oflag::NOFOLLOW | oflag::CLOEXEC,
-                0,
-            )
-        };
-        if fd < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(Self(fd))
-        }
-    }
-
-    /// A second, independent handle on the same directory.
-    fn reopen(&self) -> io::Result<Self> {
-        Self::open_child(self.0, b".\0")
-    }
-
-    /// Read a component as a symlink, or `None` if it is not one.
-    fn read_link(dirfd: i32, cname: &[u8]) -> Option<Vec<u8>> {
-        let mut buf = vec![0u8; 4096];
-        // SAFETY: `cname` is NUL-terminated; `buf` is a live allocation of
-        // exactly the length passed, and `readlinkat` writes no more than that.
-        let n = unsafe { readlinkat(dirfd, cname.as_ptr(), buf.as_mut_ptr(), buf.len()) };
-        let n = usize::try_from(n).ok()?;
-        // A target that filled the buffer may have been cut short, and acting on
-        // the *prefix* of a symlink target is how a check gets fooled.
-        if n >= buf.len() {
-            return None;
-        }
-        buf.truncate(n);
-        Some(buf)
+    /// The `stat` first is what [`dirfd::Dir::open_root`] checks the descriptor
+    /// against, and the two together are one `lstat` more than the bare
+    /// `openat` this replaced. That buys the guarantee that the directory now
+    /// held open is the one that was looked up — the same guarantee every step
+    /// below the root gets from [`dirfd::Dir::open_child`].
+    ///
+    /// One difference comes with it and is deliberately accepted: the old code
+    /// passed `O_NOFOLLOW` here, so a root that was itself a symlink to a
+    /// directory was refused, where [`dirfd::Dir::open_root`] follows it and
+    /// then verifies the identity. Unobservable in this program, because both
+    /// callers pass `"."` — `-C` is already an `env::set_current_dir` by this
+    /// point, so the symlink it may have named was resolved long before, and
+    /// `"."` itself cannot be one.
+    fn open_root(path: &Path) -> io::Result<Self> {
+        let st = dirfd::Stat::of_path(path)?;
+        Ok(Self(dirfd::Dir::open_root(path, &st)?))
     }
 
     /// Resolve `name`'s parent directory, refusing to leave this one.
@@ -3906,6 +3785,28 @@ impl Dir {
     /// caller creates relative to the descriptor that came back, so there is no
     /// second resolution for anyone to interfere with. A check-then-create by
     /// path would be correct on a quiet disk and defeatable on a busy one.
+    ///
+    /// # Stat first, then open
+    ///
+    /// The loop asks what a component *is* and then descends into it, where it
+    /// used to try the descent and use the failure to work out what the
+    /// component was. Three things come out of the swap:
+    ///
+    /// * The descent goes through [`dirfd::Dir::open_child`], which compares the
+    ///   descriptor it got against the entry that was looked up and answers
+    ///   `ESTALE` when they differ. That is the check the old walk did not have,
+    ///   and it is the one that catches a component swapped between the lookup
+    ///   and the open — `O_NOFOLLOW` alone cannot, because a *rename* is not a
+    ///   symlink.
+    /// * `readlinkat` is asked only of something already known to be a symlink,
+    ///   rather than of everything that failed to open. The old code was explicit
+    ///   that it could not rely on the errno for this ("`ELOOP` on Linux and is
+    ///   not promised to be anywhere else"), and a `stat` removes the guess.
+    /// * A component that exists but is not a directory has to be turned back
+    ///   into `ENOTDIR` by hand, because that errno was previously supplied by
+    ///   `O_DIRECTORY`. Checked against the old shape case by case: missing
+    ///   stays `ENOENT`, an unsearchable parent stays `EACCES`, a dangling
+    ///   symlink is still spliced and still fails at whatever it names.
     fn locate(&self, name: &[u8]) -> io::Result<Located> {
         let mut pending: std::collections::VecDeque<Vec<u8>> = components(name).into();
         // No components at all: `.`, `/`, `./`, or the empty name — all of them
@@ -3926,7 +3827,7 @@ impl Dir {
         if leaf == b".." {
             return Err(escapes_destination());
         }
-        let mut stack = vec![self.reopen()?];
+        let mut stack = vec![self.0.reopen()?];
         let mut hops: u32 = 0;
         while let Some(comp) = pending.pop_front() {
             if comp == b".." {
@@ -3937,33 +3838,37 @@ impl Dir {
                 stack.pop();
                 continue;
             }
-            let cname = c_name(&comp)?;
-            let Some(top) = stack.last().map(|d| d.0) else {
+            let Some(top) = stack.last() else {
                 return Err(escapes_destination());
             };
-            match Dir::open_child(top, &cname) {
-                Ok(dir) => stack.push(dir),
-                Err(e) => {
-                    // The open refused a symlink, or the component is not a
-                    // directory, or it is not there at all. `readlinkat` is what
-                    // tells the first case from the rest, and it is tried
-                    // unconditionally rather than on a particular errno: the
-                    // code for "would have followed a symlink" is `ELOOP` on
-                    // Linux and is not promised to be anywhere else.
-                    let Some(target) = Dir::read_link(top, &cname) else {
-                        return Err(e);
-                    };
-                    hops = hops.saturating_add(1);
-                    if hops > MAX_SYMLINK_HOPS {
-                        return Err(io::Error::from_raw_os_error(ELOOP));
-                    }
-                    if target.first() == Some(&b'/') {
-                        return Err(escapes_destination());
-                    }
-                    for c in components(&target).into_iter().rev() {
-                        pending.push_front(c);
-                    }
+            // `AT_SYMLINK_NOFOLLOW`, so a symlink reports as one instead of as
+            // whatever it names — which is the entire question being asked.
+            let st = top.stat(&comp)?;
+            if st.is_symlink() {
+                let target = top.read_link(&comp)?;
+                hops = hops.saturating_add(1);
+                if hops > MAX_SYMLINK_HOPS {
+                    return Err(io::Error::from_raw_os_error(ELOOP));
                 }
+                if target.first() == Some(&b'/') {
+                    return Err(escapes_destination());
+                }
+                for c in components(&target).into_iter().rev() {
+                    pending.push_front(c);
+                }
+            } else if st.is_dir() {
+                // The identity check lives in here: the descriptor that comes
+                // back is verified against `st`, so a component renamed away
+                // between the two calls is `ESTALE` rather than a descent into
+                // somewhere the archive never named.
+                let dir = top.open_child(&comp, &st)?;
+                stack.push(dir);
+            } else {
+                // What `O_DIRECTORY` used to answer. Spelled out because the
+                // callers' messages depend on it: `create_at` prints
+                // `Cannot mkdir: Not a directory` for an ancestor that is a
+                // plain file, which is GNU's wording for the same tree.
+                return Err(io::Error::from_raw_os_error(ENOTDIR));
             }
         }
         let Some(dir) = stack.pop() else {
@@ -3980,42 +3885,17 @@ impl Dir {
 /// that the place is beneath the destination.
 #[cfg(unix)]
 struct Located {
-    dir: Dir,
+    dir: dirfd::Dir,
     leaf: Vec<u8>,
 }
 
 #[cfg(unix)]
 impl Located {
-    /// The result of an `*at` call that returns 0 or -1.
-    fn checked(rc: i32) -> io::Result<()> {
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-
-    /// Open the leaf, `O_CLOEXEC` added to whatever else was asked for.
-    fn open(&self, flags: i32, mode: u32) -> io::Result<File> {
-        use std::os::unix::io::FromRawFd;
-        let cname = c_name(&self.leaf)?;
-        // SAFETY: `cname` is NUL-terminated and outlives the call.
-        let fd = unsafe { openat(self.dir.0, cname.as_ptr(), flags | oflag::CLOEXEC, mode) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `fd` was just returned by `openat`, is not -1, and is owned
-        // here — nothing else holds it, so handing it to `File` transfers the
-        // sole responsibility for closing it.
-        Ok(unsafe { File::from_raw_fd(fd) })
-    }
-
     /// `mkdir`, plain: `EEXIST` comes straight back out.
     fn mkdir(&self) -> io::Result<()> {
-        let cname = c_name(&self.leaf)?;
-        // SAFETY: `cname` is NUL-terminated and outlives the call. 0o777 is
-        // masked by the umask, which is what `fs::create_dir` passes too.
-        Self::checked(unsafe { mkdirat(self.dir.0, cname.as_ptr(), 0o777) })
+        // 0o777 is masked by the umask, which is what `fs::create_dir` passes
+        // too; the archive's own mode is applied afterwards.
+        self.dir.mkdir(&self.leaf, 0o777)
     }
 
     /// `mkdir` for a directory *member*, where an existing directory is success.
@@ -4030,7 +3910,7 @@ impl Located {
     /// opposite: it asks `is_dir()`, which follows the link, sees a directory
     /// and reports success — leaving the symlink in place for every member that
     /// followed to be written through. Not following the link is the whole of
-    /// the difference, and [`Dir::open_child`]'s `O_NOFOLLOW` is where it lives.
+    /// the difference, and [`Located::is_real_dir`] is where it lives.
     fn mkdir_member(&self) -> io::Result<()> {
         match self.mkdir() {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists && self.is_real_dir() => Ok(()),
@@ -4039,15 +3919,20 @@ impl Located {
     }
 
     /// Is the leaf a directory in its own right, rather than a link to one?
+    ///
+    /// A `stat` rather than the `openat(O_DIRECTORY|O_NOFOLLOW)` this used to
+    /// be. The two agree on the question actually being asked — every lookup in
+    /// [`dirfd`] is `AT_SYMLINK_NOFOLLOW`, so `is_dir` is already false for a
+    /// link to a directory — and they disagree on one case the open got wrong:
+    /// a directory that cannot be *opened* is still a directory, and answering
+    /// "no" for it made [`Located::mkdir_member`] report the `EEXIST` instead of
+    /// accepting the member.
     fn is_real_dir(&self) -> bool {
-        c_name(&self.leaf).is_ok_and(|cname| Dir::open_child(self.dir.0, &cname).is_ok())
+        self.dir.stat(&self.leaf).is_ok_and(|st| st.is_dir())
     }
 
     fn symlink(&self, target: &[u8]) -> io::Result<()> {
-        let cname = c_name(&self.leaf)?;
-        let ctarget = c_name(target)?;
-        // SAFETY: both strings are NUL-terminated and outlive the call.
-        Self::checked(unsafe { symlinkat(ctarget.as_ptr(), self.dir.0, cname.as_ptr()) })
+        self.dir.symlink(target, &self.leaf)
     }
 
     /// Hard-link this leaf to `target`, which must have been resolved beneath
@@ -4055,82 +3940,41 @@ impl Located {
     /// (`tar-rules17.sh`: a target reached through an escaping symlink reports
     /// `Cannot hard link to ‘x/secret’: Invalid cross-device link`).
     fn hard_link_to(&self, target: &Self) -> io::Result<()> {
-        let cname = c_name(&self.leaf)?;
-        let ctarget = c_name(&target.leaf)?;
-        // SAFETY: both strings are NUL-terminated and outlive the call; the two
-        // descriptors are live for the duration because `self` and `target` are
-        // borrowed. `flags` is 0: a hard link to a symlink stores the link.
-        Self::checked(unsafe {
-            linkat(
-                target.dir.0,
-                ctarget.as_ptr(),
-                self.dir.0,
-                cname.as_ptr(),
-                0,
-            )
-        })
+        self.dir.hard_link(&target.dir, &target.leaf, &self.leaf)
     }
 
     fn mkfifo(&self, mode: u32) -> io::Result<()> {
-        let cname = c_name(&self.leaf)?;
-        // SAFETY: `cname` is NUL-terminated and outlives the call. `mkfifoat`
-        // supplies the `S_IFIFO` bit itself.
-        Self::checked(unsafe { mkfifoat(self.dir.0, cname.as_ptr(), mode & 0o7777) })
+        self.dir.mkfifo(&self.leaf, mode & 0o7777)
     }
 
     fn mknod(&self, mode: u32, dev: u64) -> io::Result<()> {
-        let cname = c_name(&self.leaf)?;
-        // SAFETY: `cname` is NUL-terminated and outlives the call. `mode`
-        // carries the `S_IFCHR`/`S_IFBLK` bit the caller put there.
-        Self::checked(unsafe { mknodat(self.dir.0, cname.as_ptr(), mode, dev) })
+        self.dir.mknod(&self.leaf, mode, dev)
     }
 
     fn unlink(&self) -> io::Result<()> {
-        let cname = c_name(&self.leaf)?;
-        // SAFETY: `cname` is NUL-terminated and outlives the call.
-        Self::checked(unsafe { unlinkat(self.dir.0, cname.as_ptr(), 0) })
+        self.dir.unlink(&self.leaf)
     }
 
     fn rmdir(&self) -> io::Result<()> {
-        let cname = c_name(&self.leaf)?;
-        // SAFETY: as above; `AT_REMOVEDIR` makes this an `rmdir`.
-        Self::checked(unsafe { unlinkat(self.dir.0, cname.as_ptr(), AT_REMOVEDIR) })
+        self.dir.rmdir(&self.leaf)
     }
 
     fn chmod(&self, mode: u32) -> io::Result<()> {
-        let cname = c_name(&self.leaf)?;
-        // SAFETY: `cname` is NUL-terminated and outlives the call.
-        Self::checked(unsafe { fchmodat(self.dir.0, cname.as_ptr(), mode, 0) })
+        self.dir.chmod(&self.leaf, mode)
     }
 
     /// Stamp the leaf's access and modification times to the same second.
     ///
-    /// `flags` is `0` to follow a final symlink or [`AT_SYMLINK_NOFOLLOW`] to
-    /// stamp the link itself.
-    ///
-    /// Named after the syscall rather than after `File::set_times` for a reason
-    /// that only appeared once this tar could create a **fifo**: stamping by
-    /// opening and calling `futimens` means opening a fifo, and opening a fifo
-    /// blocks until somebody opens the other end. An archive holding one named
-    /// pipe was therefore a hang — `tar -xf` sat there for ever with no output
-    /// and no way to tell it from slow I/O. `utimensat` acts on the name and
-    /// never opens anything, which is also why GNU uses it.
-    fn stamp(&self, mtime: i64, flags: i32) -> io::Result<()> {
-        let cname = c_name(&self.leaf)?;
-        let t = CTimespec {
-            tv_sec: mtime,
-            tv_nsec: 0,
-        };
-        let times = [t, t];
-        // SAFETY: `cname` is NUL-terminated and `times` is exactly the
-        // two-element array `utimensat` reads; both outlive the call, which
-        // retains neither.
-        Self::checked(unsafe { utimensat(self.dir.0, cname.as_ptr(), times.as_ptr(), flags) })
+    /// `follow` says whether a final symlink is stamped or followed. See
+    /// [`dirfd::Dir::stamp`] for why this acts on the name and never opens
+    /// anything: an archive holding one named pipe was otherwise a hang.
+    fn stamp(&self, mtime: i64, follow: bool) -> io::Result<()> {
+        self.dir.stamp(&self.leaf, mtime, follow)
     }
 
     /// The `(device, inode)` pair identifying whatever is at the leaf now.
     ///
-    /// `fstatat`, not an open. This was `openat(O_RDONLY|O_NOFOLLOW)` plus
+    /// A `stat`, not an open. This was `openat(O_RDONLY|O_NOFOLLOW)` plus
     /// `File::metadata`, to avoid declaring a `struct stat` by hand — and that
     /// broke the delayed-symlink placeholder outright, because the placeholder
     /// is created **mode 0** and an unprivileged process cannot open a mode-0
@@ -4139,63 +3983,17 @@ impl Located {
     /// a name is not the same as asking to read it, and only the second needs
     /// permission.
     ///
-    /// `AT_SYMLINK_NOFOLLOW` so a link that appeared since is *not* the file we
-    /// made, and so a dangling one still answers rather than erroring.
+    /// `AT_SYMLINK_NOFOLLOW` — which is every lookup in [`dirfd`] — so a link
+    /// that appeared since is *not* the file we made, and so a dangling one
+    /// still answers rather than erroring.
     fn identity(&self) -> io::Result<(u64, u64)> {
-        let cname = c_name(&self.leaf)?;
-        let mut st = CStat::default();
-        // SAFETY: `cname` is NUL-terminated and `st` is a `CStat`, which is the
-        // layout both C libraries this links against declare for `struct stat`
-        // (see the type's own comment); the call fills it and retains neither.
-        Self::checked(unsafe {
-            fstatat(self.dir.0, cname.as_ptr(), &raw mut st, AT_SYMLINK_NOFOLLOW)
-        })?;
-        Ok((st.st_dev, st.st_ino))
+        // `identity()` is `None` only where the platform has no inode numbers,
+        // which is not this `cfg`. The fallback is unreachable here and is
+        // spelled as the non-unix twin's answer rather than as a third
+        // behaviour for a case that cannot arise.
+        Ok(self.dir.stat(&self.leaf)?.identity().unwrap_or((0, 0)))
     }
 }
-
-/// `struct stat`, in the layout `posix/src/stat.rs` declares — which is itself
-/// documented as matching Linux x86-64's, so the one declaration serves both
-/// the host build and the SlateOS one.
-///
-/// Only `st_dev` and `st_ino` are read. The rest is present so the struct is
-/// the right *size*: `fstatat` writes all of it, and a short buffer would be a
-/// stack overwrite rather than a wrong answer.
-#[repr(C)]
-#[derive(Default)]
-#[cfg_attr(not(unix), allow(dead_code))]
-struct CStat {
-    st_dev: u64,
-    st_ino: u64,
-    st_nlink: u64,
-    st_mode: u32,
-    st_uid: u32,
-    st_gid: u32,
-    _pad0: i32,
-    st_rdev: u64,
-    st_size: i64,
-    st_blksize: i64,
-    st_blocks: i64,
-    st_atim: CTimespec,
-    st_mtim: CTimespec,
-    st_ctim: CTimespec,
-    _reserved: [i64; 3],
-}
-
-/// `struct timespec`, in the layout `posix/src/stat.rs` declares.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-#[cfg_attr(not(unix), allow(dead_code))]
-struct CTimespec {
-    tv_sec: i64,
-    tv_nsec: i64,
-}
-
-/// The size [`CStat`] must have, checked here rather than discovered as a
-/// corrupted stack: `fstatat` writes 144 bytes on x86-64 whatever this file
-/// thinks, so a declaration that drifted from the C one has to fail the build.
-#[cfg(unix)]
-const _: () = assert!(core::mem::size_of::<CStat>() == 144);
 
 /// Rebuild a `dev_t` from the two halves ustar stores it in.
 ///
@@ -4219,16 +4017,6 @@ fn make_dev(major: u64, minor: u64) -> u64 {
 const S_IFCHR: u32 = 0o020000;
 #[cfg(unix)]
 const S_IFBLK: u32 = 0o060000;
-
-/// The file-type field of `st_mode`, and the value in it that means "directory".
-///
-/// Needed because `--keep-newer-files` exempts directories: what is standing in
-/// the way has to be classified before its mtime is worth comparing. See
-/// [`Located::kind_and_mtime`].
-#[cfg(unix)]
-const S_IFMT: u32 = 0o170000;
-#[cfg(unix)]
-const S_IFDIR: u32 = 0o040000;
 
 /// The parts of a member's creation whose *wording* is worth keeping beside
 /// the flags that produce it.
@@ -4263,10 +4051,7 @@ impl Located {
     /// 0o666 is the mode `File::create` would have asked for, and the umask
     /// takes it down from there; the archive's own mode is applied afterwards.
     fn create_file(&self) -> io::Result<File> {
-        self.open(
-            oflag::WRONLY | oflag::CREAT | oflag::EXCL | oflag::NONBLOCK,
-            0o666,
-        )
+        self.dir.create_new(&self.leaf, 0o666)
     }
 
     /// [`create_file`](Self::create_file) as `--overwrite` wants it: keep the
@@ -4293,10 +4078,7 @@ impl Located {
     /// says `EISDIR`, and GNU reports `Cannot open: Is a directory` and exits 2
     /// rather than removing it. `--overwrite` truncates; it does not delete.
     fn create_file_overwriting(&self) -> io::Result<File> {
-        self.open(
-            oflag::WRONLY | oflag::CREAT | oflag::TRUNC | oflag::NOFOLLOW | oflag::NONBLOCK,
-            0o666,
-        )
+        self.dir.create_truncating(&self.leaf, 0o666)
     }
 
     /// Clear the leaf out of the way for `-U`, before anything is created.
@@ -4340,19 +4122,10 @@ impl Located {
     /// input. Measured at the boundary: on-disk one nanosecond after the
     /// member's second is kept, one second before it is replaced.
     fn kind_and_mtime(&self) -> io::Result<Option<(bool, i64)>> {
-        let cname = c_name(&self.leaf)?;
-        let mut st = CStat::default();
-        // SAFETY: as `identity` — `cname` is NUL-terminated and `st` is the
-        // full-size `struct stat` the call fills and does not retain.
-        let rc = unsafe { fstatat(self.dir.0, cname.as_ptr(), &raw mut st, AT_SYMLINK_NOFOLLOW) };
-        if rc == 0 {
-            return Ok(Some((st.st_mode & S_IFMT == S_IFDIR, st.st_mtim.tv_sec)));
-        }
-        let e = io::Error::last_os_error();
-        if e.kind() == io::ErrorKind::NotFound {
-            Ok(None)
-        } else {
-            Err(e)
+        match self.dir.stat(&self.leaf) {
+            Ok(st) => Ok(Some((st.is_dir(), st.mtime()))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -4361,11 +4134,7 @@ impl Located {
     /// Mode 0, as GNU's `create_placeholder_file` opens it: nothing should be
     /// able to use this file for anything during the seconds it exists.
     fn create_placeholder(&self) -> io::Result<()> {
-        self.open(
-            oflag::WRONLY | oflag::CREAT | oflag::EXCL | oflag::NONBLOCK,
-            0,
-        )
-        .map(drop)
+        self.dir.create_new(&self.leaf, 0).map(drop)
     }
 
     /// Create a symlink at the leaf, pointing at `target`.
@@ -4405,7 +4174,7 @@ impl Located {
 
     /// Set the leaf's modification time, following a final symlink.
     fn set_mtime(&self, mtime: i64) -> io::Result<()> {
-        self.stamp(mtime, 0)
+        self.stamp(mtime, true)
     }
 
     /// Set a **symlink's own** modification time, without following it.
@@ -4415,7 +4184,7 @@ impl Located {
     /// hold. Measured: GNU restores it, and a symlink archived at 2019-05-06
     /// comes back dated 2019-05-06 even when what it points at does not exist.
     fn set_symlink_mtime(&self, mtime: i64) -> io::Result<()> {
-        self.stamp(mtime, AT_SYMLINK_NOFOLLOW)
+        self.stamp(mtime, false)
     }
 
     /// Set the leaf's permission bits.

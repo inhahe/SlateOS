@@ -76,6 +76,14 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO_ROOT, "scripts", "hooks", "pre-push")
 LIB = os.path.join(REPO_ROOT, "scripts", "run-checker.sh")
 GITTREE = os.path.join(REPO_ROOT, "scripts", "gittree.py")
+GITENV = os.path.join(REPO_ROOT, "scripts", "gitenv.py")
+
+# The hook's own words when the batched mirror fails and it degrades. Spelled
+# once because two cases assert opposite things about it: `broken` requires it
+# present, `batched` requires it absent. A private copy that drifted would not
+# make either case fail -- the absent-side assertion would go quietly vacuous,
+# which is the failure mode it exists to prevent.
+FALLBACK_NOTICE = "falling back to one git per file"
 
 # The gate fills its mirror two ways and both have to reach the same verdict.
 #
@@ -194,10 +202,17 @@ def install_gittree(work: str, mode: str) -> None:
     """
     dst = os.path.join(work, "scripts", "gittree.py")
     if mode == "batched":
-        with open(GITTREE, "r", encoding="utf-8", newline="") as src:
-            body = src.read()
-        with open(dst, "w", encoding="utf-8", newline="") as out:
-            out.write(body)
+        # `gitenv.py` travels with it: `gittree` imports it from its own
+        # directory, which here is this one. Without it `batched` is not a
+        # batched mirror but a third, unnamed mode -- an import traceback --
+        # and every assertion below that the batched and per-file paths agree
+        # would be comparing the fallback against itself.
+        for src_path, name in ((GITTREE, "gittree.py"), (GITENV, "gitenv.py")):
+            with open(src_path, "r", encoding="utf-8", newline="") as src:
+                body = src.read()
+            with open(os.path.join(work, "scripts", name), "w",
+                      encoding="utf-8", newline="") as out:
+                out.write(body)
     elif mode == "broken":
         with open(dst, "w", encoding="utf-8", newline="") as out:
             out.write("import sys\nsys.exit(3)\n")
@@ -377,13 +392,40 @@ def case_gittree_failure_falls_back(tmp: str) -> None:
     verdict, blob = push_output(work)
     check("a broken gittree.py still refuses drift", verdict, "refused")
     check("a broken gittree.py says it fell back",
-          "falling back to one git per file" in blob, True)
+          FALLBACK_NOTICE in blob, True)
 
     work = build_fixture(os.path.join(tmp, "gtbroken2"), "broken")
     write(work, "c/src/main.rs", pretty(UGLY))
     commit(work, "c/src/main.rs", "add a formatted file")
     check("a broken gittree.py still allows a clean commit",
           push_verdict(work), "allowed")
+
+
+def case_batched_really_batches(tmp: str) -> None:
+    """The converse of the case above, and the one that was missing.
+
+    Every `[batched]` case asserts a verdict, and the fallback reaches the same
+    verdict by design -- that symmetry is the point of running the modes
+    against each other. The cost of it is that a `batched` fixture whose
+    `gittree.py` does not run is indistinguishable from one whose does: it
+    falls back, agrees with itself, and prints seven passes. So the batched
+    mode has to assert the thing no verdict can carry, which is the *absence*
+    of the fallback notice.
+
+    That is not a theoretical hole. On 2026-09-04 `gittree.py` gained an
+    `import gitenv`, and `install_gittree` copied only `gittree.py` -- so the
+    helper died on import in every `batched` fixture, the gate fell back, and
+    this suite stayed green while testing the per-file path three times over.
+    The sibling suites that install the same helper failed loudly (their
+    checkers have no fallback to degrade into); this one did not, and it was
+    the only one that could have caught the packaging mistake early.
+    """
+    work = build_fixture(os.path.join(tmp, "gtworks"), "batched")
+    write(work, "c/src/main.rs", UGLY)
+    commit(work, "c/src/main.rs", "add an unformatted file")
+    verdict, blob = push_output(work)
+    check("a working gittree.py still refuses drift", verdict, "refused")
+    check("...and does not announce a fallback", FALLBACK_NOTICE in blob, False)
 
 
 def main() -> int:
@@ -404,6 +446,9 @@ def main() -> int:
                          case_untouched_submodule, case_added_then_deleted,
                          case_bypass):
                 case(os.path.join(tmp, mirror), mirror)
+        print("\n--- gittree.py works, and is used ---")
+        label_suffix = " [batched]"
+        case_batched_really_batches(os.path.join(tmp, "works"))
         print("\n--- gittree.py fails ---")
         label_suffix = " [broken]"
         case_gittree_failure_falls_back(os.path.join(tmp, "broken"))

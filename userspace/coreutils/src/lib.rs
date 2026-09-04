@@ -483,6 +483,7 @@ pub mod pathname;
 /// utility crates in the tree need it too and cannot depend on the bundle; see
 /// that crate's docs and `design-decisions.md` §370.
 pub use quoting as quote;
+pub mod remove;
 pub mod rename;
 pub mod shell;
 pub mod stdfd;

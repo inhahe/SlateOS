@@ -102338,9 +102338,60 @@ is no descriptor above it — GNU's position too.
 Two follow-ups, tracked separately:
 `TD-B-TAR-AND-RM-CARRY-TWO-DESCRIPTOR-WALKS` (convert `tar.rs` onto the shared
 module, deleting its private copy) and
-`TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS` (`rm`'s and `mv`'s).
+`TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS` (`rm`'s and `mv`'s). **Both
+are now FIXED, 2026-09-03.** The `Loc` described above no longer lives in
+`rm.rs` either: the walk moved to `userspace/coreutils/src/remove.rs`, which
+`mv` calls too, so `mv`'s path-resolved removal inherited this module's
+guarantee rather than needing its own copy of it.
 
 ## TD-B-TAR-AND-RM-CARRY-TWO-DESCRIPTOR-WALKS (lane B, 2026-09-03)
+
+**Status: FIXED, 2026-09-03**, the day after it was filed — which is what it
+said it expected. `tar.rs` now holds no syscalls of its own: its `Dir` is a
+newtype over `coreutils::dirfd::Dir`, its `Located` holds one, and the private
+`CStat`, `CTimespec`, `oflag`, `c_path`, `c_name`, `embedded_nul`, `AT_*` and
+the eleven-entry `extern "C"` block are gone. What stayed is what the entry
+said would stay: `locate`, `Located`'s wording layer, `components`,
+`MAX_SYMLINK_HOPS`, `EXDEV`/`ELOOP`.
+
+**Certified.** `scripts/tar-diff.sh` — the case-by-case comparison against GNU
+tar 1.35 that this entry named as the thing making the swap "provably a
+behavioural no-op" — reports **245 passed, 0 differed, 2 differ on purpose**.
+`scripts/coreutils-check.sh` is green on both halves: host clippy and a host
+`check --bin tar` (the only build in the tree that compiles this file's
+`cfg(not(unix))` arm), and on Linux 3755 tests across 87 binaries with the
+`coreutils` lib at 421 and `tar` at 53.
+
+Three things came out of the conversion that were not in the plan, plus one
+defect it introduced and the harness caught:
+
+- **The `locate` loop is now stat-first**, where it used to try the descent and
+  read the failure. That is what lets it call `dirfd::Dir::open_child`, which
+  is where the identity check lives — so the exposure this entry was filed
+  *for* (`tar` correct on Linux, exposed on SlateOS for an ancestor swapped
+  between the lookup and the open) is closed rather than merely relocated. It
+  also stops `readlinkat` being asked of every component that failed to open,
+  which the old code's own comment admitted was a guess at an errno that "is
+  not promised to be anywhere else".
+- **`ENOTDIR` is now raised by hand**, because it used to arrive from
+  `O_DIRECTORY` and nothing opens with that flag on this path any more.
+- **`Located::is_real_dir` stopped being an open** and became a stat, which
+  fixes a case nobody had noticed: a directory that cannot be *opened* is still
+  a directory, and answering "no" for it made a directory member over an
+  existing unreadable directory report `EEXIST` instead of being accepted.
+- **The conversion introduced exactly one behaviour change, and it was a bug.**
+  `dirfd::c_target` refused an empty symlink target with `InvalidInput`, on the
+  written grounds that `symlinkat` "would answer `EINVAL` anyway"; it answers
+  `ENOENT`, and `tar.rs`'s deleted code had passed the empty target straight
+  through. `tar-diff.sh`'s `emptysym` case is what found it — ours said
+  "Invalid argument" where GNU said "No such file or directory". `c_target` now
+  refuses only the NUL, and `dirfd`'s new test asserts *which layer* rejected
+  the empty target rather than that it was rejected. Written up as Lesson 110.
+
+`dirfd::Stat` gained an `mtime` for this — see `design-decisions.md` §756 for
+why a shared type was widened for one caller — and `dirfd::Dir` gained
+`reopen()`, which `locate` needs to keep its root while a walk consumes a
+handle.
 
 **In short:** two utilities now know how to walk a directory tree safely, and
 they know it in two places. `tar` learned it first, privately, when its own
@@ -110788,6 +110839,55 @@ Corrected the two places that stated the false claim (module docstring Usage
 section, and the `--quick` argparse help) rather than leaving the measurement
 only here — but the numbers above are the debt, not the wording.
 
+### Update, 2026-09-04: the same gates cost more in `boot-test.sh`, where it is not optional
+
+The measurement above was taken on `pre-boot.py`, which nobody is obliged to
+run. The same gate suite runs inside `scripts/boot-test.sh` — the blocking one,
+the one every merge waits on — and there it is longer, because `boot-test.sh`
+also runs `check_python_suites()`, a gate `pre-boot.py` does not have.
+
+Measured on `lane-b`, 2026-09-04, from `/tmp/boot.log` (`run-timeout.py`
+heartbeats give the clock to ±60 s):
+
+| Phase | Starts at | Length |
+|---|---|---|
+| checker gates (`check-*.py`, shellcheck, …) | 0s | **~2400s (~41 min)** |
+| `check_python_suites` (32 `scripts/test-*.py`) | ~2400s | **≥ 480s, unfinished** |
+| build | never reached | — |
+| QEMU | never reached | — |
+
+The run was killed at 2880 s (48 min) with the build not yet begun. In the
+480 s the suite gate did get, it finished **12 of 32** suites, alphabetically
+through `test-check-self-tests-wired.py`. The next one in order is
+`test-checkers-honour-head.py`, which is **582 s standalone** — measured this
+same day — so the suite gate alone is plainly a further 20–35 minutes, and the
+whole pre-build phase is **on the order of 75 minutes** before a single crate
+is compiled. Build (~6.5 min) and QEMU (~7 min) come after that.
+
+Three things follow that the entry above did not say:
+
+1. **A 3600 s timeout on `boot-test.sh` cannot pass on this tree**, regardless
+   of whether the tree is good. That is not a hypothesis — it is what killed
+   the run measured here. Any `run-timeout.py` budget for a full boot test
+   must now be **≥ 10800 s**. A too-short budget does not merely waste 60
+   minutes; it returns exit 124, which is indistinguishable at a glance from a
+   real failure, and the two previous kills recorded at the top of this entry
+   are the same mistake made twice already.
+2. **`check_python_suites` is the right design and should not be trimmed.** It
+   globs deliberately (`boot-test.sh:5159`, and see the retracted entry
+   `TD-B-THE-THIRTY-TWO-SUITES-…` below for why the glob defeated a search for
+   the names). The fix for its cost is to make it *concurrent*, exactly as fix
+   2 above proposes for the checker gates — the 32 suites are independent
+   processes over disjoint temp dirs, and the gate's wall clock would collapse
+   to roughly its longest member (~582 s) rather than their sum. Do not
+   respond to the cost by dropping suites from the glob.
+3. **The two fixes now have a much larger payoff than when they were filed.**
+   Concurrency over ~29 checker gates plus 32 suites turns ~75 minutes into
+   roughly the longest single member — `check-variant-lists.py` at 834 s or
+   `test-checkers-honour-head.py` at 582 s, so call it 15 minutes. That is the
+   difference between a boot test a lane can run per task and one it runs once
+   a day, and the serialisation lock means the cost is paid by all three lanes.
+
 ---
 ## TD-B-TEN-GATES-ARE-NEVER-ASKED
 
@@ -113188,7 +113288,7 @@ is untouched by this change and remains open.
 
 ---
 
-## TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS (lane B, 2026-09-03)
+## TD-B-TWO-RECURSIVE-REMOVERS-NOW-EXIST-IN-COREUTILS (lane B, 2026-09-03) — FIXED 2026-09-03 (lane B)
 
 **In short:** deleting a directory and everything inside it is now written out
 twice in our coreutils — once in `rm`, and once in `mv`. `mv` grew its copy on
@@ -113229,13 +113329,52 @@ in full as `design-decisions.md` §751; the short version is three facts:
 | prompts before deleting | yes, under `-i`/`-I` | never — the copy already succeeded |
 | `--one-file-system` | honoured | not applicable; the source is one device by construction |
 | what `-v` prints | `removed 'f'` / `removed directory 'd'` | the same two sentences |
-| a child that cannot be removed | reports it, keeps going, and reports the parent too | reports it, keeps going, and stays **silent** about every ancestor |
+| a child that cannot be removed | reports it, keeps going, and stays **silent** about every ancestor | the same |
+| an *empty* directory that cannot be **read** | held the read error, reported it, and stopped — GNU removes it | held it, called `rmdir` anyway, GNU's rule |
 
-That last row is the interesting one and is not an accident on either side: it
-is GNU's `mark_ancestor_dirs` behaviour, which `mv.rs` reproduces by returning
-from `remove_tree` before the `rmdir` when any child failed. `rm.rs` predates
-that reasoning and has not been checked against it — which is exactly the kind
-of divergence this entry exists to flag.
+**The drift this entry was filed to catch arrived within the day, and the
+second row is it.** As first written this table claimed the divergence was
+ancestor silence — that `rm` "reports the parent too" while `mv` does not.
+That was wrong: `rm.rs` already had the rule (`Rm::remove_tree`, "Silence,
+deliberately"), and it is GNU's `mark_ancestor_dirs` behaviour on both sides.
+Comparing the two walks properly instead turned up a real one, and in the
+opposite direction from the guess — the *younger* walk had the rule and the
+older one did not.
+
+`mv.rs` carried `is_uninformative`, upstream's list of errnos an `rmdir` may
+answer that say less than an earlier `opendir` failure did (`remove.c:424`).
+`rm.rs` had no such notion, because it never got as far as the `rmdir`: a
+directory it could not list was reported and abandoned. But listing a directory
+needs `r`, while removing an empty one needs only `w`+`x` on its *parent*, so
+`chmod 300 d` on an empty `d` is a directory nobody can read and anybody can
+delete — and GNU deletes it. Measured against GNU 9.4 on 2026-09-03:
+
+```text
+$ mkdir d && chmod 300 d && rm -rv d
+GNU : rc=0  removed directory 'd'
+OURS: rc=1  rm: cannot remove 'd': Permission denied     (directory still there)
+```
+
+Fixed the same day, and the fix is what created the shared module this entry
+asks for: `userspace/coreutils/src/remove.rs` now holds `is_uninformative` and
+a `blame(held, failure)` that states the substitution rule once for both
+binaries. `rm` gained `Rm::remove_inaccessible_directory` and upstream's third
+prompt, `attempt removal of inaccessible directory 'd'? `, which it had never
+implemented at all. `-r` and `-d` part company there: under `-d` the question
+can be asked, because there is nothing to descend into; under `-r` the question
+would have to be `descend into …?` or `remove …?` and *which one it is* depends
+on the listing that just failed, so a question that comes due is fatal — but
+with no question due, the `rmdir` still runs.
+
+**Why the harness missed it, which is the part worth keeping.** `rm-diff.sh`
+section 15 had nine cases for unreadable directories and every one of them used
+a *non-empty* one (`tree/sub` holds `b.txt`). There GNU's `rmdir` fails too, and
+prints the same substituted `Permission denied` — so a remover that never
+attempted the `rmdir` at all is indistinguishable from one that did. The
+missing case was not an exotic one; it was the *simpler* one. Fifteen cases were
+added, and against the pre-fix binary eleven of them differ (the other four pin
+the boundary from the other side: modes 0100/0000/0500, where erroring is
+correct, so a future over-eager fix is caught too).
 
 **Proper fix.** Lift the walk out of both binaries into a
 `userspace/coreutils/src/remove.rs`, shaped the way `copy.rs` already is after
@@ -113246,20 +113385,127 @@ became a producer of `copy::Opts`; `mv.rs` passes an `Opts` with the prompting
 and the `--one-file-system` knobs off. The ancestor-silence rule then lives in
 one place and both binaries get it.
 
-**Sequencing.** Do this *after*, not before,
-`TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL` is understood,
-because that entry's fix changes the walk's *signature* — it threads a
-`(dirfd, path_for_messages)` pair through every level instead of a path. Doing
-the extraction first means doing it twice. Note that `mv.rs`'s new walk has the
-same weakness for the same reason: it calls `fs::read_dir`, `fs::remove_file`
-and `fs::remove_dir` on joined path strings, so a symlink swapped in mid-walk
-is followed. It is narrower there — the tree being removed is one the user just
-successfully copied, so the window is smaller — but it is the same bug, and the
-shared module is what makes fixing it once fix it everywhere.
+**Sequencing — the blocker is gone.** This was to wait on
+`TD-B-RM-WALKS-BY-PATH-SO-A-SYMLINK-SWAP-CAN-REDIRECT-A-REMOVAL`, because that
+entry's fix changes the walk's *signature* — it threads a
+`(dirfd, path_for_messages)` pair through every level instead of a path, so
+extracting first meant extracting twice. That entry was **FIXED 2026-09-03**:
+`rm`'s walk now carries `Loc { dir, path }`, the descriptor for the syscalls and
+the string only for the messages. The signature the shared module has to take is
+therefore known, and the extraction is unblocked.
+
+`mv.rs`'s walk still has the weakness `rm`'s no longer does: it calls
+`fs::read_dir`, `fs::remove_file` and `fs::remove_dir` on joined path strings,
+so a symlink swapped in mid-walk is followed. It is narrower there — the tree
+being removed is one the user just successfully copied, so the window is
+smaller — but it is the same bug, and it is now the *only* place in coreutils
+that still has it. Sharing `rm`'s walk is what fixes it, which makes the
+extraction a security fix rather than only a tidiness one.
+
+**What is done and what is left.** Nothing is left; the last two rows closed on
+the same day the first three did.
+
+| | state |
+|---|---|
+| `remove.rs` exists | done — `is_uninformative`, `blame`, 4 tests |
+| the errno-substitution rule is shared | done — both binaries call `remove::blame` |
+| `rm` implements GNU's inaccessible-directory rule | done — 15 harness cases |
+| the *walk* is shared | **done** — `remove::Remover`, called by both |
+| `mv`'s walk stops following a mid-walk symlink swap | **done**, and it followed from the row above exactly as predicted |
+
+### How the extraction came out
+
+`userspace/coreutils/src/remove.rs` now holds the whole walk, growing from 170
+lines to 888. `rm.rs` went from 2,432 lines to 1,934, but that headline number
+undersells it: the cut is entirely above the `#[cfg(test)]` line, where `rm.rs`
+went from 1,262 lines to 744 — it lost **41% of its production code**. The test
+module is unchanged in size (1,169 → 1,189), because the tests that belonged to
+the walk moved into `remove.rs` alongside it and the ones that stayed are the
+ones that test what `rm` still does. `mv.rs` lost `remove_tree`,
+`report_unremovable` and `announce_removed` outright. There is one `Verdict`,
+one `Loc`, one `Interactive`, one set of three prompts and one `-v` sentence
+pair in the zone, where the day before there were two of each.
+
+The shape is the one this entry prescribed, and it is `copy.rs`'s:
+
+| | `cp` → `copy.rs` | `rm` → `remove.rs` |
+|---|---|---|
+| the parsed command line | `CpFlags` | `rm::Options` (9 fields) |
+| what it hands the engine | `copy::Opts` | `remove::Opts` (6 fields) |
+| the streams | `copy::Run` | `remove::Remover` |
+
+`rm::Options::walk_opts` is the projection. Six of the nine fields go through
+unchanged; the three that do not — `preserve_root`, `preserve_all_root`,
+`presume_tty` — are precisely the three that are decided **per command-line
+operand** and have no meaning for an entry found by walking, and they are
+precisely the three `Rm` keeps for itself. Between the two halves every parsed
+option is accounted for once and once only, which is the property that stops
+the drift recurring: handing the walk a struct with three fields it must
+remember never to read is how the two copies came apart the first time.
+
+The dividing line, stated once so the next reader does not have to infer it: a
+command-line operand. `--preserve-root`, the `.`/`..` refusal, `-I`'s single
+up-front question and gnulib `fts`'s trailing-slash rule all apply to *the thing
+the user typed*, and `mv` has no such thing to apply them to. Everything above
+that line stayed in `rm.rs`; everything below it moved.
+
+**What `mv` gained by inheriting the walk**, beyond no longer being a second
+copy:
+
+* **The symlink-swap fix.** The old walk called `fs::read_dir`,
+  `fs::remove_file` and `fs::remove_dir` on joined path strings; the shared one
+  resolves every syscall through an open parent descriptor (`coreutils::dirfd`),
+  which a swapped component cannot redirect. This was the last place in
+  coreutils that still walked by path.
+* **The listing is read in full before any removal**, as `fts` does, instead of
+  being interleaved with `readdir` — strictly the safer order.
+* **A `readdir` iteration error is now blamed on the child** rather than the
+  parent, which is GNU's behaviour and was not `mv`'s.
+* **One fewer `lstat`.** `remove_source` is handed the `symlink_metadata`
+  `move_one` already took (`Stat::from_metadata`) instead of taking a second.
+  All seven call sites pass an `lstat`, so the second lookup bought nothing but
+  a window in which the answer could change — and the field it decides is
+  whether the source is a directory. Reusing the earlier stat closes that window
+  in the only safe direction: a source swapped for a directory after the copy is
+  unlinked rather than descended, so a tree the user never named survives.
+
+**What did not change, checked rather than assumed:** child paths are now joined
+with `/` rather than the host separator, which is harmless — the target is unix,
+the host tests assert suffixes only, `mv-diff` runs on Linux, and `rm.rs` had
+always behaved this way. `mv`'s `Opts` are `mv.c:87`'s `rm_option_init` verbatim
+(`recursive` on, `interactive` never, `ignore_missing_files` off,
+`one_file_system` off) with `verbose` from `x.verbose` at `mv.c:238`, and
+`answers` is `None` rather than `mv`'s `-i` channel, because `-i` is a question
+about *overwriting a destination* and is already settled by the time the source
+is removed.
+
+**Certified by** the two differential harnesses that certified the half before
+it — `scripts/rm-diff.sh` and `scripts/mv-diff.sh`, both against GNU 9.4 — plus
+`scripts/coreutils-check.sh` (host clippy, host tests, Linux tests). `mv-diff`
+is the load-bearing one: it is what says a walk that now resolves through
+descriptors behaves identically to the one that resolved through strings.
+
+**Tests moved with the code they test.** `joining_drops_one_trailing_slash_only`
+went from `rm.rs` to `remove.rs` because `join` did, and `remove.rs` gained
+`worse_is_a_symmetric_maximum` — `worse` is a max over a three-valued lattice
+folded in `readdir` order, so a `worse` that answered differently for
+`(Declined, Abandoned)` than for the reverse would make a parent's fate depend
+on the order the filesystem happened to list its contents. In `mv.rs`, the two
+tests that had asserted against the deleted `announce_removed` shim were
+rewritten to drive real `remove_source` calls against real files, so the
+coverage lands on the code that actually prints rather than on a helper that no
+longer exists.
 
 ---
 
 ## TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT (lane B, 2026-09-03)
+
+**STATUS 2026-09-04: steps 1 and 2 of the proper fix have landed** — the checker
+exists and pre-push gate 12 runs it. Left open rather than marked RESOLVED
+because the automation covers exactly one crate: `-p coreutils`, on a push that
+touches `userspace/coreutils`. Every other crate in this lane — `posix`,
+`userspace/shell`, the ~30 support crates — still has the whole defect below,
+unmeasured, and step 4 is what would close it.
 
 **In short:** the coreutils crates are built, linted and tested against the
 *Windows* host target, because that is the toolchain the machine has. Every
@@ -113294,27 +113540,80 @@ to abandon it.
 
 **Proper fix**, roughly in order of value:
 
-1. A `scripts/coreutils-check.sh` that runs `cargo clippy` and `cargo test` for
-   **both** `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu` (the latter
-   through WSL, reusing `diff-wsl.sh`'s existing toolchain discovery and its
-   `~/.cache/slateos-diff-target` target dir, so it costs no extra disk).
-   Nothing today runs the Linux side except the `*-diff.sh` harnesses, and they
-   run it for a different reason and swallow the output.
-2. Wire the Linux side into the pre-push gates, or at least into the boot
+1. ~~A `scripts/coreutils-check.sh` that runs `cargo clippy` and `cargo test`
+   for **both** `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu`.~~
+   **LANDED 2026-09-03.** `scripts/coreutils-check.sh` does exactly that, into
+   the harnesses' `~/.cache/slateos-diff-target`, so it costs no extra disk.
+   `--only host|linux`, `--no-clippy`, `--no-test`, `-p PKG` and pass-through
+   cargo arguments after `--`. It exits **2**, never 0, when a requested half
+   could not run — the failure being guarded against here is precisely a check
+   that did not happen reading as one that passed, so "no WSL on this host" is
+   a decline and the summary names which halves actually ran.
+
+   Two findings from building it, both worth knowing before running it:
+
+   * The Linux half must run from the **workspace root**, not from
+     `userspace/`. That zone's config sets `build-std = [… "panic_abort"]` for
+     the SlateOS target, and asking for a host target underneath it dies with
+     ``the crate `panic_abort` does not have the panic strategy `abort` `` — a
+     message about a mismatch nobody asked for. The root config sets no
+     `build-std`, which is why the zone was given its own.
+   * WSL already had a Rust toolchain (the `*-diff.sh` harnesses need one), but
+     it is invisible to `command -v cargo` even under `bash -lc`, because
+     `~/.cargo/env` is sourced from `.bashrc` and a non-interactive login shell
+     does not read it. Name `$HOME/.cargo/bin/cargo` explicitly, as the
+     harnesses and this script do, rather than concluding there is no cargo.
+2. ~~Wire the Linux side into the pre-push gates, or at least into the boot
    test's pre-build tooling suite, so a `#[cfg(unix)]` regression cannot be
-   pushed. Note the cost before doing this: the host clippy run over
-   `-p coreutils --all-targets` took 89 minutes, so a second full pass is not
-   free and probably wants to be scoped to the crates a push touches, exactly
-   as gate 11 scopes itself.
-3. Until then, **run the Linux build by hand after touching any `#[cfg(unix)]`
-   code**:
+   pushed.~~ **LANDED 2026-09-04** as pre-push **gate 12**, scoped to pushes
+   that touch `userspace/coreutils` or the checker itself.
+
+   **The cost this step warned about was wrong, and the correction is the
+   reason it could land at all.** The "89 minutes" above is real but is a
+   *host* `clippy --all-targets` figure, which builds the zone's integration
+   tests and dev-dependencies. `coreutils-check.sh` scopes itself to
+   `--lib --bins`, and `--only linux` measured **2m16s** against a warm shared
+   target directory (clippy 1m12s, test 1m04s) — nearer 6 minutes against a
+   cold or contended one. A guessed cost had blocked a gate for a day; measure
+   before deferring on price.
+
+   Two things about gate 12 that are not obvious from the others:
+
+   * **It reads the working tree, and every other gate reads the commits being
+     pushed.** It has no choice — cargo compiles files, not a revision, so
+     there is no `--head` to pass. What makes that honest is that it first
+     *establishes* that the working tree is the push (one ref, its sha equal to
+     `HEAD`, no modified tracked file, no untracked file) and declines by name
+     if it is not. Answering about the wrong tree is exactly the defect gate 7
+     shipped; declining is the answer gate 7 should have given.
+   * **It is `--may-skip`**, so a host without WSL declines loudly rather than
+     refusing every push. That is why `coreutils-check.sh` moved its usage
+     errors to exit **64**: sharing exit 2 with a genuine decline would let a
+     future renamed flag read as "no WSL on this host" and skip forever.
+
+   Behavioural coverage is `scripts/test-pre-push-unixhalf-gate.py`, which
+   drives real pushes through the real hook against a stub checker and asserts
+   on whether the checker was *invoked* — because a declined gate and a passing
+   gate both allow the push, and only the invocation count tells them apart.
+3. Step 2 has landed, but the gate is scoped to `userspace/coreutils` and only
+   fires on a push. **Run step 1's script by hand after touching any
+   `#[cfg(unix)]` arm** in a crate it does not cover, and while iterating:
 
    ```sh
-   wsl -e sh -c 'cd "$(wslpath -u "D:\visual studio projects\os-lane-b")" && \
-     ~/.cargo/bin/cargo test -p coreutils --lib --bin <bin> \
-       --target x86_64-unknown-linux-gnu \
-       --target-dir ~/.cache/slateos-diff-target'
+   scripts/coreutils-check.sh --only linux            # both halves by default
+   scripts/coreutils-check.sh --only linux --no-clippy -- dirfd   # while iterating
    ```
+
+   First measured run, 2026-09-03: the whole `coreutils` lib reports **416**
+   passing tests on the Linux target, `dirfd` alone **24** — against 0 of
+   either on the host, since `dirfd`'s unix arm does not compile there at all.
+4. **Widen it past `coreutils`.** Gate 12 compiles one crate because that is
+   where the defect was found and because the price is per-crate; the argument
+   for it applies unchanged to `posix`, `userspace/shell` and the support
+   crates, which are equally host-only-checked today. What is missing is a
+   measurement per crate rather than a design: the gate already takes `-p`, and
+   widening it is a matter of deciding how many minutes a push may cost. Do
+   that with numbers, not with the instinct that blocked step 2 for a day.
 
 **If it is never fixed:** warnings and dead code accumulate in the unix half
 where nobody sees them, and — much worse — a unix-only test can rot into a
@@ -113422,6 +113721,427 @@ when someone remembers to ask by hand, on a machine that happens to have WSL.
 The verdicts are carried forward into kshell's self-test rungs, so the evidence
 does survive — but only the evidence gathered on the day the rule was written.
 A later edit to `shellquote.rs` that changes behaviour is caught by nothing.
+
+## A-TEST-CANARY-LOADS-LIVE-CASES-FAIL-ON-A-BUSY-HOST — OPEN 2026-09-03 (found by lane B, owned by lane A)
+
+**In short:** `scripts/test-canary-load.py` starts real spinner processes and
+then checks that each one got most of a CPU. On an idle machine that is true;
+on a busy one it is not, and the suite fails. The boot test runs it near the
+end, so any lane building or benchmarking at the wrong moment gets a red boot
+test that blames the canary harness instead of the load on the machine. It cost
+a 5166-second boot-test run on `main @ 3e1a6818f` today.
+
+**Reproduce it deliberately** — the correlation was confirmed, not assumed. A
+throwaway probe ran the suite twice, once idle and once against twelve CPU hogs
+(one per core, started and killed by PID):
+
+```
+=== idle ===            rc=0
+=== under 12 hogs ===   rc=1
+  - occupancy clears the floor: occupancy 0.409
+  - a correctly-loaded run is not flagged as unapplied: load-not-applied
+```
+
+`occupancy 0.409` is the mechanism stated outright: the spinners got 41 % of a
+core each because the hogs held the rest, and the occupancy floor reads that as
+the load never having been applied. Under heavier starvation the symptom
+changes name — the boot-test run failed with `until-never-matched` instead,
+because the spinners never reached the state `--load-until` waits for — but it
+is one root cause seen at two degrees of contention.
+
+**Why it is not "just don't run anything else":** three agents share this
+machine by design and the boot test is the longest thing any of them runs.
+Demanding an idle host for 900–5000 s is a condition none of the three can
+honour. Worse, the failure is not diagnosable from its message, and a suite
+that fails at random trains everyone to re-run the boot test until it is
+green — the exact habit that hides a real regression.
+
+**Not fixed here because it is lane A's** (`bench`/canary). Filed as
+`requests/b-a-test-canary-load-live-tests-fail-whenever-the-host-is-busy.md`
+with the reproduction and three candidate fixes. The one I'd argue for is
+declining rather than passing: measure the host's spare capacity up front and,
+when it is absent, take the `--may-skip` channel that `run-checker.sh` already
+provides. A contended host genuinely cannot answer the question the live cases
+ask, and "no verdict" is the honest answer — the same reasoning that settled
+`check-libc-shape` and the bash oracles.
+
+**If it is never fixed:** every lane's boot test keeps failing at random, and
+because the message accuses the harness, the reflex is to re-run rather than
+investigate. The live cases are the part of the canary that checks the canary,
+so switching them off would be a worse outcome than the flakiness — the fix has
+to keep them running somewhere.
+
+---
+
+## B-A-COVERAGE-FLOOR-CALIBRATED-ON-THIS-TREE-WAS-APPLIED-TO-EVERY-TREE — FIXED 2026-09-03 (lane B)
+
+**In short:** a gate learned to refuse a verdict when it had inspected
+implausibly little of the project. The numbers it compares against were
+measured from *this* repository. Nothing stopped it applying them to a
+different repository, and another test suite runs that gate against tiny
+synthetic repositories on purpose — so fourteen of its cases went red with a
+message accusing the scan of collapsing when the tree really was that small.
+
+### How it got in
+
+`d50a4b97e check-doc-links: refuse a verdict on a scan that inspected too
+little` added five absolute floors (`MIN_TREE_CRATES` and friends) and routed
+them with `whole_tree = not paths`. That expression is a property of the
+*invocation* — "the caller did not narrow the scope". The floors are a property
+of the *corpus* — "this scan saw less than this project irreducibly holds".
+The two were treated as one, and they are not: a whole-tree run of somebody
+else's tree satisfies the first and says nothing about the second.
+
+`test-checkers-honour-head.py` builds one-crate repositories in a temp dir,
+copies the gate into their `scripts/`, and runs it. The gate then computes
+`ROOT` as its own parent's parent, concludes it is looking at the whole tree,
+and measures a two-file fixture against a floor of 200 files.
+
+### Why the gate's own self-test did not catch it
+
+It nearly did, and the near miss is the instructive part. There *is* an
+end-to-end case that points `ROOT` at a fixture tree — but its fixture was
+built for a different question (does `whole_tree = not paths` route both ways),
+so it wanted the refusal and got it. Every other floor case called
+`coverage_breach` directly as a pure function, where the corpus never comes up.
+A premise that only exists in `main()` cannot be found by cases that never run
+`main()`.
+
+### The remedy
+
+`TREE_MARKERS = ("design.txt", "roadmap.md", "CLAUDE.md")` and
+`is_calibrated_corpus(tree)`. The absolute floors apply only when the tree the
+gate is installed in carries all three; the *structural* floors (a crate yields
+a unit, a unit yields a file) still apply everywhere, because those hold for
+any real crate at any size and are what actually catch a collapsed scan.
+
+Three markers and `all`, not one and `any`: a scratch repository with a stray
+`CLAUDE.md` in it is not unusual, and inheriting floors measured against a tree
+five hundred times its size is the failure being fixed, not a smaller version
+of it.
+
+The skip is **printed to stderr every time it happens**. A floor that silently
+stops applying is exactly the decoration `scripts/mutate-gate.py` exists to
+find, so the one path that legitimately skips it announces itself. In this tree
+that line never prints; if it ever does, that is the finding.
+
+Five mutation needles were added for the new branch (both directions of the
+corpus check, both directions of the `main()` derivation, and `all` → `any`),
+plus self-test cases that drive `main()` with the predicate stubbed both ways —
+because a premise decided in `main()` is invisible to a suite that only unit-
+tests the function obeying it.
+
+### The general lesson
+
+**A floor derived from a measurement carries the corpus it was measured on as
+an unwritten premise, and that premise has to be written down and checked.**
+The calibration comment named the tree, the date and the counts; what it did
+not do was make the code ask whether it was still looking at that tree. Any
+constant justified by "measured here" has the same hole.
+
+---
+
+### Lesson 110: a refusal justified by a guess about a syscall's errno invents the errno (lane B, 2026-09-03)
+
+**In short:** `coreutils`'s shared `dirfd` module refused to create a symlink
+whose target was the empty string, and the comment defending that refusal said
+the kernel "would answer `EINVAL` anyway", so answering early only improved the
+message. The kernel answers `ENOENT`. Nobody had asked it. The refusal did not
+save a syscall — it replaced the syscall's answer with a different one, and the
+only reason that surfaced is that `tar` has a harness which compares its errors
+against GNU's case by case.
+
+**What happened.** Converting `tar` to the shared `dirfd` module routed its
+symlink creation through `dirfd::c_target`, which had this:
+
+```rust
+if target.is_empty() || target.contains(&0) {
+    return Err(embedded_nul());          // io::ErrorKind::InvalidInput
+}
+```
+
+`tar`'s own code, which the conversion deleted, had passed the empty target
+straight to `symlinkat`. So the conversion was a behavioural no-op everywhere
+except one forged-header case, where:
+
+```
+ours (rc=2): tar: sl: Cannot create symlink to '': Invalid argument
+gnu  (rc=2): tar: sl: Cannot create symlink to '': No such file or directory
+```
+
+Linux resolves a symlink target through `getname()`, which rejects the empty
+string with `ENOENT`, not `EINVAL`. The comment had reasoned from the shape of
+the argument ("empty is invalid") rather than from the kernel, and reasoning
+from shape is how you arrive at a plausible errno that is not the real one.
+
+**Why the guess was invisible until a differential harness ran.** Every other
+check on that code agrees with the guess by construction. Clippy cannot know an
+errno. A unit test written by the same author asserts the same `InvalidInput`
+the code raises — this is Lesson 65 (a check that reuses the assumption it is
+checking will agree with itself), in its errno form. The only thing in the tree
+that holds an independent opinion about what `symlinkat("")` does is the kernel,
+and the only thing that consults it is a test that *calls* it, or a harness that
+compares against a program that calls it. `scripts/tar-diff.sh` was the latter,
+and its `emptysym` case is the entire reason this is a fixed defect rather than
+a shipped one.
+
+**The fix, and the shape of the test that keeps it.** `c_target` now refuses
+only the NUL — which is a real refusal, because a C call handed a NUL stores the
+prefix and the link would resolve somewhere the caller never named — and the
+empty target goes to the kernel. The test that pins it does *not* assert that
+empty is rejected; that was never in doubt and asserting it would have passed
+against the bug too. It asserts **who** rejected it:
+
+```rust
+let e = dir.symlink(b"", b"link").unwrap_err();
+assert_eq!(e.kind(), io::ErrorKind::NotFound);   // only the syscall says this
+let e = dir.symlink(b"a\0b", b"link").unwrap_err();
+assert_eq!(e.kind(), io::ErrorKind::InvalidInput); // only this module says this
+```
+
+The second assertion is what makes the first discriminating: the two errors are
+distinguishable, so `NotFound` cannot have come from the early return.
+
+**Where else to look.** Any validation that rejects an argument *before* the
+syscall, on the grounds that the syscall would reject it too. The grep is for an
+early `return Err(...)` in a thin wrapper over an `extern "C"` call, and the
+question to ask at each one is: has anyone run the syscall to find out, or is
+the errno in the comment a plausible-sounding one? Within `dirfd` the audit is
+now clean — `c_name`'s refusals (empty, `/`, NUL) are not errno-equivalence
+claims at all; they are the module's own contract that a name is one lookup, and
+the comment says so rather than appealing to what `openat` would have done.
+
+---
+
+### Lesson 111: a fixture chosen so both sides fail cannot tell which side tried (lane B, 2026-09-03)
+
+**In short:** `rm -r` refused to delete an empty directory it could not read,
+where GNU deletes it. Two separate checks were supposed to catch that and both
+were pointed at the same blind spot: nine differential cases and one unit test,
+every one of them built on a directory that had a file in it. With a file in it
+GNU fails too, and prints the same error for a different reason — so a program
+that never attempted the removal at all looked identical to one that attempted
+it and was refused. The missing fixture was not an exotic one. It was the
+*simpler* one: the same directory, empty.
+
+**The rule that was missed.** Reading a directory needs `r`. Removing an empty
+one needs `w`+`x` on its **parent** and nothing at all on the directory itself.
+So `chmod 300 d` on an empty `d` is a directory nobody can list and anybody can
+delete, and GNU deletes it — `fts` hands the entry over as `FTS_DNR` and
+`remove.c:571` calls `excise` on it anyway. Our walk reported the read failure
+and stopped:
+
+```text
+$ mkdir d && chmod 300 d && rm -rv d
+GNU : rc=0  removed directory 'd'
+OURS: rc=1  rm: cannot remove 'd': Permission denied
+```
+
+**Why nine cases and a unit test all missed it.** `rm-diff.sh` section 15 had
+nine cases for "directories that cannot be read or emptied", and all nine used
+`tree/sub`, which holds `b.txt`. There GNU's `rmdir` *also* fails, with
+`ENOTEMPTY` — which upstream then throws away in favour of the held read error,
+printing `Permission denied`. That is character-for-character what we printed by
+never calling `rmdir` at all. **The non-empty fixture makes the two behaviours
+converge on the same output**, so nine cases pinned an output that two different
+programs produce, and could not distinguish them however many of them there
+were. Adding a tenth of the same shape would not have helped; the count was
+never the problem.
+
+The unit test was worse, because it was not merely blind but confirming: it
+built an *empty* 0000 directory, ran `rm -r`, and asserted `!r.ok`. That is the
+correct fixture with the wrong expectation — written from what the code did
+rather than from what GNU does, so it converted the bug into a *requirement*.
+Anyone who later fixed the walk would have been told by the suite that they had
+broken it. This is Lesson 65's shape (a check that reuses the assumption it is
+checking will agree with itself) in its most direct form: the assertion's source
+was the program under test.
+
+**The tell.** In both cases the fixture had a property that was not needed for
+the thing being tested, and that property was what hid the bug. Section 15's
+comment says it is about "directories that cannot be read"; the file inside
+`tree/sub` is not part of that description, it is an incidental of the shared
+`mktree` helper being reused. Whenever a fixture is inherited rather than
+chosen, ask which of its properties the test actually needs — and then build the
+one with only those properties, because that is the case the suite does not
+have.
+
+**How it was fixed, and how the fix was checked.** Fifteen cases added for the
+empty-unreadable directory across `-r`, `-d`, `-f`, `-i`, `-I` and
+`---presume-input-tty`, and the unit test split in two: the non-empty one keeps
+the ancestor-silence rule it was named for (with a child added so the `rmdir`
+genuinely fails, plus an assertion that `not empty` does *not* appear, which is
+what proves the substitution ran), and a new one asserts the empty one is
+removed **silently and successfully** — success being the part a walk that
+skipped the directory cannot fake.
+
+Then the whole section was run against the *pre-fix* binary, which is the step
+that distinguishes a test suite from a description of current behaviour:
+**eleven of the fifteen differ**, and the four that do not are modes
+0100/0000/0500 where erroring is correct, so they pin the boundary from the
+other side and would catch an over-eager fix. A new case that passes before and
+after the change it was written for is not a regression test; it is a comment.
+
+**And the wider point about the conversion that found it.** A shared module
+absorbing a caller inherits every one of that caller's edge cases, including the
+ones the caller handled by *not* handling them. `tar` passed the empty target
+through because it had no opinion; the shared module had an opinion, and the
+opinion was wrong. Extraction is not only a diff about call sites — it is a diff
+about which layer is allowed to have opinions, and every opinion the new layer
+adds is a behaviour change that has to be certified, not assumed.
+
+### Lesson 112: cancelling a background task kills the shell, not the build — and the orphans come back as a compiler error (lane B, 2026-09-03)
+
+**In short:** eight coreutils binaries failed to build with
+`STATUS_DLL_INIT_FAILED` (`0xc0000142`), which reads exactly like a broken
+linker invocation or a corrupt toolchain. It was neither. It was that the
+machine had **611 processes** on it, because every long `cargo` run I had
+stopped over the preceding hour was still running. `TaskStop` had killed the
+wrapper shell each time and nothing else; `cargo`, `rustc` and `clippy-driver`
+are grandchildren, and they were orphaned, not killed. Windows fails
+`DLL_PROCESS_ATTACH` when a process cannot get the resources to initialise, so
+the symptom surfaced in the newest process rather than in the ones causing it.
+
+**The two failure modes, and why the first one hides the second.** An orphaned
+`cargo` still holds the flock on the build directory, so the *visible* symptom
+is a new run sitting at `Blocking waiting for file lock on build directory`
+forever. That one is at least self-describing. The invisible symptom is the
+resource ceiling: nothing in the 0xc0000142 message mentions process count, so
+the natural reading is that the *code* or the *toolchain* is broken, and the
+natural response is to start bisecting a source tree that is fine. I lost time
+to exactly that reading before running `wmic` and seeing the process table.
+
+**What actually diagnoses it.** `wmic process get
+ProcessId,ParentProcessId,CreationDate,CommandLine` — the creation dates are the
+tell, because orphans from a run you stopped forty minutes ago have timestamps
+that no longer correspond to anything you are running now. Kill only your own,
+**by PID**: `taskkill //PID <n> //T //F`. (From MSYS the slashes must be
+doubled, or the shell rewrites `/PID` into `C:/Program Files/Git/PID` and
+`taskkill` rejects it as a filename.) Never by image name — another lane's
+`cargo test -p mindmap` was in that same list, and a `taskkill /IM cargo.exe`
+would have destroyed their run to fix mine.
+
+**The fix is not discipline, it is the job object.** `scripts/run-timeout.py`
+exists precisely for this: it puts the child in a Windows Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so a timeout, a Ctrl-C, or the runner
+itself dying tears down the **entire tree**, grandchildren included. Every long
+run in this session went through it afterwards and the orphan problem did not
+recur. `CLAUDE.md` already said to use it for anything that might hang; what
+this incident adds is that it is equally required for anything you might
+*cancel*, which is a much larger set — a cancellable run is any run long enough
+that you would want to stop it, i.e. every run worth backgrounding.
+
+**The generalisable shape.** A cancel that only reaches the process you have a
+handle on is not a cancel; it is a detach. Whenever a tool offers to stop
+something, ask what it has a handle on, because that — not the thing you asked
+it to stop — is the extent of what dies. And when a build fails with an error
+that names no file of yours, check the machine before you check the code: the
+first hypothesis should not be "my program is wrong" when the evidence is
+equally consistent with "there is no room to run it."
+
+**Postscript, 2026-09-04 — I then made the inverse error, twice in one hour,
+and the remedy above is what caught it.** Checking whether a `git push` was
+still alive, I ran the process query through `| head -14`. The `python.exe`
+rows filled all fourteen lines, the `git.exe` rows were cut off below them, and
+I read the truncated output as "no git process" and concluded the push had died
+silently. It had not. On that reading I started a **second** `git push` to the
+same ref, and for several minutes two pushes were racing to run the same eleven
+pre-push gates. Re-querying without `head` — and with `CreationDate`, which
+distinguished the 04:36 original from my 04:44 duplicate — showed both, and the
+duplicate was killed by PID with `taskkill //PID … //T //F`.
+
+So the sharper rule, which this entry did not previously state: **never pipe a
+process query through `head`, `tail`, or any other truncation, because the
+thing you are inferring from is the *absence* of a row.** Truncation and
+absence are indistinguishable in the output, and the reading you will reach for
+is the one that says the process is gone — which is also the reading that makes
+you take action. Every other kind of command can be sampled; this one cannot.
+It is the same defect as Lesson 111's fixture, in a different costume: an
+observation whose two possible causes produce identical output, mistaken for
+evidence of one of them.
+
+### Lesson 113: a log written by two processes at once is not a log, and `wsl.exe` is always the second one (lane B, 2026-09-04)
+
+**In short:** when a program running inside WSL writes to both stdout and
+stderr, and the caller merges the two into one file — `cmd > log 2>&1`, which
+is how every backgrounded run in this tree is recorded — the quieter of the two
+streams is **silently overwritten**. Not truncated, not interleaved: gone, with
+no error anywhere. `wsl.exe` does not share a file offset with any other
+writer, so each stream starts at byte zero of the same file and the louder one
+paves over the other. Two of this project's checks were affected, and the
+symptom in both is a log that reads as if the check passed.
+
+**How it surfaced.** I ran `scripts/coreutils-check.sh --only linux` to measure
+what the Linux half costs, and grepped the captured output for its section
+headers to confirm which half had run. The grep matched only `=== summary ===`.
+The natural reading is "clippy did not run" — and I nearly acted on it. Running
+the script again with the streams captured *separately* showed the header
+present and correct on stdout. Nothing had failed to run; the bytes had been
+destroyed in transit. The merged capture said `result: clean` with nothing left
+in it to say which half had produced that verdict, which is precisely the
+defect `coreutils-check.sh` was written to close, one level up: a check that
+did not visibly happen, reading as a check that passed.
+
+**The minimal reproduce**, which is worth keeping because the behaviour is not
+documented anywhere and is easy to disbelieve:
+
+```bash
+cat > probe.sh <<'EOF'
+wsl -e bash -c 'echo "VERDICT"; for i in $(seq 1 40000); do echo "noise" >&2; done'
+EOF
+bash probe.sh > f.txt 2>&1
+grep -c VERDICT f.txt        # 0 -- the line is gone
+bash probe.sh > o.txt 2> e.txt
+grep -c VERDICT o.txt        # 1 -- it was always being written
+```
+
+Volume decides the winner, which is what makes this so dangerous: a *warm*
+build is quiet, so the verdict survives and the arrangement looks fine. It is
+the failing run — the one that floods stderr, the one whose output you actually
+need — that loses it.
+
+**Two plausible fixes that do not work, and why.** Both are worth recording
+because both look obviously correct.
+
+| Attempt | Why it fails |
+|---|---|
+| Redirect on the near side (`wsl … 2>&1`) | This is already what `> log 2>&1` does: it makes fd2 a dup of fd1. `wsl.exe` still writes the two with offsets of its own. |
+| Relay WSL's stdout through a pipe (`wsl … \| cat`) | The relay is simply one more writer with an offset of its own, racing `wsl.exe`'s stderr. Same bytes lost. |
+
+**What works is the rule that exactly one writer may own the file**, and the
+collapse must happen on the *far* side, where both streams are still ordinary
+pipes back to `wsl.exe`. One `exec` redirect does it. Which direction to
+collapse is a real choice and it went differently in the two places, for
+reasons in design-decisions.md §762: `coreutils-check.sh` does `exec 1>&2`,
+freeing stdout to carry its verdict alone where no WSL handle can reach it;
+`diff-wsl.sh` does `exec 2>&1`, because the 50 harnesses' report is *already*
+on stdout and every caller looks for it there.
+
+**Scope, once you know to look for it.** 34 files here invoke WSL, but command
+substitution — `$(wsl …)` — is immune, because a pipe has no offset to collide
+over. Only invocations that let `wsl.exe` inherit the caller's file handles can
+lose anything, and there were exactly two: `coreutils-check.sh`, and
+`diff-wsl.sh`'s `exec wsl -e env "$@"`, which is the shared preamble every one
+of the 50 `*-diff.sh` differential harnesses re-execs itself through. That
+second one means the primary correctness evidence for coreutils has been
+written this way for as long as the harnesses have existed.
+
+**The generalisable shape.** A redirection is a *contract about a file offset*,
+and it silently stops holding whenever the writer is on the far side of a
+process boundary that reopens the handle — WSL here, but the same is true of
+anything that marshals handles across a VM or container edge. So: **decide
+which stream carries the verdict, make it the only thing on that stream, and
+make the collapse happen where the streams originate.** A verdict sharing a
+file with unbounded tool output is a verdict you have merely been lucky to keep
+reading.
+
+And the reason this was caught at all is Lesson 112's postscript, applied
+without meaning to: I was reasoning from the **absence** of a line. That entry
+says never to infer from an absence in truncated output; the wider rule this
+adds is that a missing line has *three* causes, not two — it was never written,
+it was cut off, or it was written and then destroyed — and the third is the one
+nobody checks. When output disagrees with what you believe ran, re-capture with
+the streams separated before you conclude anything about the program.
 
 ## TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM (lane A, 2026-09-03)
 
@@ -114078,6 +114798,62 @@ which is exactly how `check-doc-links.py` broke and why this file exists),
 this will report "ok — all 47 gates can reach a non-zero exit bare" and be
 wrong, in the same words it uses when it is right.
 
+## TD-B-COREUTILS-IS-LINTED-AT-STOCK-CLIPPY-NOT-AT-THE-STANDARD-CLAUDE-MD-MANDATES (lane B, 2026-09-04)
+
+**In short:** `CLAUDE.md` requires every crate to deny `clippy::all` *and*
+`clippy::pedantic`, and to warn on five lints that catch panics and overflow
+(`unwrap_used`, `expect_used`, `panic`, `indexing_slicing`,
+`arithmetic_side_effects`). The workspace declares all of them in
+`[workspace.lints]`. `userspace/coreutils` never opted in — its `Cargo.toml`
+has no `[lints]` section, so it inherits none of them — and **85 of its 87
+binaries carry no lint attribute of their own either**. They are being checked
+at stock clippy defaults. `userspace/shell` is in the same state; `posix` is
+not, so the correct pattern already exists in this lane.
+
+**How it surfaced.** Not from a checker — from reading the noise. The
+2026-09-04 gate run emitted 9,828 warnings, and I nearly dismissed them all as
+belonging to the fabricated crates (4,912 are `missing [lints]` on those). Two
+of them named `coreutils`. Cargo has a warn-by-default lint,
+`cargo::missing_lints_inheritance`, that says precisely this — and it has been
+saying it on every run, buried under 4,910 identical lines about other crates.
+
+**Why it matters more than a normal lint gap.** `coreutils` is the largest
+crate in lane B and the one whose code most resembles the things those five
+lints exist to catch: byte slicing of user-supplied paths (`indexing_slicing`),
+arithmetic on sizes and offsets parsed from the command line
+(`arithmetic_side_effects`), and `unwrap` on syscall results. Every clean
+`scripts/coreutils-check.sh` run I have reported — including the one certifying
+the walk extraction in `4bb9da2fd` — graded against the weaker standard. The
+runs are not *wrong*; they are narrower than their "clean" implies.
+
+**This is Lane A's TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE shape**, arrived at
+from the other end. There the gate was wired and checked one line; here the
+gate is thorough but the *lint set it enforces* is a fraction of the mandated
+one. Both produce the same artifact: a green result whose scope the reader
+overestimates. And it is a sibling of
+`TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT` —
+same crate, same class, different axis (that one is about *which target*, this
+is about *which lints*).
+
+**The proper fix,** in the order the work has to happen:
+
+1. Add `[lints] workspace = true` to `userspace/coreutils/Cargo.toml` and
+   `userspace/shell/Cargo.toml`, matching `posix/Cargo.toml`.
+2. Measure the fallout before fixing any of it. `pedantic` plus the five
+   defensive lints across 87 binaries will produce a large number; that number
+   is the actual size of this entry and is not yet known.
+3. Fix, don't blanket-`allow`. Where a lint is genuinely wrong for this code,
+   suppress it *individually with a comment*, per `CLAUDE.md` — a crate-level
+   `allow` would re-create exactly the condition this entry describes, and
+   would do it in a way that looks deliberate.
+4. Delete `lib.rs`'s lone `#![deny(clippy::all)]` once inheritance covers it,
+   so there is one place that says what the lint policy is.
+
+**If it is never fixed:** nothing breaks and nothing regresses — the code is
+as good as it was. What is lost is the assumption every "clean" in this file
+has been written under. Treat past clean results for `coreutils` as "clean at
+stock clippy", not "clean at the project standard", until step 2 has a number.
+
 ## A-A-THE-LIBC-SHAPE-GATE-WAS-BORN-DEAD-AND-THE-WIRING-GATE-CALLS-IT-WIRED (lane A, 2026-09-04)
 
 **In short:** a gate added yesterday to check that `libc.a` is carved finely
@@ -114422,3 +115198,598 @@ The three creation sites sit in helpers — `_run_clippy_gate` (`:506`),
 per test case, so the seven leaks are seven cases spread across the three, and
 repairing the three `mkdtemp`/`rmtree` pairs covers all of them. There is no
 fourth site: these are the only `mkdtemp(dir=…)` calls anywhere in `scripts/`.
+
+## TD-B-SIX-TRACKED-FILES-HELD-CRLF-IN-THE-LANE-B-WORKTREE-AND-THE-WRITER-IS-UNIDENTIFIED (lane B, 2026-09-04)
+
+**In short:** the boot test refused to build because six files declared
+`text eol=lf` in `.gitattributes` had Windows line endings (CRLF) on disk. The
+bytes are repaired. **What wrote them is not known**, and this entry exists
+because repairing bytes without finding the writer only schedules the next
+occurrence — as `check-eol`'s own refusal message says.
+
+**Why no git command showed it.** `text eol=lf` installs a *clean filter*: git
+converts CRLF to LF before every comparison, so `git status`, `git diff` and
+`git add` all called the tree clean, and staging the repair produced a
+zero-byte diff. `git ls-files --eol` is the only view that shows it, and it
+read `i/lf w/crlf` — index correct, working tree corrupt. This is why
+`scripts/boot-test.sh`'s `check-eol` gate reads the bytes itself rather than
+asking git, and it is the reason the gate is worth its runtime.
+
+**The six, with the mtimes that bound when it happened:**
+
+| file | CRs | mtime |
+|---|---|---|
+| `requests/a-b-run-ki-dupes-after-merges.md` | 105 | 2026-08-16 15:45 |
+| `requests/a-b-set-credentials-right.md` | 151 | 2026-08-16 15:46 |
+| `scripts/getopt-ambiguity-check.py` | 837 | 2026-08-30 08:08 |
+| `scripts/check-libc-shape.py` | 1032 | 2026-09-03 21:41 |
+| `scripts/check-mutation-needles.py` | 400 | 2026-09-03 22:22 |
+| `scripts/check-doc-links.py` | 1505 | 2026-09-03 23:03 |
+
+Four distinct dates over nineteen days: this is recurring, not one event.
+
+**What has been ruled out.**
+
+- **Not the blobs.** `git ls-files --eol` reports `i/lf` for all six; the
+  repository content is correct and always was. Only the working tree was
+  wrong, so nothing was ever pushed in this state.
+- **Not `git checkout`.** `core.autocrlf` is `input` — set at *system* scope,
+  unset at local, global and worktree — and `core.eol` is unset everywhere.
+  `input` means convert on commit, never on checkout, so checkout writes the
+  blob verbatim.
+- **Not my edits this session.** All six mtimes predate 2026-09-04, and an
+  `Edit`-tool write to one of them afterwards left it `w/lf`.
+- ~~**Not a tree-wide tool.** The `os` integration worktree has **0** CRLF
+  files across the same 1,065 tracked files. Whatever did this ran in the
+  *lane-b worktree specifically*.~~ **Wrong — struck out, see the correction
+  at the end of this entry. It is not lane-b-specific.**
+- **Not the obvious text-mode write.** `check-doc-links.py:1221` does open a
+  file `"w"` without `newline=""`, which on Windows is exactly the CRLF-making
+  pattern — but its path is inside a `tempfile.TemporaryDirectory()`, so it
+  cannot touch a tracked file. Named here so the next reader does not spend
+  the same twenty minutes on it. `check-libc-shape.py` and
+  `getopt-ambiguity-check.py` contain no writes at all, and
+  `check-mutation-needles.py:314` also writes only into a temp dir.
+
+**The one partial explanation.** The two `requests/` files share a commit:
+`6caf6467e`, *"repair: restore the tree that the buggy `--selftest` deleted, on
+lane-b too"*. A repair that restores deleted files by writing them through
+Python's default text mode would produce exactly this, and it targeted the
+lane-b worktree by name — which fits the lane-b-only scope. That accounts for
+2 of 6 and for the 2026-08-16 pair. **It does not account for the four
+`scripts/*.py` files**, and no hypothesis tested so far does.
+
+**How to find it if it recurs.** The mtime is the timestamp of the write, so
+`ls -l --time-style=full-iso` on the offenders gives the minute; correlate that
+against what was run then. Do not repair before recording the mtimes — the
+repair overwrites the only evidence of when it happened, which is what makes
+this entry thinner than it should be.
+
+**If it is never fixed:** every recurrence blocks `scripts/boot-test.sh` for
+whichever lane hits it, and the gate refuses the *whole build*, so it blocks
+merging too. It is loud and self-repairing-by-hand, not silent — the failure
+mode is lost time, not lost correctness.
+
+### CORRECTION, before this entry was an hour old: it is not lane-b-specific
+
+The "Not a tree-wide tool" bullet above is **struck out because it was false**,
+and it is left visible rather than deleted because how it got here matters more
+than the claim. It was published on a partial reading: the command that
+produced it queried three worktrees, only the `os` result returned before I
+drew the conclusion — the other two auto-backgrounded — and I read "os is
+clean" as "only lane-b is dirty". The full result:
+
+| worktree | tracked files with CRLF | of those, declared `eol=lf` |
+|---|---|---|
+| `os` (integration; nobody develops in it) | **0** | 0 of 1444 |
+| `os-lane-a` | **168** (166 `.rs`, 1 `.ads`, 1 `.atp`) | **0** of 1443 |
+| `os-lane-b` | 6 | 6 — the six above; now 0 of 1446 |
+| `os-lane-c` | 66 | **31** of 1433 |
+
+**The true shape is the inverse of what I wrote: every worked-in tree has it;
+the one tree nobody develops in is clean.** And the corruption sits in each
+lane's *active area* — lane A's under `kernel/`, which is exactly what lane A
+is working on; mine in files that had just arrived from lane A. A checkout, a
+merge, or one lane's script would not produce that distribution. Something in
+the development loop itself writes tracked files through a text-mode handle.
+Both agent file-writing tools are excluded for lane B at least: an `Edit`
+applied to one of the six afterwards left it `w/lf`, and a `Write` creating a
+new `requests/*.md` — a path covered by `eol=lf`, in the same worktree, the same
+session — also produced `w/lf` with zero CRs. Whatever writes these is not the
+agent's own editor.
+
+### The correction needed a correction: the second column is the one that matters
+
+Everything above the table survived; the table's first version did not. It read
+`os-lane-a` = "~50, of which 44 in `kernel/src/fs`" — wrong twice over, and I
+had *already flagged* a 169-vs-50 discrepancy between two measurements and
+published the smaller number anyway. The real count is **168**, and the
+`~50` came from a `head`-limited view of a per-directory breakdown. When two
+measurements of one quantity disagree, the disagreement is the finding; picking
+one and moving on is not a resolution.
+
+The consequence I drew from it was also false, and more expensively so. I wrote
+that lane A's dirty files "mean `check-eol` will refuse *their* build too."
+**They do not.** `check-eol.py` does not look for CRLF; it looks for CRLF *in
+files `.gitattributes` declares `text eol=lf`*, which is `*.sh`, `*.py`,
+`*.yaml`, `*.yml`, `*.md`, `*.txt` — **and not `*.rs`**. All 168 of lane A's
+report `attr/` empty. Lane A's build is not at risk and never was.
+
+**The lane that is actually blocked is lane C**, which I had written off with a
+bare "66". Thirty-one of those 66 are declared `eol=lf` — 17 `requests/*.md`,
+8 `apps/*/mutate.py`, 6 `scripts/*.py` — so `scripts/boot-test.sh` will refuse
+lane C's build at `check-eol`, and lane C has no `known-issues.md` entry and
+nothing in `open-questions.md` about line endings. Filed as
+`requests/b-c-thirty-one-crlf-files-will-refuse-your-next-boot-test.md`.
+
+**The error underneath both of these is one conflation:** "has CRLF" is not
+"violates the promise". The gate's scope *is* `.gitattributes`' promise, by
+design and by its own docstring — so a census of CRLF files answers a different
+question than the one I was asking, and ranking the lanes by it put them in
+very nearly the reverse order. Counting the right population would have cost
+one extra pathspec on the same command.
+
+**This is not new, and lane A wrote it down seventeen days ago.**
+`A-27-KERNEL-SOURCES-ARE-CRLF-IN-THE-WORKING-TREE-WHILE-EVERY-BLOB-IS-LF`
+(2026-08-18) is the same phenomenon, diagnosed to the same cause — "written by
+something that opened them in Python text mode on Windows" — and marked
+**"tooling fixed; the divergence itself remains."** It listed **27** files. The
+same population today is **166**. It also named the durable fix (a root
+`.gitattributes` carrying `*.rs text eol=lf`) and deferred it on one stated
+objection: that `.gitattributes` is a shared root file and "needs to be
+coordinated, not dropped in by one lane — file a request or raise it in
+`open-questions.md` first." No request was ever filed, and the objection has
+since expired without anyone noticing: a root `.gitattributes` **now exists**
+and already carries six rules that three lanes depend on. What A-27 was waiting
+for arrived; nothing re-checked the entry that was waiting for it.
+
+That is its own lesson, and a more useful one than the arithmetic: **a deferral
+whose trigger condition is written in prose is a deferral nobody will notice
+has fired.** A-27's condition ("once a shared `.gitattributes` exists") became
+true and the file grew 6× behind it. This is exactly the shape
+`deferred-questions.md` exists to hold — an explicit trigger, in a file that
+gets re-read — and A-27 predates that file, so it never got one.
+
+**The lesson is the same one as Lesson 112's postscript, and I had already
+written that postscript before making this mistake.** There the truncated view
+was `| head` on a process query; here it was an auto-backgrounded command whose
+first line arrived and whose remaining two did not. Both times the partial
+output was *coherent* — it read like a complete answer — and both times I drew
+a confident conclusion from it and acted. The rule generalises past process
+queries: **when a command surveys N things, do not conclude anything until you
+have counted N results.** A survey that returns 1 of 3 rows is not weak
+evidence for the other two; it is no evidence at all.
+
+## TD-B-THE-BAND-GATE-IS-A-ONE-SECOND-CHECK-THAT-ONLY-A-SEVENTY-MINUTE-BOOT-TEST-RUNS (lane B, 2026-09-04)
+
+**In short:** `design-decisions.md` is appended to by all three lanes at once,
+so each lane owns a numbered band (B: 700–799, C: 800–899, A: 900–999) and every
+new section must carry a `**Lane:** X` line near its heading. A checker enforces
+that. It runs in about a second, needs no build, and touches one text file — and
+the *only* thing that runs it is `scripts/boot-test.sh`, which takes over an
+hour to get to it. So the feedback loop on a one-line formatting rule is
+seventy minutes, and in practice nobody finds out until they are trying to merge.
+
+**Evidence that this is not hypothetical:** measured this morning, **two of the
+three lanes were simultaneously sitting on a violation.**
+
+| branch | result |
+|---|---|
+| `origin/lane-b` | §756 and §757 missing `**Lane:** B` (757 missing `**Date:**` too) — fixed in `87dfc89ce` |
+| `origin/lane-a` | §910 missing `**Lane:** A` — still open; filed as `requests/b-a-your-section-910-has-no-lane-field-and-your-next-boot-test-will-fail-on-it.md` |
+| `origin/lane-c` | clean |
+| `origin/main` | clean |
+
+Lane A's was verified against **their** document and **their**
+`design-decisions-baseline.json`, not lane B's — the gate's notion of which
+sections are "new" comes from that baseline, so checking another branch's
+document against your own baseline answers a different question.
+
+**Where the gap is.** `check-design-decisions-bands` appears **zero** times in
+`scripts/hooks/pre-push`; `grep -rl` finds its only non-test caller is
+`boot-test.sh`. This reads as an omission rather than a policy, because
+pre-push already carries document gates built to the same shape —
+`request-deletion` and `doc-links` both run there, both preceded by a
+`--selftest`, both judging the commits being pushed with `--head <sha>` rather
+than the worktree. The band gate would drop into that pattern with no new
+machinery; it already supports `--file` and `--baseline`.
+
+**Why it was not just fixed.** The hook is shared by all three lanes, so adding
+the gate today would have made lane A's next push fail on §910 with no warning.
+That converts a courtesy into an ambush, and a gate whose first act is to block
+someone else's unrelated work is how gates get switched off. The ordering has to
+be: lane A fixes §910, then the gate goes in against a clean tree, so the first
+thing it can possibly report is a genuine new occurrence. That is the same
+ordering argued for the `*.rs text eol=lf` question in
+`requests/b-a-a27s-deferral-condition-fired-and-the-file-count-went-27-to-166.md`,
+and for the same reason.
+
+**The general shape, which is worth more than this instance.** A check's value
+is not its correctness alone but *how early it can be run times how often it
+actually is*. This one is maximally cheap and maximally late, which is the worst
+available combination — it has all the cost of a gate and, at seventy minutes'
+latency, close to none of the feedback. The rule that follows: **when adding a
+static check, place it at the earliest gate that can run it, not the most
+convenient one to wire.** `boot-test.sh` is convenient because everything is
+already there; it is also the last place anyone wants to learn about a missing
+`**Lane:**` line.
+
+**If it is never fixed:** nothing is silently wrong — the check does eventually
+run and it does block the merge, so no violation reaches `main`. The cost is
+purely wasted boot tests, one per occurrence per lane, at over an hour each. Two
+were pending as of this entry.
+
+---
+
+## TD-B-SYSINFOS-PROC-MOUNTS-PARSER-CAN-PANIC-DROPS-THE-WHOLE-TABLE-ON-ONE-ODD-BYTE-AND-MISREADS-ESCAPED-PATHS
+
+**Filed:** 2026-09-04 by lane B. **Where:** `userspace/sysinfo/src/main.rs`,
+`show_disk()` (lines 176-200) and `read_proc()` (line 30). **Status:** open;
+to be fixed as part of the `procinfo` extraction requested by lane C in
+`requests/c-b-the-proc-readers-in-userspace-sysinfo-should-be-a-crate-both-sysinfos-can-use.md`.
+
+**In short:** `sysinfo disk` — and the no-argument summary, which calls it —
+reads `/proc/mounts` in three ways that are each wrong for a file whose fields
+are *paths*. One of them aborts the program, one silently prints the wrong
+filesystem type for a row, and one makes the entire table disappear behind
+`(mount info not available)`. None can be triggered by a plain mount today,
+which is why all three have survived: they need a mount point or an option
+string that is not plain ASCII without spaces.
+
+### 1. A reachable panic on a mount option string
+
+```rust
+let options = if parts[3].len() > 20 {
+    &parts[3][..20]
+} else {
+    parts[3]
+};
+```
+
+`parts[3]` is a `&str`; `.len()` counts **bytes** and `&s[..20]` panics unless
+byte 20 is a character boundary. Verified by construction: any option string
+whose first 15 bytes are ASCII followed by two-byte characters puts a
+continuation byte (`0xa9`) at offset 20, and the slice panics rather than
+truncating. The program aborts mid-table, so the rows already printed stay on
+screen and the rest are simply gone — which reads like a short mount table, not
+like a crash, if stderr is not being watched.
+
+This is a `clippy::indexing_slicing` finding, and clippy has never seen it:
+`userspace/sysinfo/Cargo.toml` has no `[lints] workspace = true`, so the
+workspace's `indexing_slicing = "warn"` does not reach it. That is a concrete
+instance of `TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT`
+rather than a separate problem — the TD predicted this class would accumulate
+unseen, and here is one that did.
+
+### 2. `split_whitespace()` cannot parse `/proc/mounts`
+
+The mount table escapes the four characters that would otherwise break its own
+field separation — space, tab, newline and backslash — as `\040`, `\011`,
+`\012` and `\134`. `show_disk()` splits on whitespace and unescapes nothing, so
+a mount point containing a space arrives as `\040` in the middle of a field
+(harmless but wrong on screen), while any *unescaped* whitespace shifts every
+later field left by one: `parts[2]` stops being the filesystem type and
+`parts[3]` stops being the options. The row still prints, with a plausible
+value in every column. That is the failure mode worth naming — not a crash, a
+confidently mislabelled filesystem.
+
+### 3. `read_to_string` makes one bad byte delete the whole table
+
+`read_proc()` is `fs::read_to_string(path).ok()`, so a single non-UTF-8 byte
+anywhere in `/proc/mounts` turns the whole read into `None` and `show_disk()`
+prints `(mount info not available)`. Mount points are paths, and this project's
+paths *"allow all characters except `/` and null"* (CLAUDE.md, architectural
+rules) — so a non-UTF-8 mount point is legal by our own spec, and one of them
+hides every other mount as well as itself. CLAUDE.md self-review item 7 covers
+exactly this: paths and OS-boundary data are bytes, and `read_to_string` is the
+forced-UTF-8 form it forbids.
+
+The other `read_proc()` callers are not affected in the same way, because
+`/proc/cpuinfo`, `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime` and
+`/proc/stat` contain no paths and are ASCII by the kernel's own construction.
+`/proc/mounts` is the one call site whose content is attacker- or
+user-shaped. So the fix is not "stop using `read_to_string` everywhere" — it is
+that the mount table needs a byte-oriented reader of its own.
+
+### The proper fix
+
+All three go away together in the `procinfo` crate, because they are the same
+mistake — treating a path as a string:
+
+- read `/proc/mounts` with `fs::read` and parse `&[u8]`;
+- split on single spaces (the file's actual separator) rather than on runs of
+  whitespace, and unescape `\040 \011 \012 \134` per field;
+- return `Mount { device: PathBuf, mount_point: PathBuf, fstype: String,
+  options: String }`, leaving truncation to the *caller's* formatter, where it
+  can be done by characters instead of bytes;
+- `#[test]`s for a mount point with a space, one with a backslash, one with a
+  non-UTF-8 byte, and an option string that straddles the truncation width.
+
+`userspace/sysinfo` has no tests at all today — it is a single `main.rs` of
+`println!` — which is the reason none of this was caught. The extraction is
+what makes it testable, so the tests land with it rather than after it.
+
+**If it is never fixed:** `sysinfo disk` is correct for ordinary mounts and
+stays correct; the panic needs a non-ASCII option string, the field shift needs
+whitespace in a mount point, and the empty table needs a non-UTF-8 path. All
+three become reachable the moment the OS mounts anything a user named.
+
+## TD-B-THE-THIRTY-TWO-SUITES-THAT-VERIFY-THE-CHECKERS-ARE-THEMSELVES-RUN-BY-NOTHING — **RETRACTED, THE CLAIM WAS FALSE**
+
+**Filed:** 2026-09-04 by lane B. **Retracted the same day, by the same lane,
+on observing the thing it said did not exist.** Kept rather than deleted: the
+entry was wrong for a reason worth having written down, and a tracking file
+that quietly loses its own false entries teaches nobody.
+
+**In short:** I wrote that the 32 `scripts/test-*.py` suites — the ones that
+verify the `check-*.py` gates actually work — were run by nothing, and would
+execute only when a person typed the filename. **That was false.**
+`scripts/boot-test.sh` has run every one of them on every boot test since
+2026-08-29 (`bc98c61cb`), in `check_python_suites()` at `boot-test.sh:5159`.
+Observed directly on 2026-09-04: a boot test on `lane-b` printed
+`=== Running the tooling's own test suites (scripts/test-*.py) ===` and a
+per-suite pass line for each, in alphabetical order, before building anything.
+
+### Why the claim was wrong, which is the part worth keeping
+
+The retracted measurement read: *"Grepped for every suite name across `*.sh`,
+`*.yml`, `*.yaml`, `*.toml` and `Makefile`: no runner exists."* The grep was
+accurate. The inference from it was not.
+
+`check_python_suites` does not name a single suite. It globs
+`"$PROJECT_ROOT"/scripts/test-*.py` and runs whatever it finds — and its own
+comment says why, in terms that are precisely the refutation of my method:
+
+> WHY IT DISCOVERS RATHER THAN LISTS. A hand-written list is a second place a
+> new suite must be registered, and forgetting is silent: the suite passes by
+> not running, which is indistinguishable from passing. So the glob is the
+> list […]
+
+So the design decision that makes the wiring *robust* — never writing the names
+down — is exactly what made a search for the names come back empty. **A grep for
+a list cannot find a discovery**, and "I searched for every name and found no
+runner" is not evidence that nothing runs them; it is evidence of nothing at
+all when the runner is a glob. The general lesson, and the reason this is
+retained: when a search returns "nothing anywhere runs this", the next step is
+to *run the thing that would run it* and watch, not to file the finding. One
+boot test would have refuted this entry in the eleven minutes it took to reach
+that gate.
+
+There is a second-order irony worth noting, since it is the same mistake twice
+in one entry: the retracted text proposed, as its step 2, to "wire the fast
+ones into `boot-test.sh`'s pre-build gate block" — that is, to replace a
+working glob with a hand-written list, which is the arrangement the glob's
+author had already rejected in writing at the top of the function I had not
+read.
+
+### What survives the retraction
+
+Two smaller claims were true and are re-filed here at their real size, rather
+than left inside a retracted entry where nobody would trust them:
+
+1. **`check-gates-are-wired.py` really does glob `scripts/check-*.py` only**, so
+   the suites are not in *its* audited population. But they are not unaudited:
+   `check_python_suites` guards its own discovery with a floor — it refuses to
+   build if fewer than 10 suites are found, on the stated grounds that "a gate
+   that discovers nothing reports no failures, which reads exactly like a pass."
+   That floor is weak (32 suites could fall to 10 unnoticed) but it is not
+   absent, and a sharper ratchet here is a *nice-to-have*, not the hole the
+   retracted entry described. Not currently tracked as debt; noted here.
+2. **Case 11 of `quote-names.py --selftest` really was written in isolation**
+   rather than as a case in `test-checkers-honour-head.py`, which is the suite
+   built for exactly that question and which would have caught the `GIT_DIR`
+   bug. That remains a genuine miss — but the reason I gave for it ("a suite
+   nothing runs is a suite nobody remembers to extend") was a rationalisation
+   built on the false premise. The real reason is that I did not look for an
+   existing home before writing a new one.
+
+### The one real finding, which belongs elsewhere
+
+This gate is a large part of why the pre-build phase is long. Measured on
+2026-09-04 on `lane-b`: **~41 minutes of gates before `check_python_suites`
+even started**, and the suite gate was still running 6 minutes later, having
+reached `test-check-self-tests-wired.py` — with `test-checkers-honour-head.py`
+(~10 minutes standalone, measured 582 s) next in alphabetical order and 19
+suites after it. The run was killed at 47 minutes, before the build began.
+
+That cost is real and is worth a deliberate decision, but it belongs to
+`TD-B-PRE-BOOT-QUICK-IS-NOT-QUICK` — where the question is "what should a quick
+run skip", not "is this wired". Recorded there, not here.
+
+### B-FTS-DROPS-THE-65TH-CHILD-OF-ANY-DIRECTORY. `find`, `rm -rf`, `du` and `chmod -R` silently skipped files — 2026-09-04 — FIXED 2026-09-04
+
+**Where:** `posix/src/fts.rs`, the (now removed) `snapshot_dir` /
+`CachedChild` / `DirFrame::{children, n_children}` machinery, and
+`FTS_NAME_MAX`.
+
+**Two separate silent losses, in the same function:**
+
+| # | Input that triggered it | What happened | What the caller saw |
+|---|---|---|---|
+| 1 | A directory with more than 64 entries | Entries past the 64th were never copied into the frame | Traversal completed successfully, missing files |
+| 2 | A component name longer than 63 bytes | The entry was skipped in the copy loop | Same — success, missing file |
+
+Neither produced an `FTS_ERR` entry, an `errno`, or a diagnostic. The module
+docs claimed loss (2) was "skipped with an `FTS_ERR` entry"; it was not, so
+the documentation actively concealed the defect. `fts` is what `find(1)`,
+`rm -rf`, `du` and `chmod -R` are built on, so "silently" meant a recursive
+delete that reported success while leaving files behind, and a `du` that
+under-reported.
+
+**Why the eager copy existed, and why the reason had already expired:** the
+frame buffered a directory's whole listing so the underlying `Dir` handle
+could be released before descending, back when `dirent`'s pool held 8 streams
+and each slot carried a 68 KiB inline buffer. `dirent.rs`'s own docs
+(lines 1011-1013) say so outright: the small pool "is what forced
+`crate::fts` to buffer children eagerly." That pool is now 64 slots, which
+covers `MAX_FTS_INSTANCES * MAX_FTS_DEPTH` = 16 with room to spare.
+
+`fts.rs` had also acquired a *second*, incorrect justification for the copy —
+that it "makes a frame independent of a stream that could be invalidated
+underneath it." That is false: `Dir` slurps the complete listing at `opendir`
+time via `SYS_FS_GETDENTS_PINNED` and never re-reads, so holding a stream open
+is exactly as independent of later mutation as copying its entries was. The
+copy bought nothing and cost every 65th file. This is the failure mode where a
+constraint is removed but the workaround it forced stays, acquires a
+plausible-sounding rationale, and outlives the fact that justified it.
+
+**Fix:** each `DirFrame` now holds its own `crate::dirent::Dir` open for the
+frame's whole life and pulls the next entry on demand (`open_frame`,
+`next_child`, `close_frame`, `close_open_frames`), so there is no per-directory
+cap at all. `FTS_NAME_MAX` went 64 -> 256 to match the new
+`dirent::DIRENT_NAME_MAX`, which is the capacity of the `d_name` field
+`readdir` fills — so a name `readdir` can produce now always fits a frame, and
+a `const _: () = assert!(...)` fails the build if either relationship is ever
+broken again. Stream ownership is released on the pop path
+(`pop_and_yield_dp`) and by `close_open_frames`, which `release_instance`
+calls *before* it resets the slot; `DirFrame` is `Copy` and lives in a
+`static` pool, so it has no drop and those two call sites are the whole of the
+ownership discipline.
+
+**Tests:** seven added to `fts.rs`'s pure-logic `mod tests` -
+`a_traversal_at_full_depth_cannot_exhaust_the_dir_pool`,
+`every_name_readdir_can_produce_fits_a_frame`, `a_fresh_frame_owns_no_stream`,
+`closing_a_frame_twice_does_not_close_twice`,
+`a_frame_with_no_stream_yields_no_children`,
+`closing_the_open_frames_empties_the_stack`, and
+`a_frame_no_longer_carries_a_listing`, which asserts
+`size_of::<DirFrame>() < 1024` on the grounds that a frame that large is a
+listing buffer wearing a frame's name.
+
+See design-decisions.md §759.
+
+### B-FTS-SWALLOWS-EVERY-DESCENT-IT-CANNOT-MAKE. An unreadable or too-deep directory was skipped without a word — 2026-09-04 — FIXED 2026-09-04
+
+**Where:** `posix/src/fts.rs`, `fts_read_inst`'s "previous entry was an
+`FTS_D`" branch and `descend_into_current`'s error path.
+
+Found while fixing `B-FTS-DROPS-THE-65TH-CHILD-OF-ANY-DIRECTORY`, in the same
+function, and it is the same defect wearing different clothes: a traversal that
+cannot visit something reports success anyway.
+
+**Two paths, both silent:**
+
+1. **`opendir` failed** — typically `EACCES`. `descend_into_current` set
+   `inst.current.fts_info = FTS_DNR` and `fts_errno`, and then returned to a
+   caller that fell through to `step()`. `step()` reads the parent's next child
+   and writes it into `inst.current` — the single entry record the whole module
+   shares. So the `FTS_DNR` mark was overwritten before any caller could read
+   it. The code that set it looks correct in isolation, which is why it
+   survived; it was wrong only in what happened next.
+2. **The traversal stack was full** (`inst.depth == MAX_FTS_DEPTH`, 8). The
+   descent was simply not attempted, with a comment claiming this "matches
+   BSD's deeply-nested behavior of skipping deeper entries silently." BSD has
+   no such behaviour — glibc's `fts` has no depth limit at all. Everything
+   below level 8 vanished *and* the directory's own post-order `FTS_DP` never
+   arrived, so a `rm -r` built on this deleted the contents it could see,
+   never got the callback that removes the directory itself, and exited 0.
+
+**Fix:** both failures now re-yield *the same entry*, re-typed `FTS_DNR` with
+an `errno` — which is what glibc's `fts_read` does when `fts_build` returns
+NULL. That shape is forced by the architecture rather than chosen: `current`
+is the one entry record, so a failure can only be reported by returning it,
+never by marking it and stepping on. `descend_into_current` now returns
+`Result<(), i32>` and does not touch `current` at all — only the caller is in
+a position to return, so only the caller decides what the user sees. The
+depth refusal moved into `descent_refusal(depth) -> Option<i32>`, which yields
+`ENOMEM`: running out of traversal stack says nothing about the directory, and
+`EACCES` would send someone to check permissions that are fine.
+
+**Tests:** `a_failed_descent_pushes_no_frame` (the Err path leaves depth and
+the frame stack exactly as they were — which is what makes the caller's early
+`return` safe), `a_descent_within_the_depth_limit_is_not_refused`, and
+`the_depth_limit_is_a_resource_error_not_an_access_error`.
+
+**Still true, and still a limit:** the depth cap is 8, and a tree deeper than
+that cannot be walked. It is now loud rather than silent, which is the part
+that mattered; raising it is bounded by `dirent`'s 64-slot `Dir` pool
+(`MAX_FTS_INSTANCES * MAX_FTS_DEPTH` streams are held at full depth) and is
+tracked as `TD-B-FTS-DEPTH-IS-CAPPED-AT-EIGHT` below.
+
+### TD-B-FTS-DEPTH-IS-CAPPED-AT-EIGHT. `find`/`rm -r`/`du` stop at the eighth level — 2026-09-04 — OPEN
+
+**Where:** `posix/src/fts.rs`, `MAX_FTS_DEPTH`.
+
+Eight levels is shallow for real trees: a checkout of this repository exceeds
+it, and so does most of `/usr`. Since the fix above, hitting the cap produces
+`FTS_DNR`/`ENOMEM` rather than silence, so a caller finds out — but it still
+cannot complete the walk.
+
+**Why it is 8:** each level holds a `Dir` stream open for the life of its
+frame, and `dirent::MAX_OPEN_DIRS` is 64. A `const` assertion requires
+`MAX_FTS_INSTANCES * MAX_FTS_DEPTH <= MAX_OPEN_DIRS`, so with 2 concurrent
+streams the ceiling is 32 — and taking all 64 slots for traversal would starve
+every other `opendir` in the process.
+
+**What the proper fix looks like:** `dirent` already has `telldir`/`seekdir`,
+and a `Dir` is an `opendir`-time snapshot, so a frame deeper than some
+threshold could record its position, close its stream, and re-open + seek when
+the traversal returns to it. That decouples depth from the pool entirely at
+the cost of a re-`opendir` per level on the way back up, and of a directory
+that may have been replaced in between — which needs the same descriptor-
+identity check `rm -r`'s walk already does (design-decisions.md §752). Until
+then, raising `MAX_FTS_DEPTH` to 16 (32 of 64 slots) is a cheap partial step
+that halves the pool for a walk, and is not obviously the right trade.
+
+### B-NFTW-IGNORES-FTW-PHYS-AND-SKIPS-WHAT-IT-CANNOT-WALK. Four defects in one walker — 2026-09-04 — FIXED 2026-09-04
+
+**Where:** `posix/src/ftw.rs`. Found by auditing `ftw`/`nftw` for the same
+defect family as `B-FTS-SWALLOWS-EVERY-DESCENT-IT-CANNOT-MAKE` immediately
+after fixing it. The family was there, and worse.
+
+| Defect | Old behaviour | Now |
+|---|---|---|
+| `FTW_PHYS` never even read | `nftw` destructured `flags` for `FTW_DEPTH` only. `lstat` appears nowhere in the old file, so `nftw(p, cb, n, FTW_PHYS)` called `stat` — it followed every symlink it was told not to follow, descended into symlinked directories, and handed a recursive-delete caller `FTW_D` for a symlink. `FTW_SL` and `FTW_SLN` were likewise defined and never produced | `lstat` when physical; a link reports `FTW_SL` and is not descended into; a dangling link without `FTW_PHYS` reports `FTW_SLN` |
+| `FTW_DNR` never produced | `opendir` failure was `return 0` — an `EACCES` directory vanished from the walk, and a `du` built on this under-reported in silence | The directory is opened *before* it is announced; a refusal reports `FTW_DNR` in place of `FTW_D` |
+| Depth limit silent | Past `nopenfd`/`MAX_DEPTH`, `return 0` — and with `FTW_DEPTH` the `FTW_DP` still fired, so a recursive delete removed a directory it had never emptied | `FTW_DNR` with `errno` = `ENOMEM`, and no `FTW_DP` |
+| Over-long child path skipped | `continue` — a truncated traversal reported as a complete one | The walk ends with -1 and `ENAMETOOLONG`; POSIX has no per-entry flag for this |
+
+Plus two structural problems that are why the above happened:
+
+- **`ftw` and `nftw` were two near-identical recursions** (`ftw_recurse` /
+  `walk_directory` / `nftw_recurse` / `nftw_walk_directory`). Four copies of
+  one loop is how three of them ended up handling a case the fourth did not,
+  and how a flag only `nftw` accepts ended up implemented in neither. They are
+  now one `Walker<F>` differing only in how an entry is delivered, so a walk
+  option cannot be honoured in one entry point and dropped in the other.
+- **The module header described behaviour the module did not have** —
+  "symbolic link detection depends on `lstat` (uses `stat` as fallback)",
+  written about a file containing no call to `lstat`. A doc comment is not
+  evidence; this one is the reason the gap survived, since a reader checking
+  whether symlinks were handled found an answer without reading the code.
+- **The path was a `[u8; PATH_MAX]` local in the recursive function** — 4 KiB
+  of stack per level, 128 KiB at the depth cap, while the module header cited
+  stack overflow as the *reason* for the cap. One buffer now lives in the
+  `Walker`, mutated in place as the walk descends and ascends.
+
+`FTW_MOUNT` and `FTW_CHDIR` were also accepted and ignored; they are now
+refused with `EINVAL` (`UNSUPPORTED_NFTW_FLAGS`). See design-decisions.md
+§761 for why refusing beats approximating, and for the one behaviour change a
+caller could notice: a walk that used to return 0 having omitted a subtree may
+now return -1.
+
+**Reproduce (before the fix):** no in-tree caller exists — `git grep` finds
+`ftw`/`nftw` only in this module and its tests; both APIs are for ported C
+code, which is why four defects sat in one file undisturbed. The `FTW_DNR`
+case is provable from the source alone: the constant was defined, its numeric
+value asserted in `test_ftw_type_flags`, and never assigned anywhere.
+
+**Tests:** `test_ftw_null_path_efault`, `test_nftw_null_path_efault`,
+`test_ftw_zero_nopenfd_einval`, `test_nftw_zero_nopenfd_einval`,
+`test_nftw_rejects_ftw_mount`, `test_nftw_rejects_ftw_chdir`,
+`test_nftw_accepts_the_flags_it_implements`,
+`test_run_rejects_an_over_long_root`, and the five
+`test_append_component_*` cases including
+`test_append_component_overwrites_the_previous_sibling` (the in-place buffer's
+one new hazard: a shorter sibling name must not leave the tail of a longer one
+behind it).
+
+**Not covered by tests, and why:** the walk itself. Every raw syscall returns
+`HOST_ENOSYS` on the host (`posix/src/syscall.rs`), so `stat` and `opendir`
+both fail and the root is always reported `FTW_NS`. The reporting paths that
+matter — `FTW_DNR`, `FTW_SL`, `FTW_DP` ordering — need a filesystem, and are
+therefore reachable only from a booted target. Worth stating plainly, because
+the test count says otherwise: the tests above prove the *argument handling*
+and the path arithmetic, and nothing at all about the traversal. All four
+defects here were found by reading, not by a failing test, and a fifth of the
+same kind would have to be found the same way.

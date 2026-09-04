@@ -1,0 +1,17 @@
+[package]
+name = "procinfo"
+version = "0.1.0"
+edition = "2024"
+description = "Reading and parsing the kernel's /proc and /sys interfaces: the facts, without the formatting."
+
+[lib]
+path = "src/lib.rs"
+
+# Dependency-free, like `textfmt` and `yamldoc`. Unlike them this crate is
+# `std`, because half of it is `std::fs` -- and there is no useful `no_std`
+# subset to carve out, since a parser with no reader has nothing to parse in
+# the one place the format is authoritative.
+[dependencies]
+
+[lints]
+workspace = true

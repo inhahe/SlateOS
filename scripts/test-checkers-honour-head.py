@@ -94,11 +94,25 @@ def remove(root: str, rel: str) -> None:
     os.remove(os.path.join(root, rel.replace("/", os.sep)))
 
 
+# The modules a checker needs beside it that are not the checker. Named once
+# because there are two fixture builders -- `new_repo` and `_push_fixture` --
+# and a list kept twice is a list that is right once. When `gittree` grew its
+# `import gitenv`, this list was updated in `new_repo` only, and every
+# `_push_fixture` case died of `ModuleNotFoundError` inside the hook, where the
+# traceback surfaced as a gate verdict rather than as a missing file.
+#
+# `gitenv.py` travels with `gittree.py` because `gittree` imports it, and it
+# imports it from its *own* directory -- which in a fixture is this copy, not
+# the real `scripts/`. Omitting it does not degrade the fixture, it stops the
+# checker starting at all.
+SUPPORT = ("gittree.py", "gitenv.py")
+
+
 def new_repo(tmp: str, name: str, checkers: tuple[str, ...]) -> str:
-    """A repository with `checkers` (and `gittree.py`) installed in `scripts/`."""
+    """A repository with `checkers` (and their support modules) in `scripts/`."""
     root = os.path.join(tmp, name)
     os.makedirs(os.path.join(root, "scripts"))
-    for script in ("gittree.py", *checkers):
+    for script in (*SUPPORT, *checkers):
         shutil.copy(os.path.join(HERE, script), os.path.join(root, "scripts", script))
     git(root, "init", "--quiet")
     git(root, "config", "user.email", "t@example.com")
@@ -1371,7 +1385,7 @@ def _push_fixture(tmp: str, name: str,
     os.makedirs(hooks, exist_ok=True)
     copies = [(HOOK, os.path.join(hooks, "pre-push")),
               (LIB, os.path.join(work, "scripts", "run-checker.sh"))]
-    for script in ("gittree.py", *checkers):
+    for script in (*SUPPORT, *checkers):
         copies.append((os.path.join(HERE, script),
                        os.path.join(work, "scripts", script)))
     for src, dst in copies:

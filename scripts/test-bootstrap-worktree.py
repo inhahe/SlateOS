@@ -45,6 +45,24 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+import gitenv  # noqa: E402
+
+# Scrubbed once here rather than passed to each `subprocess.run` below, which is
+# what `gitenv`'s docstring recommends for a harness and is the right shape for
+# this one specifically: the children are `bash` running
+# `bootstrap-worktree.sh`, not git, and that script runs git itself (`git clone`
+# at line 183). An `env=` on the calls below would have to be remembered at
+# every one of them and would still be reaching around bash to do it, whereas
+# removing the bindings from this process covers every descendant at any depth.
+#
+# Latent rather than live today -- nothing runs this suite from a hook, and a
+# hand-run shell has no `GIT_DIR`. It is fixed anyway because "safe as long as
+# nobody wires it up" is the state `quote-names.py --selftest` was in until it
+# was wired up, at which point it re-initialised lane B on its first run.
+_REMOVED = gitenv.scrub_environ()
+
 SCRIPT = os.path.join(HERE, "bootstrap-worktree.sh")
 
 # The exit codes documented in the script's header.  Named here so a failure

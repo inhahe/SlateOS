@@ -55,12 +55,13 @@
 #
 # Cost was the stated reason, and the stated cost was wrong. The 89 minutes
 # quoted here originally was a host `clippy --all-targets` run, and this script
-# does not do that: `scope` below is `--lib --bins`, which drops the zone's
-# integration tests and examples -- the slowest part of the build and none of
-# it where a `#[cfg(unix)]` arm lives. Measured 2026-09-04 against a warm
-# shared target dir: the whole Linux half is **2m16s** (clippy 1m12s, test
-# 1m04s). That is a boot-test gate's worth of time, not an hour's, so the
-# premise that kept this unwired does not survive being measured.
+# does not do that: it compiles a package's library and its binaries and
+# nothing else, which drops the zone's integration tests and examples -- the
+# slowest part of the build and none of it where a `#[cfg(unix)]` arm lives.
+# Measured 2026-09-04 against a warm shared target dir: the whole Linux half is
+# **2m16s** (clippy 1m12s, test 1m04s). That is a boot-test gate's worth of
+# time, not an hour's, so the premise that kept this unwired does not survive
+# being measured.
 #
 # What remains true is that a warm cache is doing the work. The first run after
 # the shared `slateos-diff-target` is invalidated pays a full Linux build, so a
@@ -110,6 +111,13 @@
 # Defaults: `-p coreutils`, both targets, clippy and test both run.
 # Trailing arguments after `--` are appended to every cargo invocation, which
 # is how you narrow a run to one module (`-- dirfd`) while iterating.
+#
+# Any package may be named, whatever shape it is: what to compile is worked out
+# per package from its manifest, so a crate with only a `main.rs` is checked
+# rather than rejected. A name that matches no package in the tree, and a
+# package with neither a library nor a binary target, are both usage errors
+# (64) -- there is nothing to check in either, and reporting nothing as clean
+# is the one thing this script exists to prevent.
 #
 # ## Exit codes
 #
@@ -175,13 +183,195 @@ if [ "$run_clippy" -eq 0 ] && [ "$run_test" -eq 0 ]; then
   exit 64
 fi
 
-pkg_args=()
-for p in "${pkgs[@]}"; do pkg_args+=(-p "$p"); done
-
+# --- what to compile, decided per package -------------------------------------
+#
 # `--lib --bins` rather than `--all-targets`: the zone's integration tests and
 # examples are the slowest part of the build and none of them is what this file
 # is about. A `#[cfg(unix)]` arm lives in the library or in a `src/bin/*.rs`.
-scope=(--lib --bins)
+#
+# But `--lib` is not a request, it is an assertion. cargo fails outright with
+# "no library targets found in package 'shell'" when the named package has
+# none, and that is exactly how `-p shell` died on 2026-09-04 while measuring
+# step 4 of this file's tech-debt entry -- a defect in this script, not in the
+# crate, which has a `main.rs` and no `lib.rs` like every other program does.
+#
+# `--bins` fails in the opposite direction: cargo accepts it for a package with
+# no binaries and quietly builds nothing. So the two flags are not symmetric,
+# and only one of them is loud when it is wrong. That asymmetry is why the
+# fix cannot be "just drop --lib": a package with neither target would then be
+# reported as a clean run of nothing, which is this script's founding defect
+# reappearing inside the script itself. Such a package is refused by name.
+#
+# WHY THE MANIFEST AND NOT CARGO. cargo knows the answer authoritatively, and
+# asking it costs a workspace load: measured against this tree's 2,950 members
+# on 2026-09-04, `cargo read-manifest` is 8-9s per package and `cargo metadata
+# --no-deps --offline` is 13.8s. Worse than the seconds is *where* they could
+# be spent -- the half that has a cargo is not always the half that runs. This
+# script's whole purpose is compiling the Linux half on a Windows host, and it
+# declines the host half by design when there is no cargo there. Scope is
+# computed once, on this side, and handed to both halves; a mechanism that
+# needs a local cargo could not do that.
+#
+# AND THIS IS NOT A HEURISTIC. A cargo library target exists if and only if the
+# manifest declares `[lib]` or the file `src/lib.rs` is present -- there is no
+# third spelling, because a library whose source lives elsewhere has to say so
+# with `[lib] path = ...`. The `autolib = false` / `autobins = false` edges
+# make the test below over-count, never under-count, and over-counting is the
+# loud direction: cargo says the target is missing and this script fails with
+# it. Under-counting would be the silent one, and it cannot happen.
+
+# The name under `[package]`, and only there. `[[bin]] name = "shell"` is a
+# different claim, and a locator that accepted it would attribute one crate's
+# targets to another crate that merely ships a binary of that name -- which in
+# a tree whose coreutils crate builds ~180 named binaries is not a remote
+# possibility.
+manifest_name() {
+  awk '
+    /^[[:space:]]*\[/ { inpkg = ($0 ~ /^[[:space:]]*\[package\]/); next }
+    inpkg && /^[[:space:]]*name[[:space:]]*=/ {
+      if (match($0, /"[^"]*"/)) { print substr($0, RSTART + 1, RLENGTH - 2); exit }
+    }
+  ' "$1" 2>/dev/null || true
+}
+
+# Every manifest in the tree, worktree order. Untracked ones are included
+# deliberately: a crate added but not yet committed is still a crate this
+# script can be pointed at, and a locator that could not see it would fall
+# through to "no such package" and refuse a package that is right there.
+all_manifests() {
+  if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$root" ls-files -- '*Cargo.toml' 'Cargo.toml'
+    git -C "$root" ls-files --others --exclude-standard -- '*Cargo.toml' 'Cargo.toml'
+  else
+    (cd "$root" && find . -name target -prune -o -name Cargo.toml -print) \
+      | sed 's|^\./||'
+  fi
+}
+
+# The manifest path of package $1, or nothing.
+#
+# Three stages, and the last is what makes it correct rather than merely fast.
+#
+#  1. Guess. A crate almost always lives in a directory named after itself, so
+#     a dozen stats answer this instantly. "Almost always" is not an invariant,
+#     which is why it is only stage one.
+#  2. Narrow. One `grep -l` over every manifest in the tree finds the few that
+#     contain a `name = "<pkg>"` line at all -- 2,950 files in ~3s here. It is
+#     one process, not one per file: 2,950 process spawns on Windows is half a
+#     minute, and a locator that costs more than the build it is scoping would
+#     simply be turned off.
+#  3. Verify. `manifest_name` is run on the survivors, so `[[bin]] name =
+#     "shell"` in some other crate cannot masquerade as a package. Stage 1's
+#     guesses are verified the same way, so a wrong guess costs a stat and can
+#     never produce a wrong answer.
+manifest_of() {
+  local want=$1 cand f
+  for cand in "$want" "userspace/$want" "apps/$want" "gui/$want" "net/$want" \
+              "init/$want" "services/$want" "drivers/$want" "fs/$want" \
+              "toolchain/$want" "bench/$want" "pkg/$want"; do
+    if [ -f "$root/$cand/Cargo.toml" ] &&
+       [ "$(manifest_name "$root/$cand/Cargo.toml")" = "$want" ]; then
+      echo "$root/$cand/Cargo.toml"
+      return 0
+    fi
+  done
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if [ "$(manifest_name "$root/$f")" = "$want" ]; then
+      echo "$root/$f"
+      return 0
+    fi
+  done <<EOF
+$(cd "$root" && all_manifests | tr '\n' '\0' | xargs -0 --no-run-if-empty \
+    grep -lE "^[[:space:]]*name[[:space:]]*=[[:space:]]*\"$want\"[[:space:]]*\$" \
+    2>/dev/null || true)
+EOF
+  return 1
+}
+
+pkg_has_lib() {
+  local dir
+  dir=$(dirname "$1")
+  if [ -f "$dir/src/lib.rs" ]; then return 0; fi
+  if grep -q '^[[:space:]]*\[lib\]' "$1"; then return 0; fi
+  return 1
+}
+
+pkg_has_bins() {
+  local dir
+  dir=$(dirname "$1")
+  if [ -f "$dir/src/main.rs" ]; then return 0; fi
+  if grep -q '^[[:space:]]*\[\[bin\]\]' "$1"; then return 0; fi
+  # `src/bin/*.rs` and `src/bin/*/main.rs` are both binary targets to cargo.
+  if compgen -G "$dir/src/bin/*.rs" >/dev/null; then return 0; fi
+  if compgen -G "$dir/src/bin/*/main.rs" >/dev/null; then return 0; fi
+  return 1
+}
+
+lib_pkgs=()
+bin_pkgs=()
+for p in "${pkgs[@]}"; do
+  # Cargo package names are `[A-Za-z0-9_-]`, and this one is about to be spliced
+  # into a grep pattern and a path. Checking it here means a stray quote or `*`
+  # is a named usage error rather than a locator that searches for something
+  # else and reports "no package named ...".
+  case "$p" in
+    *[!A-Za-z0-9._-]*|"")
+      echo "coreutils-check: '$p' is not a cargo package name." >&2
+      exit 64 ;;
+  esac
+  mf=$(manifest_of "$p") || mf=""
+  if [ -z "$mf" ]; then
+    echo "coreutils-check: no package named '$p' in this tree; nothing ran." >&2
+    echo "  64 rather than 2 because a name that matches no manifest is a" >&2
+    echo "  typo, and a caller wired to tolerate declines must not tolerate" >&2
+    echo "  its own typo -- see '## Exit codes'." >&2
+    exit 64
+  fi
+  if pkg_has_lib "$mf"; then
+    lib_pkgs+=("$p")
+  elif pkg_has_bins "$mf"; then
+    bin_pkgs+=("$p")
+  else
+    echo "coreutils-check: package '$p' has neither a library nor a binary" >&2
+    echo "  target ($mf), so there is nothing in it for this script to" >&2
+    echo "  compile. Refusing rather than passing --bins, which cargo accepts" >&2
+    echo "  for a package with no binaries and which would end in 'result:" >&2
+    echo "  clean' having compiled nothing at all." >&2
+    exit 64
+  fi
+done
+
+# Groups of cargo arguments, flattened into one array with a separator, because
+# bash has no array of arrays and this list has to survive being passed through
+# `wsl -e bash -c` as positional arguments. There are at most two groups -- the
+# packages that have a library and the packages that do not -- so the ordinary
+# single-package run is still exactly one cargo invocation per step, as it was
+# when the scope was a constant.
+GSEP='@@'
+for a in "${extra[@]+"${extra[@]}"}"; do
+  if [ "$a" = "$GSEP" ]; then
+    echo "coreutils-check: '$GSEP' is this script's group separator and cannot" >&2
+    echo "  be passed through to cargo. Rename the argument or drop it." >&2
+    exit 64
+  fi
+done
+
+groups=()
+add_group() {
+  if [ ${#groups[@]} -gt 0 ]; then groups+=("$GSEP"); fi
+  groups+=("$@")
+}
+if [ ${#lib_pkgs[@]} -gt 0 ]; then
+  add_group --lib --bins
+  for p in "${lib_pkgs[@]}"; do groups+=(-p "$p"); done
+  groups+=("${extra[@]+"${extra[@]}"}")
+fi
+if [ ${#bin_pkgs[@]} -gt 0 ]; then
+  add_group --bins
+  for p in "${bin_pkgs[@]}"; do groups+=(-p "$p"); done
+  groups+=("${extra[@]+"${extra[@]}"}")
+fi
 
 status=0            # 0 pass, 1 a half failed, 2 a half could not run
 ran=()
@@ -203,20 +393,27 @@ run_host() {
     status=2
     return
   fi
-  if [ "$run_clippy" -eq 1 ]; then
-    note "host clippy ($host_target)"
-    if ! (cd "$root" && cargo +nightly clippy "${pkg_args[@]}" "${scope[@]}" \
-            --target "$host_target" "${extra[@]+"${extra[@]}"}"); then
-      status=1
-    fi
-  fi
-  if [ "$run_test" -eq 1 ]; then
-    note "host test ($host_target)"
-    if ! (cd "$root" && cargo +nightly test "${pkg_args[@]}" "${scope[@]}" \
-            --target "$host_target" "${extra[@]+"${extra[@]}"}"); then
-      status=1
-    fi
-  fi
+  local steps=""
+  if [ "$run_clippy" -eq 1 ]; then steps="$steps clippy"; fi
+  if [ "$run_test" -eq 1 ]; then steps="$steps test"; fi
+  # One invocation per (step, group). The trailing separator is what flushes
+  # the last group, so the loop body handles a group in exactly one place.
+  local step a
+  local -a cur
+  for step in $steps; do
+    cur=()
+    for a in "${groups[@]}" "$GSEP"; do
+      if [ "$a" != "$GSEP" ]; then cur+=("$a"); continue; fi
+      if [ ${#cur[@]} -gt 0 ]; then
+        note "host $step ($host_target) ${cur[*]}"
+        if ! (cd "$root" && cargo +nightly "$step" "${cur[@]}" \
+                --target "$host_target"); then
+          status=1
+        fi
+      fi
+      cur=()
+    done
+  done
   ran+=("host")
 }
 
@@ -279,21 +476,35 @@ if [ ! -x "$cargo" ]; then
 fi
 steps="$1"; shift
 target="$1"; shift
+gsep="$1"; shift
 rc=0
+# The remaining arguments are groups of cargo arguments separated by $gsep --
+# see "what to compile, decided per package" on the near side. Splitting them
+# here rather than running `wsl` once per group keeps the one-invocation
+# property this heredoc was written for.
 for step in $steps; do
-  echo ""
-  echo "=== linux $step ($target) ==="
-  # `+nightly` for the reason userspace/.cargo/config.toml states in capitals:
-  # this workspace's unstable settings are silently ignored by stable, and a
-  # silently-ignored setting is how you get a green run of the wrong thing.
-  "$cargo" +nightly "$step" "$@" --target "$target" --target-dir "$tdir" || rc=1
+  cur=()
+  for a in "$@" "$gsep"; do
+    if [ "$a" != "$gsep" ]; then cur+=("$a"); continue; fi
+    if [ ${#cur[@]} -gt 0 ]; then
+      echo ""
+      echo "=== linux $step ($target) ${cur[*]} ==="
+      # `+nightly` for the reason userspace/.cargo/config.toml states in
+      # capitals: this workspace's unstable settings are silently ignored by
+      # stable, and a silently-ignored setting is how you get a green run of
+      # the wrong thing.
+      "$cargo" +nightly "$step" "${cur[@]}" --target "$target" \
+        --target-dir "$tdir" || rc=1
+    fi
+    cur=()
+  done
 done
 exit $rc
 WSLEOF
 )
   local rc=0
-  wsl -e bash -c "$script" -- "$inside" "$steps" "$linux_target" \
-      "${pkg_args[@]}" "${scope[@]}" "${extra[@]+"${extra[@]}"}" || rc=$?
+  wsl -e bash -c "$script" -- "$inside" "$steps" "$linux_target" "$GSEP" \
+      "${groups[@]}" || rc=$?
   case "$rc" in
     0) ran+=("linux") ;;
     2) skipped+=("linux (no cargo in WSL)"); status=2 ;;
@@ -313,6 +524,11 @@ esac
 echo ""
 echo "=== summary ==="
 echo "packages: ${pkgs[*]}"
+# What was actually compiled, not just what was asked for. A package that has
+# no library is checked with `--bins` alone, and a verdict that did not say so
+# would leave the reader to assume a lib was linted that does not exist.
+if [ ${#lib_pkgs[@]} -gt 0 ]; then echo "lib+bins: ${lib_pkgs[*]}"; fi
+if [ ${#bin_pkgs[@]} -gt 0 ]; then echo "bins:     ${bin_pkgs[*]}"; fi
 if [ ${#ran[@]} -gt 0 ]; then echo "ran:      ${ran[*]}"; else echo "ran:      (nothing)"; fi
 if [ ${#skipped[@]} -gt 0 ]; then echo "declined: ${skipped[*]}"; fi
 case "$status" in

@@ -113696,6 +113696,80 @@ from Linux, which is a real portability defect even when no tracked file is
 touched. `newline=""` costs nothing anywhere, so there is no scope worth arguing
 about.
 
+### All three steps are done — 2026-09-04
+
+`scripts/check-text-mode-writes.py` exists, 87 sites across 29 files carry an
+explicit `newline=`, and `strip-workspace-sections.py` is deleted. Corrections
+to the numbers recorded above, since they were the input to the plan and two of
+them were wrong:
+
+| | recorded above | actual |
+|---|---:|---:|
+| sites needing an edit | 79 | **87** |
+| `write_text` | 40 | 38 |
+| `open()` | 39 | 40 |
+| `os.fdopen()` | — | **8** |
+| `NamedTemporaryFile(mode=…)` | — | **1** |
+| mode is computed, so undecidable | 41 | **0** |
+
+The `actual` column is the gate's own count, taken by running its `analyse`
+over the *pre-edit* blobs (`git show 2785dd1c4:<path>`) rather than over the
+diff, and it sums: 40 + 38 + 8 + 1 = 87. That distinction is worth writing
+down, because counting the diff is what produced the two wrong numbers this
+paragraph replaces. `git show --stat` reports 89 changed lines, and two of
+those are continuation lines from calls that had to be split across two lines
+to fit the new keyword — so the line count overstates the site count by two,
+and the commit message of `37ebb7a49` says "89 sites" where it should say 87.
+A changed line is not a call site, and a gate that can count call sites should
+be asked rather than a diff.
+
+Two errors, in opposite directions. The census missed `os.fdopen` and
+`tempfile` entirely — nine sites, all real, all in the same class. And the "41
+calls pass no literal mode" figure was a miscount: those 41 are `open(p)` with
+**no mode argument at all**, whose default is `"r"`. They are reads, not
+undecidable writes. The tree has *zero* statically-unreadable modes, so the rule
+the plan said the gate would need most turns out to cost nothing today — it is
+in the gate anyway, because a rule that is free now and correct later is worth
+having, and because a gate that shrugs at what it cannot decide reports no
+findings, which reads like a clean tree.
+
+**Reads are deliberately not graded.** 107 text-mode reads pass no `newline=`
+and nearly all are correct: reading in text mode *normalises* CRLF to `\n`,
+which is what a reader wants. It is only a defect in a read-modify-write round
+trip, and that is caught at the write end, which is graded. Adding ~107 findings
+that are each individually fine to buy no new coverage is how a gate becomes one
+nobody believes.
+
+### The blanket scope earned itself on the first run — 2026-09-04
+
+The third justification for the blanket scope was speculative when it was
+written: "a CRLF *fixture* makes a self-test behave differently on Windows from
+Linux". The sweep found an instance of exactly that, in
+`scripts/test-ctest-fixtures.py:137`, in a test written *for this bug family*:
+
+```python
+# What git does: rewrite the same bytes, leaving a fresh mtime.
+ps1.write_text(ps1.read_text(encoding="utf-8"), encoding="utf-8")
+```
+
+The fixture is created LF (`write_bytes(b"# flags\n")`, :101). In text mode the
+read folds CRLF to `\n` and the write turns every `\n` back into CRLF, so on
+Windows that line did not rewrite the same bytes — it converted the fixture to
+CRLF. **The test passed anyway**, because `compute_sysroot` hashes text inputs
+with CRLF folded to LF (lane B's 2026-08-16 fix) and so could not see the
+difference.
+
+Which means one line of source was asserting two different claims: *"a
+CRLF-ified file is not drift"* on Windows, *"a byte-identical file is not drift"*
+on Linux. Only the second is the claim its docstring makes, and only the second
+is the bug it was written for. Fixed to `write_bytes(read_bytes())` — which is
+what the comment above it always said it did, and which no longer depends on the
+CRLF-folding rule staying as it is.
+
+This is the seventh sighting of the shape this tree keeps finding, in its
+subtlest form yet: not a gate that discovered nothing, but a gate that
+discovered *something else* and reported it in the same words.
+
 **If the residue is never addressed:** it is presently harmless — `rustc`
 accepts CRLF — so nothing is red. The cost is that the tree carries two
 line-ending conventions with no rule stating which is intended, and the

@@ -3190,7 +3190,7 @@ check_eol
 #
 # It grades `scripts/` only, because that is lane A's tree; `--all` surveys the
 # rest without grading it, which is the evidence a cross-lane request needs.
-# It is a static AST walk over 169 files and costs well under a second, so it
+# It is a static AST walk over 170 files and costs well under a second, so it
 # belongs here in the pre-build block rather than anywhere later.
 check_text_mode_writes() {
     local py=""

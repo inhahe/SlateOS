@@ -115,8 +115,9 @@ import re
 import subprocess
 import sys
 
-# Measured 2026-09-04: 169 tracked `*.py` under `scripts/`, carrying 197
-# text-mode write sites (110 already compliant, 87 not). Two floors, because
+# Measured 2026-09-04: 170 tracked `*.py` under `scripts/` (169 before this
+# file joined them), carrying 197 text-mode write sites -- 110 of which already
+# passed an explicit `newline=` and 87 of which did not. Two floors, because
 # they fail differently and only one of them catches the mutation that matters.
 #
 # FILE_FLOOR catches a broken *enumeration*: `git ls-files` renamed, the path
@@ -125,7 +126,7 @@ import sys
 # SITE_FLOOR catches a broken *detector*, which is the likelier and quieter
 # failure: a mode-resolution rule that stops recognising `"w"`, an AST walk that
 # stops matching `Call` nodes, a keyword lookup that goes to the wrong field.
-# All of those leave the file count untouched at 169 and report a clean tree.
+# All of those leave the file count untouched at 170 and report a clean tree.
 # The site floor counts every text write the gate *understood* -- compliant ones
 # included -- so it measures comprehension rather than luck: a tree that
 # genuinely fixed all 87 findings still clears it at 197.

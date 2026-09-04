@@ -26,6 +26,9 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::{scroll_window, wheel};
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Constants — layout dimensions
@@ -2288,7 +2291,10 @@ impl SysInfoState {
     // ========================================================================
 
     /// Produce a full render tree for the current state.
-    pub fn render(&self) -> RenderTree {
+    /// Named `render_tree` and not `render`: at equal arity an inherent method
+    /// silently wins method lookup over `oswindow::app::App::render`, so an app
+    /// that keeps the name draws nothing and reports no error.
+    pub fn render_tree(&self) -> RenderTree {
         let mut tree = RenderTree::new();
 
         // Background fill.
@@ -2754,52 +2760,51 @@ fn format_bytes(bytes: u64) -> String {
 // Main
 // ============================================================================
 
-fn main() {
-    let mut app = SysInfoState::new();
-
-    // Render the initial view.
-    let render_tree = app.render();
-    println!("System Information Explorer initialized");
-    println!("  Selected: {}", app.selected_category.label());
-    println!("  Tree rows visible: {}", app.visible_tree_rows().len());
-    println!("  Render commands: {}", render_tree.len());
-
-    // Demonstrate navigation.
-    app.select_next(); // Hardware Resources
-    app.select_next(); // IRQs (expanded)
-    println!("\nNavigated to: {}", app.selected_category.label());
-
-    // Demonstrate expand/collapse.
-    app.selected_category = SysInfoCategory::Components;
-    app.collapse_selected();
-    println!(
-        "Collapsed Components: {} tree rows",
-        app.visible_tree_rows().len()
-    );
-    app.expand_selected();
-    println!(
-        "Expanded Components: {} tree rows",
-        app.visible_tree_rows().len()
-    );
-
-    // Render CPU page.
-    app.selected_category = SysInfoCategory::CompCpu;
-    let cpu_tree = app.render();
-    println!("\nCPU page: {} render commands", cpu_tree.len());
-    println!("  Properties: {}", app.current_properties().len());
-
-    // Demonstrate search.
-    let results = app.search_all("NVMe");
-    println!("\nSearch 'NVMe': {} results", results.len());
-    for (cat, prop) in results.iter().take(3) {
-        println!("  [{:?}] {} = {}", cat, prop.name, prop.value);
+impl App for SysInfoState {
+    fn title(&self) -> String {
+        "System Information".to_owned()
     }
 
-    // Export demo.
-    let report = app.export_text();
-    println!("\nExport report: {} bytes", report.len());
+    fn initial_size(&self) -> (u32, u32) {
+        (self.window_width as u32, self.window_height as u32)
+    }
 
-    println!("\nSystem Information Explorer ready.");
+    /// No clock, and the reason is that there is nothing to read.
+    ///
+    /// Some of what this app displays genuinely ages — uptime, available
+    /// memory, free disk space. None of it is *read* from anywhere: uptime is
+    /// the string "4h 23m 17s" and the memory figures are integer literals, so
+    /// a tick would redraw constants on a timer. When a source exists this
+    /// returns its poll interval and `handle_event` grows a `Tick` arm that
+    /// re-reads. See known-issues.md ->
+    /// TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Reconciled with the size we are handed rather than trusted from the
+        // last `Resize`: the compositor may grant a size that was never asked
+        // for, and the first frame is drawn before any `Resize` arrives.
+        self.window_width = width;
+        self.window_height = height;
+        self.render_tree()
+    }
+}
+
+fn main() -> ExitCode {
+    let mut info = SysInfoState::new();
+    app::launch("sysinfo", &mut info)
 }
 
 // ============================================================================
@@ -2820,6 +2825,77 @@ mod tests {
     )]
 
     use super::*;
+
+    // ------------------------------------------------------------------
+    // The compositor wiring
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn the_app_asks_for_no_clock_because_it_has_nothing_to_re_read() {
+        // Deliberate, and the opposite call from `sysmonitor`: some of what
+        // this app shows genuinely ages, but none of it is read from anywhere,
+        // so a tick would redraw constants on a timer.
+        let app = SysInfoState::new();
+        assert_eq!(app.tick_interval(), None);
+    }
+
+    #[test]
+    fn rendering_at_a_new_size_adopts_it_and_draws_something() {
+        // The first frame is drawn before any `Resize` arrives, and a
+        // compositor may grant a size that was never asked for.
+        let mut app = SysInfoState::new();
+        let tree = app.render(1600.0, 900.0);
+        assert_eq!((app.window_width, app.window_height), (1600.0, 900.0));
+        assert!(!tree.is_empty(), "the app drew nothing");
+    }
+
+    #[test]
+    fn the_initial_size_is_the_size_the_app_is_holding() {
+        let app = SysInfoState::new();
+        assert_eq!(
+            app.initial_size(),
+            (app.window_width as u32, app.window_height as u32)
+        );
+    }
+
+    #[test]
+    fn a_close_request_exits_and_an_unwanted_key_does_not_redraw() {
+        let mut app = SysInfoState::new();
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+        let unwanted = Event::Key(KeyEvent {
+            key: Key::F9,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert!(matches!(app.on_event(&unwanted), Response::Idle));
+    }
+
+    #[test]
+    fn every_category_renders_without_panicking_at_an_awkward_size() {
+        // A category reachable by holding Down that panics when drawn is a
+        // crash the user reaches by holding Down.
+        let mut app = SysInfoState::new();
+        let down = Event::Key(KeyEvent {
+            key: Key::Down,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        for _ in 0..40 {
+            for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
+                assert!(
+                    !app.render(w, h).is_empty(),
+                    "{:?} drew nothing at {w}x{h}",
+                    app.selected_category
+                );
+            }
+            app.handle_event(&down);
+        }
+    }
 
     /// Every line of the export that sits at column 0 and is not blank.
     ///

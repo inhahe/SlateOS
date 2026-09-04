@@ -34067,11 +34067,23 @@ one is a judgement call rather than a forced move: pick an app whose state type
 already exists and already has a `handle_event`, since that is most of the work,
 and expect roughly one live defect per app (three conversions, three defects).
 
-**Count corrected 2026-09-03: 55 to go, not 135.** The line above was written on
-2026-08-25 and never revised while the conversions continued. Measured today:
-143 crates under `apps/`, **88** of which now implement `oswindow::app::App`.
-The figure is worth re-measuring rather than trusting, and the command is
-`grep -rl 'impl App for' apps/*/src/main.rs | wc -l`.
+**Count corrected 2026-09-03 — and moved somewhere it cannot go stale again.**
+The line above said "135 to go". It was written on 2026-08-25 and never revised
+while the conversions continued; by 2026-09-03 the true figure was 55, and three
+conversions that same day took it to 52. A number maintained by hand in prose is
+a number that is wrong most of the time, which is the same defect as the
+hand-written palettes this file is full of, one medium over.
+
+**Do not read a count from this entry. Ask the ratchet.**
+`scripts/check-window-wiring.py` already measures it on every boot test and
+prints it: "N program(s) open a window, M do not". `BASELINE` in that file is
+the current M, and it is lowered in the same commit as each conversion — so it
+is both the count and the thing that stops the count going back up. As of
+2026-09-03 it is 46, against 92 programs that do open a window.
+
+(The two figures do not have to sum to 143. `check-window-wiring` counts
+*programs that draw*, which is not the same set as crates under `apps/`, and it
+is the more useful denominator: a crate with no renderer has no window to open.)
 
 **`apps/fontmanager` is number 88, and the "one live defect per app" rule held.**
 The defect: **there was no `Event::Mouse` arm anywhere in the file.** A font
@@ -34147,6 +34159,15 @@ Baseline 48 → 47.
 were clippy-dirty under `-D warnings` *before* being touched, and the debt is
 not visible until the crate is looked at. It is worth fixing — these are real
 overflow and panic sites — but it is most of the work, not a footnote to it.
+
+**Corrected 2026-09-03, after measuring instead of extrapolating.** Three apps
+for three looked like a tree-wide condition and I wrote it up as one. It is not:
+**114 of the 143 crates are clean**, and the debt is 588 production findings
+concentrated in 26. The apps left to convert are the ones nobody has been into
+recently, which is the same property that predicts lint debt — a biased sample,
+not a tree-wide fact. Full numbers, and the command to re-measure them, are in
+`TD-C-APPS-CARRY-1812-CLIPPY-FINDINGS-AND-588-OF-THEM-ARE-IN-PRODUCTION`. The
+advice stands; the scale was wrong.
 
 **`apps/musicplayer` is number 90, and it is why that note is there.** Its
 conversion was small; its lint tail was **71 findings, every one in production
@@ -56736,6 +56757,114 @@ else.
 That entry's account of the `SKY` transposition names `gui/toolkit/src/theme.rs`
 among the files spelling `0x89DCEB`; as of today it spells nothing.
 ---
+
+### TD-C-APPS-CARRY-1812-CLIPPY-FINDINGS-AND-588-OF-THEM-ARE-IN-PRODUCTION — 2026-09-03 — OPEN
+
+**In short.** Running the project's own lint settings across every application
+turns up 1,812 complaints. Two thirds are in test code and are noise a
+three-line annotation silences. The remaining **588 are in real code**, and
+most of them are arithmetic that could overflow or an array read that could run
+off the end — the kind that turns a malformed input file into a crash or a
+hang. They are spread over 26 of the 143 applications, so this is a pile in a
+few places rather than a thin film everywhere.
+
+**Why this was measured.** Three applications were wired to the compositor on
+2026-09-03 and each was already failing `cargo clippy -- -D warnings` before it
+was touched: a handful in `fontmanager`, 31 in `procexplorer`, 71 in
+`musicplayer`. Three for three looks like a tree-wide condition, and I wrote it
+up as one. **It is not**, and the difference matters for planning:
+
+| | |
+|---|---|
+| crates under `apps/` | 143 |
+| with any finding | **29** |
+| with a *production* finding | **26** |
+| **clean** | **114** |
+
+The impression came from a biased sample. The apps left to convert are the ones
+nobody has been into recently, and "nobody has been into it recently" is the
+same property that predicts lint debt. Measuring is what separated the two.
+
+**The numbers.** `cargo clippy -p <every app> --all-targets` on 2026-09-03:
+
+| | count |
+|---|---|
+| total findings | 1,812 |
+| in `#[cfg(test)]` modules | 1,163 |
+| **in production code** | **588** |
+
+Production findings by lint:
+
+| lint | count |
+|---|---|
+| `arithmetic_side_effects` | 410 |
+| `indexing_slicing` (indexing) | 133 |
+| `indexing_slicing` (slicing) | 15 |
+| everything else | 30 |
+
+Worst crates by *production* findings: `paint` 135, `soundrecorder` 55,
+`habits` 43, `markdowneditor` 40, `regextester` 39, `installer` 33,
+`explorer` 33, `finance` 23, `metronome` 21, `weather` 21, `reminders` 21.
+
+**Note that `metronome` is on that list**, and it is one of the three apps that
+were *already* converted before today. Wiring an app to the compositor does not
+imply anyone looked at its lints; the two jobs are independent.
+
+**Why the test-module two thirds are not the interesting part.** A test that
+indexes out of range should fail loudly and point at the line that did it —
+that is the diagnosis, and `CLAUDE.md` says as much. Those 1,163 are closed by
+adding the standard allow block to each test module, which is mechanical and
+carries no risk.
+
+**Why the 588 are worth real work.** They are not stylistic. The three fixed on
+2026-09-03 are the argument:
+
+- `musicplayer`'s WAV chunk loop advanced by `offset += 8 + chunk_size`, with
+  `chunk_size` read out of the file. A crafted size wraps the cursor back to a
+  small number, which passes the loop guard, and the parser reads the same
+  chunks **forever**. `parse_id3v2` had the identical shape. A media player
+  that hangs on a malformed file is a denial of service delivered as an email
+  attachment.
+- `procexplorer` indexed `visible[0]` and computed `visible.len() - 1` under a
+  guard three lines away.
+- `fontmanager`'s `uninstall` indexed `self.fonts[idx]` the same way.
+
+Each was safe *on the day it was written*, because of a check somewhere nearby.
+That is precisely the guarantee that stops holding when someone moves the check,
+and it is why the workspace turns these lints on at all.
+
+**Proper fix.** Per crate, in this order, because the ratio is roughly 2:1 in
+favour of the cheap half:
+
+1. Add the standard allow block to the crate's `#[cfg(test)]` modules. Closes
+   about two thirds of any crate's count for three lines.
+2. Fix the production findings properly — `checked_add`/`saturating_*`/`get`,
+   with the bound stated in the operation rather than in a guard a few lines
+   away. Do **not** blanket-allow these; a crate-wide allow is what
+   `C-CREDMANAGER-ALLOWS-DEAD-CODE-CRATE-WIDE` is about, one lint over.
+3. Look hardest at anything parsing a file or a network response. That is where
+   the 410 arithmetic findings stop being theoretical.
+
+**Reproduce**, and re-measure rather than trusting the numbers above:
+
+```bash
+pkgs=$(for d in apps/*/; do printf -- "-p %s " "$(basename "$d")"; done)
+cargo clippy $pkgs --all-targets --target x86_64-pc-windows-gnu 2>&1 \
+  | tee /tmp/clippy-all.log | grep -c '^warning:'
+```
+
+Splitting production from test needs the first `#[cfg(test)]` line of each file;
+the throwaway script that did it is not kept, because a script kept without a
+caller is the other defect this file is full of.
+
+**Trigger:** take a crate's debt when converting that crate to `oswindow::app`
+— the two passes touch the same files and the lint tail is most of the work
+either way (see `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`). `paint` at 135 is the
+one worth doing on its own.
+
+**If never fixed:** 143 applications ship with 588 unchecked operations, mostly
+arithmetic, in code that reads user files. Most will never be reached. The ones
+that are will be reached by whoever is looking for them.
 
 ### TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO — 2026-08-22 — OPEN
 

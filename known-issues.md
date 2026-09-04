@@ -56846,14 +56846,13 @@ Production findings by lint:
 | everything else | 30 |
 
 **`paint`, `soundrecorder`, `habits` and `markdowneditor` are done**
-(2026-09-03), taking 342 production findings out of the 588 and all five off
-the list below (`regextester` too). Both were
+(2026-09-03), taking 375 production findings out of the 588 — 64% — and all six off the
+list below (`regextester` and `explorer` too). Both were
 converted to `oswindow::app` in the same pass, since the trigger below says to
 take a crate's debt when converting it.
 
 Worst crates by *production* findings: ~~`paint` 135~~, ~~`soundrecorder` 55~~,
-~~`habits` 43~~, ~~`markdowneditor` 40~~, ~~`regextester` 39~~, `installer` 33,
-`explorer` 33, `finance` 23, `metronome` 21, `weather` 21, `reminders` 21.
+~~`habits` 43~~, ~~`markdowneditor` 40~~, ~~`regextester` 39~~, `installer` 33, ~~`explorer` 33~~, `finance` 23, `metronome` 21, `weather` 21, `reminders` 21.
 
 **Note that `metronome` is on that list**, and it is one of the three apps that
 were *already* converted before today. Wiring an app to the compositor does not

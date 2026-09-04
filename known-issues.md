@@ -112952,8 +112952,11 @@ A later edit to `shellquote.rs` that changes behaviour is caught by nothing.
 they read a file in `kernel/`. They do — and then check one line of it. I
 deliberately broke the code each one is named after, and both reported a clean
 tree. Both are now fixed. What is *not* fixed is the general problem they are an
-instance of: nothing in this repository tests whether a gate can still *find*
-anything, and that applies to all thirty-odd of them.
+instance of: a gate's `--self-test` proves its *logic* works on strings the
+author made up, and proves nothing about whether the gate is still attached to
+the real file it claims to grade. 24 of 37 gates have a self-test; after this
+work, 2 of 37 have a case that mutates their actual subject and demands a
+refusal.
 
 `scripts/check-shellquote-vs-bash.py`, `scripts/check-kshell-rungs-vs-bash.py`,
 wired into `scripts/boot-test.sh` in `cb29ea5dc`; fixed in `a6551a3af` and
@@ -112999,15 +113002,30 @@ gate — a Python program cannot execute Rust, so a scanner defect is caught by
 `self_test()` at boot and by nothing in `scripts/`. The docstring now says that
 in as many words rather than letting the file's name imply otherwise.
 
-**The general debt, which is the part that remains.** No gate in `scripts/` has
-a test that plants a defect in its subject and checks the gate refuses.
+**The general debt, which is the part that remains.** Stated precisely, because
+the imprecise version of this sentence is what let the defect through: 24 of the
+tree's 37 gates *do* ship a `--self-test`, and those self-tests *do* contain
+true-positive cases — a fixture the gate is expected to refuse. What none of
+them had, before the two written here, is a true-positive case built from the
+gate's **real subject as it stands in the tree**, mutated. That distinction is
+not a nicety; it is the whole failure. `check-shellquote-vs-bash.py`'s
+`--self-test` was green at 25/25 while the gate graded a single line of
+`shellquote.rs`, because every one of those 25 cases was a synthetic string the
+gate was handed rather than the file the gate is supposed to be reading. A
+synthetic fixture proves the comparison logic works on input shaped the way the
+author imagined; only a mutated real subject proves the gate is still *attached*
+to the thing it claims to grade.
+
 `check-gates-can-refuse.py` covers the neighbouring question — is *any* non-zero
 exit reachable on a bare run — and its docstring is explicit that it cannot
 cover this one, because doing so means "planting a defect each gate would
-notice: 30 bespoke fixtures against 30 unrelated subjects". Two of those thirty
-now exist, written by hand during this investigation. The other twenty-eight are
-unwritten, and a gate in that state is indistinguishable from a working one from
-outside: same directory, same exit 0, same silence.
+notice: 30 bespoke fixtures against 30 unrelated subjects". (That "30" is
+historical: the ratchet counted 30 gates when the line was written and counts
+**37** today, which is itself the point — the number only grows.) Two of the
+thirty-seven now have a real-subject mutation fixture, written by hand during
+this investigation. The other **thirty-five** do not, and a gate in that state
+is indistinguishable from a working one from outside: same directory, same exit
+0, same green self-test, same silence.
 
 The check that failed here is worth naming, because it is cheap and I used it:
 asking *does this gate open a file in `kernel/`?* cannot tell a gate that grades
@@ -113022,8 +113040,11 @@ injectable `src` parameter, and asserts a non-zero verdict. The injectable
 parameter is the load-bearing part — it is what makes the fixture free of the
 working tree, so a gate can prove it refuses without a lane ever writing a
 broken file to disk. `rustrungs.py` and both oracles now demonstrate the
-pattern; the work is applying it twenty-eight more times, one gate at a time, in
-whichever lane owns each gate's subject.
+pattern; the work is applying it **thirty-five** more times, one gate at a time,
+in whichever lane owns each gate's subject. Where a gate already has a
+`--self-test`, this is an addition to it rather than a replacement: the synthetic
+cases still guard the comparison logic, and the mutated-real-subject case guards
+the tether. Both are needed, and only the second was missing.
 
 **If it is never fixed:** the two oracles are now genuinely tethered, so the
 specific hole is closed. But the same defect can be reintroduced anywhere else

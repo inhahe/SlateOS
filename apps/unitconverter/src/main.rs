@@ -13,17 +13,17 @@
 //!
 //! Uses the guitk library with Catppuccin Mocha theme.
 
-#![allow(dead_code)]
 // Widget-heavy GUI render helpers take many positional params.
 #![allow(clippy::too_many_arguments)]
 
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEventKind};
-use guitk::layout::FlexDirection;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::wheel;
-use guitk::widget::{Widget, WidgetTree};
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::collections::VecDeque;
 use std::fmt::Write as FmtWrite;
@@ -37,15 +37,11 @@ mod theme {
 
     pub const BASE: Color = Color::from_hex(0x1E1E2E);
     pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
     pub const SURFACE0: Color = Color::from_hex(0x313244);
     pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
     pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const OVERLAY1: Color = Color::from_hex(0x7F849C);
     pub const TEXT: Color = Color::from_hex(0xCDD6F4);
     pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
     pub const BLUE: Color = Color::from_hex(0x89B4FA);
     pub const GREEN: Color = Color::from_hex(0xA6E3A1);
     pub const RED: Color = Color::from_hex(0xF38BA8);
@@ -445,7 +441,7 @@ pub fn format_number(val: f64) -> String {
         let mut buf = String::new();
         let _ = write!(buf, "{val:.6e}");
         buf
-    } else if abs == (abs as u64) as f64 && abs < 1e15 {
+    } else if (abs - (abs as u64) as f64).abs() < f64::EPSILON && abs < 1e15 {
         // Integer-valued.
         let mut buf = String::new();
         let _ = write!(buf, "{}", val as i64);
@@ -755,8 +751,11 @@ impl UnitConverterApp {
         if self.from_focused && !self.from_dropdown_open && !self.to_dropdown_open {
             match key.key {
                 Key::Backspace => {
-                    if self.from_cursor > 0 {
-                        self.from_cursor -= 1;
+                    // `checked_sub` rather than a guard a line above the
+                    // subtraction: one expression that cannot drift from its
+                    // own bound.
+                    if let Some(back) = self.from_cursor.checked_sub(1) {
+                        self.from_cursor = back;
                         if self.from_cursor < self.from_input.len() {
                             self.from_input.remove(self.from_cursor);
                         }
@@ -772,14 +771,14 @@ impl UnitConverterApp {
                     }
                 }
                 Key::Left => {
-                    if self.from_cursor > 0 {
-                        self.from_cursor -= 1;
+                    if let Some(back) = self.from_cursor.checked_sub(1) {
+                        self.from_cursor = back;
                     }
                     return true;
                 }
                 Key::Right => {
                     if self.from_cursor < self.from_input.len() {
-                        self.from_cursor += 1;
+                        self.from_cursor = self.from_cursor.saturating_add(1);
                     }
                     return true;
                 }
@@ -810,7 +809,7 @@ impl UnitConverterApp {
                     if !allowed.is_empty() {
                         for ch in allowed {
                             self.from_input.insert(self.from_cursor, ch);
-                            self.from_cursor += 1;
+                            self.from_cursor = self.from_cursor.saturating_add(1);
                         }
                         self.do_convert();
                         return true;
@@ -836,8 +835,11 @@ impl UnitConverterApp {
             let header_height: f32 = 56.0;
             if y >= header_height {
                 let idx = ((y - header_height) / item_height) as usize;
-                if idx < Category::ALL.len() {
-                    self.select_category(Category::ALL[idx]);
+                // `get` rather than a length test and an index: the click
+                // coordinate comes from outside this program, and one
+                // expression cannot disagree with itself.
+                if let Some(&category) = Category::ALL.get(idx) {
+                    self.select_category(category);
                     return true;
                 }
             }
@@ -850,7 +852,7 @@ impl UnitConverterApp {
 
         if x >= main_left && x < main_right {
             // Swap button: centered horizontally, at y ~ 200.
-            let swap_cx = (main_left + main_right) / 2.0;
+            let swap_cx = f32::midpoint(main_left, main_right);
             let swap_cy: f32 = 230.0;
             let swap_r: f32 = 18.0;
             let dx = x - swap_cx;
@@ -1056,7 +1058,10 @@ impl UnitConverterApp {
     // ========================================================================
 
     /// Render the full application into a render tree.
-    pub fn render(&self) -> RenderTree {
+    /// Named `render_tree` and not `render`: at equal arity an inherent method
+    /// silently wins method lookup over `oswindow::app::App::render`, so an app
+    /// that keeps the name draws nothing and reports no error.
+    pub fn render_tree(&self) -> RenderTree {
         let mut tree = RenderTree::new();
 
         // Full-window background.
@@ -1305,7 +1310,7 @@ impl UnitConverterApp {
         );
 
         // --- Swap button ---
-        let swap_cx = (main_left + main_right) / 2.0;
+        let swap_cx = f32::midpoint(main_left, main_right);
         let swap_cy: f32 = 115.0;
         let swap_r: f32 = 18.0;
         tree.push(RenderCommand::FillRect {
@@ -1931,28 +1936,50 @@ impl UnitConverterApp {
 // Application entry point
 // ============================================================================
 
-fn main() {
+impl App for UnitConverterApp {
+    fn title(&self) -> String {
+        format!("Unit Converter — {}", self.selected_category.name())
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// A conversion happens when a digit is typed or a unit is chosen; nothing
+    /// here advances on its own, so a tick would redraw an identical frame.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
+        self.render_tree()
+    }
+}
+
+fn main() -> ExitCode {
     let mut app = UnitConverterApp::new();
-    // Perform initial conversion so display is populated.
+    // So the first frame shows a result rather than an empty field.
     app.do_convert();
-
-    // Build widget tree.
-    let root = Widget::container()
-        .with_flex_direction(FlexDirection::Row)
-        .with_background(theme::BASE);
-    let mut widget_tree = WidgetTree::new(root, WINDOW_WIDTH, WINDOW_HEIGHT);
-    widget_tree.layout();
-
-    // Render initial frame.
-    let _frame = app.render();
-
-    // In a real OS environment, this would enter an event loop:
-    //   loop {
-    //       let event = wait_for_event();
-    //       app.handle_event(&event);
-    //       let frame = app.render();
-    //       compositor_submit(frame);
-    //   }
+    app::launch("unitconverter", &mut app)
 }
 
 // ============================================================================
@@ -1961,6 +1988,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range or overflows should fail loudly and
+    // point at the line that did it — that is the diagnosis. The defensive
+    // lints exist to keep panics out of code that runs on a user'"'"'s data,
+    // which this is not.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
     // The scrolling tests assert a float equals the exact literal the code
     // under test was handed. That is the assertion meant: a tolerance would let
     // a value that has drifted pass as one that has not. (The *conversion*
@@ -1969,6 +2007,177 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use oswindow::app::App as _;
+
+    // ------------------------------------------------------------------
+    // Compositor wiring
+    //
+    // `handle_event` already existed and was already tested; nothing called
+    // it, because `main` rendered one frame and returned.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn the_app_asks_for_no_clock() {
+        // A conversion happens when a digit is typed or a unit is chosen;
+        // nothing here advances on its own.
+        let app = UnitConverterApp::new();
+        assert_eq!(app.tick_interval(), None);
+    }
+
+    #[test]
+    fn the_title_names_the_category_on_screen() {
+        let mut app = UnitConverterApp::new();
+        let first = app.title();
+        assert!(first.contains(app.selected_category.name()));
+        let other = Category::ALL
+            .iter()
+            .find(|c| **c != app.selected_category)
+            .copied()
+            .expect("more than one category");
+        app.select_category(other);
+        assert!(app.title().contains(other.name()));
+        assert_ne!(first, app.title(), "the title should follow the category");
+    }
+
+    #[test]
+    fn a_close_request_exits_and_an_unwanted_key_does_not_redraw() {
+        let mut app = UnitConverterApp::new();
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+        let unwanted = Event::Key(KeyEvent {
+            key: Key::F9,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert!(matches!(app.on_event(&unwanted), Response::Idle));
+    }
+
+    #[test]
+    fn a_digit_reaches_the_key_handler_and_converts() {
+        let mut app = UnitConverterApp::new();
+        app.from_input.clear();
+        app.from_cursor = 0;
+        app.do_convert();
+        let digit = Event::Key(KeyEvent {
+            key: Key::Num5,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: "5".to_owned(),
+        });
+        assert!(matches!(app.on_event(&digit), Response::Redraw));
+        assert_eq!(app.from_input, "5");
+        assert!(
+            !app.to_display.is_empty(),
+            "typing a digit should have produced a result"
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_category_list_chooses_that_category() {
+        // The click coordinate comes from outside this program, so the index
+        // it produces is a `get` rather than a bounds test and an index.
+        let mut app = UnitConverterApp::new();
+        let click = Event::Mouse(MouseEvent {
+            x: 40.0,
+            y: 56.0 + 4.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        let before = app.selected_category;
+        let _ = app.handle_event(&click);
+        assert_eq!(
+            app.selected_category,
+            Category::ALL.first().copied().unwrap_or(before),
+            "the first row should select the first category"
+        );
+    }
+
+    #[test]
+    fn a_click_below_the_last_category_selects_nothing() {
+        // The row index is computed from a pixel coordinate and nothing bounds
+        // it but the lookup itself. A clamping "fix" would be wrong: clicking
+        // past the end of the list would silently select the last entry.
+        let mut app = UnitConverterApp::new();
+        let last = Category::ALL.len();
+        // One row past the last, still inside the sidebar.
+        let y = 56.0 + (last as f32) * 44.0 + 4.0;
+        let before = app.selected_category;
+        let click = Event::Mouse(MouseEvent {
+            x: 40.0,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        let _ = app.handle_event(&click);
+        assert_eq!(
+            app.selected_category, before,
+            "a click past the last row selected something"
+        );
+        // And the row immediately above it does select the last category, so
+        // the test above is not passing because the mapping is broken.
+        let click_last = Event::Mouse(MouseEvent {
+            x: 40.0,
+            y: y - 44.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        let _ = app.handle_event(&click_last);
+        assert_eq!(
+            Some(app.selected_category),
+            Category::ALL.last().copied(),
+            "the last row should select the last category"
+        );
+    }
+
+    #[test]
+    fn the_text_cursor_never_leaves_the_input() {
+        // Right at the end of the text, and Left at the start, must stay put:
+        // the cursor is used as an index into the string on the very next
+        // keystroke.
+        let mut app = UnitConverterApp::new();
+        app.from_input = "12".to_owned();
+        app.from_cursor = 0;
+        let right = Event::Key(KeyEvent {
+            key: Key::Right,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        for _ in 0..6 {
+            let _ = app.handle_event(&right);
+            assert!(
+                app.from_cursor <= app.from_input.len(),
+                "the cursor ran past the end: {} of {}",
+                app.from_cursor,
+                app.from_input.len()
+            );
+        }
+        assert_eq!(app.from_cursor, app.from_input.len());
+        let left = Event::Key(KeyEvent {
+            key: Key::Left,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        for _ in 0..6 {
+            let _ = app.handle_event(&left);
+        }
+        assert_eq!(app.from_cursor, 0, "the cursor ran past the start");
+    }
+
+    #[test]
+    fn rendering_draws_something_in_every_category() {
+        let mut app = UnitConverterApp::new();
+        for c in Category::ALL {
+            app.select_category(*c);
+            assert!(
+                !app.render(900.0, 640.0).commands.is_empty(),
+                "{} drew nothing",
+                c.name()
+            );
+        }
+    }
+
     use guitk::event::{Modifiers, MouseEvent};
 
     // ========================================================================
@@ -2746,7 +2955,7 @@ mod tests {
         };
         let label = fav.label();
         assert!(label.contains("Length"));
-        assert!(label.contains("m"));
+        assert!(label.contains('m'));
         assert!(label.contains("km"));
     }
 
@@ -2824,7 +3033,7 @@ mod tests {
     fn test_render_produces_commands() {
         let mut app = UnitConverterApp::new();
         app.do_convert();
-        let frame = app.render();
+        let frame = app.render_tree();
         assert!(!frame.is_empty());
     }
 
@@ -2835,7 +3044,7 @@ mod tests {
         app.do_convert();
         app.from_input = String::from("200");
         app.do_convert();
-        let frame = app.render();
+        let frame = app.render_tree();
         assert!(!frame.is_empty());
     }
 
@@ -2844,7 +3053,7 @@ mod tests {
         let mut app = UnitConverterApp::new();
         app.do_convert();
         app.from_dropdown_open = true;
-        let frame = app.render();
+        let frame = app.render_tree();
         assert!(!frame.is_empty());
     }
 
@@ -2854,7 +3063,7 @@ mod tests {
         app.do_convert();
         app.toggle_favorite();
         app.show_favorites = true;
-        let frame = app.render();
+        let frame = app.render_tree();
         assert!(!frame.is_empty());
     }
 
@@ -2965,7 +3174,7 @@ mod tests {
         };
         let display = entry.display();
         assert!(display.contains("1000"));
-        assert!(display.contains("m"));
+        assert!(display.contains('m'));
         assert!(display.contains("km"));
     }
 
@@ -2977,7 +3186,7 @@ mod tests {
         let m = &units[2];
         let km = &units[3];
         let formula = formula_text(m, km);
-        assert!(formula.contains("m"));
+        assert!(formula.contains('m'));
         assert!(formula.contains("km"));
     }
 

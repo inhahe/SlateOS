@@ -133,8 +133,19 @@ def test_a_rewritten_but_unchanged_file_is_not_drift(cf, tmpdir):
     cf.SYSROOT_STAMP.write_text(cf.compute_sysroot(), encoding="utf-8", newline="\n")
 
     # What git does: rewrite the same bytes, leaving a fresh mtime.
+    #
+    # `write_bytes(read_bytes())` and not a `write_text(read_text())` round
+    # trip, which is what this was until 2026-09-04. In text mode the read
+    # folds CRLF to `\n` and the write turns every `\n` back into CRLF, so on
+    # Windows this line did not rewrite the same bytes at all -- it converted
+    # the fixture (written LF at :101) to CRLF. The test passed anyway, because
+    # `compute_sysroot` hashes text inputs with CRLF folded to LF and so could
+    # not see the difference. Passing for that reason means it was asserting
+    # "a CRLF-ified file is not drift" on Windows and "an identical file is not
+    # drift" on Linux -- two different claims from one line of source, and only
+    # the second is the one the docstring above makes.
     ps1 = repo / "toolchain" / "build-sysroot.ps1"
-    ps1.write_text(ps1.read_text(encoding="utf-8"), encoding="utf-8")
+    ps1.write_bytes(ps1.read_bytes())
     os.utime(ps1, None)
 
     mode, findings = cf.sysroot_staleness()

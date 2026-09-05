@@ -3109,7 +3109,26 @@ impl ConnectionState {
     /// version exchange, key exchange, authentication -- where there is nothing
     /// else to do but wait for the client's next move. Once a session is running
     /// there *is* something else to do, and that loop uses `try_recv_packet`.
-    fn recv_packet(&mut self) -> Result<Vec<u8>, SshdError> {
+    ///
+    /// # Why this is public
+    ///
+    /// This crate exposes the protocol *phases* -- [`do_version_exchange`],
+    /// [`do_key_exchange`], [`do_rekey`] -- for a caller that drives a
+    /// connection itself rather than through [`run_cli`]. Such a caller has to
+    /// be able to read the message that tells it which phase comes next; a set
+    /// of phases with no way to read between them is not a usable API. It is
+    /// also what lets `ssh-interop` put this daemon and this tree's `ssh`
+    /// client on two ends of one connection, which is the only thing that
+    /// checks the two agree.
+    ///
+    /// The payload is returned decrypted and unframed, starting at the message
+    /// type byte.
+    ///
+    /// # Errors
+    ///
+    /// A transport failure, a framing or MAC failure, or the peer closing the
+    /// connection.
+    pub fn recv_packet(&mut self) -> Result<Vec<u8>, SshdError> {
         loop {
             if let Some((payload, consumed)) = self.codec.decode(self.stream_buf.unread())? {
                 self.stream_buf.advance(consumed);
@@ -3309,7 +3328,13 @@ fn parse_version_string(version: &str) -> Option<&str> {
     after_proto.split(' ').next()
 }
 
-/// Perform SSH key exchange (DH group14-sha256).
+/// Perform the connection's first SSH key exchange (DH group14-sha256).
+///
+/// This is the one that runs on a plaintext connection, before anything else
+/// has happened, and whose exchange hash becomes the session identifier. The
+/// server speaks first here because nothing has been said yet; a later exchange
+/// on the same connection is [`do_rekey`], and the part the two share is
+/// [`run_key_exchange`].
 pub fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
     // Build and send our KEXINIT.
     let server_kexinit = build_kexinit(conn.secrets)?;
@@ -3323,8 +3348,61 @@ pub fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
     }
     conn.debug_log("received client KEXINIT");
 
+    run_key_exchange(conn, &server_kexinit, &client_kexinit)
+}
+
+/// Run a *second or later* key exchange on an established connection, because
+/// the client sent `KEXINIT` (RFC 4253 §9).
+///
+/// # Why this exists
+///
+/// Rekeying is not politeness. A client that sends `KEXINIT` sends nothing else
+/// until the exchange it started completes — §7.1 forbids it — so a server that
+/// ignores the message does not degrade, it *stops*: the session holds open and
+/// silent, mid-command, with no error at either end. That was
+/// `TD-B-SSHD-DOES-NOT-REKEY-SO-A-LONG-SESSION-HANGS`.
+///
+/// # What differs from the first exchange
+///
+/// The client has already sent its `KEXINIT` — that is how we got here, and it
+/// is passed in rather than read, because it has been read. Our reply goes out
+/// now. Beyond that the exchange is identical, except that the session
+/// identifier does **not** change; see [`run_key_exchange`].
+///
+/// # Errors
+///
+/// The exchange failed: a malformed or out-of-range value from the client, a
+/// transport error, or the client disconnecting part-way through.
+pub fn do_rekey(conn: &mut ConnectionState, client_kexinit: &[u8]) -> Result<(), SshdError> {
+    conn.debug_log("client requested rekey (KEXINIT); starting key exchange");
+    let server_kexinit = build_kexinit(conn.secrets)?;
+    conn.send_packet(&server_kexinit)?;
+    conn.debug_log("sent KEXINIT (rekey)");
+
+    run_key_exchange(conn, &server_kexinit, client_kexinit)?;
+    conn.debug_log("rekey complete");
+    Ok(())
+}
+
+/// Everything both exchanges do: Diffie-Hellman, the exchange hash, the host-key
+/// signature, `NEWKEYS`, and installing the ciphers.
+///
+/// Both `KEXINIT` payloads are parameters because the two callers obtain them
+/// differently — the first exchange reads the client's after sending ours, a
+/// rekey already has it — while the hash they both feed is defined by *role*,
+/// not by which arrived first (RFC 4253 §8: `I_C` then `I_S`, whoever spoke
+/// first).
+///
+/// # Errors
+///
+/// As [`do_rekey`].
+fn run_key_exchange(
+    conn: &mut ConnectionState,
+    server_kexinit: &[u8],
+    client_kexinit: &[u8],
+) -> Result<(), SshdError> {
     // Receive KEX_DH_INIT from client.
-    let dh_init = conn.recv_packet()?;
+    let dh_init = recv_during_kex(conn)?;
     if dh_init.first().copied() != Some(msg::SSH_MSG_KEX_DH_INIT) {
         return Err(SshdError::ProtocolError("expected KEX_DH_INIT".into()));
     }
@@ -3363,17 +3441,24 @@ pub fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
     let exchange_hash = compute_exchange_hash(&ExchangeHashInput {
         client_version: &conn.client_version,
         server_version: SSH_SERVER_VERSION,
-        client_kexinit: &client_kexinit,
-        server_kexinit: &server_kexinit,
+        client_kexinit,
+        server_kexinit,
         host_key_blob: &conn.host_key.public_key_blob(),
         client_e: &client_e.to_bytes_be(),
         server_f: &f.to_bytes_be(),
         shared_secret: &shared_secret,
     });
 
-    // This is the session ID (first exchange hash).
-    let session_id = exchange_hash;
-    conn.session_id = Some(session_id);
+    // RFC 4253 §7.2: the session identifier is the exchange hash of the *first*
+    // key exchange, and it stays that for the life of the connection -- a rekey
+    // derives new keys from its own `H` but the session ID is unchanged. That
+    // matters beyond key derivation: it is the value a `publickey` signature is
+    // made over (RFC 4252 §7), so a session ID that moved under a rekey would
+    // silently invalidate every signature made before it.
+    //
+    // `get_or_insert` is the whole of that rule. The first exchange finds `None`
+    // and stores its hash; every later one finds the stored value and leaves it.
+    let session_id = *conn.session_id.get_or_insert(exchange_hash);
 
     // Sign the exchange hash with our host key.
     let signature = conn.host_key.sign(&exchange_hash);
@@ -3392,7 +3477,7 @@ pub fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
     conn.debug_log("sent NEWKEYS");
 
     // Receive NEWKEYS from client.
-    let newkeys = conn.recv_packet()?;
+    let newkeys = recv_during_kex(conn)?;
     if newkeys.first().copied() != Some(msg::SSH_MSG_NEWKEYS) {
         return Err(SshdError::ProtocolError("expected NEWKEYS".into()));
     }
@@ -3411,6 +3496,42 @@ pub fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
     conn.debug_log("encryption activated");
 
     Ok(())
+}
+
+/// Receive the next packet that a key exchange is actually waiting for.
+///
+/// # Why this is not `recv_packet`
+///
+/// RFC 4253 §7.1 stops a peer sending *most* things once it has sent `KEXINIT`,
+/// but not everything: `SSH_MSG_IGNORE`, `SSH_MSG_DEBUG` and
+/// `SSH_MSG_DISCONNECT` remain legal throughout, and §11.2 makes `IGNORE` a
+/// thing an implementation may send at any time for traffic analysis — OpenSSH
+/// does, under `ObscureKeystrokeTiming`. A key exchange that treated the next
+/// packet as necessarily its own would then fail on a message the RFC
+/// explicitly permits, and would report it as "expected `KEX_DH_INIT`" — a
+/// protocol error blamed on the peer for doing something correct.
+///
+/// So the advisory messages are consumed here and the caller sees only the
+/// exchange. `DISCONNECT` is the one that ends things, and it is reported as
+/// what it is rather than as a missing `KEX_DH_INIT`.
+///
+/// # Errors
+///
+/// A transport or framing failure, or the client disconnecting mid-exchange.
+fn recv_during_kex(conn: &mut ConnectionState) -> Result<Vec<u8>, SshdError> {
+    loop {
+        let packet = conn.recv_packet()?;
+        match packet.first().copied() {
+            Some(msg::SSH_MSG_IGNORE) => conn.debug_log("ignoring IGNORE during key exchange"),
+            Some(msg::SSH_MSG_DEBUG) => conn.debug_log("ignoring DEBUG during key exchange"),
+            Some(msg::SSH_MSG_DISCONNECT) => {
+                return Err(SshdError::ProtocolError(
+                    "client disconnected during key exchange".into(),
+                ));
+            }
+            _ => return Ok(packet),
+        }
+    }
 }
 
 /// Build a KEXINIT message.
@@ -4376,15 +4497,16 @@ fn dispatch_channel_message(conn: &mut ConnectionState, payload: &[u8]) -> Resul
             conn.debug_log("client sent UNIMPLEMENTED");
         }
         msg::SSH_MSG_KEXINIT => {
-            // A rekey request. We do not implement rekeying, and this arm exists
-            // to say so in the log rather than to handle it: dropping it silently
-            // is what makes the session hang, because an OpenSSH client holds all
-            // other traffic until the key exchange it started completes. Tracked
-            // as TD-B-SSHD-DOES-NOT-REKEY-SO-A-LONG-SESSION-HANGS in
-            // known-issues.md. Deliberately *not* answered with UNIMPLEMENTED:
-            // KEXINIT is a message we recognise, so that reply would be a lie
-            // about which of the two problems the client is looking at.
-            conn.debug_log("client requested rekey (KEXINIT); unsupported, ignoring");
+            // The client is rekeying. Its KEXINIT has already been read -- it is
+            // this payload -- so it is handed on rather than read again.
+            //
+            // This must run to completion here, inline, rather than setting a
+            // flag for the loop to notice: from the moment the client sent this
+            // it will send nothing but key-exchange packets (RFC 4253 §7.1), so
+            // there is no other traffic to interleave with, and returning to the
+            // dispatch loop would only mean reading KEX_DH_INIT somewhere that
+            // does not know what to do with it.
+            do_rekey(conn, payload)?;
         }
         _ => {
             // RFC 4253 §11.4: an unrecognised message must be answered, and the
@@ -8585,6 +8707,78 @@ Z
             padding,
             &(0u8..).take(pad_len).collect::<Vec<u8>>()[..],
             "the padding must be the bytes the connection's source supplied"
+        );
+    }
+
+    /// A `KEXINIT` arriving mid-session starts a key exchange.
+    ///
+    /// The rekey itself is checked end-to-end against this tree's real `ssh`
+    /// client in `ssh-interop`. What is checked *here* is the one fact that test
+    /// cannot see: that the dispatcher is wired to it. The arm used to log the
+    /// message and return `Ok`, and the cost of that was not a wrong answer but
+    /// a hung session -- a client that has sent `KEXINIT` sends nothing else
+    /// until the exchange completes (RFC 4253 §7.1), so silence here is a
+    /// session that stops mid-command with no error at either end. Nothing
+    /// distinguishes "ignored it" from "handled it" except what goes back out on
+    /// the wire, so that is what this reads.
+    ///
+    /// The exchange cannot *finish*: the peer here sends no `KEX_DH_INIT`. It
+    /// closes instead, which is what makes this terminate rather than
+    /// demonstrate the very hang it is about -- and the resulting error is
+    /// itself part of the assertion, since ignoring the message would have
+    /// returned `Ok(Flow::Continue)` having sent nothing.
+    #[test]
+    fn a_kexinit_mid_session_starts_a_key_exchange_instead_of_being_ignored() {
+        let (server_side, mut peer) = sshwire::memory_pair();
+        let mut conn = ConnectionState::new(
+            Box::new(server_side),
+            SshdConfig::default_config(),
+            HostKey::from_seed([9u8; 32]),
+            false,
+        )
+        .with_secret_source(counting_secrets);
+
+        // The peer must live on its own thread: `recv` blocks while the writer
+        // is alive, so the server's wait for KEX_DH_INIT would never return if
+        // this end sat in the same thread doing nothing. Dropping it at the end
+        // of the closure closes the pipe, which is what ends that wait.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let mut wire = [0u8; 4096];
+            // Enough to reach the message type: uint32 length, one padding-length
+            // byte, then the payload (RFC 4253 §6).
+            while seen.len() < 6 {
+                match peer.recv(&mut wire) {
+                    Ok([]) | Err(_) => break,
+                    Ok(bytes) => seen.extend_from_slice(bytes),
+                }
+            }
+            tx.send(seen).ok();
+        });
+
+        let client_kexinit = build_kexinit(counting_secrets).expect("a KEXINIT to hand in");
+        let outcome = dispatch_channel_message(&mut conn, &client_kexinit);
+        // Closing this end is what makes a *failure* here fail rather than hang.
+        // The reader is blocked until it has a message or the pipe closes, and a
+        // daemon that ignored the KEXINIT sends no message -- so without this the
+        // test would reproduce the hang it is meant to report. It is safe in the
+        // passing case too: by then the reader has what it came for.
+        drop(conn);
+        let sent = rx.recv().expect("the reader thread must report");
+        reader.join().expect("the reader thread must not panic");
+
+        assert_eq!(
+            sent.get(5).copied(),
+            Some(msg::SSH_MSG_KEXINIT),
+            "the daemon answered a mid-session KEXINIT with {sent:?}; a rekey \
+             begins by sending our own KEXINIT, and sending nothing at all is \
+             what hangs the session"
+        );
+        assert!(
+            outcome.is_err(),
+            "the peer sent no KEX_DH_INIT and then closed, so the exchange must \
+             fail rather than report success"
         );
     }
 

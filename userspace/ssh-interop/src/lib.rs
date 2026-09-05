@@ -190,6 +190,91 @@ mod tests {
         one_handshake_with(sshd::HostKey::from_seed(HOST_KEY_SEED), known_hosts)
     }
 
+    /// Handshake, then let the client rekey `rekeys` times, returning each end's
+    /// session identifier as it stood after every exchange.
+    ///
+    /// # Why more than one rekey is worth running
+    ///
+    /// A rekey that produced *different* keys at the two ends does not fail at
+    /// the point of the mistake -- both ends finish the exchange happily, having
+    /// each derived something. It fails on the next packet, which one end
+    /// encrypts with a key the other does not have, and surfaces as a MAC
+    /// failure attributed to whatever that packet happened to be.
+    ///
+    /// So each exchange here is the check on the one before it: the client's
+    /// second `KEXINIT` travels under the keys the first rekey installed, and if
+    /// those disagreed the server cannot read it. That makes a plain
+    /// `expect("...")` on the outcome a real assertion about key agreement, with
+    /// no need for this crate to invent traffic to send.
+    fn handshake_then_rekeys(known_hosts: &Path, rekeys: usize) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
+        let (client_side, server_side) = sshwire::memory_pair();
+        let host_key = sshd::HostKey::from_seed(HOST_KEY_SEED);
+
+        let server = thread::spawn(move || {
+            let secrets: SecretSource = counting_secrets;
+            let mut conn = sshd::ConnectionState::new(
+                Box::new(server_side),
+                sshd::SshdConfig::default_config(),
+                host_key,
+                false,
+            )
+            .with_secret_source(secrets);
+
+            sshd::do_version_exchange(&mut conn).map_err(|e| e.to_string())?;
+            sshd::do_key_exchange(&mut conn).map_err(|e| e.to_string())?;
+
+            let mut ids = vec![conn.session_id().ok_or("server has no session id")?];
+            for i in 0..rekeys {
+                // Exactly what the daemon's own dispatch loop does with a
+                // KEXINIT that arrives mid-session: read the packet, hand it on.
+                let kexinit = conn
+                    .recv_packet()
+                    .map_err(|e| format!("server reading rekey {i} KEXINIT: {e}"))?;
+                sshd::do_rekey(&mut conn, &kexinit)
+                    .map_err(|e| format!("server rekey {i}: {e}"))?;
+                ids.push(conn.session_id().ok_or("server lost its session id")?);
+            }
+            Ok::<Vec<[u8; 32]>, String>(ids)
+        });
+
+        let args = vec![
+            "ssh".to_string(),
+            "-o".to_string(),
+            "StrictHostKeyChecking=no".to_string(),
+            "-o".to_string(),
+            format!("UserKnownHostsFile={}", known_hosts.display()),
+            "interop@localhost".to_string(),
+        ];
+        let client = thread::spawn(move || {
+            let config = ssh::parse_args_from(args)
+                .map_err(|e| format!("client arguments rejected: {e}"))?;
+            let secrets: SecretSource = counting_secrets;
+            let mut session =
+                ssh::SshSession::new(Box::new(client_side), config).with_secret_source(secrets);
+
+            session.version_exchange().map_err(|e| e.to_string())?;
+            session.key_exchange().map_err(|e| e.to_string())?;
+
+            let mut ids = vec![*session.session_id().ok_or("client has no session id")?];
+            for i in 0..rekeys {
+                // The client's key exchange is written to be run whenever, not
+                // only on a fresh connection, so a rekey is the same call again.
+                session
+                    .key_exchange()
+                    .map_err(|e| format!("client rekey {i}: {e}"))?;
+                ids.push(*session.session_id().ok_or("client lost its session id")?);
+            }
+            Ok::<Vec<[u8; 32]>, String>(ids)
+        });
+
+        let client_outcome = client.join().expect("the client thread must not panic");
+        let server_outcome = server.join().expect("the server thread must not panic");
+        (
+            client_outcome.expect("the client must complete every exchange"),
+            server_outcome.expect("the server must complete every exchange"),
+        )
+    }
+
     /// As [`one_handshake`], but the daemon serves the host key it is handed.
     ///
     /// Split out for [`the_daemon_starts_on_the_key_its_own_key_tool_writes`],
@@ -288,6 +373,65 @@ mod tests {
             "the two ends of this protocol computed different exchange hashes, \
              which means they disagree about the handshake transcript"
         );
+    }
+
+    /// The client can rekey an established session, repeatedly, and the daemon
+    /// serves it.
+    ///
+    /// SSH renegotiates its keys periodically (RFC 4253 §9). The failure this
+    /// pins is not a wrong answer but a **hang**: a client that has sent
+    /// `KEXINIT` may send nothing else until the exchange completes (§7.1), so a
+    /// server that reads the message and does nothing leaves the session open,
+    /// silent and stuck mid-command, with no error at either end. That was
+    /// `TD-B-SSHD-DOES-NOT-REKEY-SO-A-LONG-SESSION-HANGS`.
+    ///
+    /// What is checked here is the exchange itself: the server side calls
+    /// `sshd::do_rekey` with a `KEXINIT` it has just read, which is exactly what
+    /// the daemon's dispatch arm does with the one it reads. That the arm is
+    /// wired to it at all is a separate fact, and belongs to `sshd`'s own suite
+    /// where the dispatcher is reachable --
+    /// `a_kexinit_mid_session_starts_a_key_exchange_instead_of_being_ignored`.
+    ///
+    /// Three exchanges run: the handshake and two rekeys. The second rekey is
+    /// what makes the first one's result meaningful -- see
+    /// [`handshake_then_rekeys`].
+    #[test]
+    fn the_client_can_rekey_an_established_session_and_the_daemon_serves_it() {
+        let scratch = scratchdir::ScratchDir::new("ssh-interop-rekey");
+        let (client_ids, server_ids) = handshake_then_rekeys(&scratch.path("known_hosts"), 2);
+
+        assert_eq!(client_ids.len(), 3, "one id per exchange");
+        assert_eq!(server_ids.len(), 3, "one id per exchange");
+        assert_eq!(
+            client_ids, server_ids,
+            "the two ends disagree about the session identifier after rekeying"
+        );
+    }
+
+    /// A rekey does not change the session identifier.
+    ///
+    /// RFC 4253 §7.2: the session id is the exchange hash of the *first* key
+    /// exchange and stays that for the life of the connection; a rekey derives
+    /// new keys from its own hash but leaves this one alone.
+    ///
+    /// It is worth its own assertion because the damage is not confined to key
+    /// derivation. The session id is the value a `publickey` signature is made
+    /// over (RFC 4252 §7, and the tests further down), so a session id that
+    /// moved under a rekey would retroactively invalidate the authentication the
+    /// session was already running under -- and, because both ends would move it
+    /// to the *same* new value, the tests above would go on passing.
+    #[test]
+    fn a_rekey_leaves_the_session_identifier_alone() {
+        let scratch = scratchdir::ScratchDir::new("ssh-interop-rekey-session-id");
+        let (client_ids, _) = handshake_then_rekeys(&scratch.path("known_hosts"), 2);
+
+        for (i, id) in client_ids.iter().enumerate() {
+            assert_eq!(
+                id,
+                client_ids.first().expect("there is at least one exchange"),
+                "the session id changed at exchange {i}"
+            );
+        }
     }
 
     /// The same inputs produce the same handshake twice.

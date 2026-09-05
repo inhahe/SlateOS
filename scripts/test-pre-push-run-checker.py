@@ -785,9 +785,20 @@ def main() -> int:
         # kept log *is*) would have gone unreported.
         #
         # It cannot simply be `not dupes`, because the hook has one legitimate
-        # repeat: `getopt-table` is called from the two arms of an `if/elif`
-        # (run_all versus a named list of binaries), so it is one gate spelled
-        # twice and exactly one arm ever executes. Nothing is overwritten.
+        # repeat: `getopt-table-$sha` is called from the two arms of an
+        # `if/else` (run_all versus a named list of binaries), so it is one
+        # gate spelled twice and exactly one arm ever executes. Nothing is
+        # overwritten.
+        #
+        # The `$sha` is not decoration, and it is why this pin is safe in the
+        # one place the mutual-exclusion argument alone would not reach: the
+        # two calls sit inside `for sha in $pushed_shas`, so a push of several
+        # refs runs this gate more than once. A fixed label would then have the
+        # second ref's log overwrite the first's -- exactly the evidence loss
+        # this check exists to catch -- and it did, until 0dc5d0d4b interpolated
+        # the ref tip into the name. Per iteration the label is distinct; within
+        # an iteration only one arm runs. So the only repetition left is
+        # textual.
         #
         # Pinned rather than exempted-by-pattern: "duplicates are fine when
         # the calls are mutually exclusive" is true but not decidable from
@@ -795,7 +806,10 @@ def main() -> int:
         # actually apply is one that silently permits the real collisions too.
         # A named pin is a claim someone verified once, and a new duplicate --
         # which is the case that loses evidence -- still fails here.
-        HOOK_DUPES_OK = {"getopt-table"}
+        #
+        # Pin the label as it is *written*, not as it expands: this is a read
+        # of the hook's text, and `run_checker_labels` never evaluates `$sha`.
+        HOOK_DUPES_OK = {"getopt-table-$sha"}
         hook_dupes = sorted({g for g in hook_gates if hook_gates.count(g) > 1})
         unexpected = [g for g in hook_dupes if g not in HOOK_DUPES_OK]
         check("the hook has no unpinned duplicate labels",

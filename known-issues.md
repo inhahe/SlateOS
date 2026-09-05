@@ -16269,6 +16269,18 @@ the word *begins*, and none of its five expectations move when what is
 *inserted* becomes escaped. Three independent defects in one function, and the
 fix for each leaves the other two's evidence intact.
 
+> **Both rung citations above were dangling until 2026-09-05, and the evidence
+> trail now reads as though they never were.** Rungs 116–119 ran and passed
+> from the day they were written, but announced themselves with a `// --- N:`
+> *comment* instead of a `serial_println!`, so they printed nothing. Grepping a
+> boot log for "rung 119" — the route this table tells you to take — found
+> nothing, for either of the two rungs cited on this page. The banners were
+> added in the same batch that added this note, so the citations are true now;
+> they were not when they were written. `scripts/check-selftest-rung-numbers.py`
+> gained a rule that fails the build on any rung citation naming a rung no
+> banner announces, so this cannot recur silently. It found five citations
+> across `kshell.rs` and this file, covering exactly rungs 116–119.
+
 *Still not fixed here:* completion looks the word up **unexpanded** — see
 `A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD` immediately below. §9's
 round trip deliberately does not model expansion (`strip_quotes` does not

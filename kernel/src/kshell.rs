@@ -22427,18 +22427,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
-    // --- 116: tab completion reads the same words as the rest of the shell.
-    //
-    // This rung needs real directory entries, so unlike 115 it builds a
-    // fixture. The names are prefixed `zz_tc` so that a leftover from a
-    // failed run cannot be mistaken for anything else, and every one of them
-    // is removed at the end -- a stray `/tmp/zz_tc*` would change the answer
-    // this rung gets on the *next* boot, which is the kind of self-inflicted
-    // flake that costs an afternoon.
-    //
-    // The cursor is always at the end of the text, which is what the line
-    // editor passes when Tab is pressed at the end of a line.
+    serial_println!(
+        "  kshell::self_test 116: tab completion reads the same words as the \
+         rest of the shell -- a quoted or escaped space does not begin a new \
+         word, so the candidate list comes from a prefix the user actually \
+         typed"
+    );
     {
+        // Rung 116 -- tab completion reads the same words as the rest of the
+        // shell.
+        //
+        // This rung needs real directory entries, so unlike 115 it builds a
+        // fixture. The names are prefixed `zz_tc` so that a leftover from a
+        // failed run cannot be mistaken for anything else, and every one of them
+        // is removed at the end -- a stray `/tmp/zz_tc*` would change the answer
+        // this rung gets on the *next* boot, which is the kind of self-inflicted
+        // flake that costs an afternoon.
+        //
+        // The cursor is always at the end of the text, which is what the line
+        // editor passes when Tab is pressed at the end of a line.
+
         const UNIQ: &str = "/tmp/zz_tc_uniq.txt";
         const SPACED: &str = "/tmp/zz_tc two.txt";
         let made_uniq = crate::fs::Vfs::write_file(UNIQ, b"x").is_ok();
@@ -22499,19 +22507,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
-    // --- 117: awk's print-argument splitter obeys awk's escape rule.
-    //
-    // Deliberately *not* the shared shellquote scanner: awk is a different
-    // language, and the two rules disagree about the apostrophe. The second
-    // assertion is the control that proves the difference matters -- swap in
-    // the shell scanner and the first case starts passing and this one starts
-    // failing, which is a wash, not a fix.
-    //
-    // The oracle here is awk, not bash. Measured before it was written down
-    // (`scripts/check-kshell-rungs-vs-bash.py`, AWK_CASES): real awk prints
-    // `a"b c` for the first and `it's x` for the second, so both are two
-    // arguments joined by OFS -- which is exactly the arity asserted below.
+    serial_println!(
+        "  kshell::self_test 117: awk's print-argument splitter obeys awk's \
+         escape rule and not the shell's -- the two disagree about the \
+         apostrophe, and the second case is the control that proves it matters"
+    );
     {
+        // Rung 117 -- awk's print-argument splitter obeys awk's escape rule.
+        //
+        // Deliberately *not* the shared shellquote scanner: awk is a different
+        // language, and the two rules disagree about the apostrophe. The second
+        // assertion is the control that proves the difference matters -- swap in
+        // the shell scanner and the first case starts passing and this one
+        // starts failing, which is a wash, not a fix.
+        //
+        // The oracle here is awk, not bash. Measured before it was written down
+        // (`scripts/check-kshell-rungs-vs-bash.py`, AWK_CASES): real awk prints
+        // `a"b c` for the first and `it's x` for the second, so both are two
+        // arguments joined by OFS -- which is exactly the arity asserted below.
+
         // `print "a\"b", c` -- the escaped quote does not close the string, so
         // the comma that follows is a separator and not part of it. Before the
         // escape was understood the whole line came back as one argument,
@@ -22543,17 +22557,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(awk_split_print_args("\"a\\").len(), 1);
     }
 
-    // --- 118: a redirection target is a word, and names a file after
-    // unquoting and resolution.
-    //
-    // Both halves were missing on the output side. `> "my file"` created a
-    // file whose name literally began with a quote, and a relative target was
-    // handed to the VFS unresolved, so it landed at the root no matter what
-    // the working directory was. The input side already resolved (but did not
-    // unquote), so `cmd < a > b` could read and write in different
-    // directories -- which is the shape of bug that looks like a filesystem
-    // fault rather than a shell one.
+    serial_println!(
+        "  kshell::self_test 118: a redirection target is a word, so it is \
+         unquoted and resolved before it names a file -- `> \"my file\"` no \
+         longer creates a name beginning with a quote, and a relative target \
+         no longer lands at the root"
+    );
     {
+        // Rung 118 -- a redirection target is a word, and names a file after
+        // unquoting and resolution.
+        //
+        // Both halves were missing on the output side. `> "my file"` created a
+        // file whose name literally began with a quote, and a relative target
+        // was handed to the VFS unresolved, so it landed at the root no matter
+        // what the working directory was. The input side already resolved (but
+        // did not unquote), so `cmd < a > b` could read and write in different
+        // directories -- which is the shape of bug that looks like a filesystem
+        // fault rather than a shell one.
+
         let saved_cwd = CWD.lock().clone();
         *CWD.lock() = PathBuf::from("/tmp");
 
@@ -22596,24 +22617,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(cleaned, "the rung-118 fixture outlived the rung");
     }
 
-    // --- 119: what completion inserts refers to the file it matched.
-    //
-    // Rung 116 covers where the word *begins*; this covers what gets *put
-    // there*. They are separate defects and were fixed a day apart: with the
-    // word start correct and the insertion raw, `cat /tmp/zz_tja<TAB>` produced
-    //
-    //     cat /tmp/zz_tja one.txt
-    //
-    // -- two arguments, both naming files that do not exist, in a line the
-    // user did not type. The shell wrote it for them.
-    //
-    // The assertion is the round trip and not the spelling: build the line the
-    // editor would end up with, split it with the parser's own scanner, unquote
-    // it with the dispatcher's own stage, and require the original path back
-    // as ONE word. That is a property of the whole pipeline, so it stays true
-    // if the escaping style ever changes; asserting the literal `'` placement
-    // would only pin today's spelling.
+    serial_println!(
+        "  kshell::self_test 119: what completion inserts refers to the file it \
+         matched -- the composed line splits into one argument naming the \
+         original path, in all three quoting contexts"
+    );
     {
+        // Rung 119 -- what completion inserts refers to the file it matched.
+        //
+        // Rung 116 covers where the word *begins*; this covers what gets *put
+        // there*. They are separate defects and were fixed a day apart: with the
+        // word start correct and the insertion raw, `cat /tmp/zz_tja<TAB>`
+        // produced
+        //
+        //     cat /tmp/zz_tja one.txt
+        //
+        // -- two arguments, both naming files that do not exist, in a line the
+        // user did not type. The shell wrote it for them.
+        //
+        // The assertion is the round trip and not the spelling: build the line
+        // the editor would end up with, split it with the parser's own scanner,
+        // unquote it with the dispatcher's own stage, and require the original
+        // path back as ONE word. That is a property of the whole pipeline, so it
+        // stays true if the escaping style ever changes; asserting the literal
+        // `'` placement would only pin today's spelling.
+
         // One name per context, each with the awkward byte *after* the point
         // the user stops typing -- otherwise the escaping is never exercised.
         const SPACED: &str = "/tmp/zz_tja one.txt";

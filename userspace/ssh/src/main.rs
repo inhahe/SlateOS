@@ -2745,10 +2745,7 @@ mod tests {
     #[test]
     fn no_kexinit_is_built_when_the_source_refuses() {
         let s = test_session().with_secret_source(refusing_secrets);
-        assert!(matches!(
-            s.build_kexinit(),
-            Err(SshError::ProtocolError(_))
-        ));
+        assert!(matches!(s.build_kexinit(), Err(SshError::ProtocolError(_))));
     }
 
     /// The risk this guards is a client that ships with a test source wired in,

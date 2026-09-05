@@ -3508,8 +3508,9 @@ fn build_kexinit(secrets: SecretSource) -> Result<Vec<u8>, SshdError> {
     // protocol and passes. See `known-issues.md`
     // `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
     let mut cookie = [0u8; 16];
-    secrets(&mut cookie)
-        .map_err(|e| SshdError::ProtocolError(format!("cannot generate the KEXINIT cookie: {e}")))?;
+    secrets(&mut cookie).map_err(|e| {
+        SshdError::ProtocolError(format!("cannot generate the KEXINIT cookie: {e}"))
+    })?;
     payload.extend_from_slice(&cookie);
 
     // Name-lists:

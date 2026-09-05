@@ -117991,21 +117991,34 @@ produced two before it produced none.
 
 **In short:** Before pushing, we run `cargo clippy` on this machine and take a
 clean run as evidence the push will pass. It is not evidence. The clippy that
-runs here and the clippy the push gate runs inside WSL are **five months
-apart** — 0.1.95 (2026-04-14) here, 0.1.100 (2026-09-03) there — so the gate
-routinely rejects code the local run called clean. Nothing is broken by this;
-it just means a failed push is the *first* time you learn, and on a crate the
-gate has to compile from cold that costs about seventeen minutes per attempt.
+runs here is **months older** than the one the push gate runs inside WSL, so
+the gate rejects code the local run called clean. Nothing is broken by this; it
+just means a failed push is the *first* time you learn, and on a crate the gate
+has to compile from cold that costs about seventeen minutes per attempt.
 
-**How to see it:**
+**How to see it.** Three clippies, not two — the host has both channels
+installed and neither is current:
 
 ```
-$ cargo clippy --version
-clippy 0.1.95 (59807616e1 2026-04-14)          # windows-gnu host
+$ cargo clippy --version                  # host default: STABLE
+clippy 0.1.95 (59807616e1 2026-04-14)
+
+$ cargo +nightly clippy --version         # host nightly
+clippy 0.1.97 (d3cd04068e 2026-05-16)
 
 $ wsl -e sh -c '$HOME/.cargo/bin/cargo +nightly clippy --version'
-clippy 0.1.100 (a69a63265c 2026-09-03)         # what gate 12 runs
+clippy 0.1.100 (a69a63265c 2026-09-03)    # what gate 12 runs
 ```
+
+Two separate things are in play and it is worth keeping them apart, because
+the obvious remedy only addresses one of them. The host's *default* toolchain
+is **stable**, while the gate's is **nightly** — a channel difference. And the
+host's whole rustup installation was last updated 2026-05-16, while WSL's was
+updated 2026-09-03 — an age difference. So saying `cargo +nightly` locally,
+which is the fix for the *other* nightly trap in this file
+(`TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY`), closes the channel
+gap and leaves three and a half months of the age gap wide open. It narrows
+the blind spot; it does not remove it.
 
 **Where it bit.** Pushing the sshd interactive-session work on 2026-09-05. A
 local `cargo clippy -p sshd --all-targets --target x86_64-pc-windows-gnu`
@@ -118019,20 +118032,24 @@ already expects. A lint-version skew rejects code that has no conditional
 compilation in it at all, so "I only changed portable code, the local run is
 enough" is exactly the wrong inference.
 
-**Why it is this way.** The two toolchains were installed at different times
-and nothing pins them together. `rust-toolchain.toml` would pin the *channel*,
-which both already agree on ("nightly"); it does not pin the date, and these
-are two independent rustup installations in two operating systems.
+**Why it is this way.** The two rustup installations live in two operating
+systems, were updated at different times, and nothing pins them together. Note
+what a `rust-toolchain.toml` would and would not buy: it would pin the
+*channel*, fixing the stable-vs-nightly half automatically for anyone who
+forgets `+nightly` — worth having on its own merits — but a channel is not a
+date, so it would leave the three-and-a-half-month age gap exactly where it is.
 
-**What the proper fix is.** Update the windows-gnu nightly so the two agree,
-and thereafter move them together. **This is deliberately not being done as
-part of this task**: a rustup update invalidates every lane's `target/` cache
-at once, and lane A's kernel builds against a custom target JSON with
-`-Zjson-target-spec`, which is precisely the sort of unstable interface a
-five-month toolchain jump can change under it. That is a cross-lane,
-everybody-rebuilds action and it should be taken deliberately by whoever can
-watch all three trees, not slipped into a userspace commit. Pinning both sides
-to one dated nightly afterwards is what stops the gap reopening.
+**What the proper fix is.** Move both installations onto one dated nightly and
+thereafter update them together, pinned. **This is deliberately not being done
+as part of this task**, for two reasons that are about blast radius rather than
+effort. A rustup update invalidates every lane's `target/` cache at once, so
+all three lanes pay a full cold rebuild at a moment none of them chose. And
+lane A's kernel builds against a custom target JSON via `-Zjson-target-spec` —
+an explicitly unstable interface, of exactly the kind a multi-month nightly jump
+is entitled to change underneath it. Landing that from a userspace commit,
+while two other lanes have uncommitted work in flight, is how one lane's
+convenience becomes three lanes' morning. It should be done by whoever can
+watch all three trees, deliberately.
 
 **Workaround until then** — the gate tells you this itself, but it is worth
 having in one place, because the useful time to read it is *before* the push:
@@ -118049,6 +118066,6 @@ lane touches a crate gate 12 compiles. Nothing reaches `origin` broken — the
 gate is doing its job, and doing it is the only reason this was ever noticed.
 The cost is purely the length of the feedback loop.
 
-**If never fixed:** the gap widens. Every month the two clippies diverge
+**If never fixed:** the gap widens. Every month the host and the gate diverge
 further, so the local run's predictive value keeps falling and the share of
 pushes that fail on a lint nobody could have seen locally keeps rising.

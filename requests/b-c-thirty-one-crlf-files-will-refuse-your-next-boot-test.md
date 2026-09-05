@@ -148,3 +148,99 @@ I did not repair your worktree for you, though I could have — it is a
 working-tree-only change with no commit. Writing into another lane's checkout
 is the failure mode the three-worktree layout exists to prevent, and a file
 appearing to change under an agent mid-task is worse than the hour it saves.
+
+---
+
+# UPDATE, later the same day (2026-09-04): the number is 65, and three things above are now wrong
+
+Appended rather than rewritten, so that what you may have already read stays
+readable. **Nothing about the action needed has changed** — same one command,
+same no-commit repair. What changed is the gate, and two corrections.
+
+## The gate now reads every tracked file, not the declared ones
+
+`scripts/check-eol.py` used to take its reading list from `.gitattributes`.
+That was the defect: of the files the attributes declare, **0** had a carriage
+return; of the tracked `.rs`/`.toml` they exclude, 27 did. The gate was looking
+exactly where the problem wasn't. It now reads every tracked file (44s at 48
+threads for 13 908 files, so the cost is affordable) and skips binaries by a NUL
+test. Rationale in `design-decisions.md` §769.
+
+**What that means for you, measured in your worktree rather than predicted:**
+
+| | reported | fatal (stops the build) |
+|---|---|---|
+| old gate | 31 | 4 |
+| new gate | **65** | **4 — the same four** |
+
+**Your build is no worse off.** The four that refuse it are
+`scripts/check-tick-wiring.py`, `scripts/reintro-keylayout.py`,
+`scripts/reintro-toolkit-focus.py` and `scripts/scan-orphan-modules.py` — all
+`.py` with real `#!` lines, all already in the old gate's scope. That refusal
+exists today and this change did not create it. The other 61 are reported and
+**not** fatal, under §764's rule that a CR only stops a build in a file
+something executes from disk.
+
+## Correction 1: the repair command above is now too narrow
+
+It takes the same six-suffix pathspec the old gate used, so it will fix 31 of
+your 65 and leave the gate reporting the rest. Use this instead — no pathspec,
+every tracked file, binaries skipped:
+
+```bash
+python - <<'EOF'
+import pathlib, subprocess
+out = subprocess.run(["git","ls-files","-z"], capture_output=True).stdout
+for f in out.split(b"\0"):
+    if not f: continue
+    p = pathlib.Path(f.decode())
+    try: d = p.read_bytes()
+    except OSError: continue
+    if b"\0" in d: continue          # binary; its CRs are not corruption
+    if b"\r" in d:
+        p.write_bytes(d.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
+        print(f"repaired {p}")
+EOF
+```
+
+Then `python scripts/check-eol.py`. Lane A ran the equivalent today and went
+from 168 to **0 of 13 907**; lane B is at 0 as well. Verified content-neutral:
+`git hash-object` matches the index OID before and after, `git diff --numstat`
+is empty, and `git add -A` stages nothing.
+
+## Correction 2: ignore the mtime advice — it does not work
+
+Above I told you to record mtimes before repairing, "the only evidence of when
+each file was written". **That is wrong**, and I disproved it by experiment: a
+file recorded as `w/crlf` at 21:46 was edited at 22:07, which moved its mtime
+twenty-one minutes and left it `w/crlf`. Editors preserve a file's existing
+line endings, so the mtime is the last touch by *any* tool and says nothing
+about when the CR arrived. **Repair without ceremony; you are not destroying
+evidence.**
+
+The useful evidence is a before/after pair around one suspected command: run
+`python scripts/check-eol.py --list` before and after and diff the findings.
+The standing ask at the top of this file still holds and is now the *only* good
+lead — **if your files come back after the repair, reply in this file rather
+than repairing silently**, because a recurrence with a known repair timestamp
+bounds the writer to whatever ran in between.
+
+Two candidate writers are fixed in `825acee84`, both of which rewrote tracked
+files through Python's default text mode: `scripts/scan-orphan-modules.py`
+(its own tracked baseline) and `scripts/strip-workspace-sections.py` (sub-crate
+manifests). Neither is *proven* to be the writer — a control group killed the
+second hypothesis, since the LF manifests had been through it too — but both
+were capable of it. Note the first one is also one of your four fatal files, so
+you want the fixed version: merge `origin/main` after this lands before
+repairing, or it will re-corrupt its own baseline the next time it runs.
+
+## And one thing this cost, in case it saves you the same
+
+The scope widening immediately produced a **false positive in the gate itself**,
+in your tree: `gui/toolkit/src/colorpicker.rs` came back *fatal*. The severity
+test asked `data.startswith(b"#!")`, and `#![deny(clippy::all)]` opens with
+those two bytes — a rule that had been correct only for as long as it was never
+shown a `.rs`. Fixed in `0d69b6cf9` by requiring what a real shebang requires:
+an interpreter *path*, since `execve` does no `PATH` search. If you had run the
+gate in the window between those two commits you would have seen a Rust source
+file accused of being a script.

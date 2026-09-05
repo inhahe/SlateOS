@@ -66054,6 +66054,7 @@ ever needs a listing it should switch to `open_tree` without ceremony.
 ## 811. An application's window title is re-read every batch, and a spreadsheet sort aimed at one cell covers the block around it
 
 **Date:** 2026-09-04. **Decided by:** Claude (autonomous).
+**Lane:** C
 
 **In short:** Two small choices made while connecting `apps/spreadsheet` to a
 window. First: until today, the words in a window's title bar were read from the

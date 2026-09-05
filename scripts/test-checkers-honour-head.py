@@ -48,6 +48,7 @@ invocation does.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -3153,6 +3154,359 @@ def case_gate11_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None
           "ghost_link_target" in blob, True)
 
 
+# --------------------------------------------------------------------------
+# Gate 13 -- check-design-decisions-bands.py
+#
+# The defect it looks for: a section of `design-decisions.md` numbered outside
+# its lane's band, or carrying no `**Lane:**` field. Cheap to make differ
+# between the commit and the disk, because the whole input is one text file.
+#
+# This gate has a second input the others mostly do not: a *baseline* that
+# grandfathers duplicate numbers. That makes it the sharpest instance of the
+# property this suite exists for, because the baseline is the input that
+# *forgives* -- reading it from the disk does not merely miss a finding, it
+# actively waives one that is being pushed, and the waiver never has to be
+# committed. Gate 9's `requests/.deletions-allowed` had exactly this hole; see
+# `main()`'s note.
+#
+# It is also the third gate in a row to arrive here already broken. Gates 8 and
+# 9 came back RED on the first run of their own cases, and so did this one:
+# `main()` read the baseline from the commit and then overwrote it from disk
+# one screen later, so `--head` honoured the document and not the baseline.
+# Three of the checker's own comments asserted the pairing that its command line
+# did not implement, and its `--selftest` did not notice because it calls
+# `read_doc_and_baseline` directly and so never runs the wiring. Fixed the same
+# day; `case_gate13_the_baseline_is_read_from_the_same_tree` is that regression.
+# --------------------------------------------------------------------------
+
+_DD_SECT, _DD_ENDASH = "\u00a7", "\u2013"
+
+# The band table is the gate's own configuration -- it parses this, rather than
+# hardcoding the bands -- so a fixture needs one or every section is out of band.
+_DD_TABLE = "\n".join([
+    "## Numbering and file order",
+    "",
+    "| Band | Owner | Status | Region |",
+    "|---|---|---|---|",
+    f"| {_DD_SECT}600{_DD_ENDASH}{_DD_SECT}699 | **lane A** | **open** | mid |",
+    f"| {_DD_SECT}700{_DD_ENDASH}{_DD_SECT}799 | **lane B** | **open** | the tail |",
+    "",
+])
+
+
+def _dd_section(number: int, lane: str | None) -> str:
+    """One numbered decision. `lane=None` omits the `**Lane:**` field."""
+    lane_line = f"**Lane:** {lane}\n" if lane else ""
+    return (f"## {number}. a decision\n\n"
+            f"**Date:** 2026-09-05\n"
+            f"**Decided by:** Claude (autonomous)\n"
+            f"{lane_line}\n"
+            f"**In short:** something was decided.\n")
+
+
+def _dd_doc(*sections: str) -> str:
+    return _DD_TABLE + "\n" + "\n".join(sections)
+
+
+def _dd_baseline(counts: dict[str, int]) -> str:
+    return json.dumps({"file": "design-decisions.md", "counts": counts})
+
+
+_DD_DOC_REL = "design-decisions.md"
+_DD_BASE_REL = "scripts/design-decisions-baseline.json"
+
+_DD_CHECKER = "check-design-decisions-bands.py"
+
+
+def _bands_repo(tmp: str, name: str) -> str:
+    """A repository holding a clean one-section document and an empty baseline."""
+    root = new_repo(tmp, name, (_DD_CHECKER,))
+    write(root, _DD_DOC_REL, _dd_doc(_dd_section(600, "A")))
+    write(root, _DD_BASE_REL, _dd_baseline({}))
+    return root
+
+
+def case_gate13_a_tidied_worktree_cannot_hide_a_committed_missing_lane_field(tmp: str) -> None:
+    """The silent half, and the exact shape that turned `main` red on 2026-09-04.
+
+    Lane C's section 811 landed with no `**Lane:**` field. Typing the field on
+    disk without committing it is all it would have taken to make a
+    worktree-reading gate approve the push that published it.
+    """
+    root = _bands_repo(tmp, "g13a")
+    write(root, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, None)))
+    sha = commit(root)
+    write(root, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, "A")))
+
+    disk = run_checker(root, _DD_CHECKER, "--quiet")
+    rev = run_checker(root, _DD_CHECKER, "--quiet", "--head", sha)
+    check("gate 13: the disk's sections all carry a lane", disk.returncode, 0)
+    check("gate 13: ...and the commit is refused anyway", rev.returncode, 1)
+    check("gate 13: ...naming the section only the commit has",
+          "601" in rev.stdout + rev.stderr, True)
+
+
+def case_gate13_an_uncommitted_violation_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: a half-written section on the disk, a clean commit."""
+    root = _bands_repo(tmp, "g13b")
+    write(root, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, "A")))
+    sha = commit(root)
+    write(root, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, None)))
+
+    disk = run_checker(root, _DD_CHECKER, "--quiet")
+    rev = run_checker(root, _DD_CHECKER, "--quiet", "--head", sha)
+    check("gate 13: the disk refuses the uncommitted section", disk.returncode, 1)
+    check("gate 13: ...but the commit being pushed is clean", rev.returncode, 0)
+
+
+def case_gate13_the_baseline_is_read_from_the_same_tree(tmp: str) -> None:
+    """The regression. A waiver that was never committed must not forgive.
+
+    The baseline grandfathers duplicate numbers, so it is the input that
+    *forgives* -- and an uncommitted `--update-baseline` is a single command.
+    Reading it from disk means any duplicate in the commit can be waived by a
+    file the reviewer never sees and the remote never receives.
+
+    This is not hypothetical and it is not a hardening exercise: it is what
+    `main()` did until 2026-09-05. It read the baseline out of the commit and
+    then overwrote it with `load_baseline(args.baseline)` unconditionally a few
+    lines later, so `--head` honoured the document and ignored the baseline.
+    """
+    root = _bands_repo(tmp, "g13c")
+    write(root, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, "A"),
+                                     _dd_section(601, "A")))
+    sha = commit(root)
+    check("gate 13: a committed duplicate is a violation",
+          run_checker(root, _DD_CHECKER, "--quiet", "--head", sha).returncode, 1)
+
+    # Grandfather it on the disk only -- exactly what `--update-baseline` writes.
+    # `600: 1` is not padding: the baseline is the whole grandfathered set
+    # rather than a waiver list, so a number missing from it reads as new, and
+    # waiving only the duplicate would swap one error for another.
+    write(root, _DD_BASE_REL, _dd_baseline({"600": 1, "601": 2}))
+    disk = run_checker(root, _DD_CHECKER, "--quiet")
+    rev = run_checker(root, _DD_CHECKER, "--quiet", "--head", sha)
+    check("gate 13: the disk's baseline grandfathers the duplicate",
+          disk.returncode, 0)
+    check("gate 13: ...and an UNCOMMITTED baseline does not forgive the commit",
+          rev.returncode, 1)
+
+
+def case_gate13_a_committed_baseline_does_grandfather_the_duplicate(tmp: str) -> None:
+    """The other half, without which the case above proves nothing.
+
+    A checker that ignored the baseline *entirely* passes
+    `case_gate13_the_baseline_is_read_from_the_same_tree` -- it would refuse the
+    duplicate in both runs and look correct. This is the probe-liveness half:
+    the same waiver, committed, must actually clear the finding.
+    """
+    root = _bands_repo(tmp, "g13d")
+    write(root, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, "A"),
+                                     _dd_section(601, "A")))
+    dupe = commit(root)
+    write(root, _DD_BASE_REL, _dd_baseline({"600": 1, "601": 2}))
+    waived = commit(root, "baseline the duplicate")
+
+    check("gate 13: a COMMITTED baseline does grandfather it",
+          run_checker(root, _DD_CHECKER, "--quiet", "--head", waived).returncode, 0)
+    check("gate 13: ...and the waiver is not backdated onto the commit before it",
+          run_checker(root, _DD_CHECKER, "--quiet", "--head", dupe).returncode, 1)
+
+
+def case_gate13_the_document_absent_from_the_disk_is_still_judged(tmp: str) -> None:
+    """The enumeration, not only the contents.
+
+    A checker that listed the file from the disk and read its text from the
+    revision passes every case above, because all of them edit a path present
+    in both trees. Here the document is not on the disk at all -- the ordinary
+    state of a commit that adds it and a worktree that has moved on.
+    """
+    root = _bands_repo(tmp, "g13e")
+    write(root, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, None)))
+    sha = commit(root)
+    remove(root, _DD_DOC_REL)
+
+    disk = run_checker(root, _DD_CHECKER, "--quiet")
+    rev = run_checker(root, _DD_CHECKER, "--quiet", "--head", sha)
+    check("gate 13: the disk has no document, which is no verdict",
+          disk.returncode, 2)
+    check("gate 13: ...while the commit's document is judged normally",
+          rev.returncode, 1)
+
+
+def case_gate13_a_commit_that_deletes_the_document_is_not_a_pass(tmp: str) -> None:
+    """Absence in the *commit* is an error, not an empty read.
+
+    `GitTree.read` spells a missing path as `None`, and treating that as `""`
+    would grade a commit that deletes `design-decisions.md` as having no
+    numbering violations -- which is true, and exactly the wrong answer.
+    """
+    root = _bands_repo(tmp, "g13f")
+    commit(root)
+    git(root, "rm", "--quiet", _DD_DOC_REL)
+    sha = commit(root, "delete the document")
+
+    rev = run_checker(root, _DD_CHECKER, "--quiet", "--head", sha)
+    check("gate 13: a commit deleting the document errors rather than passing",
+          rev.returncode, 2)
+    check("gate 13: ...saying so, rather than exiting quietly",
+          "does not exist" in rev.stderr, True)
+
+
+def case_gate13_a_baseline_absent_from_the_tree_is_not_a_pile_of_new_findings(tmp: str) -> None:
+    """A moved baseline must not read as every grandfathered number turning new.
+
+    Gate 8 shipped without this guard, so a commit that relocated its baseline
+    would have been refused over 1798 diagnostics nobody had touched. The same
+    commit here would turn every previously-waived duplicate into a violation.
+    """
+    root = _bands_repo(tmp, "g13g")
+    write(root, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, "A"),
+                                     _dd_section(601, "A")))
+    write(root, _DD_BASE_REL, _dd_baseline({"600": 1, "601": 2}))
+    commit(root)
+    git(root, "rm", "--quiet", _DD_BASE_REL)
+    sha = commit(root, "move the baseline")
+
+    rev = run_checker(root, _DD_CHECKER, "--quiet", "--head", sha)
+    check("gate 13: a commit with no baseline is no verdict, not a refusal",
+          rev.returncode, 2)
+
+
+def case_gate13_a_baseline_cannot_be_written_from_a_revision(tmp: str) -> None:
+    """`--update-baseline` writes the disk, which `--head` is defined not to read.
+
+    Answering this combination rather than refusing it would baseline the
+    worktree while the caller believed it had baselined a commit -- and the
+    result would then forgive whatever the worktree happened to contain.
+    """
+    root = _bands_repo(tmp, "g13h")
+    sha = commit(root)
+
+    rev = run_checker(root, _DD_CHECKER, "--head", sha, "--update-baseline")
+    check("gate 13: --head with --update-baseline is refused",
+          rev.returncode, 2)
+    check("gate 13: ...naming the contradiction rather than a stack trace",
+          "mutually exclusive" in rev.stderr, True)
+
+
+def case_gate13_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
+    """A rev that does not resolve is exit 2, not exit 1.
+
+    Exit 1 is "the document breaks its bands", and a hook that could not read
+    the commit at all must not print that. The two are different messages to
+    the author and only one of them is actionable.
+    """
+    root = _bands_repo(tmp, "g13i")
+    commit(root)
+
+    rev = run_checker(root, _DD_CHECKER, "--quiet", "--head", "no-such-rev")
+    check("gate 13: an unopenable revision is an error, not a violation",
+          rev.returncode, 2)
+    check("gate 13: ...saying the rev is not a commit",
+          "not a commit" in rev.stderr, True)
+
+
+# Gate 13's refusal sentence, from the hook's heredoc rather than the checker's
+# own output: the checker prints its findings on a `--head` run whose exit the
+# hook may still be about to allow, and the em dash in the hook's summary line
+# ("REFUSING to push - design-decisions.md breaks its numbering bands") does not
+# survive a cp1252 console. This clause occurs once, in the block that exits 1.
+_G13_REFUSAL = "three insertion points are different line offsets"
+
+_G13_SEED = {
+    _DD_DOC_REL: _dd_doc(_dd_section(600, "A")),
+    _DD_BASE_REL: _dd_baseline({}),
+}
+
+
+def _bands_push_fixture(tmp: str, name: str) -> str:
+    return _push_fixture(tmp, name, (_DD_CHECKER,), dict(_G13_SEED))
+
+
+def case_gate13_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) -> None:
+    """End to end: gate 13's own wiring, not some other gate's.
+
+    Gate 13 runs its checker once per pushed sha rather than once per push, so
+    its loop has something to get wrong that a single-invocation gate does not:
+    a range whose later commit is clean must not clear an earlier one that is
+    not.
+    """
+    work = _bands_push_fixture(tmp, "g13push-hide")
+    write(work, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, None)))
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a section with no lane field")
+    write(work, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, "A")))
+
+    verdict, blob = _push(work, marker=_G13_REFUSAL)
+    check("gate 13 end to end: the push is refused", verdict, "refused")
+    # `601`, not `Lane`: the hook's refusal heredoc says "Lane" itself, so that
+    # probe is satisfied by boilerplate on any refusal. The section number comes
+    # only from the checker's finding, and only the commit contains it.
+    check("gate 13 end to end: ...naming the section only the commit has",
+          "601" in blob, True)
+
+
+def case_gate13_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -> None:
+    """End to end: the false fail, and the proof the gate was actually asked.
+
+    The tally check is what makes this more than a formality. Gate 13 sets
+    `skip_bands=1` from four separate conditions -- the bypass, a missing
+    interpreter, a missing checker, and a `touches` scope that does not match --
+    and a gate that skipped itself allows this fixture and every other one here.
+    """
+    work = _bands_push_fixture(tmp, "g13push-wip")
+    write(work, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, "A")))
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a section that carries its lane")
+    write(work, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, None)))
+
+    verdict, blob = _push(work, marker=_G13_REFUSAL)
+    check("gate 13 end to end: an uncommitted violation does not block",
+          verdict, "allowed")
+    check("gate 13 end to end: ...and the gate actually ran",
+          "bands" in _tally(blob)[0], True)
+
+
+def case_gate13_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` while checked out on `main`.
+
+    A gate deriving its scope from `HEAD` rather than from `$pushed_shas` would
+    report itself *skipped* here -- a visible outcome nobody reads as a bug, on
+    a push carrying exactly what the gate exists to catch.
+    """
+    work = _bands_push_fixture(tmp, "g13push-offbranch")
+    git(work, "checkout", "--quiet", "-b", "feature")
+    write(work, _DD_DOC_REL, _dd_doc(_dd_section(600, "A"),
+                                     _dd_section(601, None)))
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a bad section on a branch we will leave")
+    git(work, "checkout", "--quiet", "main")
+
+    verdict, blob = _push(work, "feature", marker=_G13_REFUSAL)
+    check("gate 13 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    # Not `_tally` here, unlike the allowed-push case above: a refusing gate
+    # calls `exit 1` before the tally is printed, so on a refusal there is no
+    # `ran:` line to parse and the probe would be vacuously false. The finding
+    # itself is the evidence that the gate ran -- the hook cannot print a
+    # section number it was never given.
+    check("gate 13 end to end: ...naming the section on that other branch",
+          "601" in blob, True)
+
+
 CASES = (
     case_gate2_a_tidied_worktree_cannot_hide_a_committed_alias,
     case_gate2_an_uncommitted_alias_does_not_block_a_clean_push,
@@ -3245,15 +3599,27 @@ CASES = (
     case_gate11_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate11_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate11_the_hook_judges_a_branch_it_is_not_standing_on,
+    case_gate13_a_tidied_worktree_cannot_hide_a_committed_missing_lane_field,
+    case_gate13_an_uncommitted_violation_does_not_block_a_clean_push,
+    case_gate13_the_baseline_is_read_from_the_same_tree,
+    case_gate13_a_committed_baseline_does_grandfather_the_duplicate,
+    case_gate13_the_document_absent_from_the_disk_is_still_judged,
+    case_gate13_a_commit_that_deletes_the_document_is_not_a_pass,
+    case_gate13_a_baseline_absent_from_the_tree_is_not_a_pile_of_new_findings,
+    case_gate13_a_baseline_cannot_be_written_from_a_revision,
+    case_gate13_an_unopenable_revision_is_not_a_finding,
+    case_gate13_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate13_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate13_the_hook_judges_a_branch_it_is_not_standing_on,
 )
 
 
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 91:
+    if len(CASES) < 103:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 91. The list is broken, not the code.")
+              f"least 103. The list is broken, not the code.")
         return 1
     # ...and each converted gate must be represented, through the real hook as
     # well as directly. A floor on the count alone would be met by any number of
@@ -3262,13 +3628,13 @@ def main() -> int:
     # as each remaining checker is converted; they are the thing that notices a
     # gate's cases being deleted along with the gate's own wiring.
     #
-    # EVERY CONVERTED GATE IS NOW IN THIS TABLE. Gates 8 and 9 were the last two
-    # out, on 2026-09-04, and both of them are the argument for why "wired" was
-    # never the same claim as "covered": each had been converted, wired with
-    # `--head "$sha"`, and asserted to be wired by `test-pre-push-gates.py`'s
-    # HEAD_GATES since 2026-09-02 -- and each came back RED on the first run of
-    # its own cases. A checker can accept `--head`, be called with it correctly,
-    # and still not honour it.
+    # EVERY CONVERTED GATE IS NOW IN THIS TABLE. Gates 8 and 9 were out on
+    # 2026-09-04 and gate 13 on 2026-09-05, and all three are the argument for
+    # why "wired" was never the same claim as "covered": each had been
+    # converted, wired with `--head "$sha"`, and asserted to be wired by
+    # `test-pre-push-gates.py`'s HEAD_GATES -- and each came back RED on the
+    # first run of its own cases. A checker can accept `--head`, be called with
+    # it correctly, and still not honour it. Three for three.
     #
     # * Gate 8 had shipped without the missing-baseline guard gates 4 and 6 both
     #   carry, so a commit that moved `quote-names-baseline.txt` would have been
@@ -3278,6 +3644,18 @@ def main() -> int:
     #   be written, used and dropped without ever being published. Worse than
     #   the hole `--head` was added for, and reachable only by asking the gate a
     #   question with the two trees disagreeing.
+    # * Gate 13 read the document from the commit and the *baseline* -- the
+    #   input that grandfathers duplicate numbers, i.e. the one that forgives --
+    #   from the disk, because `main()` overwrote the commit-read baseline with
+    #   `load_baseline(args.baseline)` a few lines further down. Gate 9's hole
+    #   exactly, in a gate written after gate 9's was found and fixed.
+    #
+    # The pattern in all three is worth naming, because it predicts the next
+    # one: the half of the input that *forgives* is the half that gets read from
+    # the disk. It is the input an author edits last, by running a
+    # `--update-baseline` command, and it is the one whose absence from a commit
+    # looks harmless. A converted gate is not covered until a case asks it about
+    # a waiver that was never committed.
     #
     # So: when the next checker is converted, raise the overall floor and add
     # its row here. Do not add a row for a gate whose cases do not exist yet to
@@ -3285,7 +3663,8 @@ def main() -> int:
     for gate, floor, e2e_floor in (("gate2", 10, 3), ("gate3", 13, 4),
                                    ("gate4", 13, 3), ("gate5", 7, 3),
                                    ("gate6", 14, 3), ("gate8", 14, 3),
-                                   ("gate9", 9, 3), ("gate11", 11, 3)):
+                                   ("gate9", 9, 3), ("gate11", 11, 3),
+                                   ("gate13", 12, 3)):
         named = [c for c in CASES if c.__name__.startswith(f"case_{gate}_")]
         hooked = [c for c in named if "the_hook" in c.__name__]
         if len(named) < floor or len(hooked) < e2e_floor:

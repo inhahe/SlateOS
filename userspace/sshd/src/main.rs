@@ -3364,13 +3364,18 @@ impl ConnectionState {
 
     /// Frame, encrypt and send one packet.
     ///
-    /// The padding is zero-filled, which §6 says it SHOULD not be. The codec
-    /// takes the padding as a parameter rather than generating it so that this
-    /// line is where the change to CSPRNG bytes happens: entropy is a syscall,
-    /// it can fail, and a shared crate has no business deciding whether a
-    /// daemon that cannot get any should panic or send zeros.
+    /// The padding is CSPRNG bytes, as RFC 4253 §6 says it SHOULD be, and a
+    /// failed draw drops the connection rather than falling back to zeros. The
+    /// codec takes the padding as a parameter rather than generating it so that
+    /// both of those decisions are made here: entropy is a syscall, it can
+    /// fail, and a shared crate has no business deciding whether a daemon that
+    /// cannot get any should panic, send zeros, or hang up. See
+    /// `design-decisions.md` §773.
     fn send_packet(&mut self, payload: &[u8]) -> Result<(), SshdError> {
-        let padding = vec![0u8; self.codec.padding_len(payload.len())];
+        let mut padding = vec![0u8; self.codec.padding_len(payload.len())];
+        randrange::fill_secret(&mut padding).map_err(|e| {
+            SshdError::ProtocolError(format!("cannot generate packet padding: {e}"))
+        })?;
         let pkt = self.codec.encode(payload, &padding)?;
         tcp_send_all(self.handle, &pkt)?;
         Ok(())

@@ -1578,12 +1578,17 @@ impl SshSession {
 
     /// Frame, encrypt and send one packet.
     ///
-    /// The padding is zero-filled, which §6 says it SHOULD not be; the codec
-    /// takes it as a parameter precisely so that this line is where the change
-    /// to CSPRNG bytes happens, rather than somewhere inside a shared crate
-    /// that has no business deciding what to do when entropy is unavailable.
+    /// The padding is CSPRNG bytes, as RFC 4253 §6 says it SHOULD be, and a
+    /// failed draw refuses to send rather than falling back to zeros. The codec
+    /// takes the padding as a parameter rather than generating it so that both
+    /// of those decisions are made here, in a program that can report them,
+    /// rather than inside a shared crate that cannot. See
+    /// `design-decisions.md` §773 for why the refusal is the right answer even
+    /// though our current cipher makes predictable padding harmless.
     fn send_packet(&mut self, payload: &[u8]) -> Result<(), SshError> {
-        let padding = vec![0u8; self.codec.padding_len(payload.len())];
+        let mut padding = vec![0u8; self.codec.padding_len(payload.len())];
+        randrange::fill_secret(&mut padding)
+            .map_err(|e| SshError::ProtocolError(format!("cannot generate packet padding: {e}")))?;
         let pkt = self.codec.encode(payload, &padding)?;
         tcp_send_all(self.handle, &pkt)?;
         Ok(())

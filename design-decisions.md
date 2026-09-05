@@ -66896,9 +66896,11 @@ OpenSSH's own client does — and the answer is now true.
 this OS rather than being assembled from defaults, give it the `AcceptEnv LANG
 LC_*` line OpenSSH ships, so the common case works without the administrator
 having to know the directive exists.
+
 ## 773. Packet padding is drawn from the CSPRNG per packet, and a failed draw refuses to send
 
 **Date:** 2026-09-05
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** every SSH packet is topped up with a few filler bytes so its total

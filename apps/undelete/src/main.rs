@@ -49,16 +49,20 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cognitive_complexity)]
-#![allow(dead_code)]
 
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::collections::BTreeMap;
 
@@ -97,6 +101,26 @@ const HEADER_HEIGHT: f32 = 56.0;
 const FOOTER_HEIGHT: f32 = 48.0;
 const PADDING: f32 = 12.0;
 const ITEM_HEIGHT: f32 = 56.0;
+
+/// How long one phase of a scan is shown for.
+///
+/// The scan is simulated, so this is the pace of the animation rather than of
+/// any work. Long enough to read the phase name -- "Scanning Inode Tables" --
+/// which is the only reason the screen exists.
+const SCAN_STEP: Duration = Duration::from_millis(500);
+
+/// The sector size a deep scan reads in.
+///
+/// 512 bytes: the traditional disk sector, and comfortably more than the
+/// longest signature in the table plus its secondary pattern (`Docx`, whose
+/// confirmation sits at offset 30).
+const DEEP_SCAN_SECTOR: usize = 512;
+
+/// How tall one row of the category sidebar is.
+const CATEGORY_ROW_HEIGHT: f32 = 28.0;
+
+/// How tall one partition card is on the setup screen.
+const PARTITION_CARD_HEIGHT: f32 = 64.0;
 const CORNER_RADIUS: f32 = 8.0;
 
 /// Room the preview panel reserves for its "Detection Method" sentence.
@@ -1076,6 +1100,58 @@ impl SignatureDetector {
         found
     }
 
+    /// The table's own entry for a kind, if it has one.
+    fn signature_for(&self, kind: FileSignatureKind) -> Option<&FileSignature> {
+        // The most specific first, matching `detect_best`'s preference, so that
+        // a kind with a secondary pattern is planted with it -- a JPEG written
+        // without its JFIF marker is not what `detect_best` would call a JPEG.
+        self.signatures
+            .iter()
+            .find(|sig| sig.kind == kind && sig.secondary.is_some())
+            .or_else(|| self.signatures.iter().find(|sig| sig.kind == kind))
+    }
+
+    /// Lay out one sector per planted file, each carrying that kind's real
+    /// magic bytes.
+    ///
+    /// This is the stand-in for a device. A real deep scan reads raw sectors
+    /// off the partition; there is none here, so the simulation writes the
+    /// sectors that matter and the scan reads them back -- through
+    /// [`Self::scan_sectors`] and [`Self::detect_best`], which is the point.
+    ///
+    /// Before this the deep scan returned a hard-coded list of ten finds and
+    /// never consulted the detector at all: it was constructed, stored on the
+    /// engine, and read by nothing, so "sector-by-sector signature detection"
+    /// detected nothing and the table's twenty-odd entries could all have been
+    /// wrong without any screen changing. Going through the table puts it on
+    /// the production path, so a bad entry now costs a file type in the
+    /// results -- the same failure a real disk would produce.
+    ///
+    /// A kind the table does not know is planted as a sector of zeroes, and the
+    /// scan finds nothing there. That is the honest outcome: the detector
+    /// cannot report what it has no signature for.
+    pub fn plant_sectors(&self, kinds: &[FileSignatureKind], sector_size: usize) -> Vec<u8> {
+        let mut image = vec![0u8; kinds.len().saturating_mul(sector_size)];
+        for (index, kind) in kinds.iter().enumerate() {
+            let Some(sig) = self.signature_for(*kind) else {
+                continue;
+            };
+            let base = index.saturating_mul(sector_size);
+            let mut write = |offset: usize, bytes: &[u8]| {
+                let from = base.saturating_add(offset);
+                let to = from.saturating_add(bytes.len());
+                if let Some(slot) = image.get_mut(from..to) {
+                    slot.copy_from_slice(bytes);
+                }
+            };
+            write(sig.offset, &sig.magic);
+            if let Some((offset, pattern)) = sig.secondary.as_ref() {
+                write(*offset, pattern);
+            }
+        }
+        image
+    }
+
     /// Detect the single best-matching signature (most specific first).
     pub fn detect_best(&self, data: &[u8]) -> Option<FileSignatureKind> {
         // Prefer signatures with secondary patterns (more specific).
@@ -1488,45 +1564,93 @@ impl RecoveryEngine {
     }
 
     /// Run a full scan on the given partition.
+    /// Scan a partition from beginning to end, in one call.
+    ///
+    /// Every phase, and the progress recorded at each one, without returning in
+    /// between -- so nothing can draw a frame while it runs. That is what it
+    /// was, and what it stays for callers that want a finished result: the
+    /// tests, and anything that is not a window. A window uses
+    /// [`Self::begin_scan`] and [`Self::scan_step`], which are the same phases
+    /// with a return between them.
     pub fn scan(&mut self, partition: &Partition, mode: ScanMode) {
+        self.begin_scan(partition, mode);
+        // Bounded by the phase machine: each step advances `progress.phase`
+        // along a fixed sequence ending at `Complete`, so this cannot spin.
+        while self.scan_step(partition) {}
+    }
+
+    /// Start a scan, without doing any of it.
+    ///
+    /// The scan's four phases each record what they are doing --
+    /// `progress.phase`, `phase_progress`, `overall_progress`, `files_found` --
+    /// and the whole point of recording it is the screen `render_scanning`
+    /// draws from it. That screen was unreachable: `scan` ran every phase
+    /// inside one call, so each of those values was overwritten by the next
+    /// phase before any frame could be drawn, and `UiScreen::Scanning` was
+    /// never set by anything. A progress bar that goes from 0 to 1 with no
+    /// frame in between is a progress bar nobody has ever seen.
+    pub fn begin_scan(&mut self, partition: &Partition, mode: ScanMode) {
         self.files.clear();
         self.scan_mode = mode;
         self.progress = ScanProgress::new();
         self.progress.total_bytes = partition.total_bytes;
-
-        // Phase 1: Recycle bin
         self.progress.phase = ScanPhase::RecycleBin;
         self.progress.phase_progress = 0.0;
-        self.scan_recycle_bin(partition);
-        self.progress.phase_progress = 1.0;
-        self.progress.overall_progress = 0.2;
+    }
 
-        // Phase 2: Inode scan
-        self.progress.phase = ScanPhase::InodeScan;
-        self.progress.phase_progress = 0.0;
-        self.scan_inodes(partition);
-        self.progress.phase_progress = 1.0;
-        self.progress.overall_progress = if mode == ScanMode::Deep { 0.4 } else { 0.8 };
-
-        // Phase 3: Deep scan (if enabled)
-        if mode == ScanMode::Deep {
-            self.progress.phase = ScanPhase::DeepScan;
-            self.progress.phase_progress = 0.0;
-            self.scan_deep(partition);
-            self.progress.phase_progress = 1.0;
-            self.progress.overall_progress = 0.9;
+    /// Do the next phase of a scan. `false` once there is nothing left.
+    ///
+    /// One phase per call rather than one *inode* per call: a phase is the unit
+    /// the progress screen names, so it is the unit at which the name on screen
+    /// changes. Finer steps would move the bar more smoothly and say the same
+    /// four things while doing it.
+    pub fn scan_step(&mut self, partition: &Partition) -> bool {
+        let deep = self.scan_mode == ScanMode::Deep;
+        match self.progress.phase {
+            ScanPhase::RecycleBin => {
+                self.scan_recycle_bin(partition);
+                self.progress.files_found = self.files.len();
+                self.progress.phase_progress = 1.0;
+                self.progress.overall_progress = 0.2;
+                self.progress.phase = ScanPhase::InodeScan;
+                true
+            }
+            ScanPhase::InodeScan => {
+                self.scan_inodes(partition);
+                self.progress.files_found = self.files.len();
+                self.progress.phase_progress = 1.0;
+                self.progress.overall_progress = if deep { 0.4 } else { 0.8 };
+                self.progress.phase = if deep {
+                    ScanPhase::DeepScan
+                } else {
+                    ScanPhase::Analyzing
+                };
+                true
+            }
+            ScanPhase::DeepScan => {
+                self.scan_deep(partition);
+                self.progress.files_found = self.files.len();
+                self.progress.phase_progress = 1.0;
+                self.progress.overall_progress = 0.9;
+                self.progress.phase = ScanPhase::Analyzing;
+                true
+            }
+            ScanPhase::Analyzing => {
+                self.deduplicate_results();
+                self.progress.files_found = self.files.len();
+                self.progress.phase = ScanPhase::Complete;
+                self.progress.overall_progress = 1.0;
+                self.progress.phase_progress = 1.0;
+                // What a scan of this size takes on real hardware, which is not
+                // what this animation takes. Kept because the results screen
+                // reports it and because `estimated_remaining_seconds` divides
+                // by it -- a zero here would make the estimate `None` for the
+                // whole scan.
+                self.progress.elapsed_seconds = if deep { 45 } else { 12 };
+                false
+            }
+            ScanPhase::Idle | ScanPhase::Complete => false,
         }
-
-        // Phase 4: Analysis
-        self.progress.phase = ScanPhase::Analyzing;
-        self.deduplicate_results();
-        self.progress.files_found = self.files.len();
-
-        // Done
-        self.progress.phase = ScanPhase::Complete;
-        self.progress.overall_progress = 1.0;
-        self.progress.phase_progress = 1.0;
-        self.progress.elapsed_seconds = if mode == ScanMode::Deep { 45 } else { 12 };
     }
 
     fn scan_recycle_bin(&mut self, partition: &Partition) {
@@ -1552,10 +1676,20 @@ impl RecoveryEngine {
             .saturating_mul(256);
     }
 
+    /// Read the disk sector by sector, and take whatever the detector
+    /// recognises.
+    ///
+    /// The disk is simulated -- `plant_sectors` writes the sectors this would
+    /// otherwise read -- but the *detection* is not: every find below comes out
+    /// of `scan_sectors`, so what the results list shows is what the signature
+    /// table can actually recognise. The kind is the detector's answer and not
+    /// the plan's, which is the whole difference: if an entry in the table
+    /// names the wrong magic bytes, that file type stops appearing.
     fn scan_deep(&mut self, partition: &Partition) {
-        // Simulate finding some files via signature scanning.
-        // In a real implementation this would read raw sectors from the device.
-        let simulated_finds: Vec<(u64, FileSignatureKind, u64)> = vec![
+        // Where the simulation says these files are on the real disk, and how
+        // big they are -- neither of which a signature can tell you, so neither
+        // of which comes back from the scan.
+        let planted: [(u64, FileSignatureKind, u64); 10] = [
             (0x0010_0000, FileSignatureKind::Jpeg, 2_097_152),
             (0x0030_0000, FileSignatureKind::Png, 524_288),
             (0x0050_0000, FileSignatureKind::Pdf, 1_048_576),
@@ -1568,8 +1702,28 @@ impl RecoveryEngine {
             (0x0300_0000, FileSignatureKind::Wav, 10_485_760),
         ];
 
-        for (offset, kind, size) in simulated_finds {
-            let mut file = RecoverableFile::from_signature(self.next_id, kind, offset, size);
+        let kinds: Vec<FileSignatureKind> = planted.iter().map(|(_, kind, _)| *kind).collect();
+        let image = self
+            .signature_detector
+            .plant_sectors(&kinds, DEEP_SCAN_SECTOR);
+
+        for (image_offset, kind) in self
+            .signature_detector
+            .scan_sectors(&image, DEEP_SCAN_SECTOR)
+        {
+            // `checked_div` states the non-zero divisor in the arithmetic;
+            // `DEEP_SCAN_SECTOR` is a positive constant, so the `else` is
+            // unreachable and skipping the find is the right thing anyway.
+            let Some(index) = image_offset
+                .checked_div(DEEP_SCAN_SECTOR as u64)
+                .and_then(|i| usize::try_from(i).ok())
+            else {
+                continue;
+            };
+            let Some(&(disk_offset, _, size)) = planted.get(index) else {
+                continue;
+            };
+            let mut file = RecoverableFile::from_signature(self.next_id, kind, disk_offset, size);
             file.partition_name.clone_from(&partition.name);
             self.next_id = self.next_id.saturating_add(1);
             self.files.push(file);
@@ -1882,6 +2036,33 @@ pub enum UiScreen {
     Recovering,
 }
 
+/// Something on screen that can be clicked, and what clicking it does.
+///
+/// See [`UndeleteApp::controls`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    /// Choose a partition to scan.
+    Partition(usize),
+    /// Choose quick or deep scanning.
+    Mode(ScanMode),
+    /// Begin the scan.
+    StartScan,
+    /// Filter the results to one category, or `None` for all of them.
+    Category(Option<usize>),
+    /// Sort by a column; again to reverse it.
+    SortBy(SortField),
+    /// Select a file in the results list; again to tick it for recovery.
+    File(usize),
+    /// Tick every file the current filter shows.
+    SelectAll,
+    /// Go back to the setup screen.
+    NewScan,
+    /// Recover everything ticked.
+    Recover,
+    /// Leave the recovery report.
+    Done,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortField {
     Filename,
@@ -1968,20 +2149,484 @@ impl UndeleteApp {
     }
 
     /// Start a scan on the selected partition.
+    /// Begin scanning the selected partition.
+    ///
+    /// The scan runs a phase per tick from here, so the progress screen is
+    /// drawn between the phases -- it used to run the whole scan in this
+    /// function and jump straight to the results, which is why
+    /// `UiScreen::Scanning` was never set by anything and `render_scanning`
+    /// could not be reached.
     pub fn start_scan(&mut self) {
-        if let Some(partition) = self.partitions.get(self.selected_partition) {
-            let partition = partition.clone();
-            self.engine.scan(&partition, self.scan_mode);
-            self.screen = UiScreen::Results;
-            self.selected_file_idx = None;
-            self.scroll_offset = 0;
-        }
+        let Some(partition) = self.partitions.get(self.selected_partition).cloned() else {
+            return;
+        };
+        self.engine.begin_scan(&partition, self.scan_mode);
+        self.screen = UiScreen::Scanning;
+        self.selected_file_idx = None;
+        self.scroll_offset = 0;
+        self.clear_filters();
     }
 
     /// Run recovery on selected files.
     pub fn start_recovery(&mut self) {
         self.recovery_results = self.engine.recover_selected(&self.recovery_target);
         self.screen = UiScreen::Recovering;
+    }
+
+    // ====================================================================
+    // Input
+    //
+    // This program had none: no key handler, no mouse handler, no
+    // `handle_event`. Nineteen functions had no caller outside the tests,
+    // including the whole of the filter builder -- `with_file_type`,
+    // `with_min_size`, `with_max_size`, `with_min_confidence`, `with_search`,
+    // `with_source`, `with_delete_time_range` -- which is four of the bullet
+    // points in this file's own module doc, and `select_next`/`select_prev`,
+    // which is the keyboard.
+    // ====================================================================
+
+    /// Handle one event from the window.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Resize { width, height } => {
+                self.width = *width as f32;
+                self.height = *height as f32;
+                self.clamp_scroll();
+                EventResult::Consumed
+            }
+            Event::Tick { .. } => self.handle_tick(),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// One phase of a running scan.
+    fn handle_tick(&mut self) -> EventResult {
+        if self.screen != UiScreen::Scanning {
+            return EventResult::Ignored;
+        }
+        let Some(partition) = self.partitions.get(self.selected_partition).cloned() else {
+            // Nothing to scan. Back to the setup screen rather than parking on
+            // a progress bar that will never move.
+            self.screen = UiScreen::ScanSetup;
+            return EventResult::Consumed;
+        };
+        if !self.engine.scan_step(&partition) {
+            self.screen = UiScreen::Results;
+            self.selected_file_idx = None;
+            self.scroll_offset = 0;
+        }
+        EventResult::Consumed
+    }
+
+    /// Handle a key press.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if key.modifiers.ctrl {
+            return match key.key {
+                Key::A => {
+                    self.engine.select_all(&self.filter);
+                    EventResult::Consumed
+                }
+                Key::D => {
+                    // `deselect_all` was written and never called, so a
+                    // select-all was a decision with no way back short of
+                    // clicking every row again.
+                    self.engine.deselect_all();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+
+        match self.screen {
+            UiScreen::ScanSetup => self.handle_setup_key(key),
+            UiScreen::Scanning => {
+                if key.key == Key::Escape {
+                    self.screen = UiScreen::ScanSetup;
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            UiScreen::Results => self.handle_results_key(key),
+            UiScreen::Recovering => {
+                if matches!(key.key, Key::Escape | Key::Enter) {
+                    self.screen = UiScreen::Results;
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+        }
+    }
+
+    /// Keys on the setup screen.
+    fn handle_setup_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Up => {
+                self.selected_partition = self.selected_partition.saturating_sub(1);
+                EventResult::Consumed
+            }
+            Key::Down => {
+                let last = self.partitions.len().saturating_sub(1);
+                self.selected_partition = self.selected_partition.saturating_add(1).min(last);
+                EventResult::Consumed
+            }
+            Key::Tab => {
+                self.scan_mode = match self.scan_mode {
+                    ScanMode::Quick => ScanMode::Deep,
+                    ScanMode::Deep => ScanMode::Quick,
+                };
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.start_scan();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Keys on the results screen.
+    fn handle_results_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Up => {
+                self.select_prev();
+                EventResult::Consumed
+            }
+            Key::Down => {
+                self.select_next();
+                EventResult::Consumed
+            }
+            Key::Home => {
+                self.select_file(0);
+                EventResult::Consumed
+            }
+            Key::End => {
+                let last = self.visible_files().len().saturating_sub(1);
+                self.select_file(last);
+                EventResult::Consumed
+            }
+            Key::Space => {
+                self.toggle_current_selection();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                if self.engine.selected_count() > 0 {
+                    self.start_recovery();
+                }
+                EventResult::Consumed
+            }
+            Key::Tab => {
+                // Through the sort columns, and a second visit to the same
+                // column reverses it -- which is what `toggle_sort` is for and
+                // what nothing called.
+                let fields: Vec<SortField> = FILE_COLUMNS.iter().map(|(field, _)| *field).collect();
+                let current = fields.iter().position(|f| *f == self.sort_field);
+                let step: isize = if key.modifiers.shift { -1 } else { 1 };
+                let next = match current {
+                    Some(i) => {
+                        let count = fields.len() as isize;
+                        let at = (i as isize).saturating_add(step).rem_euclid(count);
+                        fields
+                            .get(at.unsigned_abs())
+                            .copied()
+                            .unwrap_or(self.sort_field)
+                    }
+                    // Sorting by a column that is not one of the headings:
+                    // reverse the current sort rather than jumping somewhere
+                    // the user cannot see.
+                    None => self.sort_field,
+                };
+                self.toggle_sort(next);
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                if self.filter.is_active() {
+                    // One key that clears every filter, because a search that
+                    // hides everything otherwise looks like a scan that found
+                    // nothing.
+                    self.clear_filters();
+                    EventResult::Consumed
+                } else {
+                    self.screen = UiScreen::ScanSetup;
+                    EventResult::Consumed
+                }
+            }
+            Key::Backspace => {
+                let mut search = self.filter.filename_search.clone();
+                if search.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+                self.set_search(&search);
+                EventResult::Consumed
+            }
+            _ => {
+                let typed: String = key.typed().collect();
+                if typed.is_empty() {
+                    return EventResult::Ignored;
+                }
+                let mut search = self.filter.filename_search.clone();
+                search.push_str(&typed);
+                self.set_search(&search);
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Handle a mouse event.
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        match mouse.kind {
+            MouseEventKind::Press(MouseButton::Left) => self.handle_click(mouse.x, mouse.y),
+            MouseEventKind::Scroll { dy, .. } => {
+                if self.screen != UiScreen::Results {
+                    return EventResult::Ignored;
+                }
+                let rows = guitk::wheel::rows_f(dy);
+                let delta = rows as isize;
+                self.scroll_offset = self.scroll_offset.saturating_add_signed(delta);
+                self.clamp_scroll();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Handle a left click.
+    fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
+        if let Some(control) = self
+            .controls()
+            .into_iter()
+            .find(|(rect, _)| rect.contains(x, y))
+            .map(|(_, control)| control)
+        {
+            self.apply_control(control);
+            return EventResult::Consumed;
+        }
+        EventResult::Ignored
+    }
+
+    /// Do what a control says.
+    fn apply_control(&mut self, control: Control) {
+        match control {
+            Control::Partition(index) => self.selected_partition = index,
+            Control::Mode(mode) => self.scan_mode = mode,
+            Control::StartScan => self.start_scan(),
+            Control::Category(index) => self.set_category_filter(index),
+            Control::SortBy(field) => self.toggle_sort(field),
+            Control::File(index) => {
+                if self.selected_file_idx == Some(index) {
+                    self.toggle_current_selection();
+                } else {
+                    self.select_file(index);
+                }
+            }
+            Control::SelectAll => self.engine.select_all(&self.filter),
+            Control::NewScan => {
+                self.screen = UiScreen::ScanSetup;
+                self.clear_filters();
+            }
+            Control::Recover => {
+                if self.engine.selected_count() > 0 {
+                    self.start_recovery();
+                }
+            }
+            Control::Done => self.screen = UiScreen::Results,
+        }
+    }
+
+    /// Every control the current screen draws, and where it is.
+    ///
+    /// One law, two callers: the renderer draws these rectangles and
+    /// [`Self::handle_click`] hit-tests them. Nothing outside the render
+    /// functions knew where any of this was, which is why none of it could be
+    /// pressed.
+    pub fn controls(&self) -> Vec<(Rect, Control)> {
+        match self.screen {
+            UiScreen::ScanSetup => self.setup_controls(),
+            UiScreen::Scanning => Vec::new(),
+            UiScreen::Results => self.results_controls(),
+            UiScreen::Recovering => vec![(
+                Rect::new(
+                    self.width - BUTTON_WIDTH - PADDING,
+                    self.height - FOOTER_HEIGHT + 8.0,
+                    BUTTON_WIDTH,
+                    BUTTON_HEIGHT,
+                ),
+                Control::Done,
+            )],
+        }
+    }
+
+    /// The setup screen's partition cards, mode radios and Start button.
+    fn setup_controls(&self) -> Vec<(Rect, Control)> {
+        let mut out = Vec::new();
+        let list_y = HEADER_HEIGHT + PADDING + 28.0;
+        let card_w = self.width - PADDING * 2.0;
+        for index in 0..self.partitions.len() {
+            out.push((
+                Rect::new(
+                    PADDING,
+                    list_y + index as f32 * PARTITION_CARD_HEIGHT,
+                    card_w,
+                    PARTITION_CARD_HEIGHT - 8.0,
+                ),
+                Control::Partition(index),
+            ));
+        }
+
+        let mode_y = list_y + self.partitions.len() as f32 * PARTITION_CARD_HEIGHT + PADDING;
+        let quick_y = mode_y + 28.0;
+        out.push((
+            Rect::new(PADDING, quick_y, card_w, 24.0),
+            Control::Mode(ScanMode::Quick),
+        ));
+        out.push((
+            Rect::new(PADDING, quick_y + 32.0, card_w, 24.0),
+            Control::Mode(ScanMode::Deep),
+        ));
+
+        out.push((
+            Rect::new(
+                self.width - BUTTON_WIDTH - PADDING,
+                self.height - FOOTER_HEIGHT - PADDING,
+                BUTTON_WIDTH,
+                BUTTON_HEIGHT,
+            ),
+            Control::StartScan,
+        ));
+        out
+    }
+
+    /// The results screen's sidebar, column headers, rows and footer buttons.
+    fn results_controls(&self) -> Vec<(Rect, Control)> {
+        let mut out = Vec::new();
+        let content_y = HEADER_HEIGHT;
+        let content_h = self.height - HEADER_HEIGHT - FOOTER_HEIGHT - STATUS_BAR_HEIGHT;
+
+        // Category sidebar: "All", then one row per category.
+        let all_y = content_y + 36.0;
+        out.push((
+            Rect::new(8.0, all_y, SIDEBAR_WIDTH - 16.0, CATEGORY_ROW_HEIGHT),
+            Control::Category(None),
+        ));
+        for index in 0..FileCategory::ALL.len() {
+            out.push((
+                Rect::new(
+                    8.0,
+                    all_y + 32.0 + index as f32 * CATEGORY_ROW_HEIGHT,
+                    SIDEBAR_WIDTH - 16.0,
+                    CATEGORY_ROW_HEIGHT,
+                ),
+                Control::Category(Some(index)),
+            ));
+        }
+
+        // Column headers, which sort.
+        let list_x = SIDEBAR_WIDTH;
+        let list_w = self.width - SIDEBAR_WIDTH - PREVIEW_PANEL_WIDTH;
+        let columns = file_list_columns(list_w);
+        let table = file_list_table(&columns, list_x);
+        for (index, (field, _)) in FILE_COLUMNS.iter().enumerate() {
+            // `Table::left`/`width` are the same numbers the header text is
+            // drawn at, so a click on a heading lands on the column that
+            // heading names.
+            out.push((
+                Rect::new(table.left(index), content_y, table.width(index), 24.0),
+                Control::SortBy(*field),
+            ));
+        }
+
+        // File rows.
+        let list_y = content_y + 28.0;
+        let max_visible = ((content_h - 28.0) / ITEM_HEIGHT) as usize;
+        let shown = self
+            .visible_files()
+            .len()
+            .saturating_sub(self.scroll_offset)
+            .min(max_visible);
+        for row in 0..shown {
+            out.push((
+                Rect::new(
+                    list_x,
+                    list_y + row as f32 * ITEM_HEIGHT,
+                    list_w,
+                    ITEM_HEIGHT,
+                ),
+                Control::File(row.saturating_add(self.scroll_offset)),
+            ));
+        }
+
+        // Footer buttons, in the order the renderer places them right to left.
+        let footer_y = self.height - FOOTER_HEIGHT - STATUS_BAR_HEIGHT + 8.0;
+        let btn_x = self.width - BUTTON_WIDTH - PADDING;
+        if self.engine.selected_count() > 0 {
+            out.push((
+                Rect::new(btn_x, footer_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+                Control::Recover,
+            ));
+        }
+        out.push((
+            Rect::new(
+                btn_x - BUTTON_WIDTH - PADDING,
+                footer_y,
+                BUTTON_WIDTH,
+                BUTTON_HEIGHT,
+            ),
+            Control::SelectAll,
+        ));
+        out.push((
+            Rect::new(
+                btn_x - (BUTTON_WIDTH + PADDING) * 2.0,
+                footer_y,
+                BUTTON_WIDTH,
+                BUTTON_HEIGHT,
+            ),
+            Control::NewScan,
+        ));
+        out
+    }
+
+    /// Set the filename search, and keep the selection on something visible.
+    ///
+    /// Through `ScanFilter::with_search`, which is the builder this file
+    /// already had and which nothing called.
+    pub fn set_search(&mut self, query: &str) {
+        self.filter = self.filter.clone().with_search(query);
+        self.reanchor_selection();
+    }
+
+    /// Clear every filter, including the category sidebar's.
+    pub fn clear_filters(&mut self) {
+        self.filter = ScanFilter::new();
+        self.active_category_filter = None;
+        self.reanchor_selection();
+    }
+
+    /// Keep the selection and the scroll offset inside a list that has just
+    /// been re-filtered.
+    fn reanchor_selection(&mut self) {
+        let count = self.visible_files().len();
+        if count == 0 {
+            self.selected_file_idx = None;
+            self.scroll_offset = 0;
+            return;
+        }
+        if let Some(index) = self.selected_file_idx
+            && index >= count
+        {
+            self.selected_file_idx = Some(count.saturating_sub(1));
+        }
+        self.clamp_scroll();
+    }
+
+    /// Keep the scroll offset from running past the end of the list.
+    fn clamp_scroll(&mut self) {
+        let content_h = self.height - HEADER_HEIGHT - FOOTER_HEIGHT - STATUS_BAR_HEIGHT;
+        let max_visible = ((content_h - 28.0) / ITEM_HEIGHT).max(1.0) as usize;
+        let max = self.visible_files().len().saturating_sub(max_visible);
+        self.scroll_offset = self.scroll_offset.min(max);
     }
 
     /// Get the sorted, filtered file list.
@@ -2075,7 +2720,11 @@ impl UndeleteApp {
     // Rendering
     // ========================================================================
 
-    pub fn render(&self) -> Vec<RenderCommand> {
+    /// Draw the current screen.
+    ///
+    /// Not `render`: [`App::render`] is the one the window calls, and an
+    /// inherent method of the same name shadows a trait method at equal arity.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Window background
@@ -3590,7 +4239,10 @@ pub fn format_timestamp(ts: u64) -> String {
     if ts == 0 {
         return String::from("Unknown");
     }
-    guitk::datetime::stamp(i64::try_from(ts).unwrap_or(i64::MAX), &guitk::tzrules::Tz::utc())
+    guitk::datetime::stamp(
+        i64::try_from(ts).unwrap_or(i64::MAX),
+        &guitk::tzrules::Tz::utc(),
+    )
 }
 
 /// Format bytes as a hex preview string.
@@ -3630,43 +4282,68 @@ pub fn format_hex_preview(data: &[u8], bytes_per_line: usize) -> String {
 // Entry point
 // ============================================================================
 
-fn main() {
+impl App for UndeleteApp {
+    fn title(&self) -> String {
+        // What the window is doing, because these four screens are four
+        // different jobs and a taskbar entry saying only "Undelete" cannot tell
+        // a finished scan from one still running. The harness re-reads this.
+        match self.screen {
+            UiScreen::ScanSetup => "Undelete".to_string(),
+            UiScreen::Scanning => format!(
+                "Scanning {}% - Undelete",
+                (self.engine.progress.overall_progress * 100.0) as u32
+            ),
+            UiScreen::Results => {
+                format!("{} recoverable files - Undelete", self.engine.files.len())
+            }
+            UiScreen::Recovering => format!(
+                "Recovered {} files - Undelete",
+                self.recovery_results.iter().filter(|r| r.success).count()
+            ),
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// A clock only while a scan is running.
+    ///
+    /// Nothing else in this program ages: a results list does not change until
+    /// the user changes it, and a finished recovery is finished. A scan does,
+    /// and the screen that shows it -- phase name, phase bar, overall bar,
+    /// files found so far -- could not be reached at all before, because the
+    /// scan ran its four phases inside one call. See
+    /// [`RecoveryEngine::begin_scan`].
+    fn tick_interval(&self) -> Option<Duration> {
+        (self.screen == UiScreen::Scanning).then_some(SCAN_STEP)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // From the frame being drawn, not from the last `Resize`: the first
+        // frame is drawn before any `Resize` arrives, and every hit test here
+        // is derived from these two numbers.
+        self.width = width;
+        self.height = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
     let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
-
-    // Render scan setup screen
-    let cmds = app.render();
-    let _ = cmds.len();
-
-    // Start a scan
-    app.start_scan();
-
-    // Render results
-    let cmds = app.render();
-    let _ = cmds.len();
-
-    // Select a file
-    app.select_file(0);
-    let cmds = app.render();
-    let _ = cmds.len();
-
-    // Toggle selection and recover
-    app.toggle_current_selection();
-    app.engine.select_all(&app.filter);
-    app.start_recovery();
-    let cmds = app.render();
-    let _ = cmds.len();
-
-    // Test deep scan mode
-    let mut app2 = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
-    app2.scan_mode = ScanMode::Deep;
-    app2.start_scan();
-    let cmds = app2.render();
-    let _ = cmds.len();
-
-    // Test filtering
-    app2.set_category_filter(Some(0));
-    let cmds = app2.render();
-    let _ = cmds.len();
+    app::launch("undelete", &mut app)
 }
 
 // ============================================================================
@@ -3682,6 +4359,566 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Input
+    //
+    // This program had no key handler, no mouse handler and no
+    // `handle_event`. All of the below is new.
+    // ------------------------------------------------------------------
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn press_ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    fn types(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    fn click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn click_control(app: &mut UndeleteApp, wanted: Control) {
+        let rect = app
+            .controls()
+            .into_iter()
+            .find(|(_, c)| *c == wanted)
+            .unwrap_or_else(|| panic!("{wanted:?} is not drawn on this screen"))
+            .0;
+        app.handle_event(&click(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0));
+    }
+
+    fn scanned() -> UndeleteApp {
+        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.start_scan();
+        run_scan(&mut app);
+        app
+    }
+
+    // -- the scan is something you can watch --
+
+    /// `UiScreen::Scanning` was never set by anything, so the whole progress
+    /// screen -- phase name, phase bar, overall bar, files found -- was
+    /// unreachable. The scan ran its four phases inside one call.
+    #[test]
+    fn a_scan_passes_through_its_phases_where_they_can_be_seen() {
+        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.scan_mode = ScanMode::Deep;
+        app.start_scan();
+
+        assert_eq!(app.screen, UiScreen::Scanning);
+        assert_eq!(
+            app.tick_interval(),
+            Some(SCAN_STEP),
+            "a scanning window needs a clock; nothing else here does"
+        );
+
+        let mut phases = vec![app.engine.progress.phase];
+        let mut progress = vec![app.engine.progress.overall_progress];
+        for _ in 0..16 {
+            if app.screen != UiScreen::Scanning {
+                break;
+            }
+            app.handle_event(&Event::Tick { elapsed_ms: 500 });
+            phases.push(app.engine.progress.phase);
+            progress.push(app.engine.progress.overall_progress);
+        }
+
+        assert_eq!(app.screen, UiScreen::Results);
+        assert!(
+            phases.contains(&ScanPhase::InodeScan)
+                && phases.contains(&ScanPhase::DeepScan)
+                && phases.contains(&ScanPhase::Analyzing),
+            "each phase should have been the current one at some point, got {phases:?}"
+        );
+        for pair in progress.windows(2) {
+            assert!(pair[1] >= pair[0], "the progress bar went backwards");
+        }
+        assert!(
+            progress.iter().any(|p| *p > 0.0 && *p < 1.0),
+            "there was never a frame with the bar part-way across"
+        );
+        assert_eq!(app.tick_interval(), None, "and the clock stops afterwards");
+    }
+
+    /// A quick scan skips the deep phase, and says so on the way past.
+    #[test]
+    fn a_quick_scan_does_not_go_through_the_deep_phase() {
+        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.start_scan();
+        let mut phases = Vec::new();
+        for _ in 0..16 {
+            if app.screen != UiScreen::Scanning {
+                break;
+            }
+            phases.push(app.engine.progress.phase);
+            app.handle_event(&Event::Tick { elapsed_ms: 500 });
+        }
+        assert!(!phases.contains(&ScanPhase::DeepScan), "got {phases:?}");
+    }
+
+    /// The one-call `scan` still works, and gives the same answer as the
+    /// stepwise one -- which is what lets the two exist without drifting.
+    #[test]
+    fn the_stepwise_scan_finds_what_the_one_call_scan_finds() {
+        let partition = simulated_partitions().remove(0);
+        let mut whole = RecoveryEngine::new();
+        whole.scan(&partition, ScanMode::Deep);
+
+        let mut stepped = RecoveryEngine::new();
+        stepped.begin_scan(&partition, ScanMode::Deep);
+        while stepped.scan_step(&partition) {}
+
+        assert_eq!(whole.files.len(), stepped.files.len());
+        assert_eq!(whole.progress.phase, ScanPhase::Complete);
+        assert_eq!(stepped.progress.phase, ScanPhase::Complete);
+    }
+
+    // -- the deep scan actually detects --
+
+    /// "Sector-by-sector signature detection" detected nothing: `scan_deep`
+    /// returned ten hard-coded finds and `signature_detector` was never read.
+    /// The table's twenty-odd entries could all have been wrong.
+    #[test]
+    fn the_deep_scan_finds_its_files_through_the_signature_table() {
+        let detector = SignatureDetector::new();
+        let kinds = [
+            FileSignatureKind::Jpeg,
+            FileSignatureKind::Png,
+            FileSignatureKind::Pdf,
+        ];
+        let image = detector.plant_sectors(&kinds, DEEP_SCAN_SECTOR);
+        let found = detector.scan_sectors(&image, DEEP_SCAN_SECTOR);
+
+        assert_eq!(found.len(), 3, "every planted sector should be recognised");
+        for (index, kind) in &kinds.iter().enumerate().collect::<Vec<_>>() {
+            let at = (index * DEEP_SCAN_SECTOR) as u64;
+            assert!(
+                found.contains(&(at, **kind)),
+                "{kind:?} was planted at {at} and not found: {found:?}"
+            );
+        }
+    }
+
+    /// The consequence that makes it worth routing through the table: a wrong
+    /// entry costs a file type in the results, rather than nothing at all.
+    #[test]
+    fn a_kind_the_table_does_not_know_is_simply_not_found() {
+        let detector = SignatureDetector::new();
+        // A sector of zeroes stands for a kind with no signature.
+        let image = vec![0u8; DEEP_SCAN_SECTOR];
+        assert!(
+            detector.scan_sectors(&image, DEEP_SCAN_SECTOR).is_empty(),
+            "the detector reported something in an empty sector"
+        );
+    }
+
+    /// The point of routing the deep scan through the table: the *kind* each
+    /// find is reported as comes back from the detector. Asserting only that
+    /// the right number of files turn up would pass just as well against the
+    /// hard-coded list this replaced -- so what is asserted is the variety.
+    #[test]
+    fn the_deep_scans_file_types_come_from_the_detector() {
+        let partition = simulated_partitions().remove(0);
+        let mut quick = RecoveryEngine::new();
+        quick.scan(&partition, ScanMode::Quick);
+        let mut deep = RecoveryEngine::new();
+        deep.scan(&partition, ScanMode::Deep);
+
+        let mut kinds: Vec<FileSignatureKind> = deep
+            .files
+            .iter()
+            .filter(|f| !quick.files.iter().any(|q| q.id == f.id))
+            .map(|f| f.file_type)
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert!(
+            kinds.len() >= 5,
+            "the signature-only finds should be of several types, got {kinds:?} -- \
+             one type for all of them means the kind is not coming from the scan"
+        );
+        assert!(
+            kinds.contains(&FileSignatureKind::Png) && kinds.contains(&FileSignatureKind::Pdf),
+            "got {kinds:?}"
+        );
+    }
+
+    /// A signature with a confirming pattern is only that signature when the
+    /// pattern is there too -- which is what `detect_best` prefers and what a
+    /// planted sector therefore has to carry.
+    #[test]
+    fn a_signature_with_a_secondary_pattern_needs_both_halves() {
+        let detector = SignatureDetector::new();
+        // Docx is Zip's magic plus `word/` at offset 30. Planted whole, it is
+        // a Docx; with only the first half it is a Zip, which is exactly the
+        // misreading the secondary exists to prevent.
+        let image = detector.plant_sectors(&[FileSignatureKind::Docx], DEEP_SCAN_SECTOR);
+        assert_eq!(
+            detector.scan_sectors(&image, DEEP_SCAN_SECTOR),
+            vec![(0, FileSignatureKind::Docx)],
+            "a planted Docx should come back a Docx"
+        );
+
+        let mut without = image.clone();
+        if let Some(slot) = without.get_mut(30..35) {
+            slot.fill(0);
+        }
+        assert_eq!(
+            detector.scan_sectors(&without, DEEP_SCAN_SECTOR),
+            vec![(0, FileSignatureKind::Zip)],
+            "without its confirmation it is only a zip"
+        );
+    }
+
+    #[test]
+    fn a_deep_scan_recovers_more_than_a_quick_one() {
+        let partition = simulated_partitions().remove(0);
+        let mut quick = RecoveryEngine::new();
+        quick.scan(&partition, ScanMode::Quick);
+        let mut deep = RecoveryEngine::new();
+        deep.scan(&partition, ScanMode::Deep);
+        assert!(
+            deep.files.len() > quick.files.len(),
+            "the deep scan should find the signature-only files as well"
+        );
+    }
+
+    // -- the setup screen --
+
+    #[test]
+    fn the_partition_cards_and_mode_radios_can_be_clicked() {
+        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(
+            app.partitions.len() > 1,
+            "the sample has several partitions"
+        );
+
+        click_control(&mut app, Control::Partition(1));
+        assert_eq!(app.selected_partition, 1);
+
+        click_control(&mut app, Control::Mode(ScanMode::Deep));
+        assert_eq!(app.scan_mode, ScanMode::Deep);
+        click_control(&mut app, Control::Mode(ScanMode::Quick));
+        assert_eq!(app.scan_mode, ScanMode::Quick);
+    }
+
+    #[test]
+    fn the_start_button_starts_the_scan() {
+        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        click_control(&mut app, Control::StartScan);
+        assert_eq!(app.screen, UiScreen::Scanning);
+    }
+
+    #[test]
+    fn the_keyboard_chooses_a_partition_and_a_mode() {
+        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.selected_partition, 1);
+        app.handle_event(&press(Key::Up));
+        assert_eq!(app.selected_partition, 0);
+        app.handle_event(&press(Key::Up));
+        assert_eq!(app.selected_partition, 0, "stops at the first");
+
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(app.scan_mode, ScanMode::Deep);
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.screen, UiScreen::Scanning);
+    }
+
+    // -- the results screen --
+
+    #[test]
+    fn the_arrows_walk_the_results_and_space_ticks_one() {
+        let mut app = scanned();
+        assert!(!app.visible_files().is_empty());
+
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.selected_file_idx, Some(0));
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.selected_file_idx, Some(1));
+        app.handle_event(&press(Key::Up));
+        assert_eq!(app.selected_file_idx, Some(0));
+
+        assert_eq!(app.engine.selected_count(), 0);
+        app.handle_event(&press(Key::Space));
+        assert_eq!(app.engine.selected_count(), 1, "space should tick the row");
+        app.handle_event(&press(Key::Space));
+        assert_eq!(app.engine.selected_count(), 0, "and untick it");
+    }
+
+    /// Typing filters by filename, through `ScanFilter::with_search` -- one of
+    /// eight filter builders that had no caller.
+    #[test]
+    fn typing_filters_by_filename() {
+        let mut app = scanned();
+        let all = app.visible_files().len();
+        let first = app
+            .visible_files()
+            .first()
+            .map(|f| f.filename.clone())
+            .expect("the scan found something");
+        let needle: String = first.chars().take(3).collect();
+
+        for c in needle.chars() {
+            app.handle_event(&types(c));
+        }
+        assert_eq!(app.filter.filename_search, needle);
+        assert!(app.filter.is_active(), "the filter should say it is on");
+        let shown = app.visible_files().len();
+        assert!(shown <= all);
+        assert!(
+            app.visible_files()
+                .iter()
+                .all(|f| f.filename.to_lowercase().contains(&needle.to_lowercase())),
+            "a file that does not match the search is still shown"
+        );
+
+        app.handle_event(&press(Key::Backspace));
+        assert_eq!(app.filter.filename_search, needle[..needle.len() - 1]);
+
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.filter.is_active(), "Escape should clear the filters");
+        assert_eq!(app.visible_files().len(), all);
+    }
+
+    /// A search that shrinks the list has to bring the selection with it. The
+    /// selection is a row *number*, so a query that leaves fewer rows than the
+    /// selected index leaves it pointing past the end -- at nothing, or at
+    /// whatever ends up there next.
+    #[test]
+    fn a_search_that_shrinks_the_list_moves_the_selection_into_it() {
+        let mut app = scanned();
+        let all = app.visible_files().len();
+        assert!(all > 2, "need a list to shrink");
+        app.select_file(all.saturating_sub(1));
+        assert_eq!(app.selected_file_idx, Some(all - 1));
+
+        // A query that matches something, but much less than everything.
+        let needle = app
+            .visible_files()
+            .first()
+            .map(|f| f.filename.clone())
+            .expect("non-empty");
+        for c in needle.chars() {
+            app.handle_event(&types(c));
+        }
+
+        let shown = app.visible_files().len();
+        assert!(shown < all, "the search did not narrow anything");
+        assert!(
+            app.selected_file_idx.is_some_and(|i| i < shown),
+            "the selection is at {:?} in a list of {shown}",
+            app.selected_file_idx
+        );
+    }
+
+    /// The category sidebar is drawn with a row per category and a count beside
+    /// each; none of them could be clicked.
+    #[test]
+    fn the_category_sidebar_filters_the_list() {
+        let mut app = scanned();
+        let all = app.visible_files().len();
+
+        // Whichever category actually has files in it, so the test is about the
+        // filter and not about the sample data.
+        let index = (0..FileCategory::ALL.len())
+            .find(|i| {
+                let mut probe = ScanFilter::new();
+                if let Some(cat) = FileCategory::ALL.get(*i) {
+                    probe = probe.with_category(*cat);
+                }
+                let n = app.engine.filtered_files(&probe).len();
+                n > 0 && n < all
+            })
+            .expect("some category holds some but not all of the files");
+
+        click_control(&mut app, Control::Category(Some(index)));
+        assert_eq!(app.active_category_filter, Some(index));
+        let shown = app.visible_files().len();
+        assert!(shown > 0 && shown < all, "the sidebar did not filter");
+
+        click_control(&mut app, Control::Category(None));
+        assert_eq!(
+            app.visible_files().len(),
+            all,
+            "\"All\" should restore them"
+        );
+    }
+
+    /// Clicking a column heading sorts by it; clicking again reverses.
+    #[test]
+    fn the_column_headings_sort_the_list() {
+        let mut app = scanned();
+        click_control(&mut app, Control::SortBy(SortField::Filename));
+        assert_eq!(app.sort_field, SortField::Filename);
+        let first = app.visible_files().first().map(|f| f.filename.clone());
+
+        click_control(&mut app, Control::SortBy(SortField::Filename));
+        assert_eq!(app.sort_field, SortField::Filename);
+        let reversed = app.visible_files().first().map(|f| f.filename.clone());
+        assert_ne!(first, reversed, "a second click should reverse the order");
+    }
+
+    #[test]
+    fn clicking_a_row_selects_it_and_clicking_again_ticks_it() {
+        let mut app = scanned();
+        click_control(&mut app, Control::File(1));
+        assert_eq!(app.selected_file_idx, Some(1));
+        assert_eq!(app.engine.selected_count(), 0);
+
+        click_control(&mut app, Control::File(1));
+        assert_eq!(app.engine.selected_count(), 1);
+    }
+
+    /// Select-all had no way back: `deselect_all` was written and never called.
+    #[test]
+    fn ctrl_a_ticks_everything_and_ctrl_d_unticks_it() {
+        let mut app = scanned();
+        app.handle_event(&press_ctrl(Key::A));
+        assert!(app.engine.selected_count() > 1);
+        app.handle_event(&press_ctrl(Key::D));
+        assert_eq!(app.engine.selected_count(), 0);
+    }
+
+    #[test]
+    fn recovering_needs_something_selected_and_then_reports() {
+        let mut app = scanned();
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(
+            app.screen,
+            UiScreen::Results,
+            "there was nothing ticked, so there is nothing to recover"
+        );
+
+        app.handle_event(&press_ctrl(Key::A));
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.screen, UiScreen::Recovering);
+        assert!(!app.recovery_results.is_empty());
+
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(app.screen, UiScreen::Results, "and back to the list");
+    }
+
+    #[test]
+    fn new_scan_goes_back_and_forgets_the_filters() {
+        let mut app = scanned();
+        for c in "zzz".chars() {
+            app.handle_event(&types(c));
+        }
+        assert!(app.filter.is_active());
+
+        click_control(&mut app, Control::NewScan);
+        assert_eq!(app.screen, UiScreen::ScanSetup);
+        assert!(
+            !app.filter.is_active(),
+            "a search from the last scan must not hide the results of the next"
+        );
+    }
+
+    /// Every control the current screen offers is inside the window and none
+    /// overlaps another, so each can be hit and none steals its neighbour's
+    /// click.
+    #[test]
+    fn no_two_controls_on_a_screen_overlap() {
+        for mut app in [UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT), scanned()] {
+            app.handle_event(&press_ctrl(Key::A));
+            let controls = app.controls();
+            assert!(!controls.is_empty(), "{:?} draws nothing", app.screen);
+            for (i, (a, ca)) in controls.iter().enumerate() {
+                assert!(
+                    a.x >= 0.0 && a.y >= 0.0 && a.x + a.w <= app.width && a.y + a.h <= app.height,
+                    "{ca:?} is drawn outside the window"
+                );
+                for (b, cb) in controls.iter().skip(i + 1) {
+                    let apart = a.x + a.w <= b.x
+                        || b.x + b.w <= a.x
+                        || a.y + a.h <= b.y
+                        || b.y + b.h <= a.y;
+                    assert!(apart, "{ca:?} overlaps {cb:?}");
+                }
+            }
+        }
+    }
+
+    /// The window follows the size it is handed.
+    #[test]
+    fn the_layout_follows_the_window() {
+        let mut app = scanned();
+        let before = app
+            .controls()
+            .into_iter()
+            .find(|(_, c)| *c == Control::NewScan)
+            .expect("drawn")
+            .0;
+        let _ = App::render(&mut app, WINDOW_WIDTH + 200.0, WINDOW_HEIGHT);
+        let after = app
+            .controls()
+            .into_iter()
+            .find(|(_, c)| *c == Control::NewScan)
+            .expect("drawn")
+            .0;
+        assert!(
+            after.x > before.x,
+            "the footer buttons did not follow the edge"
+        );
+    }
+
+    #[test]
+    fn the_title_says_what_the_window_is_doing() {
+        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(app.title(), "Undelete");
+        app.start_scan();
+        assert!(app.title().starts_with("Scanning"), "got {:?}", app.title());
+        run_scan(&mut app);
+        assert!(
+            app.title().contains("recoverable files"),
+            "got {:?}",
+            app.title()
+        );
+    }
+
+    /// Drive a started scan to completion, one tick per phase.
+    ///
+    /// `start_scan` begins the scan and the window's ticks finish it, so a test
+    /// that wants results has to do what the window does. This is also the only
+    /// way the progress screen is reachable at all -- see
+    /// `RecoveryEngine::begin_scan`.
+    fn run_scan(app: &mut UndeleteApp) {
+        // Bounded: the phase machine advances along a fixed sequence, so this
+        // cannot spin even if a step stops returning `false`.
+        for _ in 0..16 {
+            if app.screen != UiScreen::Scanning {
+                break;
+            }
+            app.handle_event(&Event::Tick { elapsed_ms: 500 });
+        }
+        assert_ne!(app.screen, UiScreen::Scanning, "the scan never finished");
+    }
 
     // === File signature tests ===
 
@@ -4329,7 +5566,7 @@ mod tests {
     #[test]
     fn test_ui_render_scan_setup() {
         let app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4337,7 +5574,8 @@ mod tests {
     fn test_ui_render_results() {
         let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.start_scan();
-        let cmds = app.render();
+        run_scan(&mut app);
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4345,8 +5583,9 @@ mod tests {
     fn test_ui_render_results_with_selection() {
         let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.start_scan();
+        run_scan(&mut app);
         app.select_file(0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4356,6 +5595,7 @@ mod tests {
     fn app_with_selection() -> UndeleteApp {
         let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.start_scan();
+        run_scan(&mut app);
         app.select_file(0);
         app
     }
@@ -4367,7 +5607,7 @@ mod tests {
     /// genuine overflow slip past.
     fn preview_panel_text(app: &UndeleteApp) -> Vec<(String, f32, FontWeightHint, f32)> {
         let panel_x = WINDOW_WIDTH - PREVIEW_PANEL_WIDTH;
-        app.render()
+        app.render_commands()
             .into_iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
@@ -4459,9 +5699,10 @@ mod tests {
     fn test_ui_render_recovery_results() {
         let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.start_scan();
+        run_scan(&mut app);
         app.engine.select_all(&app.filter);
         app.start_recovery();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4470,7 +5711,8 @@ mod tests {
         let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.scan_mode = ScanMode::Deep;
         app.start_scan();
-        let cmds = app.render();
+        run_scan(&mut app);
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4478,8 +5720,9 @@ mod tests {
     fn test_ui_category_filter() {
         let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.start_scan();
+        run_scan(&mut app);
         app.set_category_filter(Some(0));
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
         assert_eq!(app.filter.category, Some(FileCategory::Image));
     }
@@ -4488,6 +5731,7 @@ mod tests {
     fn test_ui_category_filter_clear() {
         let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.start_scan();
+        run_scan(&mut app);
         app.set_category_filter(Some(0));
         app.set_category_filter(None);
         assert!(app.filter.category.is_none());
@@ -4497,6 +5741,7 @@ mod tests {
     fn test_ui_sorting() {
         let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.start_scan();
+        run_scan(&mut app);
         app.toggle_sort(SortField::Size);
         assert_eq!(app.sort_field, SortField::Size);
         assert_eq!(app.sort_direction, SortDirection::Ascending);
@@ -4509,6 +5754,7 @@ mod tests {
     fn test_ui_navigation() {
         let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.start_scan();
+        run_scan(&mut app);
         assert!(app.selected_file_idx.is_none());
         app.select_next();
         assert_eq!(app.selected_file_idx, Some(0));
@@ -4524,6 +5770,7 @@ mod tests {
     fn test_ui_toggle_selection() {
         let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.start_scan();
+        run_scan(&mut app);
         app.select_file(0);
         app.toggle_current_selection();
         let file = app.visible_files()[0];
@@ -4745,6 +5992,7 @@ mod tests {
     fn test_visible_files_sorted() {
         let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.start_scan();
+        run_scan(&mut app);
         app.sort_field = SortField::Size;
         app.sort_direction = SortDirection::Ascending;
         let files = app.visible_files();

@@ -116240,3 +116240,53 @@ which is how a layout ends up half-relative and genuinely inconsistent.
 The gate for this shape already exists in spirit: `App::render` is *handed* the
 width and height rather than being expected to ask, precisely so that an app
 which ignores them has to ignore an argument in front of it. This one did.
+
+
+### Lesson 115: a blanket `allow(dead_code)` turns "this subsystem is unused" into a fact nobody is told (lane C, 2026-09-04)
+
+`apps/undelete` offers two scan modes, and the module doc describes the second
+as "a deep scan mode for sector-by-sector file signature detection". The crate
+has a `SignatureDetector` holding a table of twenty-odd file signatures -- JPEG's
+`FF D8 FF`, PNG's eight-byte header, `%PDF`, `PK\x03\x04` with a `word/`
+secondary for DOCX -- a `detect`, a `detect_best`, and a `scan_sectors` that
+walks a buffer sector by sector reporting what it finds. Thirteen tests cover
+`detect`. Every one passes.
+
+Nothing used it. `RecoveryEngine` constructed a `SignatureDetector`, stored it in
+a field, and never read the field. `scan_deep` returned a hard-coded list of ten
+`(offset, kind, size)` triples. The whole table could have been wrong -- every
+magic byte, every offset, the DOCX secondary -- and no screen would have
+differed, because the deep scan's answers never passed through it.
+
+**The compiler knew.** `field signature_detector is never read` is a warning
+rustc emits by default, and it was switched off at the top of the file:
+
+    #![allow(dead_code)]
+
+One line, no reason recorded, and it is the only thing standing between this
+defect and a build that names it. Removing it surfaced the field immediately,
+along with `scan_sectors`, `detect`, and seventeen other functions with no
+caller -- including the entire filter builder (`with_file_type`, `with_min_size`,
+`with_min_confidence`, `with_search`...), which is four more of the module doc's
+bullet points.
+
+**The tests could not have caught it, and it is worth being precise about why.**
+`test_jpeg_signature_detection` calls `detector.detect(...)` and asserts the
+answer. That is a correct test of a correct function. It says nothing whatever
+about whether the *program* calls it -- and no test of a component ever can,
+because the question is about the component's callers, not the component. The
+signal for "is this used" is the one the `allow` deleted.
+
+**The repair is not to delete the detector.** It is to put it on the path it was
+written for. There is no device to read here, so the simulation now *plants* the
+sectors -- writing each file type's real magic bytes, taken from the detector's
+own table, into a sector each -- and the deep scan reads them back through
+`scan_sectors`. The finds are the detector's answers rather than the plan's, so
+a wrong entry in the table now costs a file type in the results, which is the
+same failure a real disk would produce. That is what makes the thirteen tests
+worth having: they now fail *and* the program breaks.
+
+**The rule:** a blanket `#![allow(dead_code)]` in a crate is a statement that
+nobody wants to know which parts of it are connected. Prefer scoped
+`#[allow(dead_code, reason = "...")]` per item -- as `apps/kanban` now has, 22 of
+them -- so the next unused thing is still reported.

@@ -118882,6 +118882,33 @@ result was a server no client could connect to.
 | `build_packet`, `read_packet`, `try_parse_packet` | RFC 4253 §6 framing | shared, as the stateful `PacketCodec` — **the third bug this arrangement produced**, two faults in the server's decoder |
 | `BigUint` and its fourteen methods | RFC 4253 §8 key-exchange arithmetic | shared — **the fourth bug**, a pre-auth denial of service in the server |
 | the group-14 prime and generator | RFC 3526 §3 | shared as `DH_GROUP14_P_HEX` — 512 hex digits that were transcribed twice and checked never |
+| the KEXINIT cookie (RFC 4253 §7.1) | each end's only unpredictable contribution to `H` | **the fifth bug** — see below; the source is now shared as `sshwire::SecretSource`, the cookie itself is per-connection and stays each end's own |
+
+**The fifth bug: neither end's KEXINIT cookie was random.** RFC 4253 §7.1 wants
+sixteen random bytes because both KEXINIT payloads in full are fields of the
+exchange hash, so the cookie is the only thing each end contributes that the
+other cannot predict — the mechanism that stops either end steering `H` on its
+own. `ssh` sent sixteen zero bytes. `sshd` sent
+`sha256(b"sshd-kex-cookie")[..16]`, one constant compiled into the binary and
+identical on every connection it had ever served, with a comment calling it
+"pseudo-random". The client's was fixed on 2026-09-04; the comment left behind
+there says the constant "gave that power to the server alone", written on the
+assumption that the server's cookie was real. It was not, so `H` was a function
+of the two DH public values alone.
+
+This is the second fault of the shape *a fix reached one copy and had no way to
+reach the other* — the first being the wire readers, which sshd carried in
+their un-hardened form long after the client's had been rewritten. It is the
+shape that most argues for item 4: a test that ran the two ends together would
+not have caught this one either (both ends accept any cookie), but the class of
+"I fixed the client, and believed something about the server that I had not
+read" is exactly what an interop test makes impossible to sustain.
+
+sshd's test for this asserted that the payload began with `SSH_MSG_KEXINIT` and
+was longer than seventeen bytes — both of which a constant cookie satisfies for
+ever. It certified the bug rather than catching it. It now asserts the cookie's
+*provenance*: that the sixteen bytes are the ones the secret source supplied,
+and that two connections do not share them.
 
 The first extraction stopped at the line between total functions and fallible
 ones: everything that returns a value moved as-is, while everything returning

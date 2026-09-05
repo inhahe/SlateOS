@@ -5304,9 +5304,29 @@ check_shellcheck
 # suites that existed then took ~95 s together (the slowest,
 # `test-canary-load.py`, is 31 s), against a boot test that runs 900-1200 s.
 # The figure is dated because it is a measurement; it is the ratio that is the
-# argument, and a suite would have to be minutes long to change it.  It is also the cheapest possible place to spend it -- these fail
+# argument.  It is also the cheapest possible place to spend it -- these fail
 # in seconds and before the build, so a broken harness stops the run instead of
 # corrupting its output an hour later.
+#
+# That paragraph used to end "and a suite would have to be minutes long to
+# change it".  One now is, so the sentence is retired rather than left standing
+# as a prediction the tree has already falsified.  On 2026-09-04
+# `test-selftests-are-repo-safe.py` joined the sweep at ~200 s -- by itself
+# more than twice the whole 2026-08-29 sweep, and 17-22% of a boot test.  It is
+# still worth it, but on its own merits and not on the old ratio: it runs every
+# self-test the push hook gates on against a throwaway victim repository under
+# three environments a hook really produces, and it is the only thing in the
+# tree that does.  The alternative to paying the 200 s is the failure it exists
+# to catch, which has happened twice and once ended with the entire repository
+# deleted and *pushed to origin* (2026-08-29, `check-requests-not-deleted.py`).
+#
+# Its cost is 8 gated self-tests x 3 environments x a fresh git fixture each,
+# on a filesystem where git is unusually slow (see open question A-Q7).  So if
+# it ever stops being affordable, the axis to trim is the environment list, not
+# the gate list -- dropping a gate silences a check, while dropping the third
+# environment only weakens one that the first already covers.  Measure before
+# trimming either: on a machine with a normal filesystem this may well be a
+# tenth of the figure above.
 #
 # WHY IT DISCOVERS RATHER THAN LISTS.  A hand-written list is a second place a
 # new suite must be registered, and forgetting is silent: the suite passes by

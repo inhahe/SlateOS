@@ -34,8 +34,13 @@
 #![allow(clippy::unreadable_literal)]
 
 use guitk::Color;
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -1086,6 +1091,22 @@ impl ConversionJob {
         self.started_at = Some(timestamp);
     }
 
+    /// Move a running job's progress on, and say whether it has finished.
+    ///
+    /// `progress` was set to 0 when the job was made and 100 when it completed,
+    /// and to nothing in between -- while the queue panel draws a bar from it
+    /// (`fill_w = bar_w * progress / 100`). So the bar this program is built to
+    /// show was empty or full and never anything else. The module doc's "batch
+    /// conversion queue with progress tracking" was the queue without the
+    /// tracking.
+    pub fn advance(&mut self, percent: f32) -> bool {
+        if self.status != JobStatus::Running {
+            return false;
+        }
+        self.progress = (self.progress + percent).clamp(0.0, 100.0);
+        self.progress >= 100.0
+    }
+
     pub fn complete(&mut self, timestamp: u64, actual_size: u64) {
         self.status = JobStatus::Completed;
         self.progress = 100.0;
@@ -1162,6 +1183,19 @@ pub enum ActivePanel {
 // ============================================================================
 // Main application
 // ============================================================================
+
+/// How often the queue takes a step.
+///
+/// The conversion is simulated -- there is no encoder behind this -- so this is
+/// the pace of the progress bar and not of any work.
+const JOB_STEP: Duration = Duration::from_millis(120);
+
+/// How much of a job one [`JOB_STEP`] gets through.
+///
+/// Four percent, so a job takes twenty-five steps: about three seconds, which
+/// is long enough to watch the bar move and short enough that a batch of six
+/// finishes while you are still looking at it.
+const JOB_STEP_PERCENT: f32 = 4.0;
 
 /// The media converter application.
 pub struct MediaConvertApp {
@@ -1321,6 +1355,255 @@ impl MediaConvertApp {
     // -----------------------------------------------------------------------
     // Job queue
     // -----------------------------------------------------------------------
+
+    // ====================================================================
+    // Input
+    //
+    // This program had none, and twenty-two functions had no caller outside
+    // the tests -- the whole queue among them: `queue_all`, `queue_source`,
+    // `start_next_job`, `complete_job`, `fail_job`, `cancel_job`,
+    // `cancel_all_queued`, `clear_finished_jobs`, `remove_source`,
+    // `clear_sources`, `select_profile`, `set_quality_preset`.
+    // ====================================================================
+
+    /// The files the window opens on.
+    ///
+    /// In a method rather than in `main` because a test cannot call `main`, and
+    /// a converter that opens on an empty file list looks broken rather than
+    /// idle. One of each category, so every panel has something to show.
+    pub fn seed_sample_sources(&mut self) {
+        self.add_source_with_duration(
+            "/music/song.flac",
+            "song.flac",
+            50_000_000,
+            MediaCategory::Audio,
+            243.5,
+            "FLAC",
+        );
+        self.add_source_with_duration(
+            "/videos/clip.mkv",
+            "clip.mkv",
+            1_500_000_000,
+            MediaCategory::Video,
+            3600.0,
+            "MKV/H.264",
+        );
+        self.add_source(
+            "/pictures/photo.png",
+            "photo.png",
+            8_000_000,
+            MediaCategory::Image,
+        );
+    }
+
+    /// Whether the queue has anything left to do.
+    fn has_work(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
+    }
+
+    /// Handle one event from the window.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window wider than 16 million pixels does not exist"
+                )]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                EventResult::Consumed
+            }
+            Event::Tick { .. } => self.handle_tick(),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// One step of the queue.
+    ///
+    /// Runs one job at a time, which is what a converter on one machine does:
+    /// four conversions at a quarter speed each finish no sooner and make the
+    /// progress bars useless. When the running one finishes, the next starts on
+    /// the same tick, so the queue does not stall for a frame between jobs.
+    fn handle_tick(&mut self) -> EventResult {
+        if !self.has_work() {
+            return EventResult::Ignored;
+        }
+
+        // Every job is offered the step and `advance` refuses the ones that are
+        // not running, rather than this filtering first and `advance` checking
+        // again. Two statements of one rule is one statement that is never the
+        // reason: with the filter here, deleting the guard in `advance` changed
+        // nothing observable, which a mutation duly reported.
+        let finished = self
+            .jobs
+            .iter_mut()
+            .find_map(|job| job.advance(JOB_STEP_PERCENT).then_some(job.id));
+
+        if let Some(id) = finished {
+            // The size the profile predicted. `estimated_size` is what the
+            // program already computes for the queue panel, so a finished job
+            // reports the figure the user was shown rather than a new one.
+            let estimated = self
+                .jobs
+                .iter()
+                .find(|j| j.id == id)
+                .and_then(|j| j.estimated_size)
+                .unwrap_or(0);
+            self.complete_job(id, estimated);
+        }
+
+        // Nothing running: take the next one off the queue.
+        if !self.jobs.iter().any(|j| j.status == JobStatus::Running) {
+            self.start_next_job();
+        }
+        EventResult::Consumed
+    }
+
+    /// Handle a key press.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if key.modifiers.ctrl {
+            return match key.key {
+                // Queue everything and start. `queue_all` had six tests and no
+                // caller, so the button this program is named for did nothing.
+                Key::Enter => {
+                    self.queue_all();
+                    self.start_next_job();
+                    self.active_panel = ActivePanel::Queue;
+                    EventResult::Consumed
+                }
+                // Abandon what has not started. A queue with no cancel is a
+                // queue you have to wait out.
+                Key::C => {
+                    self.cancel_all_queued();
+                    EventResult::Consumed
+                }
+                // Sweep up what has finished.
+                Key::L => {
+                    self.clear_finished_jobs();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+
+        match key.key {
+            // The three panels. `ActivePanel` had three variants and nothing
+            // that moved between them.
+            Key::Tab => {
+                self.active_panel = match self.active_panel {
+                    ActivePanel::SourceList => ActivePanel::Settings,
+                    ActivePanel::Settings => ActivePanel::Queue,
+                    ActivePanel::Queue => ActivePanel::SourceList,
+                };
+                self.show_queue = self.active_panel == ActivePanel::Queue;
+                EventResult::Consumed
+            }
+            Key::Up | Key::Down if self.active_panel == ActivePanel::SourceList => {
+                self.move_source_selection(if key.key == Key::Down { 1 } else { -1 });
+                EventResult::Consumed
+            }
+            // Queue just the selected file.
+            Key::Enter if self.active_panel == ActivePanel::SourceList => {
+                // By id, which is what the selection holds and what these take.
+                if let Some(id) = self.selected_source {
+                    self.queue_source(id);
+                    self.start_next_job();
+                }
+                EventResult::Consumed
+            }
+            Key::Delete => match self.active_panel {
+                // Take a file off the list, or the whole list with nothing
+                // selected. `remove_source` and `clear_sources` had a test each
+                // and no caller.
+                ActivePanel::SourceList => {
+                    if let Some(id) = self.selected_source {
+                        self.remove_source(id);
+                        self.selected_source = None;
+                    } else {
+                        self.clear_sources();
+                    }
+                    EventResult::Consumed
+                }
+                ActivePanel::Queue => {
+                    if let Some(id) = self.first_cancellable_job() {
+                        self.cancel_job(id);
+                    } else {
+                        self.clear_finished_jobs();
+                    }
+                    EventResult::Consumed
+                }
+                ActivePanel::Settings => EventResult::Ignored,
+            },
+            // The conversion profiles, which `select_profile` exists to choose
+            // between and which nothing chose.
+            Key::Left | Key::Right if self.active_panel == ActivePanel::Settings => {
+                let count = self.profiles.len();
+                let delta: isize = if key.key == Key::Right { 1 } else { -1 };
+                if let Some(next) = (self.selected_profile_idx as isize)
+                    .saturating_add(delta)
+                    .rem_euclid(count.max(1) as isize)
+                    .try_into()
+                    .ok()
+                    .filter(|i: &usize| *i < count)
+                {
+                    self.select_profile(next);
+                }
+                EventResult::Consumed
+            }
+            // Quality, low to lossless. `set_quality_preset` also refuses a
+            // preset the format cannot do -- `supports_quality`, three tests,
+            // no caller.
+            Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 => {
+                let preset = match key.key {
+                    Key::Num1 => QualityPreset::Low,
+                    Key::Num2 => QualityPreset::Medium,
+                    Key::Num3 => QualityPreset::High,
+                    _ => QualityPreset::Lossless,
+                };
+                self.set_quality_preset(preset);
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Where the selected source sits in the list.
+    fn selected_source_index(&self) -> Option<usize> {
+        let id = self.selected_source?;
+        self.sources.iter().position(|s| s.id == id)
+    }
+
+    /// The first job that can still be called off.
+    fn first_cancellable_job(&self) -> Option<u64> {
+        self.jobs
+            .iter()
+            .find(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
+            .map(|j| j.id)
+    }
+
+    /// Move the source selection by `delta` files.
+    ///
+    /// Held as an id rather than an index -- `selected_source` is `Option<u64>`
+    /// -- so removing a file above the selected one does not silently select
+    /// its neighbour. Stops at the ends rather than wrapping.
+    fn move_source_selection(&mut self, delta: isize) {
+        if self.sources.is_empty() {
+            self.selected_source = None;
+            return;
+        }
+        let last = (self.sources.len() as isize).saturating_sub(1);
+        let next = match self.selected_source_index() {
+            Some(index) => (index as isize).saturating_add(delta).clamp(0, last),
+            None if delta < 0 => last,
+            None => 0,
+        };
+        self.selected_source = self.sources.get(next.unsigned_abs()).map(|s| s.id);
+    }
 
     /// Queue all sources for conversion with current settings.
     pub fn queue_all(&mut self) -> usize {
@@ -1516,7 +1799,14 @@ impl MediaConvertApp {
     // Rendering
     // -----------------------------------------------------------------------
 
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    /// Draw the whole window.
+    ///
+    /// Not `render`: [`App::render`] is the one the window calls, and this one
+    /// takes the same two arguments -- so at equal arity an inherent method
+    /// wins method lookup outright and the trait's is never called. That is the
+    /// silent version of this failure, and it is why the rename is not
+    /// cosmetic.
+    pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
@@ -2218,34 +2508,75 @@ pub struct HistoryStats {
 // Main
 // ============================================================================
 
-fn main() {
+impl App for MediaConvertApp {
+    fn title(&self) -> String {
+        // What the queue is doing, because a batch conversion is something you
+        // start and then look away from. The harness re-reads this as the
+        // program runs.
+        let running = self
+            .jobs
+            .iter()
+            .filter(|j| j.status == JobStatus::Running)
+            .count();
+        let queued = self
+            .jobs
+            .iter()
+            .filter(|j| j.status == JobStatus::Queued)
+            .count();
+        if running == 0 && queued == 0 {
+            return "Media Converter".to_string();
+        }
+        format!(
+            "Converting - {} left - Media Converter",
+            running.saturating_add(queued)
+        )
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.window_width as u32, self.window_height as u32)
+        }
+    }
+
+    /// A clock only while there is a job to run.
+    ///
+    /// The queue is the only thing in this program that moves on its own; a
+    /// window showing a list of files to convert has nothing to redraw.
+    fn tick_interval(&self) -> Option<Duration> {
+        self.has_work().then_some(JOB_STEP)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Recorded as well as passed on, because the hit tests and the panel
+        // widths are derived from these two numbers and `render_commands` is
+        // not the only reader.
+        self.window_width = width;
+        self.window_height = height;
+        RenderTree {
+            commands: self.render_commands(width, height),
+        }
+    }
+}
+
+fn main() -> ExitCode {
     let mut app = MediaConvertApp::new();
-
-    app.add_source_with_duration(
-        "/music/song.flac",
-        "song.flac",
-        50_000_000,
-        MediaCategory::Audio,
-        243.5,
-        "FLAC",
-    );
-    app.add_source_with_duration(
-        "/videos/clip.mkv",
-        "clip.mkv",
-        1_500_000_000,
-        MediaCategory::Video,
-        3600.0,
-        "MKV/H.264",
-    );
-    app.add_source(
-        "/photos/beach.png",
-        "beach.png",
-        8_000_000,
-        MediaCategory::Image,
-    );
-
-    let cmds = app.render(1280.0, 800.0);
-    let _ = cmds.len();
+    app.seed_sample_sources();
+    app::launch("mediaconvert", &mut app)
 }
 
 // ============================================================================
@@ -2261,6 +2592,357 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Wiring
+    //
+    // This program had no input handling, and twenty-two functions had no
+    // caller outside the tests -- the whole queue among them.
+    // ------------------------------------------------------------------
+
+    fn key_ev(key: Key, ctrl: bool) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn press(k: Key) -> Event {
+        key_ev(k, false)
+    }
+
+    fn tick() -> Event {
+        Event::Tick { elapsed_ms: 120 }
+    }
+
+    fn seeded() -> MediaConvertApp {
+        let mut app = MediaConvertApp::new();
+        app.seed_sample_sources();
+        app
+    }
+
+    /// A test cannot call `main`, so the files the window opens on live in a
+    /// method -- and a converter that opens on an empty list looks broken.
+    #[test]
+    fn the_window_opens_with_files_to_convert() {
+        let app = seeded();
+        assert_eq!(app.sources.len(), 3);
+        assert!(
+            app.sources
+                .iter()
+                .any(|s| s.category == MediaCategory::Audio)
+        );
+        assert!(
+            app.sources
+                .iter()
+                .any(|s| s.category == MediaCategory::Video)
+        );
+        assert!(
+            app.sources
+                .iter()
+                .any(|s| s.category == MediaCategory::Image)
+        );
+    }
+
+    /// `queue_all` had six tests and no caller: the button this program is
+    /// named for did nothing.
+    #[test]
+    fn ctrl_enter_queues_everything_and_the_queue_runs_itself() {
+        let mut app = seeded();
+        assert_eq!(app.tick_interval(), None, "an idle queue needs no clock");
+
+        app.handle_event(&key_ev(Key::Enter, true));
+        assert_eq!(app.jobs.len(), 3, "every source should be queued");
+        assert_eq!(app.active_panel, ActivePanel::Queue);
+        assert!(app.tick_interval().is_some(), "a running queue does");
+        assert_eq!(
+            app.jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Running)
+                .count(),
+            1,
+            "one at a time"
+        );
+
+        for _ in 0..200 {
+            if !app
+                .jobs
+                .iter()
+                .any(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
+            {
+                break;
+            }
+            app.handle_event(&tick());
+        }
+        assert_eq!(
+            app.jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Completed)
+                .count(),
+            3,
+            "all three should have finished"
+        );
+        assert_eq!(app.history.len(), 3, "and each should be in the history");
+        assert_eq!(app.tick_interval(), None, "and the clock should stop");
+    }
+
+    /// The progress bar the queue panel draws was empty or full and never
+    /// anything else: `progress` was set at creation and at completion, with
+    /// nothing in between.
+    #[test]
+    fn a_running_job_moves_its_progress_bar() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::Enter, true));
+
+        let mut seen = Vec::new();
+        for _ in 0..10 {
+            app.handle_event(&tick());
+            if let Some(job) = app.jobs.iter().find(|j| j.status == JobStatus::Running) {
+                seen.push(job.progress);
+            }
+        }
+        assert!(seen.len() > 2, "the first job should still be running");
+        assert!(
+            seen.windows(2).all(|w| w[1] > w[0]),
+            "the bar should only ever move forwards: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|p| *p > 0.0 && *p < 100.0),
+            "there was never a frame with the bar part-way across: {seen:?}"
+        );
+    }
+
+    /// A cancelled job's bar stops where it was. Without the status guard in
+    /// `advance` the bar keeps filling after the job has been called off, and
+    /// then reports a cancelled conversion as complete.
+    #[test]
+    fn a_cancelled_job_stops_moving() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::Enter, true));
+        for _ in 0..3 {
+            app.handle_event(&tick());
+        }
+        let (id, at) = app
+            .jobs
+            .iter()
+            .find(|j| j.status == JobStatus::Running)
+            .map(|j| (j.id, j.progress))
+            .expect("a job is running");
+        assert!(at > 0.0 && at < 100.0, "it should be part-way: {at}");
+
+        app.cancel_job(id);
+        for _ in 0..20 {
+            app.handle_event(&tick());
+        }
+        let job = app.jobs.iter().find(|j| j.id == id).expect("still listed");
+        assert_eq!(job.status, JobStatus::Cancelled);
+        assert!(
+            (job.progress - at).abs() < f32::EPSILON,
+            "a cancelled job kept converting: {at} -> {}",
+            job.progress
+        );
+    }
+
+    /// One job at a time: four at a quarter speed each finish no sooner and
+    /// make the bars useless.
+    #[test]
+    fn only_one_job_runs_at_a_time() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::Enter, true));
+        for _ in 0..60 {
+            let running = app
+                .jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Running)
+                .count();
+            assert!(running <= 1, "{running} jobs were running at once");
+            app.handle_event(&tick());
+        }
+    }
+
+    #[test]
+    fn enter_queues_only_the_selected_file() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::Down));
+        assert!(app.selected_source.is_some());
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.jobs.len(), 1, "one file selected, one job");
+    }
+
+    /// A queue with no cancel is a queue you have to wait out.
+    #[test]
+    fn ctrl_c_abandons_what_has_not_started() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::Enter, true));
+        app.handle_event(&key_ev(Key::C, true));
+        assert_eq!(
+            app.jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Queued)
+                .count(),
+            0,
+            "nothing should be left waiting"
+        );
+        assert_eq!(
+            app.jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Running)
+                .count(),
+            1,
+            "the one already running is not abandoned"
+        );
+    }
+
+    #[test]
+    fn ctrl_l_sweeps_up_the_finished_jobs() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::Enter, true));
+        for _ in 0..200 {
+            if !app
+                .jobs
+                .iter()
+                .any(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
+            {
+                break;
+            }
+            app.handle_event(&tick());
+        }
+        assert!(!app.jobs.is_empty());
+        app.handle_event(&key_ev(Key::L, true));
+        assert!(app.jobs.is_empty(), "the finished jobs should have gone");
+        assert_eq!(app.history.len(), 3, "but the history keeps them");
+    }
+
+    // -- the source list --
+
+    #[test]
+    fn the_arrows_walk_the_file_list_and_stop_at_the_ends() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::Down));
+        let first = app.selected_source;
+        assert_eq!(first, app.sources.first().map(|s| s.id));
+
+        app.handle_event(&press(Key::Up));
+        assert_eq!(app.selected_source, first, "stopping, not wrapping");
+
+        for _ in 0..10 {
+            app.handle_event(&press(Key::Down));
+        }
+        assert_eq!(app.selected_source, app.sources.last().map(|s| s.id));
+    }
+
+    /// `remove_source` and `clear_sources` had a test each and no caller.
+    #[test]
+    fn delete_removes_the_selected_file_or_all_of_them() {
+        let mut app = seeded();
+        let total = app.sources.len();
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(app.sources.len(), total - 1);
+
+        // Nothing selected now, so Delete clears the list.
+        app.handle_event(&press(Key::Delete));
+        assert!(app.sources.is_empty());
+    }
+
+    // -- settings --
+
+    /// `select_profile` exists to choose between the profiles and nothing
+    /// chose.
+    #[test]
+    fn the_arrows_cycle_the_conversion_profile() {
+        let mut app = seeded();
+        app.active_panel = ActivePanel::Settings;
+        assert!(app.profiles.len() > 1);
+
+        let mut seen = vec![app.selected_profile_idx];
+        for _ in 0..app.profiles.len() {
+            app.handle_event(&press(Key::Right));
+            seen.push(app.selected_profile_idx);
+        }
+        assert_eq!(seen.first(), seen.last(), "a full cycle should come round");
+        let mut distinct = seen.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            app.profiles.len(),
+            "and visit each: {seen:?}"
+        );
+
+        app.handle_event(&press(Key::Left));
+        assert_ne!(
+            app.selected_profile_idx, seen[0],
+            "Left should go the other way"
+        );
+    }
+
+    #[test]
+    fn the_number_keys_choose_the_quality_preset() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::Num1));
+        assert_eq!(app.quality_preset, QualityPreset::Low);
+        app.handle_event(&press(Key::Num4));
+        assert_eq!(app.quality_preset, QualityPreset::Lossless);
+    }
+
+    // -- panels and the window --
+
+    #[test]
+    fn tab_moves_through_the_three_panels() {
+        let mut app = seeded();
+        let mut seen = vec![app.active_panel];
+        for _ in 0..3 {
+            app.handle_event(&press(Key::Tab));
+            seen.push(app.active_panel);
+        }
+        assert_eq!(seen.first(), seen.last());
+        for panel in [
+            ActivePanel::SourceList,
+            ActivePanel::Settings,
+            ActivePanel::Queue,
+        ] {
+            assert!(seen.contains(&panel), "{panel:?} was skipped: {seen:?}");
+        }
+        assert!(
+            !app.show_queue || app.active_panel == ActivePanel::Queue,
+            "the queue flag should follow the panel"
+        );
+    }
+
+    #[test]
+    fn the_layout_follows_the_window_it_is_given() {
+        let mut app = seeded();
+        let _ = App::render(&mut app, 1600.0, 900.0);
+        assert!((app.window_width - 1600.0).abs() < 0.01);
+        assert!((app.window_height - 900.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_title_says_how_much_is_left() {
+        let mut app = seeded();
+        assert_eq!(app.title(), "Media Converter");
+
+        app.handle_event(&key_ev(Key::Enter, true));
+        let title = app.title();
+        assert!(title.contains("3 left"), "got {title:?}");
+
+        for _ in 0..200 {
+            if !app
+                .jobs
+                .iter()
+                .any(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
+            {
+                break;
+            }
+            app.handle_event(&tick());
+        }
+        assert_eq!(app.title(), "Media Converter", "and back when it is done");
+    }
 
     // --- Format detection ---
 
@@ -2682,7 +3364,7 @@ mod tests {
     fn test_render_produces_commands() {
         let mut app = MediaConvertApp::new();
         app.add_source("/a", "song.mp3", 5000, MediaCategory::Audio);
-        let cmds = app.render(1280.0, 800.0);
+        let cmds = app.render_commands(1280.0, 800.0);
         assert!(!cmds.is_empty());
     }
 

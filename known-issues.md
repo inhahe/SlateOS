@@ -100177,6 +100177,87 @@ Nothing here changes the operator's pending decision, which is only about
 whether to rewrite the history that already exists. This is about the history
 that does not exist yet.
 
+### Addendum 2026-09-04 (lane B) -- it recurred a third time, and gate 10 held
+
+The addendum above was written to argue that a mechanism was needed because the
+count *could* grow. It grew. This is the first recurrence since gate 10 existed,
+and it is the first one that cost nothing, so the comparison is the point.
+
+**What happened.** Lane B's commit at 23:03:31 was authored
+`selftest <selftest@example.invalid>` -- the same address as 2026-08-29, so the
+same fixture, not a new one. Lane B did not notice at the time and had no reason
+to: nothing in `git commit`'s output, `git log --oneline`, `git status` or the
+diff shows an author. It surfaced 45 minutes later as a **refused push**, which
+is the entire value of putting the check at the push boundary rather than
+anywhere earlier.
+
+**The window is bounded, which is what makes this entry evidence rather than an
+anecdote.** Both neighbouring commits are correctly attributed, so the shared
+config was poisoned and then cleaned inside a known interval:
+
+| Time (UTC) | Event | Evidence |
+|---|---|---|
+| 02:52:34 | lane B commits `251efc144`, authored correctly | commit metadata |
+| 02:58:01 | **lane A runs five gate self-tests in a loop**, `test-check-requests-not-deleted` among them | lane A session log |
+| 03:03:20 | lane B commits, authored `selftest` | commit metadata |
+| ~03:04 | **lane A's own worktree is found damaged** -- HEAD and index wrong, recovered with `git reset --hard 0ab4b55bc` | lane A session log |
+| 03:07:40 | lane A unsets `user.name`/`user.email` from `os/.git/config` | `os/.git/config` mtime + lane A session log |
+
+So the writer was a self-test running from **another lane's worktree**, and the
+damage crossed lanes because worktrees share one config -- the same coupling the
+original entry identified. Lane B's investigation initially looked for the cause
+in lane B's own tree and its own recent commands, and found nothing, correctly:
+*there was nothing there to find*. **When shared state is poisoned, the search
+must start from the state's mtime and not from your own history**, because on a
+three-lane tree the prior probability that you were the writer is one in three.
+
+**What it cost, versus what it cost last time.** 33 commits, permanently, across
+three lanes, plus two published tree-deleting commits -- against one commit,
+caught before publication, repaired in full. The repair was a `filter-branch
+--env-filter` over the nine unpushed commits, keyed on the bad address:
+
+```bash
+FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --env-filter '
+if [ "$GIT_AUTHOR_EMAIL" = "selftest@example.invalid" ]; then ... fi
+if [ "$GIT_COMMITTER_EMAIL" = "selftest@example.invalid" ]; then ... fi
+' -- HEAD --not --remotes
+```
+
+`--not --remotes` is the load-bearing part: it confines the rewrite to commits
+no remote has, so this is a rewrite of private history and **not** a force-push.
+It was chosen over the recipe the hook itself suggests
+(`git rebase --exec 'git commit --amend --no-edit --reset-author'`) for two
+reasons the hook's text does not anticipate: the range contained a merge commit
+with hand-resolved conflicts, which a rebase would have flattened or replayed;
+and `--reset-author` would have moved the author *dates* of eight commits that
+were never wrong. Verified content-neutral by comparing all nine trees
+pairwise against a backup ref -- every one identical, including the merge's.
+
+**Two things this corrects elsewhere.**
+
+- During the `A-27` / CRLF work of the same day, `check-eol` run against lane
+  A's worktree refused with `enumerated 1 of 1 tracked files, floor is 500`.
+  That was put down at the time to a live renormalisation and never written up,
+  so this is its only record. The attribution was probably wrong: lane A's index
+  was demonstrably being overwritten by fixture runs in that window, and "one
+  file in the index" is precisely the shape of a fixture repository. The reading
+  was most likely the same incident seen from the outside. It is left as a
+  probable rather than a proven cause because the two explanations were never
+  distinguished at the time.
+- `check-eol.py`'s `DISCOVERY_FLOOR = 500` is what turned that into a visible
+  refusal instead of a clean bill of health. A gate that had trusted
+  `git ls-files` would have reported lane A's tree as having zero CRLF findings
+  and been *right about the file it read*. **A guard against an implausibly
+  small input set earns its keep on the day another process is writing to your
+  input**, which is not the failure it was written for.
+
+**What is not fixed, and whose it is.** The writer is a self-test in `scripts/`,
+which is lane A's tree and lane A's ongoing work -- they committed
+`scripts/test-selftests-are-repo-safe.py` ("prove no gated self-test can damage
+the repository it runs from") within the hour. Lane B has deliberately not
+duplicated that. What lane B adds is the timeline above, because a *bounded*
+recurrence window is the one thing neither previous write-up had.
+
 ---
 
 ## `B-tar-EVERY-ARCHIVE-RECORDED-THE-OWNER-AS-A-BARE-NUMBER` (lane B, 2026-08-29) -- **FIXED 2026-08-29**

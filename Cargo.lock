@@ -16769,6 +16769,7 @@ dependencies = [
 name = "sshwire"
 version = "0.1.0"
 dependencies = [
+ "randrange",
  "sha2",
 ]
 

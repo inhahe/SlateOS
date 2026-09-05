@@ -655,6 +655,49 @@ impl Drop for MemoryTransport {
     }
 }
 
+// ============================================================================
+// The randomness underneath the protocol
+// ============================================================================
+
+/// Where a session's unpredictable bytes come from.
+///
+/// This is the second half of the argument [`Transport`] makes. `Transport`
+/// exists because both binaries were written against a raw kernel handle, so
+/// neither could be exercised without a kernel; this exists because both were
+/// written against `randrange::fill_secret` directly, so neither can be
+/// exercised without kernel *randomness* — and on the Windows host the test
+/// suite runs on, `randrange` refuses on purpose (`open-questions.md`, "The
+/// test machine cannot produce random numbers, on purpose…"). A handshake
+/// needs a Diffie-Hellman exponent. With no exponent there is no handshake,
+/// and the one test this stack most needs — run the client against the server
+/// and see whether they agree — cannot be written at all.
+///
+/// Making it a parameter buys two things beyond that. What is under test stops
+/// depending on which platform it was compiled for, which is the same mistake
+/// `randrange` made one layer down. And a test can supply a *deterministic*
+/// source, which turns "both ends derived the same session identifier" into
+/// "both ends derived exactly this session identifier" — an assertion that
+/// fails when either end drifts, rather than only when they drift apart.
+///
+/// It is deliberately a plain `fn` pointer rather than a trait object: a
+/// source with no state cannot accidentally acquire any, and both binaries can
+/// store one in a `Copy` field without a lifetime or an allocation.
+///
+/// # What this is not
+///
+/// It is **not** a way for a caller to choose weak randomness. Both binaries
+/// default to [`KERNEL_SECRETS`] and neither exposes a way to change it from
+/// the command line, a config file, or the network; the only writers are their
+/// own tests, in-crate. A source that could be selected by configuration would
+/// be a downgrade attack with a spelling.
+pub type SecretSource = fn(&mut [u8]) -> Result<(), randrange::EntropyError>;
+
+/// The real source: the kernel CSPRNG, which fails rather than substituting
+/// anything when it cannot answer.
+///
+/// This is what both binaries use unless a test says otherwise.
+pub const KERNEL_SECRETS: SecretSource = randrange::fill_secret;
+
 /// How much one [`StreamBuffer::fill_once`] will take at most.
 const STREAM_READ_SIZE: usize = 8192;
 
@@ -4000,5 +4043,66 @@ mod tests {
         let mut buf = StreamBuffer::new();
         buf.advance(9999);
         assert!(buf.unread().is_empty());
+    }
+
+    // ---- The randomness underneath the protocol ----
+
+    #[test]
+    fn the_default_secret_source_is_the_kernel_and_not_a_stand_in() {
+        // Asserting the *pointer*, not the behaviour, is the point: the risk
+        // this guards is a binary that ships with a test source wired in, which
+        // no test of "the bytes look random" would ever catch.
+        let expected: SecretSource = randrange::fill_secret;
+        assert!(
+            core::ptr::fn_addr_eq(KERNEL_SECRETS, expected),
+            "the default source must be randrange::fill_secret itself"
+        );
+    }
+
+    #[test]
+    fn the_kernel_source_answers_for_no_bytes_on_every_platform() {
+        // Asking for nothing needs no entropy, so this holds on the target and
+        // on a host that refuses -- which makes it the one assertion about the
+        // real source that is not really an assertion about the machine.
+        assert!(KERNEL_SECRETS(&mut []).is_ok());
+    }
+
+    /// A source that refuses, the way the kernel does when it cannot answer.
+    fn refuses(_out: &mut [u8]) -> Result<(), randrange::EntropyError> {
+        Err(randrange::EntropyError::Unavailable)
+    }
+
+    /// A source that answers, predictably, so a handshake is reproducible.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the Result is the SecretSource signature, not this function's choice"
+    )]
+    fn counts_up(out: &mut [u8]) -> Result<(), randrange::EntropyError> {
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::try_from(i % 251).unwrap_or(0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_substituted_source_is_the_one_that_gets_asked() {
+        // The whole value of the seam is that a caller holding a `SecretSource`
+        // reaches the substitute and not the kernel. If this ever stopped being
+        // true, every deterministic handshake test would silently start
+        // depending on the host's entropy again.
+        let mut buf = [0xFFu8; 4];
+        let source: SecretSource = counts_up;
+        source(&mut buf).expect("the stand-in answers");
+        assert_eq!(buf, [0, 1, 2, 3]);
+
+        let refusing: SecretSource = refuses;
+        assert_eq!(
+            refusing(&mut buf),
+            Err(randrange::EntropyError::Unavailable)
+        );
+        // A refusal must leave the caller's buffer alone rather than
+        // half-filling it: a partly-written secret that a caller ignored the
+        // error on is worse than an untouched one, because it looks plausible.
+        assert_eq!(buf, [0, 1, 2, 3]);
     }
 }

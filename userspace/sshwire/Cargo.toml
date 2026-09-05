@@ -8,8 +8,16 @@ description = "SSH-2 wire encoding and key-exchange arithmetic, shared by ssh an
 # with the far end of a connection. It is the same argument that already moved
 # SHA-256 out of both `ssh` and `sshd`; this crate is that argument applied one
 # layer up, to the constructions built *on* the digest.
+#
+# `randrange` for the same reason one step further out. `SecretSource` names
+# the shape of "where this session's unpredictable bytes come from", and both
+# binaries have to name the *same* shape for a test to be able to drive them
+# against each other with one source. Its error type comes along with it;
+# inventing a second spelling of "the CSPRNG said no" would be a third copy of
+# something that already exists twice.
 [dependencies]
 sha2 = { path = "../../sha2" }
+randrange = { path = "../../randrange" }
 
 [lints]
 workspace = true

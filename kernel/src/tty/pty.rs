@@ -598,6 +598,63 @@ pub fn master_try_read(handle: PtyHandle, out: &mut [u8]) -> KernelResult<usize>
     Err(KernelError::WouldBlock)
 }
 
+/// Write "keystrokes" into the pty without blocking.
+///
+/// As [`master_write`], but a full input ring is reported rather than waited
+/// out. This exists so a caller driving several objects in one loop — sshd
+/// forwarding a socket into a terminal is the case that asked for it — cannot
+/// be parked on the pty while the socket has work: with only the blocking form
+/// available, the choice was between stalling the whole loop and never filling
+/// the ring at all.
+///
+/// Two asymmetries against [`master_try_read`] are deliberate, and each follows
+/// this function's *blocking twin* rather than its non-blocking sibling:
+///
+/// 1. The hangup is checked **before** the transfer, where `master_try_read`
+///    checks it after. Bytes handed to a dead slave will never be read by
+///    anyone, whereas bytes a dying program already printed are still its
+///    output and must be drained first (see the module note and
+///    design-decisions.md §259).
+/// 2. Empty `data` is `InvalidArgument`, where an empty `out` is `Ok(0)`.
+///    Asking to write nothing is a caller bug; asking to read nothing is not.
+///
+/// # Errors
+///
+/// * `InvalidHandle` — not a master handle, or the pty is gone.
+/// * `ChannelClosed` — the slave end is closed: nothing will ever read this.
+/// * `InvalidArgument` — `data` is empty.
+/// * `WouldBlock` — the input ring is full and the slave is still open. This is
+///   the one state the blocking form waits out, and the whole point of this
+///   call is to surface it instead.
+pub fn master_try_write(handle: PtyHandle, data: &[u8]) -> KernelResult<usize> {
+    if handle.end() != PtyEnd::Master {
+        return Err(KernelError::InvalidHandle);
+    }
+    if data.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut table = PTYS.lock();
+    let pty = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
+    if pty.slave_gone() {
+        return Err(KernelError::ChannelClosed);
+    }
+    let n = pty.input.write(data);
+    if n > 0 {
+        // Waking is not optional on the short-write path either: the slave may
+        // be parked on an empty ring, and these bytes are exactly what it is
+        // waiting for.
+        let woken = pty.input_waiters.take_all();
+        drop(table);
+        wake_all(woken);
+        return Ok(n);
+    }
+    // No `input_waiters.remove(task)` counterpart to `master_write`'s: that
+    // call is paired with the `insert` its park needs, and this never parks.
+    Err(KernelError::WouldBlock)
+}
+
 // ---------------------------------------------------------------------------
 // Slave side
 // ---------------------------------------------------------------------------
@@ -1196,6 +1253,76 @@ pub fn self_test() {
     );
     let _ = close(s3);
     assert!(!tty::exists(id3), "device removed after both ends closed");
+
+    // --- non-blocking master write -----------------------------------------
+    // `master_write` cannot be exercised at its interesting point here — a full
+    // input ring is exactly where it parks, and there is no second task to
+    // unpark it. The non-blocking form reaches that state and returns, so this
+    // is the one place the full-ring behaviour is checkable in a boot self-test.
+    let (m5, s5) = create().expect("pty create 5");
+    let id5 = m5.id();
+
+    // Rejections first, so a later `Ok` cannot be an accident of a handle check
+    // that admits everything.
+    assert_eq!(
+        master_try_write(s5, b"x"),
+        Err(KernelError::InvalidHandle),
+        "a slave handle cannot write input, blocking or not"
+    );
+    // Follows `master_write`, not `master_try_read`: asking to write nothing is
+    // a caller bug, asking to read nothing is not. The two non-blocking calls
+    // deliberately disagree here, and this is what stops the disagreement being
+    // "tidied up" into a symmetry that would silently change an ABI.
+    assert_eq!(
+        master_try_write(m5, b""),
+        Err(KernelError::InvalidArgument),
+        "an empty write follows master_write's rejection, not master_try_read's Ok(0)"
+    );
+
+    let block = vec![b'a'; INPUT_CAPACITY];
+    assert_eq!(
+        master_try_write(m5, &block),
+        Ok(INPUT_CAPACITY),
+        "an empty ring takes the whole buffer"
+    );
+    assert_eq!(
+        master_try_write(m5, b"z"),
+        Err(KernelError::WouldBlock),
+        "a full ring with a live slave is WouldBlock — not Ok(0), and not a park"
+    );
+
+    // One byte out makes room for exactly one byte in, and a short count is a
+    // *success*: the caller resubmits the tail, as it would on a pipe. Reported
+    // as an error instead, a caller retrying "the failed write" would resend the
+    // byte that was in fact accepted.
+    match slave_try_read_input(id5) {
+        Input::Byte(b) => assert_eq!(b, b'a', "the byte drained is the first written"),
+        other => panic!("draining a full input ring returned {other:?}"),
+    }
+    assert_eq!(
+        master_try_write(m5, b"xy"),
+        Ok(1),
+        "a short count is a success, not an error"
+    );
+    assert_eq!(
+        master_try_write(m5, b"z"),
+        Err(KernelError::WouldBlock),
+        "and one byte refilled the ring"
+    );
+
+    // The hangup outranks the full ring, which is the asymmetry against
+    // `master_try_read` (that one drains before reporting EIO). Bytes handed to
+    // a dead slave will never be read by anybody, so there is nothing to
+    // preserve by reporting the space first — whereas a dying program's last
+    // line really is its output.
+    assert!(close(s5).is_empty(), "closing a slave hangs nobody up");
+    assert_eq!(
+        master_try_write(m5, b"z"),
+        Err(KernelError::ChannelClosed),
+        "a closed slave is EPIPE, checked before the ring's state"
+    );
+    let _ = close(m5);
+    assert!(!tty::exists(id5), "device removed after both ends closed");
 
     // --- the original pty is still intact and gets cleaned up --------------
     let _ = close(m);

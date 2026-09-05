@@ -74,8 +74,9 @@ use super::number::{
     SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
     SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP,
     SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ,
-    SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP,
-    SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_WRITE,
+    SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES,
+    SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID,
+    SYS_PTY_SLAVE_WRITE,
     SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
     SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SEM_CLOSE,
     SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT,
@@ -472,6 +473,9 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PTY_MASTER_WRITE as usize] = Some(handlers::sys_pty_master_write);
     handlers[SYS_PTY_MASTER_READ as usize] = Some(handlers::sys_pty_master_read);
     handlers[SYS_PTY_MASTER_TRY_READ as usize] = Some(handlers::sys_pty_master_try_read);
+    // Numbered 1065, not beside its twin: the 544–552 block is full. See
+    // `SYS_PTY_MASTER_TRY_WRITE`'s doc comment for why it is not renumbered.
+    handlers[SYS_PTY_MASTER_TRY_WRITE as usize] = Some(handlers::sys_pty_master_try_write);
     handlers[SYS_PTY_SLAVE_WRITE as usize] = Some(handlers::sys_pty_slave_write);
     handlers[SYS_PTY_CLOSE as usize] = Some(handlers::sys_pty_close);
     handlers[SYS_PTY_DUP as usize] = Some(handlers::sys_pty_dup);
@@ -2062,6 +2066,7 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
     //     succeed and feed a byte into the pty's line discipline.
     for (nr, name) in [
         (SYS_PTY_MASTER_WRITE, "SYS_PTY_MASTER_WRITE"),
+        (SYS_PTY_MASTER_TRY_WRITE, "SYS_PTY_MASTER_TRY_WRITE"),
         (SYS_PTY_MASTER_TRY_READ, "SYS_PTY_MASTER_TRY_READ"),
         (SYS_PTY_CLOSE, "SYS_PTY_CLOSE"),
         (SYS_PTY_DUP, "SYS_PTY_DUP"),

@@ -5895,6 +5895,20 @@ pub fn sys_pty_create(args: &SyscallArgs) -> SyscallResult {
 /// ring is full, which gives a paste into a slow program back-pressure instead
 /// of a silent truncation.
 pub fn sys_pty_master_write(args: &SyscallArgs) -> SyscallResult {
+    pty_master_write_common(args, false)
+}
+
+/// `SYS_PTY_MASTER_TRY_WRITE` — non-blocking [`sys_pty_master_write`].
+///
+/// Reports `WouldBlock` (EAGAIN) instead of parking on a full input ring, so a
+/// caller driving a socket and a terminal in one loop is never stalled on the
+/// terminal while the socket has work.
+pub fn sys_pty_master_try_write(args: &SyscallArgs) -> SyscallResult {
+    pty_master_write_common(args, true)
+}
+
+/// Body shared by the blocking and non-blocking master writes.
+fn pty_master_write_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResult {
     let handle = match owned_pty_handle(args.arg0) {
         Ok(h) => h,
         Err(e) => return SyscallResult::err(e),
@@ -5903,13 +5917,22 @@ pub fn sys_pty_master_write(args: &SyscallArgs) -> SyscallResult {
     if args.arg1 == 0 && len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    // Copied in first because `master_write` blocks: a `&[u8]` over a user
-    // pointer held across a park can be unmapped by a sibling thread.
+    // Copied in first, on both paths. The blocking one obviously needs it — a
+    // `&[u8]` over a user pointer held across a park can be unmapped by a
+    // sibling thread — but so does the non-blocking one, which is why this is
+    // not "optimised away" for it: the pty table lock is held across the
+    // transfer either way, and a fault taken there is just as unrecoverable as
+    // one taken across a park.
     let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
-    match crate::tty::pty::master_write(handle, &data) {
+    let result = if non_blocking {
+        crate::tty::pty::master_try_write(handle, &data)
+    } else {
+        crate::tty::pty::master_write(handle, &data)
+    };
+    match result {
         #[allow(clippy::cast_possible_wrap)]
         Ok(n) => SyscallResult::ok(n as i64),
         Err(e) => SyscallResult::err(e),

@@ -1,7 +1,18 @@
 # B → A: a pty master write cannot be made non-blocking — there is no `SYS_PTY_MASTER_TRY_WRITE`
 
 **Filed:** 2026-09-05 by lane B
-**Status:** OPEN
+
+**Status:** ✅ **DONE 2026-09-05.** `SYS_PTY_MASTER_TRY_WRITE` is **1065**, not a
+slot in the pty band — 544–556 is contiguous and entirely allocated, so the band
+had no room after all. **A full ring is `WouldBlock` (-4), not `Ok(0)`**, so the
+`0 → EAGAIN` arm in your contract has nothing to map; your existing
+`native::WOULD_BLOCK => EAGAIN` (`posix/src/errno.rs:378`) already produces the
+errno you asked for. Short counts and `CHANNEL_CLOSED → EPIPE` are as you wrote
+them. `SYS_PTY_WRITABLE_BYTES` is **declined** — not on cost, but because it is
+the same "there *was* room" race this request is about. Full reply, including a
+zero-length-write case your contract does not cover and an asymmetry against
+`master_try_read` that is deliberate:
+`requests/a-b-pty-master-try-write-is-1065-and-it-returns-wouldblock-not-zero.md`.
 
 ## In short
 

@@ -116455,3 +116455,70 @@ worth having: they now fail *and* the program breaks.
 nobody wants to know which parts of it are connected. Prefer scoped
 `#[allow(dead_code, reason = "...")]` per item -- as `apps/kanban` now has, 22 of
 them -- so the next unused thing is still reported.
+
+
+### Lesson 116: a fast path in front of a table becomes a second table, and the fast one wins (lane C, 2026-09-04)
+
+`apps/netscan` resolves a port number to a service name. It had two ways to do
+it:
+
+* `service_database()` -- 125 entries, each with a port, a protocol, a service
+  name and a description. The module doc advertises it: "service detection with
+  100+ port-to-service mappings".
+* `lookup_service(port)` -- a 57-arm `match`, introduced by this comment:
+
+      // Use a static-like approach; match on common ports for O(1) lookup of
+      // the most frequently queried ports, falling back to the database for
+      // the rest.
+
+It did not fall back. The `match` ended `_ => None`, and `service_database` had
+no caller anywhere in the crate. So 68 of the 125 entries were unreachable: a
+scan that found port 43 open showed `-` where the table said `whois`.
+
+**The part worth remembering is not that it was incomplete.** It is that the
+shadowing copy was *less accurate* than the table it shadowed. Where both knew a
+port, they disagreed four times, and every disagreement lost information:
+
+| port | the match said | the table said |
+|---|---|---|
+| 137 | `netbios` | `netbios-ns` |
+| 139 | `netbios` | `netbios-ssn` |
+| 67 | `dhcp` | `dhcp-server` |
+| 68 | `dhcp` | `dhcp-client` |
+
+Four services under two names. That is what a hand-written fast path drifts
+towards: it is written from memory, in a hurry, for the "common" cases, and the
+carefully-sourced table beside it is the one nobody reads.
+
+The repair was to delete the `match` outright rather than make it agree.
+125 entries is a few hundred bytes to scan, once per open port on screen; the
+performance argument for the fast path was never measured and would not have
+survived being measured. One table cannot disagree with itself.
+
+**How to find the next one:** grep for a lookup function that returns a
+`'static` answer and check whether the data structure it is named after has a
+caller. A `match` with more than a dozen arms that duplicates a nearby table is
+the shape. The test that now guards it walks the whole table and asserts every
+entry is reachable through the lookup -- which is cheap, and which no test of
+either half alone would have caught.
+
+### Lesson 117: a surviving mutation sometimes means the code is redundant, not that the test is weak (lane C, 2026-09-04)
+
+Twice this week a mutation survived and the correct response was to delete code
+rather than to write a test.
+
+* `apps/systemrestore`'s `advance_operation` ended a running operation two ways:
+  a `progress.complete` check, and running out of frames. Deleting the first
+  changed nothing observable, because the filmstrip's finished frame *is* its
+  last one -- so the second condition always fired on the same tick.
+* `apps/netscan`'s `start_scan` already reset both scroll offsets at the end,
+  with a comment explaining why and a test covering it. I added a second reset
+  at the top without reading that far. The mutation that deleted mine survived,
+  because the real one was still there.
+
+The reflex on a survivor is "my test is too loose". Check the other possibility
+first, because it is quicker to check and the fix is better: **if removing a
+line changes nothing, ask whether some other line is already doing the job.**
+The tell is a survivor on code you *just wrote* to fix something -- if the
+behaviour was already correct, the thing you added is a duplicate, and the
+duplicate is the defect.

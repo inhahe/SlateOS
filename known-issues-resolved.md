@@ -8148,6 +8148,7 @@ Baselines for P21(a) now stand at three idle release runs — `vfs_stat_breakdow
 = 262, 261, 262 ns — putting run-to-run noise on that phase under 0.5% and the
 20% threshold far outside it. `vfs_stat_breakdown_prologue` = 580, 568 ns across
 the two runs that recorded it (noise ~2%).
+
 ---
 
 ### [A] TOOLING-A-EDITING-A-SHELL-SCRIPT-WHILE-IT-IS-RUNNING-CAN-DERAIL-THE-RUNNING-COPY — ⚠️ HAZARD, avoided 2026-08-15
@@ -12093,6 +12094,7 @@ rows' values follow.
 **Impact.** Wrong value and wrong diagnostic for a deprecated spelling of
 arithmetic expansion, in malformed input, reachable only through `@P`/`PS4`/
 here-doc text.
+
 ---
 
 
@@ -51854,6 +51856,7 @@ The residual 339 are exactly the composed-Latin-diacritics cases this entry
 predicted (`\u1e09` 255, `\u212b` 57, `été` 10, …). They are **not** tracked
 here as a bug; they are the layering question in `norm.rs`'s module doc, and
 belong to the operator. See `open-questions.md`.
+
 ---
 
 

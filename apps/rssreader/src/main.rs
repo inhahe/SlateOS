@@ -26,6 +26,11 @@
 use std::collections::HashMap;
 
 use guitk::color::Color;
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::RenderTree;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 // The shared civil-date arithmetic. This app carried its own copy of Howard
 // Hinnant's `days_from_civil`/`civil_from_days` pair -- a third and fourth
 // transcription of an algorithm `guitk::date` already reaches through
@@ -2451,6 +2456,233 @@ impl RssReaderApp {
         }
     }
 
+    // ====================================================================
+    // Input
+    //
+    // This program had none, and nineteen functions had no caller outside the
+    // tests -- `parse_feed` among them, which is the first feature the module
+    // doc lists.
+    // ====================================================================
+
+    /// Handle one event from the window.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window wider than 16 million pixels does not exist"
+                )]
+                {
+                    self.width = *width as f32;
+                    self.height = *height as f32;
+                }
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Handle a key press.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // The search box takes every key while it is open, or typing a query
+        // containing `r` would mark an article read behind it.
+        if self.search_active {
+            return self.handle_search_key(key);
+        }
+
+        if key.modifiers.ctrl {
+            return match key.key {
+                Key::F => {
+                    self.search_active = true;
+                    EventResult::Consumed
+                }
+                // Every article in the current view. `mark_all_read` had a test
+                // and no caller.
+                Key::A => {
+                    self.mark_all_read();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+
+        match key.key {
+            Key::Tab => {
+                self.active_pane = if key.modifiers.shift {
+                    self.active_pane.prev()
+                } else {
+                    self.active_pane.next()
+                };
+                EventResult::Consumed
+            }
+            // Through the articles. `next_article` and `prev_article` were
+            // written, tested, and had no key.
+            Key::Down | Key::J => {
+                self.next_article();
+                EventResult::Consumed
+            }
+            Key::Up | Key::K => {
+                self.prev_article();
+                EventResult::Consumed
+            }
+            // Read and starred. Both had a test each and no caller, so an
+            // article could be opened and never marked.
+            Key::Enter | Key::M => {
+                self.toggle_read();
+                EventResult::Consumed
+            }
+            Key::S => {
+                self.toggle_star();
+                EventResult::Consumed
+            }
+            // The filters the sidebar names.
+            Key::Num1 => {
+                self.filter_mode = FilterMode::All;
+                self.clamp_selection();
+                EventResult::Consumed
+            }
+            Key::Num2 => {
+                self.filter_mode = FilterMode::Unread;
+                self.clamp_selection();
+                EventResult::Consumed
+            }
+            Key::Num3 => {
+                self.filter_mode = FilterMode::Starred;
+                self.clamp_selection();
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                if !self.search_query.is_empty() {
+                    self.search_query.clear();
+                    self.search_results.clear();
+                    EventResult::Consumed
+                } else if self.show_help {
+                    self.show_help = false;
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Key::Slash if key.modifiers.shift => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Keys while the search box is open.
+    fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.search_active = false;
+                self.search_query.clear();
+                self.search_results.clear();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.search_active = false;
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                self.search_query.pop();
+                self.perform_search();
+                EventResult::Consumed
+            }
+            _ => {
+                let typed: String = key.typed().collect();
+                if typed.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.search_query.push_str(&typed);
+                // `perform_search` on every keystroke rather than on Enter:
+                // it filters an in-memory list, and a search box that shows
+                // nothing until it is submitted is a search box you have to be
+                // told how to use.
+                self.perform_search();
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Keep the selection inside the list the current filter shows.
+    ///
+    /// The selection is an index into the *filtered* list, so changing the
+    /// filter can leave it past the end -- which `filtered_article_indices`
+    /// then answers `None` for, and every key stops working with no sign why.
+    fn clamp_selection(&mut self) {
+        let count = self.filtered_article_indices().len();
+        self.selected_article_index = self.selected_article_index.min(count.saturating_sub(1));
+    }
+
+    /// Fill one sample feed by parsing real feed XML.
+    ///
+    /// Every other feed here is built by calling `create_sample_article`, which
+    /// makes an `Article` directly. That is fine for sample data and it leaves
+    /// `parse_feed` -- the RSS 2.0 and Atom 1.0 parser that is the first
+    /// feature this file's module doc lists, with six tests over it -- with no
+    /// caller in the program at all. A parser nothing calls is a parser whose
+    /// tests are the only thing that would notice it breaking.
+    ///
+    /// So one feed is seeded the way a real refresh would seed it: XML in,
+    /// `parse_feed`, `ingest_parsed_feed`. If the parser stops recognising a
+    /// `<item>`, this feed is empty on the opening screen.
+    ///
+    /// The XML is small and deliberately exercises the awkward parts: an
+    /// escaped ampersand in a title, a CDATA description, and a
+    /// `<pubDate>` in RFC 822 form.
+    fn seed_feed_from_xml(&mut self, feed_id: FeedId) {
+        self.ingest_feed_xml(feed_id, Self::SAMPLE_RSS);
+    }
+
+    /// Parse `xml` into `feed_id`, reporting a failure on the status line.
+    ///
+    /// Split from [`Self::seed_feed_from_xml`] so the failure path can be
+    /// reached: with the XML a `const` inside the function, the only way to
+    /// exercise the `Err` arm was to break the sample, and a mutation that
+    /// deleted the error report survived because nothing could make it fire.
+    /// This is also the shape a real refresh would call.
+    fn ingest_feed_xml(&mut self, feed_id: FeedId, xml: &str) {
+        match parse_feed(xml) {
+            Ok(parsed) => self.ingest_parsed_feed(feed_id, &parsed, 1_700_000_000),
+            // Reported rather than ignored: a feed that did not parse is worth
+            // seeing on the status line, not worth a silently short list.
+            Err(err) => {
+                self.status_message = format!("feed did not parse: {err}");
+            }
+        }
+    }
+
+    /// The sample feed's XML, parsed at startup by
+    /// [`RssReaderApp::seed_feed_from_xml`].
+    ///
+    /// Small, and deliberately awkward in the places a feed parser goes wrong: an
+    /// escaped ampersand in a title, a CDATA description with markup inside it, and
+    /// an RFC 822 `pubDate`.
+    const SAMPLE_RSS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Lobsters</title>
+    <link>https://lobste.rs/</link>
+    <description>Computing-focused community</description>
+    <item>
+      <title>Bits &amp; Bytes: a history of the byte</title>
+      <link>https://lobste.rs/s/aaaaaa</link>
+      <description><![CDATA[Why eight? The answer is <b>not</b> obvious.]]></description>
+      <pubDate>Mon, 18 May 2026 09:15:00 GMT</pubDate>
+      <guid>https://lobste.rs/s/aaaaaa</guid>
+    </item>
+    <item>
+      <title>A tour of lock-free ring buffers</title>
+      <link>https://lobste.rs/s/bbbbbb</link>
+      <description>Single producer, single consumer, and the memory ordering that makes it work.</description>
+      <pubDate>Sun, 17 May 2026 21:40:00 GMT</pubDate>
+      <guid>https://lobste.rs/s/bbbbbb</guid>
+    </item>
+  </channel>
+</rss>"#;
+
     /// Populate sample data for demonstration.
     fn populate_sample_data(&mut self) {
         // Create folders
@@ -2506,6 +2738,10 @@ impl RssReaderApp {
                 .health
                 .record_failure(1_700_200_000, "Connection timeout");
         }
+
+        // One feed's articles come out of the parser rather than out of a
+        // constructor. See `seed_feed_from_xml`.
+        self.seed_feed_from_xml(lobsters_feed);
 
         // Create sample articles
 
@@ -2730,7 +2966,11 @@ impl RssReaderApp {
     // ========================================================================
 
     /// Render the entire application frame, producing a list of render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    /// Draw the whole window.
+    ///
+    /// Not `render`: [`App::render`] is the one the window calls, and an
+    /// inherent method of the same name shadows a trait method at equal arity.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background fill
@@ -4374,13 +4614,67 @@ pub fn wrap_text(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
 // Entry point
 // ============================================================================
 
-fn main() {
-    let app = RssReaderApp::new(1200.0, 800.0);
-    let cmds = app.render();
+impl App for RssReaderApp {
+    fn title(&self) -> String {
+        // The unread count, which is what a feed reader is consulted for
+        // without being raised. The harness re-reads this as the program runs.
+        let unread = self.articles.iter().filter(|a| !a.is_read).count();
+        if unread == 0 {
+            "Feeds".to_string()
+        } else {
+            format!("Feeds ({unread} unread)")
+        }
+    }
 
-    // In the actual OS, these commands would be submitted to the compositor.
-    // For now, we verify the app produces valid render output.
-    let _cmd_count = cmds.len();
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive and well inside u32"
+        )]
+        {
+            (self.width as u32, self.height as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// The app carries a `global_auto_refresh_seconds` and the module doc
+    /// offers a "configurable auto-refresh interval", but a refresh fetches
+    /// over HTTP and this tree has no client to fetch with -- so the timer
+    /// would wake the machine to re-read a fixed set of articles. The one line
+    /// to change when `net/` has an HTTP client is this method; see
+    /// `known-issues.md` ->
+    /// `TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // From the frame being drawn rather than the last `Resize`: the three
+        // pane widths are derived from these, and the first frame is drawn
+        // before any `Resize` arrives.
+        self.width = width;
+        self.height = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = RssReaderApp::new(1200.0, 800.0);
+    app::launch("rssreader", &mut app)
 }
 
 // ============================================================================
@@ -4397,10 +4691,287 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::arithmetic_side_effects
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp,
+        clippy::manual_string_new
     )]
 
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Wiring
+    //
+    // This program had no input handling, and nineteen functions had no
+    // caller outside the tests -- `parse_feed` among them, which is the first
+    // feature the module doc lists.
+    // ------------------------------------------------------------------
+
+    fn key_ev(key: Key, ctrl: bool, shift: bool) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        modifiers.shift = shift;
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn press(k: Key) -> Event {
+        key_ev(k, false, false)
+    }
+
+    fn types(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    fn app() -> RssReaderApp {
+        RssReaderApp::new(1200.0, 800.0)
+    }
+
+    /// One feed is filled by parsing real RSS rather than by a constructor, so
+    /// `parse_feed` is on the path the program actually runs. It had six tests
+    /// and no caller, which means its tests were the only thing that would
+    /// have noticed it breaking.
+    #[test]
+    fn one_sample_feed_comes_out_of_the_parser() {
+        let app = app();
+        assert!(
+            !app.status_message.contains("did not parse"),
+            "the sample feed failed to parse: {}",
+            app.status_message
+        );
+
+        let titles: Vec<&str> = app.articles.iter().map(|a| a.title.as_str()).collect();
+        assert!(
+            titles.iter().any(|t| t.contains("history of the byte")),
+            "the parsed feed's articles are missing: {titles:?}"
+        );
+        assert!(
+            titles.iter().any(|t| t.contains("ring buffers")),
+            "only one of the two parsed items arrived: {titles:?}"
+        );
+    }
+
+    /// A feed that does not parse says so, rather than leaving a silently
+    /// short list. The error arm was unreachable while the XML was a `const`
+    /// inside the function that parsed it -- so a mutation deleting the report
+    /// survived, because nothing could make it fire.
+    #[test]
+    fn a_feed_that_does_not_parse_is_reported() {
+        let mut a = app();
+        a.status_message.clear();
+        let feed = a.feeds.first().map(|f| f.id).expect("a feed");
+
+        a.ingest_feed_xml(feed, "<not-a-feed>nothing here</not-a-feed>");
+        assert!(
+            a.status_message.contains("did not parse"),
+            "the failure was swallowed; status is {:?}",
+            a.status_message
+        );
+    }
+
+    /// The awkward parts of the sample XML are there on purpose: an escaped
+    /// ampersand, a CDATA body. If the parser stops handling either, the
+    /// opening screen shows it.
+    #[test]
+    fn the_parsed_feed_decodes_entities_and_cdata() {
+        let app = app();
+        let parsed = app
+            .articles
+            .iter()
+            .find(|a| a.title.contains("history of the byte"))
+            .expect("the parsed article");
+        assert!(
+            parsed.title.contains('&'),
+            "the escaped ampersand was not decoded: {:?}",
+            parsed.title
+        );
+        assert!(
+            !parsed.title.contains("&amp;"),
+            "the entity is still raw: {:?}",
+            parsed.title
+        );
+        assert!(
+            parsed.cached_text.contains("not") && !parsed.cached_text.contains("<b>"),
+            "the CDATA body was not turned into text: {:?}",
+            parsed.cached_text
+        );
+    }
+
+    // -- navigation --
+
+    #[test]
+    fn the_arrows_walk_the_article_list_and_stop_at_the_ends() {
+        let mut a = app();
+        let count = a.filtered_article_indices().len();
+        assert!(count > 2);
+        a.selected_article_index = 0;
+
+        a.handle_event(&press(Key::Down));
+        assert_eq!(a.selected_article_index, 1);
+        a.handle_event(&press(Key::Up));
+        assert_eq!(a.selected_article_index, 0);
+        a.handle_event(&press(Key::Up));
+        assert_eq!(a.selected_article_index, 0, "stopping, not wrapping");
+
+        for _ in 0..count + 5 {
+            a.handle_event(&press(Key::Down));
+        }
+        assert_eq!(a.selected_article_index, count - 1);
+    }
+
+    #[test]
+    fn tab_moves_through_the_three_panes() {
+        let mut a = app();
+        let mut seen = vec![a.active_pane];
+        for _ in 0..3 {
+            a.handle_event(&press(Key::Tab));
+            seen.push(a.active_pane);
+        }
+        assert_eq!(seen.first(), seen.last(), "three presses should come round");
+        for pane in [
+            ActivePane::Sidebar,
+            ActivePane::ArticleList,
+            ActivePane::ContentView,
+        ] {
+            assert!(seen.contains(&pane), "{pane:?} was skipped: {seen:?}");
+        }
+
+        // And back the other way.
+        let before = a.active_pane;
+        a.handle_event(&key_ev(Key::Tab, false, true));
+        a.handle_event(&press(Key::Tab));
+        assert_eq!(a.active_pane, before);
+    }
+
+    // -- article state --
+
+    /// `toggle_read` and `toggle_star` had a test each and no caller, so an
+    /// article could be opened and never marked.
+    #[test]
+    fn enter_marks_read_and_s_stars() {
+        let mut a = app();
+        a.filter_mode = FilterMode::All;
+        a.selected_article_index = 0;
+        let idx = *a.filtered_article_indices().first().expect("an article");
+
+        let was_read = a.articles[idx].is_read;
+        a.handle_event(&press(Key::Enter));
+        assert_ne!(a.articles[idx].is_read, was_read);
+
+        let was_starred = a.articles[idx].is_starred;
+        a.handle_event(&press(Key::S));
+        assert_ne!(a.articles[idx].is_starred, was_starred);
+    }
+
+    #[test]
+    fn ctrl_a_marks_everything_in_view_read() {
+        let mut a = app();
+        a.filter_mode = FilterMode::All;
+        assert!(a.articles.iter().any(|x| !x.is_read));
+        a.handle_event(&key_ev(Key::A, true, false));
+        assert!(
+            a.articles.iter().all(|x| x.is_read),
+            "some articles are still unread"
+        );
+        assert_eq!(a.title(), "Feeds", "and the title should say so");
+    }
+
+    /// The filters the sidebar names, and the selection has to survive them:
+    /// it is an index into the *filtered* list, so a narrower filter can leave
+    /// it past the end and every subsequent key does nothing with no sign why.
+    #[test]
+    fn the_number_keys_filter_and_the_selection_survives() {
+        let mut a = app();
+        a.filter_mode = FilterMode::All;
+        let all = a.filtered_article_indices().len();
+        a.selected_article_index = all - 1;
+
+        a.handle_event(&press(Key::Num3));
+        assert_eq!(a.filter_mode, FilterMode::Starred);
+        let starred = a.filtered_article_indices().len();
+        assert!(starred < all, "the starred filter should narrow the list");
+        assert!(
+            a.selected_article_index < starred.max(1),
+            "the selection is at {} in a list of {starred}",
+            a.selected_article_index
+        );
+
+        a.handle_event(&press(Key::Num2));
+        assert_eq!(a.filter_mode, FilterMode::Unread);
+        a.handle_event(&press(Key::Num1));
+        assert_eq!(a.filter_mode, FilterMode::All);
+    }
+
+    // -- search --
+
+    /// `perform_search` had two tests and no caller.
+    #[test]
+    fn ctrl_f_searches_as_you_type_and_escape_clears_it() {
+        let mut a = app();
+        a.handle_event(&key_ev(Key::F, true, false));
+        assert!(a.search_active);
+
+        for c in "rust".chars() {
+            a.handle_event(&types(c));
+        }
+        assert_eq!(a.search_query, "rust");
+        assert!(
+            !a.search_results.is_empty(),
+            "the search should have run on each keystroke"
+        );
+
+        a.handle_event(&press(Key::Backspace));
+        assert_eq!(a.search_query, "rus");
+
+        a.handle_event(&press(Key::Escape));
+        assert!(!a.search_active);
+        assert!(a.search_query.is_empty());
+        assert!(a.search_results.is_empty());
+    }
+
+    /// While the search box is open it takes every key, so typing a query with
+    /// an `s` in it must not star the article behind it.
+    #[test]
+    fn the_search_box_swallows_the_list_keys() {
+        let mut a = app();
+        a.filter_mode = FilterMode::All;
+        a.selected_article_index = 0;
+        let idx = *a.filtered_article_indices().first().expect("an article");
+        let starred = a.articles[idx].is_starred;
+
+        a.handle_event(&key_ev(Key::F, true, false));
+        a.handle_event(&types('s'));
+        assert_eq!(
+            a.articles[idx].is_starred, starred,
+            "typing `s` starred an article"
+        );
+        assert_eq!(a.search_query, "s");
+    }
+
+    // -- the window --
+
+    #[test]
+    fn the_layout_follows_the_window_it_is_given() {
+        let mut a = app();
+        let _ = App::render(&mut a, 1600.0, 1000.0);
+        assert!((a.width - 1600.0).abs() < 0.01);
+        assert!((a.height - 1000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_title_counts_the_unread_articles() {
+        let a = app();
+        let title = a.title();
+        assert!(title.contains("unread"), "got {title:?}");
+    }
 
     /// A feed is remote data, and `parse_element` recurses once per nesting
     /// level. Before [`MAX_XML_DEPTH`] existed, roughly seven kilobytes of
@@ -4910,11 +5481,11 @@ mod tests {
 
     #[test]
     fn test_parse_atom1_multiple_entries() {
-        let xml = r#"<feed>
+        let xml = "<feed>
           <title>Multi Atom</title>
           <entry><title>X</title></entry>
           <entry><title>Y</title></entry>
-        </feed>"#;
+        </feed>";
 
         let parsed = parse_feed(xml).unwrap();
         assert_eq!(parsed.articles.len(), 2);
@@ -6001,7 +6572,7 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let app = RssReaderApp::new(1200.0, 800.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
         // Should produce a significant number of commands
         assert!(cmds.len() > 50);
@@ -6011,7 +6582,7 @@ mod tests {
     fn test_render_with_sidebar_hidden() {
         let mut app = RssReaderApp::new(1200.0, 800.0);
         app.sidebar_visible = false;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -6019,12 +6590,12 @@ mod tests {
     fn test_render_with_help_overlay() {
         let mut app = RssReaderApp::new(1200.0, 800.0);
         app.show_help = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Should have more commands due to overlay
         let normal = {
             let mut a2 = RssReaderApp::new(1200.0, 800.0);
             a2.show_help = false;
-            a2.render().len()
+            a2.render_commands().len()
         };
         assert!(cmds.len() > normal);
     }
@@ -6033,7 +6604,7 @@ mod tests {
     fn test_render_with_add_feed_dialog() {
         let mut app = RssReaderApp::new(1200.0, 800.0);
         app.show_add_feed_dialog = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -6041,7 +6612,7 @@ mod tests {
     fn test_render_with_feed_health_overlay() {
         let mut app = RssReaderApp::new(1200.0, 800.0);
         app.show_feed_health = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -6049,7 +6620,7 @@ mod tests {
     fn test_render_empty_article_list() {
         let mut app = RssReaderApp::new(800.0, 600.0);
         app.search_query = "zzzzzz_no_match_ever".to_string();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -6057,14 +6628,14 @@ mod tests {
     fn test_render_no_selected_article() {
         let mut app = RssReaderApp::new(800.0, 600.0);
         app.articles.clear();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_small_window() {
         let app = RssReaderApp::new(400.0, 300.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -6285,8 +6856,8 @@ mod tests {
             expected: "a".to_string(),
             found: "b".to_string(),
         };
-        assert!(format!("{err}").contains("a"));
-        assert!(format!("{err}").contains("b"));
+        assert!(format!("{err}").contains('a'));
+        assert!(format!("{err}").contains('b'));
     }
 
     // -----------------------------------------------------------------------

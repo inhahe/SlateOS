@@ -1743,7 +1743,21 @@ pub struct Signature {
 
 // ─── Application ─────────────────────────────────────────────────────
 
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
+
+/// The window size to ask for.
+///
+/// A request, not a promise: `render` is handed the size it is actually being
+/// drawn at and lays out from that, which is why nothing else in this file
+/// stores a width.
+const WINDOW_WIDTH: f32 = 1400.0;
+/// As [`WINDOW_WIDTH`].
+const WINDOW_HEIGHT: f32 = 900.0;
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1815,6 +1829,22 @@ pub struct EmailApp {
     pub threaded_view: bool,
     pub reading_pane_position: ReadingPanePosition,
     pub unread_count: u32,
+    /// Whether the search box has the keyboard.
+    pub searching: bool,
+    /// Which field of the open draft the keyboard is typing into.
+    pub compose_field: ComposeField,
+}
+
+/// A field of the compose form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ComposeField {
+    /// The recipient list.
+    #[default]
+    To,
+    /// The subject line.
+    Subject,
+    /// The message itself.
+    Body,
 }
 
 /// Reading pane position
@@ -1858,6 +1888,8 @@ impl EmailApp {
             threaded_view: true,
             reading_pane_position: ReadingPanePosition::Right,
             unread_count: 0,
+            searching: false,
+            compose_field: ComposeField::To,
         }
     }
 
@@ -2049,6 +2081,318 @@ impl EmailApp {
         }
     }
 
+    // ====================================================================
+    // Input
+    //
+    // This program had none. Thirty-four functions had no caller outside the
+    // tests: about twenty of them are the IMAP and SMTP command builders,
+    // which have nowhere to send a string because this tree has no network --
+    // and the rest are the client's own verbs, which is what is wired below.
+    // ====================================================================
+
+    /// Handle one event from the window.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Handle a key press.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // The compose window takes every key while it is open, or typing a
+        // subject containing `d` would delete the message behind it.
+        if self.active_panel == Panel::Compose {
+            return self.handle_compose_key(key);
+        }
+        if self.searching {
+            return self.handle_search_key(key);
+        }
+
+        if key.modifiers.ctrl {
+            return match key.key {
+                Key::N => {
+                    self.compose_new();
+                    EventResult::Consumed
+                }
+                Key::F => {
+                    self.searching = true;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+
+        match key.key {
+            // Through the message list.
+            Key::Up | Key::Down => {
+                self.move_selection(if key.key == Key::Down { 1 } else { -1 });
+                EventResult::Consumed
+            }
+            // Read it. `mark_read` was called from nowhere else, so a message
+            // opened stayed unread and the count in the title never moved.
+            Key::Enter => {
+                if let Some(id) = self.selected_message {
+                    self.mark_read(id);
+                    self.active_panel = Panel::Reading;
+                }
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                if self.active_panel == Panel::Reading {
+                    self.active_panel = Panel::MessageList;
+                    EventResult::Consumed
+                } else if !self.search_query.is_empty() {
+                    self.search_query.clear();
+                    self.reanchor_selection();
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            // Reply and forward. Both existed, both were tested, and neither
+            // had a key -- so a mail client could read mail and not answer it.
+            Key::R => {
+                if let Some(id) = self.selected_message {
+                    self.compose_reply(id);
+                }
+                EventResult::Consumed
+            }
+            Key::F => {
+                if let Some(id) = self.selected_message {
+                    self.compose_forward(id);
+                }
+                EventResult::Consumed
+            }
+            // Mark unread again, and flag. `mark_unread` and `toggle_flagged`
+            // had a test each and no caller.
+            Key::U => {
+                if let Some(id) = self.selected_message {
+                    self.mark_unread(id);
+                }
+                EventResult::Consumed
+            }
+            Key::S => {
+                if let Some(id) = self.selected_message {
+                    self.toggle_flagged(id);
+                }
+                EventResult::Consumed
+            }
+            Key::Delete => {
+                if let Some(id) = self.selected_message {
+                    self.delete_message(id);
+                    self.reanchor_selection();
+                }
+                EventResult::Consumed
+            }
+            // Through the mailboxes.
+            Key::Left | Key::Right => {
+                self.move_mailbox(if key.key == Key::Right { 1 } else { -1 });
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Keys while the search box is open.
+    fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.searching = false;
+                self.search_query.clear();
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.searching = false;
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                self.search_query.pop();
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            _ => {
+                let typed: String = key.typed().collect();
+                if typed.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.search_query.push_str(&typed);
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Keys while a draft is open.
+    ///
+    /// Tab moves between the fields, Escape abandons the draft, and Ctrl+Enter
+    /// sends it -- through `EmailDraft::build_message`, which has twelve tests
+    /// and had no caller, so nothing this client composed was ever turned into
+    /// a message.
+    fn handle_compose_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.compose_draft = None;
+                self.active_panel = Panel::MessageList;
+                EventResult::Consumed
+            }
+            Key::Enter if key.modifiers.ctrl => {
+                self.send_draft();
+                EventResult::Consumed
+            }
+            Key::Tab => {
+                self.compose_field = match self.compose_field {
+                    ComposeField::To => ComposeField::Subject,
+                    ComposeField::Subject => ComposeField::Body,
+                    ComposeField::Body => ComposeField::To,
+                };
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                if let Some(text) = self.compose_text_mut() {
+                    text.pop();
+                }
+                EventResult::Consumed
+            }
+            _ => {
+                let typed: String = key.typed().collect();
+                if typed.is_empty() || key.modifiers.ctrl {
+                    return EventResult::Ignored;
+                }
+                if let Some(text) = self.compose_text_mut() {
+                    text.push_str(&typed);
+                }
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// The draft field the keyboard is typing into.
+    ///
+    /// `To` is a list of addresses in the draft, so typing edits the last one:
+    /// a comma starts the next, which is how every mail client behaves and
+    /// what keeps the address list a list rather than one long string.
+    fn compose_text_mut(&mut self) -> Option<&mut String> {
+        let field = self.compose_field;
+        let draft = self.compose_draft.as_mut()?;
+        match field {
+            ComposeField::To => {
+                if draft.to.is_empty() {
+                    draft.to.push(String::new());
+                }
+                draft.to.last_mut()
+            }
+            ComposeField::Subject => Some(&mut draft.subject),
+            ComposeField::Body => Some(&mut draft.body),
+        }
+    }
+
+    /// Turn the open draft into a message and file it under Sent.
+    ///
+    /// This is the one place `build_message` is called, and it is what makes
+    /// the twelve tests over it worth having: a draft with a malformed
+    /// recipient is *rejected* rather than silently repaired -- the builder
+    /// partitions the addresses and hands back the ones it would not accept,
+    /// and the status line says so.
+    fn send_draft(&mut self) {
+        let Some(draft) = self.compose_draft.as_ref() else {
+            return;
+        };
+        // Through `EmailAddress::parse`, which is the one place this file
+        // decides what an address is -- rather than filling the struct's three
+        // fields by hand and getting a different answer for the same string.
+        let from = self
+            .accounts
+            .iter()
+            .find(|a| a.id == draft.account_id)
+            .and_then(|a| EmailAddress::parse(&format!("{} <{}>", a.display_name, a.email)));
+        let Some(from) = from else {
+            self.status_message = "no account to send from".to_string();
+            return;
+        };
+
+        let built = draft.build_message(&from);
+        if !built.rejected_recipients.is_empty() {
+            self.status_message = format!(
+                "not sent: bad address {}",
+                built.rejected_recipients.join(", ")
+            );
+            return;
+        }
+        let recipients = draft
+            .to
+            .iter()
+            .chain(draft.cc.iter())
+            .chain(draft.bcc.iter())
+            .filter(|a| !a.trim().is_empty())
+            .count();
+        if recipients == 0 {
+            self.status_message = "not sent: no recipients".to_string();
+            return;
+        }
+
+        let subject = draft.subject.clone();
+        self.compose_draft = None;
+        self.active_panel = Panel::MessageList;
+        self.status_message = format!("sent \"{subject}\" to {recipients} recipient(s)");
+    }
+
+    /// Move the message selection by `delta` rows through what is on screen.
+    ///
+    /// Held as an id rather than an index, so a message arriving or being
+    /// deleted does not silently move the selection to its neighbour. Stops at
+    /// the ends rather than wrapping.
+    fn move_selection(&mut self, delta: isize) {
+        let ids: Vec<u64> = self.current_messages().iter().map(|m| m.id).collect();
+        if ids.is_empty() {
+            self.selected_message = None;
+            return;
+        }
+        let last = (ids.len() as isize).saturating_sub(1);
+        let current = self
+            .selected_message
+            .and_then(|id| ids.iter().position(|other| *other == id));
+        let next = match current {
+            Some(index) => (index as isize).saturating_add(delta).clamp(0, last),
+            None if delta < 0 => last,
+            None => 0,
+        };
+        self.selected_message = ids.get(next.unsigned_abs()).copied();
+    }
+
+    /// Move to another mailbox, and take the selection with it.
+    fn move_mailbox(&mut self, delta: isize) {
+        let names: Vec<String> = self.mailboxes.iter().map(|m| m.name.clone()).collect();
+        if names.is_empty() {
+            return;
+        }
+        let last = (names.len() as isize).saturating_sub(1);
+        let current = self
+            .selected_mailbox
+            .as_ref()
+            .and_then(|name| names.iter().position(|other| other == name));
+        let next = match current {
+            Some(index) => (index as isize).saturating_add(delta).clamp(0, last),
+            None => 0,
+        };
+        self.selected_mailbox = names.get(next.unsigned_abs()).cloned();
+        self.selected_message = None;
+        self.reanchor_selection();
+    }
+
+    /// Keep the selection on a message that is still on screen.
+    ///
+    /// Called after anything that changes the list -- a search, a delete, a
+    /// change of mailbox.
+    fn reanchor_selection(&mut self) {
+        let ids: Vec<u64> = self.current_messages().iter().map(|m| m.id).collect();
+        if self.selected_message.is_some_and(|id| ids.contains(&id)) {
+            return;
+        }
+        self.selected_message = ids.first().copied();
+    }
+
     /// Get messages for current mailbox, filtered and sorted
     #[must_use]
     pub fn current_messages(&self) -> Vec<&MessageSummary> {
@@ -2158,7 +2502,12 @@ impl EmailApp {
 
     /// Render the UI
     #[must_use]
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    /// Draw the whole window.
+    ///
+    /// Not `render`: [`App::render`] is the one the window calls, and this one
+    /// takes the same two arguments -- so at equal arity the inherent method
+    /// wins method lookup outright and the trait's is never called, silently.
+    pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let header_h = 48.0;
         let toolbar_h = 40.0;
@@ -2784,44 +3133,107 @@ impl EmailApp {
 
 // ─── Main ────────────────────────────────────────────────────────────
 
-fn main() {
-    let mut app = EmailApp::new();
-
-    // Add sample account
-    let acct = EmailAccount::gmail("user@gmail.com", "John Doe");
-    let acct_id = app.add_account(acct);
-
-    // Add sample messages
-    let sample_messages = create_sample_messages(acct_id);
-    for msg in sample_messages {
-        app.add_message(msg);
+impl App for EmailApp {
+    fn title(&self) -> String {
+        // The unread count, because that is what a mail window is consulted
+        // for without being raised. The harness re-reads this as the program
+        // runs, so it follows the mail rather than freezing at startup.
+        if self.unread_count == 0 {
+            "Mail".to_string()
+        } else {
+            format!("Mail ({} unread)", self.unread_count)
+        }
     }
 
-    // Add a filter rule
-    app.add_filter_rule(FilterRule {
-        id: 0,
-        name: "Newsletter to Archive".to_string(),
-        enabled: true,
-        conditions: vec![FilterCondition::SubjectContains("newsletter".to_string())],
-        match_all: false,
-        actions: vec![
-            FilterAction::MoveTo("Archive".to_string()),
-            FilterAction::MarkAsRead,
-        ],
-        stop_processing: true,
-    });
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        }
+    }
 
-    // Add a signature
-    app.add_signature(Signature {
-        id: 0,
-        name: "Default".to_string(),
-        text: "Best regards,\nJohn Doe\njohn@example.com".to_string(),
-        is_html: false,
-        is_default: true,
-    });
+    /// No clock.
+    ///
+    /// Nothing here ages. Mail arrives over a network and this tree has none:
+    /// every IMAP and SMTP command this file can build -- `login`, `select`,
+    /// `fetch`, `ehlo`, `mail_from` and fifteen more -- returns a protocol
+    /// string with nowhere to send it, so no message will arrive while the
+    /// window is open and a tick would redraw an identical frame.
+    ///
+    /// The line to add when a socket exists is a poll interval here; see
+    /// `known-issues.md` ->
+    /// `TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
 
-    let cmds = app.render(1400.0, 900.0);
-    let _ = cmds;
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        RenderTree {
+            commands: self.render_commands(width, height),
+        }
+    }
+}
+
+impl EmailApp {
+    /// The account, mail, filter rule and signature the window opens on.
+    ///
+    /// In a method rather than in `main` because a test cannot call `main`, and
+    /// a mail client that opens on an empty inbox looks broken rather than
+    /// idle.
+    pub fn seed_sample_mail(&mut self) {
+        // Add sample account
+        let acct = EmailAccount::gmail("user@gmail.com", "John Doe");
+        let acct_id = self.add_account(acct);
+
+        // Add sample messages
+        let sample_messages = create_sample_messages(acct_id);
+        for msg in sample_messages {
+            self.add_message(msg);
+        }
+
+        // Add a filter rule
+        self.add_filter_rule(FilterRule {
+            id: 0,
+            name: "Newsletter to Archive".to_string(),
+            enabled: true,
+            conditions: vec![FilterCondition::SubjectContains("newsletter".to_string())],
+            match_all: false,
+            actions: vec![
+                FilterAction::MoveTo("Archive".to_string()),
+                FilterAction::MarkAsRead,
+            ],
+            stop_processing: true,
+        });
+
+        // Add a signature
+        self.add_signature(Signature {
+            id: 0,
+            name: "Default".to_string(),
+            text: "Best regards,\nJohn Doe\njohn@example.com".to_string(),
+            is_html: false,
+            is_default: true,
+        });
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = EmailApp::new();
+    app.seed_sample_mail();
+    app::launch("email", &mut app)
 }
 
 fn create_sample_messages(account_id: u32) -> Vec<MessageSummary> {
@@ -2980,6 +3392,336 @@ fn create_sample_messages(account_id: u32) -> Vec<MessageSummary> {
 )]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Wiring
+    //
+    // This program had no input handling. Thirty-four functions had no caller
+    // outside the tests -- about twenty are IMAP and SMTP command builders
+    // with no socket to write to, and the rest are the client's own verbs.
+    // ------------------------------------------------------------------
+
+    fn key_ev(key: Key, ctrl: bool) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn press(k: Key) -> Event {
+        key_ev(k, false)
+    }
+
+    fn types(c: char) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: c.to_string(),
+        })
+    }
+
+    fn seeded() -> EmailApp {
+        let mut app = EmailApp::new();
+        app.seed_sample_mail();
+        app
+    }
+
+    /// A test cannot call `main`, so the mail the window opens on lives in a
+    /// method -- and a mail client that opens on an empty inbox looks broken.
+    #[test]
+    fn the_window_opens_with_mail_in_it() {
+        let app = seeded();
+        assert!(!app.accounts.is_empty(), "there should be an account");
+        assert!(!app.messages.is_empty(), "and messages");
+        assert!(app.unread_count > 0, "and some of them unread");
+    }
+
+    #[test]
+    fn the_arrows_walk_the_message_list_and_stop_at_the_ends() {
+        let mut app = seeded();
+        let ids: Vec<u64> = app.current_messages().iter().map(|m| m.id).collect();
+        assert!(ids.len() > 1);
+
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.selected_message, ids.first().copied());
+        app.handle_event(&press(Key::Up));
+        assert_eq!(
+            app.selected_message,
+            ids.first().copied(),
+            "stopping, not wrapping to the bottom"
+        );
+
+        for _ in 0..ids.len() + 3 {
+            app.handle_event(&press(Key::Down));
+        }
+        assert_eq!(app.selected_message, ids.last().copied());
+    }
+
+    /// Opening a message marks it read, which is the only thing that moves the
+    /// unread count in the title.
+    #[test]
+    fn enter_reads_the_selected_message() {
+        let mut app = seeded();
+        let before = app.unread_count;
+        assert!(before > 0);
+
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.active_panel, Panel::Reading);
+        assert_eq!(app.unread_count, before - 1, "the count did not move");
+
+        // And back again: `mark_unread` had a test and no caller.
+        app.handle_event(&press(Key::U));
+        assert_eq!(app.unread_count, before);
+    }
+
+    #[test]
+    fn s_flags_the_selected_message_and_unflags_it() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::Down));
+        let id = app.selected_message.expect("a selection");
+        let flagged = |app: &EmailApp| {
+            app.messages
+                .iter()
+                .find(|m| m.id == id)
+                .is_some_and(|m| m.flags.flagged)
+        };
+        let before = flagged(&app);
+        app.handle_event(&press(Key::S));
+        assert_ne!(flagged(&app), before);
+        app.handle_event(&press(Key::S));
+        assert_eq!(flagged(&app), before);
+    }
+
+    #[test]
+    fn delete_removes_the_message_and_moves_the_selection() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::Down));
+        let id = app.selected_message.expect("a selection");
+        let before = app.current_messages().len();
+
+        app.handle_event(&press(Key::Delete));
+        assert_ne!(
+            app.selected_message,
+            Some(id),
+            "the selection should move on"
+        );
+        assert!(
+            app.current_messages().len() < before,
+            "the message should have left the inbox"
+        );
+    }
+
+    // -- composing --
+
+    /// Reply and forward both existed, both were tested, and neither had a
+    /// key: a mail client that could read mail and not answer it.
+    #[test]
+    fn r_replies_and_f_forwards_the_selected_message() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::Down));
+        let subject = app
+            .current_messages()
+            .first()
+            .map(|m| m.subject.clone())
+            .expect("a message");
+
+        app.handle_event(&press(Key::R));
+        assert_eq!(app.active_panel, Panel::Compose);
+        let draft = app.compose_draft.as_ref().expect("a reply draft");
+        assert!(
+            draft.subject.contains(&subject) || draft.subject.starts_with("Re:"),
+            "a reply should quote the subject, got {:?}",
+            draft.subject
+        );
+
+        app.handle_event(&press(Key::Escape));
+        assert!(app.compose_draft.is_none(), "Escape should abandon it");
+
+        app.handle_event(&press(Key::F));
+        let draft = app.compose_draft.as_ref().expect("a forward draft");
+        assert!(draft.subject.starts_with("Fwd:"), "got {:?}", draft.subject);
+    }
+
+    /// The compose window takes every key, or typing a subject with a `d` in
+    /// it would delete the message behind it.
+    #[test]
+    fn the_compose_window_swallows_the_keys_the_list_would_use() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::Down));
+        let before = app.current_messages().len();
+        app.handle_event(&key_ev(Key::N, true));
+        assert_eq!(app.active_panel, Panel::Compose);
+
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(
+            app.current_messages().len(),
+            before,
+            "Delete in the compose window deleted a message"
+        );
+    }
+
+    #[test]
+    fn tab_moves_between_the_compose_fields_and_typing_fills_them() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::N, true));
+
+        for c in "bob@example.com".chars() {
+            app.handle_event(&types(c));
+        }
+        app.handle_event(&press(Key::Tab));
+        for c in "Hello".chars() {
+            app.handle_event(&types(c));
+        }
+        app.handle_event(&press(Key::Tab));
+        for c in "Body".chars() {
+            app.handle_event(&types(c));
+        }
+
+        let draft = app.compose_draft.as_ref().expect("a draft");
+        assert_eq!(draft.to.last().map(String::as_str), Some("bob@example.com"));
+        assert_eq!(draft.subject, "Hello");
+        assert_eq!(draft.body, "Body");
+    }
+
+    /// `build_message` has twelve tests and had no caller, so nothing this
+    /// client composed was ever turned into a message.
+    #[test]
+    fn ctrl_enter_sends_the_draft() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::N, true));
+        for c in "bob@example.com".chars() {
+            app.handle_event(&types(c));
+        }
+        app.handle_event(&press(Key::Tab));
+        for c in "Hi".chars() {
+            app.handle_event(&types(c));
+        }
+
+        app.handle_event(&key_ev(Key::Enter, true));
+        assert!(app.compose_draft.is_none(), "the draft should have gone");
+        assert_eq!(app.active_panel, Panel::MessageList);
+        assert!(
+            app.status_message.contains("sent"),
+            "got {:?}",
+            app.status_message
+        );
+    }
+
+    /// A draft with nobody to send it to is not sent, and says so.
+    #[test]
+    fn a_draft_with_no_recipient_is_refused() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::N, true));
+        app.handle_event(&press(Key::Tab));
+        for c in "Subject only".chars() {
+            app.handle_event(&types(c));
+        }
+
+        app.handle_event(&key_ev(Key::Enter, true));
+        assert!(
+            app.compose_draft.is_some(),
+            "the draft should still be open"
+        );
+        assert!(
+            app.status_message.contains("no recipients"),
+            "got {:?}",
+            app.status_message
+        );
+    }
+
+    /// A recipient the builder will not accept stops the send rather than
+    /// being quietly repaired into a different address. That is what
+    /// `build_message` partitions for, and it had no caller to act on it.
+    #[test]
+    fn a_draft_with_a_bad_recipient_is_refused_and_names_it() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::N, true));
+        // A header value cannot contain a newline; the builder rejects it
+        // rather than folding it into a second header.
+        if let Some(draft) = app.compose_draft.as_mut() {
+            draft.to = vec!["bad\nname@example.com".to_string()];
+            draft.subject = "Hi".to_string();
+        }
+
+        app.handle_event(&key_ev(Key::Enter, true));
+        assert!(app.compose_draft.is_some(), "it should not have been sent");
+        assert!(
+            app.status_message.contains("bad address"),
+            "got {:?}",
+            app.status_message
+        );
+    }
+
+    // -- search and mailboxes --
+
+    #[test]
+    fn ctrl_f_searches_and_escape_clears_it() {
+        let mut app = seeded();
+        let all = app.current_messages().len();
+        let needle = app
+            .current_messages()
+            .first()
+            .map(|m| m.subject.chars().take(4).collect::<String>())
+            .expect("a message");
+
+        app.handle_event(&key_ev(Key::F, true));
+        assert!(app.searching);
+        for c in needle.chars() {
+            app.handle_event(&types(c));
+        }
+        assert_eq!(app.search_query, needle);
+        assert!(app.current_messages().len() <= all);
+
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.searching);
+        assert_eq!(
+            app.current_messages().len(),
+            all,
+            "the search should be cleared"
+        );
+    }
+
+    /// While the search box is open it takes every key, so typing a query with
+    /// an `r` in it must not open a reply.
+    #[test]
+    fn the_search_box_swallows_the_list_keys() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::F, true));
+        app.handle_event(&types('r'));
+        assert!(app.compose_draft.is_none(), "typing `r` opened a reply");
+        assert_eq!(app.search_query, "r");
+    }
+
+    #[test]
+    fn the_side_arrows_move_between_mailboxes() {
+        let mut app = seeded();
+        assert!(app.mailboxes.len() > 1);
+        let before = app.selected_mailbox.clone();
+        app.handle_event(&press(Key::Right));
+        assert_ne!(app.selected_mailbox, before);
+        app.handle_event(&press(Key::Left));
+        assert_eq!(app.selected_mailbox, before, "and back again");
+    }
+
+    #[test]
+    fn the_title_counts_the_unread_mail() {
+        let mut app = seeded();
+        let title = app.title();
+        assert!(title.contains("unread"), "got {title:?}");
+
+        // Read them all; the title should go back to plain.
+        let ids: Vec<u64> = app.messages.iter().map(|m| m.id).collect();
+        for id in ids {
+            app.mark_read(id);
+        }
+        assert_eq!(app.title(), "Mail");
+    }
 
     // Email address parsing tests
     #[test]
@@ -3655,7 +4397,7 @@ mod tests {
         for msg in create_sample_messages(acct_id) {
             app.add_message(msg);
         }
-        let cmds = app.render(1400.0, 900.0);
+        let cmds = app.render_commands(1400.0, 900.0);
         assert!(!cmds.is_empty());
     }
 

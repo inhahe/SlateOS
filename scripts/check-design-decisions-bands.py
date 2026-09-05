@@ -111,6 +111,7 @@ import sys
 # two questions costs ~3.8s on every push. `GitTree.read` is the same seam
 # without the index. (Same reasoning as gate 9; see scripts/gittree.py.)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gitenv  # noqa: E402
 import gittree  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -414,7 +415,10 @@ def _rev_exists(rev, repo=None):
         out = subprocess.run(
             ["git", "-C", str(PROJECT_ROOT if repo is None else repo),
              "rev-parse", "--verify", f"{rev}^{{commit}}"],
-            capture_output=True, text=True, check=False)
+            # `-C` does not name a repository; an inherited GIT_DIR outranks
+            # it. See scripts/gitenv.py.
+            capture_output=True, text=True, check=False,
+            env=gitenv.clean_env())
     except OSError:
         return False
     return out.returncode == 0
@@ -711,8 +715,49 @@ def _selftest():
     tmp = tempfile.mkdtemp(prefix="ddbands-")
     try:
         def git(*a):
+            # `env=gitenv.clean_env()` is load-bearing, not hygiene, and this
+            # comment is a post-mortem of this very function.
+            #
+            # `git -C tmp` does NOT name a repository. An inherited `GIT_DIR`
+            # outranks it, and git *exports* `GIT_DIR` into every hook's
+            # environment -- including `pre-push`, which is the one caller this
+            # self-test was written for. Run from there without scrubbing, and
+            # `git -C tmp init` re-initialises the repository being pushed,
+            # `git -C tmp add -A` replaces its index with the fixture's two
+            # files, `git -C tmp commit` writes the fixture's commits onto the
+            # branch, and `git -C tmp config user.email` poisons the *shared*
+            # config that all three worktrees read.
+            #
+            # Every one of those happened on 2026-09-04, on this function's
+            # first real invocation: six fixture commits landed on `lane-a`,
+            # `user.email` became `selftest@example.invalid` for all three
+            # lanes, and the gate reported a pass -- it had correctly verified
+            # a fixture, and the fixture was the repository. Nothing reached
+            # `origin` only because a *different* gate happened to refuse the
+            # push afterwards.
+            #
+            # It is the second time this repository has learned it. The same
+            # accident, from the same cause, hit gate 9's self-test on
+            # 2026-08-29 and published two commits; `scripts/gitenv.py` was
+            # written as its post-mortem and says all of this in its docstring.
+            # This function did not use it. That is the whole defect.
             subprocess.run(["git", "-C", tmp, *a], check=True,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True,
+                           env=gitenv.clean_env())
+
+        def commit(message):
+            # Identity via `-c`, so no `git config` runs at all. With
+            # `clean_env` a `git config` would write to the fixture's own
+            # config and be correct -- but the shared config this repository
+            # actually poisoned is `os/.git/config`, read by all three
+            # worktrees, and a self-test that never writes a config file
+            # cannot poison one however the environment is arranged.
+            git("-c", "user.email=selftest@example.invalid",
+                "-c", "user.name=selftest", "commit", "-qm", message)
+            return subprocess.run(
+                ["git", "-C", tmp, "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True,
+                env=gitenv.clean_env()).stdout.strip()
 
         def write(rel, text):
             path = os.path.join(tmp, rel.replace("/", os.sep))
@@ -746,16 +791,11 @@ def _selftest():
             return errors
 
         git("init", "-q", "-b", "main")
-        git("config", "user.email", "selftest@example.invalid")
-        git("config", "user.name", "selftest")
 
         write(DOC_REL, doc(_selftest_section(600, "A")))
         write(BASE_REL, baseline({}))
         git("add", "-A")
-        git("commit", "-qm", "clean")
-        clean = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
-                               capture_output=True, text=True,
-                               check=True).stdout.strip()
+        clean = commit("clean")
 
         expect("a clean commit has no errors", check_head(clean), [])
 
@@ -763,10 +803,7 @@ def _selftest():
         write(DOC_REL, doc(_selftest_section(600, "A"),
                            _selftest_section(601, None)))
         git("add", "-A")
-        git("commit", "-qm", "601 with no lane field")
-        bad = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
-                             capture_output=True, text=True,
-                             check=True).stdout.strip()
+        bad = commit("601 with no lane field")
         expect("a missing Lane field in the commit is caught",
                len(check_head(bad)), 1)
 
@@ -781,10 +818,7 @@ def _selftest():
                          load_baseline(base_abs))[0]), 0)
 
         git("add", "-A")
-        git("commit", "-qm", "add the lane field")
-        fixed = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
-                               capture_output=True, text=True,
-                               check=True).stdout.strip()
+        fixed = commit("add the lane field")
         expect("...and a COMMITTED fix does clear it", check_head(fixed), [])
 
         # --- The baseline half, which is why both come from one tree. ------
@@ -795,10 +829,7 @@ def _selftest():
                            _selftest_section(601, "A"),
                            _selftest_section(601, "A")))
         git("add", "-A")
-        git("commit", "-qm", "a duplicate 601")
-        dupe = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
-                              capture_output=True, text=True,
-                              check=True).stdout.strip()
+        dupe = commit("a duplicate 601")
         expect("a new duplicate number is caught", len(check_head(dupe)), 1)
 
         # `600: 1` is not padding. The baseline is the *whole* grandfathered
@@ -810,20 +841,14 @@ def _selftest():
         expect("...and an UNCOMMITTED baseline does not grandfather it",
                len(check_head(dupe)), 1)
         git("add", "-A")
-        git("commit", "-qm", "baseline the duplicate")
-        waived = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
-                                capture_output=True, text=True,
-                                check=True).stdout.strip()
+        waived = commit("baseline the duplicate")
         expect("...and a COMMITTED one does", check_head(waived), [])
         expect("a waiver is not backdated onto the commit before it",
                len(check_head(dupe)), 1)
 
         # --- Absence is an error, not an empty read. ----------------------
         git("rm", "-q", DOC_REL)
-        git("commit", "-qm", "delete the document")
-        gone = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
-                              capture_output=True, text=True,
-                              check=True).stdout.strip()
+        gone = commit("delete the document")
         expect("a commit that deletes the document errors, not passes",
                str(check_head(gone)).startswith("ERROR:"), True)
 

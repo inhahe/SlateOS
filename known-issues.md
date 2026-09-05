@@ -117564,3 +117564,46 @@ Two consequences for this tree:
   compiler check, which is what happened here and is why the collision cost a
   minute instead of a bug report. `v` was the right key anyway: it is what
   tmux's own vi copy mode uses for begin-selection.
+
+
+### Lesson 120: a failed command followed by "already up to date" is the shape of a silent no-op (lane C, 2026-09-04)
+
+Merging lane C to `main` printed this:
+
+    fatal: this operation must be run in a work tree
+    fatal: this operation must be run in a work tree
+    fatal: this operation must be run in a work tree
+    5d2f40fb9 Merge remote-tracking branch 'origin/main' into lane-a
+    Everything up-to-date
+
+Every line after the `fatal`s is *true and reassuring*. `git log` printed a real
+commit. `git push` reported that the remote already had everything — which it
+did, because the merge that would have given it something new had not run. A
+chain of `cmd; cmd; cmd` reports success at the end whether or not the middle
+happened, and the last line is the one that gets read.
+
+The cause was `core.bare=true` on the shared repository, left over from an
+incident earlier the same day: `scripts/quote-names.py`'s self-test built a
+fixture with `git init` under `-C <tmp>`, and **git exports `GIT_DIR` into every
+hook**, which outranks `-C` outright -- so inside `pre-push` the fixture *was*
+the repository. Repaired there with `env=gitenv.clean_env()`; the identical bug
+in `check-requests-not-deleted.py` was repaired on 2026-08-29. Two scripts, the
+same trap, five days apart. `scripts/gitenv.py` exists to be the one way to
+avoid it and its docstring is the post-mortem.
+
+**The lesson here is not about `GIT_DIR`, which is well covered.** It is that
+the damage was invisible at the point it mattered. What should have caught it is
+a check on the *postcondition* rather than the command:
+
+    before=$(git rev-parse main)
+    git merge --no-edit lane-c
+    test "$(git rev-parse main)" != "$before" || { echo "merge did nothing"; exit 1; }
+
+"Did `main` move?" is a question with an answer. "Did `git merge` succeed?" is a
+question whose answer gets buried under three later lines of output that are
+about something else.
+
+The general form, for anything driven by a sequence of shell commands: **assert
+the state you wanted, not the exit code of the step you hoped would produce
+it.** This is the same discipline as lesson 118 -- a witness the code already
+satisfies is not a witness -- arriving in a shell instead of a test.

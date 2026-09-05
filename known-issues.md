@@ -116534,3 +116534,49 @@ revisiting if the allowlist proves hard to keep honest.
 The cost is paid by whoever next reaches for a stateful `posix::` API from a
 program — as a failure that names the kernel, sits in another lane's tree, and
 is not there.
+
+### Lesson 300: an error that names a component nobody asked is worse than no error (lane B, 2026-09-04)
+
+*First lesson taken from lane B's proposed band 300–399
+(`requests/b-ac-lesson-numbers-have-the-disease-the-section-numbers-were-cured-of.md`),
+rather than from 115. The band scheme is not agreed yet, so this is a
+unilateral choice of number — but the alternative was the collision the
+proposal predicts: B and C have now both written a 110, a 111, a 112 **and** a
+113, and C has taken 114. Picking 115 would have made it five. If the proposal
+is rejected the cost of this number is that it looks odd; if it is accepted the
+cost of 115 would have been a sixth collision.*
+
+`sshd` could not generate a host key. It said:
+
+    cannot generate a host key: the kernel CSPRNG returned errno 5
+
+Every word of that is a lie of attribution. The kernel CSPRNG was never asked.
+The call went to an rlib copy of `posix` whose syscalls are stubbed to
+`-ENOSYS`, which read that as "there is no kernel here", fell through to a
+userspace pool, tried to seed it from RDRAND, and found the guest CPU has no
+RDRAND. `EIO` is the truthful *code*; "the kernel CSPRNG returned" it is not.
+
+**A reader who trusts that message goes to `kernel/src/`** — which is another
+lane's tree, and entirely innocent. They find a correct `SYS_GETRANDOM` handler
+with a passing self-test, conclude the message must mean something subtler than
+it says, and are now debugging with a false premise they have just confirmed.
+Silence would have sent them to the caller, which is where the defect was.
+
+The message was not careless. It was written by someone who knew the call was
+*supposed* to reach the kernel, and described the design rather than the run.
+That is the general shape: **an error message states what the author believed
+the code does, and is trusted as evidence of what it did.** It is the one class
+of comment that a reader cannot discount as possibly stale, because it arrives
+attached to a live failure.
+
+The rule that follows: **an error may name only what the code on that path
+demonstrably did.** `posix::random::fill` cannot know whether it reached a
+kernel — that is precisely the fact in question — so the honest text is what it
+now says, "the system random number generator is unavailable", which sends the
+reader to *how this program reaches the generator*. That is the question whose
+answer was wrong.
+
+Cheap test, worth applying to any error text you write: **would this sentence
+still be true if the call had been intercepted?** If not, it is naming a
+component on faith. See `design-decisions.md` §768 and
+`TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`.

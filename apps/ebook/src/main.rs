@@ -14,7 +14,6 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![allow(dead_code)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -26,11 +25,150 @@
 #![allow(clippy::fn_params_excessive_bools)]
 
 use guitk::color::Color;
-#[allow(unused_imports)]
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::textfind;
+use oswindow::app::{self, App, Response};
+use oswindow::{Event, RenderTree};
+use std::process::ExitCode;
+use std::time::Duration;
+
+// ============================================================================
+// List geometry
+// ============================================================================
+
+/// A list that is taller than the space it is drawn in.
+///
+/// Both of this reader's lists — the library and the two overlays — draw rows
+/// from the top and stop when they run out of room, and both let the keyboard
+/// move the selection anywhere. Those two facts together mean the selected row
+/// can be one nobody can see: the highlight is drawn below the fold, and the
+/// user presses Down into silence.
+///
+/// The window is therefore *derived from the selection* rather than stored
+/// beside it. A stored scroll offset would need correcting every time the
+/// selection moves, the window is resized, or the list changes length, and the
+/// correction is what gets forgotten; computed here, the selection is on
+/// screen by construction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListWindow {
+    /// Index of the first row drawn.
+    pub first: usize,
+    /// How many rows fit.
+    pub capacity: usize,
+    /// How many rows there are in total.
+    pub total: usize,
+}
+
+impl ListWindow {
+    /// Place a window of `capacity` rows over `total` so that `selected` is in
+    /// it: the top of the list until the selection would fall off the bottom,
+    /// and thereafter the selection on the last visible row.
+    pub fn new(total: usize, selected: usize, capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        // A selection past the end would otherwise put `first` past it too and
+        // the list would render blank -- a worse answer than its last rows.
+        let selected = selected.min(total.saturating_sub(1));
+        let first = if selected < capacity {
+            0
+        } else {
+            // Put the selection on the last visible row.
+            selected.saturating_sub(capacity.saturating_sub(1))
+        };
+        Self {
+            first,
+            capacity,
+            total,
+        }
+    }
+
+    /// The indices actually drawn, in order.
+    pub fn visible(self) -> impl Iterator<Item = usize> {
+        (self.first..self.total).take(self.capacity)
+    }
+
+    /// Which row a point `rows_down` from the top of the list is, or `None` if
+    /// it is past the last drawn row.
+    pub fn index_at(self, rows_down: f32) -> Option<usize> {
+        if rows_down < 0.0 {
+            return None;
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "guarded non-negative just above; a row index cannot exceed usize"
+        )]
+        let row = rows_down as usize;
+        if row >= self.capacity {
+            return None;
+        }
+        let index = self.first.checked_add(row)?;
+        (index < self.total).then_some(index)
+    }
+}
+
+/// How many whole rows of `row_height` fit in `space`.
+///
+/// A partial row counts as none, and negative space as none, both because the
+/// cast truncates -- an explicit guard for either was tried and found to be a
+/// second statement of what the cast already says. The zero-height guard is
+/// not: `space / 0.0` is infinity, and infinity cast to `usize` saturates,
+/// which would report room for every row a list could ever have.
+fn rows_that_fit(space: f32, row_height: f32) -> usize {
+    if row_height <= 0.0 {
+        return 0;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "both are positive and the quotient is bounded by the window in pixels"
+    )]
+    let n = (space / row_height) as usize;
+    n
+}
+
+/// The card an overlay is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayFrame {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl OverlayFrame {
+    /// Is this point inside the card? A click that is not is a click on the
+    /// dimmed page behind it, which dismisses the overlay.
+    pub fn contains(self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+
+    /// Y of the first list row.
+    pub fn list_top(self) -> f32 {
+        self.y + OVERLAY_LIST_TOP
+    }
+
+    /// How many rows the card has room for.
+    pub fn row_capacity(self) -> usize {
+        rows_that_fit(self.height - OVERLAY_LIST_TOP, OVERLAY_ROW_HEIGHT)
+    }
+
+    /// The window over a list of `total` rows with `selected` in view.
+    pub fn list_window(self, total: usize, selected: usize) -> ListWindow {
+        ListWindow::new(total, selected, self.row_capacity())
+    }
+
+    /// Y of the row drawn at position `slot` (0 = topmost drawn row).
+    pub fn row_y(self, slot: usize) -> f32 {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "slot is bounded by the rows that fit on a screen"
+        )]
+        let slot = slot as f32;
+        self.list_top() + slot * OVERLAY_ROW_HEIGHT
+    }
+}
 
 // ============================================================================
 // Theme colors
@@ -117,14 +255,25 @@ impl ThemeColors {
 
 const WINDOW_WIDTH: f32 = 900.0;
 const WINDOW_HEIGHT: f32 = 700.0;
+/// A window narrower or shorter than this lays out a page one character
+/// wide and one line tall. The compositor is not asked to forbid the size;
+/// the layout simply stops following it down.
+const MIN_WINDOW_WIDTH: f32 = 360.0;
+const MIN_WINDOW_HEIGHT: f32 = 240.0;
 const TOOLBAR_HEIGHT: f32 = 40.0;
 const STATUS_BAR_HEIGHT: f32 = 32.0;
 const PROGRESS_BAR_HEIGHT: f32 = 4.0;
-const SIDEBAR_WIDTH: f32 = 260.0;
 const LIBRARY_ITEM_HEIGHT: f32 = 72.0;
 const CORNER_RADIUS: f32 = 6.0;
 const SMALL_RADIUS: f32 = 3.0;
 const CONTENT_PADDING: f32 = 40.0;
+const OVERLAY_ROW_HEIGHT: f32 = 32.0;
+/// Distance from the top of an overlay card to the first list row: the title
+/// and the rule under it.
+const OVERLAY_LIST_TOP: f32 = 44.0;
+const TOC_OVERLAY_WIDTH: f32 = 400.0;
+const TOC_OVERLAY_HEIGHT: f32 = 500.0;
+const BOOKMARK_OVERLAY_WIDTH: f32 = 350.0;
 
 /// Reading time estimate assumes 238 words per minute (average adult).
 const READING_WPM: f32 = 238.0;
@@ -978,7 +1127,6 @@ pub enum AppView {
     Reading,
     TableOfContents,
     BookmarkList,
-    Search,
 }
 
 // ============================================================================
@@ -1033,6 +1181,35 @@ impl EbookApp {
     // --------------------------------------------------------------------
     // Pagination helpers
     // --------------------------------------------------------------------
+
+    /// Adopt a new window size, re-flowing the page if it changed.
+    ///
+    /// Re-flowing is the whole of what resizing means to a reader: the page is
+    /// however much text fits, so a wider window is not the same page shown
+    /// bigger, it is a different page break. The reading position survives it
+    /// because it is stored as a byte offset into the book rather than a page
+    /// number -- see `repaginate` -- so the reader stays on the sentence they
+    /// were on rather than on "page 34" of a pagination that no longer exists.
+    ///
+    /// Returns whether anything changed, so a caller can skip a redraw.
+    pub fn set_window_size(&mut self, width: f32, height: f32) -> bool {
+        let width = width.max(MIN_WINDOW_WIDTH);
+        let height = height.max(MIN_WINDOW_HEIGHT);
+        if (self.window_width - width).abs() < f32::EPSILON
+            && (self.window_height - height).abs() < f32::EPSILON
+        {
+            return false;
+        }
+        self.window_width = width;
+        self.window_height = height;
+        // Only if a book is open: the library view has no pagination, and
+        // paginating a book nobody is reading on every drag of a window edge
+        // is work for nothing.
+        if self.paginated.is_some() {
+            self.repaginate();
+        }
+        true
+    }
 
     /// Compute how many characters fit per line and lines per page given
     /// current font size and window dimensions.
@@ -1390,13 +1567,30 @@ impl EbookApp {
 
     /// Show the table of contents overlay.
     pub fn show_toc(&mut self) {
-        self.list_selection = 0;
+        self.list_selection = self.current_chapter().unwrap_or(0);
         self.view = AppView::TableOfContents;
+    }
+
+    /// Which chapter the reader is in: the last one that starts at or before
+    /// the current position.
+    pub fn current_chapter(&self) -> Option<usize> {
+        let offset = self.current_offset();
+        let book = self.current_book()?;
+        book.chapters
+            .iter()
+            .rposition(|chapter| chapter.byte_offset <= offset)
     }
 
     /// Show the bookmark list overlay.
     pub fn show_bookmark_list(&mut self) {
-        self.list_selection = 0;
+        // The bookmark on this page if there is one, otherwise the last one
+        // before it -- the list opens where the reader is standing.
+        let offset = self.current_offset();
+        self.list_selection = self
+            .bookmarks()
+            .iter()
+            .rposition(|&marked| marked <= offset)
+            .unwrap_or(0);
         self.view = AppView::BookmarkList;
     }
 
@@ -1476,7 +1670,6 @@ impl EbookApp {
             }
             AppView::TableOfContents => self.handle_toc_key(event),
             AppView::BookmarkList => self.handle_bookmark_list_key(event),
-            AppView::Search => self.handle_search_key(event),
         }
     }
 
@@ -1648,20 +1841,128 @@ impl EbookApp {
         }
     }
 
+    // --------------------------------------------------------------------
+    // Layout the renderer draws and the hit test reads
+    // --------------------------------------------------------------------
+
+    /// Height available to the library list.
+    fn library_list_height(&self) -> f32 {
+        self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT
+    }
+
+    /// Which library rows are on screen.
+    pub fn library_window(&self) -> ListWindow {
+        ListWindow::new(
+            self.library.len(),
+            self.selected_book,
+            rows_that_fit(self.library_list_height(), LIBRARY_ITEM_HEIGHT),
+        )
+    }
+
+    /// Y of the library row drawn at position `slot`.
+    fn library_row_y(slot: usize) -> f32 {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "slot is bounded by the rows that fit on a screen"
+        )]
+        let slot = slot as f32;
+        TOOLBAR_HEIGHT + slot * LIBRARY_ITEM_HEIGHT
+    }
+
+    /// Which book, if any, is under a point in the library view.
+    pub fn library_book_at(&self, y: f32) -> Option<usize> {
+        self.library_window()
+            .index_at((y - TOOLBAR_HEIGHT) / LIBRARY_ITEM_HEIGHT)
+    }
+
+    /// The card the table of contents is drawn in.
+    pub fn toc_frame(&self) -> OverlayFrame {
+        self.centred_overlay(TOC_OVERLAY_WIDTH, TOC_OVERLAY_HEIGHT)
+    }
+
+    /// The card the bookmark list is drawn in. It is only as tall as it needs
+    /// to be, so the page stays visible around a two-bookmark list.
+    pub fn bookmark_frame(&self) -> OverlayFrame {
+        let rows = self.bookmarks().len().max(1);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a book's bookmark count is far inside f32's exact range"
+        )]
+        let rows = rows as f32;
+        self.centred_overlay(
+            BOOKMARK_OVERLAY_WIDTH,
+            OVERLAY_LIST_TOP + rows * OVERLAY_ROW_HEIGHT + 16.0,
+        )
+    }
+
+    /// Centre a card of this size in the window, never taller than it.
+    fn centred_overlay(&self, width: f32, height: f32) -> OverlayFrame {
+        let width = width.min(self.window_width - 40.0).max(120.0);
+        let height = height.min(self.window_height - 80.0).max(OVERLAY_LIST_TOP);
+        OverlayFrame {
+            x: (self.window_width - width) / 2.0,
+            y: (self.window_height - height) / 2.0,
+            width,
+            height,
+        }
+    }
+
+    /// The frame and list window for whichever overlay is open.
+    fn open_overlay(&self) -> Option<(OverlayFrame, ListWindow)> {
+        match self.view {
+            AppView::TableOfContents => {
+                let frame = self.toc_frame();
+                let total = self.current_book().map_or(0, |b| b.chapters.len());
+                Some((frame, frame.list_window(total, self.list_selection)))
+            }
+            AppView::BookmarkList => {
+                let frame = self.bookmark_frame();
+                let total = self.bookmarks().len();
+                Some((frame, frame.list_window(total, self.list_selection)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Handle a click while the table of contents or the bookmark list is up.
+    ///
+    /// Both overlays were keyboard-only: the rows were drawn with a selection
+    /// highlight that follows the arrow keys, which is exactly the affordance
+    /// that says "click me", and the click fell through to nothing.
+    fn click_overlay(&mut self, x: f32, y: f32) -> bool {
+        let Some((frame, window)) = self.open_overlay() else {
+            return false;
+        };
+        if !frame.contains(x, y) {
+            // The dimmed page behind the card is the way out of it.
+            self.view = AppView::Reading;
+            return true;
+        }
+        let Some(index) = window.index_at((y - frame.list_top()) / OVERLAY_ROW_HEIGHT) else {
+            // Inside the card but not on a row: the title bar. Swallowed, so a
+            // click that misses a row by a pixel does not dismiss the overlay.
+            return true;
+        };
+        match self.view {
+            AppView::TableOfContents => self.jump_to_chapter(index),
+            _ => self.jump_to_bookmark(index),
+        }
+        true
+    }
+
     /// Handle a mouse click. Returns true if consumed.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> bool {
         if let MouseEventKind::Press(MouseButton::Left) = &event.kind {
             match self.view {
                 AppView::Library => {
-                    // Check if a library item was clicked.
-                    let y = event.y - TOOLBAR_HEIGHT;
-                    if y >= 0.0 {
-                        let idx = (y / LIBRARY_ITEM_HEIGHT) as usize;
-                        if idx < self.library.len() {
-                            self.selected_book = idx;
-                            self.open_book(idx);
-                            return true;
-                        }
+                    // `library_book_at` is the same window the renderer draws,
+                    // so a row that is not on screen cannot be clicked and a
+                    // click below the last row does nothing -- rather than
+                    // opening whichever book the arithmetic lands on.
+                    if let Some(idx) = self.library_book_at(event.y) {
+                        self.selected_book = idx;
+                        self.open_book(idx);
+                        return true;
                     }
                 }
                 AppView::Reading => {
@@ -1677,7 +1978,9 @@ impl EbookApp {
                         return true;
                     }
                 }
-                _ => {}
+                AppView::TableOfContents | AppView::BookmarkList => {
+                    return self.click_overlay(event.x, event.y);
+                }
             }
         }
         false
@@ -1688,7 +1991,7 @@ impl EbookApp {
     // --------------------------------------------------------------------
 
     /// Render the current view into a list of render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let tc = self.theme_colors();
         let mut cmds = Vec::new();
 
@@ -1713,7 +2016,6 @@ impl EbookApp {
                 self.render_reading(&tc, &mut cmds);
                 self.render_bookmark_list_overlay(&tc, &mut cmds);
             }
-            AppView::Search => self.render_reading(&tc, &mut cmds),
         }
 
         cmds
@@ -1760,10 +2062,13 @@ impl EbookApp {
             width: 1.0,
         });
 
-        // Book list
-        let list_top = TOOLBAR_HEIGHT;
-        for (i, book) in self.library.iter().enumerate() {
-            let y = list_top + (i as f32) * LIBRARY_ITEM_HEIGHT;
+        // Book list. Only the rows that fit, so a short window does not draw
+        // books over the status bar, and always including the selected one.
+        for (slot, i) in self.library_window().visible().enumerate() {
+            let Some(book) = self.library.get(i) else {
+                break;
+            };
+            let y = Self::library_row_y(slot);
             let is_selected = i == self.selected_book;
 
             // Selection highlight
@@ -2125,10 +2430,9 @@ impl EbookApp {
             None => return,
         };
 
-        let overlay_w = 400.0f32;
-        let overlay_h = 500.0f32.min(self.window_height - 80.0);
-        let overlay_x = (self.window_width - overlay_w) / 2.0;
-        let overlay_y = (self.window_height - overlay_h) / 2.0;
+        let frame = self.toc_frame();
+        let (overlay_w, overlay_h) = (frame.width, frame.height);
+        let (overlay_x, overlay_y) = (frame.x, frame.y);
 
         // Dim background
         cmds.push(RenderCommand::FillRect {
@@ -2182,13 +2486,13 @@ impl EbookApp {
         });
 
         // Chapter list
-        let item_h = 32.0f32;
-        let list_top = overlay_y + 44.0;
-        for (i, chapter) in book.chapters.iter().enumerate() {
-            let iy = list_top + (i as f32) * item_h;
-            if iy + item_h > overlay_y + overlay_h {
+        let item_h = OVERLAY_ROW_HEIGHT;
+        let window = frame.list_window(book.chapters.len(), self.list_selection);
+        for (slot, i) in window.visible().enumerate() {
+            let Some(chapter) = book.chapters.get(i) else {
                 break;
-            }
+            };
+            let iy = frame.row_y(slot);
 
             if i == self.list_selection {
                 cmds.push(RenderCommand::FillRect {
@@ -2221,11 +2525,9 @@ impl EbookApp {
     fn render_bookmark_list_overlay(&self, tc: &ThemeColors, cmds: &mut Vec<RenderCommand>) {
         let bookmarks = self.bookmarks();
 
-        let overlay_w = 350.0f32;
-        let item_count = bookmarks.len().max(1);
-        let overlay_h = (60.0 + (item_count as f32) * 32.0).min(self.window_height - 80.0);
-        let overlay_x = (self.window_width - overlay_w) / 2.0;
-        let overlay_y = (self.window_height - overlay_h) / 2.0;
+        let frame = self.bookmark_frame();
+        let (overlay_w, overlay_h) = (frame.width, frame.height);
+        let (overlay_x, overlay_y) = (frame.x, frame.y);
 
         // Dim background
         cmds.push(RenderCommand::FillRect {
@@ -2277,7 +2579,7 @@ impl EbookApp {
             width: 1.0,
         });
 
-        let list_top = overlay_y + 44.0;
+        let list_top = frame.list_top();
         if bookmarks.is_empty() {
             cmds.push(RenderCommand::Text {
                 x: overlay_x + 20.0,
@@ -2290,17 +2592,18 @@ impl EbookApp {
                 overflow: TextOverflow::Ellipsis,
             });
         } else {
-            let item_h = 32.0f32;
-            for (i, &offset) in bookmarks.iter().enumerate() {
+            let item_h = OVERLAY_ROW_HEIGHT;
+            let window = frame.list_window(bookmarks.len(), self.list_selection);
+            for (slot, i) in window.visible().enumerate() {
+                let Some(&offset) = bookmarks.get(i) else {
+                    break;
+                };
                 // The stored bookmark is an offset; the page it is shown as is
                 // whatever page that offset falls on in the pagination on
                 // screen right now, so the list stays truthful after a font
                 // change instead of naming the page it was set on.
                 let page = self.bookmark_page(offset);
-                let iy = list_top + (i as f32) * item_h;
-                if iy + item_h > overlay_y + overlay_h {
-                    break;
-                }
+                let iy = frame.row_y(slot);
 
                 if i == self.list_selection {
                     cmds.push(RenderCommand::FillRect {
@@ -2342,8 +2645,90 @@ impl Default for EbookApp {
 // Main
 // ============================================================================
 
-fn main() {
-    let _app = EbookApp::new();
+impl App for EbookApp {
+    fn title(&self) -> String {
+        // The book being read, because that is what the window is. A reader
+        // left open behind other windows is found again by its title, and
+        // "Ebook Reader" is the one thing that does not distinguish it from
+        // the other copy of itself.
+        match self.view {
+            AppView::Library => "Library - Ebook Reader".to_string(),
+            _ => match self.current_book() {
+                Some(book) => format!("{} - {}", book.meta.title, book.meta.author),
+                None => "Ebook Reader".to_string(),
+            },
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// Nothing in a book advances on its own: the page turns when the reader
+    /// turns it, and the progress bar moves with the page. Asking the harness
+    /// for a tick would wake the machine on a schedule to discover that a page
+    /// of text still says what it said -- `known-issues.md` lesson 47.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            Event::CloseRequested => Response::Exit,
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension in pixels is exact in f32"
+                )]
+                let (w, h) = (*width as f32, *height as f32);
+                if self.set_window_size(w, h) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            Event::Key(key) => {
+                if self.handle_key_event(key) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            Event::Mouse(mouse) => {
+                if self.handle_mouse_event(mouse) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            _ => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The handed size wins over the recorded one: the first frame is drawn
+        // before any `Event::Resize` arrives, so a window the compositor opened
+        // at a size other than the one asked for would be laid out for the size
+        // asked for, and every hit box in it would name the wrong rectangle.
+        self.set_window_size(width, height);
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = EbookApp::new();
+    app::launch("ebook", &mut app)
 }
 
 // ============================================================================
@@ -2360,6 +2745,9 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
+        // A window size is a value the code was handed and stored verbatim;
+        // asserting it came back exactly is the whole of the assertion.
+        clippy::float_cmp,
         clippy::arithmetic_side_effects
     )]
 
@@ -3283,7 +3671,7 @@ mod tests {
     #[test]
     fn test_render_library_produces_commands() {
         let app = make_app();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3291,7 +3679,7 @@ mod tests {
     fn test_render_reading_produces_commands() {
         let mut app = make_app();
         app.open_book(0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
         // Should contain at least background, toolbar, text, status bar.
         assert!(cmds.len() > 5);
@@ -3302,7 +3690,7 @@ mod tests {
         let mut app = make_app();
         app.open_book(0);
         app.show_toc();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // TOC overlay should produce extra commands on top of reading view.
         assert!(cmds.len() > 10);
     }
@@ -3313,7 +3701,7 @@ mod tests {
         app.open_book(0);
         app.toggle_bookmark();
         app.show_bookmark_list();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10);
     }
 
@@ -3324,7 +3712,7 @@ mod tests {
         app.open_search();
         app.search_query = "the".to_owned();
         app.execute_search();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3333,7 +3721,7 @@ mod tests {
         let mut app = make_app();
         app.open_book(0);
         app.open_search();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Should contain a search bar rectangle.
         let has_stroke = cmds
             .iter()
@@ -3345,7 +3733,7 @@ mod tests {
     fn test_render_progress_bar_exists() {
         let mut app = make_app();
         app.open_book(0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // The progress bar should be a filled rect with the progress_bar color.
         let tc = app.theme_colors();
         let has_progress = cmds.iter().any(|cmd| {
@@ -3359,9 +3747,9 @@ mod tests {
     fn test_render_different_themes() {
         let mut app = make_app();
         app.open_book(0);
-        let cmds_dark = app.render();
+        let cmds_dark = app.render_commands();
         app.toggle_theme();
-        let cmds_sepia = app.render();
+        let cmds_sepia = app.render_commands();
         // Both should produce commands, and the background colors should differ.
         assert!(!cmds_dark.is_empty());
         assert!(!cmds_sepia.is_empty());
@@ -3382,7 +3770,7 @@ mod tests {
         let mut app = make_app();
         app.open_book(0);
         app.toggle_bookmark();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_bm_text = cmds
             .iter()
             .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "BM"));
@@ -3737,6 +4125,693 @@ mod tests {
         app.open_book(999);
         // Should not crash; view stays as library since index is invalid.
         assert_eq!(app.view, AppView::Library);
+    }
+
+    // ---- window geometry, and the lists that follow it ----
+
+    fn click(app: &mut EbookApp, x: f32, y: f32) -> bool {
+        app.handle_mouse_event(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    #[test]
+    fn resizing_reflows_the_page_and_keeps_the_reader_where_they_were() {
+        let mut app = make_app();
+        app.open_book(0);
+        app.next_page();
+        app.next_page();
+        let offset = app.current_offset();
+        let pages_before = app.total_pages();
+
+        // Half the width: the same text needs more pages.
+        assert!(app.set_window_size(WINDOW_WIDTH / 2.0, WINDOW_HEIGHT));
+        assert!(
+            app.total_pages() > pages_before,
+            "a narrower window must break the book into more pages, not \
+             show the same pages smaller: {pages_before} -> {}",
+            app.total_pages()
+        );
+        assert_eq!(
+            app.current_offset(),
+            offset,
+            "the reader position is a byte offset precisely so that it \
+             survives repagination -- losing it drops them back to a \
+             sentence they did not choose"
+        );
+    }
+
+    #[test]
+    fn resizing_to_the_same_size_changes_nothing() {
+        let mut app = make_app();
+        app.open_book(0);
+        assert!(
+            !app.set_window_size(WINDOW_WIDTH, WINDOW_HEIGHT),
+            "a Resize event carrying the size we already have must not report \
+             a change, or every one of them costs a repagination and a redraw"
+        );
+    }
+
+    #[test]
+    fn a_window_dragged_tiny_still_has_a_page() {
+        let mut app = make_app();
+        app.open_book(0);
+        app.set_window_size(1.0, 1.0);
+        let (cpl, lpp) = app.layout_params();
+        assert!(cpl >= 1 && lpp >= 1);
+        assert!(
+            app.total_pages() >= 1,
+            "a book must never paginate to zero pages -- current_page would \
+             then name a page that does not exist"
+        );
+    }
+
+    #[test]
+    fn the_library_only_draws_the_rows_that_fit() {
+        let mut app = make_app();
+        // Room for three rows and no more.
+        app.set_window_size(
+            WINDOW_WIDTH,
+            TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LIBRARY_ITEM_HEIGHT * 3.0,
+        );
+        let window = app.library_window();
+        assert_eq!(window.capacity, 3);
+        assert_eq!(window.visible().collect::<Vec<_>>(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn the_selected_book_is_always_one_of_the_drawn_ones() {
+        let mut app = make_app();
+        app.set_window_size(
+            WINDOW_WIDTH,
+            TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LIBRARY_ITEM_HEIGHT * 3.0,
+        );
+        for selected in 0..app.library.len() {
+            app.selected_book = selected;
+            let visible: Vec<usize> = app.library_window().visible().collect();
+            assert!(
+                visible.contains(&selected),
+                "pressing Down past the fold must scroll the list, not move \
+                 the highlight somewhere nobody can see it: selected \
+                 {selected}, drawn {visible:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_below_the_last_library_row_opens_nothing() {
+        let mut app = make_app();
+        app.set_window_size(
+            WINDOW_WIDTH,
+            TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LIBRARY_ITEM_HEIGHT * 3.0,
+        );
+        // Where the fourth row would be if the list did not stop.
+        let y = TOOLBAR_HEIGHT + LIBRARY_ITEM_HEIGHT * 3.5;
+        assert!(!click(&mut app, 100.0, y));
+        assert_eq!(
+            app.view,
+            AppView::Library,
+            "clicking empty space below the list must not open a book"
+        );
+    }
+
+    #[test]
+    fn clicking_a_scrolled_library_row_opens_that_row_and_not_the_nth() {
+        let mut app = make_app();
+        app.set_window_size(
+            WINDOW_WIDTH,
+            TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LIBRARY_ITEM_HEIGHT * 3.0,
+        );
+        let last = app.library.len() - 1;
+        app.selected_book = last; // scrolls the window to the final three rows
+        let first = app.library_window().first;
+        assert_eq!(first, last - 2);
+        // The topmost drawn row is book `last - 2`, not book 0.
+        assert!(click(&mut app, 100.0, TOOLBAR_HEIGHT + 4.0));
+        assert_eq!(
+            app.selected_book,
+            last - 2,
+            "the hit test must read the same scrolled window the renderer \
+             drew, or a click opens the book that used to be there"
+        );
+        assert_eq!(app.view, AppView::Reading);
+    }
+
+    #[test]
+    fn clicking_a_chapter_in_the_contents_jumps_to_it() {
+        let mut app = make_app();
+        app.open_book(0);
+        app.show_toc();
+        let frame = app.toc_frame();
+        let target = 1;
+        let expected = app.library[0].chapters[target].byte_offset;
+        assert!(click(
+            &mut app,
+            frame.x + 20.0,
+            frame.row_y(target) + OVERLAY_ROW_HEIGHT / 2.0
+        ));
+        assert_eq!(app.view, AppView::Reading);
+        assert_eq!(
+            app.current_offset(),
+            expected,
+            "the contents list has a selection highlight that follows the \
+             arrow keys, which is the affordance that says it can be clicked"
+        );
+    }
+
+    #[test]
+    fn clicking_outside_an_overlay_dismisses_it() {
+        let mut app = make_app();
+        app.open_book(0);
+        let offset = app.current_offset();
+        app.show_toc();
+        assert!(click(&mut app, 2.0, 2.0));
+        assert_eq!(app.view, AppView::Reading);
+        assert_eq!(
+            app.current_offset(),
+            offset,
+            "dismissing the contents must not also jump somewhere"
+        );
+    }
+
+    #[test]
+    fn clicking_an_overlays_title_bar_does_not_dismiss_it() {
+        let mut app = make_app();
+        app.open_book(0);
+        app.show_toc();
+        let frame = app.toc_frame();
+        assert!(click(&mut app, frame.x + 20.0, frame.y + 8.0));
+        assert_eq!(
+            app.view,
+            AppView::TableOfContents,
+            "a click a pixel above the first row is a click on the card, and \
+             must not throw the card away"
+        );
+    }
+
+    #[test]
+    fn clicking_a_bookmark_jumps_to_it() {
+        let mut app = make_app();
+        app.open_book(0);
+        app.go_to_page(3);
+        app.toggle_bookmark();
+        let marked = app.current_offset();
+        app.go_to_first_page();
+        app.show_bookmark_list();
+        let frame = app.bookmark_frame();
+        assert!(click(
+            &mut app,
+            frame.x + 20.0,
+            frame.row_y(0) + OVERLAY_ROW_HEIGHT / 2.0
+        ));
+        assert_eq!(app.view, AppView::Reading);
+        assert_eq!(app.current_offset(), marked);
+    }
+
+    #[test]
+    fn an_overlay_row_click_lands_on_the_row_it_was_drawn_at() {
+        // Every row, top to bottom: the hit test and the renderer must agree
+        // on all of them, not just the first.
+        let mut app = make_app();
+        app.open_book(0);
+        app.show_toc();
+        let frame = app.toc_frame();
+        let window = frame.list_window(app.library[0].chapters.len(), 0);
+        for (slot, index) in window.visible().enumerate() {
+            let y = frame.row_y(slot) + 1.0;
+            assert_eq!(
+                window.index_at((y - frame.list_top()) / OVERLAY_ROW_HEIGHT),
+                Some(index),
+                "row drawn at slot {slot} is chapter {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bookmark_card_grows_with_the_list() {
+        let mut app = make_app();
+        app.open_book(0);
+        let empty = app.bookmark_frame().height;
+        app.toggle_bookmark();
+        app.go_to_page(2);
+        app.toggle_bookmark();
+        app.go_to_page(4);
+        app.toggle_bookmark();
+        assert!(
+            app.bookmark_frame().height > empty,
+            "a card sized for one row cannot show three"
+        );
+        let frame = app.bookmark_frame();
+        assert!(
+            frame.row_capacity() >= 3,
+            "the card must have room for the rows it is sized for: capacity {}",
+            frame.row_capacity()
+        );
+    }
+
+    #[test]
+    fn an_overlay_never_leaves_the_window() {
+        let mut app = make_app();
+        app.open_book(0);
+        for (w, h) in [(360.0, 240.0), (400.0, 300.0), (1920.0, 1080.0)] {
+            app.set_window_size(w, h);
+            for frame in [app.toc_frame(), app.bookmark_frame()] {
+                assert!(
+                    frame.x >= 0.0 && frame.y >= 0.0,
+                    "{w}x{h}: card at {},{} is off the top-left",
+                    frame.x,
+                    frame.y
+                );
+                assert!(
+                    frame.x + frame.width <= app.window_width + f32::EPSILON
+                        && frame.y + frame.height <= app.window_height + f32::EPSILON,
+                    "{w}x{h}: card runs off the bottom-right"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn list_window_puts_the_selection_on_the_last_row_once_scrolled() {
+        let w = ListWindow::new(20, 12, 5);
+        assert_eq!(w.first, 8);
+        assert_eq!(w.visible().collect::<Vec<_>>(), vec![8, 9, 10, 11, 12]);
+        assert_eq!(w.index_at(-1.0), None);
+        assert_eq!(w.index_at(0.0), Some(8));
+        assert_eq!(w.index_at(4.9), Some(12));
+        assert_eq!(w.index_at(5.0), None, "past the last drawn row");
+    }
+
+    #[test]
+    fn list_window_stops_at_the_end_of_a_short_list() {
+        let w = ListWindow::new(2, 0, 5);
+        assert_eq!(w.visible().collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            w.index_at(3.0),
+            None,
+            "there is no third row to click even though the card has room"
+        );
+    }
+
+    #[test]
+    fn rows_that_fit_never_reports_a_row_there_is_no_room_for() {
+        assert_eq!(rows_that_fit(0.0, 32.0), 0);
+        assert_eq!(rows_that_fit(31.0, 32.0), 0);
+        assert_eq!(rows_that_fit(32.0, 32.0), 1);
+        assert_eq!(rows_that_fit(-100.0, 32.0), 0);
+        assert_eq!(rows_that_fit(100.0, 0.0), 0);
+    }
+
+    // ---- the strap ----
+
+    #[test]
+    fn the_title_names_the_book_being_read() {
+        let mut app = make_app();
+        assert_eq!(app.title(), "Library - Ebook Reader");
+        app.open_book(1);
+        let book = &app.library[1];
+        assert_eq!(
+            app.title(),
+            format!("{} - {}", book.meta.title, book.meta.author),
+            "a reader behind three other windows is found again by its title"
+        );
+    }
+
+    #[test]
+    fn the_reader_asks_for_no_clock() {
+        assert_eq!(
+            make_app().tick_interval(),
+            None,
+            "nothing in a book advances on its own; a tick would wake the \
+             machine to find the same page still there"
+        );
+    }
+
+    #[test]
+    fn a_resize_event_reflows_and_a_repeat_of_it_does_not_redraw() {
+        let mut app = make_app();
+        app.open_book(0);
+        let resize = Event::Resize {
+            width: 600,
+            height: 400,
+        };
+        assert_eq!(app.on_event(&resize), Response::Redraw);
+        assert_eq!(app.window_width, 600.0);
+        assert_eq!(app.on_event(&resize), Response::Idle);
+    }
+
+    #[test]
+    fn the_close_button_exits() {
+        assert_eq!(make_app().on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn an_unhandled_key_does_not_ask_for_a_redraw() {
+        let mut app = make_app();
+        let event = Event::Key(make_key(Key::F12));
+        assert_eq!(
+            app.on_event(&event),
+            Response::Idle,
+            "redrawing on every keystroke the app ignored is a frame spent \
+             drawing what is already on screen"
+        );
+        assert_eq!(
+            app.on_event(&Event::Key(make_key(Key::Down))),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn a_click_arrives_through_the_event_loop() {
+        let mut app = make_app();
+        let on_row = Event::Mouse(MouseEvent {
+            x: 100.0,
+            y: TOOLBAR_HEIGHT + 4.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(app.on_event(&on_row), Response::Redraw);
+        assert_eq!(app.view, AppView::Reading);
+
+        let mut app = make_app();
+        let on_toolbar = Event::Mouse(MouseEvent {
+            x: 100.0,
+            y: TOOLBAR_HEIGHT / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(
+            app.on_event(&on_toolbar),
+            Response::Idle,
+            "a click the app did nothing with must not cost a frame"
+        );
+    }
+
+    #[test]
+    fn the_first_frame_is_laid_out_for_the_size_the_compositor_gave() {
+        // The window may open at a size other than the one asked for, and the
+        // first frame is drawn before any Resize arrives.
+        let mut app = make_app();
+        app.open_book(0);
+        let tree = app.render(640.0, 480.0);
+        assert_eq!(app.window_width, 640.0);
+        assert_eq!(app.window_height, 480.0);
+        assert!(!tree.commands.is_empty());
+    }
+
+    /// A book with more chapters than any overlay can show at once, so the
+    /// scrolled paths are reachable at all. The sample library's longest book
+    /// has three chapters and the smallest legal card holds more than that,
+    /// which is why every scroll test below builds its own.
+    fn app_with_long_book() -> EbookApp {
+        let mut text = String::new();
+        for i in 0..24 {
+            text.push_str(&format!("Chapter {}: Part {i}\n\n", i + 1));
+            text.push_str("Some words to fill a page with, repeated a while.\n");
+            text.push_str("\n---\n\n");
+        }
+        let mut app = make_app();
+        app.add_book("Long", "Author", &text);
+        let last = app.library.len() - 1;
+        app.open_book(last);
+        assert!(
+            app.library[last].chapters.len() > 14,
+            "fixture must have more chapters than the largest card holds"
+        );
+        app
+    }
+
+    /// The rectangle a list draws its selection highlight in, if it drew one.
+    fn selection_highlight(cmds: &[RenderCommand], colour: Color) -> Option<(f32, f32)> {
+        cmds.iter().find_map(|c| match *c {
+            RenderCommand::FillRect { x, y, color, .. } if color == colour => Some((x, y)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_window_too_short_for_one_row_still_shows_the_selected_one() {
+        // Better a clipped row than an empty pane: the alternative is a list
+        // that renders nothing at all and looks broken rather than cramped.
+        let w = ListWindow::new(5, 3, 0);
+        assert_eq!(w.capacity, 1);
+        assert_eq!(w.visible().collect::<Vec<_>>(), vec![3]);
+        assert_eq!(w.index_at(0.0), Some(3));
+    }
+
+    #[test]
+    fn a_selection_past_the_end_still_draws_the_list() {
+        let window = ListWindow::new(5, 99, 3);
+        assert_eq!(
+            window.visible().collect::<Vec<_>>(),
+            vec![2, 3, 4],
+            "a list that has rows must never render none of them"
+        );
+        assert_eq!(ListWindow::new(0, 0, 3).visible().count(), 0);
+    }
+
+    #[test]
+    fn clicking_left_of_an_overlay_dismisses_it() {
+        let mut app = make_app();
+        app.open_book(0);
+        app.go_to_page(3);
+        let offset = app.current_offset();
+        app.show_toc();
+        let frame = app.toc_frame();
+        // Beside the card, level with its first row -- inside the window, and
+        // on the dimmed page rather than the card.
+        assert!(click(&mut app, frame.x - 4.0, frame.row_y(0) + 4.0));
+        assert_eq!(app.view, AppView::Reading);
+        assert_eq!(
+            app.current_offset(),
+            offset,
+            "a click beside the card is a dismissal, not a click on the row              it happens to be level with"
+        );
+    }
+
+    #[test]
+    fn clicking_below_an_overlay_dismisses_it() {
+        let mut app = make_app();
+        app.open_book(0);
+        app.show_toc();
+        let frame = app.toc_frame();
+        assert!(click(
+            &mut app,
+            frame.x + 20.0,
+            frame.y + frame.height + 4.0
+        ));
+        assert_eq!(app.view, AppView::Reading);
+    }
+
+    #[test]
+    fn every_row_an_overlay_draws_is_inside_it() {
+        let app = app_with_long_book();
+        for frame in [app.toc_frame(), app.bookmark_frame()] {
+            let capacity = frame.row_capacity();
+            assert!(capacity > 0);
+            let last = frame.row_y(capacity - 1) + OVERLAY_ROW_HEIGHT;
+            assert!(
+                last <= frame.y + frame.height + f32::EPSILON,
+                "the card claims room for {capacity} rows but the last one \
+                 ends at {last}, past its bottom edge at {}",
+                frame.y + frame.height
+            );
+        }
+    }
+
+    #[test]
+    fn an_overlay_stays_in_a_window_dragged_as_small_as_it_goes() {
+        let mut app = make_app();
+        app.open_book(0);
+        for (w, h) in [(1.0, 1.0), (0.0, 0.0), (100.0, 90.0), (360.0, 240.0)] {
+            app.set_window_size(w, h);
+            for frame in [app.toc_frame(), app.bookmark_frame()] {
+                assert!(
+                    frame.x >= 0.0 && frame.y >= 0.0,
+                    "{w}x{h}: card at {},{} is off the top-left -- the \
+                     minimum window size is what keeps it on screen",
+                    frame.x,
+                    frame.y
+                );
+                assert!(
+                    frame.x + frame.width <= app.window_width + f32::EPSILON
+                        && frame.y + frame.height <= app.window_height + f32::EPSILON,
+                    "{w}x{h}: card runs off the bottom-right"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clicking_the_toolbar_does_not_open_a_book() {
+        let mut app = make_app();
+        assert!(!click(&mut app, 100.0, TOOLBAR_HEIGHT / 2.0));
+        assert_eq!(
+            app.view,
+            AppView::Library,
+            "the toolbar is above the list; a click on it is not a click on \
+             the first row"
+        );
+    }
+
+    #[test]
+    fn each_library_row_opens_the_book_drawn_on_it() {
+        let mut app = make_app();
+        for i in 0..3 {
+            #[allow(clippy::cast_precision_loss)]
+            let y = TOOLBAR_HEIGHT + (i as f32) * LIBRARY_ITEM_HEIGHT + 4.0;
+            app.view = AppView::Library;
+            app.selected_book = 0;
+            assert!(click(&mut app, 100.0, y));
+            assert_eq!(app.selected_book, i, "row {i} must open book {i}");
+        }
+    }
+
+    #[test]
+    fn the_library_list_never_runs_under_the_status_bar() {
+        let mut app = make_app();
+        for h in [240.0, 300.0, 350.0, 420.0, 700.0, 1080.0] {
+            app.set_window_size(WINDOW_WIDTH, h);
+            let capacity = app.library_window().capacity;
+            let bottom = EbookApp::library_row_y(capacity - 1) + LIBRARY_ITEM_HEIGHT;
+            let limit = app.window_height - STATUS_BAR_HEIGHT;
+            assert!(
+                bottom <= limit + f32::EPSILON || capacity == 1,
+                "at height {h} the list draws {capacity} rows ending at \
+                 {bottom}, over a status bar that starts at {limit}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scrolled_library_draws_its_selection_on_screen() {
+        let mut app = make_app();
+        app.set_window_size(
+            WINDOW_WIDTH,
+            TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LIBRARY_ITEM_HEIGHT * 3.0,
+        );
+        let last = app.library.len() - 1;
+        app.selected_book = last;
+        let colour = app.theme_colors().selected_bg;
+        let cmds = app.render_commands();
+        let (_, y) = selection_highlight(&cmds, colour).expect("a selected row is highlighted");
+        assert!(
+            y >= TOOLBAR_HEIGHT && y + LIBRARY_ITEM_HEIGHT <= app.window_height,
+            "the highlight for book {last} was drawn at y={y}, off a window \
+             {} tall -- a scrolled list must draw rows where it scrolled \
+             them to",
+            app.window_height
+        );
+    }
+
+    #[test]
+    fn a_scrolled_contents_draws_its_selection_inside_the_card() {
+        let mut app = app_with_long_book();
+        app.set_window_size(WINDOW_WIDTH, 400.0);
+        let frame = app.toc_frame();
+        app.show_toc();
+        app.list_selection = app.library[app.selected_book].chapters.len() - 1;
+        assert!(
+            frame
+                .list_window(
+                    app.library[app.selected_book].chapters.len(),
+                    app.list_selection
+                )
+                .first
+                > 0,
+            "fixture must actually scroll"
+        );
+        let colour = app.theme_colors().selected_bg;
+        let cmds = app.render_commands();
+        let (_, y) = selection_highlight(&cmds, colour).expect("a selected chapter is highlighted");
+        assert!(
+            y >= frame.y && y + OVERLAY_ROW_HEIGHT <= frame.y + frame.height + f32::EPSILON,
+            "the highlight was drawn at y={y}, outside a card spanning {}..{}",
+            frame.y,
+            frame.y + frame.height
+        );
+    }
+
+    #[test]
+    fn a_scrolled_bookmark_list_draws_its_selection_inside_the_card() {
+        let mut app = app_with_long_book();
+        app.set_window_size(WINDOW_WIDTH, 320.0);
+        for page in 0..app.total_pages().min(20) {
+            app.go_to_page(page);
+            app.toggle_bookmark();
+        }
+        app.show_bookmark_list();
+        app.list_selection = app.bookmarks().len() - 1;
+        let frame = app.bookmark_frame();
+        assert!(
+            frame
+                .list_window(app.bookmarks().len(), app.list_selection)
+                .first
+                > 0,
+            "fixture must actually scroll: {} bookmarks, room for {}",
+            app.bookmarks().len(),
+            frame.row_capacity()
+        );
+        let colour = app.theme_colors().selected_bg;
+        let cmds = app.render_commands();
+        let (_, y) =
+            selection_highlight(&cmds, colour).expect("a selected bookmark is highlighted");
+        assert!(
+            y >= frame.y && y + OVERLAY_ROW_HEIGHT <= frame.y + frame.height + f32::EPSILON,
+            "the highlight was drawn at y={y}, outside a card spanning {}..{}",
+            frame.y,
+            frame.y + frame.height
+        );
+    }
+
+    #[test]
+    fn the_empty_bookmark_card_has_room_for_its_message() {
+        let mut app = make_app();
+        app.open_book(0);
+        assert!(app.bookmarks().is_empty());
+        let frame = app.bookmark_frame();
+        assert!(
+            frame.height >= OVERLAY_LIST_TOP + OVERLAY_ROW_HEIGHT,
+            "'No bookmarks yet' is drawn a row down from the title and needs \
+             a row's height to sit in: card is {} tall",
+            frame.height
+        );
+    }
+
+    #[test]
+    fn the_contents_opens_on_the_chapter_being_read() {
+        let mut app = make_app();
+        app.open_book(0);
+        let chapters = app.library[0].chapters.len();
+        assert!(chapters >= 2, "fixture needs a second chapter");
+        app.go_to_offset(app.library[0].chapters[chapters - 1].byte_offset);
+        app.show_toc();
+        assert_eq!(
+            app.list_selection,
+            chapters - 1,
+            "opening the contents of a book you are most of the way through \
+             must not highlight chapter one"
+        );
+    }
+
+    #[test]
+    fn the_bookmark_list_opens_on_the_nearest_bookmark_behind_you() {
+        let mut app = make_app();
+        app.open_book(0);
+        app.go_to_page(1);
+        app.toggle_bookmark();
+        app.go_to_page(3);
+        app.toggle_bookmark();
+        app.go_to_page(4);
+        app.show_bookmark_list();
+        assert_eq!(app.list_selection, 1, "page 4 is past the page-3 bookmark");
+        app.view = AppView::Reading;
+        app.go_to_first_page();
+        app.show_bookmark_list();
+        assert_eq!(
+            app.list_selection, 0,
+            "before every bookmark, the list opens on the first"
+        );
     }
 
     #[test]

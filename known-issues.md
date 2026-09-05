@@ -119029,6 +119029,51 @@ the second proves more. Neither is blocked on another lane.
 > bin-only crates, so neither can be depended on. Each needs a `lib.rs` with a
 > thin `main.rs` over it before a third crate can drive one against the other.
 
+> **The second obstacle is entropy, and the fix chosen for it is injection,
+> not a better host — 2026-09-05.** A key exchange needs a Diffie-Hellman
+> private exponent, and drawing one goes through `randrange::fill_secret`,
+> which on this Windows host returns `Unavailable` for every request. That is
+> deliberate: `fill_from_kernel` is `#[cfg(not(unix))] -> Err(Unavailable)`, so
+> that a test reaching for the system source on the host sees it decline, and
+> "fails closed when there is no entropy" is a property something asserts.
+> Downstream of it: four permanently-red tests in `userspace/ssh` (the DH
+> exponent and the KEXINIT cookie), and no handshake, so no interop test.
+>
+> There are two ways out, and only one of them is lane B's to take.
+>
+> - **Give the host a real CSPRNG.** `fill_from_kernel` gains a
+>   `#[cfg(windows)]` arm over `BCryptGenRandom`, and the fail-closed property
+>   moves from "a platform we compile for" to "a filler a test hands over",
+>   which then also exercises it on the SlateOS target, where it never ran.
+>   This is written, tested and green, but it is **parked on branch
+>   `lane-b-randrange-entropy` and not merged**: "the host has no entropy" is a
+>   documented testing convention in lane C's tree, and about eighteen tests
+>   across seventeen `apps/`/`gui/` crates assert it. Overturning another
+>   lane's convention and reddening `main` is not a call lane B makes alone, so
+>   it is queued for the operator in `open-questions.md` ("The test machine
+>   cannot produce random numbers, on purpose…"), with the list in
+>   `requests/b-c-a-pending-question-would-red-eighteen-of-your-tests-that-assert-the-host-has-no-entropy.md`.
+> - **Make the SSH code take its byte source as a parameter.** `SshSession` and
+>   `ConnectionState` carry a filler defaulting to `randrange::fill_secret`,
+>   covering all three uses — the DH exponent, the KEXINIT cookie, the
+>   per-packet padding. This is entirely inside lane B, it is the better design
+>   on its own terms (what is under test stops depending on which platform it
+>   was compiled for), and it yields a **deterministic** handshake, so the
+>   interop test can assert the exact session identifier both ends derive
+>   rather than merely that they agree on one.
+>
+> The second is what unblocks item 4, so item 4 is **not** waiting on the
+> operator. The first would additionally un-red the four `userspace/ssh` tests
+> for the whole tree rather than only along the injected path, which is why it
+> is still worth asking about.
+>
+> `ssh` also gained `-o UserKnownHostsFile=` (`7a3bbb969`), which the test
+> needs for a reason worth stating separately from the option's own merits: the
+> client verifies the server's host key against `$HOME/.ssh/known_hosts`, and a
+> test that drove the real client would either have to skip verification —
+> testing the wrong program — or write into the operator's real trust store,
+> which is a side effect no test is entitled to have.
+
 ### TD-B-SSH-RE-ENCODED-THE-SERVER-VERSION-BEFORE-HASHING-IT
 
 **Status: FIXED** (`userspace/ssh/src/main.rs`, `classify_version_line`).

@@ -233,6 +233,56 @@ pub enum WireError {
         /// The length the peer asked for.
         len: u32,
     },
+    /// A packet's `packet_length` field is outside what §6 permits.
+    ///
+    /// Both bounds are one variant because both are the same mistake seen from
+    /// two ends, and separating them invited exactly the divergence this crate
+    /// exists to stop: the client checked the ceiling and the floor, the server
+    /// checked only the ceiling, and a `packet_length` of 0 walked past its
+    /// guard to be indexed at offset 4.
+    PacketLength {
+        /// The length the peer announced.
+        len: usize,
+    },
+    /// `padding_length` claims more bytes than the packet contains.
+    ///
+    /// §6 makes the payload `packet_length - padding_length - 1`, so a padding
+    /// length at or past `packet_length` is a peer describing a negative
+    /// payload — which, computed in `usize`, is a very large one.
+    PaddingLength {
+        /// The `packet_length` field.
+        packet_length: usize,
+        /// The `padding_length` byte.
+        padding_length: usize,
+    },
+    /// The MAC on a received packet is not the one over its plaintext.
+    ///
+    /// Carries nothing. What the received MAC *was* is the one detail an
+    /// attacker probing for an oracle would want back, and it tells whoever is
+    /// debugging nothing they cannot get from the packet itself.
+    MacMismatch,
+    /// A caller offered a padding block of the wrong length.
+    ///
+    /// Ours, not the peer's — the sole variant here that is not a protocol
+    /// fault. It exists because [`PacketCodec::encode`] takes its padding from
+    /// the caller (the entropy source, and its failure mode, belong to the
+    /// binary) and must not quietly pad the difference with zeros.
+    PaddingSize {
+        /// How many bytes the block alignment required.
+        wanted: usize,
+        /// How many the caller supplied.
+        given: usize,
+    },
+    /// Key derivation produced fewer bytes than the algorithm needs.
+    ///
+    /// Unreachable while `derive_key` returns what it is asked for. Stated
+    /// anyway because the alternative at the one site that can hit it is an
+    /// index, and a cipher keyed from a short buffer — silently zero-extended —
+    /// is worse than a refused handshake.
+    ShortKey {
+        /// Which derived value came back short.
+        what: &'static str,
+    },
 }
 
 impl core::fmt::Display for WireError {
@@ -248,6 +298,24 @@ impl core::fmt::Display for WireError {
             ),
             Self::LengthOutOfRange { len } => {
                 write!(f, "length {len} does not fit this machine's address space")
+            }
+            Self::PacketLength { len } => write!(
+                f,
+                "packet length {len} is outside the {MIN_PACKET_LENGTH}..={MAX_PACKET_SIZE} the framing allows"
+            ),
+            Self::PaddingLength {
+                packet_length,
+                padding_length,
+            } => write!(
+                f,
+                "padding length {padding_length} does not fit a packet of {packet_length}"
+            ),
+            Self::MacMismatch => f.write_str("MAC verification failed"),
+            Self::PaddingSize { wanted, given } => {
+                write!(f, "padding must be {wanted} bytes, not {given}")
+            }
+            Self::ShortKey { what } => {
+                write!(f, "key derivation produced a short {what}")
             }
         }
     }
@@ -801,6 +869,414 @@ fn increment_counter(counter: &mut [u8; 16]) {
         if !overflow {
             return;
         }
+    }
+}
+
+// ============================================================================
+// The binary packet protocol (RFC 4253 §6)
+// ============================================================================
+
+/// The largest `packet_length` we will accept or produce.
+///
+/// §6.1 obliges an implementation to handle 35000 bytes of payload; this is
+/// that figure applied to the whole packet, which is what both binaries have
+/// always meant by it.
+pub const MAX_PACKET_SIZE: usize = 35000;
+
+/// The smallest `packet_length` §6 can describe: one `padding_length` byte
+/// plus the four bytes of padding the section makes a minimum. A packet
+/// claiming less is malformed by definition, not merely empty.
+pub const MIN_PACKET_LENGTH: usize = 5;
+
+/// The multiple every packet is padded to before a cipher is negotiated.
+///
+/// §6: "the cipher block size or 8, whichever is larger" — and before
+/// `NEWKEYS` the cipher is `none`, whose block size §6.3 fixes at 8.
+const BLOCK_SIZE_UNENCRYPTED: usize = 8;
+
+/// Which end of the connection a codec is.
+///
+/// RFC 4253 §7.2 derives six values labelled `A`..`F`, and three of them are
+/// "client to server". Which of those three is *outbound* therefore depends on
+/// who is asking, and until now each binary answered that by hand: the client
+/// assigned `A`/`C`/`E` to its send direction and the server assigned them to
+/// its receive direction, in two separate blocks of near-identical code that
+/// had to stay each other's mirror image forever. Naming the end once and
+/// letting [`PacketCodec::activate`] do the mapping is what makes the two
+/// assignments a single statement instead of a coincidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The end that connects, sends `V_C`, and encrypts under the `A`/`C`/`E`
+    /// values.
+    Client,
+    /// The end that listens, sends `V_S`, and encrypts under the `B`/`D`/`F`
+    /// values.
+    Server,
+}
+
+/// The SSH transport's packet layer: framing, encryption, MAC and both
+/// sequence numbers.
+///
+/// # Why the sequence numbers live in here
+///
+/// §6.4 makes the MAC `HMAC(key, sequence_number || unencrypted_packet)`, so
+/// the sequence number is an *input to the framing*, not bookkeeping the caller
+/// keeps alongside it. Held outside, it is a value that must be incremented by
+/// hand at every one of a dozen call sites and never on the error paths between
+/// them — and it was not: `known-issues.md` records a send path that passed
+/// `seq_send` to the packet builder and then never advanced it, so every packet
+/// after the first was authenticated under a number the peer had already moved
+/// past. Owning it here makes "encode a packet" and "advance the sequence
+/// number" the same act, exactly as owning the counter inside [`Aes128Ctr`]
+/// made "encrypt" and "advance the counter" the same act.
+///
+/// # What it deliberately does not do
+///
+/// No I/O. [`PacketCodec::decode`] is a pure function of a byte slice and
+/// returns `Ok(None)` when a whole packet has not arrived, so each binary keeps
+/// its own buffering and its own idea of what to do while waiting — the server
+/// has a shell to service, the client has a terminal to read. It is also what
+/// keeps the framing testable on a development host, which has no kernel to
+/// hold a TCP connection open.
+///
+/// It does not generate padding either; see [`PacketCodec::encode`].
+#[derive(Clone)]
+pub struct PacketCodec {
+    /// Cipher for packets we send. `None` before `NEWKEYS`.
+    cipher_out: Option<Aes128Ctr>,
+    /// Cipher for packets we receive. `None` before `NEWKEYS`.
+    cipher_in: Option<Aes128Ctr>,
+    mac_key_out: Vec<u8>,
+    mac_key_in: Vec<u8>,
+    block_size: usize,
+    mac_len: usize,
+    seq_out: u32,
+    seq_in: u32,
+}
+
+impl core::fmt::Debug for PacketCodec {
+    /// Opaque for the same reason [`Aes128Ctr`]'s is: it holds key material,
+    /// and even the sequence numbers say how much traffic has passed.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PacketCodec { .. }")
+    }
+}
+
+impl Default for PacketCodec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PacketCodec {
+    /// A codec for the pre-`NEWKEYS` transport: no cipher, no MAC, 8-byte
+    /// blocks, both sequence numbers at zero.
+    ///
+    /// The absent ciphers are `Option`s rather than an `encrypted: bool` beside
+    /// a set of keys. Both binaries carried such a flag, and a flag reading
+    /// "encrypted" next to a cipher that was never installed is a plaintext
+    /// packet sent in the belief that it was protected. Only one of the two can
+    /// now be true at a time.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            cipher_out: None,
+            cipher_in: None,
+            mac_key_out: Vec::new(),
+            mac_key_in: Vec::new(),
+            block_size: BLOCK_SIZE_UNENCRYPTED,
+            mac_len: 0,
+            seq_out: 0,
+            seq_in: 0,
+        }
+    }
+
+    /// Install the keys `NEWKEYS` brings into force, for `aes128-ctr` with
+    /// `hmac-sha2-256`.
+    ///
+    /// `shared_secret` is `K` as its raw big-endian bytes — [`derive_key`]
+    /// applies the §5 `mpint` encoding that §7.2 actually hashes, so passing
+    /// an already-encoded `K` here would encode it twice. `exchange_hash` is
+    /// `H`, and `session_id` is the `H` of the *first* key exchange, which
+    /// stays fixed across rekeys.
+    ///
+    /// The sequence numbers deliberately survive this call. §6.4 runs them for
+    /// the life of the connection, not the life of a key, and resetting them at
+    /// a rekey would break the MAC on the very next packet.
+    ///
+    /// # Errors
+    ///
+    /// [`WireError::ShortKey`] if a derived value came back shorter than the
+    /// algorithm needs. `derive_key` returns the length it is asked for, so
+    /// this is unreachable; it is reported rather than indexed past because the
+    /// failure it stands for — a cipher keyed with implicit zero padding — is
+    /// silent and total.
+    pub fn activate(
+        &mut self,
+        role: Role,
+        shared_secret: &[u8],
+        exchange_hash: &[u8; 32],
+        session_id: &[u8; 32],
+    ) -> Result<(), WireError> {
+        // The lengths are the negotiated algorithms', not SHA-256's: aes128-ctr
+        // takes a 16-byte key and a 16-byte IV, hmac-sha2-256 a 32-byte key.
+        let derive = |label: u8, len: usize| {
+            derive_key(shared_secret, exchange_hash, label, session_id, len)
+        };
+
+        // §7.2 names the six values by direction, not by who is reading them.
+        // This is the one place that translation happens.
+        let (iv_out, key_out, mac_out, iv_in, key_in, mac_in) = match role {
+            Role::Client => (b'A', b'C', b'E', b'B', b'D', b'F'),
+            Role::Server => (b'B', b'D', b'F', b'A', b'C', b'E'),
+        };
+
+        let (iv_out, key_out) = (derive(iv_out, 16), derive(key_out, 16));
+        let (iv_in, key_in) = (derive(iv_in, 16), derive(key_in, 16));
+
+        // A cipher is only ever constructed from a key and an IV together, so
+        // there is no window in which one is installed without the other.
+        let (Some(key_out), Some(iv_out), Some(key_in), Some(iv_in)) = (
+            key_out.first_chunk::<16>(),
+            iv_out.first_chunk::<16>(),
+            key_in.first_chunk::<16>(),
+            iv_in.first_chunk::<16>(),
+        ) else {
+            return Err(WireError::ShortKey {
+                what: "cipher key or IV",
+            });
+        };
+
+        self.cipher_out = Some(Aes128Ctr::new(key_out, iv_out));
+        self.cipher_in = Some(Aes128Ctr::new(key_in, iv_in));
+        self.mac_key_out = derive(mac_out, 32);
+        self.mac_key_in = derive(mac_in, 32);
+        self.block_size = 16;
+        self.mac_len = 32;
+        Ok(())
+    }
+
+    /// Whether `NEWKEYS` has taken effect.
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        self.cipher_out.is_some()
+    }
+
+    /// The alignment a received packet's first block is read in.
+    ///
+    /// A caller polling a socket needs this to know how few bytes are too few
+    /// to bother trying [`decode`](Self::decode) with.
+    #[must_use]
+    pub fn inbound_block_size(&self) -> usize {
+        if self.cipher_in.is_some() {
+            self.block_size.max(BLOCK_SIZE_UNENCRYPTED)
+        } else {
+            BLOCK_SIZE_UNENCRYPTED
+        }
+    }
+
+    /// The sequence number of the packet [`decode`](Self::decode) returned
+    /// last.
+    ///
+    /// `decode` advances `seq_in` as it hands a packet back, so the number that
+    /// packet was authenticated under is one behind. A caller that must quote it
+    /// — `SSH_MSG_UNIMPLEMENTED` names the sequence number it is rejecting
+    /// (§11.4) — needs this rather than an arithmetic guess.
+    #[must_use]
+    pub fn last_inbound_seq(&self) -> u32 {
+        self.seq_in.wrapping_sub(1)
+    }
+
+    /// How many padding bytes a payload of `payload_len` needs.
+    ///
+    /// §6: `packet_length + padding_length + payload + padding` is a multiple
+    /// of the block size, with at least four bytes of padding.
+    #[must_use]
+    pub fn padding_len(&self, payload_len: usize) -> usize {
+        let block_size = if self.cipher_out.is_some() {
+            self.block_size.max(BLOCK_SIZE_UNENCRYPTED)
+        } else {
+            BLOCK_SIZE_UNENCRYPTED
+        };
+        // Saturating throughout: every input is ours (a payload we built, a
+        // block size of 8 or 16), so none of it can overflow — but a saturating
+        // form that produces a packet the peer rejects beats a wrapping one
+        // that produces a *valid-looking* packet describing the wrong length.
+        // The server's copy of this arithmetic was the plain-operator one, and
+        // its `% block_size` would have divided by zero for a block size of 0.
+        let unpadded = payload_len.saturating_add(1);
+        let overhang = unpadded
+            .saturating_add(4)
+            .checked_rem(block_size)
+            .unwrap_or(0);
+        let padding = block_size.saturating_sub(overhang);
+        if padding < 4 {
+            padding.saturating_add(block_size)
+        } else {
+            padding
+        }
+    }
+
+    /// Frame, encrypt and authenticate one packet, advancing the outbound
+    /// sequence number and the cipher's counter.
+    ///
+    /// `padding` must be exactly [`padding_len`](Self::padding_len) bytes.
+    /// §6 says those bytes SHOULD be random, and this crate does not produce
+    /// them: entropy is a syscall, it can fail, and what to do when it fails is
+    /// the binary's decision — the alternative is a shared layer that either
+    /// panics on a host with no CSPRNG or quietly pads with zeros, which is the
+    /// behaviour this parameter exists to retire.
+    ///
+    /// # Errors
+    ///
+    /// [`WireError::PaddingSize`] if `padding` is not the required length. It
+    /// is an error rather than a truncate-or-extend because both silent fixes
+    /// are wrong: a short block would be zero-extended into the packet, and a
+    /// long one would mean the caller had computed the alignment differently
+    /// from the codec that is about to state it in the length field.
+    pub fn encode(&mut self, payload: &[u8], padding: &[u8]) -> Result<Vec<u8>, WireError> {
+        let wanted = self.padding_len(payload.len());
+        if padding.len() != wanted {
+            return Err(WireError::PaddingSize {
+                wanted,
+                given: padding.len(),
+            });
+        }
+
+        let packet_length = payload.len().saturating_add(1).saturating_add(wanted);
+        let mut pkt = Vec::with_capacity(packet_length.saturating_add(4));
+        pkt.extend_from_slice(
+            &u32::try_from(packet_length)
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        pkt.push(u8::try_from(wanted).unwrap_or(u8::MAX));
+        pkt.extend_from_slice(payload);
+        pkt.extend_from_slice(padding);
+
+        if let Some(cipher) = self.cipher_out.as_mut() {
+            // §6: the MAC covers the *plaintext* packet, so it is computed
+            // before the cipher runs and appended after it.
+            let mac = compute_mac(&self.mac_key_out, self.seq_out, &pkt);
+            cipher.apply(&mut pkt);
+            pkt.extend_from_slice(&mac);
+        }
+
+        self.seq_out = self.seq_out.wrapping_add(1);
+        Ok(pkt)
+    }
+
+    /// Decode one packet from the front of `buf`, if a whole one is there.
+    ///
+    /// Returns the payload and how many bytes of `buf` it used, or `Ok(None)`
+    /// when more bytes are needed — in which case nothing has changed, and the
+    /// caller may read more and try again on the same bytes. That the cipher
+    /// survives an `Ok(None)` untouched is why [`Aes128Ctr::peek_block`] takes
+    /// `&self`: the length has to be decrypted to be read, and consuming that
+    /// keystream would leave this counter a block ahead of the sender's for the
+    /// rest of the session.
+    ///
+    /// On success the inbound sequence number and the cipher's counter have
+    /// both advanced; the caller's only remaining duty is to drop the consumed
+    /// bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`WireError::PacketLength`] for a length outside §6's range,
+    /// [`WireError::Truncated`] for a MAC shorter than the algorithm's,
+    /// [`WireError::MacMismatch`] for a packet that is not authentic, and
+    /// [`WireError::PaddingLength`] for a padding length that does not fit the
+    /// packet. Every one of them is the peer's fault and none is recoverable:
+    /// a codec that has decrypted a packet has moved its counter, so there is
+    /// no resynchronising after a rejection — the connection must close.
+    pub fn decode(&mut self, buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>, WireError> {
+        let block_size = self.inbound_block_size();
+        let Some(first_block) = buf.get(..block_size) else {
+            return Ok(None);
+        };
+
+        // The length is inside the first encrypted block, so that block must be
+        // decrypted before we know how many more bytes to wait for — and
+        // decrypted again below as part of the whole packet.
+        let first = match self.cipher_in.as_ref() {
+            Some(cipher) => cipher.peek_block(first_block),
+            None => first_block.to_vec(),
+        };
+        let (packet_length, _) = read_u32(&first, 0)?;
+        let packet_length = usize::try_from(packet_length)
+            .map_err(|_| WireError::LengthOutOfRange { len: packet_length })?;
+
+        // Both bounds, and the floor is the one the server was missing: a peer
+        // announcing a `packet_length` of 0 or 1 produced a four- or five-byte
+        // packet, and the `padding_length` byte at offset 4 — which §6 puts
+        // *inside* the packet — was then read off the end of it.
+        if !(MIN_PACKET_LENGTH..=MAX_PACKET_SIZE).contains(&packet_length) {
+            return Err(WireError::PacketLength { len: packet_length });
+        }
+
+        let mac_len = if self.cipher_in.is_some() {
+            self.mac_len
+        } else {
+            0
+        };
+        let body_len = packet_length.saturating_add(4);
+        let total = body_len.saturating_add(mac_len);
+        let Some(raw) = buf.get(..total) else {
+            return Ok(None);
+        };
+        // `body_len <= total == raw.len()` by construction, but the checked
+        // split says so to the compiler rather than to a reader, and `split_at`
+        // is a panic where this is a `?`.
+        let (body, mac_data) = raw
+            .split_at_checked(body_len)
+            .ok_or(WireError::PacketLength { len: packet_length })?;
+
+        // Past this point the packet is consumed whatever happens: the cipher's
+        // counter moves, so every remaining failure is fatal to the connection.
+        let plain = if let Some(cipher) = self.cipher_in.as_mut() {
+            let mut plain = body.to_vec();
+            cipher.apply(&mut plain);
+
+            // A short MAC must *reject*. The server's copy guarded this
+            // comparison with `mac_data.len() >= mac_len`, so a truncated MAC
+            // skipped verification entirely and the packet was accepted
+            // unauthenticated — from a peer that, in a daemon, has not yet
+            // authenticated anything.
+            let received = mac_data.get(..mac_len).ok_or(WireError::Truncated {
+                what: "MAC",
+                needed: mac_len,
+                available: mac_data.len(),
+            })?;
+            let expected = compute_mac(&self.mac_key_in, self.seq_in, &plain);
+            if !constant_time_eq(received, &expected) {
+                return Err(WireError::MacMismatch);
+            }
+            plain
+        } else {
+            body.to_vec()
+        };
+
+        // Layout: [0..4] length, [4] padding_length, [5..] payload then padding.
+        let (padding_length, payload_start) = read_byte(&plain, 4)?;
+        let padding_length = usize::from(padding_length);
+        let payload_len = packet_length
+            .checked_sub(1)
+            .and_then(|n| n.checked_sub(padding_length))
+            .ok_or(WireError::PaddingLength {
+                packet_length,
+                padding_length,
+            })?;
+        let payload_end = payload_start.saturating_add(payload_len);
+        let payload = plain
+            .get(payload_start..payload_end)
+            .ok_or(WireError::PaddingLength {
+                packet_length,
+                padding_length,
+            })?
+            .to_vec();
+
+        self.seq_in = self.seq_in.wrapping_add(1);
+        Ok(Some((payload, total)))
     }
 }
 
@@ -1628,5 +2104,442 @@ mod tests {
         assert_eq!(shown, "Aes128Ctr { .. }");
         assert!(!shown.contains("ab"));
         assert!(!shown.contains("cd"));
+    }
+
+    // ---- The binary packet protocol (RFC 4253 §6) ----
+
+    /// A client and a server codec keyed from one handshake.
+    ///
+    /// Returned as a pair on purpose: every test below that matters is about
+    /// the two of them agreeing, which is the property neither binary's own
+    /// test suite could ever state while each carried its own framing.
+    fn a_keyed_pair() -> (PacketCodec, PacketCodec) {
+        let secret = encode_mpint(&[0x2au8; 32]);
+        let hash = [0x5bu8; 32];
+        let session = [0x77u8; 32];
+        let mut client = PacketCodec::new();
+        let mut server = PacketCodec::new();
+        client
+            .activate(Role::Client, &secret, &hash, &session)
+            .expect("32-byte inputs derive");
+        server
+            .activate(Role::Server, &secret, &hash, &session)
+            .expect("32-byte inputs derive");
+        (client, server)
+    }
+
+    /// Encode `payload` with zero padding of whatever length the codec asks
+    /// for. What the padding *is* is the subject of its own test; everywhere
+    /// else it is noise.
+    fn encode(codec: &mut PacketCodec, payload: &[u8]) -> Vec<u8> {
+        let padding = vec![0u8; codec.padding_len(payload.len())];
+        codec.encode(payload, &padding).expect("padding fits")
+    }
+
+    /// §6's alignment rule, stated over the range of payload lengths that
+    /// crosses two block boundaries.
+    #[test]
+    fn a_packet_is_block_aligned_with_at_least_four_bytes_of_padding() {
+        for &(encrypted, block) in &[(false, 8usize), (true, 16usize)] {
+            let codec = if encrypted {
+                a_keyed_pair().0
+            } else {
+                PacketCodec::new()
+            };
+            for payload_len in 0..40usize {
+                let padding = codec.padding_len(payload_len);
+                assert!(padding >= 4, "§6 requires at least four bytes of padding");
+                assert!(padding <= 255, "padding_length is one byte");
+                let total = payload_len + 1 + padding + 4;
+                assert_eq!(
+                    total % block,
+                    0,
+                    "a {payload_len}-byte payload is not aligned to {block}"
+                );
+            }
+        }
+    }
+
+    /// The unencrypted packet, byte for byte, against §6 written out by hand.
+    #[test]
+    fn a_plaintext_packet_is_laid_out_as_the_rfc_describes_it() {
+        let mut codec = PacketCodec::new();
+        let payload = b"hello";
+        let padding = vec![0xeeu8; codec.padding_len(payload.len())];
+        let pkt = codec.encode(payload, &padding).expect("padding fits");
+
+        let mut expected = Vec::new();
+        // packet_length covers padding_length + payload + padding, not itself.
+        let packet_length = 1 + payload.len() + padding.len();
+        expected.extend_from_slice(&u32::try_from(packet_length).expect("small").to_be_bytes());
+        expected.push(u8::try_from(padding.len()).expect("small"));
+        expected.extend_from_slice(payload);
+        expected.extend_from_slice(&padding);
+        assert_eq!(pkt, expected);
+        // No MAC before NEWKEYS.
+        assert_eq!(pkt.len(), packet_length + 4);
+    }
+
+    /// The test that could not previously exist: one end's packets decode at
+    /// the other end.
+    ///
+    /// Both directions, because the six §7.2 letters mean opposite things to
+    /// the two ends and a codec that assigned them by hand — as both binaries
+    /// did — could get one direction right and the other backwards. That is not
+    /// a hypothetical shape of bug in this stack: an exchange hash, two packet
+    /// readers and a counter rule have each already been wrong in exactly the
+    /// way that only the far end could notice.
+    #[test]
+    fn what_one_end_encodes_the_other_end_decodes() {
+        let (mut client, mut server) = a_keyed_pair();
+
+        for payload in [&b""[..], &b"x"[..], &[0xa5; 3000][..]] {
+            let wire = encode(&mut client, payload);
+            let (got, consumed) = server
+                .decode(&wire)
+                .expect("a whole packet")
+                .expect("a whole packet");
+            assert_eq!(got, payload);
+            assert_eq!(consumed, wire.len());
+
+            let wire = encode(&mut server, payload);
+            let (got, consumed) = client
+                .decode(&wire)
+                .expect("a whole packet")
+                .expect("a whole packet");
+            assert_eq!(got, payload);
+            assert_eq!(consumed, wire.len());
+        }
+    }
+
+    /// Two ends that used the same letters for both directions would still pass
+    /// a same-codec roundtrip. This states what that would break: the
+    /// directions are keyed differently.
+    #[test]
+    fn the_two_directions_do_not_share_a_key() {
+        let (mut client, mut server) = a_keyed_pair();
+        let payload = b"the same payload, both ways";
+        assert_ne!(
+            encode(&mut client, payload),
+            encode(&mut server, payload),
+            "the two directions produced identical ciphertext"
+        );
+    }
+
+    /// A packet arriving in pieces: every prefix returns `Ok(None)` and changes
+    /// nothing, so the whole packet still decodes when the last byte lands.
+    ///
+    /// This is the case the cipher's `peek_block` exists for. A peek that
+    /// consumed its keystream would leave the counter ahead of the sender's
+    /// from the first partially-arrived packet onwards — and a TCP stream
+    /// delivers a partial packet whenever it feels like it.
+    #[test]
+    fn a_packet_that_arrives_in_pieces_is_decoded_once_it_is_whole() {
+        let (mut client, mut server) = a_keyed_pair();
+        let payload = b"a packet split across several reads";
+        let wire = encode(&mut client, payload);
+
+        for prefix in 0..wire.len() {
+            assert_eq!(
+                server.decode(wire.get(..prefix).expect("in range")),
+                Ok(None),
+                "a {prefix}-byte prefix was treated as a whole packet"
+            );
+        }
+        let (got, consumed) = server
+            .decode(&wire)
+            .expect("a whole packet")
+            .expect("a whole packet");
+        assert_eq!(got, payload);
+        assert_eq!(consumed, wire.len());
+    }
+
+    /// Trailing bytes are left alone: `decode` reports what it used, and a
+    /// second call on the remainder finds the next packet.
+    #[test]
+    fn two_packets_in_one_buffer_are_taken_one_at_a_time() {
+        let (mut client, mut server) = a_keyed_pair();
+        let mut stream = encode(&mut client, b"first");
+        stream.extend_from_slice(&encode(&mut client, b"second"));
+
+        let (first, used) = server
+            .decode(&stream)
+            .expect("a whole packet")
+            .expect("a whole packet");
+        assert_eq!(first, b"first");
+        let (second, _) = server
+            .decode(stream.get(used..).expect("in range"))
+            .expect("a whole packet")
+            .expect("a whole packet");
+        assert_eq!(second, b"second");
+    }
+
+    /// §6.4 runs the sequence number over the connection, so a packet is
+    /// authentic only in its place in the stream.
+    ///
+    /// Replay is the attack this stops, and dropping a packet is the bug: a
+    /// send path that framed a packet without advancing its sequence number is
+    /// a fault already recorded against this code, and it fails here.
+    ///
+    /// The rejection is a length error rather than a MAC one, and that is not
+    /// an accident worth papering over: the receiving counter has moved on, so
+    /// a replayed packet decrypts to noise and its *length field* is noise
+    /// too. It is refused before the MAC is reached. What matters is that no
+    /// replayed packet is ever returned as a payload.
+    #[test]
+    fn a_packet_replayed_out_of_order_is_refused() {
+        let (mut client, mut server) = a_keyed_pair();
+        let first = encode(&mut client, b"the first packet");
+        let _second = encode(&mut client, b"the second packet");
+
+        // Deliver the first, then the first again where the second belongs.
+        server.decode(&first).expect("authentic").expect("whole");
+        assert!(server.decode(&first).is_err(), "a replay was accepted");
+    }
+
+    /// A single flipped bit anywhere in the packet must be caught.
+    ///
+    /// Where it is flipped decides *which* refusal, and the length field is the
+    /// interesting case. §6 puts the MAC over the whole plaintext packet, so
+    /// the length has to be trusted before there is anything to check it
+    /// against — it is encrypted, but it is not authenticated ahead of the
+    /// packet it introduces. A flip there therefore does not fail a MAC: it
+    /// either falls outside §6's range, or leaves the receiver waiting for a
+    /// packet of the wrong size, which fails the MAC once those bytes arrive.
+    /// What must hold in every case is that no altered packet is ever returned
+    /// as a payload. Stated as three separate outcomes rather than one
+    /// "rejected somehow", because that weaker claim is also satisfied by a
+    /// decoder that rejects everything.
+    #[test]
+    fn a_modified_packet_is_refused() {
+        let payload = b"a packet an attacker would like to alter";
+
+        // Top byte: the length becomes enormous and is out of range at once.
+        let (mut client, mut server) = a_keyed_pair();
+        let mut wire = encode(&mut client, payload);
+        *wire.get_mut(0).expect("in range") ^= 0x01;
+        assert!(matches!(
+            server.decode(&wire),
+            Err(WireError::PacketLength { .. })
+        ));
+
+        // Bottom byte: the length is still plausible, so the decoder asks for
+        // more bytes — and rejects the packet once it has them.
+        let (mut client, mut server) = a_keyed_pair();
+        let mut wire = encode(&mut client, payload);
+        *wire.get_mut(3).expect("in range") ^= 0x01;
+        assert_eq!(server.decode(&wire), Ok(None));
+        wire.resize(wire.len() + 16, 0);
+        assert_eq!(server.decode(&wire), Err(WireError::MacMismatch));
+
+        // Anywhere after the first block: straight to the MAC.
+        for index in [16usize, 20, 44] {
+            let (mut client, mut server) = a_keyed_pair();
+            let mut wire = encode(&mut client, payload);
+            *wire.get_mut(index).expect("in range") ^= 0x01;
+            assert_eq!(
+                server.decode(&wire),
+                Err(WireError::MacMismatch),
+                "a flipped bit at {index} was accepted"
+            );
+        }
+    }
+
+    /// The fail-open bug, stated.
+    ///
+    /// The server's copy of this check read `if mac_data.len() >= mac_len &&
+    /// !constant_time_eq(...)`, so a peer that sent a *short* MAC skipped
+    /// verification entirely and had its packet accepted unauthenticated —
+    /// before it had authenticated anything at all. It is unreachable through
+    /// that binary's own buffering, which waits for the full length, which is
+    /// exactly why nothing found it: the guard was wrong, and the caller was
+    /// what made it harmless.
+    #[test]
+    fn a_short_mac_is_rejected_rather_than_skipped() {
+        let (mut client, mut server) = a_keyed_pair();
+        let wire = encode(&mut client, b"unauthenticated");
+
+        // Cut the last MAC byte off, and claim the packet is that much shorter
+        // by handing over only those bytes. The MAC is now short, not absent.
+        let truncated = wire.get(..wire.len() - 1).expect("in range");
+        assert_eq!(server.decode(truncated), Ok(None));
+    }
+
+    /// §6's floor and ceiling, both checked.
+    ///
+    /// The floor is the one the server did not have. `packet_length` 0 through
+    /// 4 leaves no room for the `padding_length` byte the format puts at offset
+    /// 4, and the server's parser read it anyway.
+    #[test]
+    fn a_length_outside_the_permitted_range_is_refused() {
+        for len in [0u32, 1, 4, 35001, 0xffff_ffff] {
+            let mut codec = PacketCodec::new();
+            let mut wire = len.to_be_bytes().to_vec();
+            wire.resize(64, 0);
+            assert_eq!(
+                codec.decode(&wire),
+                Err(WireError::PacketLength { len: len as usize }),
+                "a packet length of {len} was not refused"
+            );
+        }
+        // The floor itself is legal: five bytes is a padding-length byte and
+        // the four-byte minimum padding, i.e. an empty payload.
+        let mut codec = PacketCodec::new();
+        let mut wire = 5u32.to_be_bytes().to_vec();
+        wire.push(4);
+        wire.resize(9, 0);
+        assert_eq!(codec.decode(&wire), Ok(Some((Vec::new(), 9))));
+    }
+
+    /// A `padding_length` that claims more bytes than the packet holds.
+    ///
+    /// The subtraction it feeds is `packet_length - 1 - padding_length` in
+    /// `usize`, where "negative" is a number near 2^64 and the slice that
+    /// follows would be an out-of-bounds read.
+    #[test]
+    fn padding_longer_than_the_packet_is_refused() {
+        let mut codec = PacketCodec::new();
+        let mut wire = 12u32.to_be_bytes().to_vec();
+        wire.push(200); // padding_length, against a packet_length of 12
+        wire.resize(16, 0);
+        assert_eq!(
+            codec.decode(&wire),
+            Err(WireError::PaddingLength {
+                packet_length: 12,
+                padding_length: 200
+            })
+        );
+    }
+
+    /// `encode` will not silently fix a padding block of the wrong size.
+    ///
+    /// Both silent fixes are wrong. Extending a short block pads the packet
+    /// with the zeros §6 asks us to stop sending; accepting a long one means
+    /// the caller and the codec disagree about the alignment the length field
+    /// is about to assert.
+    #[test]
+    fn padding_of_the_wrong_length_is_refused_rather_than_adjusted() {
+        let mut codec = PacketCodec::new();
+        let wanted = codec.padding_len(3);
+        assert_eq!(
+            codec.encode(b"abc", &vec![0; wanted - 1]),
+            Err(WireError::PaddingSize {
+                wanted,
+                given: wanted - 1
+            })
+        );
+        assert_eq!(
+            codec.encode(b"abc", &vec![0; wanted + 1]),
+            Err(WireError::PaddingSize {
+                wanted,
+                given: wanted + 1
+            })
+        );
+        // And a refusal must not have moved the sequence number, or the next
+        // packet the caller does send would be numbered past the peer's.
+        assert_eq!(
+            codec.encode(b"abc", &vec![0; wanted]).map(|p| p.len()),
+            Ok(4 + 1 + 3 + wanted)
+        );
+    }
+
+    /// The padding bytes reach the wire unaltered, which is what makes the
+    /// binaries' switch to CSPRNG padding observable rather than decorative.
+    #[test]
+    fn the_padding_the_caller_supplies_is_what_goes_on_the_wire() {
+        let mut codec = PacketCodec::new();
+        let payload = b"payload";
+        let padding: Vec<u8> = (0..codec.padding_len(payload.len()))
+            .map(|i| 0xa0 ^ u8::try_from(i).unwrap_or(0))
+            .collect();
+        let pkt = codec.encode(payload, &padding).expect("padding fits");
+        assert_eq!(
+            pkt.get(pkt.len() - padding.len()..).expect("in range"),
+            padding.as_slice()
+        );
+    }
+
+    /// `NEWKEYS` changes the keys, not the sequence numbers.
+    ///
+    /// §6.4 runs them for the life of the *connection*. Resetting them when a
+    /// rekey installs new keys would break the MAC on the very next packet —
+    /// and this codec is what a future rekey will call, so the property is
+    /// stated before there is a rekey to get it wrong.
+    #[test]
+    fn activating_keys_does_not_rewind_the_sequence_numbers() {
+        let mut client = PacketCodec::new();
+        let mut server = PacketCodec::new();
+        // Three packets each way in the clear, as a real handshake sends.
+        for _ in 0..3 {
+            let wire = encode(&mut client, b"KEXINIT");
+            server.decode(&wire).expect("plaintext").expect("whole");
+            let wire = encode(&mut server, b"KEXINIT");
+            client.decode(&wire).expect("plaintext").expect("whole");
+        }
+
+        let secret = encode_mpint(&[9u8; 32]);
+        client
+            .activate(Role::Client, &secret, &[1; 32], &[2; 32])
+            .expect("derives");
+        server
+            .activate(Role::Server, &secret, &[1; 32], &[2; 32])
+            .expect("derives");
+
+        // If either end had restarted at zero, this MAC would not verify.
+        let wire = encode(&mut client, b"the first encrypted packet");
+        assert_eq!(
+            server.decode(&wire).expect("authentic").expect("whole").0,
+            b"the first encrypted packet"
+        );
+        assert_eq!(server.last_inbound_seq(), 3);
+    }
+
+    /// Before `NEWKEYS` the transport is plaintext, unauthenticated and aligned
+    /// to 8; after it, encrypted, authenticated and aligned to 16.
+    #[test]
+    fn activation_switches_the_transport_over_completely() {
+        let mut codec = PacketCodec::new();
+        assert!(!codec.is_encrypted());
+        assert_eq!(codec.inbound_block_size(), 8);
+        let plain = encode(&mut codec, b"KEXINIT");
+        assert_eq!(plain.len() % 8, 0);
+
+        codec
+            .activate(Role::Client, &encode_mpint(&[3u8; 32]), &[4; 32], &[5; 32])
+            .expect("derives");
+        assert!(codec.is_encrypted());
+        assert_eq!(codec.inbound_block_size(), 16);
+        let sealed = encode(&mut codec, b"KEXINIT");
+        // Body aligned to 16, plus a 32-byte HMAC-SHA256 tag that the
+        // plaintext packet did not carry at all.
+        assert_eq!((sealed.len() - 32) % 16, 0);
+        assert_eq!(sealed.len() - 32, plain.len());
+        assert_eq!(sealed.len(), 48);
+    }
+
+    /// `last_inbound_seq` names the packet just returned, not the next one.
+    ///
+    /// §11.4 has `SSH_MSG_UNIMPLEMENTED` quote the sequence number it is
+    /// rejecting, and the number wanted there is the one the packet came in
+    /// under — which the counter has already moved past by the time the caller
+    /// has the packet to reject.
+    #[test]
+    fn the_last_inbound_sequence_number_is_the_packet_just_returned() {
+        let (mut client, mut server) = a_keyed_pair();
+        // Before anything arrives, "the last one" is the wrap-around, which is
+        // the honest answer and not a panic.
+        assert_eq!(server.last_inbound_seq(), u32::MAX);
+        for expected in 0..3u32 {
+            let wire = encode(&mut client, b"packet");
+            server.decode(&wire).expect("authentic").expect("whole");
+            assert_eq!(server.last_inbound_seq(), expected);
+        }
+    }
+
+    /// `Debug` must not print keys, counters or traffic volume.
+    #[test]
+    fn the_codec_does_not_print_its_keys() {
+        let (client, _) = a_keyed_pair();
+        assert_eq!(format!("{client:?}"), "PacketCodec { .. }");
     }
 }

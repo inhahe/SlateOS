@@ -73,8 +73,8 @@ use quoting::quoteaf_os;
 // here: see that crate's module docs for why one definition shared by both ends
 // is the point, and `ssh/Cargo.toml` for what a second copy cost the last time.
 use sshwire::{
-    Aes128Ctr, ExchangeHashInput, compute_exchange_hash, compute_mac, constant_time_eq, derive_key,
-    encode_mpint, read_byte, read_mpint, read_ssh_string, read_u32, ssh_string,
+    ExchangeHashInput, PacketCodec, Role, compute_exchange_hash, encode_mpint, read_byte,
+    read_mpint, read_ssh_string, read_u32, ssh_string,
 };
 use std::env;
 use std::fmt;
@@ -385,11 +385,20 @@ mod msg {
 // SSH-2 packet framing
 // ============================================================================
 
-/// Maximum SSH packet payload size we handle.
-const MAX_PACKET_SIZE: usize = 35000;
-
-/// Minimum block size for packet alignment.
-const BLOCK_SIZE_UNENCRYPTED: usize = 8;
+// The framing itself -- `[u32 packet_length][u8 padding_length][payload]
+// [padding]`, the MAC over it, and both sequence numbers -- lives in
+// `sshwire::PacketCodec`. It was the last function in this file that the daemon
+// also had a copy of, and the two copies had already drifted: this one had been
+// hardened to `checked_*`/`saturating_*` arithmetic and given the `packet_length
+// < 5` floor check that stops a peer's zero-length packet being indexed at
+// offset 4, and the server's had neither, because there was no mechanism by
+// which either fix could reach it.
+//
+// The sequence numbers moved with it. §6.4 makes the sequence number an input
+// to the MAC, so advancing it is part of framing a packet rather than
+// bookkeeping the caller keeps beside it -- and kept beside it, it was already
+// once forgotten on a send path, which authenticated every packet after the
+// first under a number the peer had moved past.
 
 /// Largest `SSH_MSG_CHANNEL_DATA` payload we will send in one packet.
 ///
@@ -399,165 +408,6 @@ const BLOCK_SIZE_UNENCRYPTED: usize = 8;
 /// advertised figure binding, so a change to one that missed the other would
 /// have us overrun a limit we had just announced.
 const MAX_CHANNEL_CHUNK: usize = 32768;
-
-/// Build a raw SSH binary packet from a payload.
-///
-/// Format: `[u32 packet_length][u8 padding_length][payload][random_padding]`
-///
-/// Before encryption is active, the MAC is empty and padding is zero-filled.
-///
-/// Whether the packet is encrypted is read from `enc.cipher_c2s`, not passed in
-/// alongside it. The caller used to pass a `self.encrypted` flag that was set at
-/// `NEWKEYS` and the keys installed separately; a flag that says "encrypted" and
-/// a cipher that is absent are a plaintext packet sent in the belief that it was
-/// protected, and only one of the two can now be true at a time.
-fn build_packet(payload: &[u8], seq: u32, enc: &mut EncryptionState) -> Vec<u8> {
-    let block_size = if enc.cipher_c2s.is_some() {
-        enc.block_size.max(8)
-    } else {
-        BLOCK_SIZE_UNENCRYPTED
-    };
-
-    // Compute padding: packet_length + padding_length + payload must be
-    // a multiple of block_size, with at least 4 bytes of padding.
-    //
-    // Saturating rather than wrapping throughout: every input here is ours
-    // (a payload we built, a block size of 8 or 16), so none of these can
-    // actually overflow — but a saturating form that produces a too-long
-    // packet the server rejects beats a wrapping one that silently produces a
-    // *valid-looking* packet describing the wrong length.
-    let unpadded = payload.len().saturating_add(1); // padding_length byte + payload
-    let overhang = unpadded
-        .saturating_add(4)
-        .checked_rem(block_size)
-        .unwrap_or(0);
-    let mut padding = block_size.saturating_sub(overhang);
-    if padding < 4 {
-        padding = padding.saturating_add(block_size);
-    }
-
-    let packet_length = unpadded.saturating_add(padding);
-    let total_len = packet_length.saturating_add(4);
-    let mut pkt = Vec::with_capacity(total_len);
-    pkt.extend_from_slice(
-        &u32::try_from(packet_length)
-            .unwrap_or(u32::MAX)
-            .to_be_bytes(),
-    );
-    pkt.push(u8::try_from(padding).unwrap_or(u8::MAX));
-    pkt.extend_from_slice(payload);
-    // Zero-fill padding (simplified; a real implementation would use random bytes).
-    pkt.resize(total_len, 0);
-
-    if let Some(cipher) = enc.cipher_c2s.as_mut() {
-        // The MAC covers the *plaintext* packet (RFC 4253 s6), so it is
-        // computed before the cipher runs and appended after it.
-        let mac = compute_mac(&enc.mac_key_c2s, seq, &pkt);
-        cipher.apply(&mut pkt);
-        pkt.extend_from_slice(&mac);
-    }
-
-    pkt
-}
-
-/// Read one SSH binary packet from the TCP stream. Returns the payload.
-fn read_packet(
-    handle: u64,
-    buf: &mut StreamBuffer,
-    seq: u32,
-    enc: &mut EncryptionState,
-) -> Result<Vec<u8>, SshError> {
-    let encrypted = enc.cipher_s2c.is_some();
-    let block_size = if encrypted {
-        enc.block_size.max(8)
-    } else {
-        BLOCK_SIZE_UNENCRYPTED
-    };
-
-    // The packet length is inside the first encrypted block, so that block has
-    // to be decrypted before we know how many more bytes to wait for -- and
-    // decrypted again below as part of the whole packet. `peek_block` takes
-    // `&self` for exactly that reason: consuming the keystream here would leave
-    // the counter one block ahead of the sender's for the rest of the session.
-    let first_block = buf.peek(handle, block_size)?;
-    let first_decrypted = match enc.cipher_s2c.as_ref() {
-        Some(cipher) => cipher.peek_block(first_block),
-        None => first_block.to_vec(),
-    };
-
-    let [len_b0, len_b1, len_b2, len_b3, ..] = *first_decrypted.as_slice() else {
-        return Err(SshError::ProtocolError("short packet header".into()));
-    };
-    let packet_length = u32::from_be_bytes([len_b0, len_b1, len_b2, len_b3]) as usize;
-
-    // Both bounds matter, and only the upper one used to be checked. A server
-    // announcing `packet_length` 0 or 1 produced a `decrypted` of four or five
-    // bytes, and the `decrypted[4]` below — the padding-length byte, which the
-    // wire format says is inside the packet — then indexed off the end and
-    // panicked. RFC 4253 s6 puts the floor at one padding-length byte plus the
-    // four-byte minimum padding, so anything under 5 is malformed by
-    // definition and is rejected here rather than surviving to be indexed.
-    if packet_length < 5 || packet_length > MAX_PACKET_SIZE {
-        return Err(SshError::ProtocolError(format!(
-            "bad packet length: {packet_length}"
-        )));
-    }
-
-    let mac_len = if encrypted { enc.mac_len } else { 0 };
-    let body_len = packet_length
-        .checked_add(4)
-        .ok_or_else(|| SshError::ProtocolError("packet length overflow".into()))?;
-    let total = body_len
-        .checked_add(mac_len)
-        .ok_or_else(|| SshError::ProtocolError("packet length overflow".into()))?;
-
-    let raw = buf.take(handle, total)?;
-
-    // Decrypt if needed.
-    let decrypted = if let Some(cipher) = enc.cipher_s2c.as_mut() {
-        let (pkt_data, mac_data) = raw.split_at(body_len);
-        let mut dec = pkt_data.to_vec();
-        // CTR is its own inverse, and this is the call that advances the
-        // counter past the packet -- once, for the whole packet, matching the
-        // sender's single `apply`.
-        cipher.apply(&mut dec);
-
-        // Verify MAC. The `get` failing means the server sent a short MAC, and
-        // that has to *reject*: the previous form guarded the comparison with
-        // `mac_data.len() >= mac_len`, so a truncated MAC skipped the check
-        // entirely and the packet was accepted unauthenticated.
-        let expected_mac = compute_mac(&enc.mac_key_s2c, seq, &dec);
-        let received_mac = mac_data
-            .get(..mac_len)
-            .ok_or_else(|| SshError::ProtocolError("truncated MAC".into()))?;
-        if !constant_time_eq(received_mac, &expected_mac) {
-            return Err(SshError::ProtocolError("MAC verification failed".into()));
-        }
-        dec
-    } else {
-        raw.get(..body_len)
-            .ok_or_else(|| SshError::ProtocolError("short packet".into()))?
-            .to_vec()
-    };
-
-    // Layout: [0..4] length, [4] padding_length, [5..] payload then padding.
-    let padding_length = usize::from(
-        *decrypted
-            .get(4)
-            .ok_or_else(|| SshError::ProtocolError("short packet".into()))?,
-    );
-    let payload_len = packet_length
-        .checked_sub(1)
-        .and_then(|n| n.checked_sub(padding_length))
-        .ok_or_else(|| SshError::ProtocolError("invalid padding length".into()))?;
-    let payload_end = payload_len
-        .checked_add(5)
-        .ok_or_else(|| SshError::ProtocolError("invalid padding length".into()))?;
-    Ok(decrypted
-        .get(5..payload_end)
-        .ok_or_else(|| SshError::ProtocolError("short packet".into()))?
-        .to_vec())
-}
 
 // ============================================================================
 // Stream buffer — accumulates TCP data for packet parsing
@@ -576,12 +426,13 @@ impl StreamBuffer {
         }
     }
 
-    /// Return how many unconsumed bytes are buffered.
-    fn available(&self) -> usize {
-        self.data.len().saturating_sub(self.pos)
-    }
-
     /// The unconsumed bytes.
+    ///
+    /// The whole of what the packet layer needs: `PacketCodec::decode` decides
+    /// for itself whether a packet is there, so the `available() >= n` guards
+    /// that used to precede a separate taking call — and could, at two sites,
+    /// be reached with a different `n` than the one they had checked — have no
+    /// caller left.
     fn unread(&self) -> &[u8] {
         self.data.get(self.pos..).unwrap_or_default()
     }
@@ -603,26 +454,16 @@ impl StreamBuffer {
         Ok(())
     }
 
-    /// Read from TCP until at least `n` bytes are buffered, then return them
-    /// without consuming.
+    /// Drop the first `n` unread bytes.
     ///
-    /// Fusing "make sure `n` bytes are there" with "hand me `n` bytes" is the
-    /// point: as two separate calls it was possible — and, at the two
-    /// `available() >= block_size` shortcuts in `try_recv_packet`, actually
-    /// the case — for a caller to reach the taking half with a different `n`
-    /// than it had ensured, and the taking half indexed unchecked.
-    fn peek(&mut self, handle: u64, n: usize) -> Result<&[u8], SshError> {
-        while self.available() < n {
-            self.fill_once(handle)?;
-        }
-        self.unread().get(..n).ok_or(SshError::RecvFailed)
-    }
-
-    /// Read from TCP until at least `n` bytes are buffered, then consume them.
-    fn take(&mut self, handle: u64, n: usize) -> Result<Vec<u8>, SshError> {
-        let taken = self.peek(handle, n)?.to_vec();
-        self.pos = self.pos.saturating_add(n);
-        Ok(taken)
+    /// The only caller is the one that has just been told by
+    /// `PacketCodec::decode` how many bytes the packet it returned occupied, so
+    /// `n` is never a number this side chose. `saturating_add` past the end
+    /// would leave the buffer empty rather than panicking, but `min` keeps
+    /// `pos` a position in `data` rather than a number that merely behaves like
+    /// one.
+    fn advance(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n).min(self.data.len());
     }
 }
 
@@ -1112,45 +953,14 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 // session -- and the server had invented a third rule. A shared stateful type
 // is what makes all three unwriteable. See that crate's `Aes128Ctr`.
 
-// ============================================================================
-// Encryption state tracking
-// ============================================================================
-
-struct EncryptionState {
-    /// MAC key for client-to-server.
-    mac_key_c2s: Vec<u8>,
-    /// MAC key for server-to-client.
-    mac_key_s2c: Vec<u8>,
-    /// Outbound cipher, `None` until `NEWKEYS` installs the derived keys.
-    ///
-    /// The key and IV used to be held here as separate `Vec`s and handed to a
-    /// stateless `encrypt_packet_aes_ctr` once per packet, which is exactly how
-    /// this crate came to restart its counter at every packet and encrypt an
-    /// entire session under one keystream. The cipher owns its counter now, so
-    /// there is no per-packet starting point left for anyone to get wrong, and
-    /// `Option` rather than an empty `Vec` makes "not yet keyed" a state the
-    /// compiler asks about instead of a length nobody checked.
-    cipher_c2s: Option<Aes128Ctr>,
-    /// Inbound cipher, `None` until `NEWKEYS` installs the derived keys.
-    cipher_s2c: Option<Aes128Ctr>,
-    /// Block size for the cipher.
-    block_size: usize,
-    /// MAC length in bytes.
-    mac_len: usize,
-}
-
-impl EncryptionState {
-    fn new() -> Self {
-        Self {
-            mac_key_c2s: Vec::new(),
-            mac_key_s2c: Vec::new(),
-            cipher_c2s: None,
-            cipher_s2c: None,
-            block_size: 16,
-            mac_len: 32, // HMAC-SHA256
-        }
-    }
-}
+// The transport's cipher, MAC and both sequence numbers live in one
+// `sshwire::PacketCodec` on `SshSession`, not in a local `EncryptionState`
+// beside a pair of loose `seq_*` fields. Every part of that grouping had
+// already gone wrong once while the pieces were held apart: the key and IV as
+// separate `Vec`s let a fresh counter be rebuilt per packet, so one keystream
+// covered a whole session; an `encrypted: bool` beside an uninstalled cipher
+// described a plaintext packet as protected; and a sequence number the caller
+// advanced by hand was, on one send path, not advanced at all.
 
 // ============================================================================
 // Diffie-Hellman group 14 (2048-bit MODP group, RFC 3526)
@@ -1712,9 +1522,8 @@ struct SshSession {
     client_kexinit: Vec<u8>,
     server_kexinit: Vec<u8>,
     session_id: [u8; 32],
-    enc: EncryptionState,
-    seq_send: u32,
-    seq_recv: u32,
+    /// The packet layer: framing, cipher, MAC and both sequence numbers.
+    codec: PacketCodec,
     channel_id: u32,
     remote_channel_id: u32,
     remote_window: u32,
@@ -1732,9 +1541,7 @@ impl SshSession {
             client_kexinit: Vec::new(),
             server_kexinit: Vec::new(),
             session_id: [0u8; 32],
-            enc: EncryptionState::new(),
-            seq_send: 0,
-            seq_recv: 0,
+            codec: PacketCodec::new(),
             channel_id: 0,
             remote_channel_id: 0,
             remote_window: 0,
@@ -1769,19 +1576,28 @@ impl SshSession {
         }
     }
 
-    /// Send an SSH packet (handles encryption and sequence numbering).
+    /// Frame, encrypt and send one packet.
+    ///
+    /// The padding is zero-filled, which §6 says it SHOULD not be; the codec
+    /// takes it as a parameter precisely so that this line is where the change
+    /// to CSPRNG bytes happens, rather than somewhere inside a shared crate
+    /// that has no business deciding what to do when entropy is unavailable.
     fn send_packet(&mut self, payload: &[u8]) -> Result<(), SshError> {
-        let pkt = build_packet(payload, self.seq_send, &mut self.enc);
+        let padding = vec![0u8; self.codec.padding_len(payload.len())];
+        let pkt = self.codec.encode(payload, &padding)?;
         tcp_send_all(self.handle, &pkt)?;
-        self.seq_send = self.seq_send.wrapping_add(1);
         Ok(())
     }
 
-    /// Receive an SSH packet (handles decryption and sequence numbering).
+    /// Block until one whole packet has arrived, then return its payload.
     fn recv_packet(&mut self) -> Result<Vec<u8>, SshError> {
-        let payload = read_packet(self.handle, &mut self.buf, self.seq_recv, &mut self.enc)?;
-        self.seq_recv = self.seq_recv.wrapping_add(1);
-        Ok(payload)
+        loop {
+            if let Some((payload, consumed)) = self.codec.decode(self.buf.unread())? {
+                self.buf.advance(consumed);
+                return Ok(payload);
+            }
+            self.buf.fill_once(self.handle)?;
+        }
     }
 
     // === Phase 1: Version exchange ===
@@ -2048,41 +1864,14 @@ impl SshSession {
         }
         self.verbose("received NEWKEYS");
 
-        // Derive encryption keys.
-        // RFC 4253 section 7.2:
-        //   Initial IV c2s:    HASH(K || H || "A" || session_id)
-        //   Initial IV s2c:    HASH(K || H || "B" || session_id)
-        //   Encryption key c2s: HASH(K || H || "C" || session_id)
-        //   Encryption key s2c: HASH(K || H || "D" || session_id)
-        //   Integrity key c2s: HASH(K || H || "E" || session_id)
-        //   Integrity key s2c: HASH(K || H || "F" || session_id)
-        let iv_c2s = derive_key(&k_bytes, &h, b'A', &self.session_id, 16);
-        let iv_s2c = derive_key(&k_bytes, &h, b'B', &self.session_id, 16);
-        let key_c2s = derive_key(&k_bytes, &h, b'C', &self.session_id, 16);
-        let key_s2c = derive_key(&k_bytes, &h, b'D', &self.session_id, 16);
-        self.enc.mac_key_c2s = derive_key(&k_bytes, &h, b'E', &self.session_id, 32);
-        self.enc.mac_key_s2c = derive_key(&k_bytes, &h, b'F', &self.session_id, 32);
-
-        // This is the only place a cipher is constructed, and it consumes the
-        // key and the IV together. Holding them apart in the state -- as this
-        // crate used to -- is what let a fresh counter be rebuilt from the IV
-        // once per packet, so that one keystream covered the whole session.
-        let (Some(key_c2s), Some(iv_c2s), Some(key_s2c), Some(iv_s2c)) = (
-            key_c2s.first_chunk::<16>(),
-            iv_c2s.first_chunk::<16>(),
-            key_s2c.first_chunk::<16>(),
-            iv_s2c.first_chunk::<16>(),
-        ) else {
-            // `derive_key` was asked for 16 bytes and returns what it is asked
-            // for, so this is unreachable -- but the alternative to saying so
-            // is an index, and a cipher keyed from a short buffer is worse than
-            // a refused connection.
-            return Err(SshError::ProtocolError(
-                "key derivation produced a short key".into(),
-            ));
-        };
-        self.enc.cipher_c2s = Some(Aes128Ctr::new(key_c2s, iv_c2s));
-        self.enc.cipher_s2c = Some(Aes128Ctr::new(key_s2c, iv_s2c));
+        // Install the keys `NEWKEYS` brings into force. Which of RFC 4253
+        // §7.2's six lettered values is the *outbound* one depends on which end
+        // is asking, and saying `Role::Client` is the whole of this end's answer
+        // — the six assignments themselves are the codec's, shared with the
+        // daemon, rather than a block of code here that has to stay the
+        // daemon's mirror image by hand.
+        self.codec
+            .activate(Role::Client, &k_bytes, &h, &self.session_id)?;
 
         self.verbose("encryption activated");
 
@@ -2495,25 +2284,18 @@ impl SshSession {
     /// In this simplified implementation, this always blocks for at least
     /// one recv call.
     fn try_recv_packet(&mut self) -> Result<Option<Vec<u8>>, SshError> {
-        // If we have buffered data, try to parse a packet.
-        let block_size = if self.enc.cipher_s2c.is_some() {
-            self.enc.block_size.max(8)
-        } else {
-            BLOCK_SIZE_UNENCRYPTED
-        };
-
-        if self.buf.available() >= block_size {
-            let payload = read_packet(self.handle, &mut self.buf, self.seq_recv, &mut self.enc)?;
-            self.seq_recv = self.seq_recv.wrapping_add(1);
+        // A whole packet may already be buffered from an earlier read.
+        if let Some((payload, consumed)) = self.codec.decode(self.buf.unread())? {
+            self.buf.advance(consumed);
             return Ok(Some(payload));
         }
 
-        // Try one non-blocking recv.
+        // Otherwise one read, not a loop: the caller has a terminal to service
+        // and must not be parked here while the server has nothing to say.
         self.buf.fill_once(self.handle)?;
 
-        if self.buf.available() >= block_size {
-            let payload = read_packet(self.handle, &mut self.buf, self.seq_recv, &mut self.enc)?;
-            self.seq_recv = self.seq_recv.wrapping_add(1);
+        if let Some((payload, consumed)) = self.codec.decode(self.buf.unread())? {
+            self.buf.advance(consumed);
             Ok(Some(payload))
         } else {
             Ok(None)

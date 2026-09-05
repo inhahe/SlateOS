@@ -5013,6 +5013,53 @@ mod tests {
     }
 
     #[test]
+    fn every_one_of_the_sixty_four_digits_is_the_one_rfc_4648_names() {
+        // The vectors above are the published ones, and they are not enough on
+        // their own: "Zg==", "Zm8=" … "Zm9vYmFy" between them use ten distinct
+        // digits, so fifty-four of the sixty-four table entries are unpinned by
+        // them. A single wrong entry at an uncovered index is invisible to every
+        // other test in this tree -- the encoder and the decoder share one
+        // `B64_ALPHABET` (the decoder builds its lookup table *from* it), and
+        // `sshd` and `ssh-keygen` both call these functions rather than carrying
+        // their own, so a corrupt table round-trips perfectly and agrees with
+        // itself everywhere. It was verified that swapping 'A' and 'B' in the
+        // constant leaves all 350 tests of `sshwire`, `ssh-keygen` and `sshd`
+        // green, and the `ssh-interop` suite too: both ends of a comparison are
+        // ours, so neither can notice. What such a table breaks is the only
+        // thing no test here can speak for -- reading a key file that OpenSSH
+        // wrote, or writing one it can read.
+        //
+        // So this pins the table itself, digit by digit, against RFC 4648 §4
+        // Table 1. The expected string below is transcribed from the RFC and is
+        // deliberately a *second* statement of the alphabet: a test that read
+        // `B64_ALPHABET` would agree with any value it happened to hold.
+        const RFC_4648_TABLE_1: &str =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+        for (sextet, expected) in RFC_4648_TABLE_1.chars().enumerate() {
+            // Three bytes encode as four digits, and the first digit is the top
+            // six bits of the first byte. So `sextet << 2` puts this sextet in
+            // the leading position, and the rest of the group is zero.
+            let leading = u8::try_from(sextet << 2).expect("a sextet shifted twice is a byte");
+            let encoded = base64_encode(&[leading, 0, 0]);
+            assert_eq!(
+                encoded.chars().next(),
+                Some(expected),
+                "sextet {sextet} encoded as {encoded:?}, so B64_ALPHABET[{sextet}] is wrong"
+            );
+
+            // And the decoder's table, which is built from the same constant in
+            // a loop that could itself be wrong, agrees in the other direction.
+            let decoded = base64_decode(encoded.as_bytes()).expect("our own output decodes");
+            assert_eq!(
+                decoded,
+                vec![leading, 0, 0],
+                "digit {expected:?} did not decode back to sextet {sextet}"
+            );
+        }
+    }
+
+    #[test]
     fn the_two_encoders_differ_only_in_padding() {
         // This is the property that was false while `ssh` and `sshd` each had
         // a function named `base64_encode` and only one of them padded. Now

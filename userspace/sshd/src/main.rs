@@ -97,6 +97,15 @@ use std::io;
 use std::io::Write;
 use std::process;
 
+// Everything the far end of the socket has to agree with byte for byte. Not
+// re-implemented here: see the crate's own module docs for why one definition
+// shared by both ends is the point, and `sshd/Cargo.toml` for what a second copy
+// cost the last time.
+use sshwire::{
+    ExchangeHashInput, compute_exchange_hash, derive_key, encode_mpint, ssh_string,
+    strip_leading_zeros,
+};
+
 // ============================================================================
 // Syscall numbers (from kernel/src/syscall/number.rs)
 // ============================================================================
@@ -1614,14 +1623,11 @@ impl StreamBuffer {
 // SSH data encoding helpers
 // ============================================================================
 
-/// Encode a string/bytes as SSH `string` type: u32 length + data.
-fn ssh_string(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + data.len());
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    out.extend_from_slice(data);
-    out
-}
-
+// The encoders -- `ssh_string`, `encode_mpint`, `strip_leading_zeros` -- live in
+// `sshwire`, not here. Each is one half of a contract with whatever is at the
+// other end of the socket, and a private copy of one half is a copy that can
+// drift without any test in this crate noticing. The readers below stay for now
+// because they return `SshdError`; moving them needs a shared error type first.
 /// Read an SSH `string` from a byte slice at the given offset.
 fn read_ssh_string(data: &[u8], offset: usize) -> Result<(&[u8], usize), SshdError> {
     if offset + 4 > data.len() {
@@ -1666,33 +1672,11 @@ fn read_byte(data: &[u8], offset: usize) -> Result<(u8, usize), SshdError> {
     Ok((data[offset], offset + 1))
 }
 
-/// Encode an SSH `mpint` from big-endian unsigned byte array.
-fn encode_mpint(value: &[u8]) -> Vec<u8> {
-    let stripped = strip_leading_zeros(value);
-    if stripped.is_empty() {
-        return vec![0, 0, 0, 0];
-    }
-    let needs_pad = (stripped[0] & 0x80) != 0;
-    let total_len = stripped.len() + usize::from(needs_pad);
-    let mut out = Vec::with_capacity(4 + total_len);
-    out.extend_from_slice(&(total_len as u32).to_be_bytes());
-    if needs_pad {
-        out.push(0);
-    }
-    out.extend_from_slice(stripped);
-    out
-}
-
 /// Read an SSH `mpint` from a byte slice, returning unsigned big-endian bytes.
 fn read_mpint(data: &[u8], offset: usize) -> Result<(Vec<u8>, usize), SshdError> {
     let (raw, next) = read_ssh_string(data, offset)?;
     let stripped = strip_leading_zeros(raw);
     Ok((stripped.to_vec(), next))
-}
-
-fn strip_leading_zeros(data: &[u8]) -> &[u8] {
-    let first_nonzero = data.iter().position(|&b| b != 0).unwrap_or(data.len());
-    &data[first_nonzero..]
 }
 
 /// Read a boolean from the data at the given offset.
@@ -2286,24 +2270,23 @@ fn derive_keys(
     exchange_hash: &[u8; 32],
     session_id: &[u8; 32],
 ) -> EncryptionState {
-    let k_enc = encode_mpint(shared_secret);
-
-    let derive = |label: u8| -> Vec<u8> {
-        let mut input = Vec::new();
-        input.extend_from_slice(&k_enc);
-        input.extend_from_slice(exchange_hash);
-        input.push(label);
-        input.extend_from_slice(session_id);
-        sha256(&input).to_vec()
+    // The lengths are the negotiated algorithms', not SHA-256's: aes128-ctr
+    // takes a 16-byte key and a 16-byte IV, hmac-sha2-256 a 32-byte key. Asking
+    // `derive_key` for the length wanted is also what makes this correct for any
+    // future algorithm needing more than one digest's worth -- the RFC's
+    // extension rule lives in one place rather than being absent here because
+    // today's numbers happen to fit.
+    let derive = |label: u8, len: usize| -> Vec<u8> {
+        derive_key(shared_secret, exchange_hash, label, session_id, len)
     };
 
     EncryptionState {
-        iv_c2s: derive(b'A')[..16].to_vec(),
-        iv_s2c: derive(b'B')[..16].to_vec(),
-        enc_key_c2s: derive(b'C')[..16].to_vec(),
-        enc_key_s2c: derive(b'D')[..16].to_vec(),
-        mac_key_c2s: derive(b'E'),
-        mac_key_s2c: derive(b'F'),
+        iv_c2s: derive(b'A', 16),
+        iv_s2c: derive(b'B', 16),
+        enc_key_c2s: derive(b'C', 16),
+        enc_key_s2c: derive(b'D', 16),
+        mac_key_c2s: derive(b'E', 32),
+        mac_key_s2c: derive(b'F', 32),
         block_size: 16,
         mac_len: 32,
     }
@@ -4002,7 +3985,7 @@ fn do_version_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
 
     // Keep it. This line used to be read, logged and dropped, and the exchange
     // hash substituted a fixed "SSH-2.0-client" for it — which made every
-    // handshake unverifiable. See `compute_exchange_hash`.
+    // handshake unverifiable. See `sshwire::compute_exchange_hash`.
     conn.client_version = client_version;
 
     Ok(())
@@ -4098,17 +4081,20 @@ fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
     let shared_secret_big = client_e.mod_pow(&y, &p); // K = e^y mod p
     let shared_secret = shared_secret_big.to_bytes_be();
 
-    // Compute exchange hash H.
-    let exchange_hash = compute_exchange_hash(
-        &conn.client_version,
-        SSH_SERVER_VERSION,
-        &client_kexinit,
-        &server_kexinit,
-        &conn.host_key.public_key_blob(),
-        &client_e.to_bytes_be(),
-        &f.to_bytes_be(),
-        &shared_secret,
-    );
+    // Compute exchange hash H. `client_version` is the line the client actually
+    // sent (see `do_version_exchange`); a placeholder here is what made this
+    // daemon unusable by every client, ours included, and it is now the client's
+    // recomputation of this same shared function that has to agree with it.
+    let exchange_hash = compute_exchange_hash(&ExchangeHashInput {
+        client_version: &conn.client_version,
+        server_version: SSH_SERVER_VERSION,
+        client_kexinit: &client_kexinit,
+        server_kexinit: &server_kexinit,
+        host_key_blob: &conn.host_key.public_key_blob(),
+        client_e: &client_e.to_bytes_be(),
+        server_f: &f.to_bytes_be(),
+        shared_secret: &shared_secret,
+    });
 
     // This is the session ID (first exchange hash).
     let session_id = exchange_hash;
@@ -4181,51 +4167,6 @@ fn build_kexinit() -> Vec<u8> {
     payload.extend_from_slice(&0u32.to_be_bytes());
 
     payload
-}
-
-/// Compute the SSH exchange hash H (RFC 4253, Section 8).
-fn compute_exchange_hash(
-    client_version: &str,
-    server_version: &str,
-    client_kexinit: &[u8],
-    server_kexinit: &[u8],
-    host_key_blob: &[u8],
-    client_e: &[u8],
-    server_f: &[u8],
-    shared_secret: &[u8],
-) -> [u8; 32] {
-    let mut hash_input = Vec::new();
-
-    // V_C: client version, as the client actually sent it.
-    //
-    // This was a fixed `b"SSH-2.0-client"`, with a comment saying we did not
-    // store the real one. That single substitution made the daemon unusable by
-    // any client at all, ours included: `H` is what we sign with the host key,
-    // and the client recomputes it from its own view of the handshake and
-    // checks our signature against *that*. Two different `V_C` values give two
-    // different hashes, so the signature could never verify and every
-    // connection died at host-key verification, before authentication.
-    //
-    // It survived because both ends are unit-tested against themselves and
-    // there is no test that makes them agree. See known-issues.md
-    // `TD-B-SSHD-SIGNS-AN-EXCHANGE-HASH-OVER-A-CLIENT-VERSION-THE-CLIENT-NEVER-SENT`.
-    hash_input.extend_from_slice(&ssh_string(client_version.as_bytes()));
-    // V_S: server version.
-    hash_input.extend_from_slice(&ssh_string(server_version.as_bytes()));
-    // I_C: client KEXINIT payload.
-    hash_input.extend_from_slice(&ssh_string(client_kexinit));
-    // I_S: server KEXINIT payload.
-    hash_input.extend_from_slice(&ssh_string(server_kexinit));
-    // K_S: host key blob.
-    hash_input.extend_from_slice(&ssh_string(host_key_blob));
-    // e: client DH value.
-    hash_input.extend_from_slice(&encode_mpint(client_e));
-    // f: server DH value.
-    hash_input.extend_from_slice(&encode_mpint(server_f));
-    // K: shared secret.
-    hash_input.extend_from_slice(&encode_mpint(shared_secret));
-
-    sha256(&hash_input)
 }
 
 /// Handle the SSH-USERAUTH service request.
@@ -6540,19 +6481,12 @@ mod tests {
     // ---- SSH encoding helpers ----
 
     #[test]
-    fn test_ssh_string_encoding() {
-        let encoded = ssh_string(b"hello");
-        assert_eq!(&encoded[..4], &[0, 0, 0, 5]);
-        assert_eq!(&encoded[4..], b"hello");
-    }
-
-    #[test]
-    fn test_ssh_string_empty() {
-        let encoded = ssh_string(b"");
-        assert_eq!(&encoded, &[0, 0, 0, 0]);
-    }
-
-    #[test]
+    // `ssh_string` and `encode_mpint` are `sshwire`'s, and are tested there
+    // against RFC 4251 §5's own published examples. Re-asserting them here would
+    // grow a second, weaker statement of the same encoding in the crate that the
+    // shared one exists to stop having its own opinion. The roundtrip below is
+    // different in kind and stays: it checks sshd's *reader*, which is still
+    // local, against the shared writer.
     fn test_read_ssh_string_roundtrip() {
         let encoded = ssh_string(b"test data");
         let (val, next) = read_ssh_string(&encoded, 0).unwrap();
@@ -6594,27 +6528,6 @@ mod tests {
     #[test]
     fn test_read_byte_empty() {
         assert!(read_byte(&[], 0).is_err());
-    }
-
-    #[test]
-    fn test_encode_mpint_zero() {
-        let result = encode_mpint(&[]);
-        assert_eq!(result, vec![0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn test_encode_mpint_positive() {
-        let result = encode_mpint(&[0x01, 0x02]);
-        assert_eq!(&result[..4], &[0, 0, 0, 2]);
-        assert_eq!(&result[4..], &[0x01, 0x02]);
-    }
-
-    #[test]
-    fn test_encode_mpint_high_bit() {
-        let result = encode_mpint(&[0x80, 0x01]);
-        // Should be padded with a leading zero.
-        assert_eq!(&result[..4], &[0, 0, 0, 3]);
-        assert_eq!(&result[4..], &[0x00, 0x80, 0x01]);
     }
 
     #[test]
@@ -8793,88 +8706,35 @@ DenyGroups nogroup
 
     // ---- Exchange hash (RFC 4253 §8) ----
 
-    /// The RFC 4253 §8 construction, written out longhand.
+    /// Build the exchange-hash input the way `do_key_exchange` does, varying
+    /// only the field this crate is responsible for supplying.
     ///
-    /// `H = HASH(V_C || V_S || I_C || I_S || K_S || e || f || K)`, with the two
-    /// version strings and the three blobs as `string` and the three numbers as
-    /// `mpint`.
-    ///
-    /// This deliberately does not call `compute_exchange_hash`. A test that
-    /// asserts a function equals itself catches nothing, and the bug this
-    /// guards was a *missing input* — the real client version replaced by a
-    /// fixed one — which only an independent statement of what the hash should
-    /// cover can catch.
-    #[allow(clippy::too_many_arguments)]
-    fn rfc4253_exchange_hash(
-        v_c: &str,
-        v_s: &str,
-        i_c: &[u8],
-        i_s: &[u8],
-        k_s: &[u8],
-        e: &[u8],
-        f: &[u8],
-        k: &[u8],
-    ) -> [u8; 32] {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&ssh_string(v_c.as_bytes()));
-        buf.extend_from_slice(&ssh_string(v_s.as_bytes()));
-        buf.extend_from_slice(&ssh_string(i_c));
-        buf.extend_from_slice(&ssh_string(i_s));
-        buf.extend_from_slice(&ssh_string(k_s));
-        buf.extend_from_slice(&encode_mpint(e));
-        buf.extend_from_slice(&encode_mpint(f));
-        buf.extend_from_slice(&encode_mpint(k));
-        sha256(&buf)
-    }
-
-    #[test]
-    fn the_exchange_hash_is_the_one_rfc_4253_specifies() {
-        let v_c = "SSH-2.0-OpenSSH_9.6";
-        let (i_c, i_s) = (&[0x14u8, 1, 2, 3][..], &[0x14u8, 9, 8, 7][..]);
-        let k_s = &[0xAAu8; 51][..];
-        let e = &[0x11u8; 32][..];
-        let f = &[0x22u8; 32][..];
-        let k = &[0x33u8; 32][..];
-
-        assert_eq!(
-            compute_exchange_hash(v_c, SSH_SERVER_VERSION, i_c, i_s, k_s, e, f, k),
-            rfc4253_exchange_hash(v_c, SSH_SERVER_VERSION, i_c, i_s, k_s, e, f, k),
-        );
+    /// What the hash *is* — the RFC 4253 §8 field order, the `string`/`mpint`
+    /// framing, that all eight inputs are load-bearing — is `sshwire`'s to test,
+    /// against a longhand oracle, once, for both ends. What is sshd's alone is
+    /// which values it passes, and the bug here was exactly that: a constant
+    /// where `conn.client_version` belonged.
+    fn hash_for_client_version(client_version: &str) -> [u8; 32] {
+        compute_exchange_hash(&ExchangeHashInput {
+            client_version,
+            server_version: SSH_SERVER_VERSION,
+            client_kexinit: &[0x14, 1, 2, 3],
+            server_kexinit: &[0x14, 9, 8, 7],
+            host_key_blob: &[0xAA; 51],
+            client_e: &[0x11; 32],
+            server_f: &[0x22; 32],
+            shared_secret: &[0x33; 32],
+        })
     }
 
     #[test]
     fn the_clients_own_version_reaches_the_exchange_hash() {
         // The regression, stated as the thing that was actually wrong: the hash
         // did not depend on what the client said, because a constant stood in
-        // for it. Under the old code these two calls returned the same digest.
-        let (i_c, i_s) = (&[0x14u8, 1][..], &[0x14u8, 2][..]);
-        let k_s = &[0xAAu8; 51][..];
-        let e = &[0x11u8; 32][..];
-        let f = &[0x22u8; 32][..];
-        let k = &[0x33u8; 32][..];
-
-        let openssh = compute_exchange_hash(
-            "SSH-2.0-OpenSSH_9.6",
-            SSH_SERVER_VERSION,
-            i_c,
-            i_s,
-            k_s,
-            e,
-            f,
-            k,
-        );
-        let ours = compute_exchange_hash(
-            "SSH-2.0-SlateOS_1.0",
-            SSH_SERVER_VERSION,
-            i_c,
-            i_s,
-            k_s,
-            e,
-            f,
-            k,
-        );
+        // for it. Under the old code these two returned the same digest.
         assert_ne!(
-            openssh, ours,
+            hash_for_client_version("SSH-2.0-OpenSSH_9.6"),
+            hash_for_client_version("SSH-2.0-SlateOS_1.0"),
             "V_C must be an input to H, or the signature binds nothing about the client"
         );
     }
@@ -8884,26 +8744,10 @@ DenyGroups nogroup
         // Pins the specific fabricated string out of existence. Our own client
         // sends `SSH-2.0-SlateOS_1.0`; the old code hashed `SSH-2.0-client`
         // whatever the client sent, so this equality was what shipped.
-        let (i_c, i_s) = (&[0x14u8][..], &[0x14u8][..]);
-        let (k_s, e, f, k) = (
-            &[0u8; 51][..],
-            &[1u8; 32][..],
-            &[2u8; 32][..],
-            &[3u8; 32][..],
+        assert_ne!(
+            hash_for_client_version("SSH-2.0-SlateOS_1.0"),
+            hash_for_client_version("SSH-2.0-client"),
         );
-        let real = compute_exchange_hash(
-            "SSH-2.0-SlateOS_1.0",
-            SSH_SERVER_VERSION,
-            i_c,
-            i_s,
-            k_s,
-            e,
-            f,
-            k,
-        );
-        let placeholder =
-            compute_exchange_hash("SSH-2.0-client", SSH_SERVER_VERSION, i_c, i_s, k_s, e, f, k);
-        assert_ne!(real, placeholder);
     }
 
     #[test]

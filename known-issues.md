@@ -118151,3 +118151,59 @@ one session went to a debugger before concluding the machine was merely slow.
 
 **If never fixed:** it worsens monotonically. The `deps` directory grows with
 the crate count, enumeration is linear in it, and the disk does not get faster.
+
+## TD-B-SSHD-TELLS-EVERY-CLIENT-ITS-ENVIRONMENT-VARIABLES-WERE-ACCEPTED-AND-THROWS-THEM-AWAY (lane B)
+
+**Status:** OPEN — 2026-09-05
+
+**In short:** When you run `ssh -o SendEnv=LANG host`, the client asks the
+server to set `LANG` in the session. Our server answers "yes, done" and then
+discards it. Nothing is set. The client has no way to find out, because the
+only signal it gets is the answer we lied in. A program on the far end that
+depends on `LANG`, `TZ` or `LC_ALL` silently runs with the wrong one.
+
+**Where it lives.** `userspace/sshd/src/main.rs`, the `"env"` arm of the
+channel-request handler (~line 4800):
+
+```rust
+"env" => {
+    // Accept environment variable requests silently.
+    if want_reply { /* ... SSH_MSG_CHANNEL_SUCCESS ... */ }
+}
+```
+
+The request payload — name and value, RFC 4254 §6.4 — is never even parsed.
+
+**Why answering SUCCESS is the wrong lie.** RFC 4254 makes the reply mean
+"the request was accepted", and a client is entitled to act on that. Answering
+FAILURE for something we do not do is not a defeat; it is the protocol working.
+This is also what OpenSSH does: `session_env_req` returns success only when the
+name matches an `AcceptEnv` pattern and failure otherwise, and clients handle
+that every day without complaint.
+
+**Why not simply set them.** Because an SSH client's environment is
+attacker-controlled input to a privileged process. `LD_PRELOAD`, `PATH`,
+`IFS`, `BASH_ENV` and friends turn "set a variable" into "run my code as the
+authenticated user with the server's choice of libraries". That is precisely
+why OpenSSH gates it behind an explicit, empty-by-default allowlist rather
+than accepting whatever arrives.
+
+**What the proper fix is,** as its own commit:
+
+1. Parse the request: two SSH strings, name then value.
+2. Add an `AcceptEnv` directive to the config, taking shell-glob patterns, and
+   defaulting to **empty** — the OpenSSH default, and the only safe one.
+3. Match the name against the patterns. On a match, record the pair on the
+   channel and answer SUCCESS; the recorded pairs are applied to the child's
+   environment when `shell`/`exec`/`subsystem` spawns it.
+4. On no match, answer FAILURE and log the rejected name at debug level.
+5. Reject names containing `=` or a NUL outright, whatever the patterns say.
+
+**Cost while unfixed:** any client that sends `SendEnv` gets a wrong answer.
+The practical damage today is limited — `LANG`/`LC_*` are the common cases and
+their absence degrades rather than breaks — but the *reporting* is the bug:
+a caller cannot distinguish "set" from "silently dropped".
+
+**If never fixed:** it stays a quiet correctness lie, and it gets worse the
+moment anything on this OS starts depending on a client-supplied variable,
+because the failure will look like a bug in that program instead of here.

@@ -5335,24 +5335,49 @@ check_shellcheck
 # corrupting its output an hour later.
 #
 # That paragraph used to end "and a suite would have to be minutes long to
-# change it".  One now is, so the sentence is retired rather than left standing
-# as a prediction the tree has already falsified.  On 2026-09-04
-# `test-selftests-are-repo-safe.py` joined the sweep at ~200 s -- by itself
-# more than twice the whole 2026-08-29 sweep, and 17-22% of a boot test.  It is
-# still worth it, but on its own merits and not on the old ratio: it runs every
-# self-test the push hook gates on against a throwaway victim repository under
-# three environments a hook really produces, and it is the only thing in the
-# tree that does.  The alternative to paying the 200 s is the failure it exists
-# to catch, which has happened twice and once ended with the entire repository
-# deleted and *pushed to origin* (2026-08-29, `check-requests-not-deleted.py`).
+# change it".  Several now are, so the sentence is retired rather than left
+# standing as a prediction the tree has already falsified.  On 2026-09-05 the
+# whole sweep was measured end to end for the first time -- 34 suites, all
+# green, **2482 s** wall (the per-suite times sum to 2481 s; the missing second
+# is loop overhead, which is the useful thing to know about the loop):
+#
+#     test-checkers-honour-head.py         898 s   36%
+#     test-src-digest.py                   296 s   12%
+#     test-selftests-are-repo-safe.py      285 s   11%
+#     test-canary-load.py                  216 s    9%
+#     test-pre-push-fmt-gate.py            133 s    5%
+#     (29 others, none over 94 s)          653 s   26%
+#
+# Two things in that table correct what this comment said before it existed.
+#
+# First, `test-selftests-are-repo-safe.py` is **285 s, not the ~200 s** written
+# here on the day it landed -- an estimate taken from a run that was not
+# competing with a full sweep.  Prefer the table; it is a measurement of the
+# thing actually being paid for.  It is still worth it, but on its own merits
+# and not on the old ratio: it runs every self-test the push hook gates on
+# against a throwaway victim repository under three environments a hook really
+# produces, and it is the only thing in the tree that does.  The alternative to
+# paying the 285 s is the failure it exists to catch, which has happened twice;
+# once it ended with the entire repository deleted and *pushed to origin*
+# (2026-08-29, `check-requests-not-deleted.py`), and once -- 2026-09-04, the
+# push hook's gate 13 -- it built a six-commit chain whose first commit deletes
+# 13,905 of the tree's 13,907 files, stopped one refused push short of origin.
+#
+# Second, and this is the correction that matters: this comment used to say
+# that if the sweep stopped being affordable, "the axis to trim is the
+# environment list".  That was reasoning about the wrong suite.  The dominant
+# cost is `test-checkers-honour-head.py` at 898 s -- more than three times
+# this one, and by itself over a third of the sweep.  Anyone trimming for time
+# should measure first and start there.  Within *this* suite the old advice
+# still holds -- trim the environment list, not the gate list, since dropping a
+# gate silences a check while dropping the third environment only weakens one
+# the first already covers -- but it is the second question to ask, not the
+# first.
 #
 # Its cost is 8 gated self-tests x 3 environments x a fresh git fixture each,
-# on a filesystem where git is unusually slow (see open question A-Q7).  So if
-# it ever stops being affordable, the axis to trim is the environment list, not
-# the gate list -- dropping a gate silences a check, while dropping the third
-# environment only weakens one that the first already covers.  Measure before
-# trimming either: on a machine with a normal filesystem this may well be a
-# tenth of the figure above.
+# on a filesystem where git is unusually slow (see open question A-Q7).
+# Measure before trimming anything: on a machine with a normal filesystem the
+# whole table may well be a tenth of these figures.
 #
 # WHY IT DISCOVERS RATHER THAN LISTS.  A hand-written list is a second place a
 # new suite must be registered, and forgetting is silent: the suite passes by

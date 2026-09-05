@@ -16201,6 +16201,80 @@ apparent mismatches. The remaining two were a `str`-vs-`bytes` comparison that
 reported *every* case as a mismatch — which is the harmless direction, but only
 by luck.
 
+**[A] 2026-09-05 — ✅ stage (d) is DONE. Completion escapes what it inserts,
+and the escaping is pinned by real bash.** ((a), (b′) and (c) remain open; this
+closes only (d).)
+
+**In short:** pressing Tab on a file whose name contains a space, an
+apostrophe or a `$` used to produce a command line naming a *different* file —
+or two files that do not exist. Completion now inserts a spelling that parses
+back to the name it matched, in whichever quoting region the cursor happens to
+be in.
+
+*What was added.* `shellquote::quote_suffix(suffix, ctx)`, plus
+`quote_suffix_str` for the line editor's `String` buffer. The `_str` form is a
+one-line wrapper over the byte form and **not** a second implementation: two
+spellings of one escaping rule is the disease this module exists to end, and a
+`char`-oriented copy would drift from the byte-oriented original the first time
+one of them was corrected. It returns `Option` rather than asserting — the
+conversion cannot fail for a `&str` input, since every byte the escaping adds
+is ASCII, but a kernel that panics on a Tab keypress is worse than one that
+declines to complete.
+
+*Why a suffix function rather than the existing `quote_word`.* Completion never
+gets to write the whole word. The user has already typed part of it, possibly
+inside a quote they opened, and the only edit completion may make is an
+insertion at the cursor — so the bytes emitted have to be correct *inside the
+region already open*, which is a different problem in each context and in none
+of them is the answer "wrap it in single quotes". The rules are the three from
+the 2026-09-04 note above, unchanged: `Ctx::Single` passes bytes through and
+spells `'` as `'\''`; `Ctx::Double` backslash-escapes `"` `\` `$` `` ` ``;
+`Ctx::Unquoted` wraps in `'…'` if any byte is special, which stays one word
+because adjacent quoting concatenates (`My` + `' Doc.txt'`).
+
+*The one rule that looks like an omission and is not.* `\n` is in
+`DQ_ESCAPABLE` but is deliberately **not** escaped in the double-quoted case:
+inside `"…"`, `\<newline>` is a line continuation, so escaping a newline would
+*delete* it. A raw newline is already literal there. The case is in the table
+below with that reason written next to it, because it is exactly the kind of
+"missing" entry a later reader would helpfully add.
+
+*Where it is wired.* `kshell::tab_complete`, both insertion sites — the unique
+match and the common prefix. The context is computed once, from
+`trailing_context` at the cursor, and an unterminated quote is the normal case
+there rather than an error: the user is mid-word by definition. The unique
+match still closes the quote before the separating space; the common prefix
+deliberately does not, because the word is not finished.
+
+*What pins it, in four layers.* Each catches something the others cannot:
+
+| layer | asserts | catches |
+|---|---|---|
+| `shellquote::self_test` §8 | the literal output spelling for each rule | a rule quietly changing |
+| `shellquote::self_test` §9 | round trip over 10 names × every split point × 3 contexts | a rule that is right on its own example and wrong one byte over |
+| `kshell::self_test` rung 119 | the real `tab_complete`, against real VFS entries, unquoted with the dispatcher's own `remove_quotes` | the two being individually right and *not wired together* |
+| `scripts/check-kshell-rungs-vs-bash.py` `SUFFIX_CASES` | what **real bash** parses out of the composed line | all of the above agreeing with each other and with nothing outside |
+
+The bash leg is the one worth explaining. §8 and §9 both grade `quote_suffix`
+with *our* scanner, so a wrong-but-self-consistent escaping satisfies both.
+`SUFFIX_CASES` transcribes §8's output literals — read out of `shellquote.rs`
+verbatim, so the table cannot drift into fiction — composes
+`<opener><typed><inserted><closer>`, and asks bash what that means. All five
+agree. Note it is the *output* spelling that is pinned to the Rust, not the
+input: pinning the input would leave the kernel free to assert any output at
+all while the checker measured a string it had invented itself.
+
+*Rung 116 still passes unchanged*, which is the useful control: it covers where
+the word *begins*, and none of its five expectations move when what is
+*inserted* becomes escaped. Three independent defects in one function, and the
+fix for each leaves the other two's evidence intact.
+
+*Still not fixed here:* completion looks the word up **unexpanded** — see
+`A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD` immediately below. §9's
+round trip deliberately does not model expansion (`strip_quotes` does not
+expand and a real shell does), and says so in place, so that gap is not
+silently absorbed into a property that would then read as covering it.
+
 ### A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD, so `$HOME/<TAB>` searches for a directory literally named `$HOME` — 2026-09-04 (lane A) — OPEN
 
 **In short:** in the kernel shell, press Tab after typing a path that contains
@@ -119427,3 +119501,102 @@ copy out of two does not make it constant-time. It does mean the eventual fix �
 X25519, per `TD-B-SSH-KEY-EXCHANGE-LEAKS-ITS-SECRET-THROUGH-TIMING` — now has a
 single place to land instead of two, which is the same property this entry is
 about, running the other way.
+
+## A-ADA-PREBUILT-VERIFICATION-NEVER-RAN-BECAUSE-THE-RTS-WAS-INCOMPLETE
+
+**[A] 2026-09-05 — ✅ FIXED.**
+
+**In short:** the kernel links a *committed* Ada object rather than compiling
+Ada on every build. Two things are supposed to guard it: a stamp proving the
+object was built from the current sources, and a byte-for-byte comparison
+against what the compiler actually produces. The second one has never run —
+not on this machine, not on any machine, not once since it was written. A
+directory it needed could not survive a `git clone`, and the resulting failure
+was swallowed by a warning.
+
+### What was wrong
+
+`kernel/build.rs:169` calls `verify_against_toolchain` whenever a cross GNAT is
+found. That function compiles `kernel/ada/src/virtqueue_descriptors.adb` with
+`--RTS=kernel/ada/rts` and asserts the result equals
+`kernel/ada/prebuilt/virtqueue_descriptors.o`.
+
+GNAT validates the `--RTS=` path before it reads a line of Ada, and rejects one
+with no `adalib/` next to `adainclude/`:
+
+```
+gnat1: RTS path not valid: missing adalib directory
+```
+
+Our RTS is a stub — `adainclude/system.ads` and nothing else, because we link no
+Ada runtime — so `adalib/` was legitimately empty. **Git cannot track an empty
+directory.** It existed on whichever machine first generated the object, was
+never committed, and has been absent from every checkout since.
+
+The compile therefore failed on every build, and the failure landed in the `_ =>`
+arm, which printed a `cargo:warning` and continued. The only symptom was one
+line inside a build log — in the run that exposed this, a 10 712-second one:
+
+```
+warning: kernel@0.1.0: Ada toolchain found but failed to compile
+virtqueue_descriptors; using the committed object. The stamp check still passed.
+```
+
+`regen-prebuilt.py` was broken by the same cause, with worse consequences: its
+`compile_units` exits on a failed compile, so **there was no supported way to
+move the stamp forward at all.** The one documented remedy for a stamp mismatch
+would itself have failed.
+
+### The warning was not merely quiet, it was wrong
+
+"The stamp check still passed" is offered as reassurance, and it contradicts the
+comment 90 lines above it in the same file, which is correct:
+
+> the stamp records what the object should be built from, not what it contains.
+
+The stamp hashes `ADA_FLAGS`, `system.ads`, `x86_64-elf.atp` and the `.ads`/`.adb`
+sources. It cannot see the object. Detecting a tampered or mis-generated object
+is the *entire* purpose of the byte comparison, so a message telling the reader
+that the surviving check covers the skipped one states the opposite of the truth.
+This is the project's recurring shape — "the check did not run" wearing the
+costume of "the check passed" — and here the costume was hand-stitched.
+
+### The object itself is fine
+
+Verified 2026-09-05 before changing anything: creating `rts/adalib` makes the
+compile succeed, and the produced object is **byte-identical** to the committed
+`virtqueue_descriptors.o`, with and without a `.gitkeep` inside the directory.
+The committed artifact is authentic and the gate would have passed every time.
+What was lost was the guarantee, not the object — which is exactly why nothing
+ever pointed at it.
+
+### How it is fixed
+
+- **`kernel/ada/rts/adalib/.gitkeep`** — holds the directory in the tree. Its
+  contents explain what deleting it would silently cost, since an empty file
+  named `.gitkeep` invites exactly the deletion that caused this.
+- **`build.rs` now separates the two failures**, which were never the same kind
+  of thing. A missing `adalib/` is a defect in the *repository*: identical on
+  every machine, fixed by a checkout, and now a hard `assert!` that names the
+  directory and the remedy. A toolchain that is present but fails to compile is
+  a property of one developer's install and stays a warning — but the warning
+  now says the verification was **skipped** and that the stamp cannot substitute
+  for it.
+- **`regen-prebuilt.py` gets the same guard**, diagnosing the missing directory
+  itself rather than surfacing gnat1's wording, which suggests nothing about a
+  checkout being the remedy.
+
+Verified in both directions: with `adalib/` present, `regen-prebuilt.py --check`
+prints `prebuilt is current` — the first time the byte comparison has ever been
+made. With it renamed away, both the script and the build fail with the new
+message and exit 1.
+
+### Standing lesson
+
+An empty directory is not representable in git, so any check whose *validity*
+depends on one is a check that disables itself on the next clone and reports
+nothing. The general form: when a guard degrades to a warning, the warning is
+the only thing standing between a silent gap and a person noticing — so it must
+state what is no longer being checked, never what still is. A degradation
+message that lists the surviving checks reads as reassurance and buries the gap
+it was written to expose.

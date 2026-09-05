@@ -258,6 +258,7 @@ HEAD_GATES = {
     "check-requests-not-deleted.py": "gate 9, request deletion",
     "check-doc-links.py": "gate 11, dead doc links",
     "check-design-decisions-bands.py": "gate 13, per-lane numbering bands",
+    "check-accidental-headings.py": "gate 14, `---` that renders as a heading",
 }
 
 

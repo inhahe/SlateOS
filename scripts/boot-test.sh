@@ -5655,6 +5655,65 @@ check_open_questions() {
 
 check_open_questions
 
+# A `---` on the line directly below prose is a setext underline, not a thematic
+# break: Markdown renders that paragraph's last line as an `<h2>` and drops the
+# separator entirely.  Both halves are wrong and neither is visible in the
+# source, which is how 21 of them accumulated across `known-issues.md`,
+# `known-issues-resolved.md` and `design-decisions.md` -- contributed by all
+# three lanes -- before anything looked.  Our shared documents are written as
+# `entry ... --- entry ...`, so the mistake is one missing blank line away at
+# every entry boundary in the three files the whole project writes into.
+#
+# WHY THE SWEEP LIVES HERE AND THE SCOPED CHECK LIVES IN THE PUSH HOOK.  Gate 14
+# of `scripts/hooks/pre-push` runs the same checker with `--changed-only`, so it
+# judges a commit's own documents and never blocks a lane on a pre-existing
+# defect in a file it must not edit.  That is the right question for a gate and
+# the wrong one for an audit: three of the 21 were in `known-issues-resolved.md`
+# and `design-decisions.md`, files nobody would have thought to name.  Only a
+# whole-corpus pass finds those, and this is where a whole-corpus pass belongs.
+#
+# The self-test first, as the gate above does: a checker that no longer agrees
+# with its own fixtures has a verdict worth nothing, and this one's fixtures
+# include two false *negatives* it shipped with and was caught on.
+check_accidental_headings() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== accidental-heading check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the accidental-heading gate against its fixtures ==="
+    if ! run_checker check-accidental-headings-selftest "$py" -u \
+        "$PROJECT_ROOT/scripts/check-accidental-headings.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The accidental-heading gate no longer" >&2
+        echo "agrees with its own fixtures, so its verdict means nothing." >&2
+        exit 1
+    fi
+
+    echo "=== Checking every tracked *.md for a \`---\` that renders as a heading ==="
+    if run_checker check-accidental-headings "$py" -u \
+        "$PROJECT_ROOT/scripts/check-accidental-headings.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A \`---\` in a tracked Markdown file sits" >&2
+    echo "directly below a line of prose, which makes it a setext underline:" >&2
+    echo "that line renders as an <h2> and the separator disappears.  The" >&2
+    echo "errors above name the file and line and quote the text being turned" >&2
+    echo "into a heading.  The fix is one blank line above the \`---\`; run" >&2
+    echo "    python scripts/check-accidental-headings.py --fix" >&2
+    echo "to insert them, then re-run without --fix and read the diff." >&2
+    exit 1
+}
+
+check_accidental_headings
+
 # Refuse to build when a self-test skip has fired on every recorded boot.
 #
 # This reads `bench/boot-history.jsonl`, so it is about the *previous* runs and

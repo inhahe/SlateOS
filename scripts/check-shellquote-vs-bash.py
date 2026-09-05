@@ -363,6 +363,17 @@ EXCUSED_RUNGS = {
     "find_bare(&q, b'>')":
         "same loop, same reason: `q` is quote_word's output for each name in "
         "turn, not a literal this file could transcribe.",
+    "strip_quotes(raw)":
+        "inside the quote_suffix round-trip loop (self_test section 9), where "
+        "`raw` is a slice of a line assembled from three loop variables -- a "
+        "filename, a split point, and a quoting context -- so the rung stands "
+        "for ~700 cases and not one literal. What it asserts is a Rust-side "
+        "invariant, that quote_suffix's output parses back to the name it was "
+        "given, rather than a claim about bash. The claim about bash is made "
+        "separately and IS graded against the real shell: "
+        "check-kshell-rungs-vs-bash.py's SUFFIX_CASES puts the three context "
+        "rules to bash directly, and pins each one's Rust literal verbatim, "
+        "so excusing it here does not leave quote_suffix ungraded anywhere.",
 }
 
 

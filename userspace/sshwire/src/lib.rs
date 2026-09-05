@@ -2348,6 +2348,363 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64Error> {
     Ok(out)
 }
 
+// ============================================================================
+// The unencrypted OpenSSH private key container (`PROTOCOL.key`)
+// ============================================================================
+
+/// The magic that opens the container, NUL included.
+const OPENSSH_KEY_MAGIC: &[u8] = b"openssh-key-v1\0";
+
+/// The PEM band around the base64 body.
+const OPENSSH_KEY_HEADER: &str = "-----BEGIN OPENSSH PRIVATE KEY-----";
+/// The closing band; see [`OPENSSH_KEY_HEADER`].
+const OPENSSH_KEY_FOOTER: &str = "-----END OPENSSH PRIVATE KEY-----";
+
+/// The key type this module handles. The only one SlateOS implements.
+pub const OPENSSH_KEY_TYPE_ED25519: &[u8] = b"ssh-ed25519";
+
+/// What an unencrypted Ed25519 private key file holds.
+///
+/// # Why the public key comes back rather than being checked here
+///
+/// The file stores the public key beside the seed, so the two can disagree —
+/// through corruption, or through a file assembled by hand. Verifying that
+/// they agree means deriving a public key from the seed, which is Ed25519
+/// arithmetic, which lives in `posix`. This crate deliberately does not depend
+/// on `posix`: an rlib copy of `posix` linked into a SlateOS program is a
+/// second libc whose every syscall answers `-ENOSYS` (known-issues.md
+/// `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`), so
+/// pulling it in here to check one equality would put that hazard into both
+/// binaries.
+///
+/// So the container codec returns both halves and each caller checks. That is
+/// a real obligation and not a formality — `sshd` already does it, and a
+/// caller that skips it accepts a key whose halves disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpensshPrivateKey {
+    /// The 32-byte Ed25519 seed: the actual secret.
+    pub seed: [u8; 32],
+    /// The public key **as stored in the file**, which the caller must check
+    /// against one derived from `seed`.
+    pub public: [u8; 32],
+    /// The trailing comment. Not authenticated by anything; treat as a label.
+    pub comment: String,
+}
+
+/// Why a private key file could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivateKeyError {
+    /// The PEM band is missing, or the footer precedes the header.
+    NotPem,
+    /// The body is not valid base64.
+    Base64(Base64Error),
+    /// The decoded bytes do not begin with `openssh-key-v1\0`.
+    NotOpensshKey,
+    /// A length-prefixed field ran off the end of the container.
+    ///
+    /// `what` names the field, so a truncated file says which part is missing
+    /// rather than only that something is.
+    Truncated {
+        /// The field that could not be read.
+        what: &'static str,
+    },
+    /// The key is encrypted, and nothing here can decrypt it.
+    ///
+    /// Carries the cipher name so the message can say what to re-create the
+    /// key without. Refusing is the honest answer: `sshd` is started by init
+    /// with no terminal to prompt on, and there is no `bcrypt_pbkdf` here to
+    /// derive a key with even if there were.
+    Encrypted {
+        /// The `ciphername` field, as written in the file.
+        cipher: String,
+    },
+    /// The container holds a number of keys other than one.
+    KeyCount {
+        /// The count the file declares.
+        count: u32,
+    },
+    /// The two `checkint` words differ.
+    ///
+    /// In OpenSSH this is how a wrong passphrase is detected. Here, where
+    /// nothing is ever encrypted, it is a free integrity check on the private
+    /// section.
+    CheckintMismatch,
+    /// The key is of a type this does not implement.
+    UnsupportedKeyType {
+        /// The type named in the file.
+        keytype: String,
+    },
+    /// The `ssh-ed25519` secret field is not the 64 bytes the format requires.
+    SecretLength {
+        /// The length found.
+        len: usize,
+    },
+    /// The stored public key is not 32 bytes.
+    PublicLength {
+        /// The length found.
+        len: usize,
+    },
+}
+
+impl std::fmt::Display for PrivateKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::NotPem => write!(f, "not a PEM-wrapped key: no {OPENSSH_KEY_HEADER} band"),
+            Self::Base64(e) => write!(f, "key body is not valid base64: {e}"),
+            Self::NotOpensshKey => f.write_str("not an openssh-key-v1 container"),
+            Self::Truncated { what } => write!(f, "truncated {what}"),
+            Self::Encrypted { ref cipher } => write!(
+                f,
+                "key is encrypted with {cipher}; there is no passphrase prompt here, \
+                 re-create it with an empty passphrase"
+            ),
+            Self::KeyCount { count } => {
+                write!(f, "expected exactly one key in the file, found {count}")
+            }
+            Self::CheckintMismatch => {
+                f.write_str("private section checkints differ (corrupt or encrypted key)")
+            }
+            Self::UnsupportedKeyType { ref keytype } => write!(
+                f,
+                "unsupported key type {keytype}; only ssh-ed25519 is implemented"
+            ),
+            Self::SecretLength { len } => {
+                write!(f, "ssh-ed25519 secret should be 64 bytes, found {len}")
+            }
+            Self::PublicLength { len } => {
+                write!(f, "ssh-ed25519 public key should be 32 bytes, found {len}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PrivateKeyError {}
+
+impl From<Base64Error> for PrivateKeyError {
+    fn from(e: Base64Error) -> Self {
+        Self::Base64(e)
+    }
+}
+
+/// The public-key blob for an Ed25519 key: `string("ssh-ed25519") ||
+/// string(public)`.
+///
+/// This is the blob that appears base64-encoded in the middle field of an
+/// `authorized_keys` or `known_hosts` line, inside the private key container's
+/// `publickey` field, and on the wire in `SSH_MSG_KEXDH_REPLY`. One function
+/// so those four spellings cannot drift apart.
+#[must_use]
+pub fn ed25519_public_blob(public: &[u8; 32]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(51);
+    blob.extend_from_slice(&ssh_string(OPENSSH_KEY_TYPE_ED25519));
+    blob.extend_from_slice(&ssh_string(public));
+    blob
+}
+
+/// Write an unencrypted Ed25519 private key in the OpenSSH container format.
+///
+/// The layout, from `PROTOCOL.key` in the OpenSSH distribution:
+///
+/// ```text
+/// "openssh-key-v1\0"
+/// string  ciphername   ("none")
+/// string  kdfname      ("none")
+/// string  kdfoptions   ("")
+/// uint32  number of keys N   (1)
+/// string  publickey[0]
+/// string  encrypted-private-section
+/// ```
+///
+/// and the private section, which for `ciphername = none` is not encrypted at
+/// all:
+///
+/// ```text
+/// uint32  checkint
+/// uint32  checkint   (the same value again)
+/// string  keytype
+/// string  public key
+/// string  private key   (seed || public, 64 bytes)
+/// string  comment
+/// byte[]  padding 1, 2, 3, ...  to a multiple of 8
+/// ```
+///
+/// # The `checkint` is a parameter, not drawn here
+///
+/// OpenSSH compares the two copies on read to detect a wrong passphrase. Since
+/// nothing here encrypts, any value works provided both copies match — but
+/// writing a *constant* would make every key file this project produces share
+/// a recognisable byte pattern, so the caller draws one from its own CSPRNG.
+/// Passing it in rather than reaching for `randrange` here is also what lets a
+/// test pin an exact file: a codec that draws its own entropy cannot be
+/// checked against a fixture.
+#[must_use]
+pub fn encode_openssh_private_key(
+    seed: &[u8; 32],
+    public: &[u8; 32],
+    comment: &str,
+    checkint: u32,
+) -> String {
+    let mut secret = Vec::with_capacity(64);
+    secret.extend_from_slice(seed);
+    secret.extend_from_slice(public);
+
+    let mut private = Vec::new();
+    private.extend_from_slice(&ssh_u32(checkint));
+    private.extend_from_slice(&ssh_u32(checkint));
+    private.extend_from_slice(&ssh_string(OPENSSH_KEY_TYPE_ED25519));
+    private.extend_from_slice(&ssh_string(public));
+    private.extend_from_slice(&ssh_string(&secret));
+    private.extend_from_slice(&ssh_string(comment.as_bytes()));
+    // Pad to a multiple of 8 -- the block size "none" nominally has -- with the
+    // bytes 1, 2, 3, ... as PROTOCOL.key specifies. `pad` cannot reach 8, so
+    // the counter cannot wrap.
+    let mut pad: u8 = 1;
+    while !private.len().is_multiple_of(8) {
+        private.push(pad);
+        pad = pad.wrapping_add(1);
+    }
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(OPENSSH_KEY_MAGIC);
+    raw.extend_from_slice(&ssh_string(b"none")); // ciphername
+    raw.extend_from_slice(&ssh_string(b"none")); // kdfname
+    raw.extend_from_slice(&ssh_string(b"")); // kdfoptions
+    raw.extend_from_slice(&ssh_u32(1)); // exactly one key
+    raw.extend_from_slice(&ssh_string(&ed25519_public_blob(public)));
+    raw.extend_from_slice(&ssh_string(&private));
+
+    // 70 columns is what OpenSSH writes. The width is cosmetic -- the decoder
+    // strips whitespace -- but matching it keeps a diff against a file written
+    // by the real ssh-keygen down to the key material.
+    let mut text = String::from(OPENSSH_KEY_HEADER);
+    text.push('\n');
+    for chunk in base64_encode_padded(&raw).as_bytes().chunks(70) {
+        text.push_str(&String::from_utf8_lossy(chunk));
+        text.push('\n');
+    }
+    text.push_str(OPENSSH_KEY_FOOTER);
+    text.push('\n');
+    text
+}
+
+/// Read an unencrypted Ed25519 private key from the OpenSSH container format.
+///
+/// The inverse of [`encode_openssh_private_key`]; the layout is documented
+/// there.
+///
+/// # Errors
+///
+/// A [`PrivateKeyError`] naming which part of the container was wrong. Every
+/// failure is a refusal: this never falls back to inventing a key from a file
+/// it could not parse. `sshd` once did — it hashed the first line and used
+/// that as a seed — so `sshd -h /etc/ssh/ssh_host_rsa_key` started
+/// successfully with a host key unrelated to the file named, and the only
+/// symptom was every client reporting a changed host key.
+///
+/// The returned `public` is the one *stored in the file*. See
+/// [`OpensshPrivateKey`] for why checking it against the seed is the caller's
+/// job and not this function's.
+pub fn decode_openssh_private_key(text: &str) -> Result<OpensshPrivateKey, PrivateKeyError> {
+    // The band is required, not merely tolerated: a bare base64 body would
+    // also decode, and accepting one means accepting a file that no tool
+    // produces and that a user pasted incompletely.
+    let start = text
+        .find(OPENSSH_KEY_HEADER)
+        .ok_or(PrivateKeyError::NotPem)?;
+    let after_header = start.saturating_add(OPENSSH_KEY_HEADER.len());
+    let body_end = text
+        .get(after_header..)
+        .and_then(|rest| rest.find(OPENSSH_KEY_FOOTER))
+        .ok_or(PrivateKeyError::NotPem)?;
+    let body = text
+        .get(after_header..after_header.saturating_add(body_end))
+        .ok_or(PrivateKeyError::NotPem)?;
+
+    let raw = base64_decode(body.as_bytes())?;
+
+    if raw.get(..OPENSSH_KEY_MAGIC.len()) != Some(OPENSSH_KEY_MAGIC) {
+        return Err(PrivateKeyError::NotOpensshKey);
+    }
+    let mut off = OPENSSH_KEY_MAGIC.len();
+
+    let (ciphername, next) = read_ssh_string(&raw, off)
+        .map_err(|_| PrivateKeyError::Truncated { what: "ciphername" })?;
+    off = next;
+    if ciphername != b"none" {
+        return Err(PrivateKeyError::Encrypted {
+            cipher: String::from_utf8_lossy(ciphername).into_owned(),
+        });
+    }
+    let (_kdfname, next) =
+        read_ssh_string(&raw, off).map_err(|_| PrivateKeyError::Truncated { what: "kdfname" })?;
+    off = next;
+    let (_kdfopts, next) = read_ssh_string(&raw, off)
+        .map_err(|_| PrivateKeyError::Truncated { what: "kdfoptions" })?;
+    off = next;
+
+    let (count, next) =
+        read_u32(&raw, off).map_err(|_| PrivateKeyError::Truncated { what: "key count" })?;
+    off = next;
+    if count != 1 {
+        return Err(PrivateKeyError::KeyCount { count });
+    }
+
+    let (_pubkey, next) = read_ssh_string(&raw, off)
+        .map_err(|_| PrivateKeyError::Truncated { what: "public key" })?;
+    off = next;
+    let (private, _) = read_ssh_string(&raw, off).map_err(|_| PrivateKeyError::Truncated {
+        what: "private section",
+    })?;
+
+    let (check1, poff) =
+        read_u32(private, 0).map_err(|_| PrivateKeyError::Truncated { what: "checkint" })?;
+    let (check2, poff) = read_u32(private, poff).map_err(|_| PrivateKeyError::Truncated {
+        what: "second checkint",
+    })?;
+    if check1 != check2 {
+        return Err(PrivateKeyError::CheckintMismatch);
+    }
+
+    let (keytype, poff) = read_ssh_string(private, poff)
+        .map_err(|_| PrivateKeyError::Truncated { what: "key type" })?;
+    if keytype != OPENSSH_KEY_TYPE_ED25519 {
+        return Err(PrivateKeyError::UnsupportedKeyType {
+            keytype: String::from_utf8_lossy(keytype).into_owned(),
+        });
+    }
+    let (stored_public, poff) =
+        read_ssh_string(private, poff).map_err(|_| PrivateKeyError::Truncated {
+            what: "stored public key",
+        })?;
+    let (secret, poff) = read_ssh_string(private, poff)
+        .map_err(|_| PrivateKeyError::Truncated { what: "secret" })?;
+    // The comment is the last field before the padding. A file whose comment
+    // is missing entirely is truncated, not comment-less: the encoder always
+    // writes the field, even when empty.
+    let (comment, _) = read_ssh_string(private, poff)
+        .map_err(|_| PrivateKeyError::Truncated { what: "comment" })?;
+
+    let public: [u8; 32] = stored_public
+        .try_into()
+        .map_err(|_| PrivateKeyError::PublicLength {
+            len: stored_public.len(),
+        })?;
+    // §"private key" for ssh-ed25519 is seed || public, 64 bytes. We keep the
+    // seed and hand back the stored public separately rather than trusting the
+    // copy inside the secret, so the two can be compared.
+    let seed: [u8; 32] = secret
+        .get(..32)
+        .and_then(|s| <[u8; 32]>::try_from(s).ok())
+        .filter(|_| secret.len() == 64)
+        .ok_or(PrivateKeyError::SecretLength { len: secret.len() })?;
+
+    Ok(OpensshPrivateKey {
+        seed,
+        public,
+        comment: String::from_utf8_lossy(comment).into_owned(),
+    })
+}
+
 #[cfg(test)]
 // A test that gets an `Err` where it asserted a value should stop, loudly, at
 // the line that was wrong -- which is what these lints exist to prevent in
@@ -4422,5 +4779,215 @@ mod tests {
         // both would accept key files no OpenSSH tool wrote.
         assert_eq!(base64_decode(b"-_-_"), Err(Base64Error::Invalid));
         assert!(base64_decode(b"+/+/").is_ok());
+    }
+
+    // ---- the OpenSSH private key container (PROTOCOL.key) ----
+
+    /// RFC 8032 §7.1 test vector 1: a seed and the public key it derives.
+    ///
+    /// A published pair rather than an arbitrary one, so a reader can check
+    /// the halves belong together without running any of our code.
+    const TEST_SEED: [u8; 32] = [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
+        0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
+        0x7f, 0x60,
+    ];
+    const TEST_PUBLIC: [u8; 32] = [
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07,
+        0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07,
+        0x51, 0x1a,
+    ];
+
+    #[test]
+    fn a_key_written_here_is_a_key_read_here() {
+        let text =
+            encode_openssh_private_key(&TEST_SEED, &TEST_PUBLIC, "host@slateos", 0x1234_5678);
+        assert_eq!(
+            decode_openssh_private_key(&text),
+            Ok(OpensshPrivateKey {
+                seed: TEST_SEED,
+                public: TEST_PUBLIC,
+                comment: "host@slateos".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn the_file_is_the_shape_openssh_writes() {
+        // The band and the 70-column body are what make the file loadable by
+        // the real `ssh-keygen -lf`, which is the only external check this
+        // project has on the container. A test that only round-trips through
+        // our own codec would pass for any self-consistent format -- which is
+        // exactly how `ssh-keygen` came to write a container of its own
+        // invention that our own `sshd` could not read.
+        let text = encode_openssh_private_key(&TEST_SEED, &TEST_PUBLIC, "c", 1);
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        let body: Vec<&str> = lines
+            .clone()
+            .take_while(|l| !l.starts_with("-----"))
+            .collect();
+        assert!(!body.is_empty(), "no body between the bands");
+        for line in &body {
+            assert!(line.len() <= 70, "body line longer than 70 columns: {line}");
+        }
+        assert_eq!(
+            text.lines().last(),
+            Some("-----END OPENSSH PRIVATE KEY-----")
+        );
+        assert!(text.ends_with('\n'), "the footer must end with a newline");
+
+        // The magic is the first thing in the decoded body, so a file that
+        // decodes at all is one another implementation will recognise.
+        let raw = base64_decode(body.concat().as_bytes()).expect("body is base64");
+        assert!(raw.starts_with(b"openssh-key-v1\0"));
+    }
+
+    #[test]
+    fn the_stored_public_key_comes_back_rather_than_being_checked() {
+        // The codec must *not* silently correct a file whose halves disagree:
+        // returning the stored public key is what lets the caller notice. If
+        // this ever started re-deriving it, a corrupted file would load as a
+        // working key with a different identity, which is the failure mode
+        // that makes clients report a changed host key.
+        let mut wrong = TEST_PUBLIC;
+        wrong[0] ^= 0xFF;
+        let text = encode_openssh_private_key(&TEST_SEED, &wrong, "c", 1);
+        let parsed = decode_openssh_private_key(&text).expect("still well-formed");
+        assert_eq!(parsed.seed, TEST_SEED);
+        assert_eq!(
+            parsed.public, wrong,
+            "the file's own public key, unmodified"
+        );
+    }
+
+    #[test]
+    fn an_encrypted_key_is_refused_by_name() {
+        // Hand-built, because the encoder here cannot produce one. The message
+        // has to name the cipher: "re-create it with an empty passphrase" is
+        // only actionable if the operator can see what it was encrypted with.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"openssh-key-v1\0");
+        raw.extend_from_slice(&ssh_string(b"aes256-ctr"));
+        raw.extend_from_slice(&ssh_string(b"bcrypt"));
+        raw.extend_from_slice(&ssh_string(b""));
+        let text = format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+            base64_encode_padded(&raw)
+        );
+        assert_eq!(
+            decode_openssh_private_key(&text),
+            Err(PrivateKeyError::Encrypted {
+                cipher: "aes256-ctr".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_this_format_is_refused_rather_than_guessed() {
+        // Each of these once had a path through some parser in this tree that
+        // produced a key anyway. `sshd`'s old loader hashed the first line and
+        // used the digest as a seed, so a wrong `-h` argument started the
+        // daemon with a host key unrelated to the file named.
+        for (name, text) in [
+            ("empty", String::new()),
+            ("a public key line", "ssh-ed25519 AAAAC3Nz c\n".to_string()),
+            (
+                "ssh-keygen's homebrew band",
+                "-----BEGIN ED25519 PRIVATE KEY-----\nAAAA\n-----END ED25519 PRIVATE KEY-----\n"
+                    .to_string(),
+            ),
+            (
+                "the right band around the wrong bytes",
+                format!(
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+                    base64_encode_padded(b"not a key at all")
+                ),
+            ),
+        ] {
+            assert!(
+                decode_openssh_private_key(&text).is_err(),
+                "{name} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_corrupt_body_fails_instead_of_loading_a_shorter_key() {
+        // This is the pair of bugs that motivated the shared copy, as one
+        // test: the old decoder truncated at the first bad character, and the
+        // container parser then read whatever that left. Either the base64 or
+        // the structure must object -- what must not happen is a successful
+        // load of a *different* key.
+        let good = encode_openssh_private_key(&TEST_SEED, &TEST_PUBLIC, "c", 1);
+        for pos in [40usize, 80, 120] {
+            let mut bad = good.clone();
+            let body_start = bad.find('\n').expect("has a band") + 1;
+            let at = body_start + pos;
+            if at >= bad.len() {
+                continue;
+            }
+            bad.replace_range(at..=at, "!");
+            match decode_openssh_private_key(&bad) {
+                Err(_) => {}
+                Ok(k) => panic!("corruption at {pos} loaded as a key: {k:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_checkints_must_agree() {
+        // The one integrity check the container gives us for free. Build it by
+        // hand, since the encoder always writes them equal.
+        let mut private = Vec::new();
+        private.extend_from_slice(&ssh_u32(1));
+        private.extend_from_slice(&ssh_u32(2));
+        private.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+        private.extend_from_slice(&ssh_string(&TEST_PUBLIC));
+        let mut secret = TEST_SEED.to_vec();
+        secret.extend_from_slice(&TEST_PUBLIC);
+        private.extend_from_slice(&ssh_string(&secret));
+        private.extend_from_slice(&ssh_string(b"c"));
+
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"openssh-key-v1\0");
+        raw.extend_from_slice(&ssh_string(b"none"));
+        raw.extend_from_slice(&ssh_string(b"none"));
+        raw.extend_from_slice(&ssh_string(b""));
+        raw.extend_from_slice(&ssh_u32(1));
+        raw.extend_from_slice(&ssh_string(&ed25519_public_blob(&TEST_PUBLIC)));
+        raw.extend_from_slice(&ssh_string(&private));
+
+        let text = format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+            base64_encode_padded(&raw)
+        );
+        assert_eq!(
+            decode_openssh_private_key(&text),
+            Err(PrivateKeyError::CheckintMismatch)
+        );
+    }
+
+    #[test]
+    fn an_empty_comment_survives_the_round_trip() {
+        // `ssh-keygen -C ""` is legal, and the field is always written even
+        // when empty -- so a missing comment is a truncated file, not an
+        // absent label, and the two must not read the same.
+        let text = encode_openssh_private_key(&TEST_SEED, &TEST_PUBLIC, "", 7);
+        let parsed = decode_openssh_private_key(&text).expect("round trips");
+        assert_eq!(parsed.comment, "");
+    }
+
+    #[test]
+    fn the_public_blob_is_the_one_that_goes_on_a_known_hosts_line() {
+        // The same bytes appear in four places (the container, authorized_keys,
+        // known_hosts, and KEXDH_REPLY). This pins the encoding so those four
+        // cannot drift.
+        let blob = ed25519_public_blob(&TEST_PUBLIC);
+        let (keytype, off) = read_ssh_string(&blob, 0).expect("type");
+        assert_eq!(keytype, b"ssh-ed25519");
+        let (key, off) = read_ssh_string(&blob, off).expect("key");
+        assert_eq!(key, TEST_PUBLIC);
+        assert_eq!(off, blob.len(), "nothing trails the two strings");
     }
 }

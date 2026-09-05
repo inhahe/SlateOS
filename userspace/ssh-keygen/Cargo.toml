@@ -15,9 +15,25 @@ description = "SlateOS SSH key generation and management"
 # Rust API instead, which is stubbed to `-ENOSYS` in a program build. One copy,
 # in one crate, is what stops the next tool from picking the wrong one. See
 # known-issues.md `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`.
+#
+# `sshwire` for base64 and for the `openssh-key-v1` private key container, and
+# this one was a live bug rather than a duplication waiting to become one. This
+# tool wrote `-----BEGIN ED25519 PRIVATE KEY-----` around a bare
+# `seed || public || comment` blob, which is a format nothing else in the tree
+# -- or anywhere else -- can read. So the documented way to set the daemon up,
+#
+#     ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
+#     sshd
+#
+# ended with sshd refusing to start on the key its own key tool had just
+# written. Both crates' test suites were green: each tested its own encoder
+# against its own decoder, which is exactly the arrangement that cannot notice
+# a disagreement. See known-issues.md
+# `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
 [dependencies]
 sha2 = { path = "../../sha2" }
 randrange = { path = "../../randrange" }
+sshwire = { path = "../sshwire" }
 
 [lints]
 workspace = true

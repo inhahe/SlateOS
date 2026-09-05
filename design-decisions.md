@@ -66899,6 +66899,7 @@ having to know the directive exists.
 ## 773. Packet padding is drawn from the CSPRNG per packet, and a failed draw refuses to send
 
 **Date:** 2026-09-05
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** every SSH packet is topped up with a few filler bytes so its total
@@ -66968,6 +66969,7 @@ reason to skip the draw.
 ## 774. The SSH client and daemon take their randomness as a parameter, so a handshake can be reproduced without weakening one
 
 **Date:** 2026-09-05
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** The SSH client and the SSH server each need unpredictable bytes in

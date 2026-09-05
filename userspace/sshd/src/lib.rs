@@ -113,7 +113,7 @@ use sshwire::{
     BigUint, ExchangeHashInput, PacketCodec, Role, SecretSource, StreamBuffer, Transport,
     TransportError, base64_decode, base64_encode, compute_exchange_hash,
     decode_openssh_private_key, ed25519_public_blob, encode_mpint, encode_openssh_private_key,
-    read_bool, read_mpint, read_ssh_string, read_u32, ssh_string,
+    pubkey_signed_blob, read_bool, read_mpint, read_ssh_string, read_u32, ssh_string,
 };
 
 // ============================================================================
@@ -3755,30 +3755,6 @@ fn verify_pubkey_signature(
 
     let signed = pubkey_signed_blob(session_id, user_bytes, service_bytes, algorithm, key_blob);
     posix::ed25519::verify_slices(ed_public, &signed, signature)
-}
-
-/// The exact byte sequence a `publickey` signature covers (RFC 4252 section 7).
-///
-/// Shared by the server's verification path and by the tests, so that a test
-/// asserting a signature verifies cannot pass by agreeing with a blob that
-/// only the test knows how to build.
-fn pubkey_signed_blob(
-    session_id: &[u8; 32],
-    user_bytes: &[u8],
-    service_bytes: &[u8],
-    algorithm: &[u8],
-    key_blob: &[u8],
-) -> Vec<u8> {
-    let mut signed = Vec::new();
-    signed.extend_from_slice(&ssh_string(session_id));
-    signed.push(msg::SSH_MSG_USERAUTH_REQUEST);
-    signed.extend_from_slice(&ssh_string(user_bytes));
-    signed.extend_from_slice(&ssh_string(service_bytes));
-    signed.extend_from_slice(&ssh_string(b"publickey"));
-    signed.push(1); // boolean TRUE
-    signed.extend_from_slice(&ssh_string(algorithm));
-    signed.extend_from_slice(&ssh_string(key_blob));
-    signed
 }
 
 /// Extract the raw 32-byte Ed25519 point from an SSH public key blob

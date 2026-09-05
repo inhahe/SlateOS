@@ -2574,6 +2574,76 @@ pub fn ed25519_public_blob(public: &[u8; 32]) -> Vec<u8> {
     blob
 }
 
+/// The exact byte sequence a `publickey` signature covers (RFC 4252 §7).
+///
+/// ```text
+/// string    session identifier
+/// byte      SSH_MSG_USERAUTH_REQUEST
+/// string    user name
+/// string    service name
+/// string    "publickey"
+/// boolean   TRUE
+/// string    public key algorithm name
+/// string    public key blob
+/// ```
+///
+/// The client builds this and signs it; the server builds it again and verifies
+/// against it. Nothing on the wire carries the blob itself — that is the whole
+/// design, since a signature over bytes the *sender* chose would prove nothing
+/// — so the two constructions must agree byte for byte with no opportunity to
+/// discover that they do not. A trailing field the client includes and the
+/// server omits does not produce a diagnosable error; it produces a signature
+/// that simply fails to verify, indistinguishable from a wrong key or a
+/// forgery.
+///
+/// That is why this is here rather than in `sshd`, where it was written first
+/// and where it was still the only copy. The client does not yet do publickey
+/// authentication; when it does, it needs these bytes, and the point of moving
+/// the function now is that there is no moment at which a second copy exists to
+/// drift from this one.
+///
+/// # What is bound, and what each binding stops
+///
+/// - **The session identifier** ties the signature to one connection, so one
+///   captured from a session with a hostile server cannot be replayed to a
+///   different one. It is the exchange hash of the *first* key exchange, which
+///   the peer cannot choose alone.
+/// - **The user name and service name** tie it to one account, so a signature
+///   offered for `alice` cannot be presented as `root`.
+/// - **The algorithm name and key blob** tie it to one key, so a signature made
+///   under a weak algorithm cannot be re-labelled as one made under a strong
+///   one.
+///
+/// `key_blob` is the wire form of the public key — [`ed25519_public_blob`] for
+/// an Ed25519 key — and not the bare 32-byte point; it is the same blob that
+/// appeared in the request being signed.
+#[must_use]
+pub fn pubkey_signed_blob(
+    session_id: &[u8; 32],
+    user_bytes: &[u8],
+    service_bytes: &[u8],
+    algorithm: &[u8],
+    key_blob: &[u8],
+) -> Vec<u8> {
+    let mut signed = Vec::new();
+    signed.extend_from_slice(&ssh_string(session_id));
+    signed.push(msg::SSH_MSG_USERAUTH_REQUEST);
+    signed.extend_from_slice(&ssh_string(user_bytes));
+    signed.extend_from_slice(&ssh_string(service_bytes));
+    // Not a parameter: §7 fixes this field to the method name of the request
+    // being signed, and the only method whose request carries a signature is
+    // `publickey`. A caller able to vary it could only produce a blob no
+    // verifier builds.
+    signed.extend_from_slice(&ssh_string(b"publickey"));
+    // The boolean is TRUE by definition: a request with FALSE here carries no
+    // signature, so there is nothing to sign over. `read_bool` is what turns
+    // the received byte back into a bool; this is the encoding side of it.
+    signed.push(1);
+    signed.extend_from_slice(&ssh_string(algorithm));
+    signed.extend_from_slice(&ssh_string(key_blob));
+    signed
+}
+
 /// Write an unencrypted Ed25519 private key in the OpenSSH container format.
 ///
 /// The layout, from `PROTOCOL.key` in the OpenSSH distribution:
@@ -4964,6 +5034,111 @@ mod tests {
         // both would accept key files no OpenSSH tool wrote.
         assert_eq!(base64_decode(b"-_-_"), Err(Base64Error::Invalid));
         assert!(base64_decode(b"+/+/").is_ok());
+    }
+
+    // ---- the publickey signed blob (RFC 4252 §7) ----
+
+    /// The signed blob is the exact byte sequence RFC 4252 §7 lays out.
+    ///
+    /// Built here a second time *without* [`ssh_string`], writing the length
+    /// prefixes as literals. That is the point of the test: a round-trip
+    /// through our own readers would confirm that our decoder undoes our
+    /// encoder, which it does whatever order the fields are in. Only a
+    /// separately-written expectation notices a swapped pair of strings — and
+    /// a swap is exactly the defect that survives every internal check, since
+    /// both fields are strings and both ends of a round trip would agree.
+    ///
+    /// Nothing on the wire carries this blob, so a fault in it does not
+    /// surface as a decode error anywhere. It surfaces as a signature that
+    /// does not verify, which is indistinguishable from a wrong key.
+    #[test]
+    fn the_signed_blob_is_the_byte_sequence_rfc_4252_lays_out() {
+        let session_id = [0xAA_u8; 32];
+        let got = pubkey_signed_blob(
+            &session_id,
+            b"alice",
+            b"ssh-connection",
+            b"ssh-ed25519",
+            b"KEY",
+        );
+
+        let mut want: Vec<u8> = Vec::new();
+        want.extend_from_slice(&[0, 0, 0, 32]); // string session identifier
+        want.extend_from_slice(&session_id);
+        want.push(50); // byte SSH_MSG_USERAUTH_REQUEST
+        want.extend_from_slice(&[0, 0, 0, 5]); // string user name
+        want.extend_from_slice(b"alice");
+        want.extend_from_slice(&[0, 0, 0, 14]); // string service name
+        want.extend_from_slice(b"ssh-connection");
+        want.extend_from_slice(&[0, 0, 0, 9]); // string "publickey"
+        want.extend_from_slice(b"publickey");
+        want.push(1); // boolean TRUE
+        want.extend_from_slice(&[0, 0, 0, 11]); // string algorithm name
+        want.extend_from_slice(b"ssh-ed25519");
+        want.extend_from_slice(&[0, 0, 0, 3]); // string public key blob
+        want.extend_from_slice(b"KEY");
+
+        assert_eq!(got, want);
+    }
+
+    /// Every field the blob binds actually changes it.
+    ///
+    /// The bindings are the entire security argument for the construction: the
+    /// session identifier is what stops a captured signature being replayed on
+    /// another connection, and the user name is what stops one offered for
+    /// `alice` being presented as `root`. A field that was written into the
+    /// blob but not *varied* by its input — a placeholder, a fixed string, an
+    /// argument shadowed by a constant — would leave the signature valid
+    /// across the boundary it is supposed to bind, and every round-trip test
+    /// would still pass. This is the same defect class as the server hashing a
+    /// fixed `"SSH-2.0-client"` into the exchange hash.
+    #[test]
+    fn changing_any_bound_field_changes_the_blob() {
+        let base = pubkey_signed_blob(&[0; 32], b"alice", b"ssh-connection", b"ssh-ed25519", b"K");
+        let variants = [
+            (
+                "session id",
+                pubkey_signed_blob(&[1; 32], b"alice", b"ssh-connection", b"ssh-ed25519", b"K"),
+            ),
+            (
+                "user name",
+                pubkey_signed_blob(&[0; 32], b"root", b"ssh-connection", b"ssh-ed25519", b"K"),
+            ),
+            (
+                "service name",
+                pubkey_signed_blob(&[0; 32], b"alice", b"ssh-userauth", b"ssh-ed25519", b"K"),
+            ),
+            (
+                "algorithm",
+                pubkey_signed_blob(&[0; 32], b"alice", b"ssh-connection", b"ssh-rsa", b"K"),
+            ),
+            (
+                "key blob",
+                pubkey_signed_blob(&[0; 32], b"alice", b"ssh-connection", b"ssh-ed25519", b"J"),
+            ),
+        ];
+        for (field, blob) in variants {
+            assert_ne!(
+                base, blob,
+                "changing the {field} left the signed blob identical, so a \
+                 signature would carry across a boundary it is meant to bind"
+            );
+        }
+    }
+
+    /// A string field cannot be smuggled across a boundary by its neighbour.
+    ///
+    /// Length-prefixed framing is what makes this true, and this test is what
+    /// says so out loud: `alice` + service `x` and `alicex` + service `` are
+    /// the same bytes under concatenation, and differ only because each string
+    /// carries its own length. An encoder that ever dropped a prefix — for a
+    /// field it thought was fixed-width, say — would let a signature for one
+    /// account verify for another.
+    #[test]
+    fn a_field_cannot_borrow_bytes_from_the_next_one() {
+        let a = pubkey_signed_blob(&[0; 32], b"alice", b"x", b"ssh-ed25519", b"K");
+        let b = pubkey_signed_blob(&[0; 32], b"alicex", b"", b"ssh-ed25519", b"K");
+        assert_ne!(a, b);
     }
 
     // ---- the OpenSSH private key container (PROTOCOL.key) ----

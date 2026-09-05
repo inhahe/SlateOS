@@ -35,5 +35,19 @@ sha2 = { path = "../../sha2" }
 randrange = { path = "../../randrange" }
 sshwire = { path = "../sshwire" }
 
+# A library with a three-line binary on top, for the same reason `sshd` is one:
+# a binary crate produces no rlib, so while this tool was a single `main.rs` no
+# test in any other crate could link it. That is not a theoretical loss. The bug
+# this split was made for -- a private key format `sshd` could not read -- is
+# visible only to a test that holds both programs at once, and while neither
+# was linkable the tree accumulated seven of them.
+[lib]
+name = "ssh_keygen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ssh-keygen"
+path = "src/main.rs"
+
 [lints]
 workspace = true

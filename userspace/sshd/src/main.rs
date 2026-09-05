@@ -1974,12 +1974,17 @@ fn base64_encode(data: &[u8]) -> String {
 // a..d are the four decoded sextets of a base64 quartet; short names match the
 // usual base64 decode formulation.
 #[allow(clippy::many_single_char_names)]
-#[expect(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn base64_decode(input: &str) -> Vec<u8> {
+    // The table writes are the only indexing left in this function, and they
+    // are const-evaluated: an index out of range here does not panic at run
+    // time, it fails the build. So this suppression cannot hide a reachable
+    // panic, which is what the lint is for. It is scoped to the table alone so
+    // the decode loop below — the part that reads a peer's bytes — stays under
+    // the lint.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "const-evaluated: an out-of-range index is a compile error, not a panic"
+    )]
     const DECODE: [u8; 128] = {
         let mut table = [0xFFu8; 128];
         let mut i = 0u8;
@@ -1998,38 +2003,46 @@ fn base64_decode(input: &str) -> Vec<u8> {
         table
     };
 
+    /// Not a base64 character. Distinct from every sextet, which are 0..=63.
+    const INVALID: u8 = 0xFF;
+
+    let sextet = |&b: &u8| DECODE.get(b as usize).copied().unwrap_or(INVALID);
+
     let mut output = Vec::new();
     let bytes: Vec<u8> = input
         .bytes()
         .filter(|&b| b != b'=' && b != b'\n' && b != b'\r' && b != b' ')
         .collect();
-    let mut i = 0;
-    // Process 4-char groups. The padding ('=') has already been stripped, so
-    // the final group may legitimately be 2 or 3 chars (encoding 1 or 2 bytes);
-    // read the 3rd/4th positions with bounds checks rather than requiring a
-    // full quartet (the old `i + 3 < len` condition dropped the last group).
-    while i + 1 < bytes.len() {
-        let a = DECODE.get(bytes[i] as usize).copied().unwrap_or(0xFF);
-        let b = DECODE.get(bytes[i + 1] as usize).copied().unwrap_or(0xFF);
-        let c = bytes
-            .get(i + 2)
-            .and_then(|&x| DECODE.get(x as usize).copied())
-            .unwrap_or(0xFF);
-        let d = bytes
-            .get(i + 3)
-            .and_then(|&x| DECODE.get(x as usize).copied())
-            .unwrap_or(0xFF);
-        if a == 0xFF || b == 0xFF {
+
+    // `chunks(4)` rather than an index and `i += 4`. Quartets are what base64
+    // is defined over, so taking them directly leaves no offset arithmetic for
+    // a peer to push out of range — which is what this function needed, since
+    // it decodes the key blob a client offers during public-key authentication,
+    // before that client has proved anything.
+    //
+    // The padding ('=') was stripped above, so the last chunk may hold 2 or 3
+    // characters (encoding 1 or 2 bytes). A chunk holding 1 has no second
+    // sextet, so `b` is INVALID and the decode ends — which is exactly what the
+    // old `i + 1 < bytes.len()` condition expressed.
+    for quad in bytes.chunks(4) {
+        let a = quad.first().map_or(INVALID, sextet);
+        let b = quad.get(1).map_or(INVALID, sextet);
+        let c = quad.get(2).map_or(INVALID, sextet);
+        let d = quad.get(3).map_or(INVALID, sextet);
+        if a == INVALID || b == INVALID {
             break;
         }
+        // The shifts discard high bits by design: that is how six-bit sextets
+        // are repacked into eight-bit bytes. Rust only panics on a shift whose
+        // *amount* reaches the width, never on the bits shifted out, and every
+        // amount here is a constant below 8.
         output.push((a << 2) | (b >> 4));
-        if c != 0xFF {
+        if c != INVALID {
             output.push((b << 4) | (c >> 2));
-            if d != 0xFF {
+            if d != INVALID {
                 output.push((c << 6) | d);
             }
         }
-        i += 4;
     }
     output
 }

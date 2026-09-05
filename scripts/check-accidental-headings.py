@@ -72,14 +72,39 @@ EQUALS_RULE_RE = re.compile(r"^ {0,3}={1,}[ \t]*$")
 #: findings, so an over-eager fence costs a missed report, never a false one.
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
-#: The preceding line, when it starts with one of these, is not a plain
-#: paragraph, and a following `---` is then either a thematic break or part of
-#: another construct.  Flagging those would be a false positive, and a false
-#: finding costs more than a missed one -- it teaches the reader to skim.
-NOT_A_PARAGRAPH_PREFIXES = ("#", ">", "|", "-", "*", "+", "=", "`", "~", "_")
-
-#: An ordered-list marker: `1.` / `12)`.  Same reasoning as above.
-ORDERED_ITEM_RE = re.compile(r"^ *\d+[.)]\s")
+#: The preceding line is not a plain paragraph -- it is a construct after which
+#: a `---` is legitimately a thematic break.
+#:
+#: Every alternative here is anchored precisely, because the first draft used a
+#: set of one-character *prefixes* and that was wrong in both directions.  A
+#: bare "`" prefix (meant for code fences) also suppressed every paragraph line
+#: that merely *starts* with an inline code span, and a bare "*" prefix (meant
+#: for bullets) suppressed every line starting with `**bold**` -- which is how
+#: nearly every entry in `known-issues.md` begins its paragraphs.  Both were
+#: found by reading the documents rather than by re-reading the regex:
+#: `design-decisions.md:65450` is a real accidental heading that the prefix
+#: version silently passed, because the line above it opens with a `TD-...`
+#: identifier in backticks.
+#:
+#: So: a list marker must be followed by whitespace (`- x`, not `**bold**`), a
+#: fence must be three or more marks (not one inline backtick), and a setext
+#: underline must be the whole line.
+NOT_A_PARAGRAPH_RE = re.compile(
+    # `[ ]` and not a bare space: `re.VERBOSE` discards literal whitespace, so
+    # ` {0,3}` compiles to a repeat with nothing to repeat.
+    r"""^[ ]{0,3}(
+          \#{1,6}(\s|$)          # ATX heading
+        | >                      # blockquote
+        | \|                     # table row
+        | [-*+](\s|$)            # bullet: the marker must be followed by space
+        | \d+[.)](\s|$)          # ordered item
+        | (`{3,}|~{3,})          # code fence, three or more marks
+        | -{3,}[ \t]*$           # a thematic break / setext underline
+        | ={1,}[ \t]*$           # a setext underline
+        | _{3,}[ \t]*$           # the underscore thematic break
+    )""",
+    re.VERBOSE,
+)
 
 #: A plausible parse.  A checker that discovers nothing reports no failures,
 #: which reads exactly like a pass, so refuse to return a verdict if the corpus
@@ -156,9 +181,7 @@ def analyse_one(path: str, text: str, f: Findings) -> None:
         if not prev.strip():
             continue                       # blank above: a real thematic break
         stripped = prev.lstrip()
-        if stripped.startswith(NOT_A_PARAGRAPH_PREFIXES):
-            continue
-        if ORDERED_ITEM_RE.match(prev):
+        if NOT_A_PARAGRAPH_RE.match(prev):
             continue
         if len(prev) - len(stripped) >= 4:
             continue                       # indented code block, not prose
@@ -359,6 +382,24 @@ def self_test() -> int:
     ):
         f = one(f"intro\n\n{prev}\n---\n\ndone\n")
         check(f"{label} above a `---` is not a finding", f.ok())
+
+    # The two false NEGATIVES the first draft shipped with, both from treating
+    # a single character as a prefix.  These are regressions, not hardening:
+    # `design-decisions.md:65450` was passed by the shipped version.
+    f = one("intro\n\n"
+            "with a much wider blast radius -- see\n"
+            "`TD-A-AN-ABSENT-OPERAND-IS-THE-SAME-STRING`.\n---\n\ndone\n")
+    check("a paragraph line opening with an inline code span is still prose",
+          len(f.failures) == 1)
+    f = one("intro\n\n**If it is never fixed:** the thing stays broken.\n---\n")
+    check("a paragraph line opening with `**bold**` is still prose",
+          len(f.failures) == 1)
+    # ...while the constructs those rules were actually aimed at still suppress.
+    f = one("intro\n\n- a bullet\n---\n\ndone\n")
+    check("...and a real bullet still suppresses", f.ok())
+    f = one("intro\n\n*a starred bullet\n---\n\ndone\n")
+    check("...but a `*` with no space after it is prose, not a bullet",
+          len(f.failures) == 1)
 
     # Four spaces of indent is a code block, where `---` is literal.
     f = one("intro\n\n    literal text\n    ---\n\ndone\n")

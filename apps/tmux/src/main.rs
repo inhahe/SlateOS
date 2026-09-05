@@ -34,13 +34,16 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cognitive_complexity)]
-#![allow(dead_code)]
 
 use guitk::Color;
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -51,6 +54,12 @@ const MANTLE: Color = Color::from_hex(0x181825);
 const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
 const SURFACE1: Color = Color::from_hex(0x45475A);
+#[allow(
+    dead_code,
+    reason = "the Catppuccin Mocha palette is carried whole so that a colour \
+              chosen later is the palette's and not a fresh literal; four of \
+              its entries have no use in this program yet"
+)]
 const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
@@ -59,11 +68,14 @@ const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
+#[allow(dead_code, reason = "palette entry, see SURFACE2")]
 const PEACH: Color = Color::from_hex(0xFAB387);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 const TEAL: Color = Color::from_hex(0x94E2D5);
 const MAUVE: Color = Color::from_hex(0xCBA6F7);
+#[allow(dead_code, reason = "palette entry, see SURFACE2")]
 const SKY: Color = Color::from_hex(0x89DCEB);
+#[allow(dead_code, reason = "palette entry, see SURFACE2")]
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
 // ============================================================================
@@ -74,6 +86,11 @@ const WINDOW_WIDTH: f32 = 1200.0;
 const WINDOW_HEIGHT: f32 = 800.0;
 const STATUS_BAR_HEIGHT: f32 = 22.0;
 const TAB_BAR_HEIGHT: f32 = 28.0;
+#[allow(
+    dead_code,
+    reason = "panes draw with PANE_BORDER_WIDTH; this is the thinner rule the \
+              status and tab bars would use if they were given borders"
+)]
 const BORDER_WIDTH: f32 = 1.0;
 const PANE_BORDER_WIDTH: f32 = 1.0;
 /// Font size of one terminal cell.
@@ -132,6 +149,13 @@ const NORMAL_TEXT: f32 = 13.0;
 const HEADER_TEXT: f32 = 14.0;
 const MIN_PANE_SIZE: f32 = 40.0;
 const RESIZE_STEP: f32 = 20.0;
+
+/// How small a share of a split one side may be squeezed to.
+///
+/// A ratio of zero is a pane with no pixels, which `compute_bounds` then floors
+/// at `MIN_PANE_SIZE` -- so the divider stops moving and cannot be brought
+/// back, because the ratio it is stored as has already gone past the end.
+const MIN_SPLIT_RATIO: f32 = 0.1;
 
 const MAX_SESSIONS: usize = 64;
 const MAX_WINDOWS: usize = 32;
@@ -336,7 +360,10 @@ impl TerminalBuffer {
         }
         if ch == '\t' {
             // Tab: advance to next 8-column stop
-            let next_tab = (self.cursor_col / 8 + 1) * 8;
+            // Saturating: `cursor_col` is bounded by `cols` in every path
+            // that writes it, but a tab stop computed by overflowing to zero
+            // would move the cursor backwards, which no tab does.
+            let next_tab = (self.cursor_col / 8).saturating_add(1).saturating_mul(8);
             self.cursor_col = next_tab.min(self.cols.saturating_sub(1));
             return;
         }
@@ -400,6 +427,18 @@ impl TerminalBuffer {
         (rows.start..rows.end())
             .filter_map(|i| self.line(i))
             .collect()
+    }
+
+    /// One line's characters, with the trailing blanks removed.
+    ///
+    /// Trailing blanks are dropped because a terminal line is `cols` cells wide
+    /// whether or not anything was written to the end of it, and pasting 80
+    /// characters where 12 were typed is not what was copied.
+    fn line_text(&self, index: usize) -> Option<String> {
+        let line = self.line(index)?;
+        let mut text: String = line.iter().map(|cell| cell.ch).collect();
+        text.truncate(text.trim_end().len());
+        Some(text)
     }
 
     /// Which lines — numbered across the scrollback and the live grid as one
@@ -528,6 +567,15 @@ impl TerminalBuffer {
     }
 
     /// Write a string to the buffer, handling basic control characters.
+    #[allow(
+        dead_code,
+        reason = "the buffer's own convenience for a run of characters. The \
+                  program writes through `Pane::feed`, which parses escape \
+                  sequences first and then calls `write_char` per character, \
+                  so this stays as the direct path for the twelve tests that \
+                  exercise wrapping and control characters without a parser \
+                  in the way"
+    )]
     fn write_str(&mut self, s: &str) {
         for ch in s.chars() {
             self.write_char(ch);
@@ -647,7 +695,7 @@ impl AnsiParser {
                 self.current_param = self
                     .current_param
                     .saturating_mul(10)
-                    .saturating_add(ch as u16 - u16::from(b'0'));
+                    .saturating_add(u16::from(ch as u8).saturating_sub(u16::from(b'0')));
                 self.has_param = true;
             }
             ';' => {
@@ -764,7 +812,10 @@ impl AnsiParser {
     fn apply_sgr(&self, params: &[u16], buf: &mut TerminalBuffer) {
         let mut i = 0;
         while i < params.len() {
-            match params[i] {
+            let Some(&param) = params.get(i) else {
+                break;
+            };
+            match param {
                 0 => buf.reset_attrs(),
                 1 => buf.current_bold = true,
                 2 => buf.current_dim = true,
@@ -808,12 +859,17 @@ impl AnsiParser {
                 // 256-color and truecolor
                 38 => {
                     if let Some(&2) = params.get(i.saturating_add(1)) {
-                        // Truecolor: 38;2;r;g;b
-                        if i.saturating_add(4) < params.len() {
-                            let r = params[i.saturating_add(2)] as u8;
-                            let g_val = params[i.saturating_add(3)] as u8;
-                            let b = params[i.saturating_add(4)] as u8;
-                            buf.current_fg = Color::rgb(r, g_val, b);
+                        // Truecolor: `38;2;r;g;b`. Read through `get`, so a
+                        // sequence cut short by the sender is a colour not set
+                        // rather than a panic on someone else's bytes -- the
+                        // bound was two lines above the three reads that
+                        // depended on it.
+                        if let (Some(&r), Some(&g_val), Some(&b)) = (
+                            params.get(i.saturating_add(2)),
+                            params.get(i.saturating_add(3)),
+                            params.get(i.saturating_add(4)),
+                        ) {
+                            buf.current_fg = Color::rgb(r as u8, g_val as u8, b as u8);
                             i = i.saturating_add(4);
                         }
                     } else if let Some(&5) = params.get(i.saturating_add(1)) {
@@ -826,11 +882,17 @@ impl AnsiParser {
                 }
                 48 => {
                     if let Some(&2) = params.get(i.saturating_add(1)) {
-                        if i.saturating_add(4) < params.len() {
-                            let r = params[i.saturating_add(2)] as u8;
-                            let g_val = params[i.saturating_add(3)] as u8;
-                            let b = params[i.saturating_add(4)] as u8;
-                            buf.current_bg = Color::rgb(r, g_val, b);
+                        // Truecolor: `48;2;r;g;b`. Read through `get`, so a
+                        // sequence cut short by the sender is a colour not set
+                        // rather than a panic on someone else's bytes -- the
+                        // bound was two lines above the three reads that
+                        // depended on it.
+                        if let (Some(&r), Some(&g_val), Some(&b)) = (
+                            params.get(i.saturating_add(2)),
+                            params.get(i.saturating_add(3)),
+                            params.get(i.saturating_add(4)),
+                        ) {
+                            buf.current_bg = Color::rgb(r as u8, g_val as u8, b as u8);
                             i = i.saturating_add(4);
                         }
                     } else if let Some(&5) = params.get(i.saturating_add(1))
@@ -935,6 +997,13 @@ struct Pane {
     /// ANSI parser state.
     parser: AnsiParser,
     /// Process ID running in this pane (0 if none).
+    ///
+    /// Always zero: there is no PTY layer in this tree, so no pane has a
+    /// process behind it. Kept because it is the field a real one goes in, and
+    /// because the pane banner says so out loud rather than leaving a blank
+    /// rectangle. See `known-issues.md` ->
+    /// `TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`.
+    #[allow(dead_code, reason = "written at construction; read when a PTY exists")]
     pid: u64,
     /// Command that was launched in this pane.
     command: String,
@@ -988,6 +1057,49 @@ impl Pane {
         } else {
             &self.command
         }
+    }
+
+    /// The line at the top of what copy mode is currently showing.
+    ///
+    /// Copy mode's position is stored as a distance *back* from the live
+    /// screen, and a selection has to be stored in coordinates that do not move
+    /// when the view scrolls -- so the mark is a line number across the
+    /// scrollback and the grid together, which is what `view_rows` counts in.
+    fn copy_view_top(&self) -> usize {
+        self.buffer
+            .view_rows(self.buffer.rows, self.copy_scroll)
+            .start
+    }
+
+    /// Mark the top visible line as one end of a selection.
+    fn set_copy_mark(&mut self) {
+        self.copy_start = Some((self.copy_view_top(), 0));
+    }
+
+    /// The text between the mark and the current position, or `None` if
+    /// nothing is marked.
+    ///
+    /// Line-wise, which is tmux's own default and the only kind that is
+    /// unambiguous here: a terminal line is a fixed number of cells and a
+    /// column-wise selection across a wrapped line copies padding.
+    ///
+    /// `copy_start` was written to `None` in two places and never to anything
+    /// else, and `Multiplexer::clipboard` was read by nothing -- so copy mode
+    /// could scroll the scrollback and could not copy from it, which is the one
+    /// thing it is named for.
+    fn copy_selection(&self) -> Option<String> {
+        let (mark, _) = self.copy_start?;
+        let here = self.copy_view_top();
+        let (from, to) = if mark <= here {
+            (mark, here)
+        } else {
+            (here, mark)
+        };
+        let text = (from..=to)
+            .filter_map(|i| self.buffer.line_text(i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(text)
     }
 
     /// Enter copy mode for scrollback browsing.
@@ -1071,6 +1183,60 @@ enum LayoutNode {
 }
 
 impl LayoutNode {
+    /// Change the ratio of the innermost split containing `target`.
+    ///
+    /// `true` if a split was found and adjusted. A layout that is a single leaf
+    /// has no ratio to change, which is why this reports whether it did
+    /// anything: the caller shows "no split to resize" rather than nothing at
+    /// all happening.
+    ///
+    /// The *innermost* split, not the outermost: with panes split twice, the
+    /// divider a user means by "make this pane wider" is the one they can see
+    /// beside it. Walking down to the deepest split that still contains the
+    /// pane is what picks that one.
+    ///
+    /// `delta` moves the *divider*, not the active pane: Right and Down push it
+    /// towards the far edge whichever side of it the pane is on. That is what
+    /// tmux's `resize-pane -R` does and what an arrow key means -- "grow
+    /// whichever pane I am in" would send the divider left for a right-hand
+    /// pane and left-arrow would then send it right, which is a control that
+    /// reverses itself depending on where the cursor happens to be.
+    fn resize_containing(&mut self, target: PaneId, delta: f32) -> bool {
+        let Self::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return false;
+        };
+
+        // Deeper first: if a child split also holds the pane, it is the nearer
+        // divider and the one to move.
+        if first.resize_containing(target, delta) || second.resize_containing(target, delta) {
+            return true;
+        }
+
+        if !first.contains(target) && !second.contains(target) {
+            return false;
+        }
+        let signed = delta;
+        // Clamped well inside 0 and 1: a ratio of zero is a pane with no
+        // pixels, which `compute_bounds` then floors at `MIN_PANE_SIZE`,
+        // leaving the divider stuck against an edge it cannot come back from.
+        *ratio = (*ratio + signed).clamp(MIN_SPLIT_RATIO, 1.0 - MIN_SPLIT_RATIO);
+        true
+    }
+
+    /// Whether this subtree holds `target`.
+    fn contains(&self, target: PaneId) -> bool {
+        match self {
+            Self::Leaf(id) => *id == target,
+            Self::Split { first, second, .. } => first.contains(target) || second.contains(target),
+        }
+    }
+
     /// Compute the absolute bounds for each pane in this layout tree.
     fn compute_bounds(
         &self,
@@ -1169,12 +1335,12 @@ impl LayoutNode {
                 let first_ids = first.pane_ids();
                 let second_ids = second.pane_ids();
 
-                if first_ids.len() == 1 && first_ids[0] == target {
+                if first_ids.first() == Some(&target) && first_ids.len() == 1 {
                     // Replace self with second child
                     *self = *second.clone();
                     return true;
                 }
-                if second_ids.len() == 1 && second_ids[0] == target {
+                if second_ids.first() == Some(&target) && second_ids.len() == 1 {
                     // Replace self with first child
                     *self = *first.clone();
                     return true;
@@ -1225,6 +1391,10 @@ enum LayoutPreset {
 }
 
 impl LayoutPreset {
+    #[allow(
+        dead_code,
+        reason = "the presets themselves are reachable -- Ctrl+B Space cycles                   them and `apply_layout` rebuilds the tree -- but no screen                   writes their names. The status bar has room for one when it                   is worth showing"
+    )]
     fn label(self) -> &'static str {
         match self {
             Self::EvenHorizontal => "Even Horizontal",
@@ -1241,15 +1411,23 @@ impl LayoutPreset {
             return LayoutNode::Leaf(PaneId(0));
         }
         if panes.len() == 1 {
-            return LayoutNode::Leaf(panes[0]);
+            // `first`, not `panes[0]`: the length check is on the line
+            // above, and a bound stated one line from the read it protects is
+            // a bound the next edit moves.
+            if let Some(&only) = panes.first() {
+                return LayoutNode::Leaf(only);
+            }
         }
 
         match self {
             Self::EvenHorizontal => Self::build_even(panes, SplitDir::Horizontal),
             Self::EvenVertical => Self::build_even(panes, SplitDir::Vertical),
             Self::MainHorizontal => {
-                let main_pane = panes[0];
-                let rest = &panes[1..];
+                let Some((&main_pane, rest)) = panes.split_first() else {
+                    // No panes at all. The caller checked, but the check is
+                    // over there and this is the read.
+                    return Self::build_even(panes, SplitDir::Horizontal);
+                };
                 if rest.is_empty() {
                     LayoutNode::Leaf(main_pane)
                 } else {
@@ -1262,8 +1440,9 @@ impl LayoutPreset {
                 }
             }
             Self::MainVertical => {
-                let main_pane = panes[0];
-                let rest = &panes[1..];
+                let Some((&main_pane, rest)) = panes.split_first() else {
+                    return Self::build_even(panes, SplitDir::Vertical);
+                };
                 if rest.is_empty() {
                     LayoutNode::Leaf(main_pane)
                 } else {
@@ -1280,37 +1459,52 @@ impl LayoutPreset {
     }
 
     fn build_even(panes: &[PaneId], direction: SplitDir) -> LayoutNode {
-        if panes.len() == 1 {
-            return LayoutNode::Leaf(panes[0]);
+        // One pane, or none: `first` answers both, and an empty slice would
+        // otherwise recurse forever halving zero.
+        if panes.len() <= 1 {
+            return panes.first().map_or_else(
+                || LayoutNode::Leaf(PaneId(0)),
+                |&only| LayoutNode::Leaf(only),
+            );
         }
         let mid = panes.len() / 2;
         let ratio = mid as f32 / panes.len() as f32;
         LayoutNode::Split {
             direction,
             ratio,
-            first: Box::new(Self::build_even(&panes[..mid], direction)),
-            second: Box::new(Self::build_even(&panes[mid..], direction)),
+            first: Box::new(Self::build_even(panes.get(..mid).unwrap_or(&[]), direction)),
+            second: Box::new(Self::build_even(panes.get(mid..).unwrap_or(&[]), direction)),
         }
     }
 
     fn build_tiled(panes: &[PaneId]) -> LayoutNode {
-        if panes.len() == 1 {
-            return LayoutNode::Leaf(panes[0]);
-        }
-        if panes.len() == 2 {
-            return LayoutNode::Split {
+        // The one- and two-pane cases read their panes out of the slice they
+        // just measured; `match` on the slice does both at once, so the length
+        // and the reads cannot come apart.
+        match panes {
+            [] => LayoutNode::Leaf(PaneId(0)),
+            [only] => LayoutNode::Leaf(*only),
+            [left, right] => LayoutNode::Split {
                 direction: SplitDir::Vertical,
                 ratio: 0.5,
-                first: Box::new(LayoutNode::Leaf(panes[0])),
-                second: Box::new(LayoutNode::Leaf(panes[1])),
-            };
-        }
-        let mid = panes.len() / 2;
-        LayoutNode::Split {
-            direction: SplitDir::Horizontal,
-            ratio: 0.5,
-            first: Box::new(Self::build_even(&panes[..mid], SplitDir::Vertical)),
-            second: Box::new(Self::build_even(&panes[mid..], SplitDir::Vertical)),
+                first: Box::new(LayoutNode::Leaf(*left)),
+                second: Box::new(LayoutNode::Leaf(*right)),
+            },
+            _ => {
+                let mid = panes.len() / 2;
+                LayoutNode::Split {
+                    direction: SplitDir::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(Self::build_even(
+                        panes.get(..mid).unwrap_or(&[]),
+                        SplitDir::Vertical,
+                    )),
+                    second: Box::new(Self::build_even(
+                        panes.get(mid..).unwrap_or(&[]),
+                        SplitDir::Vertical,
+                    )),
+                }
+            }
         }
     }
 }
@@ -1326,6 +1520,12 @@ struct WindowId(usize);
 /// A tmux "window" — a tab containing one or more panes arranged by a layout.
 #[derive(Debug, Clone)]
 struct Window {
+    /// Stable identity, distinct from the position in `Session::windows` --
+    /// which moves when a window before it is closed.
+    #[allow(
+        dead_code,
+        reason = "windows are addressed by position everywhere today; this is                   what survives a close, and is what a `select-window -t` by                   id would use"
+    )]
     id: WindowId,
     /// Window name (user-settable or auto-derived from active pane).
     name: String,
@@ -1358,12 +1558,20 @@ impl Window {
     /// and [`Multiplexer::relayout`] converts them into cell counts; when the
     /// two computed the pane area separately, only one of them was ever told
     /// about a change.
-    fn bounds(&self) -> Vec<(PaneId, f32, f32, f32, f32)> {
+    /// Where each pane sits, given the window's pixel size.
+    ///
+    /// Taking the size rather than reading `WINDOW_WIDTH`/`WINDOW_HEIGHT`,
+    /// which is what it did: this is the one place a pane's pixel rectangle
+    /// comes from, and `relayout` turns that rectangle into the terminal's
+    /// columns and rows -- so with the constants here, every pane was 1200x800
+    /// worth of character cells whatever size window the compositor granted,
+    /// and text wrapped at a width it was not being drawn at.
+    fn bounds(&self, width: f32, height: f32) -> Vec<(PaneId, f32, f32, f32, f32)> {
         self.layout.compute_bounds(
             0.0,
             TAB_BAR_HEIGHT,
-            WINDOW_WIDTH,
-            WINDOW_HEIGHT - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT,
+            width,
+            height - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT,
         )
     }
 }
@@ -1379,6 +1587,11 @@ struct SessionId(usize);
 /// A tmux session — a collection of windows that can be detached/reattached.
 #[derive(Debug, Clone)]
 struct Session {
+    /// Stable identity, distinct from the position in `Multiplexer::sessions`.
+    #[allow(
+        dead_code,
+        reason = "as `Window::id`: sessions are addressed by position, and                   `kill-session` takes an index for that reason"
+    )]
     id: SessionId,
     /// Session name.
     name: String,
@@ -1389,6 +1602,10 @@ struct Session {
     /// Whether a client is attached.
     attached: bool,
     /// When the session was created (monotonic ms).
+    #[allow(
+        dead_code,
+        reason = "when the session was made. The status bar has room for an                   age and does not show one yet; recorded now because it                   cannot be recovered later"
+    )]
     created_at_ms: u64,
     /// Next pane ID counter.
     next_pane_id: usize,
@@ -1415,6 +1632,12 @@ impl Session {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "the session's own id allocator. Panes are currently numbered \
+                  by the multiplexer, which owns the shared pane vector; this \
+                  is what a session would use if panes became per-session"
+    )]
     fn alloc_pane_id(&mut self) -> PaneId {
         let id = PaneId(self.next_pane_id);
         self.next_pane_id = self.next_pane_id.saturating_add(1);
@@ -1487,6 +1710,15 @@ struct Multiplexer {
     session_chooser: bool,
     /// Window chooser open flag.
     window_chooser: bool,
+    /// How wide the window is, in pixels.
+    ///
+    /// Every layout read the `WINDOW_WIDTH` constant, so the panes were laid
+    /// out for a 1200x800 window whatever size the compositor granted -- and
+    /// because `relayout` turns pixels into terminal columns and rows, a pane
+    /// drawn at one size wrapped its text at another.
+    window_width: f32,
+    /// How tall the window is, in pixels.
+    window_height: f32,
 }
 
 impl Multiplexer {
@@ -1503,6 +1735,8 @@ impl Multiplexer {
             status_message: String::new(),
             status_time: 0,
             current_time: 0,
+            window_width: WINDOW_WIDTH,
+            window_height: WINDOW_HEIGHT,
             next_session_id: 1,
             clipboard: String::new(),
             session_chooser: false,
@@ -1537,6 +1771,7 @@ impl Multiplexer {
     /// [`Pane::max_scroll_back`] and [`Pane::page_lines`] — sees a current
     /// grid rather than the previous frame's.
     fn relayout(&mut self) {
+        let (width, height) = (self.window_width, self.window_height);
         let Some(session) = self.active_session() else {
             return;
         };
@@ -1544,7 +1779,7 @@ impl Multiplexer {
         // the walk borrows `self.sessions`.
         let mut grids: Vec<(PaneId, usize, usize)> = Vec::new();
         for window in &session.windows {
-            for (id, _, _, w, h) in window.bounds() {
+            for (id, _, _, w, h) in window.bounds(width, height) {
                 let (cols, rows) = pane_grid(w, h);
                 grids.push((id, cols, rows));
             }
@@ -1647,9 +1882,108 @@ impl Multiplexer {
     }
 
     /// Kill a session by index.
+    /// Copy the marked lines into the clipboard and leave copy mode.
+    fn yank_selection(&mut self) {
+        let Some(text) = self
+            .active_pane_mut()
+            .filter(|pane| pane.copy_mode)
+            .and_then(|pane| {
+                let text = pane.copy_selection();
+                if text.is_some() {
+                    pane.exit_copy_mode();
+                }
+                text
+            })
+        else {
+            self.set_status("nothing marked");
+            return;
+        };
+        let lines = text.lines().count();
+        self.clipboard = text;
+        self.set_status(&format!("copied {lines} line(s)"));
+    }
+
+    /// Paste the clipboard into the active pane.
+    fn paste_clipboard(&mut self) {
+        if self.clipboard.is_empty() {
+            self.set_status("clipboard is empty");
+            return;
+        }
+        let text = self.clipboard.clone();
+        if let Some(pane) = self.active_pane_mut() {
+            pane.feed(&text);
+        }
+    }
+
+    /// Resize the split around the active pane.
+    ///
+    /// `RESIZE_STEP` was a constant with no code behind it, and the module doc
+    /// promises "split panes ... with configurable ratios": the layout tree
+    /// stored a ratio per split and nothing ever changed one, so every split
+    /// was 50/50 for the life of the session.
+    ///
+    /// `delta` is in pixels, converted against the window so that a step moves
+    /// the divider the same visible distance whichever way the split runs.
+    fn resize_active_split(&mut self, delta: f32) {
+        let Some(pane_id) = self
+            .active_session()
+            .and_then(Session::active_window)
+            .map(|w| w.active_pane)
+        else {
+            return;
+        };
+        let span = self.window_width.max(1.0);
+        let fraction = delta / span;
+        let Some(session) = self.sessions.get_mut(self.active_session) else {
+            return;
+        };
+        let Some(window) = session.windows.get_mut(session.active_window) else {
+            return;
+        };
+        if !window.layout.resize_containing(pane_id, fraction) {
+            self.set_status("no split to resize");
+        }
+    }
+
+    /// Move to the next session, wrapping at the end.
+    ///
+    /// The session chooser (Ctrl+B `s`) drew a list of every session and there
+    /// was no way to choose one: nothing in the program ever changed
+    /// `active_session` except creating or killing a session. The same shape as
+    /// `apps/kanban`'s board list, which listed boards and had no key that
+    /// picked one.
+    fn next_session(&mut self) {
+        // `checked_rem` is the emptiness test: there is no next session in a
+        // list of none, and no remainder modulo zero.
+        if let Some(next) = self
+            .active_session
+            .saturating_add(1)
+            .checked_rem(self.sessions.len())
+        {
+            self.active_session = next;
+        }
+    }
+
+    /// Move to the previous session, wrapping at the start.
+    fn prev_session(&mut self) {
+        let Some(last) = self.sessions.len().checked_sub(1) else {
+            return;
+        };
+        self.active_session = self
+            .active_session
+            .checked_sub(1)
+            // Wrapping past the start lands on the last session, and clamping
+            // to `last` also repairs an index that was somehow already past the
+            // end rather than carrying it forward.
+            .map_or(last, |prev| prev.min(last));
+    }
+
     fn kill_session(&mut self, index: usize) {
-        if index < self.sessions.len() && self.sessions.len() > 1 {
-            let name = self.sessions[index].name.clone();
+        // `get` rather than an index guarded two conditions away: the
+        // length test and the read are the same question asked once.
+        if self.sessions.len() > 1
+            && let Some(name) = self.sessions.get(index).map(|s| s.name.clone())
+        {
             self.sessions.remove(index);
             if self.active_session >= self.sessions.len() {
                 self.active_session = self.sessions.len().saturating_sub(1);
@@ -1702,8 +2036,16 @@ impl Multiplexer {
         if let Some(session) = self.active_session_mut()
             && !session.windows.is_empty()
         {
-            session.active_window =
-                (session.active_window.saturating_add(1)) % session.windows.len();
+            // `checked_rem` is the emptiness test; the `!is_empty` above says
+            // the same thing, and stating it in the arithmetic is what keeps
+            // the two from drifting apart.
+            if let Some(next) = session
+                .active_window
+                .saturating_add(1)
+                .checked_rem(session.windows.len())
+            {
+                session.active_window = next;
+            }
         }
     }
 
@@ -1793,11 +2135,13 @@ impl Multiplexer {
             && let Some(window) = session.active_window_mut()
         {
             let ids = window.layout.pane_ids();
-            if let Some(pos) = ids.iter().position(|id| *id == window.active_pane) {
-                let next = (pos.saturating_add(1)) % ids.len();
-                if let Some(id) = ids.get(next) {
-                    window.active_pane = *id;
-                }
+            if let Some(pos) = ids.iter().position(|id| *id == window.active_pane)
+                && let Some(id) = pos
+                    .saturating_add(1)
+                    .checked_rem(ids.len())
+                    .and_then(|next| ids.get(next))
+            {
+                window.active_pane = *id;
             }
         }
     }
@@ -1855,6 +2199,204 @@ impl Multiplexer {
     // Command processing
     // ========================================================================
 
+    // ====================================================================
+    // Input
+    //
+    // The multiplexer was complete and had no way in. `process_prefix_key` --
+    // the Ctrl+B keyboard this program is *for*, and the first feature its
+    // module doc lists -- had eighteen tests and no caller; so did
+    // `process_command`, the `:` prompt. `main` constructed a `Multiplexer`
+    // and dropped it.
+    // ====================================================================
+
+    /// Handle one event from the window.
+    fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Resize { width, height } => {
+                self.window_width = *width as f32;
+                self.window_height = *height as f32;
+                // `relayout` re-derives every pane's columns and rows from the
+                // new pixel size; it is idempotent, so doing it here as well as
+                // in `render` costs nothing and keeps the terminal's idea of
+                // its own width true between the two.
+                self.relayout();
+                EventResult::Consumed
+            }
+            Event::Tick { .. } => {
+                // A whole second of it, which is this clock's resolution.
+                self.set_time(self.current_time.saturating_add(1000));
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Handle a key press.
+    ///
+    /// Three states, in the order they take priority:
+    ///
+    /// 1. the `:` command prompt, which swallows everything until Enter or
+    ///    Escape, because a half-typed command must not also split a pane;
+    /// 2. the prefix state, one key after Ctrl+B, which is the tmux vocabulary;
+    /// 3. everything else, which belongs to the pane -- and which currently has
+    ///    nowhere to go, because no pane has a process behind it.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if self.command_mode {
+            return self.handle_command_key(key);
+        }
+
+        if self.prefix_state == PrefixState::Prefix {
+            self.prefix_state = PrefixState::Normal;
+            // Prefix then an arrow resizes the split around the active pane,
+            // which is what tmux does and what makes the layout's ratio -- a
+            // field nothing else ever wrote -- reachable.
+            match key.key {
+                Key::Left => {
+                    self.resize_active_split(-RESIZE_STEP);
+                    return EventResult::Consumed;
+                }
+                Key::Right => {
+                    self.resize_active_split(RESIZE_STEP);
+                    return EventResult::Consumed;
+                }
+                // Up and Down move a top/bottom divider the same way Left
+                // and Right move a left/right one: towards the near edge and
+                // towards the far one. Which kind of divider it is comes from
+                // the split itself, so the pair of directions is enough.
+                Key::Up => {
+                    self.resize_active_split(-RESIZE_STEP);
+                    return EventResult::Consumed;
+                }
+                Key::Down => {
+                    self.resize_active_split(RESIZE_STEP);
+                    return EventResult::Consumed;
+                }
+                _ => {}
+            }
+            // Otherwise the prefix is followed by a *character*: `x` closes a
+            // pane, `%` splits it. A key that carries no text is not one of
+            // them, and eating it here would make the prefix swallow the next
+            // keystroke whatever it was.
+            if let Some(ch) = key.typed().next() {
+                self.process_prefix_key(ch);
+            }
+            return EventResult::Consumed;
+        }
+
+        // Ctrl+B arms the prefix. This is the one chord the multiplexer keeps
+        // for itself; everything else Ctrl is the pane's.
+        if key.modifiers.ctrl && key.key == Key::B {
+            self.prefix_state = PrefixState::Prefix;
+            return EventResult::Consumed;
+        }
+
+        // A chooser overlay takes the arrows and Enter while it is open.
+        if self.session_chooser || self.window_chooser {
+            return self.handle_chooser_key(key);
+        }
+
+        EventResult::Ignored
+    }
+
+    /// Keys while the `:` prompt is open.
+    fn handle_command_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.command_mode = false;
+                self.command_input.clear();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                let cmd = std::mem::take(&mut self.command_input);
+                self.command_mode = false;
+                self.process_command(&cmd);
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                // Never past the `:` itself: the prompt is the mode indicator,
+                // and a prompt that can be deleted leaves the user typing into
+                // an empty line with no way to tell what it is.
+                if self.command_input.len() > 1 {
+                    self.command_input.pop();
+                }
+                EventResult::Consumed
+            }
+            _ => {
+                let typed: String = key.typed().collect();
+                if typed.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.command_input.push_str(&typed);
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Keys while the session or window chooser is open.
+    fn handle_chooser_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.session_chooser = false;
+                self.window_chooser = false;
+                EventResult::Consumed
+            }
+            Key::Down if self.window_chooser => {
+                self.next_window();
+                EventResult::Consumed
+            }
+            Key::Up if self.window_chooser => {
+                self.prev_window();
+                EventResult::Consumed
+            }
+            Key::Down if self.session_chooser => {
+                self.next_session();
+                EventResult::Consumed
+            }
+            Key::Up if self.session_chooser => {
+                self.prev_session();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.session_chooser = false;
+                self.window_chooser = false;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Put something in the first pane, so the window does not open blank.
+    ///
+    /// Through [`Pane::feed`], which is the real ANSI path -- the escape
+    /// sequences below are parsed by the same parser a process's output would
+    /// go through, so the parser is exercised by the program and not only by
+    /// its tests. Nothing called `feed` before this: every pane was empty for
+    /// the life of the process.
+    ///
+    /// What it says is what is true. There is no PTY layer in this tree, so no
+    /// pane has a process behind it and typing into one has nowhere to go; the
+    /// splitting, the windows, the sessions and the `:` prompt are all real.
+    /// Saying so beats an empty black rectangle that looks like a shell which
+    /// has stopped responding. See `known-issues.md` ->
+    /// `TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`.
+    fn greet_pane(&mut self) {
+        let Some(pane) = self.active_pane_mut() else {
+            return;
+        };
+        pane.feed("\x1B[1mSlate OS terminal multiplexer\x1B[0m\r\n");
+        pane.feed("\r\n");
+        pane.feed("No process is attached to this pane: the OS has no PTY\r\n");
+        pane.feed("layer yet, so there is nothing to run in it.\r\n");
+        pane.feed("\r\n");
+        pane.feed("\x1B[1mCtrl+B\x1B[0m then:\r\n");
+        pane.feed("  \x1B[1m%\x1B[0m  split left/right     \x1B[1m\"\x1B[0m  split top/bottom\r\n");
+        pane.feed("  \x1B[1mo\x1B[0m  next pane            \x1B[1mx\x1B[0m  close pane\r\n");
+        pane.feed("  \x1B[1mc\x1B[0m  new window           \x1B[1mn\x1B[0m / \x1B[1mp\x1B[0m  next / previous\r\n");
+        pane.feed("  \x1B[1ms\x1B[0m  sessions             \x1B[1mw\x1B[0m  windows\r\n");
+        pane.feed("  \x1B[1md\x1B[0m  detach               \x1B[1m:\x1B[0m  command prompt\r\n");
+    }
+
     /// Process a prefix command key.
     fn process_prefix_key(&mut self, key: char) {
         match key {
@@ -1862,8 +2404,16 @@ impl Multiplexer {
             '-' | '"' => self.split_pane(SplitDir::Horizontal),
             // Split vertical (left/right)
             '|' | '%' => self.split_pane(SplitDir::Vertical),
-            // Navigate panes
+            // Navigate panes. `;` is tmux's "last pane" and is the only way
+            // backwards -- `prev_pane` existed, was tested, and had no key.
             'o' => self.next_pane(),
+            ';' => self.prev_pane(),
+            // Swap the active pane with the next one, tmux's `}`. Written,
+            // untested and unbound before this.
+            '}' => self.swap_pane_next(),
+            // Close the whole window, tmux's `&`. `x` closes one pane; this
+            // closed nothing, because nothing called it.
+            '&' => self.close_window(),
             // Next/prev window
             'n' => self.next_window(),
             'p' => self.prev_window(),
@@ -1905,6 +2455,27 @@ impl Multiplexer {
                     pane.exit_copy_mode();
                 }
             }
+            // Mark one end of a selection, and yank from the mark to here.
+            // Both are no-ops outside copy mode, where there is no scrollback
+            // position to mark.
+            //
+            // `v`, not Space: Space already cycles the layout preset below, and
+            // the compiler said so -- an unreachable-pattern warning on the
+            // arm I had shadowed. `v` is what tmux's own vi copy mode uses for
+            // begin-selection, so it is the right key anyway.
+            'v' => {
+                if let Some(pane) = self.active_pane_mut()
+                    && pane.copy_mode
+                {
+                    pane.set_copy_mark();
+                    self.set_status("selection started");
+                }
+            }
+            'y' => self.yank_selection(),
+            // Paste, tmux's `]`. Into the pane through `feed`, the same path a
+            // process's output takes, so pasted text is parsed rather than
+            // pushed in behind the terminal's back.
+            ']' => self.paste_clipboard(),
             // Scrollback navigation. The keys that move *backwards* enter copy
             // mode on their own: asking to see earlier output is unambiguous,
             // and requiring `[` first would make the first press of Page Up do
@@ -1952,7 +2523,10 @@ impl Multiplexer {
             // is available via the ':' command mode instead.
             // Window selection by number
             '0'..='9' => {
-                let idx = (key as u8 - b'0') as usize;
+                // The arm above matched `'1'..='9'`, so the subtraction is
+                // in range -- said here rather than there, where an added
+                // digit would quietly change it.
+                let idx = usize::from((key as u8).saturating_sub(b'0'));
                 if let Some(session) = self.active_session_mut()
                     && idx < session.windows.len()
                 {
@@ -2057,7 +2631,10 @@ impl Multiplexer {
     /// and wrapping at another unreachable, rather than merely unlikely.
     /// [`Self::relayout`] is idempotent, so the mutations calling it too costs
     /// nothing.
-    fn render(&mut self) -> Vec<RenderCommand> {
+    ///
+    /// Not `render`: [`App::render`] is the one the window calls, and an
+    /// inherent method of the same name shadows a trait method at equal arity.
+    fn render_commands(&mut self) -> Vec<RenderCommand> {
         self.relayout();
 
         let mut cmds = Vec::with_capacity(256);
@@ -2076,8 +2653,8 @@ impl Multiplexer {
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
+            width: self.window_width,
+            height: self.window_height,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
         });
@@ -2087,7 +2664,7 @@ impl Multiplexer {
 
         // Pane area
         if let Some(window) = session.active_window() {
-            let bounds = window.bounds();
+            let bounds = window.bounds(self.window_width, self.window_height);
 
             for (pane_id, x, y, w, h) in &bounds {
                 let is_active = *pane_id == window.active_pane;
@@ -2121,7 +2698,7 @@ impl Multiplexer {
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: TAB_BAR_HEIGHT,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
@@ -2214,6 +2791,29 @@ impl Multiplexer {
             line_width: PANE_BORDER_WIDTH,
             corner_radii: CornerRadii::ZERO,
         });
+
+        // The pane's name, on its top border, which is where tmux puts it and
+        // the only thing that tells two panes apart once a window is split
+        // four ways. `Pane::effective_title` -- title, else the buffer's OSC
+        // title, else the command -- existed for this and had no caller, so
+        // every pane was an anonymous rectangle and the `command` field was
+        // read by nothing.
+        if let Some(pane) = self.panes.iter().find(|p| p.id == pane_id) {
+            let title = pane.effective_title();
+            if !title.is_empty() {
+                let room = (width - 12.0).max(0.0);
+                cmds.push(RenderCommand::Text {
+                    x: x + 6.0,
+                    y: y - SMALL_TEXT / 2.0,
+                    text: text::elide(title, room, "...", SMALL_TEXT, FontWeightHint::Regular),
+                    color: border_color,
+                    font_size: SMALL_TEXT,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(room),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
 
         // Render terminal content
         if let Some(pane) = self.find_pane(pane_id) {
@@ -2357,13 +2957,13 @@ impl Multiplexer {
     }
 
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, session: &Session) {
-        let y = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
+        let y = self.window_height - STATUS_BAR_HEIGHT;
 
         // Status bar background
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: STATUS_BAR_HEIGHT,
             color: GREEN,
             corner_radii: CornerRadii::ZERO,
@@ -2433,7 +3033,7 @@ impl Multiplexer {
         };
 
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 200.0,
+            x: self.window_width - 200.0,
             y: y + 4.0,
             text: msg,
             font_size: SMALL_TEXT,
@@ -2449,15 +3049,15 @@ impl Multiplexer {
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
+            width: self.window_width,
+            height: self.window_height,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
         });
 
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH / 2.0 - 100.0,
-            y: WINDOW_HEIGHT / 2.0 - 20.0,
+            x: self.window_width / 2.0 - 100.0,
+            y: self.window_height / 2.0 - 20.0,
             text: "[detached]".into(),
             font_size: HEADER_TEXT,
             color: TEXT,
@@ -2467,8 +3067,8 @@ impl Multiplexer {
         });
 
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH / 2.0 - 150.0,
-            y: WINDOW_HEIGHT / 2.0 + 10.0,
+            x: self.window_width / 2.0 - 150.0,
+            y: self.window_height / 2.0 + 10.0,
             text: "Use :attach or tmux attach to reconnect".into(),
             font_size: NORMAL_TEXT,
             color: SUBTEXT0,
@@ -2481,15 +3081,15 @@ impl Multiplexer {
     fn render_session_chooser(&self, cmds: &mut Vec<RenderCommand>) {
         let w = 300.0;
         let h = (self.sessions.len() as f32 * 24.0 + 40.0).min(400.0);
-        let x = (WINDOW_WIDTH - w) / 2.0;
-        let y = (WINDOW_HEIGHT - h) / 2.0;
+        let x = (self.window_width - w) / 2.0;
+        let y = (self.window_height - h) / 2.0;
 
         // Overlay background
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
+            width: self.window_width,
+            height: self.window_height,
             color: Color::rgba(0, 0, 0, 100),
             corner_radii: CornerRadii::ZERO,
         });
@@ -2569,14 +3169,14 @@ impl Multiplexer {
 
         let w = 300.0;
         let h = (session.windows.len() as f32 * 24.0 + 40.0).min(400.0);
-        let x = (WINDOW_WIDTH - w) / 2.0;
-        let y = (WINDOW_HEIGHT - h) / 2.0;
+        let x = (self.window_width - w) / 2.0;
+        let y = (self.window_height - h) / 2.0;
 
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
+            width: self.window_width,
+            height: self.window_height,
             color: Color::rgba(0, 0, 0, 100),
             corner_radii: CornerRadii::ZERO,
         });
@@ -2645,12 +3245,12 @@ impl Multiplexer {
     }
 
     fn render_command_input(&self, cmds: &mut Vec<RenderCommand>) {
-        let y = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
+        let y = self.window_height - STATUS_BAR_HEIGHT;
         // Overwrite status bar with command input
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: STATUS_BAR_HEIGHT,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
@@ -2662,7 +3262,7 @@ impl Multiplexer {
             font_size: SMALL_TEXT,
             color: YELLOW,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(WINDOW_WIDTH - PADDING * 2.0),
+            max_width: Some(self.window_width - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
     }
@@ -2670,7 +3270,7 @@ impl Multiplexer {
     #[allow(clippy::unused_self)] // kept as method for symmetry with other render_* dispatch
     fn render_prefix_indicator(&self, cmds: &mut Vec<RenderCommand>) {
         // Show a small indicator that prefix key was pressed
-        let x = WINDOW_WIDTH - 100.0;
+        let x = self.window_width - 100.0;
         let y = TAB_BAR_HEIGHT;
         cmds.push(RenderCommand::FillRect {
             x,
@@ -2697,10 +3297,67 @@ impl Multiplexer {
 // Main (placeholder)
 // ============================================================================
 
-fn main() {
-    // In the real OS, this would start the terminal multiplexer,
-    // connect to the compositor, and begin the event loop.
-    let _mux = Multiplexer::new();
+impl App for Multiplexer {
+    fn title(&self) -> String {
+        // The session and the window inside it, which is what a multiplexer's
+        // title bar is for -- the same two names its own status bar shows. The
+        // harness re-reads this as the program runs.
+        match self.active_session() {
+            Some(session) => {
+                let window = session
+                    .windows
+                    .get(session.active_window)
+                    .map_or("", |w| w.name.as_str());
+                format!("{}:{} - tmux", session.name, window)
+            }
+            None => "tmux".to_string(),
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// A second.
+    ///
+    /// Two things on screen age without anyone touching the keyboard: the clock
+    /// in the status bar, which is `current_time / 1000`, and status messages,
+    /// which stop being shown five seconds after they are set. Nothing ever
+    /// moved `current_time` -- `set_time` had no caller -- so the clock read
+    /// 00:00:00 for the life of the process and no message ever expired.
+    ///
+    /// A second is the resolution of the coarsest of them; anything shorter
+    /// redraws an identical frame.
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(Duration::from_secs(1))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // From the frame being drawn rather than the last `Resize`: `relayout`
+        // turns these pixels into terminal columns and rows, so a stale pair is
+        // a pane that wraps its text at a width it is not being drawn at.
+        self.window_width = width;
+        self.window_height = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut mux = Multiplexer::new();
+    mux.greet_pane();
+    app::launch("tmux", &mut mux)
 }
 
 // ============================================================================
@@ -3117,6 +3774,494 @@ mod tests {
 
     // --- Session ---
 
+    // ------------------------------------------------------------------
+    // Input
+    //
+    // `main` built a `Multiplexer` and dropped it. `process_prefix_key` -- the
+    // Ctrl+B keyboard, the first feature the module doc lists -- had eighteen
+    // tests and no caller, and so did `process_command`.
+    // ------------------------------------------------------------------
+
+    fn key_ev(key: Key, text: &str, ctrl: bool) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_string(),
+        })
+    }
+
+    fn press(k: Key) -> Event {
+        key_ev(k, "", false)
+    }
+
+    fn types(c: char) -> Event {
+        key_ev(Key::A, &c.to_string(), false)
+    }
+
+    /// Ctrl+B, then the key.
+    fn prefixed(mux: &mut Multiplexer, c: char) {
+        mux.handle_event(&key_ev(Key::B, "", true));
+        assert_eq!(mux.prefix_state, PrefixState::Prefix, "Ctrl+B did not arm");
+        mux.handle_event(&types(c));
+    }
+
+    /// The pane the keyboard is aimed at.
+    ///
+    /// A test helper rather than a method: every production reader of the
+    /// active pane needs it mutably, and a shared accessor that only tests call
+    /// is API for its own sake.
+    fn active_pane(mux: &Multiplexer) -> Option<&Pane> {
+        let id = mux.active_session()?.active_window()?.active_pane;
+        mux.find_pane(id)
+    }
+
+    fn panes_in_active_window(mux: &Multiplexer) -> usize {
+        mux.active_session()
+            .and_then(Session::active_window)
+            .map_or(0, |w| w.layout.pane_ids().len())
+    }
+
+    #[test]
+    fn ctrl_b_arms_the_prefix_and_the_next_key_is_a_command() {
+        let mut mux = Multiplexer::new();
+        assert_eq!(panes_in_active_window(&mux), 1);
+
+        prefixed(&mut mux, '%');
+        assert_eq!(panes_in_active_window(&mux), 2, "Ctrl+B % should split");
+        assert_eq!(
+            mux.prefix_state,
+            PrefixState::Normal,
+            "the prefix lasts exactly one key"
+        );
+    }
+
+    /// A bare key is the pane's, not the multiplexer's -- otherwise typing `x`
+    /// into a shell would close the pane.
+    #[test]
+    fn a_key_without_the_prefix_is_not_a_command() {
+        let mut mux = Multiplexer::new();
+        mux.handle_event(&types('x'));
+        assert_eq!(panes_in_active_window(&mux), 1, "`x` alone closed a pane");
+    }
+
+    /// The prefix waits for a *character*. An arrow resizes; a key with no text
+    /// and no meaning must not be swallowed as if it were a command.
+    #[test]
+    fn the_prefix_is_spent_by_whatever_follows_it() {
+        let mut mux = Multiplexer::new();
+        mux.handle_event(&key_ev(Key::B, "", true));
+        mux.handle_event(&press(Key::F5));
+        assert_eq!(
+            mux.prefix_state,
+            PrefixState::Normal,
+            "the prefix must not stay armed waiting for a key it likes"
+        );
+    }
+
+    #[test]
+    fn the_prefix_covers_the_vocabulary_the_banner_advertises() {
+        let mut mux = Multiplexer::new();
+
+        prefixed(&mut mux, 'c');
+        assert_eq!(
+            mux.active_session().map_or(0, |s| s.windows.len()),
+            2,
+            "Ctrl+B c should make a window"
+        );
+
+        prefixed(&mut mux, '"');
+        assert_eq!(panes_in_active_window(&mux), 2, "Ctrl+B \" should split");
+
+        prefixed(&mut mux, 'x');
+        assert_eq!(panes_in_active_window(&mux), 1, "Ctrl+B x should close one");
+
+        prefixed(&mut mux, 'd');
+        assert!(
+            mux.active_session().is_some_and(|s| !s.attached),
+            "Ctrl+B d should detach"
+        );
+    }
+
+    // -- the command prompt --
+
+    #[test]
+    fn the_command_prompt_takes_a_line_and_runs_it() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, ':');
+        assert!(mux.command_mode);
+        assert_eq!(mux.command_input, ":");
+
+        for c in "new-window".chars() {
+            mux.handle_event(&types(c));
+        }
+        assert_eq!(mux.command_input, ":new-window");
+        mux.handle_event(&press(Key::Enter));
+
+        assert!(!mux.command_mode);
+        assert_eq!(mux.active_session().map_or(0, |s| s.windows.len()), 2);
+    }
+
+    /// While the prompt is open it takes every key: a half-typed `:split-window`
+    /// must not also split something because it contains an `x`.
+    #[test]
+    fn the_prompt_swallows_keys_that_would_otherwise_be_commands() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, ':');
+        mux.handle_event(&types('x'));
+        assert_eq!(panes_in_active_window(&mux), 1);
+        assert_eq!(mux.command_input, ":x");
+    }
+
+    #[test]
+    fn escape_abandons_the_prompt_and_backspace_stops_at_the_colon() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, ':');
+        for _ in 0..5 {
+            mux.handle_event(&press(Key::Backspace));
+        }
+        assert_eq!(
+            mux.command_input, ":",
+            "the prompt is the mode indicator and must survive backspace"
+        );
+
+        for c in "kill".chars() {
+            mux.handle_event(&types(c));
+        }
+        mux.handle_event(&press(Key::Escape));
+        assert!(!mux.command_mode);
+        assert!(mux.command_input.is_empty());
+    }
+
+    // -- the choosers --
+
+    /// The session chooser drew every session and there was no way to pick one:
+    /// nothing ever changed `active_session` except creating or killing.
+    #[test]
+    fn the_session_chooser_can_choose_a_session() {
+        let mut mux = Multiplexer::new();
+        mux.new_session("second");
+        assert!(mux.sessions.len() >= 2);
+
+        prefixed(&mut mux, 's');
+        assert!(mux.session_chooser);
+        let before = mux.active_session;
+        mux.handle_event(&press(Key::Down));
+        assert_ne!(
+            mux.active_session, before,
+            "Down did not move the selection"
+        );
+
+        mux.handle_event(&press(Key::Enter));
+        assert!(!mux.session_chooser, "Enter should close the chooser");
+    }
+
+    #[test]
+    fn the_window_chooser_can_choose_a_window() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, 'c');
+        prefixed(&mut mux, 'w');
+        assert!(mux.window_chooser);
+
+        let before = mux.active_session().map_or(0, |s| s.active_window);
+        mux.handle_event(&press(Key::Down));
+        assert_ne!(mux.active_session().map_or(0, |s| s.active_window), before);
+        mux.handle_event(&press(Key::Escape));
+        assert!(!mux.window_chooser);
+    }
+
+    // -- resizing --
+
+    /// `RESIZE_STEP` was a constant with nothing behind it, and every split was
+    /// 50/50 for the life of the session.
+    #[test]
+    fn the_prefix_and_an_arrow_move_the_divider() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '%');
+        let before = split_ratio(&mux).expect("a split exists");
+
+        mux.handle_event(&key_ev(Key::B, "", true));
+        mux.handle_event(&press(Key::Right));
+        let after = split_ratio(&mux).expect("still split");
+        assert!(
+            after > before,
+            "the divider did not move: {before} -> {after}"
+        );
+
+        mux.handle_event(&key_ev(Key::B, "", true));
+        mux.handle_event(&press(Key::Left));
+        let back = split_ratio(&mux).expect("still split");
+        assert!((back - before).abs() < 0.001, "and it should come back");
+    }
+
+    /// The divider stops well inside the edges, or the ratio walks past a bound
+    /// `compute_bounds` then floors -- and cannot be brought back.
+    #[test]
+    fn the_divider_stops_before_it_reaches_the_edge() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '%');
+        for _ in 0..200 {
+            mux.handle_event(&key_ev(Key::B, "", true));
+            mux.handle_event(&press(Key::Right));
+        }
+        let ratio = split_ratio(&mux).expect("still split");
+        assert!(
+            (MIN_SPLIT_RATIO..=1.0 - MIN_SPLIT_RATIO).contains(&ratio),
+            "ratio ran to {ratio}"
+        );
+
+        for _ in 0..400 {
+            mux.handle_event(&key_ev(Key::B, "", true));
+            mux.handle_event(&press(Key::Left));
+        }
+        let ratio = split_ratio(&mux).expect("still split");
+        assert!(
+            (MIN_SPLIT_RATIO..=1.0 - MIN_SPLIT_RATIO).contains(&ratio),
+            "ratio ran to {ratio}"
+        );
+    }
+
+    fn split_ratio(mux: &Multiplexer) -> Option<f32> {
+        fn find(node: &LayoutNode) -> Option<f32> {
+            match node {
+                LayoutNode::Leaf(_) => None,
+                LayoutNode::Split {
+                    ratio,
+                    first,
+                    second,
+                    ..
+                } => find(first).or_else(|| find(second)).or(Some(*ratio)),
+            }
+        }
+        find(&mux.active_session()?.active_window()?.layout)
+    }
+
+    // -- copy and paste --
+
+    /// `copy_start` was set to `None` in two places and to a value in none, and
+    /// `clipboard` was read by nothing: copy mode could scroll the scrollback
+    /// and not copy from it.
+    #[test]
+    fn copy_mode_can_mark_yank_and_paste() {
+        let mut mux = Multiplexer::new();
+        if let Some(pane) = mux.active_pane_mut() {
+            pane.feed("alpha\r\nbravo\r\n");
+        }
+
+        prefixed(&mut mux, '[');
+        assert!(active_pane(&mux).is_some_and(|p| p.copy_mode));
+        prefixed(&mut mux, 'v');
+        assert!(
+            active_pane(&mux).is_some_and(|p| p.copy_start.is_some()),
+            "`v` should have marked a position"
+        );
+
+        prefixed(&mut mux, 'y');
+        assert!(!mux.clipboard.is_empty(), "the yank copied nothing");
+        assert!(
+            !active_pane(&mux).is_some_and(|p| p.copy_mode),
+            "yanking leaves copy mode"
+        );
+
+        // Into a *new* pane, which starts empty. Pasting back into the pane the
+        // text was yanked from proves nothing: the words are already on that
+        // screen, so the assertion passes whether or not the paste happened --
+        // which is exactly what a mutation deleting the paste showed.
+        let copied = mux.clipboard.clone();
+        prefixed(&mut mux, '%');
+        assert!(
+            pane_text(&mux).trim().is_empty(),
+            "the new pane should start empty, or this proves nothing either"
+        );
+
+        prefixed(&mut mux, ']');
+        assert!(
+            pane_text(&mux).contains(copied.trim()),
+            "the paste did not reach the pane"
+        );
+    }
+
+    /// The divider a user means by "make this wider" is the one beside the
+    /// pane, not the outermost one in the window.
+    #[test]
+    fn resizing_moves_the_divider_nearest_the_active_pane() {
+        let mut mux = Multiplexer::new();
+        // Two nested splits: an outer one, then a second inside its right half,
+        // which is where the active pane ends up.
+        prefixed(&mut mux, '%');
+        prefixed(&mut mux, '"');
+
+        let outer_before = outer_ratio(&mux).expect("an outer split");
+        let inner_before = inner_ratio(&mux).expect("an inner split");
+
+        mux.handle_event(&key_ev(Key::B, "", true));
+        mux.handle_event(&press(Key::Down));
+
+        assert_eq!(
+            outer_ratio(&mux),
+            Some(outer_before),
+            "the outer divider should not have moved"
+        );
+        assert_ne!(
+            inner_ratio(&mux),
+            Some(inner_before),
+            "the divider beside the active pane is the one that should move"
+        );
+    }
+
+    /// The ratio of the topmost split.
+    fn outer_ratio(mux: &Multiplexer) -> Option<f32> {
+        match &mux.active_session()?.active_window()?.layout {
+            LayoutNode::Split { ratio, .. } => Some(*ratio),
+            LayoutNode::Leaf(_) => None,
+        }
+    }
+
+    /// The ratio of the deepest split, which is the one nearest the pane the
+    /// splits were made from.
+    fn inner_ratio(mux: &Multiplexer) -> Option<f32> {
+        fn deepest(node: &LayoutNode) -> Option<f32> {
+            match node {
+                LayoutNode::Leaf(_) => None,
+                LayoutNode::Split {
+                    ratio,
+                    first,
+                    second,
+                    ..
+                } => deepest(first).or_else(|| deepest(second)).or(Some(*ratio)),
+            }
+        }
+        let layout = &mux.active_session()?.active_window()?.layout;
+        match layout {
+            LayoutNode::Split { first, second, .. } => deepest(first).or_else(|| deepest(second)),
+            LayoutNode::Leaf(_) => None,
+        }
+    }
+
+    #[test]
+    fn yanking_with_nothing_marked_says_so_rather_than_copying_blank() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '[');
+        prefixed(&mut mux, 'y');
+        assert!(mux.clipboard.is_empty());
+        assert_eq!(mux.status_message, "nothing marked");
+    }
+
+    #[test]
+    fn pasting_an_empty_clipboard_says_so() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, ']');
+        assert_eq!(mux.status_message, "clipboard is empty");
+    }
+
+    fn pane_text(mux: &Multiplexer) -> String {
+        let Some(pane) = active_pane(mux) else {
+            return String::new();
+        };
+        (0..pane.buffer.cells.len())
+            .filter_map(|i| pane.buffer.line_text(i))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // -- the window --
+
+    /// Nothing ever moved `current_time`, so the status bar's clock read
+    /// 00:00:00 for the life of the process and no status message expired.
+    #[test]
+    fn the_tick_moves_the_clock() {
+        let mut mux = Multiplexer::new();
+        assert_eq!(mux.current_time, 0);
+        mux.handle_event(&Event::Tick { elapsed_ms: 1000 });
+        assert_eq!(mux.current_time, 1000);
+        assert_eq!(mux.tick_interval(), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_status_message_stops_being_shown_once_it_is_old() {
+        let mut mux = Multiplexer::new();
+        mux.set_status("hello");
+        // The message and the clock share one slot in the status bar, so the
+        // *count* of draw commands is the same either way -- which is what the
+        // first version of this test compared, and why it passed against a
+        // status bar that never changed. The text is the observable thing.
+        assert!(
+            drawn_texts(&mut mux).iter().any(|t| t == "hello"),
+            "the message should be on the status bar as soon as it is set"
+        );
+
+        // Ten minutes of ticks, not ten seconds: the status clock is hh:mm, so
+        // ten seconds of it is still 00:00 and would prove only that something
+        // was drawn there.
+        for _ in 0..600 {
+            mux.handle_event(&Event::Tick { elapsed_ms: 1000 });
+        }
+        let after = drawn_texts(&mut mux);
+        assert!(
+            !after.iter().any(|t| t == "hello"),
+            "the message should have gone once it was older than five seconds"
+        );
+        assert!(
+            after.iter().any(|t| t == "00:10"),
+            "and the clock should be back, reading the time the ticks made: {after:?}"
+        );
+    }
+
+    /// Every string the current frame draws.
+    fn drawn_texts(mux: &mut Multiplexer) -> Vec<String> {
+        mux.render_commands()
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every layout read the `WINDOW_WIDTH` constant, and `relayout` turns
+    /// pixels into terminal columns -- so a pane was drawn at one size and
+    /// wrapped at another.
+    #[test]
+    fn the_panes_are_measured_in_the_window_they_are_given() {
+        let mut mux = Multiplexer::new();
+        let narrow = App::render(&mut mux, 600.0, 400.0);
+        let cols_narrow = active_pane(&mux).map_or(0, |p| p.buffer.cols);
+        assert!(!narrow.commands.is_empty());
+
+        let _ = App::render(&mut mux, 1600.0, 900.0);
+        let cols_wide = active_pane(&mux).map_or(0, |p| p.buffer.cols);
+        assert!(
+            cols_wide > cols_narrow,
+            "a wider window should be a wider terminal: {cols_narrow} -> {cols_wide}"
+        );
+    }
+
+    #[test]
+    fn the_first_pane_is_not_blank() {
+        let mut mux = Multiplexer::new();
+        mux.greet_pane();
+        let text = pane_text(&mux);
+        assert!(
+            text.contains("multiplexer"),
+            "the window opens on an empty black rectangle"
+        );
+        assert!(
+            text.contains("Ctrl+B"),
+            "and it should say how to drive it, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn the_title_names_the_session_and_window() {
+        let mut mux = Multiplexer::new();
+        let first = mux.title();
+        assert!(first.ends_with("- tmux"), "got {first:?}");
+        prefixed(&mut mux, 'c');
+        assert_ne!(mux.title(), first, "a new window should retitle");
+    }
+
     #[test]
     fn test_session_new() {
         let session = Session::new(SessionId(0), "test", 0);
@@ -3404,7 +4549,7 @@ mod tests {
     #[test]
     fn test_mux_render_nonempty() {
         let mut mux = Multiplexer::new();
-        let cmds = mux.render();
+        let cmds = mux.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3412,7 +4557,7 @@ mod tests {
     fn test_mux_render_detached() {
         let mut mux = Multiplexer::new();
         mux.detach();
-        let cmds = mux.render();
+        let cmds = mux.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3421,7 +4566,7 @@ mod tests {
         let mut mux = Multiplexer::new();
         mux.split_pane(SplitDir::Vertical);
         mux.split_pane(SplitDir::Horizontal);
-        let cmds = mux.render();
+        let cmds = mux.render_commands();
         assert!(cmds.len() > 10); // Should have many render commands
     }
 
@@ -3533,7 +4678,7 @@ mod tests {
         for pane in &mut app.panes {
             pane.buffer.write_str("cell content\n");
         }
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let mut depth = 0_i32;
         let mut deepest = 0_i32;
         let mut cell_glyphs = 0_usize;
@@ -3819,7 +4964,7 @@ mod tests {
         app.active_session()
             .into_iter()
             .flat_map(|s| s.windows.iter())
-            .flat_map(Window::bounds)
+            .flat_map(|w| w.bounds(WINDOW_WIDTH, WINDOW_HEIGHT))
             .map(|(id, _, _, w, h)| {
                 let (cols, rows) = pane_grid(w, h);
                 (id, cols, rows)
@@ -4023,7 +5168,7 @@ mod tests {
             "the drift this test relies on did not take"
         );
 
-        let _ = app.render();
+        let _ = app.render_commands();
         assert_grids_match(&app, "a frame drawn after the grids drifted");
     }
 
@@ -4079,7 +5224,7 @@ mod tests {
         let (cw, ch) = (char_width(), char_height());
         let bottom = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
         let mut cells = 0_usize;
-        for cmd in &app.render() {
+        for cmd in &app.render_commands() {
             if let RenderCommand::Text {
                 x, y, font_size, ..
             } = cmd
@@ -4119,10 +5264,10 @@ mod tests {
             .expect("a session")
             .active_window()
             .expect("a window")
-            .bounds();
+            .bounds(WINDOW_WIDTH, WINDOW_HEIGHT);
         let (cw, ch) = (char_width(), char_height());
         let mut cells = 0_usize;
-        for cmd in &app.render() {
+        for cmd in &app.render_commands() {
             if let RenderCommand::Text {
                 x, y, font_size, ..
             } = cmd
@@ -4141,7 +5286,7 @@ mod tests {
     /// Every glyph the render pass emits at cell size, concatenated. Cells are
     /// drawn one character at a time, so this reassembles the screen as text.
     fn drawn_text(app: &mut Multiplexer) -> String {
-        app.render()
+        app.render_commands()
             .iter()
             .filter_map(|cmd| match cmd {
                 RenderCommand::Text {

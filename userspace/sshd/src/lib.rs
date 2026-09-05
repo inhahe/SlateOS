@@ -3788,7 +3788,19 @@ enum PubkeyOutcome {
 /// deliberate omission rather than an oversight -- see known-issues.md.
 fn authorized_keys_path(pattern: &str, user: &PasswdEntry) -> String {
     let expanded = expand_path_tokens(pattern, user);
-    if expanded.starts_with('/') {
+    // `has_root`, not `starts_with('/')`, and not `is_absolute` either.
+    //
+    // On the target these three are not three things: SlateOS is a unix, where
+    // `std` defines both `has_root` and `is_absolute` as exactly "begins with
+    // `/`". Which one is written here therefore cannot change what the daemon
+    // does. It changes only what the daemon does when the *tests* run, on a
+    // Windows development host -- and there the three diverge: a scratch
+    // directory is `C:\Users\...`, which `starts_with('/')` calls relative, while
+    // `is_absolute` in turn calls the target's own `/etc/ssh/...` relative
+    // because it has no drive letter. `has_root` is true for both, so it is the
+    // one spelling under which the end-to-end tests below exercise the same rule
+    // the target will.
+    if std::path::Path::new(&expanded).has_root() {
         expanded
     } else {
         // The home directory's own trailing slash is dropped rather than doubled.
@@ -3903,7 +3915,48 @@ fn handle_pubkey_auth(
     let Some(user) = lookup_passwd(username) else {
         return Ok(PubkeyOutcome::Rejected);
     };
-    let keys_path = authorized_keys_path(&config.authorized_keys_file, &user);
+    pubkey_auth_for_account(
+        payload,
+        offset,
+        user_bytes,
+        service_bytes,
+        session_id,
+        config,
+        &user,
+    )
+}
+
+/// The publickey decision for an account whose `/etc/passwd` entry is in hand.
+///
+/// # Why this is its own function
+///
+/// Three steps stand between an account and an answer: work out which file holds
+/// its keys, read that file, decide what the keys in it authorise. Each is
+/// separately tested -- [`authorized_keys_path`], [`fs_read_file`] and
+/// [`decide_pubkey_auth`] all have their own suites, and all three were correct
+/// while the `/home/<username>` bug was live.
+///
+/// The bug was in none of them. It was in the *wiring*: a path built from the
+/// wrong ingredients and handed to a reader that duly reported the file missing.
+/// That is the one class of defect a set of well-tested parts cannot catch, and
+/// it needs a test that runs the three in sequence against a real directory --
+/// which is what this function exists to be callable by. Its caller
+/// [`handle_pubkey_auth`] adds only the `/etc/passwd` lookup.
+///
+/// That lookup is the one step still beyond a test here: [`lookup_passwd`] names
+/// `/etc/passwd` absolutely, so on a machine that is not SlateOS there is no way
+/// to put a fixture where it will look. Keeping it in the caller confines that to
+/// a single line.
+fn pubkey_auth_for_account(
+    payload: &[u8],
+    offset: usize,
+    user_bytes: &[u8],
+    service_bytes: &[u8],
+    session_id: &[u8; 32],
+    config: &SshdConfig,
+    user: &PasswdEntry,
+) -> Result<PubkeyOutcome, SshdError> {
+    let keys_path = authorized_keys_path(&config.authorized_keys_file, user);
     // A file we cannot read authorises no keys, so the error is discarded
     // rather than propagated: the overwhelmingly common cause is that the user
     // has no `authorized_keys` at all, which is not a fault and must not fail
@@ -7224,6 +7277,159 @@ DenyGroups nogroup
             authorized_keys_path(".ssh/authorized_keys", &account("nobody", 65534, "/")),
             "/.ssh/authorized_keys"
         );
+    }
+
+    // ---- Where authorized_keys lives: the whole path, through a real directory ----
+    //
+    // The tests above pin the resolver against strings. These four run the three
+    // steps the daemon actually performs -- resolve the path, read that file,
+    // decide what its keys authorise -- in sequence, against a directory on disk.
+    //
+    // That sequence is the only place the bug could have been caught. The resolver
+    // did not exist to be wrong; the reader read what it was told to read; the
+    // decision decided correctly about the text it was given. What was wrong was
+    // the argument passed from the first to the second, and an argument is not
+    // something a unit test of either end can see.
+    //
+    // Each writes its fixture with `std::fs` into a home directory that is
+    // nowhere near `/home/<name>`, which is what makes the old code fail them.
+
+    /// A scratch directory standing in for an account's home, and the account.
+    ///
+    /// The directory is returned alongside because dropping it deletes the tree;
+    /// binding it to `_` rather than `_dir` would delete the fixture before the
+    /// assertion reads it.
+    fn home_for(username: &str) -> (PasswdEntry, ScratchDir) {
+        let dir = ScratchDir::new("sshd_home");
+        let user = account(username, 4242, &dir.dir().to_string_lossy());
+        (user, dir)
+    }
+
+    /// List `a`'s key at `<home>/.ssh/authorized_keys`.
+    ///
+    /// The path is spelled out here rather than obtained from
+    /// [`authorized_keys_path`]. Asking the resolver where to put the fixture
+    /// would make these tests agree with the resolver by construction: point it
+    /// at `/home/<name>` again and the fixture would move there too, and every
+    /// assertion below would still pass with the bug restored.
+    fn list_key_in_home(dir: &ScratchDir, a: &PubkeyAttempt) {
+        fs::create_dir_all(dir.path(".ssh")).expect("create the .ssh directory");
+        fs::write(dir.path(".ssh/authorized_keys"), a.authorized_keys_line())
+            .expect("write authorized_keys");
+    }
+
+    /// The regression test for the whole defect: an account whose home is not
+    /// `/home/<name>` can use publickey authentication.
+    ///
+    /// The old code read `/home/<username>/.ssh/authorized_keys`, which for this
+    /// account is a path that does not exist, so it returned `Rejected` with a
+    /// perfectly good key sitting in the file it should have read.
+    #[test]
+    fn a_key_listed_in_the_accounts_real_home_authenticates_it() {
+        let a = PubkeyAttempt::valid();
+        let (user, dir) = home_for(&String::from_utf8_lossy(&a.user));
+        list_key_in_home(&dir, &a);
+
+        let outcome = pubkey_auth_for_account(
+            &a.request_tail(true),
+            0,
+            &a.user,
+            &a.service,
+            &a.session_id,
+            &SshdConfig::default_config(),
+            &user,
+        )
+        .expect("a well-formed request is not a protocol error");
+        assert!(
+            matches!(outcome, PubkeyOutcome::Accepted),
+            "the key is listed in this account's own authorized_keys and the \
+             signature is genuine; a rejection here means the daemon read some \
+             other file"
+        );
+    }
+
+    /// The second half of the same bug: an absolute `AuthorizedKeysFile` is the
+    /// way an administrator moves authority out of user-writable space, and the
+    /// old code appended it to a home directory instead of using it.
+    #[test]
+    fn an_absolute_authorized_keys_file_is_read_where_the_administrator_put_it() {
+        let a = PubkeyAttempt::valid();
+        let username = String::from_utf8_lossy(&a.user).into_owned();
+
+        // `<somewhere>/%u`, so the test also pins that the token expands inside an
+        // absolute pattern rather than only inside a relative one.
+        let keys_dir = ScratchDir::new("sshd_keys");
+        fs::write(keys_dir.path(&username), a.authorized_keys_line()).expect("write the key file");
+        let config = SshdConfig {
+            authorized_keys_file: format!("{}/%u", keys_dir.dir().to_string_lossy()),
+            ..SshdConfig::default_config()
+        };
+
+        // The account's home is a different directory, and is left empty: the only
+        // copy of this key is the one the absolute pattern names, so an
+        // implementation that appends the pattern to the home directory -- which
+        // is what the old one did -- finds nothing.
+        let (user, _home) = home_for(&username);
+
+        let outcome = pubkey_auth_for_account(
+            &a.request_tail(true),
+            0,
+            &a.user,
+            &a.service,
+            &a.session_id,
+            &config,
+            &user,
+        )
+        .expect("a well-formed request is not a protocol error");
+        assert!(matches!(outcome, PubkeyOutcome::Accepted));
+    }
+
+    /// A key listed for one account must not admit another. This is what pins the
+    /// resolution to the *account's* home rather than to any home: both accounts
+    /// use the same pattern and the same key, and only the one whose directory
+    /// holds the file gets in.
+    #[test]
+    fn a_key_listed_in_another_accounts_home_does_not_authenticate_this_one() {
+        let a = PubkeyAttempt::valid();
+        let username = String::from_utf8_lossy(&a.user).into_owned();
+        let (_listed, listed_dir) = home_for(&username);
+        list_key_in_home(&listed_dir, &a);
+
+        // Same name, same key, same pattern -- a different home directory.
+        let (unlisted, _dir) = home_for(&username);
+
+        let outcome = pubkey_auth_for_account(
+            &a.request_tail(true),
+            0,
+            &a.user,
+            &a.service,
+            &a.session_id,
+            &SshdConfig::default_config(),
+            &unlisted,
+        )
+        .expect("a well-formed request is not a protocol error");
+        assert!(matches!(outcome, PubkeyOutcome::Rejected));
+    }
+
+    /// Having no `authorized_keys` at all is the ordinary state of most accounts,
+    /// not a fault: it must reject the method and leave the connection alive for
+    /// the client to try a password, rather than raise an error that drops it.
+    #[test]
+    fn an_account_with_no_authorized_keys_file_rejects_without_erroring() {
+        let a = PubkeyAttempt::valid();
+        let (user, _dir) = home_for(&String::from_utf8_lossy(&a.user));
+
+        let outcome = pubkey_auth_for_account(
+            &a.request_tail(true),
+            0,
+            &a.user,
+            &a.service,
+            &a.session_id,
+            &SshdConfig::default_config(),
+            &user,
+        )
+        .expect("a missing authorized_keys is not a protocol error");
+        assert!(matches!(outcome, PubkeyOutcome::Rejected));
     }
 
     // ---- Channel message handling ----

@@ -119939,3 +119939,106 @@ the only thing standing between a silent gap and a person noticing — so it mus
 state what is no longer being checked, never what still is. A degradation
 message that lists the surviving checks reads as reassurance and buries the gap
 it was written to expose.
+
+## TD-B-SSH-REPORTS-A-PASSPHRASE-PROTECTED-KEY-AS-A-DAMAGED-FILE (lane B)
+
+**In short:** A private key file can be *encrypted with a passphrase*, so that
+stealing the file is not enough to steal the key — the thief also needs the
+words. Neither `ssh` nor `sshd` nor `ssh-keygen` in this tree can read one, and
+none of them says so. `ssh -i ~/.ssh/id_ed25519 host` on a passphrase-protected
+key — which is what a user who copied a key over from a real machine will have —
+reports the file as unusable, which reads as "your key is corrupt". The user's
+key is fine; this client cannot open it.
+
+**Where it lives:** `sshwire::decode_openssh_private_key`
+(`userspace/sshwire/src/lib.rs`) reads the `openssh-key-v1` container's cipher
+name and refuses anything that is not `none`. `userspace/ssh/src/lib.rs`
+`load_identity_from` turns that refusal into an error naming the file, per
+design-decisions.md §778; `sshd::HostKey::from_openssh_text` and `ssh-keygen`
+do the equivalent.
+
+**Reproduce:** take any key written by real `ssh-keygen -t ed25519` with a
+non-empty passphrase (its container names `aes256-ctr` and `bcrypt`), and hand
+it to `ssh -i`. The message describes the container, not the passphrase.
+
+**Two defects, and only the second is large:**
+
+1. *The message is wrong.* An encrypted container is a recognisable thing — its
+   cipher-name field says `aes256-ctr` where an unencrypted one says `none` —
+   so the decoder can distinguish "this key is locked" from "this file is
+   damaged" without implementing anything. Saying so is a small change and
+   should happen regardless of when (2) does.
+2. *The feature is missing.* Reading one needs bcrypt-pbkdf (a deliberately slow
+   key-derivation function) and AES-256-CTR over the private section. The
+   AES is already in `sshwire`; bcrypt-pbkdf is not, and is the real work.
+   `ssh-keygen -p` (change a passphrase) and writing an encrypted key are the
+   same machinery in reverse.
+
+**Why this matters beyond convenience:** the current arrangement quietly
+pressures users toward *unencrypted* private keys, because those are the only
+ones that work. That is a security regression dressed as a missing feature — the
+file on disk is the whole secret.
+
+**The proper fix:** implement (1) now as a distinct `PrivateKeyError::Encrypted`
+variant carrying the cipher name, and (2) as `bcrypt-pbkdf` in a shared crate
+with `sshwire` decrypting the private section, plus a passphrase prompt in `ssh`
+and `ssh-keygen` and a `-P` flag for scripts. Both halves belong in `sshwire`,
+not in the three binaries, for the reason the whole crate exists: a
+key file one program can open and another cannot is precisely the class of bug
+this stack has produced fourteen times.
+
+**Until then:** design-decisions.md §778's rule — an explicit `-i` that cannot
+be used stops the client — is right for a damaged file and wrong for a locked
+one, which should prompt. Revisit that rule when (2) lands.
+
+## TD-B-NO-SSH-TOOL-CAN-READ-A-PASSPHRASE-PROTECTED-PRIVATE-KEY (lane B)
+
+**In short:** A private key file can be *encrypted with a passphrase*, so that
+stealing the file is not enough to steal the key — the thief also needs the
+words. Real `ssh-keygen` offers to do this every time it makes a key, so a user
+arriving from any other machine is likely to have one. No tool in this tree can
+read one. The diagnosis is already good — `key is encrypted with aes256-ctr;
+there is no passphrase prompt here, re-create it with an empty passphrase` — so
+this is a missing feature, not a misleading error. It is filed anyway because
+of what the missing feature *pushes users to do*.
+
+**Where it lives:** `sshwire::decode_openssh_private_key`
+(`userspace/sshwire/src/lib.rs`) reads the `openssh-key-v1` container's
+`ciphername` field and returns `PrivateKeyError::Encrypted { cipher }` for
+anything but `none`. All three callers surface it verbatim:
+`userspace/ssh/src/lib.rs` `load_identity_from`,
+`sshd::HostKey::from_openssh_text`, and `ssh-keygen`.
+
+**Reproduce:** take any key written by real `ssh-keygen -t ed25519` with a
+non-empty passphrase (its container names `aes256-ctr` and `bcrypt`) and hand it
+to `ssh -i`.
+
+**Why this is more than an inconvenience:** the advice the message gives —
+"re-create it with an empty passphrase" — is the only thing a user can do, and
+it is the *less safe* configuration. So the gap does not merely block a feature;
+it steadily converts protected keys into unprotected ones, on the disks of the
+users who cared enough to set a passphrase in the first place. The file on disk
+is the whole secret.
+
+**What it would take:** `bcrypt-pbkdf` (a deliberately slow key-derivation
+function, Blowfish-based) to turn the passphrase into a key, then AES-256-CTR
+over the private section. The AES is already in `sshwire`; `bcrypt-pbkdf` is the
+real work and exists nowhere in this tree. Writing an encrypted key, and
+`ssh-keygen -p` to change a passphrase, are the same machinery in reverse.
+
+**The proper fix:** `bcrypt-pbkdf` and the private-section decryption go in
+`sshwire`, not in the three binaries — for the reason that crate exists: a key
+file one program can open and another cannot is exactly the class of defect this
+stack has produced fourteen times. On top of that, a passphrase prompt in `ssh`
+and `ssh-keygen`, and a way to supply one non-interactively for scripts.
+
+`sshd` is the exception and must stay one: it is started by init with no
+terminal to prompt on, so an encrypted *host* key has to remain an error there
+however this is implemented. That asymmetry is the reason the decoder reports
+the fact and each caller decides what it means, rather than prompting itself.
+
+**Interaction with design-decisions.md §778:** that rule makes an explicit `-i`
+naming an unusable key a hard error rather than a silent fall back to a password
+prompt. For an encrypted key that is currently right — there is no passphrase
+prompt to offer — but it stops being right the moment there is one. Revisit §778
+together with this entry.

@@ -388,34 +388,16 @@ const SSH_VERSION_STRING: &str = "SSH-2.0-SlateOS_1.0";
 /// this buffer until the client dies — before it has authenticated anything.
 const MAX_GREETING_LINE: usize = 1024;
 
-/// SSH message type codes (RFC 4253 / 4252 / 4254).
-mod msg {
-    pub const SSH_MSG_DISCONNECT: u8 = 1;
-    pub const SSH_MSG_IGNORE: u8 = 2;
-    pub const SSH_MSG_UNIMPLEMENTED: u8 = 3;
-    pub const SSH_MSG_DEBUG: u8 = 4;
-    pub const SSH_MSG_SERVICE_REQUEST: u8 = 5;
-    pub const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
-    pub const SSH_MSG_KEXINIT: u8 = 20;
-    pub const SSH_MSG_NEWKEYS: u8 = 21;
-    pub const SSH_MSG_KEX_DH_INIT: u8 = 30;
-    pub const SSH_MSG_KEX_DH_REPLY: u8 = 31;
-    pub const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
-    pub const SSH_MSG_USERAUTH_FAILURE: u8 = 51;
-    pub const SSH_MSG_USERAUTH_SUCCESS: u8 = 52;
-    pub const SSH_MSG_USERAUTH_BANNER: u8 = 53;
-    pub const SSH_MSG_CHANNEL_OPEN: u8 = 90;
-    pub const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
-    pub const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
-    pub const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
-    pub const SSH_MSG_CHANNEL_DATA: u8 = 94;
-    pub const SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95;
-    pub const SSH_MSG_CHANNEL_EOF: u8 = 96;
-    pub const SSH_MSG_CHANNEL_CLOSE: u8 = 97;
-    pub const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
-    pub const SSH_MSG_CHANNEL_SUCCESS: u8 = 99;
-    pub const SSH_MSG_CHANNEL_FAILURE: u8 = 100;
-}
+/// SSH message type codes, from `sshwire`.
+///
+/// This module used to define all twenty-five of them itself, alongside an
+/// identical twenty-five in `sshd`. The two copies agreed, but nothing made
+/// them agree: a number this end writes is a number the other end switches on,
+/// so a table that drifts by one entry produces a client and a server that
+/// cannot talk while both suites — each sending and receiving through its own
+/// copy — stay green. `sshwire::msg` is the single table; the alias keeps the
+/// `msg::` spelling every call site here already uses.
+use sshwire::msg;
 
 // ============================================================================
 // SSH-2 packet framing

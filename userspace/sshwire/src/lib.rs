@@ -1243,6 +1243,79 @@ fn increment_counter(counter: &mut [u8; 16]) {
 }
 
 // ============================================================================
+// Message type codes (RFC 4253 §12, RFC 4252 §6, RFC 4254 §9)
+// ============================================================================
+
+/// The number that begins every payload, naming what the payload is.
+///
+/// These are the most obviously two-sided values in the protocol: the sender
+/// writes one and the receiver switches on it, so a table that differs by a
+/// single entry produces a client and a server that cannot talk — while each
+/// one's tests, which send and receive using the same table, pass.
+///
+/// This table was written twice, once in `ssh` and once in `sshd`, and the two
+/// copies did agree; that is luck rather than a property of the arrangement,
+/// and it is the same luck the exchange hash did not have. See
+/// `known-issues.md`
+/// `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
+///
+/// The table is the union of what the two binaries used, so a constant here may
+/// have no caller in one of them — that is the point. A number one end has not
+/// needed yet still has exactly one correct value, and the next end to need it
+/// should find it rather than transcribe it from the RFC a second time.
+///
+/// The `KEX_DH` names keep this project's spelling; RFC 4253 §8 writes them
+/// `SSH_MSG_KEXDH_INIT` and `SSH_MSG_KEXDH_REPLY`.
+pub mod msg {
+    // RFC 4253 §12 — transport layer, generic.
+    pub const SSH_MSG_DISCONNECT: u8 = 1;
+    pub const SSH_MSG_IGNORE: u8 = 2;
+    pub const SSH_MSG_UNIMPLEMENTED: u8 = 3;
+    pub const SSH_MSG_DEBUG: u8 = 4;
+    pub const SSH_MSG_SERVICE_REQUEST: u8 = 5;
+    pub const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
+
+    // RFC 4253 §12 — algorithm negotiation.
+    pub const SSH_MSG_KEXINIT: u8 = 20;
+    pub const SSH_MSG_NEWKEYS: u8 = 21;
+
+    // RFC 4253 §8 — Diffie-Hellman key exchange. 30..=49 are reserved for the
+    // *negotiated* method, so these two numbers mean something else entirely
+    // under a different kex algorithm.
+    pub const SSH_MSG_KEX_DH_INIT: u8 = 30;
+    pub const SSH_MSG_KEX_DH_REPLY: u8 = 31;
+
+    // RFC 4252 §6 — user authentication, generic.
+    pub const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
+    pub const SSH_MSG_USERAUTH_FAILURE: u8 = 51;
+    pub const SSH_MSG_USERAUTH_SUCCESS: u8 = 52;
+    pub const SSH_MSG_USERAUTH_BANNER: u8 = 53;
+
+    /// RFC 4252 §7 — method-specific, and 60..=79 are reserved for whichever
+    /// method is in progress, so this number is `publickey`'s only while a
+    /// `publickey` request is outstanding.
+    pub const SSH_MSG_USERAUTH_PK_OK: u8 = 60;
+
+    // RFC 4254 §9 — connection layer, global requests.
+    pub const SSH_MSG_GLOBAL_REQUEST: u8 = 80;
+    pub const SSH_MSG_REQUEST_SUCCESS: u8 = 81;
+    pub const SSH_MSG_REQUEST_FAILURE: u8 = 82;
+
+    // RFC 4254 §9 — connection layer, channels.
+    pub const SSH_MSG_CHANNEL_OPEN: u8 = 90;
+    pub const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
+    pub const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
+    pub const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
+    pub const SSH_MSG_CHANNEL_DATA: u8 = 94;
+    pub const SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95;
+    pub const SSH_MSG_CHANNEL_EOF: u8 = 96;
+    pub const SSH_MSG_CHANNEL_CLOSE: u8 = 97;
+    pub const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
+    pub const SSH_MSG_CHANNEL_SUCCESS: u8 = 99;
+    pub const SSH_MSG_CHANNEL_FAILURE: u8 = 100;
+}
+
+// ============================================================================
 // The binary packet protocol (RFC 4253 §6)
 // ============================================================================
 
@@ -3529,6 +3602,118 @@ mod tests {
         assert_eq!(shown, "Aes128Ctr { .. }");
         assert!(!shown.contains("ab"));
         assert!(!shown.contains("cd"));
+    }
+
+    // ---- Message type codes ----
+
+    /// Every entry in [`msg`], as `(name, value)`.
+    ///
+    /// Written out once so the two tests below can walk the table. Keeping it
+    /// beside them rather than deriving it from the module is deliberate: a
+    /// macro that generated both the constants and this list would make the
+    /// list agree with the constants by construction, which is the shape of
+    /// self-agreement this whole crate exists to avoid.
+    const ALL_MESSAGE_CODES: &[(&str, u8)] = &[
+        ("SSH_MSG_DISCONNECT", msg::SSH_MSG_DISCONNECT),
+        ("SSH_MSG_IGNORE", msg::SSH_MSG_IGNORE),
+        ("SSH_MSG_UNIMPLEMENTED", msg::SSH_MSG_UNIMPLEMENTED),
+        ("SSH_MSG_DEBUG", msg::SSH_MSG_DEBUG),
+        ("SSH_MSG_SERVICE_REQUEST", msg::SSH_MSG_SERVICE_REQUEST),
+        ("SSH_MSG_SERVICE_ACCEPT", msg::SSH_MSG_SERVICE_ACCEPT),
+        ("SSH_MSG_KEXINIT", msg::SSH_MSG_KEXINIT),
+        ("SSH_MSG_NEWKEYS", msg::SSH_MSG_NEWKEYS),
+        ("SSH_MSG_KEX_DH_INIT", msg::SSH_MSG_KEX_DH_INIT),
+        ("SSH_MSG_KEX_DH_REPLY", msg::SSH_MSG_KEX_DH_REPLY),
+        ("SSH_MSG_USERAUTH_REQUEST", msg::SSH_MSG_USERAUTH_REQUEST),
+        ("SSH_MSG_USERAUTH_FAILURE", msg::SSH_MSG_USERAUTH_FAILURE),
+        ("SSH_MSG_USERAUTH_SUCCESS", msg::SSH_MSG_USERAUTH_SUCCESS),
+        ("SSH_MSG_USERAUTH_BANNER", msg::SSH_MSG_USERAUTH_BANNER),
+        ("SSH_MSG_USERAUTH_PK_OK", msg::SSH_MSG_USERAUTH_PK_OK),
+        ("SSH_MSG_GLOBAL_REQUEST", msg::SSH_MSG_GLOBAL_REQUEST),
+        ("SSH_MSG_REQUEST_SUCCESS", msg::SSH_MSG_REQUEST_SUCCESS),
+        ("SSH_MSG_REQUEST_FAILURE", msg::SSH_MSG_REQUEST_FAILURE),
+        ("SSH_MSG_CHANNEL_OPEN", msg::SSH_MSG_CHANNEL_OPEN),
+        (
+            "SSH_MSG_CHANNEL_OPEN_CONFIRMATION",
+            msg::SSH_MSG_CHANNEL_OPEN_CONFIRMATION,
+        ),
+        (
+            "SSH_MSG_CHANNEL_OPEN_FAILURE",
+            msg::SSH_MSG_CHANNEL_OPEN_FAILURE,
+        ),
+        (
+            "SSH_MSG_CHANNEL_WINDOW_ADJUST",
+            msg::SSH_MSG_CHANNEL_WINDOW_ADJUST,
+        ),
+        ("SSH_MSG_CHANNEL_DATA", msg::SSH_MSG_CHANNEL_DATA),
+        (
+            "SSH_MSG_CHANNEL_EXTENDED_DATA",
+            msg::SSH_MSG_CHANNEL_EXTENDED_DATA,
+        ),
+        ("SSH_MSG_CHANNEL_EOF", msg::SSH_MSG_CHANNEL_EOF),
+        ("SSH_MSG_CHANNEL_CLOSE", msg::SSH_MSG_CHANNEL_CLOSE),
+        ("SSH_MSG_CHANNEL_REQUEST", msg::SSH_MSG_CHANNEL_REQUEST),
+        ("SSH_MSG_CHANNEL_SUCCESS", msg::SSH_MSG_CHANNEL_SUCCESS),
+        ("SSH_MSG_CHANNEL_FAILURE", msg::SSH_MSG_CHANNEL_FAILURE),
+    ];
+
+    /// No two message codes share a number.
+    ///
+    /// The failure this catches is a copy-paste: a constant added by duplicating
+    /// its neighbour and renaming it without changing the value. Nothing else
+    /// would notice. Both constants would compile, both would be dispatched on,
+    /// and the receiver would route one message type to the other's handler —
+    /// which looks, from either end, like a peer that sends the wrong thing.
+    #[test]
+    fn no_two_message_codes_collide() {
+        for (i, &(name_a, value_a)) in ALL_MESSAGE_CODES.iter().enumerate() {
+            for &(name_b, value_b) in ALL_MESSAGE_CODES.iter().skip(i + 1) {
+                assert_ne!(
+                    value_a, value_b,
+                    "{name_a} and {name_b} are both {value_a}; \
+                     one message number cannot mean two things"
+                );
+            }
+        }
+    }
+
+    /// Every code sits in the range its RFC reserves for that layer.
+    ///
+    /// RFC 4250 §4.1.2 partitions the byte, and the partition is what makes the
+    /// numbers extensible: 30..=49 belong to whichever key exchange method was
+    /// negotiated, and 60..=79 to whichever authentication method is in
+    /// progress, so the *same* byte means different things at different points
+    /// in one connection. A constant in the wrong band is therefore not a
+    /// cosmetic mistake — it claims a number that some other feature owns.
+    ///
+    /// This is the check that consults something outside the table. Asserting
+    /// `SSH_MSG_CHANNEL_DATA == 94` beside `SSH_MSG_CHANNEL_DATA: u8 = 94`
+    /// would only restate the definition; the bands come from the registry.
+    #[test]
+    fn every_message_code_is_in_the_band_rfc_4250_reserves_for_it() {
+        for &(name, value) in ALL_MESSAGE_CODES {
+            let band = match name {
+                n if n.starts_with("SSH_MSG_KEX_DH_") => (30, 49),
+                n if n.starts_with("SSH_MSG_USERAUTH_PK") => (60, 79),
+                n if n.starts_with("SSH_MSG_USERAUTH_") => (50, 59),
+                n if n.starts_with("SSH_MSG_CHANNEL_")
+                    || n.starts_with("SSH_MSG_GLOBAL_")
+                    || n.starts_with("SSH_MSG_REQUEST_") =>
+                {
+                    (80, 127)
+                }
+                // Everything else is transport: 1..=19 generic, 20..=29
+                // negotiation. One band, since both are the transport layer's.
+                _ => (1, 29),
+            };
+            assert!(
+                value >= band.0 && value <= band.1,
+                "{name} is {value}, outside the {}..={} band RFC 4250 §4.1.2 \
+                 reserves for its layer",
+                band.0,
+                band.1
+            );
+        }
     }
 
     // ---- The binary packet protocol (RFC 4253 §6) ----

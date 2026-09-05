@@ -1437,41 +1437,21 @@ impl From<TransportError> for SshdError {
 /// Our server version identification string.
 const SSH_SERVER_VERSION: &str = "SSH-2.0-SlateOS_SSHD_1.0";
 
-/// SSH message type codes (RFC 4253 / 4252 / 4254).
-mod msg {
-    pub const SSH_MSG_DISCONNECT: u8 = 1;
-    pub const SSH_MSG_IGNORE: u8 = 2;
-    pub const SSH_MSG_UNIMPLEMENTED: u8 = 3;
-    pub const SSH_MSG_DEBUG: u8 = 4;
-    pub const SSH_MSG_SERVICE_REQUEST: u8 = 5;
-    pub const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
-    pub const SSH_MSG_KEXINIT: u8 = 20;
-    pub const SSH_MSG_NEWKEYS: u8 = 21;
-    #[allow(dead_code)]
-    pub const SSH_MSG_KEX_DH_INIT: u8 = 30;
-    pub const SSH_MSG_KEX_DH_REPLY: u8 = 31;
-    pub const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
-    pub const SSH_MSG_USERAUTH_FAILURE: u8 = 51;
-    pub const SSH_MSG_USERAUTH_SUCCESS: u8 = 52;
-    pub const SSH_MSG_USERAUTH_BANNER: u8 = 53;
-    #[allow(dead_code)]
-    pub const SSH_MSG_USERAUTH_PK_OK: u8 = 60;
-    pub const SSH_MSG_GLOBAL_REQUEST: u8 = 80;
-    #[allow(dead_code)]
-    pub const SSH_MSG_REQUEST_SUCCESS: u8 = 81;
-    pub const SSH_MSG_REQUEST_FAILURE: u8 = 82;
-    pub const SSH_MSG_CHANNEL_OPEN: u8 = 90;
-    pub const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
-    pub const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
-    pub const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
-    pub const SSH_MSG_CHANNEL_DATA: u8 = 94;
-    pub const SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95;
-    pub const SSH_MSG_CHANNEL_EOF: u8 = 96;
-    pub const SSH_MSG_CHANNEL_CLOSE: u8 = 97;
-    pub const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
-    pub const SSH_MSG_CHANNEL_SUCCESS: u8 = 99;
-    pub const SSH_MSG_CHANNEL_FAILURE: u8 = 100;
-}
+/// SSH message type codes, from `sshwire`.
+///
+/// This module used to define all of them itself, alongside a near-identical
+/// table in `ssh`. The two copies agreed, but nothing made them agree: a number
+/// this end switches on is a number the other end writes, so a table that
+/// drifts by one entry produces a client and a server that cannot talk while
+/// both suites — each sending and receiving through its own copy — stay green.
+/// `sshwire::msg` is the single table; the alias keeps the `msg::` spelling
+/// every call site here already uses.
+///
+/// The `#[allow(dead_code)]` attributes that stood on the codes this binary does
+/// not send went with the copy. In the shared table a constant with no caller
+/// *here* still has one in `ssh`, or will have — that a number is unused by one
+/// of the two programs is not a defect worth silencing per-constant.
+use sshwire::msg;
 
 // ============================================================================
 // SSH-2 packet framing

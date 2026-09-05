@@ -110,8 +110,9 @@ use std::process;
 // shared by both ends is the point, and `sshd/Cargo.toml` for what a second copy
 // cost the last time.
 use sshwire::{
-    BigUint, ExchangeHashInput, PacketCodec, Role, compute_exchange_hash, encode_mpint, read_bool,
-    read_mpint, read_ssh_string, read_u32, ssh_string,
+    BigUint, ExchangeHashInput, PacketCodec, Role, StreamBuffer, Transport, TransportError,
+    compute_exchange_hash, encode_mpint, read_bool, read_mpint, read_ssh_string, read_u32,
+    ssh_string,
 };
 
 // ============================================================================
@@ -411,75 +412,115 @@ fn tcp_bind(port: u16) -> Result<u64, SshdError> {
     Ok(ret as u64)
 }
 
-/// Accept an incoming connection on a listener (blocking).
-/// Returns a connection handle.
-fn tcp_accept(listener: u64) -> Result<u64, SshdError> {
-    // SAFETY: listener is a valid listener handle from tcp_bind.
-    let ret = unsafe { syscall1(SYS_TCP_ACCEPT, listener) };
-    if ret < 0 {
-        return Err(SshdError::NetworkError(format!("tcp_accept failed: {ret}")));
-    }
-    Ok(ret as u64)
+/// A TCP connection, as [`sshwire::Transport`] sees it.
+///
+/// This — and its counterpart in `ssh` — is the only place in either program
+/// that knows the protocol runs over TCP. Everything above it takes a
+/// `&mut dyn Transport`, which is what makes the two ends drivable against each
+/// other in a test rather than only against a kernel.
+struct TcpTransport {
+    handle: u64,
 }
 
-/// Send data on a TCP connection. Returns number of bytes sent.
-fn tcp_send(handle: u64, data: &[u8]) -> Result<usize, SshdError> {
-    // SAFETY: We pass a valid handle and a pointer to a byte buffer with its
-    // correct length.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_SEND,
-            handle,
-            data.as_ptr() as u64,
-            data.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(SshdError::NetworkError("tcp_send failed".into()));
-    }
-    Ok(ret as usize)
-}
-
-/// Send all bytes, looping until the entire buffer is transmitted.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
-fn tcp_send_all(handle: u64, data: &[u8]) -> Result<(), SshdError> {
-    let mut offset = 0;
-    while offset < data.len() {
-        let n = tcp_send(handle, &data[offset..])?;
-        if n == 0 {
-            return Err(SshdError::NetworkError("tcp_send returned 0".into()));
+impl TcpTransport {
+    /// Accept an incoming connection on a listener (blocking).
+    fn accept(listener: u64) -> Result<Self, SshdError> {
+        // SAFETY: listener is a valid listener handle from tcp_bind.
+        let ret = unsafe { syscall1(SYS_TCP_ACCEPT, listener) };
+        if ret < 0 {
+            return Err(SshdError::NetworkError(format!("tcp_accept failed: {ret}")));
         }
-        offset = offset
-            .checked_add(n)
-            .ok_or_else(|| SshdError::NetworkError("offset overflow".into()))?;
+        Ok(Self { handle: ret as u64 })
     }
-    Ok(())
+
+    /// The peer address as (`ip_u32_network_order`, port).
+    ///
+    /// Not on the trait: an in-memory stream has no address, and inventing one
+    /// so the signature fits would put a fiction in the log the daemon writes
+    /// about who connected.
+    fn peer_addr(&self) -> Result<(u32, u16), SshdError> {
+        let mut buf = [0u8; 6];
+        // SAFETY: handle is valid. buf is a stack-allocated 6-byte buffer.
+        let ret = unsafe { syscall3(SYS_TCP_PEER_ADDR, self.handle, buf.as_mut_ptr() as u64, 0) };
+        if ret < 0 {
+            return Err(SshdError::NetworkError("tcp_peer_addr failed".into()));
+        }
+        let ip = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let port = u16::from_be_bytes([buf[4], buf[5]]);
+        Ok((ip, port))
+    }
 }
 
-/// Receive data from a TCP connection. Returns 0 when peer has closed.
-fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<usize, SshdError> {
-    // SAFETY: We pass a valid handle and a mutable buffer pointer with length.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_RECV,
-            handle,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(SshdError::NetworkError("tcp_recv failed".into()));
+impl Transport for TcpTransport {
+    fn send(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+        // SAFETY: We pass a valid handle and a pointer to a byte buffer with
+        // its correct length.
+        let ret = unsafe {
+            syscall3(
+                SYS_TCP_SEND,
+                self.handle,
+                data.as_ptr() as u64,
+                data.len() as u64,
+            )
+        };
+        if ret < 0 {
+            return Err(TransportError::Send);
+        }
+        usize::try_from(ret).map_err(|_| TransportError::Send)
     }
-    Ok(ret as usize)
-}
 
-/// Close a TCP connection handle.
-fn tcp_close(handle: u64) {
-    // SAFETY: handle is (or was) a valid TCP connection handle.
-    let _ = unsafe { syscall1(SYS_TCP_CLOSE, handle) };
+    fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<&'b [u8], TransportError> {
+        // SAFETY: We pass a valid handle and a mutable buffer pointer with its
+        // correct length. The kernel writes at most `buf.len()` bytes into it.
+        let ret = unsafe {
+            syscall3(
+                SYS_TCP_RECV,
+                self.handle,
+                buf.as_mut_ptr() as u64,
+                buf.len() as u64,
+            )
+        };
+        if ret < 0 {
+            return Err(TransportError::Recv);
+        }
+        // The kernel's number becomes a range in exactly one place: here, where
+        // a count that does not fit the buffer we handed over is refused. It
+        // used to become one in `StreamBuffer::fill_once` as `&tmp[..n]`, under
+        // this crate's blanket panic-lint suppression.
+        let received = usize::try_from(ret).map_err(|_| TransportError::Recv)?;
+        buf.get(..received).ok_or(TransportError::Recv)
+    }
+
+    /// Whether a `recv` would return now.
+    ///
+    /// `SYS_TCP_POLL_STATUS` answers with the Linux `poll` bitmask — `POLLIN`
+    /// (0x01) when the receive buffer is non-empty, `POLLERR` (0x08) and
+    /// `POLLHUP` (0x10) when the connection has failed or the peer has gone.
+    /// All three mean the same thing to this daemon: a `recv` will return
+    /// *now*, with either bytes or the truth about the connection.
+    ///
+    /// A negative return is deliberately reported as "readable". It happens on
+    /// a handle the kernel no longer knows, and on the development host, where
+    /// the syscall stub answers `-ENOSYS`. Treating it as ready makes the
+    /// caller perform the real `recv` and act on whatever *that* says, which is
+    /// both the honest answer and — on the host — exactly the blocking
+    /// behaviour the daemon had before readiness polling existed. Reporting
+    /// "not ready" instead would turn an unknown handle into a silent,
+    /// permanent sleep.
+    fn readable(&self) -> bool {
+        // SAFETY: `handle` is a TCP connection handle owned by this process;
+        // the syscall takes it by value and writes no memory.
+        let status = unsafe { syscall1(SYS_TCP_POLL_STATUS, self.handle) };
+        if status < 0 {
+            return true;
+        }
+        (status & i64::from(POLLIN | POLLERR | POLLHUP)) != 0
+    }
+
+    fn close(&mut self) {
+        // SAFETY: handle is (or was) a valid TCP connection handle.
+        let _ = unsafe { syscall1(SYS_TCP_CLOSE, self.handle) };
+    }
 }
 
 /// Close a TCP listener handle.
@@ -489,20 +530,6 @@ fn tcp_close(handle: u64) {
 fn tcp_close_listener(listener: u64) {
     // SAFETY: listener is (or was) a valid TCP listener handle.
     let _ = unsafe { syscall1(SYS_TCP_CLOSE_LISTENER, listener) };
-}
-
-/// Get the peer address of a TCP connection.
-/// Returns (`ip_u32_network_order`, port).
-fn tcp_peer_addr(handle: u64) -> Result<(u32, u16), SshdError> {
-    let mut buf = [0u8; 6];
-    // SAFETY: handle is valid. buf is a stack-allocated 6-byte buffer.
-    let ret = unsafe { syscall3(SYS_TCP_PEER_ADDR, handle, buf.as_mut_ptr() as u64, 0) };
-    if ret < 0 {
-        return Err(SshdError::NetworkError("tcp_peer_addr failed".into()));
-    }
-    let ip = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-    let port = u16::from_be_bytes([buf[4], buf[5]]);
-    Ok((ip, port))
 }
 
 /// Spawn a new process. Returns child pid on success.
@@ -526,31 +553,6 @@ fn process_spawn(path: &str) -> Result<u64, SshdError> {
         ))));
     }
     Ok(ret as u64)
-}
-
-/// Report whether the connection has something waiting for `tcp_recv`.
-///
-/// `SYS_TCP_POLL_STATUS` answers with the Linux `poll` bitmask — `POLLIN`
-/// (0x01) when the receive buffer is non-empty, `POLLERR` (0x08) and
-/// `POLLHUP` (0x10) when the connection has failed or the peer has gone. All
-/// three mean the same thing to this daemon: a `tcp_recv` will return *now*,
-/// with either bytes or the truth about the connection.
-///
-/// A negative return is deliberately reported as "readable". It happens on a
-/// handle the kernel no longer knows, and on the development host, where the
-/// syscall stub answers `-ENOSYS`. Treating it as ready makes the caller
-/// perform the real `tcp_recv` and act on whatever *that* says, which is both
-/// the honest answer and — on the host — exactly the blocking behaviour the
-/// daemon had before readiness polling existed. Reporting "not ready" instead
-/// would turn an unknown handle into a silent, permanent sleep.
-fn tcp_readable(handle: u64) -> bool {
-    // SAFETY: `handle` is a TCP connection handle owned by this process; the
-    // syscall takes it by value and writes no memory.
-    let status = unsafe { syscall1(SYS_TCP_POLL_STATUS, handle) };
-    if status < 0 {
-        return true;
-    }
-    (status & i64::from(POLLIN | POLLERR | POLLHUP)) != 0
 }
 
 /// Sleep for the given number of **nanoseconds**.
@@ -1350,6 +1352,15 @@ fn winsize_from_ssh(cols: u32, rows: u32, width_px: u32, height_px: u32) -> Wins
 enum SshdError {
     ConfigError(String),
     NetworkError(String),
+    /// The client hung up.
+    ///
+    /// Its own variant because the session loop has to tell an orderly
+    /// disconnection from a failure, and it was doing so by searching an error
+    /// message for the substring `"connection closed"` — in two places, each
+    /// deciding whether to return `Ok(())` or propagate. Nothing would have
+    /// failed when someone reworded that message; the daemon would simply have
+    /// begun reporting every normal client disconnection as a protocol error.
+    PeerClosed,
     ProtocolError(String),
     AuthError(String),
     IoError(io::Error),
@@ -1362,6 +1373,7 @@ impl fmt::Display for SshdError {
         match self {
             Self::ConfigError(msg) => write!(f, "config error: {msg}"),
             Self::NetworkError(msg) => write!(f, "network error: {msg}"),
+            Self::PeerClosed => write!(f, "connection closed"),
             Self::ProtocolError(msg) => write!(f, "protocol error: {msg}"),
             Self::AuthError(msg) => write!(f, "auth error: {msg}"),
             Self::IoError(e) => write!(f, "I/O error: {e}"),
@@ -1389,6 +1401,18 @@ impl From<io::Error> for SshdError {
 impl From<sshwire::WireError> for SshdError {
     fn from(e: sshwire::WireError) -> Self {
         Self::ProtocolError(e.to_string())
+    }
+}
+
+/// The same for the byte stream underneath: a shared `StreamBuffer` cannot
+/// return `SshdError` either.
+impl From<TransportError> for SshdError {
+    fn from(e: TransportError) -> Self {
+        match e {
+            TransportError::Send => Self::NetworkError("send failed".into()),
+            TransportError::Recv => Self::NetworkError("receive failed".into()),
+            TransportError::Closed => Self::PeerClosed,
+        }
     }
 }
 
@@ -1459,71 +1483,11 @@ mod msg {
 // number an input to the MAC -- advancing it is part of framing a packet, not
 // bookkeeping the caller keeps beside it.
 
-// ============================================================================
-// Stream buffer -- accumulates TCP data for packet parsing
-// ============================================================================
-
-struct StreamBuffer {
-    data: Vec<u8>,
-    pos: usize,
-}
-
-impl StreamBuffer {
-    fn new() -> Self {
-        Self {
-            data: Vec::with_capacity(8192),
-            pos: 0,
-        }
-    }
-
-    /// The unread bytes, which is the whole of what the packet layer needs:
-    /// `PacketCodec::decode` decides for itself whether a whole packet is
-    /// present.
-    fn unread(&self) -> &[u8] {
-        self.data.get(self.pos..).unwrap_or_default()
-    }
-
-    /// Read once from the connection and append whatever arrived.
-    ///
-    /// One read, not a loop: the caller decides what to do when the buffer is
-    /// still short, and a session loop's answer is "go and check whether the
-    /// shell has printed anything" rather than "block until the client types".
-    ///
-    /// A zero-length read is the peer's orderly close and is an error here,
-    /// because every caller is in the middle of wanting more bytes. The message
-    /// is matched on by `handle_channels`, which treats it as a normal end of
-    /// connection rather than a protocol failure.
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-    )]
-    fn fill_once(&mut self, handle: u64) -> Result<(), SshdError> {
-        // Reclaim the consumed prefix before growing. Doing this only past a
-        // threshold keeps a long session from memmoving the tail on every
-        // packet, while still bounding the buffer for one that runs for hours.
-        if self.pos > 4096 {
-            self.data.drain(..self.pos);
-            self.pos = 0;
-        }
-        let mut tmp = [0u8; 8192];
-        let n = tcp_recv(handle, &mut tmp)?;
-        if n == 0 {
-            return Err(SshdError::ProtocolError("connection closed".into()));
-        }
-        self.data.extend_from_slice(&tmp[..n]);
-        Ok(())
-    }
-
-    /// Drop the first `n` unread bytes.
-    ///
-    /// `n` is always a length `PacketCodec::decode` has just reported for a
-    /// packet it took out of `unread()`, never a number this side chose, and
-    /// clamping keeps `pos` a position in `data` rather than a value that
-    /// merely behaves like one.
-    fn advance(&mut self, n: usize) {
-        self.pos = self.pos.saturating_add(n).min(self.data.len());
-    }
-}
+// The stream buffer that used to be here is `sshwire::StreamBuffer`. Both
+// programs had one, with the same two fields and the same four methods, and
+// again they were not equal: this copy's `fill_once` ended `&tmp[..n]`,
+// indexing a length the kernel reported, under the blanket panic-lint
+// suppression that used to sit at the top of this file.
 
 // ============================================================================
 // SSH data encoding helpers
@@ -3102,7 +3066,7 @@ fn parse_pty_request(data: &[u8], offset: usize) -> Result<PtyRequest, SshdError
 
 /// State for a single SSH connection.
 struct ConnectionState {
-    handle: u64,
+    transport: Box<dyn Transport>,
     stream_buf: StreamBuffer,
     config: SshdConfig,
     host_key: HostKey,
@@ -3126,9 +3090,14 @@ struct ConnectionState {
 }
 
 impl ConnectionState {
-    fn new(handle: u64, config: SshdConfig, host_key: HostKey, debug_mode: bool) -> Self {
+    fn new(
+        transport: Box<dyn Transport>,
+        config: SshdConfig,
+        host_key: HostKey,
+        debug_mode: bool,
+    ) -> Self {
         Self {
-            handle,
+            transport,
             stream_buf: StreamBuffer::new(),
             config,
             host_key,
@@ -3160,7 +3129,7 @@ impl ConnectionState {
             SshdError::ProtocolError(format!("cannot generate packet padding: {e}"))
         })?;
         let pkt = self.codec.encode(payload, &padding)?;
-        tcp_send_all(self.handle, &pkt)?;
+        self.transport.send_all(&pkt)?;
         Ok(())
     }
 
@@ -3176,7 +3145,7 @@ impl ConnectionState {
                 self.stream_buf.advance(consumed);
                 return Ok(payload);
             }
-            self.stream_buf.fill_once(self.handle)?;
+            self.stream_buf.fill_once(self.transport.as_mut())?;
         }
     }
 
@@ -3222,13 +3191,13 @@ impl ConnectionState {
 
 /// Handle a single SSH connection.
 fn handle_connection(
-    handle: u64,
+    transport: TcpTransport,
     config: &SshdConfig,
     host_key: &HostKey,
     debug_mode: bool,
     auth: &mut authlib::Authenticator,
 ) {
-    let peer = tcp_peer_addr(handle).map_or_else(
+    let peer = transport.peer_addr().map_or_else(
         |_| "unknown".into(),
         |(ip, port)| format!("{}:{}", format_ip(ip), port),
     );
@@ -3238,7 +3207,7 @@ fn handle_connection(
     }
 
     let hk = HostKey::from_seed(host_key.seed);
-    let mut conn = ConnectionState::new(handle, config.clone(), hk, debug_mode);
+    let mut conn = ConnectionState::new(Box::new(transport), config.clone(), hk, debug_mode);
 
     let result = run_connection(&mut conn, auth);
 
@@ -3248,7 +3217,7 @@ fn handle_connection(
         eprintln!("sshd: connection from {peer} error: {e}");
     }
 
-    tcp_close(handle);
+    conn.transport.close();
 
     if debug_mode {
         eprintln!("sshd: connection from {peer} closed");
@@ -3286,7 +3255,7 @@ fn run_connection(
 fn do_version_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
     // Send our version string.
     let version_line = format!("{SSH_SERVER_VERSION}\r\n");
-    tcp_send_all(conn.handle, version_line.as_bytes())?;
+    conn.transport.send_all(version_line.as_bytes())?;
 
     conn.debug_log("sent version string");
 
@@ -3328,13 +3297,11 @@ fn read_version_line(conn: &mut ConnectionState) -> Result<String, SshdError> {
     let mut line = Vec::new();
     let mut single = [0u8; 1];
     loop {
-        let n = tcp_recv(conn.handle, &mut single)?;
-        if n == 0 {
+        let [byte] = *conn.transport.recv(&mut single)? else {
             return Err(SshdError::ProtocolError(
                 "connection closed during version exchange".into(),
             ));
-        }
-        let [byte] = single;
+        };
         if byte == b'\n' {
             break;
         }
@@ -3996,9 +3963,7 @@ fn handle_channels(conn: &mut ConnectionState) -> Result<(), SshdError> {
         if !conn.channels.iter().any(|ch| ch.child.is_some()) {
             let payload = match conn.recv_packet() {
                 Ok(p) => p,
-                Err(SshdError::ProtocolError(msg)) if msg.contains("connection closed") => {
-                    return Ok(());
-                }
+                Err(SshdError::PeerClosed) => return Ok(()),
                 Err(e) => return Err(e),
             };
             if dispatch_channel_message(conn, &payload)? == Flow::Stop {
@@ -4023,13 +3988,14 @@ fn handle_channels(conn: &mut ConnectionState) -> Result<(), SshdError> {
         // 2. More bytes from the client, but only when there are some: an
         //    unconditional read here would block, and the shell's output would
         //    stop until the user typed.
-        if tcp_readable(conn.handle) {
-            match conn.stream_buf.fill_once(conn.handle) {
+        if conn.transport.readable() {
+            match conn.stream_buf.fill_once(conn.transport.as_mut()) {
                 Ok(()) => worked = true,
-                Err(SshdError::ProtocolError(msg)) if msg.contains("connection closed") => {
-                    return Ok(());
-                }
-                Err(e) => return Err(e),
+                // An orderly hangup is how a session normally ends, not a
+                // fault: the client closed the connection after its last
+                // packet, and there is nothing left to serve.
+                Err(TransportError::Closed) => return Ok(()),
+                Err(e) => return Err(e.into()),
             }
         }
 
@@ -5773,15 +5739,15 @@ fn main() {
 
     // Accept connections.
     loop {
-        let conn_handle = match tcp_accept(listener) {
-            Ok(h) => h,
+        let transport = match TcpTransport::accept(listener) {
+            Ok(t) => t,
             Err(e) => {
                 log_error(&format!("accept error: {e}"), opts.log_stderr);
                 continue;
             }
         };
 
-        handle_connection(conn_handle, &config, &host_key, opts.debug_mode, &mut auth);
+        handle_connection(transport, &config, &host_key, opts.debug_mode, &mut auth);
     }
 }
 
@@ -7298,99 +7264,20 @@ DenyGroups nogroup
 
     // ---- The buffer under the packet layer ----
     //
-    // The framing is `sshwire::PacketCodec`'s and is tested there. What is this
-    // crate's is the plumbing around it: `StreamBuffer` must hand the codec
-    // every unread byte, and must drop exactly the bytes the codec reports
-    // having used. Both halves are what `try_recv_packet` does, and getting
-    // either wrong desynchronises the stream permanently.
-
-    /// Feed a buffer one byte at a time; report when a packet first appears.
-    ///
-    /// This is the session pump's exact shape -- decode what is buffered, read
-    /// once, try again -- with the read replaced by a byte.
-    fn feed_byte_at_a_time(wire: &[u8]) -> (usize, Vec<u8>) {
-        let mut codec = PacketCodec::new();
-        let mut buf = StreamBuffer::new();
-        for (i, byte) in wire.iter().enumerate() {
-            buf.data.push(*byte);
-            match codec.decode(buf.unread()) {
-                Ok(Some((payload, consumed))) => {
-                    buf.advance(consumed);
-                    return (i + 1, payload);
-                }
-                Ok(None) => {}
-                Err(e) => panic!("framing error at byte {i}: {e}"),
-            }
-        }
-        panic!("packet never completed after {} bytes", wire.len());
-    }
+    // These tests moved to `sshwire` along with the type they cover. They read
+    // and wrote `StreamBuffer`'s fields directly, which they could do while the
+    // buffer was this crate's private copy and cannot now that it is shared --
+    // and that is the right outcome rather than an inconvenience: the plumbing
+    // they describe is the same plumbing on both ends, so a test of it that
+    // lives in one binary states the property for only half the connection.
+    // They now drive a real `Transport` (an in-memory pipe) instead of pushing
+    // bytes into a field, which makes them tests of the path the session pump
+    // actually takes.
 
     /// Frame a payload the way `send_packet` does.
     fn framed(codec: &mut PacketCodec, payload: &[u8]) -> Vec<u8> {
         let padding = vec![0u8; codec.padding_len(payload.len())];
         codec.encode(payload, &padding).expect("padding fits")
-    }
-
-    #[test]
-    fn test_a_packet_is_produced_exactly_when_its_last_byte_lands() {
-        let mut codec = PacketCodec::new();
-        let payload = b"hello ssh".to_vec();
-        let wire = framed(&mut codec, &payload);
-
-        let (consumed, parsed) = feed_byte_at_a_time(&wire);
-        assert_eq!(parsed, payload);
-        // Neither early (which would mean parsing a partial packet) nor late.
-        assert_eq!(consumed, wire.len());
-    }
-
-    #[test]
-    fn test_an_empty_buffer_asks_for_more_rather_than_failing() {
-        let mut codec = PacketCodec::new();
-        let buf = StreamBuffer::new();
-        assert!(matches!(codec.decode(buf.unread()), Ok(None)));
-    }
-
-    #[test]
-    fn test_a_declined_partial_packet_is_still_in_the_buffer() {
-        // The bytes a `None` declined are the start of the packet the next call
-        // will parse. Advancing past them would desynchronise the stream.
-        let mut codec = PacketCodec::new();
-        let wire = framed(&mut codec, b"payload");
-        let mut buf = StreamBuffer::new();
-        buf.data.extend_from_slice(&wire[..wire.len() - 1]);
-
-        let mut reader = PacketCodec::new();
-        assert!(matches!(reader.decode(buf.unread()), Ok(None)));
-        assert_eq!(buf.unread().len(), wire.len() - 1);
-
-        buf.data.push(wire[wire.len() - 1]);
-        let (payload, consumed) = reader
-            .decode(buf.unread())
-            .expect("framing")
-            .expect("packet");
-        buf.advance(consumed);
-        assert_eq!(payload, b"payload");
-        assert!(buf.unread().is_empty(), "the packet was not consumed");
-    }
-
-    #[test]
-    fn test_several_packets_from_one_read_are_drained_one_at_a_time() {
-        // A single TCP read can carry several SSH packets. The session pump
-        // drains them all before sleeping, so the buffer must give up each in
-        // turn rather than asking for more bytes after the first.
-        let mut sender = PacketCodec::new();
-        let mut reader = PacketCodec::new();
-        let mut buf = StreamBuffer::new();
-        buf.data.extend_from_slice(&framed(&mut sender, b"first"));
-        buf.data.extend_from_slice(&framed(&mut sender, b"second"));
-
-        let mut drained = Vec::new();
-        while let Some((payload, consumed)) = reader.decode(buf.unread()).expect("framing") {
-            buf.advance(consumed);
-            drained.push(payload);
-        }
-        assert_eq!(drained, vec![b"first".to_vec(), b"second".to_vec()]);
-        assert!(buf.unread().is_empty());
     }
 
     // ---- Login shell argv[0] ----
@@ -7652,19 +7539,31 @@ DenyGroups nogroup
     /// A connection with one channel and the given send window, for the pump
     /// tests below.
     ///
-    /// The socket handle is 0 and is never written to: every case here is one
-    /// where the pump returns without sending, which is deliberate — the send
-    /// paths need a real socket and belong in an integration test, while the
-    /// decision *not* to close a channel is pure logic and belongs here.
+    /// The transport is an in-memory pair whose far end is dropped, so a read
+    /// reports a hangup rather than blocking and a write goes nowhere. Every
+    /// case here is one where the pump returns without sending, which is
+    /// deliberate — the send paths belong in an interop test that runs a real
+    /// client against this server, while the decision *not* to close a channel
+    /// is pure logic and belongs here.
     fn conn_with_channel(remote_window: u32) -> ConnectionState {
+        conn_with_peer(remote_window).0
+    }
+
+    /// The same, but keeping the client end of the transport.
+    ///
+    /// A test that holds the far end can put bytes on the wire the way a client
+    /// would, and the server reads them through the same `fill_once` the session
+    /// pump uses — so what is exercised is the receive path, not a field.
+    fn conn_with_peer(remote_window: u32) -> (ConnectionState, sshwire::MemoryTransport) {
+        let (near, far) = sshwire::memory_pair();
         let mut conn = ConnectionState::new(
-            0,
+            Box::new(near),
             SshdConfig::default_config(),
             HostKey::from_seed([0u8; 32]),
             false,
         );
         conn.channels.push(Channel::new(1, 2, remote_window, 32768));
-        conn
+        (conn, far)
     }
 
     #[test]
@@ -7990,11 +7889,14 @@ DenyGroups nogroup
         // hand. Driven through the real receive path rather than by setting a
         // counter, because the thing being checked is exactly the relationship
         // between that path and this accessor.
-        let mut conn = conn_with_channel(32768);
+        let (mut conn, mut peer) = conn_with_peer(32768);
         let mut client = PacketCodec::new();
         for expected in 0..8u32 {
             let wire = framed(&mut client, b"a packet");
-            conn.stream_buf.data.extend_from_slice(&wire);
+            peer.send_all(&wire).expect("the server end is alive");
+            conn.stream_buf
+                .fill_once(conn.transport.as_mut())
+                .expect("the packet is waiting");
             conn.try_recv_packet()
                 .expect("framing")
                 .expect("a whole packet is buffered");

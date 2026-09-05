@@ -73,9 +73,9 @@ use quoting::quoteaf_os;
 // here: see that crate's module docs for why one definition shared by both ends
 // is the point, and `ssh/Cargo.toml` for what a second copy cost the last time.
 use sshwire::{
-    BigUint, DH_GROUP14_G, ExchangeHashInput, PacketCodec, Role, compute_exchange_hash,
-    dh_group14_prime_bytes, encode_mpint, read_byte, read_mpint, read_ssh_string, read_u32,
-    ssh_string,
+    BigUint, DH_GROUP14_G, ExchangeHashInput, PacketCodec, Role, StreamBuffer, Transport,
+    TransportError, compute_exchange_hash, dh_group14_prime_bytes, encode_mpint, read_byte,
+    read_mpint, read_ssh_string, read_u32, ssh_string,
 };
 use std::env;
 use std::fmt;
@@ -203,83 +203,81 @@ fn dns_resolve(hostname: &str) -> Result<u32, SshError> {
     Ok(result_ip)
 }
 
-/// Open a TCP connection to the given IP (network byte order) and port.
-/// Returns a handle on success.
-fn tcp_connect(ip: u32, port: u16) -> Result<u64, SshError> {
-    // SAFETY: We pass a valid IP and port. The kernel returns a handle (>= 0)
-    // or a negative error code. No pointers are involved.
-    let ret = unsafe { syscall3(SYS_TCP_CONNECT, u64::from(ip), u64::from(port), 0) };
-    if ret < 0 {
-        return Err(SshError::ConnectionFailed(format!(
-            "tcp_connect returned {ret}"
-        )));
-    }
-    Ok(ret as u64)
-}
-
-/// Send data on a TCP connection. Returns the number of bytes actually sent.
-fn tcp_send(handle: u64, data: &[u8]) -> Result<usize, SshError> {
-    // SAFETY: We pass a valid handle and a pointer to a byte buffer with its
-    // correct length. The kernel reads up to `data.len()` bytes from the buffer.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_SEND,
-            handle,
-            data.as_ptr() as u64,
-            data.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(SshError::SendFailed);
-    }
-    Ok(ret as usize)
-}
-
-/// Send all bytes, looping until the entire buffer is transmitted.
-fn tcp_send_all(handle: u64, data: &[u8]) -> Result<(), SshError> {
-    // Walking a shrinking `rest` rather than an offset keeps "how much is left"
-    // and "where that starts" from being two facts that can disagree.
-    let mut rest = data;
-    while !rest.is_empty() {
-        let sent = tcp_send(handle, rest)?;
-        if sent == 0 {
-            return Err(SshError::SendFailed);
-        }
-        rest = rest.get(sent..).ok_or(SshError::SendFailed)?;
-    }
-    Ok(())
-}
-
-/// Receive from a TCP connection, returning the prefix of `buf` the kernel
-/// actually filled. An empty slice means the peer has closed.
+/// A TCP connection, as [`sshwire::Transport`] sees it.
 ///
-/// Handing back the slice rather than a count is deliberate: the kernel's
-/// number is turned into a range in exactly one place, here, where a byte count
-/// that does not fit the buffer we handed over is rejected as `RecvFailed`
-/// rather than travelling into a caller's `buf[..n]` and panicking there.
-fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<&[u8], SshError> {
-    // SAFETY: We pass a valid handle and a mutable buffer pointer with its
-    // correct length. The kernel writes at most `buf.len()` bytes into the buffer.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_RECV,
-            handle,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(SshError::RecvFailed);
-    }
-    let received = usize::try_from(ret).map_err(|_| SshError::RecvFailed)?;
-    buf.get(..received).ok_or(SshError::RecvFailed)
+/// This — and its counterpart in `sshd` — is the only place in either program
+/// that knows the protocol runs over TCP. Everything above it takes a
+/// `&mut dyn Transport`, which is what makes the two ends drivable against each
+/// other in a test rather than only against a kernel.
+struct TcpTransport {
+    handle: u64,
 }
 
-/// Close a TCP connection handle.
-fn tcp_close(handle: u64) {
-    // SAFETY: We pass a valid handle. The kernel deallocates internal state.
-    // Ignoring the return value is safe: the handle becomes invalid regardless.
-    let _ = unsafe { syscall1(SYS_TCP_CLOSE, handle) };
+impl TcpTransport {
+    /// Open a connection to the given IP (network byte order) and port.
+    fn connect(ip: u32, port: u16) -> Result<Self, SshError> {
+        // SAFETY: We pass a valid IP and port. The kernel returns a handle
+        // (>= 0) or a negative error code. No pointers are involved.
+        let ret = unsafe { syscall3(SYS_TCP_CONNECT, u64::from(ip), u64::from(port), 0) };
+        if ret < 0 {
+            return Err(SshError::ConnectionFailed(format!(
+                "tcp_connect returned {ret}"
+            )));
+        }
+        Ok(Self { handle: ret as u64 })
+    }
+}
+
+impl Transport for TcpTransport {
+    fn send(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+        // SAFETY: We pass a valid handle and a pointer to a byte buffer with
+        // its correct length. The kernel reads up to `data.len()` bytes from it.
+        let ret = unsafe {
+            syscall3(
+                SYS_TCP_SEND,
+                self.handle,
+                data.as_ptr() as u64,
+                data.len() as u64,
+            )
+        };
+        if ret < 0 {
+            return Err(TransportError::Send);
+        }
+        usize::try_from(ret).map_err(|_| TransportError::Send)
+    }
+
+    fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<&'b [u8], TransportError> {
+        // SAFETY: We pass a valid handle and a mutable buffer pointer with its
+        // correct length. The kernel writes at most `buf.len()` bytes into it.
+        let ret = unsafe {
+            syscall3(
+                SYS_TCP_RECV,
+                self.handle,
+                buf.as_mut_ptr() as u64,
+                buf.len() as u64,
+            )
+        };
+        if ret < 0 {
+            return Err(TransportError::Recv);
+        }
+        // The kernel's number becomes a range in exactly one place: here, where
+        // a count that does not fit the buffer we handed over is refused rather
+        // than travelling into a caller's `buf[..n]` to panic there.
+        let received = usize::try_from(ret).map_err(|_| TransportError::Recv)?;
+        buf.get(..received).ok_or(TransportError::Recv)
+    }
+
+    fn readable(&self) -> bool {
+        // The client never polls: every read it does is one it is waiting for.
+        true
+    }
+
+    fn close(&mut self) {
+        // SAFETY: We pass a valid handle. The kernel deallocates internal
+        // state. Ignoring the return value is safe: the handle becomes invalid
+        // regardless.
+        let _ = unsafe { syscall1(SYS_TCP_CLOSE, self.handle) };
+    }
 }
 
 // ============================================================================
@@ -333,6 +331,24 @@ impl From<io::Error> for SshError {
 impl From<sshwire::WireError> for SshError {
     fn from(e: sshwire::WireError) -> Self {
         Self::ProtocolError(e.to_string())
+    }
+}
+
+/// The same for the byte stream underneath: a shared `StreamBuffer` cannot
+/// return `SshError` either.
+///
+/// `Closed` becomes a protocol error here because every client read is one it
+/// is waiting for, so a hang-up mid-exchange really is a failure. The server
+/// maps it differently — its session loop has reads it merely hopes will
+/// return — which is exactly why the shared type reports the fact and each end
+/// decides what it means.
+impl From<TransportError> for SshError {
+    fn from(e: TransportError) -> Self {
+        match e {
+            TransportError::Send => Self::SendFailed,
+            TransportError::Recv => Self::RecvFailed,
+            TransportError::Closed => Self::ProtocolError("connection closed".into()),
+        }
     }
 }
 
@@ -410,63 +426,10 @@ mod msg {
 /// have us overrun a limit we had just announced.
 const MAX_CHANNEL_CHUNK: usize = 32768;
 
-// ============================================================================
-// Stream buffer — accumulates TCP data for packet parsing
-// ============================================================================
-
-struct StreamBuffer {
-    data: Vec<u8>,
-    pos: usize,
-}
-
-impl StreamBuffer {
-    fn new() -> Self {
-        Self {
-            data: Vec::with_capacity(8192),
-            pos: 0,
-        }
-    }
-
-    /// The unconsumed bytes.
-    ///
-    /// The whole of what the packet layer needs: `PacketCodec::decode` decides
-    /// for itself whether a packet is there, so the `available() >= n` guards
-    /// that used to precede a separate taking call — and could, at two sites,
-    /// be reached with a different `n` than the one they had checked — have no
-    /// caller left.
-    fn unread(&self) -> &[u8] {
-        self.data.get(self.pos..).unwrap_or_default()
-    }
-
-    /// Read once from TCP and append. Errors if the peer has closed.
-    fn fill_once(&mut self, handle: u64) -> Result<(), SshError> {
-        // Compact if we have consumed a lot, so a long session does not grow
-        // `data` without bound behind an ever-advancing `pos`.
-        if self.pos > 4096 {
-            self.data.drain(..self.pos);
-            self.pos = 0;
-        }
-        let mut tmp = [0u8; 8192];
-        let received = tcp_recv(handle, &mut tmp)?;
-        if received.is_empty() {
-            return Err(SshError::ProtocolError("connection closed".into()));
-        }
-        self.data.extend_from_slice(received);
-        Ok(())
-    }
-
-    /// Drop the first `n` unread bytes.
-    ///
-    /// The only caller is the one that has just been told by
-    /// `PacketCodec::decode` how many bytes the packet it returned occupied, so
-    /// `n` is never a number this side chose. `saturating_add` past the end
-    /// would leave the buffer empty rather than panicking, but `min` keeps
-    /// `pos` a position in `data` rather than a number that merely behaves like
-    /// one.
-    fn advance(&mut self, n: usize) {
-        self.pos = self.pos.saturating_add(n).min(self.data.len());
-    }
-}
+// The stream buffer that used to be here is `sshwire::StreamBuffer`. Both
+// programs had one, with the same two fields and the same four methods, and
+// again they were not equal -- the server's `fill_once` indexed the length
+// the kernel reported, under its blanket panic-lint suppression.
 
 // ============================================================================
 // SSH data encoding helpers
@@ -1072,7 +1035,7 @@ enum RemoteExit {
 }
 
 struct SshSession {
-    handle: u64,
+    transport: Box<dyn Transport>,
     buf: StreamBuffer,
     config: Config,
     server_version: String,
@@ -1089,9 +1052,9 @@ struct SshSession {
 }
 
 impl SshSession {
-    fn new(handle: u64, config: Config) -> Self {
+    fn new(transport: Box<dyn Transport>, config: Config) -> Self {
         Self {
-            handle,
+            transport,
             buf: StreamBuffer::new(),
             config,
             server_version: String::new(),
@@ -1147,8 +1110,13 @@ impl SshSession {
         randrange::fill_secret(&mut padding)
             .map_err(|e| SshError::ProtocolError(format!("cannot generate packet padding: {e}")))?;
         let pkt = self.codec.encode(payload, &padding)?;
-        tcp_send_all(self.handle, &pkt)?;
+        self.transport.send_all(&pkt)?;
         Ok(())
+    }
+
+    /// Release the connection.
+    fn close(&mut self) {
+        self.transport.close();
     }
 
     /// Block until one whole packet has arrived, then return its payload.
@@ -1158,7 +1126,7 @@ impl SshSession {
                 self.buf.advance(consumed);
                 return Ok(payload);
             }
-            self.buf.fill_once(self.handle)?;
+            self.buf.fill_once(self.transport.as_mut())?;
         }
     }
 
@@ -1172,14 +1140,14 @@ impl SshSession {
 
         // Send our version string.
         let version_line = format!("{SSH_VERSION_STRING}\r\n");
-        tcp_send_all(self.handle, version_line.as_bytes())?;
+        self.transport.send_all(version_line.as_bytes())?;
 
         // Read the server's version line. It is accumulated as *bytes*; see
         // `classify_version_line` for why that is not incidental.
         let mut line: Vec<u8> = Vec::new();
         loop {
             let mut buf = [0u8; 1];
-            let [byte] = *tcp_recv(self.handle, &mut buf)? else {
+            let [byte] = *self.transport.recv(&mut buf)? else {
                 return Err(SshError::ProtocolError(
                     "connection closed during version exchange".into(),
                 ));
@@ -1854,7 +1822,7 @@ impl SshSession {
 
         // Otherwise one read, not a loop: the caller has a terminal to service
         // and must not be parked here while the server has nothing to say.
-        self.buf.fill_once(self.handle)?;
+        self.buf.fill_once(self.transport.as_mut())?;
 
         if let Some((payload, consumed)) = self.codec.decode(self.buf.unread())? {
             self.buf.advance(consumed);
@@ -2158,8 +2126,8 @@ fn main() {
     }
 
     // Open TCP connection.
-    let handle = match tcp_connect(ip, config.port) {
-        Ok(h) => h,
+    let transport = match TcpTransport::connect(ip, config.port) {
+        Ok(t) => t,
         Err(e) => {
             eprintln!(
                 "ssh: connect to host {} port {}: {e}",
@@ -2174,7 +2142,7 @@ fn main() {
     }
 
     // Run the SSH session.
-    let mut session = SshSession::new(handle, config);
+    let mut session = SshSession::new(Box::new(transport), config);
     match session.run() {
         Ok(()) => {
             session.send_disconnect(11, "disconnected by user");
@@ -2182,7 +2150,7 @@ fn main() {
         Err(e) => {
             eprintln!("ssh: {e}");
             session.send_disconnect(2, "protocol error");
-            tcp_close(handle);
+            session.close();
             // 255 is `ssh(1)`'s reserved code for "the connection or the
             // client failed", as distinct from any status a remote command
             // could return — the distinction a caller needs in order to tell
@@ -2191,7 +2159,7 @@ fn main() {
         }
     }
 
-    tcp_close(handle);
+    session.close();
 
     // Exit with the remote command's status. Computed after the socket is
     // closed because `process::exit` runs no destructors.
@@ -2231,11 +2199,18 @@ mod tests {
         }
     }
 
-    /// A session with no socket. Every function exercised below either does no
-    /// I/O at all or does it only when `want_reply` is set, which these
-    /// payloads never set.
+    /// A session over an in-memory stream whose peer end is dropped
+    /// immediately, so any I/O reports a closed connection rather than
+    /// reaching a kernel that would refuse it anyway.
+    ///
+    /// This used to be `SshSession::new(0, ...)` — a raw handle 0, valid only
+    /// because nothing exercised below does I/O. That is a precondition no type
+    /// enforced and no reader could see; a transport that is genuinely closed
+    /// is the same guarantee stated where the compiler can keep it.
     fn test_session() -> SshSession {
-        SshSession::new(0, test_config())
+        let (near, far) = sshwire::memory_pair();
+        drop(far);
+        SshSession::new(Box::new(near), test_config())
     }
 
     fn channel_request(req_type: &[u8], want_reply: bool, rest: &[u8]) -> Vec<u8> {

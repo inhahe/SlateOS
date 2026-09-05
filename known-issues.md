@@ -118985,11 +118985,49 @@ the argument for item 4, which is the outstanding work here.
 **Known obstacle to item 4:** both crates' `syscall0/1/3/4` are host stubs that
 return `-ENOSYS` on the Windows host build *and* on the WSL Linux build, so
 neither `ssh` nor `sshd` can open a socket in a `cargo test`. An interop test
-therefore either needs the two ends driven over an in-process transport (the
-handshake logic would have to be separable from `tcp_send_all`/`tcp_recv`, which
-today it is not), or has to run under QEMU as a boot-test stage. The first is
-more work and more useful; the second proves more. Neither is blocked on another
-lane.
+therefore either needs the two ends driven over an in-process transport, or has
+to run under QEMU as a boot-test stage. The first is more work and more useful;
+the second proves more. Neither is blocked on another lane.
+
+> **The in-process route is now open, 2026-09-05.** The obstacle above used to
+> continue "the handshake logic would have to be separable from
+> `tcp_send_all`/`tcp_recv`, which today it is not". It now is. Both binaries
+> talk to `sshwire::Transport` — four methods, `send`/`recv`/`readable`/`close`,
+> with `send_all` as a provided method so the short-write loop is written once —
+> and each holds a `Box<dyn Transport>` rather than a `u64` socket handle. The
+> only code in either program that knows the protocol runs over TCP is a
+> `TcpTransport` struct of about seventy lines at the top of each file.
+>
+> `sshwire::memory_pair()` is the other end of that: two connected in-memory
+> transports, each direction a `VecDeque<u8>` behind a `Mutex` with a `Condvar`
+> beside it. It **blocks**, exactly like the socket it stands in for — a `recv`
+> with nothing to read waits until the peer writes or hangs up — so both ends
+> can run unmodified on two threads. A non-blocking stand-in would have forced
+> both programs to be restructured around polling *in order to be testable*,
+> which is the tail wagging the dog, and would have meant the code under test
+> was not the code that ships.
+>
+> Two things came out of the conversion itself, before any interop test exists:
+>
+> - **A ninth duplicated type.** `StreamBuffer` — the thing that holds a partial
+>   packet, since a stream has no packet boundaries — existed in both binaries
+>   with the same two fields and the same four methods, and as with the other
+>   eight the two were not equal: the server's `fill_once` ended `&tmp[..n]`,
+>   indexing a length the kernel reported, under the crate-wide panic-lint
+>   suppression that used to sit at the top of that file. It is now
+>   `sshwire::StreamBuffer`, and the kernel's number becomes a range in exactly
+>   one place per binary, inside `TcpTransport::recv`, where it is refused if it
+>   does not fit.
+> - **A latent correctness bug in sshd.** The session loop decided whether a
+>   client had hung up *orderly* or had failed by testing whether the error's
+>   message string contained `"connection closed"` — in two places. Any future
+>   error whose text happened to contain that phrase would have been reported to
+>   the operator as a normal disconnect. It is now an `SshdError::PeerClosed`
+>   variant, matched as a variant.
+>
+> What remains for item 4 is the test itself: `ssh` and `sshd` are both
+> bin-only crates, so neither can be depended on. Each needs a `lib.rs` with a
+> thin `main.rs` over it before a third crate can drive one against the other.
 
 ### TD-B-SSH-RE-ENCODED-THE-SERVER-VERSION-BEFORE-HASHING-IT
 

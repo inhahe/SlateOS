@@ -39,6 +39,8 @@
 //! different" is how the last drift started.
 
 use sha2::sha256;
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex};
 
 // ============================================================================
 // Identification string (RFC 4253 §4.2)
@@ -423,6 +425,313 @@ pub fn read_ssh_string(data: &[u8], offset: usize) -> Result<(&[u8], usize), Wir
 pub fn read_mpint(data: &[u8], offset: usize) -> Result<(&[u8], usize), WireError> {
     let (raw, next) = read_ssh_string(data, offset)?;
     Ok((strip_leading_zeros(raw), next))
+}
+
+// ============================================================================
+// The byte stream underneath the protocol
+// ============================================================================
+
+/// What the byte stream underneath SSH can fail to do.
+///
+/// Deliberately not a variant of [`WireError`]. `WireError` means "the peer's
+/// bytes do not describe what they claim to" — a protocol fault. These mean the
+/// bytes did not arrive at all, which is a different thing to report and, for
+/// [`Closed`](Self::Closed), not a fault at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportError {
+    /// A write failed, or accepted nothing while bytes were still owed.
+    Send,
+    /// A read failed.
+    Recv,
+    /// The peer closed the connection.
+    ///
+    /// A *variant*, because both ends need to tell an orderly hang-up from a
+    /// failure and one of them was doing it by searching an error message for
+    /// the substring `"connection closed"` — in two places, in the server's
+    /// session loop, deciding whether to return `Ok` or propagate. That works
+    /// until someone rewords a message, and nothing would have failed when they
+    /// did: the server would simply have started reporting normal client
+    /// disconnections as protocol errors.
+    Closed,
+}
+
+impl core::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Send => write!(f, "send failed"),
+            Self::Recv => write!(f, "receive failed"),
+            Self::Closed => write!(f, "connection closed"),
+        }
+    }
+}
+
+/// A bidirectional byte stream: the whole of what the SSH transport layer needs
+/// from the thing underneath it.
+///
+/// SSH is defined over "a reliable byte-oriented stream" (RFC 4253 §1) and
+/// never over TCP specifically, but both binaries were written against a raw
+/// kernel handle, which is why neither can be exercised without a kernel. That
+/// is not a small inconvenience: it is the reason the one test this stack most
+/// needs — run the client against the server and see whether they agree — has
+/// never existed, and every wire-layer bug found so far was found by reading.
+///
+/// Implementations live in the binaries, next to the syscalls they wrap, so
+/// this crate stays free of any notion of a kernel.
+pub trait Transport {
+    /// Write some of `data`, returning how many bytes were accepted.
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::Send`] if the write failed.
+    fn send(&mut self, data: &[u8]) -> Result<usize, TransportError>;
+
+    /// Read into `buf`, returning the prefix actually filled.
+    ///
+    /// An empty slice is the peer's orderly close. Handing back the slice
+    /// rather than a count is deliberate: the count is turned into a range in
+    /// exactly one place, the implementation, where a length that does not fit
+    /// the buffer is rejected rather than travelling into a caller's `buf[..n]`
+    /// to panic there. The server's copy of this did index, under a suppressed
+    /// lint; the client's did not.
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::Recv`] if the read failed.
+    fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<&'b [u8], TransportError>;
+
+    /// Whether a [`recv`](Self::recv) would return without blocking.
+    ///
+    /// The server's session loop needs this: it interleaves "has the client
+    /// sent anything" with "has the shell printed anything", and an
+    /// unconditional read would stall the second until the user typed.
+    fn readable(&self) -> bool;
+
+    /// Release the connection. Idempotent; failures are not reportable, since
+    /// the stream is unusable either way.
+    fn close(&mut self);
+
+    /// Write all of `data`.
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::Send`] if any write fails or stalls at zero bytes.
+    fn send_all(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        // Walking a shrinking `rest` rather than an offset keeps "how much is
+        // left" and "where that starts" from being two facts that can disagree.
+        let mut rest = data;
+        while !rest.is_empty() {
+            let sent = self.send(rest)?;
+            if sent == 0 {
+                return Err(TransportError::Send);
+            }
+            rest = rest.get(sent..).ok_or(TransportError::Send)?;
+        }
+        Ok(())
+    }
+}
+
+/// One end of an in-memory byte stream, for driving the protocol without a
+/// kernel.
+///
+/// This exists because of a specific gap: neither binary's syscalls work on a
+/// host build (they return `-ENOSYS`), so no `cargo test` in this tree has ever
+/// been able to open a socket, so the one test the SSH stack most needs — run
+/// the client against the server and see whether they agree — could not be
+/// written. Every wire-layer disagreement found so far was found by reading two
+/// files side by side. A transport that is just two queues removes the excuse.
+///
+/// It **blocks**, like the socket it stands in for: a read with nothing to read
+/// waits until the peer writes or hangs up. A non-blocking stand-in would have
+/// forced both ends to be restructured around polling in order to be testable,
+/// which is the tail wagging the dog — and worse, it would have meant the code
+/// under test was not the code that ships.
+///
+/// It is deliberately not `cfg(test)`: the point is for it to be reachable from
+/// the *binaries'* tests and from a separate interop crate, neither of which
+/// can see a `cfg(test)` item in this one.
+#[derive(Debug)]
+pub struct MemoryTransport {
+    /// Bytes written by the peer, waiting to be read here.
+    inbound: Arc<Duct>,
+    /// Bytes written here, waiting to be read by the peer.
+    outbound: Arc<Duct>,
+}
+
+/// One direction of a [`MemoryTransport`] pair: a queue and the wait for it.
+#[derive(Debug, Default)]
+struct Duct {
+    pipe: Mutex<Pipe>,
+    /// Signalled whenever `pipe` gains bytes or loses its writer.
+    arrived: Condvar,
+}
+
+/// The queued bytes of one direction.
+#[derive(Debug, Default)]
+struct Pipe {
+    bytes: VecDeque<u8>,
+    /// Set when the writing end goes away, so a reader sees a close rather than
+    /// waiting for bytes that will never come.
+    writer_gone: bool,
+}
+
+/// A connected pair of in-memory transports: what one writes, the other reads.
+#[must_use]
+pub fn memory_pair() -> (MemoryTransport, MemoryTransport) {
+    let a_to_b = Arc::new(Duct::default());
+    let b_to_a = Arc::new(Duct::default());
+    (
+        MemoryTransport {
+            inbound: Arc::clone(&b_to_a),
+            outbound: Arc::clone(&a_to_b),
+        },
+        MemoryTransport {
+            inbound: a_to_b,
+            outbound: b_to_a,
+        },
+    )
+}
+
+impl Transport for MemoryTransport {
+    fn send(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+        let mut pipe = self
+            .outbound
+            .pipe
+            .lock()
+            .map_err(|_| TransportError::Send)?;
+        if pipe.writer_gone {
+            return Err(TransportError::Send);
+        }
+        pipe.bytes.extend(data.iter().copied());
+        drop(pipe);
+        self.outbound.arrived.notify_all();
+        Ok(data.len())
+    }
+
+    fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<&'b [u8], TransportError> {
+        let mut pipe = self.inbound.pipe.lock().map_err(|_| TransportError::Recv)?;
+        while pipe.bytes.is_empty() && !pipe.writer_gone {
+            pipe = self
+                .inbound
+                .arrived
+                .wait(pipe)
+                .map_err(|_| TransportError::Recv)?;
+        }
+        let mut taken = 0usize;
+        for slot in buf.iter_mut() {
+            let Some(byte) = pipe.bytes.pop_front() else {
+                break;
+            };
+            *slot = byte;
+            taken = taken.saturating_add(1);
+        }
+        // `taken == 0` here means the loop above exited on `writer_gone`, which
+        // is exactly the empty slice the trait defines as the peer's close.
+        buf.get(..taken).ok_or(TransportError::Recv)
+    }
+
+    fn readable(&self) -> bool {
+        self.inbound
+            .pipe
+            .lock()
+            .map_or(true, |pipe| !pipe.bytes.is_empty() || pipe.writer_gone)
+    }
+
+    fn close(&mut self) {
+        if let Ok(mut pipe) = self.outbound.pipe.lock() {
+            pipe.writer_gone = true;
+        }
+        // Wake the peer even if the lock was poisoned: a reader blocked in
+        // `recv` has no other way out, and a test that deadlocks reports far
+        // less than one that fails.
+        self.outbound.arrived.notify_all();
+    }
+}
+
+impl Drop for MemoryTransport {
+    /// Hanging up on drop is what makes a peer's `recv` return instead of
+    /// blocking for ever when the other end's thread finishes.
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// How much one [`StreamBuffer::fill_once`] will take at most.
+const STREAM_READ_SIZE: usize = 8192;
+
+/// How far `pos` may run ahead before the consumed prefix is reclaimed.
+const STREAM_COMPACT_THRESHOLD: usize = 4096;
+
+/// Accumulates stream bytes until a whole packet is present.
+///
+/// A stream has no packet boundaries, so something has to hold the partial one.
+/// Both binaries held it in a private `StreamBuffer` with the same two fields
+/// and the same four methods, and — as with everything else in this crate — the
+/// two were not equal: the server's `fill_once` ended `&tmp[..n]`, indexing a
+/// length the kernel reported, under the crate-wide panic-lint suppression.
+#[derive(Debug, Default)]
+pub struct StreamBuffer {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+impl StreamBuffer {
+    /// An empty buffer, sized for one read.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            data: Vec::with_capacity(STREAM_READ_SIZE),
+            pos: 0,
+        }
+    }
+
+    /// The unconsumed bytes.
+    ///
+    /// The whole of what the packet layer needs: [`PacketCodec::decode`]
+    /// decides for itself whether a whole packet is present, so there is no
+    /// `available() >= n` guard for a caller to get wrong.
+    #[must_use]
+    pub fn unread(&self) -> &[u8] {
+        self.data.get(self.pos..).unwrap_or_default()
+    }
+
+    /// Read once from `transport` and append whatever arrived.
+    ///
+    /// One read, not a loop: the caller decides what to do when the buffer is
+    /// still short, and a session loop's answer is "go and check whether the
+    /// shell has printed anything" rather than "block until the client types".
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::Closed`] when the peer has hung up — every caller is
+    /// in the middle of wanting more bytes, so a zero-length read is an error
+    /// here even though it is not a fault. Otherwise as [`Transport::recv`].
+    pub fn fill_once(&mut self, transport: &mut dyn Transport) -> Result<(), TransportError> {
+        // Reclaim the consumed prefix before growing. Doing this only past a
+        // threshold keeps a long session from memmoving the tail on every
+        // packet, while still bounding the buffer for one that runs for hours.
+        if self.pos > STREAM_COMPACT_THRESHOLD {
+            self.data.drain(..self.pos);
+            self.pos = 0;
+        }
+        let mut tmp = [0u8; STREAM_READ_SIZE];
+        let received = transport.recv(&mut tmp)?;
+        if received.is_empty() {
+            return Err(TransportError::Closed);
+        }
+        self.data.extend_from_slice(received);
+        Ok(())
+    }
+
+    /// Drop the first `n` unread bytes.
+    ///
+    /// `n` is always a length [`PacketCodec::decode`] has just reported for a
+    /// packet it took out of [`unread`](Self::unread), never a number this side
+    /// chose. `saturating_add` past the end would leave the buffer empty rather
+    /// than panicking, but the `min` keeps `pos` a position in `data` rather
+    /// than a number that merely behaves like one.
+    pub fn advance(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n).min(self.data.len());
+    }
 }
 
 // ============================================================================
@@ -3420,5 +3729,276 @@ mod tests {
             .div_rem(&BigUint::from_bytes_be(&[2]));
         assert!(rem.is_zero(), "p - 1 must be even");
         assert_eq!(to_hex(&g.mod_pow(&q, &p).to_bytes_be()), "01");
+    }
+
+    // ========================================================================
+    // The transport, and the buffer under the packet layer
+    // ========================================================================
+    //
+    // The framing itself is `PacketCodec`'s and is tested above. What is tested
+    // here is the plumbing around it, which both binaries used to carry
+    // privately and separately: `StreamBuffer` must hand the codec every unread
+    // byte, and must drop exactly the bytes the codec reports having used.
+    // Getting either wrong desynchronises the stream permanently -- and neither
+    // copy was ever compared against the other's.
+
+    /// A transport that accepts at most `chunk` bytes per `send`.
+    ///
+    /// A real socket does this whenever its send buffer is nearly full, and a
+    /// caller that ignored the short count would truncate a packet. That is
+    /// what [`Transport::send_all`] exists to prevent, so it needs a transport
+    /// that actually short-writes; `MemoryTransport` never does.
+    struct Trickle {
+        chunk: usize,
+        written: Vec<u8>,
+    }
+
+    impl Transport for Trickle {
+        fn send(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+            let n = data.len().min(self.chunk);
+            self.written
+                .extend_from_slice(data.get(..n).unwrap_or_default());
+            Ok(n)
+        }
+
+        fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<&'b [u8], TransportError> {
+            buf.get(..0).ok_or(TransportError::Recv)
+        }
+
+        fn readable(&self) -> bool {
+            true
+        }
+
+        fn close(&mut self) {}
+    }
+
+    #[test]
+    fn what_one_end_writes_the_other_reads() {
+        let (mut a, mut b) = memory_pair();
+        a.send_all(b"one").expect("the far end is alive");
+        b.send_all(b"two").expect("the far end is alive");
+        let mut buf = [0u8; 8];
+        assert_eq!(b.recv(&mut buf).expect("bytes are waiting"), b"one");
+        assert_eq!(a.recv(&mut buf).expect("bytes are waiting"), b"two");
+    }
+
+    #[test]
+    fn a_read_takes_only_what_fits_and_leaves_the_rest() {
+        // A stream has no message boundaries, so a buffer shorter than what
+        // arrived must not lose the tail: that tail is the front of the next
+        // packet.
+        let (mut a, mut b) = memory_pair();
+        a.send_all(b"abcdef").expect("the far end is alive");
+        let mut small = [0u8; 4];
+        assert_eq!(b.recv(&mut small).expect("bytes are waiting"), b"abcd");
+        assert_eq!(b.recv(&mut small).expect("bytes are waiting"), b"ef");
+    }
+
+    #[test]
+    fn a_hung_up_peer_reads_as_a_close_rather_than_a_wait() {
+        // The property that makes this transport usable as a stand-in at all:
+        // a read with no writer left must return. Without it, every test that
+        // forgot to close an end would hang rather than fail, and a hang
+        // reports nothing.
+        let (mut near, far) = memory_pair();
+        drop(far);
+        let mut buf = [0u8; 8];
+        assert_eq!(near.recv(&mut buf), Ok(&[][..]));
+        let mut stream = StreamBuffer::new();
+        assert_eq!(stream.fill_once(&mut near), Err(TransportError::Closed));
+    }
+
+    #[test]
+    fn bytes_written_before_a_hangup_are_still_delivered() {
+        // Closing does not discard what was already sent. A server that writes
+        // SSH_MSG_DISCONNECT and immediately hangs up must still be heard, or
+        // the client would report a dropped connection instead of the reason.
+        let (mut near, mut far) = memory_pair();
+        far.send_all(b"goodbye").expect("the near end is alive");
+        drop(far);
+        let mut buf = [0u8; 16];
+        assert_eq!(near.recv(&mut buf).expect("queued bytes"), b"goodbye");
+        assert_eq!(near.recv(&mut buf), Ok(&[][..]));
+    }
+
+    #[test]
+    fn readable_is_false_only_while_a_live_peer_has_sent_nothing() {
+        // The session pump reads only when this says yes, so a wrong `true`
+        // blocks the shell's output behind the user's next keystroke, and a
+        // wrong `false` after a hangup spins instead of ending the session.
+        let (near, mut far) = memory_pair();
+        assert!(!near.readable(), "nothing has been sent yet");
+        far.send_all(b"x").expect("the near end is alive");
+        assert!(near.readable(), "a byte is waiting");
+        drop(far);
+        assert!(near.readable(), "a hangup is something to read");
+    }
+
+    #[test]
+    fn send_all_keeps_going_until_every_byte_is_gone() {
+        let mut trickle = Trickle {
+            chunk: 3,
+            written: Vec::new(),
+        };
+        trickle
+            .send_all(b"0123456789")
+            .expect("every call makes progress");
+        assert_eq!(trickle.written, b"0123456789");
+    }
+
+    #[test]
+    fn send_all_gives_up_rather_than_spinning_on_a_transport_that_takes_nothing() {
+        let mut trickle = Trickle {
+            chunk: 0,
+            written: Vec::new(),
+        };
+        assert_eq!(trickle.send_all(b"x"), Err(TransportError::Send));
+    }
+
+    /// Feed a buffer one byte at a time; report when a packet first appears.
+    ///
+    /// This is the session pump's exact shape -- decode what is buffered, read
+    /// once, try again -- with each read carrying a single byte. That is a
+    /// stream's worst case, and the one a buffer that guessed at lengths rather
+    /// than asking the codec would get wrong.
+    fn feed_byte_at_a_time(wire: &[u8]) -> (usize, Vec<u8>) {
+        let mut codec = PacketCodec::new();
+        let mut buf = StreamBuffer::new();
+        let (mut near, mut far) = memory_pair();
+        for (i, byte) in wire.iter().enumerate() {
+            far.send_all(&[*byte]).expect("the near end is alive");
+            buf.fill_once(&mut near).expect("a byte is waiting");
+            match codec.decode(buf.unread()) {
+                Ok(Some((payload, consumed))) => {
+                    buf.advance(consumed);
+                    return (i.saturating_add(1), payload);
+                }
+                Ok(None) => {}
+                Err(e) => panic!("framing error at byte {i}: {e}"),
+            }
+        }
+        panic!("packet never completed after {} bytes", wire.len());
+    }
+
+    #[test]
+    fn a_packet_is_produced_exactly_when_its_last_byte_lands() {
+        let mut codec = PacketCodec::new();
+        let payload = b"hello ssh".to_vec();
+        let wire = encode(&mut codec, &payload);
+
+        let (consumed, parsed) = feed_byte_at_a_time(&wire);
+        assert_eq!(parsed, payload);
+        // Neither early (which would mean parsing a partial packet) nor late.
+        assert_eq!(consumed, wire.len());
+    }
+
+    #[test]
+    fn an_empty_buffer_asks_for_more_rather_than_failing() {
+        let mut codec = PacketCodec::new();
+        let buf = StreamBuffer::new();
+        assert!(matches!(codec.decode(buf.unread()), Ok(None)));
+    }
+
+    #[test]
+    fn a_declined_partial_packet_is_still_in_the_buffer() {
+        // The bytes a `None` declined are the start of the packet the next call
+        // will parse. Advancing past them would desynchronise the stream.
+        let mut sender = PacketCodec::new();
+        let wire = encode(&mut sender, b"payload");
+        let (head, tail) = wire.split_at(wire.len().saturating_sub(1));
+        let (mut near, mut far) = memory_pair();
+        let mut buf = StreamBuffer::new();
+        far.send_all(head).expect("the near end is alive");
+        buf.fill_once(&mut near).expect("bytes are waiting");
+
+        let mut reader = PacketCodec::new();
+        assert!(matches!(reader.decode(buf.unread()), Ok(None)));
+        assert_eq!(buf.unread().len(), head.len());
+
+        far.send_all(tail).expect("the near end is alive");
+        buf.fill_once(&mut near).expect("the last byte is waiting");
+        let (payload, consumed) = reader
+            .decode(buf.unread())
+            .expect("framing")
+            .expect("packet");
+        buf.advance(consumed);
+        assert_eq!(payload, b"payload");
+        assert!(buf.unread().is_empty(), "the packet was not consumed");
+    }
+
+    #[test]
+    fn several_packets_from_one_read_are_drained_one_at_a_time() {
+        // A single read can carry several SSH packets. The session pump drains
+        // them all before sleeping, so the buffer must give up each in turn
+        // rather than asking for more bytes after the first.
+        let mut sender = PacketCodec::new();
+        let mut reader = PacketCodec::new();
+        let mut wire = encode(&mut sender, b"first");
+        wire.extend_from_slice(&encode(&mut sender, b"second"));
+        let (mut near, mut far) = memory_pair();
+        let mut buf = StreamBuffer::new();
+        far.send_all(&wire).expect("the near end is alive");
+        buf.fill_once(&mut near).expect("bytes are waiting");
+
+        let mut drained = Vec::new();
+        while let Some((payload, consumed)) = reader.decode(buf.unread()).expect("framing") {
+            buf.advance(consumed);
+            drained.push(payload);
+        }
+        assert_eq!(drained, vec![b"first".to_vec(), b"second".to_vec()]);
+        assert!(buf.unread().is_empty());
+    }
+
+    #[test]
+    fn a_long_session_does_not_grow_the_buffer_without_bound() {
+        // `pos` only moves forward, so without the reclaim in `fill_once` a
+        // session that ran for hours would still be holding every byte it had
+        // ever read. The threshold is what keeps that reclaim from being a
+        // memmove per packet, so what is checked here is that `data` stops
+        // growing -- not that it never grows.
+        let (mut near, mut far) = memory_pair();
+        let mut buf = StreamBuffer::new();
+        let chunk = vec![0xa5u8; 1024];
+        for _ in 0..16 {
+            far.send_all(&chunk).expect("the near end is alive");
+            buf.fill_once(&mut near).expect("bytes are waiting");
+            buf.advance(chunk.len());
+            assert!(buf.unread().is_empty());
+        }
+        assert!(
+            buf.data.len() <= STREAM_COMPACT_THRESHOLD + chunk.len(),
+            "consumed bytes were never reclaimed: {} still held",
+            buf.data.len()
+        );
+    }
+
+    #[test]
+    fn the_reclaim_keeps_the_unread_bytes_it_has_not_been_told_to_drop() {
+        // The reclaim moves `pos` as well as the bytes. Draining without
+        // resetting it would silently skip the front of the next packet, which
+        // is the same desynchronisation as advancing too far -- and would show
+        // up only after a session had run long enough to cross the threshold.
+        let (mut near, mut far) = memory_pair();
+        let mut buf = StreamBuffer::new();
+        let filler = vec![0x11u8; STREAM_COMPACT_THRESHOLD + 1];
+        far.send_all(&filler).expect("the near end is alive");
+        buf.fill_once(&mut near).expect("bytes are waiting");
+        buf.advance(filler.len());
+
+        far.send_all(b"kept").expect("the near end is alive");
+        // This fill is the one that crosses the threshold and reclaims.
+        buf.fill_once(&mut near).expect("bytes are waiting");
+        assert_eq!(buf.unread(), b"kept");
+    }
+
+    #[test]
+    fn advancing_past_the_end_empties_the_buffer_rather_than_panicking() {
+        // `advance` is only ever given a length the codec just reported, so a
+        // correct caller cannot reach this -- but the buffer is exactly where a
+        // framing bug would otherwise surface as a panic in a server's session
+        // loop, which is a denial of service rather than a dropped connection.
+        let mut buf = StreamBuffer::new();
+        buf.advance(9999);
+        assert!(buf.unread().is_empty());
     }
 }

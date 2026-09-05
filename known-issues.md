@@ -59108,7 +59108,12 @@ The smaller gaps below were not addressed and carry over to that entry:
   carries a `termios` translation table this daemon does not have.
 
 
-## TD-B-SSHD-EXEC-DOES-NOT-STREAM-AND-SSH-DASH-T-IS-REFUSED — 2026-09-05
+## TD-B-SSHD-EXEC-DOES-NOT-STREAM-AND-SSH-DASH-T-IS-REFUSED — 2026-09-05 — FIXED 2026-09-05 (lane B)
+
+**Fixed.** `exec` streams as the command produces output, `ssh -T` runs a login
+shell on plain pipes, subsystems spawn, and `exec`'s stdin is a real pipe, so
+`ssh host 'wc -l' < file` counts the file instead of reporting 0. What follows
+is the original entry, unchanged; the account of the fix is at the end of it.
 
 **In short:** `ssh host` (a normal interactive login) works. Two narrower things
 do not. `ssh host 'some command'` waits for the command to finish before sending
@@ -59151,6 +59156,64 @@ needs exactly this machinery and nothing else new.
 
 **If never fixed:** SSH remains excellent for interactive logins and for
 commands that finish, and unusable for streaming ones and for `sftp`.
+
+### How it was fixed — 2026-09-05 (lane B)
+
+`wait_with_output()` is gone. A session's standard streams are now a
+`SessionIo` — `None`, `Terminal(Pty)`, or `Pipes` — held on the channel, so
+"terminal *or* three pipes, never both and never one of each" is a fact the
+type system enforces rather than a pair of `Option` fields that could disagree.
+The pump that already carried a pty's bytes now carries a pipe-backed session's
+in the same pass, so all four session kinds run on one code path:
+
+| Request | Before | After |
+|---|---|---|
+| `shell` **with** `pty-req` | worked | unchanged |
+| `shell` **without** `pty-req` (`ssh -T`) | refused | login shell on three pipes |
+| `exec` | buffered until exit, stdin `/dev/null` | streamed, stdin is a real pipe |
+| `subsystem` | refused | spawns the configured command on pipes |
+
+Three things the fix had to get right, each recorded in full in
+`design-decisions.md` §771:
+
+- **Nothing is buffered on the daemon side.** Each read is capped at the
+  channel's `remote_window`, and a zero window reads nothing, so the client's
+  back-pressure reaches the remote process through the kernel's pipe buffer
+  instead of accumulating in daemon memory. `ssh host 'yes'` from a paused
+  client costs one 8 KiB stack buffer, not a growing queue.
+- **The descriptors are made non-blocking, or the session is refused.**
+  `poll` is not sufficient on the write side: POSIX only promises `POLLOUT`
+  means *some* data may be written, so a large payload aimed at a nearly-full
+  pipe would block in `write` despite a clean poll — and one blocked write in
+  this single-threaded daemon stops every other connection on the machine. On
+  SlateOS the flag also selects the syscall: `posix`'s `write` reaches the
+  non-blocking `SYS_PIPE_TRY_WRITE` only when `O_NONBLOCK` is set.
+- **A session ends at end-of-file, not at the child's exit.** Closing on exit
+  races with the child's last write; closing on an empty read is wrong the
+  first time a program pauses mid-output. Both output pipes reaching EOF (or
+  `EIO` on a pty master) is the only unambiguous signal, and it is what
+  licenses the close.
+
+One defect found by review while writing the above and fixed with it: the pump
+originally reported "not finished" whenever the send window was closed, which
+left a session hanging when a command's final write happened to consume the
+last of the window — a client that has everything it asked for has no reason to
+send another `WINDOW_ADJUST`. Whether a session is finished is a fact about its
+streams; the window only decides whether to *read*.
+
+**Verified:** 164 tests pass on the Windows host and again under the WSL linux
+half (`scripts/coreutils-check.sh --only linux --dir userspace/sshd`), which is
+the build where `cfg(unix)` is true and therefore the only one that compiles
+the descriptor code at all. Thirteen of those tests are new and cover the
+stream bookkeeping directly, including a regression test for the zero-window
+defect above. Host and linux clippy are both clean.
+
+**Still open in sshd**, tracked separately: `env` requests are answered SUCCESS
+and discarded
+(`TD-B-SSHD-TELLS-EVERY-CLIENT-ITS-ENVIRONMENT-VARIABLES-WERE-ACCEPTED-AND-THROWS-THEM-AWAY`).
+And the `sftp` subsystem now has the machinery it needs, but no server: the
+configured `/usr/lib/sftp-server` does not exist in this tree, and
+`userspace/sftp` is a *client* that speaks its own protocol over raw TCP.
 
 
 ## TD-B-POLL-SELECT-AND-EPOLL-ARE-A-10MS-SPIN-LOOP-BECAUSE-THERE-IS-NO-KERNEL-WAIT — 2026-09-05

@@ -39579,6 +39579,35 @@ candidate fixes, neither done:
 **Severity:** low — invisible to git, the compiler, and rustfmt; it costs a
 confusing failure in a line-based script roughly once per script.
 
+### Note appended by lane B, 2026-09-04: item 1 is done and item 2 is half-obsolete
+
+Appended rather than edited in, since this is lane A's entry.
+
+**Item 1 (normalise) is done in all three worktrees.** Measured with the widened
+`check-eol` on 2026-09-04: `os-lane-a` **0 of 13 907** tracked files carry a CR,
+`os-lane-b` 0, `os-lane-c` 65 (4 of them fatal, and fatal under the *old* gate
+too). The 27 named above had grown to 168 in lane A's tree before that; whatever
+lane A ran on 2026-09-04 cleared them. The repair is content-neutral for exactly
+the reason this entry gives — the clean filter means the blob never differed —
+so it shows as a zero-line diff.
+
+**Item 2 is superseded for visibility, still open for prevention.** A-27 wanted
+`*.rs text eol=lf` primarily so the condition would stop being invisible.
+`design-decisions.md` §769 achieves that differently: `scripts/check-eol.py` now
+reads **every tracked file** rather than only the ones `.gitattributes` declares,
+so a CRLF `.rs` is reported without any attribute existing. The measurement that
+forced it is the one this entry predicted — of the declared files, 0 had a CR; of
+the tracked `.rs`/`.toml` the declarations exclude, 27 did.
+
+That removes A-27's *reason* for item 2 but not item 2's own merit: attributes
+act at checkout, and the gate acts after the fact, so `*.rs text eol=lf` would
+still prevent rather than detect. §769 explicitly declines to make that change —
+it is a three-lane shared file and A-27's objection to one lane dropping it in
+still stands. **It is lane A's call, and it is now a smaller one**, because with
+every worktree at 0 the "every lane's CRLF working copies convert on their next
+checkout" side-effect that made it risky no longer has anything to convert.
+That window will not stay open on its own.
+
 ---
 
 ## [B] The sudoers parser cannot reject a malformed `Defaults` or command list (2026-08-18)
@@ -115545,6 +115574,12 @@ bytes are repaired. **What wrote them is not known**, and this entry exists
 because repairing bytes without finding the writer only schedules the next
 occurrence — as `check-eol`'s own refusal message says.
 
+**Read the three corrections at the end before acting on anything above.** The
+count in this entry's title is wrong (six were *declared*; twenty-seven more
+were invisible to the gate as it then was), the mtime table below does not mean
+what it says it means, and both named suspects have since been ruled out. The
+title is left alone because the entry is referenced by that ID.
+
 **Why no git command showed it.** `text eol=lf` installs a *clean filter*: git
 converts CRLF to LF before every comparison, so `git status`, `git diff` and
 `git add` all called the tree clean, and staging the repair produced a
@@ -115564,7 +115599,10 @@ asking git, and it is the reason the gate is worth its runtime.
 | `scripts/check-mutation-needles.py` | 400 | 2026-09-03 22:22 |
 | `scripts/check-doc-links.py` | 1505 | 2026-09-03 23:03 |
 
-Four distinct dates over nineteen days: this is recurring, not one event.
+~~Four distinct dates over nineteen days: this is recurring, not one event.~~
+**Struck — the mtimes do not support this. See the third correction at the end
+of this entry: an mtime is the last touch by any tool, not the CRLF-introducing
+write, and the experiment that shows it.**
 
 **What has been ruled out.**
 
@@ -115597,11 +115635,19 @@ lane-b worktree by name — which fits the lane-b-only scope. That accounts for
 2 of 6 and for the 2026-08-16 pair. **It does not account for the four
 `scripts/*.py` files**, and no hypothesis tested so far does.
 
-**How to find it if it recurs.** The mtime is the timestamp of the write, so
+**Struck as well.** `6caf6467e` touched 13 690 of 13 908 tracked files, so it
+contains the affected ones the way it contains almost everything. See the third
+correction for that measurement and for the second hypothesis that also failed.
+
+**How to find it if it recurs.** ~~The mtime is the timestamp of the write, so
 `ls -l --time-style=full-iso` on the offenders gives the minute; correlate that
-against what was run then. Do not repair before recording the mtimes — the
-repair overwrites the only evidence of when it happened, which is what makes
-this entry thinner than it should be.
+against what was run then.~~ **Struck: this method does not work, and the third
+correction below shows why by experiment.** What to do instead: the CR is
+invisible to `git status`, so the only way to bound *when* is to catch it
+narrowly — run `python scripts/check-eol.py` (which now reads every tracked
+file) before and after a suspected tool, and diff the finding lists. A
+before/after pair around one command is the evidence the mtimes were mistaken
+for.
 
 **If it is never fixed:** every recurrence blocks `scripts/boot-test.sh` for
 whichever lane hits it, and the gate refuses the *whole build*, so it blocks
@@ -115697,6 +115743,86 @@ a confident conclusion from it and acted. The rule generalises past process
 queries: **when a command surveys N things, do not conclude anything until you
 have counted N results.** A survey that returns 1 of 3 rows is not weak
 evidence for the other two; it is no evidence at all.
+
+### Third correction, same day: the forensic method this entry recommends does not work
+
+Everything above rests on one unstated assumption, and it is false. **"The mtime
+is the timestamp of the write"** — the first sentence of *How to find it if it
+recurs* — is wrong, and the table of six mtimes it justifies cannot bear the
+weight put on it.
+
+Disproved by direct experiment rather than by argument. A census at 21:46:29
+recorded `userspace/authlib/src/faillock.rs` as `w/crlf`. I edited that file at
+22:07:49, which updated its mtime by twenty-one minutes. It was **still**
+`w/crlf`. An editor preserves a file's existing line endings, so a write leaves
+the mtime fresh and the CRLF untouched: the mtime records the last touch by *any*
+tool, which can be arbitrarily later than — and entirely unrelated to — the
+write that introduced the CR.
+
+The casualty is the inference **"four distinct dates over nineteen days: this is
+recurring, not one event."** That is unsupported. Six files could have been
+corrupted in one event and subsequently touched on four different days; the
+mtimes are consistent with that and cannot distinguish it. The conclusion may
+still be true — it is simply not evidence for it. Struck, not deleted, for the
+same reason as the first correction.
+
+**Two hypotheses for the writer were tested and both failed.** Recorded because
+a hypothesis that died quietly gets re-proposed:
+
+1. **Commit `6caf6467e`** (the "one partial explanation" above). It does contain
+   all the affected files — but it touched **13 690 of 13 908** tracked files, so
+   containing them is not a property of the commit, it is a property of its size.
+   An overlap that a coin flip would also produce is not evidence. I had the
+   sentence "all 27 of 27 are in `6caf6467e`" drafted before checking the
+   denominator.
+2. **`scripts/strip-workspace-sections.py`.** It genuinely wrote CRLF (fixed —
+   see below), and every one of the six affected manifests had been through it.
+   But the **control group refutes it**: the LF manifests had been through it
+   too, with the same history. A predictor that fires equally on both classes
+   predicts nothing.
+
+The one correlation that survived is weak and is left as a lead rather than a
+finding: the four `scripts/*.py` mtimes cluster near the 2026-08-24 coreutils
+sweep. Given the paragraph above, "cluster near" is doing very little work.
+
+**The counts in the table above are the wrong population, and the previous
+correction's conclusion is now itself superseded.** That correction ended by
+insisting the *second* column — "of those, declared `eol=lf`" — was the one that
+mattered, because the gate's scope was `.gitattributes`' promise. That was
+correct about the gate as it then stood. §769 changed the gate: `check-eol` now
+reads **every tracked file**, so the *first* column is the one that matters, and
+the ranking flips back. Restated with the widened gate, measured 2026-09-04:
+
+| worktree | tracked files with CRLF | fatal (executed from disk) |
+|---|---|---|
+| `os-lane-a` | **0** (was 168; lane A renormalised) | 0 |
+| `os-lane-b` | **0** (was 6 declared + 27 undeclared + 22 binary) | 0 |
+| `os-lane-c` | 65 | 4 |
+
+Lane B's real figure was never 6. Six were *declared*; twenty-seven more were
+`.rs`/`.toml` that the old gate had no reason to open, and a further twenty-two
+are binaries whose CRs are not corruption at all. All twenty-seven are repaired,
+with `git hash-object` equal to the index OID before and after — a repair with
+provably zero content change, because the clean filter means the blob never
+differed.
+
+**The writers are fixed even though the writer is not identified.** Two scripts
+in this tree really did emit CRLF into tracked files through Python's default
+text mode, and both are corrected in `825acee84`:
+`scan-orphan-modules.py` (rewriting its own tracked baseline) and
+`strip-workspace-sections.py` (rewriting sub-crate manifests). Neither is proven
+to be *the* writer — see hypothesis 2 — but both were capable of it, so the
+population of possible causes is smaller by two regardless.
+
+**A-27's "Still to do" is now partly closed.** Item 1, "normalise the 27 files",
+is done for lane B, and lane A's own worktree measured 0 of 13 907 on
+2026-09-04, so it is done there too. Item 2, "add a root `.gitattributes`
+(`*.rs text eol=lf`)", is **superseded for visibility and still open for
+prevention**: §769 makes the gate see every tracked file without touching
+`.gitattributes`, which removes the reason A-27 wanted the change but not the
+change's own merit at checkout time. That half remains lane A's to decide, and
+it is deliberately not being made by lane B — it is a three-lane shared file, and
+A-27's original objection to one lane dropping it in still holds.
 
 ## TD-B-THE-BAND-GATE-IS-A-ONE-SECOND-CHECK-THAT-ONLY-A-SEVENTY-MINUTE-BOOT-TEST-RUNS (lane B, 2026-09-04)
 

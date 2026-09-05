@@ -1,0 +1,62 @@
+[package]
+name = "ssh-interop"
+version = "0.1.0"
+edition = "2024"
+description = "Runs the real SSH client against the real SSH server, in one process"
+
+# This crate ships nothing. Its library is a page of documentation and its only
+# code is tests, which is the point: it exists so that `userspace/ssh` and
+# `userspace/sshd` can be compiled into *one* process and made to talk to each
+# other, and neither of them can host that test itself. A crate's own tests can
+# only reach one side of a two-party protocol; both ends passing their own
+# suites is exactly the state this project has been in for every one of the
+# following bugs.
+#
+# Eleven duplications of the wire layer have been found here, and every one was
+# found by a human reading two files side by side -- never by a test. Six of
+# them were live divergences: the exchange hash hashed a placeholder client
+# version on the server, so no client could verify a host key signature; the
+# KEXINIT cookie was a constant on the server; and so on. Both suites were
+# green throughout.
+#
+# `sshwire` is what stopped the *encodings* diverging, by giving both ends one
+# copy. This crate is the other half: it checks that the two programs built on
+# it actually agree, which no amount of shared code can guarantee on its own --
+# the two ends still choose independently what to send, in what order, and what
+# to feed the hash.
+[dependencies]
+
+# Both peers are dev-dependencies, and `deterministic-secrets` is why the
+# distinction matters rather than being bookkeeping. That feature exposes the
+# seam that lets a test replace the Diffie-Hellman exponent, the KEXINIT cookie
+# and the packet padding with a reproducible source. A release build compiles
+# no dev-dependencies, so it does not contain that seam at all -- a stronger
+# statement than "nothing calls it".
+#
+# The seam is also not a convenience. The Windows host this suite runs on has
+# no kernel CSPRNG that `randrange` will draw from -- it refuses on purpose,
+# see open-questions.md -- and a handshake with no exponent is not a handshake.
+# Without the seam this test could not be written at all, on this machine.
+#
+# `randrange` only for its `EntropyError`, which is the error half of
+# `sshwire::SecretSource`'s signature: a substitute source has to be able to
+# return the same failure the kernel one can, because "the CSPRNG refused" is a
+# case both peers must handle and a test source that cannot express it could
+# never exercise those paths.
+#
+# `scratchdir` because the client writes a `known_hosts` entry for a host it
+# has not seen before, and a test that writes into `$HOME/.ssh/known_hosts`
+# would be editing the developer's real trust store.
+[dev-dependencies]
+ssh = { path = "../ssh", features = ["deterministic-secrets"] }
+sshd = { path = "../sshd", features = ["deterministic-secrets"] }
+sshwire = { path = "../sshwire" }
+randrange = { path = "../../randrange" }
+scratchdir = { path = "../scratchdir" }
+
+[lib]
+name = "ssh_interop"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

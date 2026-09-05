@@ -16746,6 +16746,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssh-interop"
+version = "0.1.0"
+dependencies = [
+ "randrange",
+ "scratchdir",
+ "ssh",
+ "sshd",
+ "sshwire",
+]
+
+[[package]]
 name = "ssh-keygen"
 version = "0.1.0"
 dependencies = [

@@ -117768,3 +117768,37 @@ Two things in it are load-bearing and easy to drop in a rewrite:
 and identity must come from `git -c user.email=… -c user.name=…` rather than
 `git config`, which writes to a file.* Not as hygiene — as the thing that
 decides which repository the command lands in.
+
+
+### Lesson 121: before adding a private helper to an app you are wiring, grep for the four lines you are about to write again (lane C, 2026-09-05)
+
+Lesson 117 says a surviving mutation sometimes means the code is redundant
+rather than the test weak. I wrote that lesson on 2026-09-04 after it happened
+twice. It happened a third time the next day, in `apps/screenrecorder`, in the
+same shape:
+
+I added `reset_for_new_recording` so that a second recording would not continue
+the first one's frame count. A mutation deleting its three counter lines
+survived. The cause: `start_recording` already zeroed those counters twenty
+lines further down, **and** the file already had a `reset()` doing exactly what
+my helper did plus clearing the annotations. Three copies, one of them mine, and
+mine was the only one with no reason to exist.
+
+The mutation also mis-fired the first time, which is worth noting on its own:
+`s.replace(old, "", 1)` hit the *first* of the three identical blocks, not
+mine. A mutation aimed at duplicated code lands on whichever copy comes first in
+the file, and then proves something about a copy you were not testing. Both
+symptoms — the survivor and the mis-fire — were the same fact reported twice:
+**those lines exist more than once.**
+
+**The habit that would have caught it before writing any code**: when adding a
+private helper to a file you did not write, grep the file for the assignment its
+body would perform. One `grep -n "total_frames = 0"` returns three hits, and the
+helper is not written. That is cheaper than a mutation sweep and it happens at
+the right moment.
+
+This is the third instance in two days and the pattern is stable enough to state
+as a rule: **in a large unfamiliar file, the thing you are about to add usually
+exists.** The wiring campaign's apps are 2000-8000 lines each and were written
+by someone with no memory of them; the odds that a four-line utility is missing
+are much lower than the odds that it is somewhere you have not read yet.

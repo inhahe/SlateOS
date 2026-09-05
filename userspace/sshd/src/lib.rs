@@ -111,8 +111,9 @@ use std::process;
 // cost the last time.
 use sshwire::{
     BigUint, ExchangeHashInput, PacketCodec, Role, SecretSource, StreamBuffer, Transport,
-    TransportError, compute_exchange_hash, encode_mpint, read_bool, read_mpint, read_ssh_string,
-    read_u32, ssh_string,
+    TransportError, base64_decode, base64_encode, compute_exchange_hash,
+    decode_openssh_private_key, ed25519_public_blob, encode_mpint, encode_openssh_private_key,
+    read_bool, read_mpint, read_ssh_string, read_u32, ssh_string,
 };
 
 // ============================================================================
@@ -1634,6 +1635,22 @@ pub struct HostKey {
     public_key: [u8; 32],
 }
 
+/// Written out by hand rather than derived, because a derived one would print
+/// the seed. That is not a hypothetical: `Debug` is what `unwrap`, `expect`,
+/// `assert_eq!` and every structured log line reach for, so a derived
+/// implementation puts the host's private key into the first panic message or
+/// log record that happens to mention a `HostKey`. The public half is safe to
+/// show and is the half anyone debugging actually wants, since it is what the
+/// client compares against `known_hosts`.
+impl core::fmt::Debug for HostKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HostKey")
+            .field("seed", &"<redacted>")
+            .field("fingerprint", &self.fingerprint())
+            .finish()
+    }
+}
+
 impl HostKey {
     /// Create a host key from a 32-byte RFC 8032 seed.
     #[must_use]
@@ -1669,11 +1686,12 @@ impl HostKey {
     }
 
     /// Encode the public key in SSH wire format: "ssh-ed25519" + `key_data`.
+    ///
+    /// These are the same bytes that go inside the private key container, into
+    /// an `authorized_keys` line, and into a client's `known_hosts`. The shared
+    /// definition is in `sshwire` so those four spellings cannot drift.
     fn public_key_blob(&self) -> Vec<u8> {
-        let mut blob = Vec::new();
-        blob.extend_from_slice(&ssh_string(b"ssh-ed25519"));
-        blob.extend_from_slice(&ssh_string(&self.public_key));
-        blob
+        ed25519_public_blob(&self.public_key)
     }
 
     /// Sign data with the host key, returning an RFC 4253 section 6.6 signature
@@ -1690,12 +1708,14 @@ impl HostKey {
     /// Compute the SHA-256 fingerprint of the public key, in the form
     /// `ssh-keygen -lf` prints: base64 of the digest with the `=` padding
     /// removed. The padding matters — an operator comparing this line against
-    /// the one their client shows needs the two to be the same string.
+    /// the one their client shows needs the two to be the same string, which
+    /// is why `sshwire` names its two encoders apart rather than making one of
+    /// them a default: `base64_encode` is the unpadded one this needs, and
+    /// `base64_encode_padded` is the one a key file needs.
     fn fingerprint(&self) -> String {
         let blob = self.public_key_blob();
         let hash = sha256(&blob);
         let encoded = base64_encode(&hash);
-        let encoded = encoded.trim_end_matches('=');
         format!("SHA256:{encoded}")
     }
 
@@ -1710,19 +1730,13 @@ impl HostKey {
     /// successfully with a host key unrelated to the file named, and the
     /// operator's only clue would have been that every client reported a
     /// changed host key. Failing to parse a host key must stop the daemon.
-    #[expect(
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-    )]
     fn load_from_file(path: &str) -> Result<Self, SshdError> {
         let data = fs_read_file(path)?;
         let text = String::from_utf8_lossy(&data);
 
         if text.contains("BEGIN OPENSSH PRIVATE KEY") {
-            let seed = parse_openssh_private_key(&text)
-                .map_err(|e| SshdError::ConfigError(format!("{path}: {e}")))?;
-            return Ok(Self::from_seed(seed));
+            return Self::from_openssh_text(&text)
+                .map_err(|e| SshdError::ConfigError(format!("{path}: {e}")));
         }
 
         if data.len() == 32 {
@@ -1734,8 +1748,12 @@ impl HostKey {
         let hex_str: String = text.chars().filter(char::is_ascii_hexdigit).collect();
         if hex_str.len() == 64 {
             let mut seed = [0u8; 32];
-            for i in 0..32 {
-                seed[i] = u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16)
+            // `as_chunks` pairs the digits, so there is no `i * 2` stride to
+            // get wrong and no slice index that could panic on a short string.
+            let (pairs, _) = hex_str.as_bytes().as_chunks::<2>();
+            for (byte, pair) in seed.iter_mut().zip(pairs) {
+                let digits = String::from_utf8_lossy(pair);
+                *byte = u8::from_str_radix(&digits, 16)
                     .map_err(|_| SshdError::ConfigError(format!("invalid hex in {path}")))?;
             }
             return Ok(Self::from_seed(seed));
@@ -1746,187 +1764,62 @@ impl HostKey {
              32 raw bytes, or 64 hex digits"
         )))
     }
-}
 
-/// Extract the Ed25519 seed from an unencrypted OpenSSH private key file.
-///
-/// The container (`PROTOCOL.key` in the OpenSSH distribution) is:
-///
-/// ```text
-/// "openssh-key-v1\0"
-/// string  ciphername
-/// string  kdfname
-/// string  kdfoptions
-/// uint32  number of keys N
-/// string  publickey[N]
-/// string  encrypted-private-section
-/// ```
-///
-/// and the private section, once decrypted (a no-op when `ciphername` is
-/// `none`), is:
-///
-/// ```text
-/// uint32  checkint
-/// uint32  checkint   (must equal the first: this is how a wrong passphrase
-///                     is detected, and it is a free integrity check for us)
-/// string  keytype
-/// string  public key
-/// string  private key
-/// string  comment
-/// byte[]  padding 1, 2, 3, ...
-/// ```
-///
-/// For `ssh-ed25519` the "private key" field is 64 bytes: the 32-byte seed
-/// followed by a copy of the public key. We take the seed and re-derive the
-/// public key rather than trusting the copy, so a corrupted file fails the
-/// consistency check below instead of producing a key whose halves disagree.
-#[expect(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
-fn parse_openssh_private_key(text: &str) -> Result<[u8; 32], String> {
-    let body: String = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with("-----") && !l.is_empty())
-        .collect();
-    let raw = base64_decode(&body);
-
-    const MAGIC: &[u8] = b"openssh-key-v1\0";
-    if raw.len() < MAGIC.len() || &raw[..MAGIC.len()] != MAGIC {
-        return Err("not an openssh-key-v1 container".into());
+    /// Parse an OpenSSH private key file that has already been read.
+    ///
+    /// Split from [`Self::load_from_file`] because the two halves fail for
+    /// unrelated reasons — the file was unreadable, or its contents were not a
+    /// key — and because only this half can be tested: there is no filesystem
+    /// under `cargo test`, so a check reachable only through a `read` syscall
+    /// is a check that never runs.
+    ///
+    /// # Errors
+    ///
+    /// A message naming what was wrong with the container, or that its two
+    /// halves disagree.
+    fn from_openssh_text(text: &str) -> Result<Self, String> {
+        let key = decode_openssh_private_key(text).map_err(|e| e.to_string())?;
+        // `sshwire` hands back the public key the *file* holds rather than one
+        // derived from the seed, because deriving it is Ed25519 and that lives
+        // in `posix`, which that crate deliberately does not depend on.
+        // Checking that the two agree is therefore this caller's obligation,
+        // and skipping it would accept a file whose halves disagree: the
+        // daemon would then run under an identity that is not the one in the
+        // matching `.pub`, and every client would report a changed host key
+        // with nothing to point at.
+        if posix::ed25519::public_key(&key.seed) != key.public {
+            return Err("the public key in the file does not match the private seed".to_string());
+        }
+        Ok(Self::from_seed(key.seed))
     }
-    let mut off = MAGIC.len();
-
-    let (ciphername, next) = read_ssh_string(&raw, off).map_err(|_| "truncated ciphername")?;
-    off = next;
-    if ciphername != b"none" {
-        // Refusing is the honest answer: we have no passphrase prompt (sshd is
-        // started by init, with no terminal), and no bcrypt_pbkdf to derive the
-        // key with even if we had one.
-        return Err(format!(
-            "key is encrypted with {}; sshd cannot prompt for a passphrase, \
-             re-create it with an empty passphrase",
-            String::from_utf8_lossy(ciphername)
-        ));
-    }
-    let (_kdfname, next) = read_ssh_string(&raw, off).map_err(|_| "truncated kdfname")?;
-    off = next;
-    let (_kdfopts, next) = read_ssh_string(&raw, off).map_err(|_| "truncated kdfoptions")?;
-    off = next;
-
-    if off + 4 > raw.len() {
-        return Err("truncated key count".into());
-    }
-    let nkeys = u32::from_be_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]);
-    off += 4;
-    if nkeys != 1 {
-        return Err(format!(
-            "expected exactly one key in the file, found {nkeys}"
-        ));
-    }
-
-    let (_pubkey, next) = read_ssh_string(&raw, off).map_err(|_| "truncated public key")?;
-    off = next;
-    let (private, _) = read_ssh_string(&raw, off).map_err(|_| "truncated private section")?;
-
-    if private.len() < 8 {
-        return Err("private section too short".into());
-    }
-    let check1 = u32::from_be_bytes([private[0], private[1], private[2], private[3]]);
-    let check2 = u32::from_be_bytes([private[4], private[5], private[6], private[7]]);
-    if check1 != check2 {
-        return Err("private section checkints differ (corrupt or encrypted key)".into());
-    }
-
-    let (keytype, poff) = read_ssh_string(private, 8).map_err(|_| "truncated key type")?;
-    if keytype != b"ssh-ed25519" {
-        return Err(format!(
-            "unsupported host key type {}; only ssh-ed25519 is implemented",
-            String::from_utf8_lossy(keytype)
-        ));
-    }
-    let (stored_public, poff) = read_ssh_string(private, poff).map_err(|_| "truncated pubkey")?;
-    let (secret, _) = read_ssh_string(private, poff).map_err(|_| "truncated secret")?;
-    if secret.len() != 64 {
-        return Err(format!(
-            "ssh-ed25519 secret should be 64 bytes, found {}",
-            secret.len()
-        ));
-    }
-
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&secret[..32]);
-    if posix::ed25519::public_key(&seed).as_slice() != stored_public {
-        return Err("public key in the file does not match the private seed".into());
-    }
-    Ok(seed)
 }
 
 /// Write an unencrypted OpenSSH-format Ed25519 private key to `path`, mode
 /// 0600.
 ///
-/// The layout is the one [`parse_openssh_private_key`] documents, written back.
-/// Using the real container rather than a bare 32-byte seed file means a key
-/// this daemon generates can be inspected with `ssh-keygen -lf` and copied to
-/// another machine, and that the round trip through our own parser is exercised
-/// on the very next start.
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
+/// The container itself is `sshwire::encode_openssh_private_key`; what is left
+/// here is the part that is this daemon's own business — where the file goes,
+/// what permissions it gets, and where the `checkint` comes from. Using the
+/// real container rather than a bare 32-byte seed file means a key this daemon
+/// generates can be inspected with `ssh-keygen -lf` and copied to another
+/// machine.
 fn write_openssh_private_key(
     path: &str,
     seed: &[u8; 32],
     public: &[u8; 32],
 ) -> Result<(), SshdError> {
-    let mut pub_blob = Vec::new();
-    pub_blob.extend_from_slice(&ssh_string(b"ssh-ed25519"));
-    pub_blob.extend_from_slice(&ssh_string(public));
-
-    let mut secret = Vec::with_capacity(64);
-    secret.extend_from_slice(seed);
-    secret.extend_from_slice(public);
-
     // The two checkints are compared on read to detect a wrong passphrase. We
-    // never encrypt, so any value works as long as they match; a random one
-    // keeps the file byte-identical in structure to what ssh-keygen writes.
+    // never encrypt, so any value works as long as they match — but a constant
+    // would give every key file this daemon writes a recognisable byte pattern,
+    // so it comes from the CSPRNG. `sshwire` takes it as an argument rather
+    // than drawing it, which is what keeps that codec testable against a fixed
+    // expected file.
     let mut checkint = [0u8; 4];
     randrange::fill_secret(&mut checkint)
         .map_err(|e| SshdError::ConfigError(format!("cannot generate a host key: {e}")))?;
 
-    let mut private = Vec::new();
-    private.extend_from_slice(&checkint);
-    private.extend_from_slice(&checkint);
-    private.extend_from_slice(&ssh_string(b"ssh-ed25519"));
-    private.extend_from_slice(&ssh_string(public));
-    private.extend_from_slice(&ssh_string(&secret));
-    private.extend_from_slice(&ssh_string(b"slateos-sshd"));
-    // Pad to a multiple of 8 (the cipher block size that "none" nominally has)
-    // with the bytes 1, 2, 3, … as PROTOCOL.key specifies.
-    let mut pad: u8 = 1;
-    while private.len() % 8 != 0 {
-        private.push(pad);
-        pad += 1;
-    }
-
-    let mut raw = Vec::new();
-    raw.extend_from_slice(b"openssh-key-v1\0");
-    raw.extend_from_slice(&ssh_string(b"none")); // ciphername
-    raw.extend_from_slice(&ssh_string(b"none")); // kdfname
-    raw.extend_from_slice(&ssh_string(b"")); // kdfoptions
-    raw.extend_from_slice(&1u32.to_be_bytes()); // one key
-    raw.extend_from_slice(&ssh_string(&pub_blob));
-    raw.extend_from_slice(&ssh_string(&private));
-
-    let body = base64_encode(&raw);
-    let mut text = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
-    for chunk in body.as_bytes().chunks(70) {
-        text.push_str(&String::from_utf8_lossy(chunk));
-        text.push('\n');
-    }
-    text.push_str("-----END OPENSSH PRIVATE KEY-----\n");
+    let text =
+        encode_openssh_private_key(seed, public, "slateos-sshd", u32::from_be_bytes(checkint));
 
     fs_write_file(path, text.as_bytes())?;
     // Order matters: the file is created by the write above with whatever the
@@ -1934,118 +1827,6 @@ fn write_openssh_private_key(
     // users is a host key that has already been compromised.
     fs_set_mode(path, 0o600)?;
     Ok(())
-}
-
-/// Minimal base64 encoder (RFC 4648, with `=` padding).
-#[expect(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
-fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    let mut i = 0;
-    while i < data.len() {
-        let b0 = data[i];
-        let b1 = if i + 1 < data.len() { data[i + 1] } else { 0 };
-        let b2 = if i + 2 < data.len() { data[i + 2] } else { 0 };
-
-        result.push(ALPHABET[(b0 >> 2) as usize] as char);
-        result.push(ALPHABET[((b0 & 0x03) << 4 | (b1 >> 4)) as usize] as char);
-
-        if i + 1 < data.len() {
-            result.push(ALPHABET[((b1 & 0x0F) << 2 | (b2 >> 6)) as usize] as char);
-        } else {
-            result.push('=');
-        }
-
-        if i + 2 < data.len() {
-            result.push(ALPHABET[(b2 & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-
-        i += 3;
-    }
-    result
-}
-
-/// Minimal base64 decoder.
-// a..d are the four decoded sextets of a base64 quartet; short names match the
-// usual base64 decode formulation.
-#[allow(clippy::many_single_char_names)]
-fn base64_decode(input: &str) -> Vec<u8> {
-    // The table writes are the only indexing left in this function, and they
-    // are const-evaluated: an index out of range here does not panic at run
-    // time, it fails the build. So this suppression cannot hide a reachable
-    // panic, which is what the lint is for. It is scoped to the table alone so
-    // the decode loop below — the part that reads a peer's bytes — stays under
-    // the lint.
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "const-evaluated: an out-of-range index is a compile error, not a panic"
-    )]
-    const DECODE: [u8; 128] = {
-        let mut table = [0xFFu8; 128];
-        let mut i = 0u8;
-        while i < 26 {
-            table[(b'A' + i) as usize] = i;
-            table[(b'a' + i) as usize] = i + 26;
-            i += 1;
-        }
-        let mut d = 0u8;
-        while d < 10 {
-            table[(b'0' + d) as usize] = d + 52;
-            d += 1;
-        }
-        table[b'+' as usize] = 62;
-        table[b'/' as usize] = 63;
-        table
-    };
-
-    /// Not a base64 character. Distinct from every sextet, which are 0..=63.
-    const INVALID: u8 = 0xFF;
-
-    let sextet = |&b: &u8| DECODE.get(b as usize).copied().unwrap_or(INVALID);
-
-    let mut output = Vec::new();
-    let bytes: Vec<u8> = input
-        .bytes()
-        .filter(|&b| b != b'=' && b != b'\n' && b != b'\r' && b != b' ')
-        .collect();
-
-    // `chunks(4)` rather than an index and `i += 4`. Quartets are what base64
-    // is defined over, so taking them directly leaves no offset arithmetic for
-    // a peer to push out of range — which is what this function needed, since
-    // it decodes the key blob a client offers during public-key authentication,
-    // before that client has proved anything.
-    //
-    // The padding ('=') was stripped above, so the last chunk may hold 2 or 3
-    // characters (encoding 1 or 2 bytes). A chunk holding 1 has no second
-    // sextet, so `b` is INVALID and the decode ends — which is exactly what the
-    // old `i + 1 < bytes.len()` condition expressed.
-    for quad in bytes.chunks(4) {
-        let a = quad.first().map_or(INVALID, sextet);
-        let b = quad.get(1).map_or(INVALID, sextet);
-        let c = quad.get(2).map_or(INVALID, sextet);
-        let d = quad.get(3).map_or(INVALID, sextet);
-        if a == INVALID || b == INVALID {
-            break;
-        }
-        // The shifts discard high bits by design: that is how six-bit sextets
-        // are repacked into eight-bit bytes. Rust only panics on a shift whose
-        // *amount* reaches the width, never on the bits shifted out, and every
-        // amount here is a constant below 8.
-        output.push((a << 2) | (b >> 4));
-        if c != INVALID {
-            output.push((b << 4) | (c >> 2));
-            if d != INVALID {
-                output.push((c << 6) | d);
-            }
-        }
-    }
-    output
 }
 
 // ============================================================================
@@ -2445,7 +2226,15 @@ fn parse_authorized_keys(content: &str) -> Vec<AuthorizedKey> {
             ) {
                 continue;
             }
-            let key_data = base64_decode(parts[1]);
+            // A line whose base64 is malformed grants nothing, so it is
+            // skipped rather than stored. The decoder this replaces stopped at
+            // the first bad character and returned the prefix, which entered
+            // the table as a *shorter* key -- safe only by accident, since a
+            // truncated blob happens never to match one a client offers.
+            // Skipping says what was actually meant: this line is not a key.
+            let Ok(key_data) = base64_decode(parts[1].as_bytes()) else {
+                continue;
+            };
             let comment = if parts.len() >= 3 {
                 parts[2].to_string()
             } else {
@@ -6933,42 +6722,57 @@ DenyGroups nogroup
     }
 
     // ---- OpenSSH private key container ----
+    //
+    // The container codec itself lives in `sshwire` and is tested there. What
+    // is tested here is the part that is this crate's own: that a well-formed
+    // container yields a working host key, and that the seed/public agreement
+    // check -- which `sshwire` deliberately leaves to its callers -- actually
+    // happens.
 
     #[test]
     fn an_openssh_private_key_round_trips() {
         let seed = [0x42u8; 32];
         let public = posix::ed25519::public_key(&seed);
+        let text = encode_openssh_private_key(&seed, &public, "test", 0xDEAD_BEEF);
 
-        // Build the container the same way write_openssh_private_key does,
-        // without touching the filesystem (there is none under `cargo test`).
-        let text = openssh_private_key_text(&seed, &public);
-        let recovered = parse_openssh_private_key(&text).expect("parses");
-        assert_eq!(recovered, seed);
+        let key = HostKey::from_openssh_text(&text).expect("parses");
+        assert_eq!(key.seed, seed);
+        assert_eq!(key.public_key, public);
     }
 
     #[test]
     fn an_encrypted_openssh_private_key_is_refused_not_guessed() {
         let mut raw = Vec::new();
-        raw.extend_from_slice(b"openssh-key-v1\0");
+        raw.extend_from_slice(b"openssh-key-v1 ");
         raw.extend_from_slice(&ssh_string(b"aes256-ctr"));
         raw.extend_from_slice(&ssh_string(b"bcrypt"));
         raw.extend_from_slice(&ssh_string(b"salt-and-rounds"));
         raw.extend_from_slice(&1u32.to_be_bytes());
         raw.extend_from_slice(&ssh_string(b"pubkey"));
         raw.extend_from_slice(&ssh_string(b"ciphertext"));
-        let text = pem_wrap(&base64_encode(&raw));
+        let text = format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----
+{}
+-----END OPENSSH PRIVATE KEY-----
+",
+            sshwire::base64_encode_padded(&raw)
+        );
 
-        let err = parse_openssh_private_key(&text).expect_err("must refuse");
+        let err = HostKey::from_openssh_text(&text).expect_err("must refuse");
         assert!(err.contains("encrypted"), "{err}");
     }
 
     #[test]
     fn an_openssh_key_whose_halves_disagree_is_refused() {
+        // This check is `sshd`'s, not `sshwire`'s: the codec returns the
+        // public key the file holds precisely so that this comparison can be
+        // made, and a caller that forgot to make it would run under an
+        // identity that does not match its own `.pub` file.
         let seed = [0x11u8; 32];
-        // A public key belonging to a different seed entirely.
         let wrong_public = posix::ed25519::public_key(&[0x22u8; 32]);
-        let text = openssh_private_key_text(&seed, &wrong_public);
-        let err = parse_openssh_private_key(&text).expect_err("must refuse");
+        let text = encode_openssh_private_key(&seed, &wrong_public, "test", 1);
+
+        let err = HostKey::from_openssh_text(&text).expect_err("must refuse");
         assert!(err.contains("does not match"), "{err}");
     }
 
@@ -6976,54 +6780,13 @@ DenyGroups nogroup
     fn a_file_that_is_not_a_host_key_is_an_error_not_an_invented_key() {
         // The old loader fell back to sha256(first_line), so this produced a
         // valid-looking host key unrelated to the file.
-        let err = parse_openssh_private_key("-----BEGIN OPENSSH PRIVATE KEY-----\nZ\n")
-            .expect_err("must refuse");
-        assert!(err.contains("openssh-key-v1"), "{err}");
-    }
-
-    /// Build an OpenSSH private key file body for tests. Mirrors
-    /// `write_openssh_private_key` minus the I/O and the random checkint.
-    fn openssh_private_key_text(seed: &[u8; 32], public: &[u8; 32]) -> String {
-        let mut pub_blob = Vec::new();
-        pub_blob.extend_from_slice(&ssh_string(b"ssh-ed25519"));
-        pub_blob.extend_from_slice(&ssh_string(public));
-
-        let mut secret = Vec::with_capacity(64);
-        secret.extend_from_slice(seed);
-        secret.extend_from_slice(public);
-
-        let mut private = Vec::new();
-        private.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
-        private.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
-        private.extend_from_slice(&ssh_string(b"ssh-ed25519"));
-        private.extend_from_slice(&ssh_string(public));
-        private.extend_from_slice(&ssh_string(&secret));
-        private.extend_from_slice(&ssh_string(b"test"));
-        let mut pad: u8 = 1;
-        while private.len() % 8 != 0 {
-            private.push(pad);
-            pad += 1;
-        }
-
-        let mut raw = Vec::new();
-        raw.extend_from_slice(b"openssh-key-v1\0");
-        raw.extend_from_slice(&ssh_string(b"none"));
-        raw.extend_from_slice(&ssh_string(b"none"));
-        raw.extend_from_slice(&ssh_string(b""));
-        raw.extend_from_slice(&1u32.to_be_bytes());
-        raw.extend_from_slice(&ssh_string(&pub_blob));
-        raw.extend_from_slice(&ssh_string(&private));
-        pem_wrap(&base64_encode(&raw))
-    }
-
-    fn pem_wrap(body: &str) -> String {
-        let mut text = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
-        for chunk in body.as_bytes().chunks(70) {
-            text.push_str(&String::from_utf8_lossy(chunk));
-            text.push('\n');
-        }
-        text.push_str("-----END OPENSSH PRIVATE KEY-----\n");
-        text
+        let err = HostKey::from_openssh_text(
+            "-----BEGIN OPENSSH PRIVATE KEY-----
+Z
+",
+        )
+        .expect_err("must refuse");
+        assert!(!err.is_empty(), "the refusal must say something");
     }
 
     // ---- publickey authentication (RFC 4252 section 7) ----
@@ -7317,30 +7080,9 @@ DenyGroups nogroup
 
     // HMAC-SHA256's vector test moved to `sshwire` with the function.
 
-    // ---- Base64 ----
-
-    #[test]
-    fn test_base64_encode_empty() {
-        assert_eq!(base64_encode(&[]), "");
-    }
-
-    #[test]
-    fn test_base64_encode_hello() {
-        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
-    }
-
-    #[test]
-    fn test_base64_decode_hello() {
-        assert_eq!(base64_decode("aGVsbG8="), b"hello");
-    }
-
-    #[test]
-    fn test_base64_roundtrip() {
-        let data = b"SSH server daemon testing";
-        let encoded = base64_encode(data);
-        let decoded = base64_decode(&encoded);
-        assert_eq!(&decoded, data);
-    }
+    // Base64's tests moved to `sshwire` with the functions. Duplicating them
+    // here would rebuild the arrangement this whole change is dismantling: a
+    // second copy of a shared encoding, tested against its own expectation.
 
     // ---- Big integer ----
 

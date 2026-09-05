@@ -388,6 +388,198 @@ mod tests {
         );
     }
 
+    // ---- publickey authentication (RFC 4252 §7), both ends in one process ----
+    //
+    // The handshake tests above compare a value the two ends each *computed*.
+    // These compare something narrower and sharper: bytes one end produced,
+    // consumed by the other end's real decision function.
+    //
+    // §7 is the part of this protocol where a disagreement is least visible. The
+    // client signs `sshwire::pubkey_signed_blob` and the server rebuilds it, and
+    // nothing on the wire carries the blob itself — that is the design, since a
+    // signature over bytes the sender chose would prove nothing. So a field the
+    // two ends order differently, length-prefix differently, or one of them
+    // omits, produces no decode error anywhere. It produces a signature that
+    // fails to verify, which RFC 4252 §5.1 reports as a bare
+    // `SSH_MSG_USERAUTH_FAILURE` — byte-identical to the reply for a key that
+    // genuinely is not authorised. "Publickey does not work and nothing says
+    // why" is the entire symptom, from both ends, for every possible cause.
+    //
+    // Three crates meet in these four tests, which is one more than the name of
+    // this one suggests: `ssh-keygen` writes both files, `ssh` reads the private
+    // one and signs, `sshd` reads the public one as `authorized_keys` and
+    // verifies. Each of those is a contract between two programs that until now
+    // only ever had one program's opinion of it.
+
+    /// The seed the client's own key is built from.
+    ///
+    /// Deliberately not [`HOST_KEY_SEED`]: if the two were the same, "the client
+    /// authenticated" could pass while the client was holding the *server's*
+    /// key, which is not the thing being tested.
+    const CLIENT_KEY_SEED: [u8; 32] = [0x5a; 32];
+
+    /// A key belonging to nobody in these tests, for the rejection cases.
+    const STRANGER_KEY_SEED: [u8; 32] = [0x17; 32];
+
+    /// The account being authenticated, as bytes rather than as a `&str`.
+    ///
+    /// The signature covers the bytes the client put on the wire for this field.
+    /// Spelling it as bytes at every point it appears is what keeps a `String`
+    /// round trip — which rewrites anything that is not valid UTF-8 — out of the
+    /// path between signing and verifying.
+    const INTEROP_USER: &[u8] = b"interop";
+
+    /// RFC 4252 §5: the service the authentication is *for*, bound into the
+    /// signature so that one obtained for a different service cannot be reused.
+    const SSH_CONNECTION: &[u8] = b"ssh-connection";
+
+    /// The two files a user with a key actually has: the private key their
+    /// client signs with, and the one line an administrator pastes into
+    /// `authorized_keys`.
+    ///
+    /// Both come from `ssh-keygen` rather than being assembled here, because
+    /// "the daemon accepts a key the client signed with" is only worth knowing
+    /// if the key is one this tree's own tool produced. Building the
+    /// `authorized_keys` line by hand in this file would make the test agree with
+    /// a third copy of the format that no program reads.
+    ///
+    /// `encode_private_key` rather than `generate_key` for
+    /// [`the_daemon_starts_on_the_key_its_own_key_tool_writes`]'s reason: the
+    /// latter draws from `randrange`, which refuses on this host.
+    fn key_files(seed: [u8; 32]) -> (String, String) {
+        let keypair = ssh_keygen::Ed25519KeyPair::from_seed(seed);
+        let private =
+            ssh_keygen::encode_private_key(&keypair.seed, &keypair.public, "interop", 0x1234_5678);
+        let authorized = ssh_keygen::public_key_line(&keypair.public, "interop");
+        (private, authorized)
+    }
+
+    /// The client's own loader, on the text of a private key file.
+    fn identity(private_key_file: &str) -> ssh::Identity {
+        ssh::Identity::from_openssh_text(private_key_file)
+            .expect("the client must load a key ssh-keygen wrote")
+    }
+
+    /// The daemon accepts a signature the client made over the session the two
+    /// of them just negotiated.
+    ///
+    /// The session identifiers are the ones the *handshake* produced, and each
+    /// end uses its own: the client signs with the value it derived, the daemon
+    /// verifies with the value it derived. That is what happens on a real
+    /// connection, and it means this test also fails if the two ever stop
+    /// agreeing — the signature is over a value neither end was told.
+    #[test]
+    fn the_daemon_accepts_a_signature_the_client_made_over_the_session_they_negotiated() {
+        let scratch = scratchdir::ScratchDir::new("ssh-interop-pubkey-accept");
+        let (client_id, server_id) = one_handshake(&scratch.path("known_hosts"));
+
+        let (private, authorized) = key_files(CLIENT_KEY_SEED);
+        let request = identity(&private).auth_request(INTEROP_USER, SSH_CONNECTION, &client_id);
+
+        let verdict = sshd::decide_publickey_request(&request, &server_id, &authorized)
+            .expect("the daemon must be able to read the request its own peer built");
+
+        assert_eq!(
+            verdict,
+            sshd::PubkeyOutcome::Accepted,
+            "the daemon refused a signature the client made with the key that is \
+             listed in the authorized_keys the daemon was given. The two ends \
+             disagree about the bytes RFC 4252 §7 signs, or about the public key \
+             blob, or about how ssh-keygen writes one of the two files."
+        );
+    }
+
+    /// A key that is not in `authorized_keys` does not get in.
+    ///
+    /// The complement of the test above, and the reason that one means anything:
+    /// a server that accepted everything would pass it. Here the signature is
+    /// genuine and the key is real — the only thing wrong is that this account
+    /// never listed it.
+    ///
+    /// No handshake: what is under test is the decision, and a session
+    /// identifier is 32 bytes both ends were handed. The test above is the one
+    /// that establishes those bytes are the ones a real connection produces.
+    #[test]
+    fn a_key_that_is_not_in_authorized_keys_is_refused() {
+        let session_id = [0x11u8; 32];
+        let (private, _my_own_line) = key_files(CLIENT_KEY_SEED);
+        let (_stranger_private, stranger_line) = key_files(STRANGER_KEY_SEED);
+
+        let request = identity(&private).auth_request(INTEROP_USER, SSH_CONNECTION, &session_id);
+        let verdict = sshd::decide_publickey_request(&request, &session_id, &stranger_line)
+            .expect("a well-formed request is readable whatever the daemon decides");
+
+        assert_eq!(
+            verdict,
+            sshd::PubkeyOutcome::Rejected,
+            "the daemon admitted a key that is not in the authorized_keys it was \
+             given"
+        );
+    }
+
+    /// A signature captured from one connection does not authenticate another.
+    ///
+    /// This is the whole job of the session identifier in the signed blob (RFC
+    /// 4252 §7): it is the exchange hash of the first key exchange, which no
+    /// single peer chooses, so a signature is usable only on the connection it
+    /// was made for. A hostile server that collected one cannot present it
+    /// elsewhere.
+    ///
+    /// The check is worth making across the boundary rather than inside either
+    /// crate because the binding only works if both ends put the identifier in
+    /// the same place. A pair of implementations that both omitted it would
+    /// interoperate perfectly and be replayable by anyone.
+    #[test]
+    fn a_signature_made_for_one_session_does_not_authenticate_another() {
+        let (private, authorized) = key_files(CLIENT_KEY_SEED);
+        let request = identity(&private).auth_request(INTEROP_USER, SSH_CONNECTION, &[0x11; 32]);
+
+        let verdict = sshd::decide_publickey_request(&request, &[0x22; 32], &authorized)
+            .expect("a replayed request is still a well-formed one");
+
+        assert_eq!(
+            verdict,
+            sshd::PubkeyOutcome::Rejected,
+            "a signature made for one session authenticated a different one, so \
+             the session identifier is not actually bound into what the two ends \
+             sign and verify"
+        );
+    }
+
+    /// Changing one byte of the signature is enough to be refused.
+    ///
+    /// Which sounds obvious, and is the exact bug this server shipped: it
+    /// compared the offered public key against `authorized_keys`, found a match,
+    /// and returned success without ever checking the signature — so anyone who
+    /// could read a `.pub` file could log in as its owner. `sshd`'s own suite
+    /// covers that now; this is the same question asked of a signature the real
+    /// client really produced, rather than one the server's tests built.
+    ///
+    /// The last byte of the packet is the last byte of the signature, since the
+    /// signature is the final field. Flipping a bit in it leaves every length
+    /// prefix intact, so the request stays perfectly well-formed and the only
+    /// thing wrong with it is the one thing that must be checked.
+    #[test]
+    fn a_signature_with_one_bit_changed_is_refused() {
+        let session_id = [0x11u8; 32];
+        let (private, authorized) = key_files(CLIENT_KEY_SEED);
+        let mut request =
+            identity(&private).auth_request(INTEROP_USER, SSH_CONNECTION, &session_id);
+
+        let last = request.len() - 1;
+        request[last] ^= 0x01;
+
+        let verdict = sshd::decide_publickey_request(&request, &session_id, &authorized)
+            .expect("flipping a signature bit does not malform the packet");
+
+        assert_eq!(
+            verdict,
+            sshd::PubkeyOutcome::Rejected,
+            "the daemon accepted a request whose signature had been altered, \
+             which means it is not verifying the signature at all"
+        );
+    }
+
     /// Lowercase hex, for an assertion failure a reader can compare by eye.
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()

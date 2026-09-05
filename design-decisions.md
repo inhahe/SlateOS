@@ -67356,10 +67356,13 @@ connect, since they never asked for that file by name.
   thing without that.
 
 **What this does not cover:** a key file that is *encrypted with a passphrase*.
-This client cannot read one at all, so today it lands in the "unusable" column
-and produces an error naming the container. That is the right answer only while
-passphrases are unimplemented; when they are, an encrypted file must prompt
-rather than fail. `known-issues.md` carries this.
+No tool in this tree can read one, so today it lands in the "unusable" column —
+though with an accurate message, since the decoder recognises an encrypted
+container and says so rather than calling the file damaged. Erroring is the
+right answer only while there is no passphrase prompt to offer; once there is,
+an encrypted file must prompt rather than fail, and this rule needs revisiting
+alongside it. See known-issues.md
+`TD-B-NO-SSH-TOOL-CAN-READ-A-PASSPHRASE-PROTECTED-PRIVATE-KEY`.
 
 **Where it lives:** `userspace/ssh/src/lib.rs`, `load_identity` and
 `load_identity_from`. The pair is split so the *default*-path policy is testable

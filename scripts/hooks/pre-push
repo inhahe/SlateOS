@@ -1,5 +1,5 @@
 #!/bin/sh
-# Twelve gates at the push boundary. Any one of them aborts the push.
+# Thirteen gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -14,20 +14,26 @@
 #  10. Refuse to publish a commit authored by a test fixture's identity.
 #  11. Refuse to publish a doc comment whose `[`link`]` names nothing.
 #  12. Refuse to publish coreutils whose unix half was never compiled.
+#  13. Refuse to publish a `design-decisions.md` section outside its lane's
+#      numbering band, or missing the `**Lane:**` field that declares it.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
-# were implemented. A list in a comment beside the code it lists is a second
-# copy that rots. It is short enough to be worth keeping, so it is *checked* --
-# scripts/test-pre-push-gates.py -- rather than trusted.)
+# were implemented, and it was wrong again the moment gate 13 was written --
+# the section and the bypass landed in `0ab4b55bc` and this list did not.
+# A list in a comment beside the code it lists is a second copy that rots. It
+# is short enough to be worth keeping, so it is *checked* --
+# scripts/test-pre-push-gates.py, which is what caught both -- rather than
+# trusted.)
 #
 # Each has a full comment above it, further down; each has its own bypass
 # variable, so silencing one never silences another; and each is scoped to the
 # tree that can introduce it, so a lane that cannot cause a given defect never
 # pays for the check or is blocked by it.
 #
-# Gates 1-11 are static checkers and the whole set costs seconds. Gate 12 is a
-# compiler, and costs minutes when it runs at all; its scope is correspondingly
-# narrow (one crate's own tree) and its comment argues the price.
+# Gates 1-11 and 13 are static checkers and the whole set costs seconds. Gate
+# 12 is a compiler, and costs minutes when it runs at all; its scope is
+# correspondingly narrow (one crate's own tree) and its comment argues the
+# price.
 #
 # They are unrelated to each other on purpose. A single `ALLOW_EVERYTHING`
 # would be one variable away from turning the push boundary off entirely.
@@ -142,8 +148,8 @@ fi
 # every path-gated check legitimately skips. Silence therefore cannot be read
 # either way, and "no news is good news" is precisely the reading that failed.
 #
-# A tally the hook had to compute fixes that: `12 ran, 0 skipped` and
-# `0 ran, 12 skipped` are different lines, and *no line at all* means the hook
+# A tally the hook had to compute fixes that: `13 ran, 0 skipped` and
+# `0 ran, 13 skipped` are different lines, and *no line at all* means the hook
 # did not execute. It also makes an over-narrow `touches` pattern visible —
 # a gate that skips on a push it should have judged now says so by name,
 # instead of being silently absent.
@@ -2234,15 +2240,145 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 13 — design-decisions.md's per-lane numbering bands.
+#
+# WHY IT IS HERE AND NOT ONLY IN THE BOOT TEST. It was only in the boot test,
+# and that is precisely how it failed. `scripts/boot-test.sh` runs this checker,
+# and the standing decision recorded at the top of this file argues that the
+# boot test is enough because it "is required before any merge to `main`".
+# That premise is documented and unenforced, and the gap is not uniform across
+# lanes: of 648 boot-history records, lane A has 619, lane B 28 and lane C
+# **zero**. So the lane whose band is the most active is the one lane for which
+# this gate did not exist.
+#
+# On 2026-09-04 lane C's section 811 landed with no `**Lane:**` field, `main`
+# went red for all three lanes, and it stayed red until a lane that does run
+# the boot test tripped over it. `--head 79e2d6009` reproduces exactly that
+# failure, which is what says this gate placed here would have caught it at the
+# push that introduced it.
+#
+# This is not a reversal of the standing decision above -- that one is about
+# running the *tooling suites* at push time, which is a multi-minute cost. This
+# is one checker over one file, measured at well under a second because
+# `GitTree.read` fetches two blobs instead of indexing ~13,800 paths.
+#
+# WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. `--head "$sha"` is what makes the
+# gate read what is being pushed. Without it the 811 case would have passed the
+# moment its author typed the missing field on disk, committed or not -- and
+# worse, an uncommitted `--update-baseline` would forgive any duplicate in the
+# commit, because the baseline is the input that *grandfathers*. The checker
+# reads both the document and the baseline from the same tree for that reason.
+#
+# Bypass: ALLOW_UNCHECKED_BANDS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+skip_bands=0
+# `${VAR:-0}` and `= "1"`, matching the other bypasses, and neither half is
+# cosmetic. The default is what keeps this legal under `set -u` (line 116) --
+# a bare `$ALLOW_UNCHECKED_BANDS` aborts the whole hook when the variable is
+# unset, which is every push. Comparing to "1" rather than testing non-empty
+# is so that `ALLOW_UNCHECKED_BANDS=0` means what it says.
+if [ "${ALLOW_UNCHECKED_BANDS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNCHECKED_BANDS=1 set — skipping the numbering-band gate." >&2
+    skip_bands=1
+fi
+[ -n "$py" ] || skip_bands=1
+
+bands="${repo_root:-.}/scripts/check-design-decisions-bands.py"
+[ -f "$bands" ] || skip_bands=1
+# Checker and baseline in scope alongside the document, per gate 8: a baseline
+# edited by hand is judged by the push that edits it, and a change to the
+# checker changes every judgement it makes.
+touches design-decisions.md scripts/check-design-decisions-bands.py \
+        scripts/design-decisions-baseline.json || skip_bands=1
+# Nothing being published is nothing to judge — and this is also what stops the
+# `--head` loop below from silently degrading to zero runs while `note_gate`
+# had already reported the gate as having run.
+[ -n "${pushed_shas# }" ] || skip_bands=1
+note_gate bands "$skip_bands"
+
+bands_failed=0
+if [ "$skip_bands" != "1" ]; then
+    # Check the checker first, as gates 3-5 do. No `--head` on the selftest,
+    # for their reason: it builds its own scratch repository and never reads
+    # this one, so there is no worktree-versus-commit question for it to get
+    # wrong.
+    if ! run_checker bands-selftest "$py" "$bands" --selftest; then
+        echo "pre-push: check-design-decisions-bands.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        bands_failed=1
+    else
+        for sha in $pushed_shas; do
+            # Per-sha gate name, for gate 9's reason: a shared name lets a
+            # later clean sha delete the kept log of an earlier failing one.
+            if ! run_checker "bands-$sha" "$py" "$bands" \
+                             --head "$sha" --quiet; then
+                bands_failed=1
+            fi
+        done
+    fi
+fi
+
+if [ "$bands_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — design-decisions.md breaks its numbering bands.
+
+The file is written by three lanes at once, and *position*, not number, is what
+makes a merge conflict: if each lane inserts inside its own numeric band, the
+three insertion points are different line offsets and git never compares them.
+Append at end of file instead and all three lanes edit the same offset — which
+is how lanes A and B once wrote two section 626s hours apart and got a 350-line
+CONFLICT that never mentioned the number.
+
+The errors above name the line. The usual ones:
+
+  * a new section with no \`**Lane:**\` field — add it; that field is what makes
+    a band collision visible in the diff instead of findable only by grep. This
+    is the one that turned \`main\` red for all three lanes on 2026-09-04.
+  * a number outside your lane's open band, or below the band's high-water
+    mark — take the next number the summary prints. Never reissue a spent one;
+    they are cited from source comments and from other entries.
+
+See the file's own "Numbering and file order" header, which is also the table
+this gate parses — it is not hardcoded here.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/check-design-decisions-bands.py --head <sha>
+
+or against your worktree, which is what the boot test checks:
+
+    python scripts/check-design-decisions-bands.py
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_UNCHECKED_BANDS=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # The tally. Unconditional, and on stderr with the rest of the hook's output.
 #
 # This is the line whose absence means "the hook did not run" — the one reading
 # that silence could never carry. It is deliberately printed even when every
-# gate skipped, because `0 ran, 12 skipped` is the interesting case, not the
+# gate skipped, because `0 ran, 13 skipped` is the interesting case, not the
 # boring one: it says the push was judged by nothing, which for a push that
 # edits only documentation is correct, and for a push that edits a utility is a
 # bug in a `touches` pattern. Naming the skipped gates is what makes the second
 # case diagnosable rather than merely suspicious.
+#
+# The `13` above and in the header comment is today's total, and it is the one
+# number in this file that goes stale silently — nothing recomputes it, because
+# the tally counts at run time and does not care what a comment claims.  It is
+# the number of distinct gate *names*, which is not the number of `note_gate`
+# call sites: `getopt-table` has two (the arms of an if/else), so counting
+# lines gives 15 and overstates it.  Recompute with
+#
+#     grep -o '^[[:space:]]*note_gate [a-z0-9-]*' "$0" | awk '{print $2}' | sort -u | wc -l
+#
+# Gate 13 (`bands`) made it 13 on 2026-09-05; if you add a gate, bump both.
 #
 # A refusing gate exits before this, so the tally is not a claim that the push
 # passed — only a record of what was asked.

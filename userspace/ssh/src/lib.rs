@@ -91,8 +91,9 @@ use quoting::quoteaf_os;
 // is the point, and `ssh/Cargo.toml` for what a second copy cost the last time.
 use sshwire::{
     BigUint, DH_GROUP14_G, ExchangeHashInput, PacketCodec, Role, SecretSource, StreamBuffer,
-    Transport, TransportError, compute_exchange_hash, dh_group14_prime_bytes, encode_mpint,
-    read_byte, read_mpint, read_ssh_string, read_u32, ssh_string,
+    Transport, TransportError, base64_decode, base64_encode, base64_encode_padded,
+    compute_exchange_hash, dh_group14_prime_bytes, encode_mpint, read_byte, read_mpint,
+    read_ssh_string, read_u32, ssh_string,
 };
 use std::env;
 use std::fmt;
@@ -690,57 +691,6 @@ fn host_key_fingerprint(key_blob: &[u8]) -> String {
     format!("SHA256:{b64}")
 }
 
-/// Minimal base64 encoder (no padding variant for fingerprints).
-fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    /// One base64 digit from the low six bits of `sextet`.
-    ///
-    /// Masking to `0x3f` before the lookup makes the index provably in range
-    /// for a 64-entry table, so the fallback is unreachable.
-    fn digit(sextet: u32) -> char {
-        ALPHABET
-            .get((sextet & 0x3f) as usize)
-            .map_or('A', |&b| char::from(b))
-    }
-
-    // The three cases used to be three separate index expressions over `i`,
-    // with a `while i + 2 < data.len()` head and a `data.len() - i` tail that
-    // had to agree about where the full groups stopped. `chunks(3)` decides
-    // that once: the bit layout is identical in all three cases, and only the
-    // number of digits emitted -- which is the chunk's own length -- differs.
-    let mut result = String::new();
-    for chunk in data.chunks(3) {
-        let [b0, b1, b2] = match *chunk {
-            [b0, b1, b2] => [b0, b1, b2],
-            [b0, b1] => [b0, b1, 0],
-            [b0] => [b0, 0, 0],
-            // `chunks(3)` never yields an empty or over-long slice; the arm
-            // exists only because the compiler cannot know that.
-            _ => continue,
-        };
-        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
-        result.push(digit(n >> 18));
-        result.push(digit(n >> 12));
-        if chunk.len() >= 2 {
-            result.push(digit(n >> 6));
-        }
-        if chunk.len() >= 3 {
-            result.push(digit(n));
-        }
-    }
-    result
-}
-
-/// Minimal base64 encoder with padding (for known_hosts storage).
-fn base64_encode_padded(data: &[u8]) -> String {
-    let mut s = base64_encode(data);
-    while !s.len().is_multiple_of(4) {
-        s.push('=');
-    }
-    s
-}
-
 /// The name a host is filed under in `known_hosts`: bare for the default port,
 /// bracketed otherwise, as OpenSSH writes it.
 ///
@@ -765,6 +715,20 @@ enum KnownHostsVerdict {
     Match,
     /// A line names this host and carries a *different* key.
     Mismatch,
+    /// A line names this host but its key field is not valid base64, so there
+    /// is no key to compare against.
+    ///
+    /// This case only became expressible when the decoder moved to `sshwire`.
+    /// The private one this crate used to carry dropped characters it did not
+    /// recognise and returned whatever bytes were left, so a mangled entry
+    /// decoded to a short blob, compared unequal, and was reported as
+    /// `Mismatch` -- which prints "someone could be eavesdropping on you" and
+    /// tells the user to remove the old entry to accept the new key. Both
+    /// halves of that are wrong for a corrupt line, and the second is a trap:
+    /// the first line naming a host is the one that decides, so accepting the
+    /// key appends a line that will never be consulted and the same warning
+    /// comes back on every subsequent connection.
+    Corrupt,
 }
 
 /// Search already-read `known_hosts` text for `host_pattern`.
@@ -801,7 +765,10 @@ fn known_hosts_lookup(content: &str, host_pattern: &str, key_blob: &[u8]) -> Kno
         // Decode the stored key and compare. The first line naming this host
         // decides: a later line cannot rehabilitate a key the earlier one
         // contradicts.
-        return if base64_decode(key_b64) == key_blob {
+        let Ok(stored) = base64_decode(key_b64.as_bytes()) else {
+            return KnownHostsVerdict::Corrupt;
+        };
+        return if stored == key_blob {
             KnownHostsVerdict::Match
         } else {
             KnownHostsVerdict::Mismatch
@@ -856,6 +823,19 @@ fn check_known_hosts(
              Remove the old entry from {path} to accept the new key.",
             host_key_fingerprint(key_blob),
         ))),
+        // Refusing rather than treating the host as unknown: an unreadable
+        // entry is not an absent one. Prompting to accept the key would append
+        // a line below the corrupt one, which the lookup never reaches, so the
+        // user would be asked the same question forever. Naming the actual
+        // problem is what lets them fix it in one step.
+        KnownHostsVerdict::Corrupt => Err(SshError::HostKeyMismatch(format!(
+            "the entry for {host_pattern} in {path} is damaged: its key is not \
+             valid base64, so it cannot be compared against the key this server \
+             offered.\n\
+             The fingerprint of the offered key is:\n  {}\n\
+             Repair or remove that line to continue.",
+            host_key_fingerprint(key_blob),
+        ))),
     }
 }
 
@@ -892,52 +872,6 @@ fn add_known_host(
         }
     };
     let _ = f.write_all(entry.as_bytes());
-}
-
-/// Minimal base64 decoder.
-fn base64_decode(input: &str) -> Vec<u8> {
-    // Subtracting the range's own start cannot underflow inside the arm that
-    // established the range, and the largest sum is `b'z' - b'a' + 26` = 51,
-    // so every branch is bounded by inspection.
-    #[allow(clippy::arithmetic_side_effects)]
-    fn b64val(c: u8) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-
-    let bytes: Vec<u8> = input
-        .bytes()
-        .filter(|&b| b != b'=' && b != b'\n' && b != b'\r')
-        .collect();
-
-    // As with the encoder, `chunks(4)` replaces a `while i + 3 < len` head and
-    // a `bytes.len() - i` tail that separately decided where the whole groups
-    // ended. Missing characters decode as zero sextets, and how many whole
-    // bytes the group yields is a function of its length: 4 characters carry
-    // three bytes, 3 carry two, 2 carry one. A lone trailing character carries
-    // no whole byte and is dropped -- which is what the old `remaining >= 2`
-    // guard did.
-    let mut result = Vec::with_capacity(bytes.len().saturating_mul(3) / 4);
-    for chunk in bytes.chunks(4) {
-        let mut sextets = [0u8; 4];
-        for (slot, &c) in sextets.iter_mut().zip(chunk) {
-            *slot = b64val(c).unwrap_or(0);
-        }
-        let [a, b, c, d] = sextets;
-        let n = (u32::from(a) << 18) | (u32::from(b) << 12) | (u32::from(c) << 6) | u32::from(d);
-        for (shift, needed) in [(16, 2), (8, 3), (0, 4)] {
-            if chunk.len() >= needed {
-                result.push(((n >> shift) & 0xff) as u8);
-            }
-        }
-    }
-    result
 }
 
 // ============================================================================
@@ -3008,58 +2942,12 @@ mod tests {
     //     structurally cannot see.
     // ------------------------------------------------------------------
 
-    // ------------------------------------------------------------------
-    // base64
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn base64_matches_the_rfc_4648_vectors() {
-        // The three tail lengths are the whole difficulty here, and each of
-        // them used to be a separate hand-indexed branch.
-        for (plain, padded) in [
-            ("", ""),
-            ("f", "Zg=="),
-            ("fo", "Zm8="),
-            ("foo", "Zm9v"),
-            ("foob", "Zm9vYg=="),
-            ("fooba", "Zm9vYmE="),
-            ("foobar", "Zm9vYmFy"),
-        ] {
-            assert_eq!(
-                base64_encode_padded(plain.as_bytes()),
-                padded,
-                "encoding {plain:?}"
-            );
-            assert_eq!(
-                base64_encode(plain.as_bytes()),
-                padded.trim_end_matches('='),
-                "unpadded encoding of {plain:?}"
-            );
-            assert_eq!(base64_decode(padded), plain.as_bytes(), "decoding {padded}");
-        }
-    }
-
-    #[test]
-    fn base64_round_trips_every_length_up_to_three_blocks() {
-        for len in 0..=12usize {
-            let data: Vec<u8> = (0..len)
-                .map(|i| u8::try_from(i * 17 % 251).unwrap())
-                .collect();
-            let encoded = base64_encode_padded(&data);
-            assert_eq!(base64_decode(&encoded), data, "round trip at length {len}");
-        }
-    }
-
-    #[test]
-    fn base64_decoding_ignores_whitespace_padding_and_stray_characters() {
-        // known_hosts lines are wrapped and hand-edited, so the decoder has to
-        // survive line endings; a bad character decodes as a zero sextet
-        // rather than shifting everything after it.
-        assert_eq!(base64_decode("Zm9v\r\nYmFy"), b"foobar");
-        assert_eq!(base64_decode("Zm9vYmFy===="), b"foobar");
-        // A lone trailing character carries no whole byte and is dropped.
-        assert_eq!(base64_decode("Zm9vYmFyZ"), b"foobar");
-    }
+    // base64's tests moved to `sshwire` with the functions -- including the
+    // RFC 4648 vectors, the every-length round trip, and the line-wrapping
+    // tolerance a hand-edited `known_hosts` needs. What used to be tested here
+    // as well is the case this crate no longer decides: a stray character is
+    // now an error rather than a zero sextet, which is what `Corrupt` below
+    // exists to carry.
 
     // ------------------------------------------------------------------
     // known_hosts
@@ -3109,6 +2997,24 @@ mod tests {
         assert_eq!(
             known_hosts_lookup(&content, "example.com", b"an-impostors-key"),
             KnownHostsVerdict::Mismatch
+        );
+    }
+
+    #[test]
+    fn known_hosts_reports_a_damaged_entry_as_damaged_and_not_as_an_attack() {
+        // With a decoder that dropped unrecognised characters, this line
+        // decoded to a *shorter* blob, compared unequal, and came out as
+        // `Mismatch` -- so a typo in the trust store printed "someone could be
+        // eavesdropping on you". The advice that warning gives is also wrong
+        // here: removing "the old entry" is right, but accepting the new key
+        // appends below a line the lookup stops at, so the prompt would return
+        // on every connection.
+        let blob = b"the-real-host-key".to_vec();
+        let content = "example.com ssh-ed25519 not!valid!base64!\n";
+
+        assert_eq!(
+            known_hosts_lookup(content, "example.com", &blob),
+            KnownHostsVerdict::Corrupt
         );
     }
 

@@ -50,9 +50,10 @@ than silently believing there are no bands.
 | §400–§499 | **lane C** | closed — full at §498 | after B's first band |
 | §500–§599 | **lane C** | closed early at §579 — 20 numbers unused | interleaved with A's §600s |
 | §600–§699 | **lane A** | closed early at §679 — 20 numbers unused | interleaved with C's §500s |
-| §700–§799 | **lane B** | **open** | the tail — B alone still appends at EOF |
+| §700–§799 | **lane B** | closed early at §779 — 20 numbers unused | interleaved before C's §800s |
 | §800–§899 | **lane C** | **open** | immediately after §579; C's own run ascends |
 | §900–§999 | **lane A** | **open** | immediately after §679; A's own run ascends |
+| §1000–§1099 | **lane B** | **open** | the tail — B alone still appends at EOF |
 
 Bands 200–499 are closed but **not free**: every number in them is spent, and
 spent numbers are never reissued (see §217–§220 and §626 below). A new entry
@@ -172,6 +173,43 @@ was **not** run: regenerating from the whole file would additionally grandfather
 lane B's live §700s, and a grandfathered heading is exempt from the `**Lane:**`
 check. Every one of the 49 already declares `**Lane:** A`, verified before
 baselining, so the exemption they gain is one they do not use.
+
+**Lane B closed §700–§799 early, at §779, and opened §1000–§1099 (2026-09-05),**
+the third lane to do so and the first to do it with no argument left to make:
+lane C set the precedent, lane A followed it the same day without re-litigating,
+and this is the pattern working as intended — the gate warned at 80%, the warning
+was obeyed, 20 numbers went unspent. Nothing here is lane-specific either.
+
+**§1000 goes at end of file, and that is not an exception to the
+"keep-your-region-contiguous" rule that put §800 after §579 and §900 after
+§679 — it is that rule.** Lane B's §700s already end at EOF, because B is the
+only lane still appending there. Following B's own band's tail therefore lands
+in the same place it always has. Lanes A and C: your insertion points do not
+move, and no number you might reach for is taken — §1000–§1099 was unclaimed by
+anyone, so this needs no request, only the notice in
+`requests/b-ac-lane-b-closed-700-799-at-779-and-opened-1000-1099.md`.
+
+Four digits are new. The gate parses `§lo–§hi` with `\d+` and compares numbers,
+so it neither knows nor cares; the one thing to watch is that a heading written
+`## 1000.` sorts correctly by number and not as text, which it does, because
+nothing in this file sorts headings as text.
+
+Grandfathering is what closing a band means, so the same commit adds §701–§779
+to `scripts/design-decisions-baseline.json` — the 79 lane-B entries that closing
+the band would otherwise turn into "new heading in a closed band" errors. As
+lanes C and A did, `--update-baseline` was **not** run: regenerating from the
+whole file would additionally grandfather lane C's live §800s and lane A's live
+§900s, and a grandfathered heading is exempt from the `**Lane:**` check.
+
+That exemption is one none of the 79 uses, verified before baselining — but the
+check found one entry that would have quietly taken it. **§741 declared
+`**Lane:** B` fifteen lines below its heading**, past the gate's twelve-line
+window, because a ten-line `⛔ SUPERSEDED` banner had been inserted between the
+two. The field was never missing; it had been pushed out of the window by a
+later edit that had no reason to think about it. Its metadata block now sits
+*above* the banner, which is where the rule wants it and where a reader
+resolving a band question would look. Worth knowing if you add a banner to an
+entry of your own: the window is measured from the heading, not from the prose.
 
 **The gate landed 2026-08-29: `scripts/check-design-decisions-bands.py`,** run
 by `scripts/boot-test.sh` before it builds anything. It requires each *new*
@@ -60439,6 +60477,10 @@ that would then have to agree with each other forever.
 
 ## 741. `mv`'s cross-device copy uses `io::copy` and gives up telling a read failure from a write failure, rather than a hand-written loop that would give up sparse files
 
+**Date:** 2026-09-01
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
 > **⛔ SUPERSEDED 2026-09-01, the same day, by §745.** The choice below is
 > real but the *menu* was wrong: it treats "the kernel's copy" and "knowing
 > which end failed" as two options you must pick between, and they are not.
@@ -60449,10 +60491,6 @@ that would then have to agree with each other forever.
 > reasoning about *which* loss is silent and which is loud is still correct and
 > is what makes the third sentence the right resolution rather than a
 > compromise.
-
-**Date:** 2026-09-01
-**Decided by:** Claude (autonomous)
-**Lane:** B
 
 **In short:** When `mv` cannot rename a file — because the two names are on
 different disks — it has to copy the bytes and delete the original. There are
@@ -67374,6 +67412,7 @@ without reading the developer's own `~/.ssh`.
 ## 779. Userspace file access goes through `std::fs`, never a hand-rolled syscall
 
 **Date:** 2026-09-05
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** `sshd` opened, read and wrote every file by executing a raw CPU

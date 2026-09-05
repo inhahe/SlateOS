@@ -53,5 +53,12 @@ sshwire = { path = "../sshwire" }
 # modes (the process just exits)". For a network client a panic reachable from
 # a server's bytes is a remote denial of service, not a tidy exit.
 # See known-issues.md `TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS`.
+# Test-only. `-o UserKnownHostsFile=` is tested against a real file, and a real
+# file in a test needs a private directory that goes away afterwards — the
+# alternative being a clock-named temp path, which is not unique and which only
+# gets cleaned up when the test passes. See that crate's module docs.
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }
+
 [lints]
 workspace = true

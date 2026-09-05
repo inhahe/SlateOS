@@ -16740,6 +16740,7 @@ dependencies = [
  "posix",
  "quoting",
  "randrange",
+ "scratchdir",
  "sha2",
  "sshwire",
 ]

@@ -787,12 +787,33 @@ fn known_hosts_lookup(content: &str, host_pattern: &str, key_blob: &[u8]) -> Kno
     KnownHostsVerdict::Unknown
 }
 
+/// Where the trusted host keys are recorded.
+///
+/// `-o UserKnownHostsFile=` overrides it, as in OpenSSH. That option is not
+/// decoration: `$HOME/.ssh/known_hosts` is the user's real trust store, so
+/// without a way to name a different file, *any* automated exercise of this
+/// client — an interoperability test above all — either has to skip host-key
+/// verification entirely or write into the operator's own trust store. The
+/// first tests the wrong program and the second is a side effect no test is
+/// entitled to have.
+fn known_hosts_path(known_hosts_file: Option<&str>) -> String {
+    if let Some(path) = known_hosts_file {
+        return path.to_string();
+    }
+    let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    format!("{home}/.ssh/known_hosts")
+}
+
 /// Check the known_hosts file for a matching host key.
 /// Returns Ok(true) if found and matches, Ok(false) if not found,
 /// Err if found but mismatched.
-fn check_known_hosts(hostname: &str, port: u16, key_blob: &[u8]) -> Result<bool, SshError> {
-    let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let path = format!("{home}/.ssh/known_hosts");
+fn check_known_hosts(
+    known_hosts_file: Option<&str>,
+    hostname: &str,
+    port: u16,
+    key_blob: &[u8],
+) -> Result<bool, SshError> {
+    let path = known_hosts_path(known_hosts_file);
 
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -815,13 +836,21 @@ fn check_known_hosts(hostname: &str, port: u16, key_blob: &[u8]) -> Result<bool,
 }
 
 /// Add a host key to the known_hosts file.
-fn add_known_host(hostname: &str, port: u16, key_type: &str, key_blob: &[u8]) {
-    let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let dir = format!("{home}/.ssh");
-    let path = format!("{dir}/known_hosts");
+fn add_known_host(
+    known_hosts_file: Option<&str>,
+    hostname: &str,
+    port: u16,
+    key_type: &str,
+    key_blob: &[u8],
+) {
+    let path = known_hosts_path(known_hosts_file);
 
-    // Ensure ~/.ssh directory exists.
-    let _ = std::fs::create_dir_all(&dir);
+    // Ensure the directory exists. `rsplit_once` rather than a `Path` parent so
+    // an explicit `UserKnownHostsFile` in the current directory -- no separator
+    // at all -- creates nothing rather than trying to create "".
+    if let Some((dir, _)) = path.rsplit_once('/') {
+        let _ = std::fs::create_dir_all(dir);
+    }
 
     let host_pattern = known_hosts_pattern(hostname, port);
     let key_b64 = base64_encode_padded(key_blob);
@@ -898,6 +927,8 @@ struct Config {
     command: Option<String>,
     verbose: bool,
     strict_host_key: StrictHostKey,
+    /// `-o UserKnownHostsFile=`; `None` means `$HOME/.ssh/known_hosts`.
+    known_hosts_file: Option<String>,
     // Parsed from -o ConnectTimeout=N; consumed by the future socket
     // connect path that wires a real timeout into the TCP handshake.
     #[allow(dead_code)]
@@ -923,6 +954,7 @@ fn parse_args() -> Result<Config, String> {
     let mut port: u16 = 22;
     let mut verbose = false;
     let mut strict_host_key = StrictHostKey::Ask;
+    let mut known_hosts_file: Option<String> = None;
     let mut connect_timeout: u32 = 30;
     let mut destination: Option<String> = None;
     let mut command_parts: Vec<String> = Vec::new();
@@ -959,6 +991,8 @@ fn parse_args() -> Result<Config, String> {
                         "no" => StrictHostKey::No,
                         _ => StrictHostKey::Ask,
                     };
+                } else if let Some(val) = opt.strip_prefix("UserKnownHostsFile=") {
+                    known_hosts_file = Some(val.to_string());
                 }
                 // Silently ignore unknown options (like OpenSSH).
             }
@@ -1009,6 +1043,7 @@ fn parse_args() -> Result<Config, String> {
         command,
         verbose,
         strict_host_key,
+        known_hosts_file,
         connect_timeout,
     })
 }
@@ -1415,7 +1450,13 @@ impl SshSession {
         key_type: &str,
         fingerprint: &str,
     ) -> Result<(), SshError> {
-        if check_known_hosts(&self.config.hostname, self.config.port, key_blob)? {
+        let known_hosts_file = self.config.known_hosts_file.as_deref();
+        if check_known_hosts(
+            known_hosts_file,
+            &self.config.hostname,
+            self.config.port,
+            key_blob,
+        )? {
             self.verbose("host key matches known_hosts");
             Ok(())
         } else {
@@ -1430,7 +1471,13 @@ impl SshSession {
                         "Warning: Permanently added {} ({key_type}) to the list of known hosts.",
                         quoteaf_os(&self.config.hostname)
                     );
-                    add_known_host(&self.config.hostname, self.config.port, key_type, key_blob);
+                    add_known_host(
+                        known_hosts_file,
+                        &self.config.hostname,
+                        self.config.port,
+                        key_type,
+                        key_blob,
+                    );
                     Ok(())
                 }
                 StrictHostKey::Ask => {
@@ -1453,7 +1500,13 @@ impl SshSession {
                             "Warning: Permanently added {} ({key_type}) to the list of known hosts.",
                             quoteaf_os(&self.config.hostname)
                         );
-                        add_known_host(&self.config.hostname, self.config.port, key_type, key_blob);
+                        add_known_host(
+                            known_hosts_file,
+                            &self.config.hostname,
+                            self.config.port,
+                            key_type,
+                            key_blob,
+                        );
                         Ok(())
                     } else {
                         Err(SshError::HostKeyMismatch(
@@ -2195,6 +2248,12 @@ mod tests {
             command: Some("true".into()),
             verbose: false,
             strict_host_key: StrictHostKey::No,
+            // Never `None` in a test: `None` means the operator's real
+            // `~/.ssh/known_hosts`, and `StrictHostKeyChecking=no` above would
+            // append to it. The empty path is deliberate -- no platform can
+            // open or create it, so it is "a file that is not there" stated in
+            // a way that cannot accidentally become a file that is.
+            known_hosts_file: Some(String::new()),
             connect_timeout: 0,
         }
     }
@@ -2871,5 +2930,76 @@ mod tests {
             known_hosts_lookup(&content, "example.com", &blob),
             KnownHostsVerdict::Unknown
         );
+    }
+
+    // ---- -o UserKnownHostsFile= ----
+
+    #[test]
+    fn without_the_option_the_trust_store_is_the_users_own_file() {
+        let path = known_hosts_path(None);
+        assert!(
+            path.ends_with("/.ssh/known_hosts"),
+            "default trust store moved: {path}"
+        );
+    }
+
+    #[test]
+    fn the_option_names_the_file_and_nothing_is_appended_to_it() {
+        // OpenSSH takes the value as the whole path, not a directory or a stem.
+        assert_eq!(known_hosts_path(Some("/tmp/hosts")), "/tmp/hosts");
+    }
+
+    #[test]
+    fn a_key_written_to_the_named_file_is_recognised_when_read_back() {
+        // The round trip is the point: `add_known_host` writes base64 and
+        // `check_known_hosts` decodes it, and a disagreement between those two
+        // would make every host look unknown for ever -- while each function's
+        // own test kept passing.
+        let scratch = scratchdir::ScratchDir::new("ssh-known-hosts");
+        let path = scratch.path("known_hosts");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+        let blob = b"a-host-key-blob".to_vec();
+
+        assert!(
+            !check_known_hosts(Some(file), "example.com", 2222, &blob)
+                .expect("no file is not an error"),
+            "an absent file must read as 'host unknown', not as a match"
+        );
+
+        add_known_host(Some(file), "example.com", 2222, "ssh-ed25519", &blob);
+        assert!(
+            check_known_hosts(Some(file), "example.com", 2222, &blob).expect("readable"),
+            "the key just written was not recognised"
+        );
+
+        // The port is part of the identity, so the same key on another port is
+        // a different host and is still unknown.
+        assert!(
+            !check_known_hosts(Some(file), "example.com", 22, &blob).expect("readable"),
+            "a different port must not match"
+        );
+
+        // A different key for a host we know is the man-in-the-middle case,
+        // and must be an error rather than "unknown" -- "unknown" would let
+        // StrictHostKeyChecking=no silently append the impostor's key.
+        assert!(
+            check_known_hosts(Some(file), "example.com", 2222, b"an-impostors-key").is_err(),
+            "a changed key must be reported, not treated as a new host"
+        );
+    }
+
+    #[test]
+    fn the_option_keeps_a_test_out_of_the_operators_own_trust_store() {
+        // The reason the option exists. `StrictHostKeyChecking=no` appends the
+        // server's key to the trust store, so without a way to name a different
+        // file, running the client under test would edit `~/.ssh/known_hosts`.
+        let scratch = scratchdir::ScratchDir::new("ssh-known-hosts-isolated");
+        let path = scratch.path("known_hosts");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+        add_known_host(Some(file), "example.com", 22, "ssh-ed25519", b"key");
+        assert!(path.exists(), "the named file is the one that was written");
+
+        let default = known_hosts_path(None);
+        assert_ne!(default, file, "the named file must not be the default one");
     }
 }

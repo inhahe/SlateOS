@@ -548,6 +548,66 @@ fn fill_from_kernel(_buffer: &mut [u8]) -> Result<(), EntropyError> {
     Err(EntropyError::Unavailable)
 }
 
+/// Fill `out` with bytes from the kernel CSPRNG, or fail.
+///
+/// [`SystemRandom`] is the right type when a caller wants a *stream* of
+/// unguessable values — a password, a shuffle of a wordlist — because it
+/// amortises the syscall and keeps the sticky-failure bookkeeping. This
+/// function is the right one when a caller wants a *fixed-size secret*: an
+/// Ed25519 seed, a Diffie-Hellman private exponent, an X11 MIT-MAGIC-COOKIE.
+/// Those are drawn once, must be exactly as long as they are, and have no use
+/// for a generator afterwards.
+///
+/// # Why this is here rather than written out at each call site
+///
+/// It was written out at each call site, three times, and one of the three was
+/// wrong in a way that could not be seen locally. `userspace/ssh` and
+/// `userspace/sshd` drew their host keys and DH exponents through
+/// `posix::random::fill` — the `posix` crate reached as a *Rust dependency*.
+/// That looks like the most direct route to the libc and is in fact the one
+/// route that does not reach it: a SlateOS program is built for
+/// `x86_64-slateos`, whose `target_os` is `"linux"`, while every syscall in
+/// `posix` is gated `#[cfg(target_os = "none")]` for the bare-metal `libc.a`
+/// build. The dependency therefore compiles a *second* copy of the libc into
+/// the program with all of its syscalls stubbed out to `-ENOSYS`, and
+/// `posix::random::fill` fell through to its RDRAND fallback — which the
+/// boot-test guest CPU does not have, so it returned `EIO` and the SSH server
+/// could not generate a host key at all. See `known-issues.md`
+/// → `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`.
+///
+/// The lesson is not "remember to use the C symbol". It is that the correct
+/// route and the incorrect one are indistinguishable at the call site, so the
+/// call site must not be where the choice is made.
+///
+/// # Errors
+///
+/// [`EntropyError::Unavailable`] if the kernel CSPRNG did not answer, or
+/// answered with fewer bytes than were asked for. A short read is a failure,
+/// not a smaller helping of randomness — `out` must be treated as containing
+/// nothing usable.
+///
+/// # Examples
+///
+/// ```
+/// let mut seed = [0u8; 32];
+/// match randrange::fill_secret(&mut seed) {
+///     Ok(()) => { /* `seed` is key material */ }
+///     Err(e) => { /* refuse to continue; never fall back to a guessable seed */
+///         let _ = e;
+///     }
+/// }
+/// ```
+pub fn fill_secret(out: &mut [u8]) -> Result<(), EntropyError> {
+    if out.is_empty() {
+        // Asking for nothing succeeds without a syscall. `getrandom(_, 0, _)`
+        // returns 0, which `fill_from_kernel`'s "wrote as many bytes as we
+        // asked for" check reads as a short read -- reporting a failure for a
+        // request that was trivially satisfiable.
+        return Ok(());
+    }
+    fill_from_kernel(out)
+}
+
 // ---------------------------------------------------------------------------
 // Drawing something that has to be unguessable
 // ---------------------------------------------------------------------------
@@ -1187,6 +1247,48 @@ mod tests {
             fill_from_kernel(&mut [0u8; 8]),
             Err(EntropyError::Unavailable)
         ));
+    }
+
+    /// A zero-length request must not be answered by asking the kernel for
+    /// zero bytes: `getrandom(_, 0, _)` returns 0, and the "did it write as
+    /// many bytes as we asked for" check would read that as a short read and
+    /// report `Unavailable` for a request that was trivially satisfiable.
+    ///
+    /// This is asserted on *every* host, target or not, because the answer
+    /// must not depend on whether a kernel is present — there is nothing to
+    /// fill either way.
+    #[test]
+    fn filling_no_bytes_succeeds_without_asking_the_kernel() {
+        assert_eq!(fill_secret(&mut []), Ok(()));
+    }
+
+    /// `fill_secret` and [`SystemRandom`] must agree about whether entropy is
+    /// available: they are two shapes over one source, and a caller choosing
+    /// between them by shape must not also be choosing whether it works.
+    #[test]
+    fn the_two_shapes_of_the_system_source_agree_about_availability() {
+        let mut secret = [0u8; 32];
+        assert_eq!(
+            fill_secret(&mut secret).is_ok(),
+            SystemRandom::open().is_ok(),
+            "one shape of the system source answered and the other did not"
+        );
+    }
+
+    /// Where entropy is available, a 32-byte draw must not come back as the
+    /// zeroes it started as. This is the failure that
+    /// `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`
+    /// would have produced had the stubbed route ever "succeeded" instead of
+    /// erroring: a buffer that was filled with nothing and reported as filled.
+    #[test]
+    fn a_successful_draw_is_not_the_buffer_we_handed_in() {
+        let mut secret = [0u8; 32];
+        if fill_secret(&mut secret).is_err() {
+            // No kernel here; `the_system_source_either_answers_or_refuses_to_exist`
+            // is the test that asserts a target must not reach this branch.
+            return;
+        }
+        assert_ne!(secret, [0u8; 32], "a filled secret must not be all zeroes");
     }
 
     #[test]

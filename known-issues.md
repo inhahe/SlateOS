@@ -118836,7 +118836,17 @@ below.
 
 ## TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE (lane B)
 
-**Status:** PARTLY FIXED, 2026-09-05. **Items 1–3 below are done.** Nothing in
+**Status:** FIXED, 2026-09-05. **All four items below are done.** Item 4 — the
+interop test, the one that matters most and the reason this entry existed — is
+`userspace/ssh-interop`, which links both peers as dev-dependencies, joins them
+with `sshwire::memory_pair()`, runs each on its own thread and asserts they
+derive the same RFC 4253 §7.2 session identifier from the same transcript. It
+also pins that identifier to a recorded constant, because agreement alone cannot
+see a change both ends make together — which is the exact state this stack was
+in when the server hashed a placeholder client version and its own tests,
+recomputing the hash the same wrong way, agreed with it. See the closing note.
+
+**Items 1–3 are done.** Nothing in
 the wire and transport layer is written twice any more: encoders, decoders, the
 identification line, the key-exchange arithmetic, the transport crypto and — as
 of the last change — the RFC 4253 §6 packet framing all live in
@@ -118850,10 +118860,9 @@ for the two faults that move fixed, and
 `TD-B-THE-AES-CTR-COUNTER-IS-REUSED-BY-THE-CLIENT-AND-INVENTED-BY-THE-SERVER`
 for the confidentiality bug that drove the crypto across.
 
-**Item 4 — an interop test — is untouched, and is the item that matters most**;
-see the note at the end. `PacketCodec` narrows the gap slightly on its own:
-`what_one_end_encodes_the_other_end_decodes` is the first test in this stack
-that runs one end against the other rather than against its own output. It
+`PacketCodec` narrowed the gap slightly on its own before item 4 landed:
+`what_one_end_encodes_the_other_end_decodes` was the first test in this stack
+that ran one end against the other rather than against its own output. It
 covers the framing only, not the state machines above it.
 
 Filed 2026-09-05 alongside the fix above, which is the first bug this
@@ -118956,7 +118965,8 @@ The extraction simply stopped short of the protocol layer.
 Every one of these functions is a *contract between two programs*, and a
 divergence in any of them is invisible to both test suites: each end tests its
 copy against its own expectations and passes. The failure only appears when the
-two are made to talk, which nothing currently does.
+two are made to talk, which for the whole life of this stack nothing did.
+`userspace/ssh-interop` is now the thing that does.
 
 The severity of a divergence is not uniform, which is the trap — a drift in
 `ssh_string` would break loudly and instantly, while the `V_C` drift produced a
@@ -119006,8 +119016,8 @@ seventh
 is the one where the divergence was not a mistake at all: someone found the
 client's key-exchange arithmetic unusably slow and fixed it properly, and the
 fix simply had no route to the copy in the server, which is a worse place to be
-slow. Duplication does not only propagate bugs; it blocks fixes. That ratio is
-the argument for item 4, which is the outstanding work here.
+slow. Duplication does not only propagate bugs; it blocks fixes. That ratio was
+the argument for item 4, which has since been built.
 
 **Known obstacle to item 4:** both crates' `syscall0/1/3/4` are host stubs that
 return `-ENOSYS` on the Windows host build *and* on the WSL Linux build, so
@@ -119101,6 +119111,52 @@ the second proves more. Neither is blocked on another lane.
 > testing the wrong program — or write into the operator's real trust store,
 > which is a side effect no test is entitled to have.
 
+> **Item 4 landed, 2026-09-05: `userspace/ssh-interop`.** The real client and
+> the real server now complete a version exchange and a key exchange against
+> each other in one process, and are asserted to derive the same session
+> identifier. Two tests, both green.
+>
+> **Why a third crate.** A crate's own tests can only reach one side of a
+> two-party protocol; to have both ends in one process something has to depend
+> on both, and a crate cannot depend on itself. The crate ships nothing — its
+> library is a page of documentation — and both peers arrive as
+> `dev-dependencies`. That is also the last thing the `lib.rs`/`main.rs` splits
+> in `ssh` and `sshd` were for: a bin-only crate produces no rlib.
+>
+> **Why the session id is the assertion.** RFC 4253 §7.2 makes it the exchange
+> hash of the first key exchange, and both ends compute it independently from
+> the same eight inputs: the two version strings, the two KEXINIT payloads, the
+> host key, both DH public values, the shared secret. A disagreement about any
+> of them — a field order, a length prefix, an integer encoding, a version
+> string one side remembers differently — yields two different values. It is the
+> sharpest single comparison available between these two programs, and it is the
+> one that was missing while six divergences shipped.
+>
+> **Why agreement alone was not enough.** Two ends can agree on a value neither
+> computed the way the RFC says; that is precisely what
+> `TD-B-SSHD-SIGNS-AN-EXCHANGE-HASH-OVER-A-CLIENT-VERSION-THE-CLIENT-NEVER-SENT`
+> was. So the transcript is pinned as well: with the host key seed and both
+> secret sources fixed, every byte either end hashes is fixed, and the session
+> id is one recorded constant. A deliberate protocol change is expected to
+> update it, which is the point — it forces the change to be looked at from both
+> sides at once.
+>
+> **What makes it reproducible.** A counting `SecretSource` whose counter is
+> **thread-local**, and both peers on spawned threads. A shared counter would be
+> drawn from by the two peer threads concurrently, so each peer's bytes would
+> depend on the interleaving — a source that is deterministic in the sense that
+> it uses no entropy and nondeterministic in the only sense that matters. A peer
+> driven on the harness's own thread would likewise inherit whatever that thread
+> had already drawn. Verified by three separate process runs producing the same
+> identifier, not assumed.
+>
+> **What it does not cover yet.** It stops after key exchange. `NEWKEYS` is
+> inside that (both `do_key_exchange` and `key_exchange` send and receive it),
+> but nothing yet drives authentication, channel open, or a data round-trip
+> through the encrypted transport — so the *state machines* above the handshake
+> are still each end tested against its own expectations. Extending it that far
+> is the obvious next increment, and it is cheap now that the harness exists.
+
 ### TD-B-SSH-RE-ENCODED-THE-SERVER-VERSION-BEFORE-HASHING-IT
 
 **Status: FIXED** (`userspace/ssh/src/main.rs`, `classify_version_line`).
@@ -119148,11 +119204,12 @@ not have one.
 arbitrary control sequences to the user's terminal before the handshake even
 started. They are now escaped.
 
-**What is still true after this.** Only that these two ends agree; there is
-still no test that runs one against the other. See
+**What was still true after this, and no longer is.** This fix established only
+that the two ends agree; no test ran one against the other. That was
 `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`
-item 4 — an interop test remains the only thing that would have caught either of
-these without someone happening to read the right two functions on the same day.
+item 4, and it is now `userspace/ssh-interop` — the only thing that would have
+caught either of these without someone happening to read the right two functions
+on the same day.
 
 ### TD-B-THE-TWO-ENDS-DISAGREED-ABOUT-WHICH-CARRIAGE-RETURNS-ARE-FRAMING
 

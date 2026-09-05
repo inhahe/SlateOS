@@ -386,11 +386,24 @@ fn fs_set_mode(path: &str, mode: u32) -> Result<(), SshdError> {
     Ok(())
 }
 
-/// Get the current monotonic clock in milliseconds.
-fn clock_monotonic_ms() -> u64 {
+/// The monotonic clock in milliseconds, or `None` if the kernel could not
+/// answer.
+///
+/// `None` rather than `0`, because a clock that cannot be read and a machine
+/// that booted a moment ago are different facts and this function's only
+/// caller *subtracts* two of its readings. Reporting `0` for a failure made
+/// that subtraction underflow whenever the clock answered when the connection
+/// opened and failed later: in a debug build a panic any unauthenticated peer
+/// could reach by holding a connection open, and in a release build a wrap to a
+/// huge elapsed time that disconnects every client the instant it connects.
+/// Both are worse than the thing the grace timer exists to prevent.
+fn clock_monotonic_ms() -> Option<u64> {
     // SAFETY: SYS_CLOCK_MONOTONIC takes no pointer arguments, returns time.
     let ret = unsafe { syscall0(SYS_CLOCK_MONOTONIC) };
-    if ret < 0 { 0 } else { ret as u64 }
+    // `try_from` rather than a sign test and an `as` cast: the negative values
+    // are exactly the error returns, so this is the same test spelled in a way
+    // that cannot silently reinterpret one as a time.
+    u64::try_from(ret).ok()
 }
 
 /// Get the current process ID.
@@ -3090,7 +3103,9 @@ struct ConnectionState {
     channels: Vec<Channel>,
     next_channel_id: u32,
     debug_mode: bool,
-    connection_start_ms: u64,
+    /// When this connection opened, for the login grace timer — or `None` if
+    /// the clock could not be read at that moment. See [`clock_monotonic_ms`].
+    connection_start_ms: Option<u64>,
     /// Where this connection's unpredictable bytes come from: the packet
     /// padding, the KEXINIT cookie and the Diffie-Hellman exponent.
     ///
@@ -3356,21 +3371,19 @@ fn read_version_line(conn: &mut ConnectionState) -> Result<String, SshdError> {
 // parsed software version to enable known-client workarounds. The current
 // handshake only validates the "SSH-2.0" prefix. Not yet invoked (but tested).
 #[allow(dead_code)]
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn parse_version_string(version: &str) -> Option<&str> {
-    // Format: SSH-protoversion-softwareversion SP comments
+    // Format: SSH-protoversion-softwareversion SP comments (RFC 4253 §4.2).
+    //
+    // Written without index arithmetic rather than with the panic lint
+    // suppressed over it: `strip_prefix` and `split_once` do the same job and
+    // there is no offset left to get wrong, so the audit this function was
+    // waiting for has nothing to look at.
     let version = version.trim();
-    if !version.starts_with("SSH-") {
-        return None;
-    }
-    let after_ssh = &version[4..];
-    // Skip protocol version.
-    let after_proto = after_ssh.find('-').map(|i| &after_ssh[i + 1..])?;
-    // Software version is up to the first space (or end).
-    Some(after_proto.split(' ').next().unwrap_or(after_proto))
+    let after_ssh = version.strip_prefix("SSH-")?;
+    // Drop the protocol version; the software version runs from there to the
+    // first space, after which RFC 4253 §4.2 allows free-form comments.
+    let (_protoversion, after_proto) = after_ssh.split_once('-')?;
+    after_proto.split(' ').next()
 }
 
 /// Perform SSH key exchange (DH group14-sha256).
@@ -3585,17 +3598,30 @@ fn handle_service_request(conn: &mut ConnectionState) -> Result<(), SshdError> {
 /// per-user failure tally has to outlive the connection, or an attacker gets an
 /// unlimited number of guesses simply by reconnecting after each `max_auth_tries`
 /// refusal. `max_auth_tries` bounds one conversation; `auth` bounds the account.
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn do_user_auth(
     conn: &mut ConnectionState,
     auth: &mut authlib::Authenticator,
 ) -> Result<(), SshdError> {
     loop {
         // Check login grace time.
-        let elapsed_s = (clock_monotonic_ms() - conn.connection_start_ms) / 1000;
+        //
+        // A clock we cannot read refuses the connection rather than granting
+        // it unlimited time. This timer is the only bound on how long an
+        // *unauthenticated* peer may hold a connection open, so treating an
+        // unreadable clock as "no time has passed" would quietly switch that
+        // bound off for exactly the peers it exists to constrain. The daemon
+        // already argues this way about an unreadable host key: it stops
+        // rather than serving under a substitute.
+        let (Some(now), Some(start)) = (clock_monotonic_ms(), conn.connection_start_ms) else {
+            send_disconnect(conn, 2, "monotonic clock unavailable")?;
+            return Err(SshdError::ProtocolError(
+                "cannot read the monotonic clock, so the login grace time cannot be enforced"
+                    .into(),
+            ));
+        };
+        // Saturating on top of that: a monotonic clock that steps backwards is
+        // a kernel bug, and it must not become a panic here.
+        let elapsed_s = now.saturating_sub(start) / 1000;
         if elapsed_s > u64::from(conn.config.login_grace_time) {
             send_disconnect(conn, 2, "login grace time expired")?;
             return Err(SshdError::AuthError("login grace time expired".into()));
@@ -3627,7 +3653,7 @@ fn do_user_auth(
         if !is_user_allowed(&username, &[], &conn.config) {
             conn.debug_log(&format!("user {username} denied by access list"));
             send_auth_failure(conn, false)?;
-            conn.auth_attempts += 1;
+            conn.auth_attempts = conn.auth_attempts.saturating_add(1);
             if conn.auth_attempts >= conn.config.max_auth_tries {
                 send_disconnect(conn, 2, "too many authentication failures")?;
                 return Err(SshdError::AuthError("max auth tries exceeded".into()));
@@ -3639,7 +3665,7 @@ fn do_user_auth(
         if username == "root" && !is_root_login_allowed(&method, &conn.config) {
             conn.debug_log("root login denied by policy");
             send_auth_failure(conn, false)?;
-            conn.auth_attempts += 1;
+            conn.auth_attempts = conn.auth_attempts.saturating_add(1);
             if conn.auth_attempts >= conn.config.max_auth_tries {
                 send_disconnect(conn, 2, "too many authentication failures")?;
                 return Err(SshdError::AuthError("max auth tries exceeded".into()));
@@ -3728,7 +3754,7 @@ fn do_user_auth(
             return Ok(());
         }
 
-        conn.auth_attempts += 1;
+        conn.auth_attempts = conn.auth_attempts.saturating_add(1);
         if conn.auth_attempts >= conn.config.max_auth_tries {
             send_disconnect(conn, 2, "too many authentication failures")?;
             return Err(SshdError::AuthError("max auth tries exceeded".into()));
@@ -7390,6 +7416,46 @@ DenyGroups nogroup
             core::ptr::fn_addr_eq(conn.secrets, sshwire::KERNEL_SECRETS),
             "a connection the daemon accepts must draw from the kernel CSPRNG"
         );
+    }
+
+    // Both of these describe what happens when the monotonic clock cannot be
+    // read. On the dev host that is not a hypothetical: `syscall0` answers
+    // every raw syscall with -ENOSYS (see its docs), so the failing-clock case
+    // is the one `cargo test` actually executes. They are gated to the host
+    // for that reason — on a real SlateOS target the clock answers and there
+    // is nothing here to observe.
+    #[cfg(not(target_vendor = "slateos"))]
+    #[test]
+    fn a_failed_clock_read_is_not_reported_as_the_time_zero() {
+        // The old signature was `-> u64`, returning 0 for a failed read — the
+        // same value a machine that booted this instant reports. `do_user_auth`
+        // subtracted the connection's start time from that, so a clock that
+        // answered when the connection opened and failed later underflowed:
+        // in a debug build a panic any unauthenticated peer could reach by
+        // holding a connection open, and in a release build an elapsed time so
+        // large that every client was disconnected the moment it arrived.
+        assert_eq!(
+            clock_monotonic_ms(),
+            None,
+            "a clock that cannot be read must stay distinguishable from time zero"
+        );
+    }
+
+    #[cfg(not(target_vendor = "slateos"))]
+    #[test]
+    fn a_connection_opened_without_a_clock_has_no_start_time_to_subtract_from() {
+        let (server_side, _client_side) = sshwire::memory_pair();
+        let conn = ConnectionState::new(
+            Box::new(server_side),
+            SshdConfig::default_config(),
+            HostKey::from_seed([7u8; 32]),
+            false,
+        );
+        // `None`, not `Some(0)`. This is the field the login grace check
+        // subtracts from, and the point of the fix is that "we never got a
+        // reading" is a state the type can hold — so the check can refuse the
+        // connection instead of computing an elapsed time out of a failure.
+        assert_eq!(conn.connection_start_ms, None);
     }
 
     #[test]

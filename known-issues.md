@@ -119537,3 +119537,77 @@ copy out of two does not make it constant-time. It does mean the eventual fix �
 X25519, per `TD-B-SSH-KEY-EXCHANGE-LEAKS-ITS-SECRET-THROUGH-TIMING` — now has a
 single place to land instead of two, which is the same property this entry is
 about, running the other way.
+
+### TD-B-SSHD-UNDERFLOWED-THE-LOGIN-GRACE-TIMER-WHEN-THE-CLOCK-FAILED
+
+**Status: FIXED**, 2026-09-05. `clock_monotonic_ms` returns `Option<u64>`; an
+unreadable clock refuses the connection instead of subtracting from zero.
+
+**In short:** the server gives a peer that has not logged in yet a limited
+number of seconds to do so — the "login grace time". It measured that by
+reading the clock when the connection opened, reading it again during
+authentication, and subtracting. The function it used to read the clock
+reported **the number zero when the read failed**, which is indistinguishable
+from "the machine booted this instant". So if the clock answered when the
+connection opened and failed later, the server subtracted a real time from
+zero. On unsigned arithmetic that goes below zero and wraps: in a debug build
+it crashes the daemon, and in a release build it produces an enormous elapsed
+time, so *every* connection is dropped the moment it arrives with "login grace
+time expired". Either one is reachable by anyone who can open a socket, with no
+password and no account.
+
+### Where it lived
+
+`userspace/sshd/src/main.rs`, `do_user_auth`:
+
+```rust
+let elapsed_s = (clock_monotonic_ms() - conn.connection_start_ms) / 1000;
+```
+
+against
+
+```rust
+fn clock_monotonic_ms() -> u64 {
+    let ret = unsafe { syscall0(SYS_CLOCK_MONOTONIC) };
+    if ret < 0 { 0 } else { ret as u64 }   // <-- failure spelled as a time
+}
+```
+
+### Why it was invisible
+
+`do_user_auth` carried
+`#[expect(clippy::arithmetic_side_effects, reason = "not yet audited for panics
+on peer-controlled input")]`. The lint that exists to find exactly this had been
+switched off over the function, with a note saying the audit was owed. The
+suppression was not hiding a false positive; it was hiding the true one. That is
+the argument for treating the remaining 21 such suppressions as a queue of
+unread bug reports rather than as settled exemptions — this was the first one
+opened, and it contained a remotely-reachable panic.
+
+It is the same shape as `PeerClosed` elsewhere in this file: a real condition
+encoded as a value that an ordinary case can also produce, so no caller can tell
+the two apart. `clock_monotonic_ms` had only two call sites, which is why the
+honest fix was cheap.
+
+### The fix, and the tradeoff inside it
+
+`clock_monotonic_ms() -> Option<u64>`, `connection_start_ms: Option<u64>`, and a
+grace check that **fails closed**: a clock it cannot read disconnects the peer
+rather than treating the elapsed time as zero. Saturating subtraction on top,
+so a clock that steps backwards cannot underflow either.
+
+Failing closed is a real choice and is recorded in `design-decisions.md` §775.
+The alternative — carry on with the timer disabled — hands unlimited connection
+time to unauthenticated peers, which is precisely the population the timer
+exists to bound, so a broken clock would switch the bound off for exactly the
+wrong people. The cost is that a transient clock-syscall failure refuses logins;
+the daemon already reasons this way about an unreadable host key, where it stops
+rather than serving under a substitute identity.
+
+### Also retired here
+
+`parse_version_string`'s `#[expect(clippy::arithmetic_side_effects)]`. That one
+audited clean — but rather than re-justify the suppression, the arithmetic was
+removed: `strip_prefix` and `split_once` do the same work with no byte offset to
+get wrong, so there is nothing left for a future audit to re-examine. Its three
+`auth_attempts += 1` counters became `saturating_add(1)` for the same reason.

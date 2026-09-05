@@ -2081,7 +2081,82 @@ impl Default for ClientSettings {
 
 // ─── Application ─────────────────────────────────────────────────────
 
+use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
+
+/// How many peers in `peers` hold each piece.
+///
+/// This is what `PieceTracker::pick_piece` compares to choose the rarest piece
+/// first, and it is the reason the picker takes an availability slice at all.
+/// The peers are simulated -- their bitfields are made up when a torrent is
+/// added -- but the counting and the choice are the real ones.
+fn piece_availability(peers: &[PeerInfo], piece_count: usize) -> Vec<u32> {
+    let mut counts = vec![0u32; piece_count];
+    for peer in peers {
+        for (index, count) in counts.iter_mut().enumerate() {
+            if peer_has_piece(peer, index) {
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+    counts
+}
+
+/// The union of every peer's bitfield: what the swarm can supply between them.
+fn swarm_bitfield(peers: &[PeerInfo], bytes: usize) -> Vec<u8> {
+    let mut union = vec![0u8; bytes];
+    for peer in peers {
+        for (index, byte) in union.iter_mut().enumerate() {
+            *byte |= peer.bitfield.get(index).copied().unwrap_or(0);
+        }
+    }
+    union
+}
+
+/// Whether `peer` holds piece `index`.
+///
+/// Bit 7 of the first byte is piece 0, per BEP 3 -- the same order
+/// `PieceTracker::set_piece` writes in, which is why this is spelled out
+/// rather than left to a reader to match up.
+fn peer_has_piece(peer: &PeerInfo, index: usize) -> bool {
+    let byte = index / 8;
+    let bit = 7usize.saturating_sub(index % 8);
+    peer.bitfield
+        .get(byte)
+        .is_some_and(|b| b & (1u8 << bit) != 0)
+}
+
+/// How many bytes piece `index` holds.
+///
+/// Every piece is `total / count` except the last, which is the remainder --
+/// so a progress figure summed from these reaches the torrent's real size
+/// rather than overshooting it on the final piece.
+fn piece_size(total_size: u64, piece_count: usize, index: usize) -> u64 {
+    let count = piece_count as u64;
+    let Some(each) = total_size.checked_div(count) else {
+        return 0;
+    };
+    if index.saturating_add(1) >= piece_count {
+        total_size.saturating_sub(each.saturating_mul(count.saturating_sub(1)))
+    } else {
+        each
+    }
+}
+
+/// The window size to ask for.
+const WINDOW_WIDTH: f32 = 1300.0;
+/// As [`WINDOW_WIDTH`].
+const WINDOW_HEIGHT: f32 = 800.0;
+
+/// How often a downloading torrent takes a piece.
+///
+/// The transfer is simulated -- there is no peer wire behind this -- so it is
+/// the pace of the progress bar and not of any network.
+const PIECE_STEP: Duration = Duration::from_millis(150);
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
@@ -2379,6 +2454,258 @@ impl TorrentApp {
         }
     }
 
+    // ====================================================================
+    // Input
+    //
+    // This program had none, and twenty functions had no caller outside the
+    // tests: the transfer controls (`pause_torrent`, `resume_torrent`,
+    // `pause_all`, `resume_all`, `remove_torrent`), the settings
+    // (`set_priority`, `toggle_sequential`, `set_limit`), and the piece
+    // picker -- `pick_piece`, `set_piece`, `set_in_progress` -- which is the
+    // whole of a `BitTorrent` client's download loop.
+    // ====================================================================
+
+    /// Give a torrent a swarm to download from.
+    ///
+    /// The stand-in for a tracker announce: this tree has no HTTP client, so
+    /// `TrackerRequest::build_url` builds a URL nothing can fetch and no peer
+    /// list ever comes back. Without one, the Peers tab is empty for every
+    /// torrent -- which it was -- and `pick_piece` has nobody to ask, so
+    /// nothing downloads.
+    ///
+    /// The peers are invented; what is done with them is not. Their bitfields
+    /// overlap unevenly on purpose, so `piece_availability` produces genuinely
+    /// different counts and the picker's rarest-first choice is exercised
+    /// rather than being a tie broken by index.
+    fn attach_simulated_peers(&mut self, id: u32) {
+        let Some(torrent) = self.torrents.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
+        if !torrent.peers.is_empty() {
+            return;
+        }
+        let bytes = torrent.pieces.bitfield().len();
+        // A seed, and two partial peers holding alternating halves -- so every
+        // piece is available, and how many peers hold each one differs.
+        for (index, (address, port, rule)) in [
+            ("203.0.113.10", 51_413u16, 0u8),
+            ("198.51.100.7", 6881, 1),
+            ("192.0.2.44", 6889, 2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut peer = PeerInfo::new(address, port);
+            peer.bitfield = (0..bytes)
+                .map(|byte| match rule {
+                    // A seed: everything, so no piece is held by nobody.
+                    0 => 0xFF,
+                    // The first half, and every third byte. Between them the
+                    // counts come out 1, 2 or 3 -- which is the point, and is
+                    // what an earlier version of this got wrong: a seed plus
+                    // two peers holding alternate halves gives *every* piece a
+                    // count of exactly two, so rarest-first has nothing to
+                    // choose between and the picker falls back to index order.
+                    // The test noticed.
+                    1 => u8::from(byte < bytes / 2).wrapping_mul(0xFF),
+                    _ => u8::from(byte % 3 == 0).wrapping_mul(0xFF),
+                })
+                .collect();
+            // A real peer ID, so the Peers tab's client column is filled by
+            // `PeerInfo::identify_client` -- which parses the Azureus-style
+            // `-XX0000-` prefix, has two tests, and had no caller.
+            let prefixes: [&[u8; 8]; 3] = [b"-qB4650-", b"-TR4060-", b"-lt0D60-"];
+            let mut id_bytes = [0u8; 20];
+            let prefix = prefixes.get(index).copied().unwrap_or(b"-qB4650-");
+            if let Some(head) = id_bytes.get_mut(..8) {
+                head.copy_from_slice(prefix);
+            }
+            peer.peer_id = Some(id_bytes);
+            peer.client_name = PeerInfo::identify_client(&id_bytes);
+            torrent.peers.push(peer);
+        }
+    }
+
+    /// Handle one event from the window.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Tick { .. } => self.handle_tick(),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Take one piece for each downloading torrent.
+    ///
+    /// Through `PieceTracker::pick_piece` and `set_piece`, which is the point:
+    /// the picker chooses the rarest piece that is not already held, in
+    /// progress or set to skip, and it had no caller -- so a client whose
+    /// module doc leads with "piece management with bitfield tracking" never
+    /// picked one, and every torrent sat at whatever progress it was created
+    /// with.
+    ///
+    /// The peers are simulated, so the availability count is taken from the
+    /// peers the torrent has rather than from a wire; what the picker does
+    /// with it is the real thing.
+    fn handle_tick(&mut self) -> EventResult {
+        let mut moved = false;
+        let mut needs_peers: Vec<u32> = Vec::new();
+        for torrent in &mut self.torrents {
+            if torrent.state != TorrentState::Downloading {
+                continue;
+            }
+            if torrent.peers.is_empty() {
+                // Deferred to the first tick rather than done at `add_torrent`,
+                // because that is when a real announce would have returned.
+                needs_peers.push(torrent.id);
+                continue;
+            }
+            let availability = piece_availability(&torrent.peers, torrent.pieces.total_count());
+            // What the swarm between them can supply. With no peers there is
+            // nothing to ask, which is the honest answer -- and is why a
+            // torrent with an empty peer list makes no progress rather than
+            // downloading from nobody.
+            let offered = swarm_bitfield(&torrent.peers, torrent.pieces.bitfield().len());
+            let Some(index) = torrent.pieces.pick_piece(&offered, &availability) else {
+                // Nothing to pick: finished, or every remaining piece is set
+                // to skip, or no peer has what is left.
+                if torrent.pieces.is_complete() {
+                    torrent.state = TorrentState::Seeding;
+                    torrent.completed_time = Some(torrent.added_time);
+                }
+                continue;
+            };
+            torrent.pieces.set_in_progress(index);
+            torrent.pieces.set_piece(index);
+            torrent.pieces.clear_in_progress(index);
+            let size = piece_size(torrent.total_size, torrent.pieces.total_count(), index);
+            torrent.downloaded = torrent.downloaded.saturating_add(size);
+            if torrent.pieces.is_complete() {
+                torrent.state = TorrentState::Seeding;
+                torrent.completed_time = Some(torrent.added_time);
+            }
+            moved = true;
+        }
+        for id in needs_peers {
+            self.attach_simulated_peers(id);
+            moved = true;
+        }
+        if moved {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// Handle a key press.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if key.modifiers.ctrl {
+            return match key.key {
+                // Everything at once, which is what the toolbar buttons are
+                // for and what nothing called.
+                Key::P => {
+                    self.pause_all();
+                    EventResult::Consumed
+                }
+                Key::R => {
+                    self.resume_all();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+
+        match key.key {
+            Key::Up | Key::Down => {
+                self.move_selection(if key.key == Key::Down { 1 } else { -1 });
+                EventResult::Consumed
+            }
+            // Pause and resume the selected transfer. Both existed, both were
+            // tested, and neither had a key -- so a download could be started
+            // and not stopped.
+            Key::Space => {
+                if let Some(id) = self.selected_torrent {
+                    let downloading = self
+                        .torrents
+                        .iter()
+                        .find(|t| t.id == id)
+                        .is_some_and(|t| t.state == TorrentState::Downloading);
+                    if downloading {
+                        self.pause_torrent(id);
+                    } else {
+                        self.resume_torrent(id);
+                    }
+                }
+                EventResult::Consumed
+            }
+            Key::Delete => {
+                if let Some(id) = self.selected_torrent {
+                    // The files stay: deleting someone's download because
+                    // they pressed Delete on the list entry is the one
+                    // irreversible thing this program can do, and it is not
+                    // what a bare Delete should mean.
+                    self.remove_torrent(id, false);
+                    self.reanchor_selection();
+                }
+                EventResult::Consumed
+            }
+            // Download the pieces in order rather than rarest-first, which is
+            // what someone streaming a file wants. `toggle_sequential` had no
+            // caller.
+            Key::S => {
+                if let Some(id) = self.selected_torrent
+                    && let Some(t) = self.torrents.iter_mut().find(|t| t.id == id)
+                {
+                    t.toggle_sequential();
+                }
+                EventResult::Consumed
+            }
+            Key::Tab => {
+                self.active_tab = match self.active_tab {
+                    Tab::Transfers => Tab::Details,
+                    Tab::Details => Tab::Peers,
+                    Tab::Peers => Tab::Files,
+                    Tab::Files => Tab::Trackers,
+                    Tab::Trackers => Tab::Settings,
+                    Tab::Settings => Tab::Transfers,
+                };
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Move the selection by `delta` rows through the torrent list.
+    ///
+    /// Held as an id rather than an index, so removing a torrent above the
+    /// selected one does not silently select its neighbour. Stops at the ends.
+    fn move_selection(&mut self, delta: isize) {
+        let ids: Vec<u32> = self.torrents.iter().map(|t| t.id).collect();
+        if ids.is_empty() {
+            self.selected_torrent = None;
+            return;
+        }
+        let last = (ids.len() as isize).saturating_sub(1);
+        let current = self
+            .selected_torrent
+            .and_then(|id| ids.iter().position(|other| *other == id));
+        let next = match current {
+            Some(index) => (index as isize).saturating_add(delta).clamp(0, last),
+            None if delta < 0 => last,
+            None => 0,
+        };
+        self.selected_torrent = ids.get(next.unsigned_abs()).copied();
+    }
+
+    /// Keep the selection on a torrent that still exists.
+    fn reanchor_selection(&mut self) {
+        let ids: Vec<u32> = self.torrents.iter().map(|t| t.id).collect();
+        if self.selected_torrent.is_some_and(|id| ids.contains(&id)) {
+            return;
+        }
+        self.selected_torrent = ids.first().copied();
+    }
+
     /// Pause a torrent
     pub fn pause_torrent(&mut self, id: u32) {
         if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
@@ -2495,7 +2822,12 @@ impl TorrentApp {
 
     /// Render the UI
     #[must_use]
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    /// Draw the whole window.
+    ///
+    /// Not `render`: [`App::render`] is the one the window calls, and this one
+    /// takes the same two arguments -- so at equal arity the inherent method
+    /// wins method lookup outright and the trait's is never called, silently.
+    pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let header_h = 48.0;
         let tab_h = 36.0;
@@ -3476,46 +3808,108 @@ pub fn format_duration(seconds: u64) -> String {
 
 // ─── Main ────────────────────────────────────────────────────────────
 
-fn main() {
-    let mut app = TorrentApp::new();
-
-    // Add sample torrents for testing
-    let sample_torrent = create_sample_torrent(
-        "Ubuntu 24.04 LTS Desktop",
-        4_200_000_000,
-        262_144,
-        "https://torrent.ubuntu.com/announce",
-    );
-    app.add_torrent(sample_torrent, None);
-
-    let sample2 = create_sample_torrent(
-        "LibreOffice 7.6.4",
-        350_000_000,
-        524_288,
-        "udp://tracker.opentrackr.org:1337/announce",
-    );
-    let id2 = app.add_torrent(sample2, None);
-    if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id2) {
-        t.state = TorrentState::Downloading;
-        t.downloaded = 175_000_000;
-        t.label = "Software".to_string();
+impl App for TorrentApp {
+    fn title(&self) -> String {
+        // How many transfers are running, because that is what a torrent
+        // client is left open for. The harness re-reads this as it runs.
+        let active = self
+            .torrents
+            .iter()
+            .filter(|t| t.state == TorrentState::Downloading)
+            .count();
+        if active == 0 {
+            "Torrents".to_string()
+        } else {
+            format!("{active} downloading - Torrents")
+        }
     }
 
-    let magnet = MagnetLink {
-        info_hash: [0xAB; 20],
-        display_name: Some("Big Buck Bunny 1080p".to_string()),
-        trackers: vec!["udp://tracker.openbittorrent.com:80".to_string()],
-        web_seeds: Vec::new(),
-        exact_length: Some(276_134_947),
-    };
-    app.add_magnet(magnet, None);
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        }
+    }
 
-    let cmds = app.render(1280.0, 800.0);
-    // In a real system, these commands would be sent to the compositor
-    let _ = cmds;
+    /// A clock only while something is downloading.
+    ///
+    /// A window showing a list of paused or finished torrents has nothing to
+    /// redraw, and waking the machine to find that out is what
+    /// `known-issues.md` lesson 47 is about.
+    fn tick_interval(&self) -> Option<Duration> {
+        self.torrents
+            .iter()
+            .any(|t| t.state == TorrentState::Downloading)
+            .then_some(PIECE_STEP)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        RenderTree {
+            commands: self.render_commands(width, height),
+        }
+    }
 }
 
-/// Create a sample torrent for testing
+impl TorrentApp {
+    /// The torrents the window opens on.
+    ///
+    /// In a method rather than in `main` because a test cannot call `main`,
+    /// and a client that opens on an empty list looks broken rather than idle.
+    pub fn seed_sample_torrents(&mut self) {
+        // Add sample torrents for testing
+        let sample_torrent = create_sample_torrent(
+            "Ubuntu 24.04 LTS Desktop",
+            4_200_000_000,
+            262_144,
+            "https://torrent.ubuntu.com/announce",
+        );
+        self.add_torrent(sample_torrent, None);
+
+        let sample2 = create_sample_torrent(
+            "LibreOffice 7.6.4",
+            350_000_000,
+            524_288,
+            "udp://tracker.opentrackr.org:1337/announce",
+        );
+        let id2 = self.add_torrent(sample2, None);
+        if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id2) {
+            t.state = TorrentState::Downloading;
+            t.downloaded = 175_000_000;
+            t.label = "Software".to_string();
+        }
+
+        let magnet = MagnetLink {
+            info_hash: [0xAB; 20],
+            display_name: Some("Big Buck Bunny 1080p".to_string()),
+            trackers: vec!["udp://tracker.openbittorrent.com:80".to_string()],
+            web_seeds: Vec::new(),
+            exact_length: Some(276_134_947),
+        };
+        self.add_magnet(magnet, None);
+        // In a real system, these commands would be sent to the compositor
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = TorrentApp::new();
+    app.seed_sample_torrents();
+    app::launch("torrent", &mut app)
+}
+
 fn create_sample_torrent(name: &str, size: u64, piece_len: u64, announce: &str) -> TorrentMetainfo {
     let piece_count = (size.saturating_add(piece_len).saturating_sub(1)) / piece_len;
     let pieces: Vec<[u8; 20]> = (0..piece_count)
@@ -3558,6 +3952,346 @@ fn create_sample_torrent(name: &str, size: u64, piece_len: u64, announce: &str) 
 )]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Wiring
+    //
+    // This program had no input handling, and twenty functions had no caller
+    // outside the tests -- the transfer controls and the piece picker, which
+    // is the whole of a BitTorrent client's download loop.
+    // ------------------------------------------------------------------
+
+    fn key_ev(key: Key, ctrl: bool) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn press(k: Key) -> Event {
+        key_ev(k, false)
+    }
+
+    fn tick() -> Event {
+        Event::Tick { elapsed_ms: 150 }
+    }
+
+    fn seeded() -> TorrentApp {
+        let mut app = TorrentApp::new();
+        app.seed_sample_torrents();
+        app
+    }
+
+    /// A test cannot call `main`, and a client that opens on an empty list
+    /// looks broken rather than idle.
+    #[test]
+    fn the_window_opens_with_torrents_in_it() {
+        let app = seeded();
+        assert!(app.torrents.len() > 1);
+    }
+
+    // -- the download loop --
+
+    /// `pick_piece` and `set_piece` had no caller, so a client whose module
+    /// doc leads with "piece management with bitfield tracking" never picked
+    /// a piece and every torrent sat at whatever progress it was created with.
+    #[test]
+    fn a_downloading_torrent_takes_pieces_until_it_is_done() {
+        let mut app = seeded();
+        let id = app.torrents.first().map(|t| t.id).expect("a torrent");
+        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
+            t.state = TorrentState::Downloading;
+        }
+        let before = app
+            .torrents
+            .iter()
+            .find(|t| t.id == id)
+            .map_or(0, |t| t.pieces.completed_count());
+        assert!(app.tick_interval().is_some(), "a download needs a clock");
+
+        // The first tick fetches the swarm -- what a tracker announce would
+        // have returned -- and the second takes a piece from it.
+        app.handle_event(&tick());
+        assert!(
+            app.torrents
+                .iter()
+                .find(|t| t.id == id)
+                .is_some_and(|t| !t.peers.is_empty()),
+            "the first tick should have found peers"
+        );
+        app.handle_event(&tick());
+        let after = app
+            .torrents
+            .iter()
+            .find(|t| t.id == id)
+            .map_or(0, |t| t.pieces.completed_count());
+        assert_eq!(after, before + 1, "a tick with peers should take one piece");
+    }
+
+    /// The bytes follow the pieces, and the last piece is the remainder -- so
+    /// a finished torrent reports its real size rather than overshooting.
+    #[test]
+    fn the_downloaded_total_reaches_the_torrents_size_exactly() {
+        let mut app = TorrentApp::new();
+        let torrent = create_sample_torrent("Small", 1000, 256, "https://example/announce");
+        let id = app.add_torrent(torrent, None);
+        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
+            t.state = TorrentState::Downloading;
+            t.downloaded = 0;
+        }
+
+        for _ in 0..200 {
+            if app
+                .torrents
+                .iter()
+                .find(|t| t.id == id)
+                .is_some_and(|t| t.pieces.is_complete())
+            {
+                break;
+            }
+            app.handle_event(&tick());
+        }
+        let t = app
+            .torrents
+            .iter()
+            .find(|t| t.id == id)
+            .expect("still there");
+        assert!(t.pieces.is_complete(), "it never finished");
+        assert_eq!(
+            t.downloaded, t.total_size,
+            "the byte total should land exactly on the size"
+        );
+        assert_eq!(
+            t.state,
+            TorrentState::Seeding,
+            "and it should start seeding"
+        );
+        assert_eq!(app.tick_interval(), None, "and the clock should stop");
+    }
+
+    /// A paused torrent takes nothing.
+    #[test]
+    fn a_paused_torrent_makes_no_progress() {
+        let mut app = seeded();
+        let id = app.torrents.first().map(|t| t.id).expect("a torrent");
+        app.selected_torrent = Some(id);
+        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
+            t.state = TorrentState::Downloading;
+        }
+
+        app.handle_event(&press(Key::Space));
+        assert_ne!(
+            app.torrents.iter().find(|t| t.id == id).map(|t| t.state),
+            Some(TorrentState::Downloading),
+            "space should have paused it"
+        );
+        let before = app
+            .torrents
+            .iter()
+            .find(|t| t.id == id)
+            .map_or(0, |t| t.pieces.completed_count());
+        for _ in 0..5 {
+            app.handle_event(&tick());
+        }
+        assert_eq!(
+            app.torrents
+                .iter()
+                .find(|t| t.id == id)
+                .map_or(0, |t| t.pieces.completed_count()),
+            before,
+            "a paused torrent kept downloading"
+        );
+
+        app.handle_event(&press(Key::Space));
+        assert_eq!(
+            app.torrents.iter().find(|t| t.id == id).map(|t| t.state),
+            Some(TorrentState::Downloading),
+            "and space again should resume it"
+        );
+    }
+
+    /// The swarm the first tick attaches is uneven on purpose, so
+    /// `piece_availability` returns different counts and the picker's
+    /// rarest-first choice is a real choice rather than a tie broken by index.
+    #[test]
+    fn the_attached_swarm_holds_every_piece_but_not_evenly() {
+        let mut app = seeded();
+        let id = app.torrents.first().map(|t| t.id).expect("a torrent");
+        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
+            t.state = TorrentState::Downloading;
+        }
+        app.handle_event(&tick());
+
+        let t = app.torrents.iter().find(|t| t.id == id).expect("there");
+        assert!(t.peers.len() > 1, "one peer is not a swarm");
+        let counts = piece_availability(&t.peers, t.pieces.total_count());
+        assert!(
+            counts.iter().all(|c| *c > 0),
+            "some piece is held by nobody, so it could never be downloaded"
+        );
+        assert!(
+            counts.iter().any(|c| *c != counts[0]),
+            "every piece is equally available, so rarest-first is a no-op: {counts:?}"
+        );
+    }
+
+    // -- the helpers the picker is fed with --
+
+    #[test]
+    fn availability_counts_the_peers_holding_each_piece() {
+        let mut a = PeerInfo::new("1.1.1.1", 1);
+        let mut b = PeerInfo::new("2.2.2.2", 2);
+        // Piece 0 only: bit 7 of byte 0.
+        a.bitfield = vec![0b1000_0000];
+        // Pieces 0 and 1.
+        b.bitfield = vec![0b1100_0000];
+
+        let counts = piece_availability(&[a, b], 3);
+        assert_eq!(counts, vec![2, 1, 0], "got {counts:?}");
+    }
+
+    #[test]
+    fn the_swarm_bitfield_is_the_union_of_the_peers() {
+        let mut a = PeerInfo::new("1.1.1.1", 1);
+        let mut b = PeerInfo::new("2.2.2.2", 2);
+        a.bitfield = vec![0b1000_0000];
+        b.bitfield = vec![0b0100_0000];
+        assert_eq!(swarm_bitfield(&[a, b], 1), vec![0b1100_0000]);
+    }
+
+    /// Every piece is the same size except the last, which is the remainder.
+    #[test]
+    fn the_last_piece_is_the_remainder() {
+        // 1000 bytes in 4 pieces: 250 each, and the last takes what is left.
+        assert_eq!(piece_size(1000, 4, 0), 250);
+        assert_eq!(piece_size(1000, 4, 3), 250);
+        // 1001 bytes in 4: 250 each and 251 at the end.
+        assert_eq!(piece_size(1001, 4, 0), 250);
+        assert_eq!(piece_size(1001, 4, 3), 251);
+        let total: u64 = (0..4).map(|i| piece_size(1001, 4, i)).sum();
+        assert_eq!(total, 1001, "the pieces should sum to the whole");
+    }
+
+    #[test]
+    fn a_torrent_with_no_pieces_has_no_piece_size() {
+        assert_eq!(piece_size(1000, 0, 0), 0, "and does not divide by zero");
+    }
+
+    // -- the list --
+
+    #[test]
+    fn the_arrows_walk_the_list_and_stop_at_the_ends() {
+        let mut app = seeded();
+        let ids: Vec<u32> = app.torrents.iter().map(|t| t.id).collect();
+        assert!(ids.len() > 1);
+
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.selected_torrent, ids.first().copied());
+        app.handle_event(&press(Key::Up));
+        assert_eq!(
+            app.selected_torrent,
+            ids.first().copied(),
+            "stopping, not wrapping"
+        );
+
+        for _ in 0..ids.len() + 3 {
+            app.handle_event(&press(Key::Down));
+        }
+        assert_eq!(app.selected_torrent, ids.last().copied());
+    }
+
+    /// Delete removes the entry and keeps the files: deleting someone's
+    /// download because they pressed Delete on a list row is the one
+    /// irreversible thing this program can do.
+    #[test]
+    fn delete_removes_the_torrent_from_the_list() {
+        let mut app = seeded();
+        let before = app.torrents.len();
+        app.handle_event(&press(Key::Down));
+        let id = app.selected_torrent.expect("a selection");
+
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(app.torrents.len(), before - 1);
+        assert!(
+            !app.torrents.iter().any(|t| t.id == id),
+            "the torrent is still listed"
+        );
+        assert_ne!(app.selected_torrent, Some(id), "and the selection moved on");
+        assert!(
+            app.status_message.starts_with("Removed:"),
+            "Delete should take the entry off the list and leave the files              alone -- deleting someone's download because they pressed Delete              on a row is the one irreversible thing this program does. Status              says {:?}",
+            app.status_message
+        );
+    }
+
+    /// `pause_all` and `resume_all` had no caller at all -- not even a test.
+    #[test]
+    fn ctrl_p_and_ctrl_r_stop_and_start_everything() {
+        let mut app = seeded();
+        for t in &mut app.torrents {
+            t.state = TorrentState::Downloading;
+        }
+
+        app.handle_event(&key_ev(Key::P, true));
+        assert!(
+            !app.torrents
+                .iter()
+                .any(|t| t.state == TorrentState::Downloading),
+            "something is still downloading"
+        );
+        assert_eq!(app.tick_interval(), None);
+
+        app.handle_event(&key_ev(Key::R, true));
+        assert!(
+            app.torrents
+                .iter()
+                .any(|t| t.state == TorrentState::Downloading),
+            "nothing resumed"
+        );
+    }
+
+    #[test]
+    fn tab_moves_through_the_six_tabs() {
+        let mut app = seeded();
+        let mut seen = vec![app.active_tab];
+        for _ in 0..6 {
+            app.handle_event(&press(Key::Tab));
+            seen.push(app.active_tab);
+        }
+        assert_eq!(seen.first(), seen.last(), "six presses should come round");
+        for tab in [
+            Tab::Transfers,
+            Tab::Details,
+            Tab::Peers,
+            Tab::Files,
+            Tab::Trackers,
+            Tab::Settings,
+        ] {
+            assert!(seen.contains(&tab), "{tab:?} was skipped: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn the_title_counts_the_running_transfers() {
+        let mut app = seeded();
+        for t in &mut app.torrents {
+            t.state = TorrentState::Paused;
+        }
+        assert_eq!(app.title(), "Torrents");
+
+        if let Some(t) = app.torrents.first_mut() {
+            t.state = TorrentState::Downloading;
+        }
+        assert!(
+            app.title().starts_with("1 downloading"),
+            "got {:?}",
+            app.title()
+        );
+    }
 
     // Bencode tests
     #[test]
@@ -4119,7 +4853,7 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let app = TorrentApp::new();
-        let cmds = app.render(1280.0, 800.0);
+        let cmds = app.render_commands(1280.0, 800.0);
         assert!(!cmds.is_empty());
     }
 

@@ -73,8 +73,8 @@ use quoting::quoteaf_os;
 // here: see that crate's module docs for why one definition shared by both ends
 // is the point, and `ssh/Cargo.toml` for what a second copy cost the last time.
 use sshwire::{
-    ExchangeHashInput, compute_exchange_hash, derive_key, encode_mpint, read_byte, read_mpint,
-    read_ssh_string, read_u32, ssh_string,
+    Aes128Ctr, ExchangeHashInput, compute_exchange_hash, compute_mac, constant_time_eq, derive_key,
+    encode_mpint, read_byte, read_mpint, read_ssh_string, read_u32, ssh_string,
 };
 use std::env;
 use std::fmt;
@@ -405,8 +405,14 @@ const MAX_CHANNEL_CHUNK: usize = 32768;
 /// Format: `[u32 packet_length][u8 padding_length][payload][random_padding]`
 ///
 /// Before encryption is active, the MAC is empty and padding is zero-filled.
-fn build_packet(payload: &[u8], encrypted: bool, seq: u32, enc: &EncryptionState) -> Vec<u8> {
-    let block_size = if encrypted {
+///
+/// Whether the packet is encrypted is read from `enc.cipher_c2s`, not passed in
+/// alongside it. The caller used to pass a `self.encrypted` flag that was set at
+/// `NEWKEYS` and the keys installed separately; a flag that says "encrypted" and
+/// a cipher that is absent are a plaintext packet sent in the belief that it was
+/// protected, and only one of the two can now be true at a time.
+fn build_packet(payload: &[u8], seq: u32, enc: &mut EncryptionState) -> Vec<u8> {
+    let block_size = if enc.cipher_c2s.is_some() {
         enc.block_size.max(8)
     } else {
         BLOCK_SIZE_UNENCRYPTED
@@ -443,11 +449,11 @@ fn build_packet(payload: &[u8], encrypted: bool, seq: u32, enc: &EncryptionState
     // Zero-fill padding (simplified; a real implementation would use random bytes).
     pkt.resize(total_len, 0);
 
-    if encrypted {
-        // Compute MAC over sequence number + unencrypted packet.
+    if let Some(cipher) = enc.cipher_c2s.as_mut() {
+        // The MAC covers the *plaintext* packet (RFC 4253 s6), so it is
+        // computed before the cipher runs and appended after it.
         let mac = compute_mac(&enc.mac_key_c2s, seq, &pkt);
-        // Encrypt the packet portion (after constructing MAC on plaintext).
-        encrypt_packet_aes_ctr(&mut pkt, &enc.enc_key_c2s, &enc.iv_c2s, seq);
+        cipher.apply(&mut pkt);
         pkt.extend_from_slice(&mac);
     }
 
@@ -458,22 +464,25 @@ fn build_packet(payload: &[u8], encrypted: bool, seq: u32, enc: &EncryptionState
 fn read_packet(
     handle: u64,
     buf: &mut StreamBuffer,
-    encrypted: bool,
     seq: u32,
-    enc: &EncryptionState,
+    enc: &mut EncryptionState,
 ) -> Result<Vec<u8>, SshError> {
+    let encrypted = enc.cipher_s2c.is_some();
     let block_size = if encrypted {
         enc.block_size.max(8)
     } else {
         BLOCK_SIZE_UNENCRYPTED
     };
 
-    // Peek/decrypt the first block to get packet_length.
+    // The packet length is inside the first encrypted block, so that block has
+    // to be decrypted before we know how many more bytes to wait for -- and
+    // decrypted again below as part of the whole packet. `peek_block` takes
+    // `&self` for exactly that reason: consuming the keystream here would leave
+    // the counter one block ahead of the sender's for the rest of the session.
     let first_block = buf.peek(handle, block_size)?;
-    let first_decrypted = if encrypted {
-        decrypt_block_aes_ctr(first_block, &enc.enc_key_s2c, &enc.iv_s2c, seq, 0)
-    } else {
-        first_block.to_vec()
+    let first_decrypted = match enc.cipher_s2c.as_ref() {
+        Some(cipher) => cipher.peek_block(first_block),
+        None => first_block.to_vec(),
     };
 
     let [len_b0, len_b1, len_b2, len_b3, ..] = *first_decrypted.as_slice() else {
@@ -505,10 +514,13 @@ fn read_packet(
     let raw = buf.take(handle, total)?;
 
     // Decrypt if needed.
-    let decrypted = if encrypted {
+    let decrypted = if let Some(cipher) = enc.cipher_s2c.as_mut() {
         let (pkt_data, mac_data) = raw.split_at(body_len);
         let mut dec = pkt_data.to_vec();
-        decrypt_packet_aes_ctr(&mut dec, &enc.enc_key_s2c, &enc.iv_s2c, seq);
+        // CTR is its own inverse, and this is the call that advances the
+        // counter past the packet -- once, for the whole packet, matching the
+        // sender's single `apply`.
+        cipher.apply(&mut dec);
 
         // Verify MAC. The `get` failing means the server sent a short MAC, and
         // that has to *reject*: the previous form guarded the comparison with
@@ -1093,327 +1105,34 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     sha2::sha256(data)
 }
 
-// ============================================================================
-// HMAC-SHA256
-// ============================================================================
-
-/// Compute HMAC-SHA256(key, data).
-fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    /// SHA-256's block size, and therefore HMAC's (RFC 2104).
-    const BLOCK_SIZE: usize = 64;
-
-    // A key longer than one block is replaced by its digest. That is what makes
-    // the pad below total rather than conditional: `key_used` is now at most 64
-    // bytes, either because it already was or because it is a 32-byte hash.
-    let key_hash;
-    let key_used: &[u8] = if key.len() > BLOCK_SIZE {
-        key_hash = sha256(key);
-        &key_hash
-    } else {
-        key
-    };
-
-    // A fixed-size array rather than a `vec![0u8; block_size]`, so "the pad is
-    // exactly one block" is the type and not a runtime length.
-    let mut k_padded = [0u8; BLOCK_SIZE];
-    if let Some(head) = k_padded.get_mut(..key_used.len()) {
-        head.copy_from_slice(key_used);
-    }
-
-    // Inner: SHA256((key XOR ipad) || data)
-    let mut inner = Vec::with_capacity(BLOCK_SIZE.saturating_add(data.len()));
-    inner.extend(k_padded.iter().map(|b| b ^ 0x36));
-    inner.extend_from_slice(data);
-    let inner_hash = sha256(&inner);
-
-    // Outer: SHA256((key XOR opad) || inner_hash)
-    let mut outer = Vec::with_capacity(BLOCK_SIZE.saturating_add(inner_hash.len()));
-    outer.extend(k_padded.iter().map(|b| b ^ 0x5c));
-    outer.extend_from_slice(&inner_hash);
-    sha256(&outer)
-}
-
-/// Compute the SSH MAC for a packet.
-/// MAC = HMAC-SHA256(key, sequence_number(u32_be) || unencrypted_packet)
-fn compute_mac(key: &[u8], seq: u32, packet: &[u8]) -> Vec<u8> {
-    let mut mac_input = Vec::with_capacity(packet.len().saturating_add(4));
-    mac_input.extend_from_slice(&seq.to_be_bytes());
-    mac_input.extend_from_slice(packet);
-    hmac_sha256(key, &mac_input).to_vec()
-}
-
-/// Constant-time comparison to prevent timing attacks.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-// ============================================================================
-// AES-128-CTR encryption/decryption
-//
-// A simplified AES-128 implementation for the SSH transport layer.
-// Not optimized for performance — adequate for an OS utility.
-// ============================================================================
-
-/// AES S-Box lookup table.
-const AES_SBOX: [u8; 256] = [
-    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
-    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
-    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
-    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
-    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
-    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
-    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
-    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
-    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
-    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
-    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
-    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
-    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
-    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
-    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
-    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
-];
-
-/// AES round constants.
-const AES_RCON: [u8; 10] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
-
-/// S-box substitution. A `u8` always indexes a 256-entry table, so the
-/// fallback is unreachable; saying it with `get` costs nothing and keeps the
-/// one genuinely computed index in this cipher out of the unchecked column.
-fn sbox(byte: u8) -> u8 {
-    AES_SBOX.get(usize::from(byte)).copied().unwrap_or(0)
-}
-
-/// Galois Field multiplication by 2 in GF(2^8).
-fn gf_mul2(x: u8) -> u8 {
-    // Double, then reduce if a bit fell off the top, by the AES field
-    // polynomial x^8 + x^4 + x^3 + x + 1 (0x11b, low byte 0x1b). `wrapping_shl`
-    // rather than `<<` because discarding that bit is the definition of the
-    // operation, not an accident of the width.
-    let shifted = x.wrapping_shl(1);
-    if (x & 0x80) != 0 {
-        shifted ^ 0x1b
-    } else {
-        shifted
-    }
-}
-
-/// Galois Field multiplication by 3 in GF(2^8).
-fn gf_mul3(x: u8) -> u8 {
-    gf_mul2(x) ^ x
-}
-
-/// AES-128 key expansion. Produces 11 round keys (176 bytes total).
-fn aes128_key_expand(key: &[u8; 16]) -> [[u8; 16]; 11] {
-    let mut round_keys = [[0u8; 16]; 11];
-    let mut prev = *key;
-
-    // Zipping the round-constant table against the output slots states the
-    // rule "one round key per round constant" once. The old `for i in 1..11`
-    // had the count 11 written in the loop bound and the count 10 implied by
-    // `AES_RCON`, and reached back into the array it was filling with
-    // `round_keys[i - 1]` -- three facts that had to agree by hand.
-    let mut slots = round_keys.iter_mut();
-    if let Some(first) = slots.next() {
-        *first = prev;
-    }
-
-    for (&rcon, slot) in AES_RCON.iter().zip(slots) {
-        // RotWord + SubWord + Rcon over the previous key's last column.
-        let mut word = *prev.last_chunk::<4>().unwrap_or(&[0; 4]);
-        word.rotate_left(1);
-        for b in &mut word {
-            *b = sbox(*b);
-        }
-        if let Some(top) = word.first_mut() {
-            *top ^= rcon;
-        }
-
-        let mut next = [0u8; 16];
-        for (prev_col, next_col) in prev.chunks_exact(4).zip(next.chunks_exact_mut(4)) {
-            for ((dst, &p), &w) in next_col.iter_mut().zip(prev_col).zip(word.iter()) {
-                *dst = p ^ w;
-            }
-            // The column just written feeds the next one.
-            word = <[u8; 4]>::try_from(&*next_col).unwrap_or([0; 4]);
-        }
-
-        *slot = next;
-        prev = next;
-    }
-    round_keys
-}
-
-/// Encrypt one 16-byte block with AES-128.
-fn aes128_encrypt_block(block: &[u8; 16], round_keys: &[[u8; 16]; 11]) -> [u8; 16] {
-    // Destructuring says what `round_keys[0]`, `.take(10).skip(1)` and
-    // `round_keys[10]` said, but the compiler checks the arithmetic instead of
-    // the reader: "first, all but the last, last" cannot be off by one, whereas
-    // a `take`/`skip` pair silently loses or repeats a round if either constant
-    // drifts from the array's length.
-    let [first_key, middle_keys @ .., last_key] = round_keys;
-    let mut state = *block;
-
-    // Initial round key addition.
-    xor_block(&mut state, first_key);
-
-    // Rounds 1..9: SubBytes, ShiftRows, MixColumns, AddRoundKey.
-    for round_key in middle_keys {
-        sub_bytes(&mut state);
-        shift_rows(&mut state);
-        mix_columns(&mut state);
-        xor_block(&mut state, round_key);
-    }
-
-    // Final round (no MixColumns).
-    sub_bytes(&mut state);
-    shift_rows(&mut state);
-    xor_block(&mut state, last_key);
-
-    state
-}
-
-fn xor_block(state: &mut [u8; 16], key: &[u8; 16]) {
-    for (s, &k) in state.iter_mut().zip(key.iter()) {
-        *s ^= k;
-    }
-}
-
-fn sub_bytes(state: &mut [u8; 16]) {
-    for b in state.iter_mut() {
-        *b = sbox(*b);
-    }
-}
-
-// Every index below is a literal into a `[u8; 16]`, so the bound is checked at
-// compile time by the array's own type -- there is no runtime index here for
-// `indexing_slicing` to be warning about. Writing the row rotations through
-// `get`/`get_mut` would add sixteen `Option`s that can never be `None` and
-// would obscure the one thing this function has to get right, which is which
-// index moves where.
-#[allow(clippy::indexing_slicing)]
-fn shift_rows(state: &mut [u8; 16]) {
-    // AES state is column-major: indices [row + 4*col]
-    // Row 0: no shift
-    // Row 1: shift left by 1
-    let tmp = state[1];
-    state[1] = state[5];
-    state[5] = state[9];
-    state[9] = state[13];
-    state[13] = tmp;
-    // Row 2: shift left by 2
-    let (t0, t1) = (state[2], state[6]);
-    state[2] = state[10];
-    state[6] = state[14];
-    state[10] = t0;
-    state[14] = t1;
-    // Row 3: shift left by 3 (= shift right by 1)
-    let tmp = state[15];
-    state[15] = state[11];
-    state[11] = state[7];
-    state[7] = state[3];
-    state[3] = tmp;
-}
-
-fn mix_columns(state: &mut [u8; 16]) {
-    // `chunks_exact_mut(4)` hands out the four columns directly, so the
-    // `col * 4` base and its four `off + k` offsets -- five chances to write
-    // one column while reading another -- are gone. A 16-byte state is four
-    // whole columns, so the remainder is always empty.
-    for col in state.chunks_exact_mut(4) {
-        let [a0, a1, a2, a3] = *col else { continue };
-        col.copy_from_slice(&[
-            gf_mul2(a0) ^ gf_mul3(a1) ^ a2 ^ a3,
-            a0 ^ gf_mul2(a1) ^ gf_mul3(a2) ^ a3,
-            a0 ^ a1 ^ gf_mul2(a2) ^ gf_mul3(a3),
-            gf_mul3(a0) ^ a1 ^ a2 ^ gf_mul2(a3),
-        ]);
-    }
-}
-
-/// Increment a 16-byte big-endian counter by 1.
-fn increment_counter(counter: &mut [u8; 16]) {
-    for b in counter.iter_mut().rev() {
-        let (val, overflow) = b.overflowing_add(1);
-        *b = val;
-        if !overflow {
-            return;
-        }
-    }
-}
-
-/// Encrypt a packet in-place using AES-128-CTR.
-///
-/// For SSH, the counter starts from the IV and increments for each 16-byte
-/// block within the packet. Across packets, we track the IV globally (the
-/// EncryptionState's IV is incremented after each packet).
-fn encrypt_packet_aes_ctr(packet: &mut [u8], key: &[u8], iv: &[u8], _seq: u32) {
-    // `first_chunk` performs the length check and the copy in one step, so the
-    // `len() < 16` guard and the `[..16]` slice that followed it can no longer
-    // disagree about which 16 bytes were checked.
-    let (Some(key16), Some(iv16)) = (key.first_chunk::<16>(), iv.first_chunk::<16>()) else {
-        return;
-    };
-    let round_keys = aes128_key_expand(key16);
-
-    // One counter walked forward across the packet. It used to be re-derived
-    // from the IV for every block, by incrementing a fresh copy `block_idx`
-    // times, which made an N-block packet cost O(N^2) counter steps: a 32 KiB
-    // packet paid over two million increments to produce 2048 blocks. Walking
-    // it also removes the `start`/`end`/`i - start` index triple, whose short
-    // final block was the only thing keeping the last `min` honest.
-    let mut counter = *iv16;
-    for chunk in packet.chunks_mut(16) {
-        let keystream = aes128_encrypt_block(&counter, &round_keys);
-        for (b, k) in chunk.iter_mut().zip(keystream) {
-            *b ^= k;
-        }
-        increment_counter(&mut counter);
-    }
-}
-
-/// Decrypt a packet in-place using AES-128-CTR (same as encrypt for CTR mode).
-fn decrypt_packet_aes_ctr(packet: &mut [u8], key: &[u8], iv: &[u8], _seq: u32) {
-    encrypt_packet_aes_ctr(packet, key, iv, _seq);
-}
-
-/// Decrypt just the first block to peek at packet_length.
-fn decrypt_block_aes_ctr(
-    data: &[u8],
-    key: &[u8],
-    iv: &[u8],
-    _seq: u32,
-    _block_idx: usize,
-) -> Vec<u8> {
-    let mut result = data.to_vec();
-    encrypt_packet_aes_ctr(&mut result, key, iv, _seq);
-    result
-}
+// HMAC-SHA256, the packet MAC, constant-time comparison and AES-128-CTR all
+// live in `sshwire` now. The cipher in particular had to: its counter is state
+// that RFC 4344 §4 says advances once per block for the life of the key, this
+// crate restarted it at every packet -- reusing one keystream for the whole
+// session -- and the server had invented a third rule. A shared stateful type
+// is what makes all three unwriteable. See that crate's `Aes128Ctr`.
 
 // ============================================================================
 // Encryption state tracking
 // ============================================================================
 
 struct EncryptionState {
-    /// Encryption key for client-to-server.
-    enc_key_c2s: Vec<u8>,
-    /// Encryption key for server-to-client.
-    enc_key_s2c: Vec<u8>,
     /// MAC key for client-to-server.
     mac_key_c2s: Vec<u8>,
     /// MAC key for server-to-client.
     mac_key_s2c: Vec<u8>,
-    /// IV for client-to-server.
-    iv_c2s: Vec<u8>,
-    /// IV for server-to-client.
-    iv_s2c: Vec<u8>,
+    /// Outbound cipher, `None` until `NEWKEYS` installs the derived keys.
+    ///
+    /// The key and IV used to be held here as separate `Vec`s and handed to a
+    /// stateless `encrypt_packet_aes_ctr` once per packet, which is exactly how
+    /// this crate came to restart its counter at every packet and encrypt an
+    /// entire session under one keystream. The cipher owns its counter now, so
+    /// there is no per-packet starting point left for anyone to get wrong, and
+    /// `Option` rather than an empty `Vec` makes "not yet keyed" a state the
+    /// compiler asks about instead of a length nobody checked.
+    cipher_c2s: Option<Aes128Ctr>,
+    /// Inbound cipher, `None` until `NEWKEYS` installs the derived keys.
+    cipher_s2c: Option<Aes128Ctr>,
     /// Block size for the cipher.
     block_size: usize,
     /// MAC length in bytes.
@@ -1423,12 +1142,10 @@ struct EncryptionState {
 impl EncryptionState {
     fn new() -> Self {
         Self {
-            enc_key_c2s: Vec::new(),
-            enc_key_s2c: Vec::new(),
             mac_key_c2s: Vec::new(),
             mac_key_s2c: Vec::new(),
-            iv_c2s: Vec::new(),
-            iv_s2c: Vec::new(),
+            cipher_c2s: None,
+            cipher_s2c: None,
             block_size: 16,
             mac_len: 32, // HMAC-SHA256
         }
@@ -1996,7 +1713,6 @@ struct SshSession {
     server_kexinit: Vec<u8>,
     session_id: [u8; 32],
     enc: EncryptionState,
-    encrypted: bool,
     seq_send: u32,
     seq_recv: u32,
     channel_id: u32,
@@ -2017,7 +1733,6 @@ impl SshSession {
             server_kexinit: Vec::new(),
             session_id: [0u8; 32],
             enc: EncryptionState::new(),
-            encrypted: false,
             seq_send: 0,
             seq_recv: 0,
             channel_id: 0,
@@ -2056,7 +1771,7 @@ impl SshSession {
 
     /// Send an SSH packet (handles encryption and sequence numbering).
     fn send_packet(&mut self, payload: &[u8]) -> Result<(), SshError> {
-        let pkt = build_packet(payload, self.encrypted, self.seq_send, &self.enc);
+        let pkt = build_packet(payload, self.seq_send, &mut self.enc);
         tcp_send_all(self.handle, &pkt)?;
         self.seq_send = self.seq_send.wrapping_add(1);
         Ok(())
@@ -2064,13 +1779,7 @@ impl SshSession {
 
     /// Receive an SSH packet (handles decryption and sequence numbering).
     fn recv_packet(&mut self) -> Result<Vec<u8>, SshError> {
-        let payload = read_packet(
-            self.handle,
-            &mut self.buf,
-            self.encrypted,
-            self.seq_recv,
-            &self.enc,
-        )?;
+        let payload = read_packet(self.handle, &mut self.buf, self.seq_recv, &mut self.enc)?;
         self.seq_recv = self.seq_recv.wrapping_add(1);
         Ok(payload)
     }
@@ -2347,14 +2056,34 @@ impl SshSession {
         //   Encryption key s2c: HASH(K || H || "D" || session_id)
         //   Integrity key c2s: HASH(K || H || "E" || session_id)
         //   Integrity key s2c: HASH(K || H || "F" || session_id)
-        self.enc.iv_c2s = derive_key(&k_bytes, &h, b'A', &self.session_id, 16);
-        self.enc.iv_s2c = derive_key(&k_bytes, &h, b'B', &self.session_id, 16);
-        self.enc.enc_key_c2s = derive_key(&k_bytes, &h, b'C', &self.session_id, 16);
-        self.enc.enc_key_s2c = derive_key(&k_bytes, &h, b'D', &self.session_id, 16);
+        let iv_c2s = derive_key(&k_bytes, &h, b'A', &self.session_id, 16);
+        let iv_s2c = derive_key(&k_bytes, &h, b'B', &self.session_id, 16);
+        let key_c2s = derive_key(&k_bytes, &h, b'C', &self.session_id, 16);
+        let key_s2c = derive_key(&k_bytes, &h, b'D', &self.session_id, 16);
         self.enc.mac_key_c2s = derive_key(&k_bytes, &h, b'E', &self.session_id, 32);
         self.enc.mac_key_s2c = derive_key(&k_bytes, &h, b'F', &self.session_id, 32);
 
-        self.encrypted = true;
+        // This is the only place a cipher is constructed, and it consumes the
+        // key and the IV together. Holding them apart in the state -- as this
+        // crate used to -- is what let a fresh counter be rebuilt from the IV
+        // once per packet, so that one keystream covered the whole session.
+        let (Some(key_c2s), Some(iv_c2s), Some(key_s2c), Some(iv_s2c)) = (
+            key_c2s.first_chunk::<16>(),
+            iv_c2s.first_chunk::<16>(),
+            key_s2c.first_chunk::<16>(),
+            iv_s2c.first_chunk::<16>(),
+        ) else {
+            // `derive_key` was asked for 16 bytes and returns what it is asked
+            // for, so this is unreachable -- but the alternative to saying so
+            // is an index, and a cipher keyed from a short buffer is worse than
+            // a refused connection.
+            return Err(SshError::ProtocolError(
+                "key derivation produced a short key".into(),
+            ));
+        };
+        self.enc.cipher_c2s = Some(Aes128Ctr::new(key_c2s, iv_c2s));
+        self.enc.cipher_s2c = Some(Aes128Ctr::new(key_s2c, iv_s2c));
+
         self.verbose("encryption activated");
 
         Ok(())
@@ -2767,20 +2496,14 @@ impl SshSession {
     /// one recv call.
     fn try_recv_packet(&mut self) -> Result<Option<Vec<u8>>, SshError> {
         // If we have buffered data, try to parse a packet.
-        let block_size = if self.encrypted {
+        let block_size = if self.enc.cipher_s2c.is_some() {
             self.enc.block_size.max(8)
         } else {
             BLOCK_SIZE_UNENCRYPTED
         };
 
         if self.buf.available() >= block_size {
-            let payload = read_packet(
-                self.handle,
-                &mut self.buf,
-                self.encrypted,
-                self.seq_recv,
-                &self.enc,
-            )?;
+            let payload = read_packet(self.handle, &mut self.buf, self.seq_recv, &mut self.enc)?;
             self.seq_recv = self.seq_recv.wrapping_add(1);
             return Ok(Some(payload));
         }
@@ -2789,13 +2512,7 @@ impl SshSession {
         self.buf.fill_once(self.handle)?;
 
         if self.buf.available() >= block_size {
-            let payload = read_packet(
-                self.handle,
-                &mut self.buf,
-                self.encrypted,
-                self.seq_recv,
-                &self.enc,
-            )?;
+            let payload = read_packet(self.handle, &mut self.buf, self.seq_recv, &mut self.enc)?;
             self.seq_recv = self.seq_recv.wrapping_add(1);
             Ok(Some(payload))
         } else {
@@ -4001,121 +3718,23 @@ mod tests {
     // ------------------------------------------------------------------
     // AES-128 and AES-128-CTR
     //
-    // The cipher had no tests at all, which is how `aes128_key_expand`,
-    // `mix_columns` and the CTR counter walk could all be rewritten with
-    // nothing but the compiler checking the result. These are the published
-    // known-answer vectors, so they check this implementation against the
-    // standard rather than against its own previous output.
+    // The cipher is `sshwire::Aes128Ctr` now, and so are its tests: FIPS-197's
+    // block and key-schedule vectors, and RFC 3686's and NIST SP 800-38A's
+    // counter-mode vectors. Six tests lived here; four moved, and two are gone
+    // because the shared type retired the thing they were checking.
+    //
+    //   * `aes_ctr_declines_a_short_key_or_iv_rather_than_encrypting_with_padding`
+    //     asserted that a 15-byte key left the data alone. `Aes128Ctr::new`
+    //     takes `&[u8; 16]`, so a short key no longer compiles and there is
+    //     nothing left to assert at run time.
+    //   * `aes_ctr_round_trips_a_length_that_is_not_a_block_multiple` is the
+    //     shape of test that let the counter bug live for as long as it did:
+    //     encrypt-then-decrypt with the same wrong counter returns the
+    //     plaintext perfectly. RFC 3686's 36-byte vector covers the short final
+    //     block against a published answer instead, and `sshwire`'s
+    //     `the_keystream_never_repeats_across_packets` covers what a roundtrip
+    //     structurally cannot see.
     // ------------------------------------------------------------------
-
-    #[test]
-    fn aes128_matches_the_fips_197_known_answer() {
-        // FIPS-197 appendix C.1.
-        let key: [u8; 16] = hex_to_bytes("000102030405060708090a0b0c0d0e0f")
-            .try_into()
-            .unwrap();
-        let plain: [u8; 16] = hex_to_bytes("00112233445566778899aabbccddeeff")
-            .try_into()
-            .unwrap();
-
-        let round_keys = aes128_key_expand(&key);
-        let cipher = aes128_encrypt_block(&plain, &round_keys);
-
-        assert_eq!(bytes_to_hex(&cipher), "69c4e0d86a7b0430d8cdb78070b4c55a");
-    }
-
-    #[test]
-    fn aes128_key_expansion_matches_the_published_schedule() {
-        // FIPS-197 appendix A.1: the last round key for the all-zero-ish
-        // C.1 key. Checking the *final* round key is what catches an
-        // expansion that went wrong partway and then stayed wrong.
-        let key: [u8; 16] = hex_to_bytes("000102030405060708090a0b0c0d0e0f")
-            .try_into()
-            .unwrap();
-        let round_keys = aes128_key_expand(&key);
-
-        assert_eq!(
-            bytes_to_hex(&round_keys[0]),
-            "000102030405060708090a0b0c0d0e0f"
-        );
-        assert_eq!(
-            bytes_to_hex(&round_keys[1]),
-            "d6aa74fdd2af72fadaa678f1d6ab76fe"
-        );
-        assert_eq!(
-            bytes_to_hex(&round_keys[10]),
-            "13111d7fe3944a17f307a78b4d2b30c5"
-        );
-    }
-
-    #[test]
-    fn aes_ctr_matches_the_nist_sp_800_38a_vector() {
-        // NIST SP 800-38A F.5.1, CTR-AES128.Encrypt. Four blocks, so the
-        // counter has to advance three times: this is the test that would
-        // have caught the counter walk being wrong, which the previous
-        // O(N^2) "re-derive from the IV each block" form got right only by
-        // repeating the whole increment sequence from scratch.
-        let key = hex_to_bytes("2b7e151628aed2a6abf7158809cf4f3c");
-        let iv = hex_to_bytes("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff");
-        let mut data = hex_to_bytes(concat!(
-            "6bc1bee22e409f96e93d7e117393172a",
-            "ae2d8a571e03ac9c9eb76fac45af8e51",
-            "30c81c46a35ce411e5fbc1191a0a52ef",
-            "f69f2445df4f9b17ad2b417be66c3710",
-        ));
-
-        encrypt_packet_aes_ctr(&mut data, &key, &iv, 0);
-
-        assert_eq!(
-            bytes_to_hex(&data),
-            concat!(
-                "874d6191b620e3261bef6864990db6ce",
-                "9806f66b7970fdff8617187bb9fffdff",
-                "5ae4df3edbd5d35e5b4f09020db03eab",
-                "1e031dda2fbe03d1792170a0f3009cee",
-            )
-        );
-    }
-
-    #[test]
-    fn aes_ctr_round_trips_a_length_that_is_not_a_block_multiple() {
-        // CTR is its own inverse, and the short final block is the part the
-        // old `(start + 16).min(len)` arithmetic had to get right by hand.
-        let key = hex_to_bytes("2b7e151628aed2a6abf7158809cf4f3c");
-        let iv = hex_to_bytes("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff");
-        let original: Vec<u8> = (0u8..37).collect();
-
-        let mut data = original.clone();
-        encrypt_packet_aes_ctr(&mut data, &key, &iv, 0);
-        assert_ne!(data, original, "encryption left the plaintext alone");
-        assert_eq!(data.len(), original.len());
-
-        decrypt_packet_aes_ctr(&mut data, &key, &iv, 0);
-        assert_eq!(data, original);
-    }
-
-    #[test]
-    fn aes_ctr_declines_a_short_key_or_iv_rather_than_encrypting_with_padding() {
-        let mut data = vec![1, 2, 3, 4];
-        encrypt_packet_aes_ctr(&mut data, &[0; 15], &[0; 16], 0);
-        assert_eq!(data, vec![1, 2, 3, 4], "a 15-byte key must not be used");
-        encrypt_packet_aes_ctr(&mut data, &[0; 16], &[0; 15], 0);
-        assert_eq!(data, vec![1, 2, 3, 4], "a 15-byte IV must not be used");
-    }
-
-    #[test]
-    fn the_ctr_counter_carries_across_byte_boundaries() {
-        let mut counter = [0xffu8; 16];
-        increment_counter(&mut counter);
-        assert_eq!(counter, [0u8; 16], "an all-ones counter wraps to zero");
-
-        let mut counter = [0u8; 16];
-        counter[15] = 0xff;
-        counter[14] = 0x01;
-        increment_counter(&mut counter);
-        assert_eq!(counter[14], 0x02);
-        assert_eq!(counter[15], 0x00);
-    }
 
     // ------------------------------------------------------------------
     // base64

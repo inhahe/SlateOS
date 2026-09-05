@@ -120042,3 +120042,56 @@ naming an unusable key a hard error rather than a silent fall back to a password
 prompt. For an encrypted key that is currently right — there is no passphrase
 prompt to offer — but it stops being right the moment there is one. Revisit §778
 together with this entry.
+
+## TD-B-SSHD-ACCEPTS-ONLY-ONE-AUTHORIZEDKEYSFILE-PATH-WHERE-OPENSSH-ACCEPTS-A-LIST (lane B, 2026-09-05)
+
+**In short:** `sshd_config` has a setting, `AuthorizedKeysFile`, naming the file
+that lists which keys may log into an account. Real OpenSSH lets an
+administrator write *several* files there, separated by spaces, and tries each
+in turn. We read the whole setting as one file name. An administrator who
+carries over a config using the list form gets a daemon looking for a single
+file whose name contains spaces, which will not exist — so publickey
+authentication silently stops working for every account, and the clients are
+told only that their keys were not accepted.
+
+**Where it lives:** `authorized_keys_path` in `userspace/sshd/src/lib.rs`
+resolves exactly one pattern, and `pubkey_auth_for_account` reads exactly one
+file. The config parser (`"authorizedkeysfile"` in `SshdConfig::parse`) stores
+the rest of the line verbatim, spaces included.
+
+**Reproduce:** put `AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2`
+in `sshd_config` and try to log in with a key listed in the first file. It is
+refused. The daemon looked for a file literally named
+`.ssh/authorized_keys .ssh/authorized_keys2`.
+
+**Why the list form is not obscure:** it is how `.ssh/authorized_keys2` — the
+second file every OpenSSH has read since the SSH-1/SSH-2 split — is still
+configured, and it is how an administrator adds a system-wide file
+(`/etc/ssh/authorized_keys/%u`) *alongside* the user's own rather than instead
+of it. That combination is the standard recipe for "the admin can grant access
+and the user can too", so the configs most likely to use it are the ones written
+by someone being careful.
+
+**Severity:** a config-compatibility gap rather than a security hole. The
+failure is closed — an unresolvable path authorises nothing — so it refuses
+logins that should work and never admits one that should not. Nothing in this
+tree writes the list form today, so it bites only an operator bringing a config
+from a real OpenSSH.
+
+**The proper fix:** split the setting on whitespace at *parse* time, keeping
+`SshdConfig::authorized_keys_file` a `Vec<String>`, and have
+`pubkey_auth_for_account` resolve and read each in order, concatenating what it
+finds. Resolution stays per-path so `%h`/`%u`/`%U` expand in each. A file that
+is absent must remain not-an-error, exactly as the single-file case already
+treats it — with a list, most accounts will have only the first.
+
+The one thing to get right is that a *missing* file and an *unreadable* one stay
+indistinguishable to the peer, as they are now: reporting which is which across
+several paths would let an unauthenticated client map the filesystem. And the
+concatenation must not stop at the first file that exists — OpenSSH reads all of
+them, and stopping early would silently ignore keys an administrator had granted.
+
+Note that quoting is *not* part of this: OpenSSH splits on whitespace with no
+quoting mechanism, so a path containing a space cannot be configured there
+either. Matching that exactly is better than inventing quoting we would then
+have to keep agreeing with.

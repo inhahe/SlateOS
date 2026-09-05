@@ -787,6 +787,44 @@ def test_the_exit_code_distinguishes_violation_from_breakage(mod, tmpdir):
                     "--baseline", baseline]), 2)
 
 
+def test_head_and_update_baseline_are_refused_together(mod, tmpdir):
+    """The one argument combination that is a contradiction, not a gap.
+
+    `--update-baseline` writes a file in the working tree; `--head` is defined
+    as not reading the working tree. Silently baselining the worktree while the
+    caller believed it baselined a commit is the failure mode -- it would write
+    a waiver nobody asked for, and the baseline is the one input that *forgives*
+    violations, so a wrong one is not a wrong answer but a disabled gate.
+    """
+    check("--head with --update-baseline exits 2",
+          mod.main(["--head", "HEAD", "--update-baseline",
+                    "--baseline", os.path.join(tmpdir, "b.json")]), 2)
+
+
+def test_head_rejects_a_rev_that_is_not_a_commit(mod):
+    """A typo'd rev must not read as 'nothing to complain about'.
+
+    The hook interpolates `$sha`, so a rev this gate cannot resolve means the
+    hook is wired wrong. Exiting 0 there is the silent-skip failure the
+    `note_gate` bookkeeping elsewhere in the hook exists to catch.
+    """
+    check("a bogus --head exits 2",
+          mod.main(["--head", "definitely-not-a-rev", "--quiet"]), 2)
+
+
+def test_the_head_seam_selftest_passes(mod):
+    """Run the embedded self-test from the suite as well as from the hook.
+
+    The `--head` seam needs a real repository with a real difference between
+    the commit and the worktree, so it lives in the checker's own `--selftest`
+    rather than here. Invoking it from the suite too means the boot test covers
+    it: a self-test that only ever runs at push time is one that a lane which
+    does not push a `.py` file never runs at all, which is the same
+    documented-but-unenforced hole this gate was wired into the hook to close.
+    """
+    check("--selftest passes", mod.main(["--selftest"]), 0)
+
+
 def main():
     mod = load_module()
     tests = [(name, fn) for name, fn in list(globals().items())

@@ -16,6 +16,14 @@ is our own stage (it runs before word splitting and preserves text, which
 bash has no equivalent of), so its assertions are not checkable here and are
 deliberately absent rather than faked.
 
+Three tables, three subjects: `CASES` is the quote *reader* (rung 115),
+`AWK_CASES` is awk's own escape rule (rung 117, whose oracle is awk), and
+`SUFFIX_CASES` is the quote *writer* -- `shellquote::quote_suffix`, which tab
+completion uses to insert a fragment into a word the user is halfway through
+typing.  The reader and the writer are separate risks: a reader that is right
+about `'a'\''b'` says nothing about whether anything in the tree ever spells an
+apostrophe that way.
+
 WHAT THIS FILE READS OUT OF THE RUST, AND WHY IT IS THREE-WAY
 -------------------------------------------------------------
 For a long time this file read the rung *inputs* out of kshell.rs and nothing
@@ -194,6 +202,115 @@ AWK_CASES = [
 ]
 
 
+# --- shellquote::quote_suffix, whose oracle is bash and whose subject is a
+# --- *fragment* rather than a whole word. -----------------------------------
+#
+# Tab completion never gets to write the whole word: the user has already typed
+# part of it, possibly inside a quote they opened, and the only edit completion
+# may make is an insertion at the cursor.  So the thing to ask bash is not "is
+# this a correctly quoted word" -- it is:
+#
+#     what does bash parse out of <opener><typed><inserted><closer>?
+#
+# and the answer must be the filename, byte for byte, as ONE word.  A wrong
+# escaping does not usually produce a syntax error; it produces a line that
+# runs fine and names a different file, or two files, which is exactly why this
+# needs an oracle rather than a reading.
+#
+# The `rust_src` column is the *output* spelling asserted in
+# `shellquote::self_test` section 8, not the input.  That is what makes this
+# three-legged like `CASES` above: leg (1) proves the kernel asserts this exact
+# spelling, leg (2) is the composed line transcribed here, and leg (3) is bash.
+# Pinning the input instead would leave the kernel free to assert any output at
+# all while this file happily measured a string it had made up itself.
+#
+# (rust_src as typed in shellquote.rs, the composed line, expected words, what
+#  it pins)
+# Every `rust_src` below is a RAW string, so what is written here is what is in
+# the Rust file -- no Python escaping layer to miscount.  That is the same
+# hazard `assert_rust_src_is_verbatim`'s docstring records having been burned
+# by, arriving in a new table.
+SUFFIX_CASES = [
+    (
+        r'''b"'a b'"''',
+        "cat 'a b'",
+        W("cat", "a b"),
+        "Ctx::Unquoted wraps a suffix containing a space",
+    ),
+    (
+        r'''b"' Doc.txt'"''',
+        "cat My' Doc.txt'",
+        W("cat", "My Doc.txt"),
+        "adjacent quoting concatenates, so a quoted fragment is still one word",
+    ),
+    (
+        r'''b"a'\\''b"''',
+        "cat 'a'\\''b'",
+        W("cat", "a'b"),
+        "Ctx::Single spells an apostrophe by closing, escaping and reopening",
+    ),
+    (
+        r'b"a\\\"b\\$c\\`d\\\\e"',
+        'cat "a\\"b\\$c\\`d\\\\e"',
+        W("cat", 'a"b$c`d\\e'),
+        'Ctx::Double escapes exactly the four bytes still live inside "..."',
+    ),
+    (
+        r'b"a\nb"',
+        'cat "a\nb"',
+        W("cat", "a\nb"),
+        "a newline is NOT escaped inside double quotes -- backslash-newline is "
+        "a line continuation there and would delete the byte",
+    ),
+]
+
+#: Where `SUFFIX_CASES`'s `rust_src` column must be found verbatim.
+SHELLQUOTE = (pathlib.Path(__file__).resolve().parent.parent
+              / "kernel" / "src" / "shellquote.rs")
+
+
+def assert_suffix_src_is_verbatim(src: str | None = None, cases=None):
+    """Every `SUFFIX_CASES` rust_src must occur in shellquote.rs, byte for byte.
+
+    Same argument as `assert_rust_src_is_verbatim`, and injectable for the same
+    reason: the self-test must drive it from a fixture it carries itself, never
+    from the real kernel source.
+
+    This is the leg that stops the table drifting into fiction.  Without it,
+    `quote_suffix` could be changed to emit anything at all and this file would
+    still report that bash agrees -- with a spelling nothing in the kernel has
+    asserted since.
+    """
+    if src is None:
+        src = SHELLQUOTE.read_text(encoding="utf-8", errors="surrogateescape")
+    if cases is None:
+        cases = SUFFIX_CASES
+    missing = [c[0] for c in cases if c[0] not in src]
+    if missing:
+        raise SystemExit(
+            f"{len(missing)} of {len(cases)} SUFFIX_CASES literal(s) do not "
+            f"occur in\n  {SHELLQUOTE}\nEither section 8 was edited and this "
+            f"file was not, or the transcription is wrong.\nUntil they agree, "
+            f"this file is not checking what it claims to check.\n\n  "
+            + "\n  ".join(missing))
+
+
+def check_suffix():
+    """Ask real bash what a completed line means."""
+    fails = 0
+    print("\n--- shellquote::quote_suffix, against real bash ---")
+    for rust_src, line, want, why in SUFFIX_CASES:
+        got = bashprobe.words(line)
+        ok = got == want
+        if not ok:
+            fails += 1
+        print(f"{'ok  ' if ok else 'FAIL'} rust {rust_src} -> {line!r}")
+        print(f"       bash={got!r}")
+        if not ok:
+            print(f"       want={want!r}   <-- the rule is wrong ({why})")
+    return fails
+
+
 def check_rungs_against_transcription(src, cases, quiet=False):
     """Leg (1): what the rung asserts vs. what `CASES` says it asserts.
 
@@ -262,6 +379,7 @@ def check_awk():
 #: that took one side of a conflict trips them and ordinary editing does not.
 MIN_CASES = 14
 MIN_AWK_CASES = 2
+MIN_SUFFIX_CASES = 4
 
 
 def _assert_tables_are_not_gutted() -> None:
@@ -285,6 +403,13 @@ def _assert_tables_are_not_gutted() -> None:
             f"only {len(AWK_CASES)} case(s) in AWK_CASES, below the floor of "
             f"{MIN_AWK_CASES}. Rung 117 would be reported as agreeing with awk "
             f"without awk having been asked anything.")
+    if len(SUFFIX_CASES) < MIN_SUFFIX_CASES:
+        raise SystemExit(
+            f"only {len(SUFFIX_CASES)} case(s) in SUFFIX_CASES, below the floor "
+            f"of {MIN_SUFFIX_CASES}. quote_suffix has three context rules and "
+            f"one deliberate non-escape; a table below this floor cannot be "
+            f"covering all four, so 'bash agrees' would be a claim about "
+            f"whichever rule happened to survive.")
 
 
 def _fixture(src, cases):
@@ -304,13 +429,13 @@ def _fixture(src, cases):
 
 
 def _selftest() -> int:
-    """Drive the two guards against fixtures, never against the real tree.
+    """Drive the guards against fixtures, never against the real tree.
 
-    `kshell.rs` is lane A's file. A self-test that read it would be a lane-B
-    test that lane A can turn red by editing its own code, which is precisely
-    what lane A's rule says a self-test must never be able to do. So the
-    verbatim check is driven through its injected `src`, and the floors through
-    a temporarily shortened table.
+    `kshell.rs` and `shellquote.rs` are lane A's files. A self-test that read
+    them would be a lane-B test that lane A can turn red by editing its own
+    code, which is precisely what lane A's rule says a self-test must never be
+    able to do. So both verbatim checks are driven through their injected
+    `src`, and the floors through a temporarily shortened table.
     """
     checks = bad = 0
 
@@ -361,9 +486,37 @@ def _selftest() -> int:
     check(f"the {len(CASES)} real literals are all present in kshell.rs",
           assert_rust_src_is_verbatim() is None)
 
+    # --- the same two directions for the quote_suffix table ------------------
+    #
+    # Driven through the injected `src` for the same lane reason: `shellquote.rs`
+    # is lane A's file too, so reading it from a self-test would make this suite
+    # fail for a change that is none of its business.
+    sq_fixture = [(r'''b"a'\\''b"''', "cat 'a'\\''b'", [b"cat", b"a'b"], "why")]
+    try:
+        assert_suffix_src_is_verbatim(
+            "assert_eq!(quote_suffix(b\"a'b\", Ctx::Single), "
+            "b\"a'\\\\''b\".to_vec());\n", sq_fixture)
+    except SystemExit as exc:
+        check(f"a quote_suffix literal that IS present passes ({exc})", False)
+    else:
+        check("a quote_suffix literal that is present passes", True)
+
+    try:
+        assert_suffix_src_is_verbatim("nothing like it\n", sq_fixture)
+    except SystemExit as exc:
+        check("a missing quote_suffix literal is reported",
+              "do not occur in" in str(exc) and "section 8" in str(exc))
+    else:
+        check("a missing quote_suffix literal is reported", False)
+
+    check(f"the {len(SUFFIX_CASES)} real quote_suffix literals are all present "
+          f"in shellquote.rs", assert_suffix_src_is_verbatim() is None)
+
     # The floors, seen to fire in both directions.
     real_cases, real_awk = CASES, AWK_CASES
-    for name, short in (("CASES", "CASES"), ("AWK_CASES", "AWK_CASES")):
+    real_suffix = SUFFIX_CASES
+    for name, short in (("CASES", "CASES"), ("AWK_CASES", "AWK_CASES"),
+                        ("SUFFIX_CASES", "SUFFIX_CASES")):
         try:
             globals()[short] = globals()[short][:1]
             try:
@@ -375,6 +528,7 @@ def _selftest() -> int:
                 check(f"a gutted {name} refuses to return a verdict", False)
         finally:
             globals()["CASES"], globals()["AWK_CASES"] = real_cases, real_awk
+            globals()["SUFFIX_CASES"] = real_suffix
     check("...and the real tables pass the same guard",
           _assert_tables_are_not_gutted() is None)
 
@@ -433,6 +587,7 @@ def main():
     # actually contains, or every answer below is about a different string.
     _assert_tables_are_not_gutted()
     assert_rust_src_is_verbatim()
+    assert_suffix_src_is_verbatim()
     src = KSHELL.read_text(encoding="utf-8", errors="surrogateescape")
     rung_fails = check_rungs_against_transcription(src, CASES, quiet=True)
     # All three checks above run before the transport check and none needs WSL:
@@ -451,6 +606,8 @@ def main():
         return 1
     bashprobe.assert_transport_is_faithful()
     print(f"all {len(CASES)} rust_src literals found verbatim in kshell.rs")
+    print(f"all {len(SUFFIX_CASES)} quote_suffix literals found verbatim in "
+          f"shellquote.rs")
     print(f"all {len(CASES)} rung expectations agree with the transcription "
           f"below")
     print("transport verified faithful\n")
@@ -464,6 +621,7 @@ def main():
         print(f"       bash={got!r}")
         if not ok:
             print(f"       rung={want!r}   <-- the rung is wrong")
+    fails += check_suffix()
     fails += check_awk()
     print(f"\n{fails} rung assertion(s) disagree with the reference tool")
     return 1 if fails else 0

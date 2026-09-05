@@ -16201,6 +16201,80 @@ apparent mismatches. The remaining two were a `str`-vs-`bytes` comparison that
 reported *every* case as a mismatch — which is the harmless direction, but only
 by luck.
 
+**[A] 2026-09-05 — ✅ stage (d) is DONE. Completion escapes what it inserts,
+and the escaping is pinned by real bash.** ((a), (b′) and (c) remain open; this
+closes only (d).)
+
+**In short:** pressing Tab on a file whose name contains a space, an
+apostrophe or a `$` used to produce a command line naming a *different* file —
+or two files that do not exist. Completion now inserts a spelling that parses
+back to the name it matched, in whichever quoting region the cursor happens to
+be in.
+
+*What was added.* `shellquote::quote_suffix(suffix, ctx)`, plus
+`quote_suffix_str` for the line editor's `String` buffer. The `_str` form is a
+one-line wrapper over the byte form and **not** a second implementation: two
+spellings of one escaping rule is the disease this module exists to end, and a
+`char`-oriented copy would drift from the byte-oriented original the first time
+one of them was corrected. It returns `Option` rather than asserting — the
+conversion cannot fail for a `&str` input, since every byte the escaping adds
+is ASCII, but a kernel that panics on a Tab keypress is worse than one that
+declines to complete.
+
+*Why a suffix function rather than the existing `quote_word`.* Completion never
+gets to write the whole word. The user has already typed part of it, possibly
+inside a quote they opened, and the only edit completion may make is an
+insertion at the cursor — so the bytes emitted have to be correct *inside the
+region already open*, which is a different problem in each context and in none
+of them is the answer "wrap it in single quotes". The rules are the three from
+the 2026-09-04 note above, unchanged: `Ctx::Single` passes bytes through and
+spells `'` as `'\''`; `Ctx::Double` backslash-escapes `"` `\` `$` `` ` ``;
+`Ctx::Unquoted` wraps in `'…'` if any byte is special, which stays one word
+because adjacent quoting concatenates (`My` + `' Doc.txt'`).
+
+*The one rule that looks like an omission and is not.* `\n` is in
+`DQ_ESCAPABLE` but is deliberately **not** escaped in the double-quoted case:
+inside `"…"`, `\<newline>` is a line continuation, so escaping a newline would
+*delete* it. A raw newline is already literal there. The case is in the table
+below with that reason written next to it, because it is exactly the kind of
+"missing" entry a later reader would helpfully add.
+
+*Where it is wired.* `kshell::tab_complete`, both insertion sites — the unique
+match and the common prefix. The context is computed once, from
+`trailing_context` at the cursor, and an unterminated quote is the normal case
+there rather than an error: the user is mid-word by definition. The unique
+match still closes the quote before the separating space; the common prefix
+deliberately does not, because the word is not finished.
+
+*What pins it, in four layers.* Each catches something the others cannot:
+
+| layer | asserts | catches |
+|---|---|---|
+| `shellquote::self_test` §8 | the literal output spelling for each rule | a rule quietly changing |
+| `shellquote::self_test` §9 | round trip over 10 names × every split point × 3 contexts | a rule that is right on its own example and wrong one byte over |
+| `kshell::self_test` rung 119 | the real `tab_complete`, against real VFS entries, unquoted with the dispatcher's own `remove_quotes` | the two being individually right and *not wired together* |
+| `scripts/check-kshell-rungs-vs-bash.py` `SUFFIX_CASES` | what **real bash** parses out of the composed line | all of the above agreeing with each other and with nothing outside |
+
+The bash leg is the one worth explaining. §8 and §9 both grade `quote_suffix`
+with *our* scanner, so a wrong-but-self-consistent escaping satisfies both.
+`SUFFIX_CASES` transcribes §8's output literals — read out of `shellquote.rs`
+verbatim, so the table cannot drift into fiction — composes
+`<opener><typed><inserted><closer>`, and asks bash what that means. All five
+agree. Note it is the *output* spelling that is pinned to the Rust, not the
+input: pinning the input would leave the kernel free to assert any output at
+all while the checker measured a string it had invented itself.
+
+*Rung 116 still passes unchanged*, which is the useful control: it covers where
+the word *begins*, and none of its five expectations move when what is
+*inserted* becomes escaped. Three independent defects in one function, and the
+fix for each leaves the other two's evidence intact.
+
+*Still not fixed here:* completion looks the word up **unexpanded** — see
+`A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD` immediately below. §9's
+round trip deliberately does not model expansion (`strip_quotes` does not
+expand and a real shell does), and says so in place, so that gap is not
+silently absorbed into a property that would then read as covering it.
+
 ### A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD, so `$HOME/<TAB>` searches for a directory literally named `$HOME` — 2026-09-04 (lane A) — OPEN
 
 **In short:** in the kernel shell, press Tab after typing a path that contains

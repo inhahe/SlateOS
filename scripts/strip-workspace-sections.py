@@ -66,7 +66,24 @@ def should_kill(header: str) -> bool:
 
 
 def process(path: Path) -> bool:
-    """Returns True if the file was modified."""
+    """Returns True if the file was modified.
+
+    The read translates any line ending to `\\n` (Python's default) and the
+    write emits `\\n` verbatim -- `newline='\\n'`, *not* `Path.write_text`,
+    which opens in text mode and on Windows turns every `\\n` back into
+    `\\r\\n`. That asymmetry is the bug: read-translating and write-translating
+    together mean a file this touches comes out with every line ending changed,
+    burying the real edit under a whole-file diff. `scripts/quote-sweep.py`
+    learned it the expensive way -- "rewrote every line of all 50 files it
+    touched" -- and the lesson did not reach here.
+
+    Translating on *read* rather than preserving is deliberate. The body below
+    emits its own `\\n` (the blank-line collapse, the trailing newline), so
+    preserving a CRLF input would produce a file mixing both endings, which is
+    strictly worse than either. Normalising instead means a CRLF manifest comes
+    out LF -- the tree's policy, the index's existing content, and therefore a
+    zero-line diff.
+    """
     original = path.read_text(encoding='utf-8')
     stripped = strip_sections(original, should_kill)
     # Collapse runs of >2 blank lines to a single blank line.
@@ -77,7 +94,8 @@ def process(path: Path) -> bool:
     if not stripped.endswith('\n'):
         stripped += '\n'
     if stripped != original:
-        path.write_text(stripped, encoding='utf-8')
+        with open(path, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(stripped)
         return True
     return False
 

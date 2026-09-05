@@ -599,7 +599,14 @@ def main():
     if mode == "pin":
         body = "\n".join(sorted(hard_paths))
         BASELINE.parent.mkdir(parents=True, exist_ok=True)
-        BASELINE.write_text(BASELINE_HEADER + body + "\n", encoding="utf-8")
+        # `newline="\n"` rather than `write_text`, which opens in text mode and
+        # on Windows turns every `\n` into `\r\n`. The baseline is a tracked
+        # `.txt` and `.gitattributes` declares `*.txt text eol=lf`, so a `--pin`
+        # run from a Windows worktree would write the exact corruption
+        # `scripts/check-eol.py` refuses builds over, into a file that gate
+        # reads. See `known-issues.md` -> `TD-B-SIX-TRACKED-FILES-HELD-CRLF-...`.
+        with open(BASELINE, "w", encoding="utf-8", newline="\n") as f:
+            f.write(BASELINE_HEADER + body + "\n")
         print(f"pinned {len(hard_paths)} island(s) to {BASELINE.as_posix()}")
         return 0
 

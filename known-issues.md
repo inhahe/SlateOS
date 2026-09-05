@@ -118152,6 +118152,47 @@ one session went to a debugger before concluding the machine was merely slow.
 **If never fixed:** it worsens monotonically. The `deps` directory grows with
 the crate count, enumeration is linear in it, and the disk does not get faster.
 
+### Addendum 2026-09-05 (lane B) — measured, and a workaround that needs no filesystem surgery
+
+Both halves of the fix above were attempted. **Option 1 does not work as
+written**: renaming `target` aside so a junction can take its place fails with
+*Access is denied*, and it is not a permissions problem — `icacls` shows
+`Authenticated Users:(M)`, which includes delete. NTFS refuses to rename a
+directory while any file beneath it is open, and something in that 69,161-file
+tree is held open by a process this account cannot enumerate (`handle.exe`
+needs administrator). Both `move` and `ren` fail identically; unrelated
+directories in the same parent rename instantly. So the junction is blocked
+until whatever holds it is identified, which needs an elevated `handle.exe`.
+
+**What does work, immediately and with no filesystem changes at all**, is to
+leave the old directory where it is and send new output elsewhere:
+
+```bash
+CARGO_TARGET_DIR="E:/slateos-build/lane-b" cargo build -p sshd --target x86_64-pc-windows-gnu
+```
+
+It is per-command, so it cannot disturb another lane, and there is nothing to
+undo. It must not be committed to `.cargo/config.toml`: that file is tracked
+and shared, so a `build.target-dir` there would follow the branch into `main`
+and point all three lanes at one directory.
+
+**The measurement, same crate, same cold cache, half an hour apart:**
+
+| Target directory | Result |
+|---|---|
+| `D:` (HDD, 69,161-file `deps`) | **killed at 11 min**, still inside `rustc sshd`; 0.7 s of CPU consumed in the last 6 of those minutes |
+| `E:` (NVMe, empty `deps`) | **2 min 09 s**, complete, including `posix`, `userdb`, `authlib` and `sshd` from scratch |
+
+The second run built strictly *more* than the first and finished more than five
+times faster, which settles the question of where the time was going. Later
+runs in the same session: `cargo test -p sshd` 136 s and
+`cargo clippy -p sshd --all-targets` 111 s, both from a warm cache on `E:`.
+
+Reclaiming the 63.9 GB still sitting on `D:` is now independent of all this —
+nothing builds into it any more — but it is not free: `rd /s /q` ran 45 minutes
+against it and freed nothing. `robocopy /MIR` from an empty directory is the
+usual faster route on Windows and is worth trying before another `rd`.
+
 ## TD-B-SSHD-TELLS-EVERY-CLIENT-ITS-ENVIRONMENT-VARIABLES-WERE-ACCEPTED-AND-THROWS-THEM-AWAY (lane B)
 
 **Status:** OPEN — 2026-09-05

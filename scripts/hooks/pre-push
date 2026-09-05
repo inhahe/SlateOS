@@ -1,5 +1,5 @@
 #!/bin/sh
-# Twelve gates at the push boundary. Any one of them aborts the push.
+# Thirteen gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -14,20 +14,26 @@
 #  10. Refuse to publish a commit authored by a test fixture's identity.
 #  11. Refuse to publish a doc comment whose `[`link`]` names nothing.
 #  12. Refuse to publish coreutils whose unix half was never compiled.
+#  13. Refuse to publish a `design-decisions.md` section outside its lane's
+#      numbering band, or missing the `**Lane:**` field that declares it.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
-# were implemented. A list in a comment beside the code it lists is a second
-# copy that rots. It is short enough to be worth keeping, so it is *checked* --
-# scripts/test-pre-push-gates.py -- rather than trusted.)
+# were implemented, and it was wrong again the moment gate 13 was written --
+# the section and the bypass landed in `0ab4b55bc` and this list did not.
+# A list in a comment beside the code it lists is a second copy that rots. It
+# is short enough to be worth keeping, so it is *checked* --
+# scripts/test-pre-push-gates.py, which is what caught both -- rather than
+# trusted.)
 #
 # Each has a full comment above it, further down; each has its own bypass
 # variable, so silencing one never silences another; and each is scoped to the
 # tree that can introduce it, so a lane that cannot cause a given defect never
 # pays for the check or is blocked by it.
 #
-# Gates 1-11 are static checkers and the whole set costs seconds. Gate 12 is a
-# compiler, and costs minutes when it runs at all; its scope is correspondingly
-# narrow (one crate's own tree) and its comment argues the price.
+# Gates 1-11 and 13 are static checkers and the whole set costs seconds. Gate
+# 12 is a compiler, and costs minutes when it runs at all; its scope is
+# correspondingly narrow (one crate's own tree) and its comment argues the
+# price.
 #
 # They are unrelated to each other on purpose. A single `ALLOW_EVERYTHING`
 # would be one variable away from turning the push boundary off entirely.
@@ -2234,7 +2240,7 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# GATE 13 — design-decisions.md's per-lane numbering bands.
+# Gate 13 — design-decisions.md's per-lane numbering bands.
 #
 # WHY IT IS HERE AND NOT ONLY IN THE BOOT TEST. It was only in the boot test,
 # and that is precisely how it failed. `scripts/boot-test.sh` runs this checker,

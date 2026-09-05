@@ -42,11 +42,22 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO_ROOT, "scripts", "hooks", "pre-push")
 
-# Spelled-out counts, because that is how the header writes it. Only as many as
-# a hook could plausibly have.
+# Spelled-out counts, because that is how the header writes it.
+#
+# It runs well past the current gate count on purpose. It used to stop at
+# `twelve`, which was exactly how many gates there were -- so adding gate 13
+# and correctly updating the header to "Thirteen" produced the failure
+# `the count 'thirteen' is a number word`, which reads as a malformed header
+# and is in fact a complete and correct one. A ceiling pinned to today's count
+# is a second copy of that count, and it rots the same way the header does;
+# the difference is that this copy rots into a *false* finding, which is worse
+# than a missed one, because the author's first move is to distrust the change
+# they just made rather than the table.
 NUMBER_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
     "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
 }
 
 # `^#   4. ...` -- an entry in the header's numbered list.
@@ -246,6 +257,7 @@ HEAD_GATES = {
     "quote-names.py": "gate 8, file names in diagnostics",
     "check-requests-not-deleted.py": "gate 9, request deletion",
     "check-doc-links.py": "gate 11, dead doc links",
+    "check-design-decisions-bands.py": "gate 13, per-lane numbering bands",
 }
 
 

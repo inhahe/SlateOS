@@ -118699,8 +118699,19 @@ below.
 
 ## TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE (lane B)
 
-**Status:** OPEN. Filed 2026-09-05 alongside the fix above, which is the first
-bug this arrangement produced and the one that found it.
+**Status:** PARTLY FIXED, 2026-09-05. Items 1–3 below are done for the
+*encoders and the key-exchange arithmetic*: `userspace/sshwire` exists, both
+binaries depend on it, and neither keeps a private copy of `ssh_string`,
+`ssh_u32`, `encode_mpint`, `strip_leading_zeros`, the RFC 4253 §8 exchange hash
+or §7.2 key derivation. **Still open:** the fallible *readers*
+(`read_ssh_string`, `read_mpint`, `read_u32`, `read_bool`), `build_packet`,
+`compute_mac` and AES-CTR are still written twice — they return each crate's own
+error type, so moving them needs a shared `WireError` with a `From` impl on each
+side first. **Item 4 — an interop test — is untouched, and is the item that
+matters most**; see the note at the end.
+
+Filed 2026-09-05 alongside the fix above, which is the first bug this
+arrangement produced and the one that found it.
 
 **In short:** the SSH client and the SSH server each contain their own private
 copy of the same protocol plumbing — how to frame a packet, how to encode a
@@ -118713,14 +118724,20 @@ result was a server no client could connect to.
 `userspace/ssh/src/main.rs` (4261 lines) and `userspace/sshd/src/main.rs`
 (8775 lines). Duplicated between them, at minimum:
 
-| Function | Purpose |
-|---|---|
-| `compute_exchange_hash` | RFC 4253 §8 — **this is the one that drifted** |
-| `derive_key` / `derive_keys` | RFC 4253 §7.2 key derivation |
-| `ssh_string`, `encode_mpint` | wire encoding |
-| `read_ssh_string`, `read_mpint`, `read_u32`, `read_bool` | wire decoding |
-| `build_packet`, `compute_mac` | RFC 4253 §6 framing and MAC |
-| `aes128_encrypt_block`, AES-CTR | the cipher |
+| Function | Purpose | Now |
+|---|---|---|
+| `compute_exchange_hash` | RFC 4253 §8 — **this is the one that drifted** | shared |
+| `derive_key` / `derive_keys` | RFC 4253 §7.2 key derivation | shared |
+| `ssh_string`, `encode_mpint` | wire encoding | shared |
+| `read_ssh_string`, `read_mpint`, `read_u32`, `read_bool` | wire decoding | **still twice** |
+| `build_packet`, `compute_mac` | RFC 4253 §6 framing and MAC | **still twice** |
+| `aes128_encrypt_block`, AES-CTR | the cipher | **still twice** |
+
+The split is not arbitrary: everything in the first group is total and returns a
+value, so it moved as-is. Everything in the second returns `Result<_, SshError>`
+or `Result<_, SshdError>`, and a shared crate cannot name either. That wants a
+`sshwire::WireError` with `From<WireError>` on each crate's error type — which
+is a fine change, just a different one from the extraction itself.
 
 `sha2`, `randrange` and `posix::ed25519` were already extracted into shared
 crates for exactly this reason, so the precedent and the mechanism both exist.
@@ -118752,8 +118769,24 @@ key? tampered handshake?) rather than a bug in our own encoder.
    makes the two ends agree about the parts they share and says nothing about
    the parts they do not — message ordering, state machines, who speaks first.
 
-Item 4 is worth doing **even before** items 1–3: it is the check that catches
-this whole class, extraction or no extraction.
+Item 4 was worth doing **even before** items 1–3: it is the check that catches
+this whole class, extraction or no extraction. Items 1–3 got done first anyway,
+and the extraction immediately demonstrated its own limit — reading the two ends'
+version-line parsing side by side afterwards turned up
+`TD-B-SSH-RE-ENCODED-THE-SERVER-VERSION-BEFORE-HASHING-IT`, a second
+never-agree-on-`H` bug that a shared hash function does nothing about, because
+what each end *passes* to the shared function is still each end's own business.
+Two such bugs have now been found by one person reading two files at once, and
+none by a test. Item 4 is the outstanding work here.
+
+**Known obstacle to item 4:** both crates' `syscall0/1/3/4` are host stubs that
+return `-ENOSYS` on the Windows host build *and* on the WSL Linux build, so
+neither `ssh` nor `sshd` can open a socket in a `cargo test`. An interop test
+therefore either needs the two ends driven over an in-process transport (the
+handshake logic would have to be separable from `tcp_send_all`/`tcp_recv`, which
+today it is not), or has to run under QEMU as a boot-test stage. The first is
+more work and more useful; the second proves more. Neither is blocked on another
+lane.
 
 ### TD-B-SSH-RE-ENCODED-THE-SERVER-VERSION-BEFORE-HASHING-IT
 

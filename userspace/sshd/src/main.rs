@@ -1580,14 +1580,17 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let block_size = 64;
 
-    let key_used;
+    // `key_hash` is declared out here, and only *assigned* in the long-key
+    // branch, because `key_used` borrows it: the hash has to outlive the `if`
+    // that produced it. Declaring it inside the branch would drop it at the
+    // brace and leave the borrow dangling.
     let key_hash;
-    if key.len() > block_size {
+    let key_used = if key.len() > block_size {
         key_hash = sha256(key);
-        key_used = &key_hash[..];
+        &key_hash[..]
     } else {
-        key_used = key;
-    }
+        key
+    };
 
     let mut k_padded = vec![0u8; block_size];
     k_padded[..key_used.len()].copy_from_slice(key_used);
@@ -3029,24 +3032,35 @@ fn shell_command(user: &PasswdEntry, term: &str, slave_fd: i32) -> process::Comm
         cmd.gid(user.gid);
         cmd.uid(user.uid);
 
-        // SAFETY: the closure runs in the forked child, between `fork` and
-        // `execve`, where only async-signal-safe work is permitted. It calls
-        // `login_tty` and nothing else, and `login_tty` is `setsid` +
-        // `ioctl(TIOCSCTTY)` + three `dup2`s + one `close` — all bare syscalls,
-        // no allocation, no lock, no libc state. `slave_fd` is copied into the
-        // closure by value and is open in the child because `openpty` does not
-        // set `FD_CLOEXEC` on it. Registering a closure also takes `std` off
-        // its `posix_spawn` fast path onto `fork`/`exec`, which is required:
+        // The closure is built *outside* the `unsafe` block that registers it,
+        // which is not a stylistic choice: a closure body written inside an
+        // `unsafe` block inherits that block's unsafe context, so the
+        // `login_tty` call below would compile with no `unsafe` of its own —
+        // and adding one anyway is an `unused_unsafe` warning. Either way the
+        // single most dangerous call in this file ends up with no unsafe block
+        // naming it. Splitting the two gives each `unsafe` exactly one
+        // operation to justify, which is what the policy in CLAUDE.md asks for.
+        let enter_session = move || {
+            // SAFETY: this runs in the forked child, between `fork` and
+            // `execve`, where only async-signal-safe work is permitted.
+            // `login_tty` is `setsid` + `ioctl(TIOCSCTTY)` + three `dup2`s +
+            // one `close` — all bare syscalls, no allocation, no lock, no libc
+            // state. `slave_fd` is copied into the closure by value and is
+            // open in the child because `openpty` does not set `FD_CLOEXEC`
+            // on it.
+            if unsafe { ptylibc::login_tty(slave_fd) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        };
+
+        // SAFETY: `pre_exec`'s contract is that the closure is async-signal-
+        // safe, which the block above establishes for this one. Registering a
+        // closure at all also takes `std` off its `posix_spawn` fast path onto
+        // `fork`/`exec`, which is required rather than incidental:
         // `posix_spawn` has no hook that could acquire a controlling terminal.
         unsafe {
-            cmd.pre_exec(move || {
-                // SAFETY: as above — `slave_fd` is a live descriptor in this
-                // child, inherited across the fork.
-                if unsafe { ptylibc::login_tty(slave_fd) } != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
+            cmd.pre_exec(enter_session);
         }
     }
     #[cfg(not(unix))]

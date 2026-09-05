@@ -1026,12 +1026,23 @@ fn aes128_key_expand(key: &[u8; 16]) -> [[u8; 16]; 11] {
         }
 
         let mut next = [0u8; 16];
-        for (prev_col, next_col) in prev.chunks_exact(4).zip(next.chunks_exact_mut(4)) {
+        // `as_chunks::<4>` rather than `chunks_exact(4)` because it hands back
+        // `[u8; 4]` rather than a slice that happens to be four long. That is
+        // not a style preference: the column feeds the next iteration as a
+        // `word`, and with a slice that assignment needed a fallible
+        // `<[u8; 4]>::try_from(...)` whose failure arm had to invent a value.
+        // The arm was unreachable, but "unreachable" is a claim about the
+        // chunk size that the reader has to check; with an array the type
+        // system makes it, and a round key can no longer be silently zeroed by
+        // a conversion that was never supposed to fail.
+        let (prev_cols, _) = prev.as_chunks::<4>();
+        let (next_cols, _) = next.as_chunks_mut::<4>();
+        for (prev_col, next_col) in prev_cols.iter().zip(next_cols) {
             for ((dst, &p), &w) in next_col.iter_mut().zip(prev_col).zip(word.iter()) {
                 *dst = p ^ w;
             }
             // The column just written feeds the next one.
-            word = <[u8; 4]>::try_from(&*next_col).unwrap_or([0; 4]);
+            word = *next_col;
         }
 
         *slot = next;
@@ -1112,12 +1123,19 @@ fn shift_rows(state: &mut [u8; 16]) {
 }
 
 fn mix_columns(state: &mut [u8; 16]) {
-    // `chunks_exact_mut(4)` hands out the four columns directly, so the
+    // `as_chunks_mut::<4>` hands out the four columns directly, so the
     // `col * 4` base and its four `off + k` offsets -- five chances to write
     // one column while reading another -- are gone. A 16-byte state is four
     // whole columns, so the remainder is always empty.
-    for col in state.chunks_exact_mut(4) {
-        let [a0, a1, a2, a3] = *col else { continue };
+    //
+    // The column arrives as `[u8; 4]` rather than a slice, which is what makes
+    // the destructuring below irrefutable: `chunks_exact_mut` needed a
+    // `let ... else { continue }` whose `continue` arm silently left a column
+    // un-mixed if it were ever reached. It could not be, but only the reader
+    // knew that; here the compiler does.
+    let (columns, _) = state.as_chunks_mut::<4>();
+    for col in columns {
+        let [a0, a1, a2, a3] = *col;
         col.copy_from_slice(&[
             gf_mul2(a0) ^ gf_mul3(a1) ^ a2 ^ a3,
             a0 ^ gf_mul2(a1) ^ gf_mul3(a2) ^ a3,
@@ -2120,19 +2138,19 @@ pub fn dh_group14_prime() -> BigUint {
 /// `BigUint`.
 #[must_use]
 pub fn dh_group14_prime_bytes() -> Vec<u8> {
-    // `chunks_exact` *is* the "pairs of digits" rule, so there is no stride
-    // arithmetic and no `i + 1 < len` guard to get wrong. The string is a
-    // literal in this file with an even length, so no pair can fail to parse;
-    // a byte that somehow did would read as zero rather than panic, and the
-    // length assertion below would still hold, so the test that checks the
-    // first and last bytes is what actually guards the transcription.
-    DH_GROUP14_P_HEX
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let hi = char::from(pair.first().copied().unwrap_or(b'0'));
-            let lo = char::from(pair.get(1).copied().unwrap_or(b'0'));
-            let nibble = |c: char| u8::try_from(c.to_digit(16).unwrap_or(0)).unwrap_or(0);
+    // `as_chunks::<2>` *is* the "pairs of digits" rule, so there is no stride
+    // arithmetic and no `i + 1 < len` guard to get wrong -- and because it
+    // yields `[u8; 2]` rather than a two-long slice, the pair destructures
+    // directly and there is no `first()`/`get(1)` pair with an invented `b'0'`
+    // default standing in for a case the chunk size already rules out. A digit
+    // that somehow failed to parse would still read as zero rather than panic;
+    // the length assertion below would hold, so the test that checks the first
+    // and last bytes is what actually guards the transcription.
+    let (pairs, _) = DH_GROUP14_P_HEX.as_bytes().as_chunks::<2>();
+    pairs
+        .iter()
+        .map(|&[hi, lo]| {
+            let nibble = |b: u8| u8::try_from(char::from(b).to_digit(16).unwrap_or(0)).unwrap_or(0);
             (nibble(hi) << 4) | nibble(lo)
         })
         .collect()

@@ -1177,7 +1177,8 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory() as td:
         check(not is_calibrated_corpus(td), "an empty dir is not the corpus")
         for i, marker in enumerate(TREE_MARKERS):
-            open(os.path.join(td, marker), "w", encoding="utf-8").close()
+            open(os.path.join(td, marker), "w", encoding="utf-8",
+                 newline="").close()
             want = i == len(TREE_MARKERS) - 1
             check(is_calibrated_corpus(td) == want,
                   f"{i + 1} of {len(TREE_MARKERS)} marker(s) -> {want}")
@@ -1218,7 +1219,7 @@ def selftest() -> int:
         def write(rel: str, text: str) -> None:
             p = os.path.join(td, rel.replace("/", os.sep))
             os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="utf-8") as fh:
+            with open(p, "w", encoding="utf-8", newline="") as fh:
                 fh.write(text)
 
         # Six doc lines, three link targets, two of them resolvable. The URL is

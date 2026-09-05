@@ -10346,6 +10346,81 @@ resolved.** Two follow-ons to the shadow work above, both boot-green:
   compiler-instrumented KASAN kernel is the fallback if they don't localize it.
   Flagged as a design fork for the operator — see `open-questions.md` (Q34).
 
+**SIGHTING 2026-09-04 (lane A, commit be4600d6a) — the code-fetch variant landed
+on a MAPPED page, so it raised `#UD` and took a handler with none of the
+hardening. Handler gap FIXED this session; corruption still open.**
+
+Caught by an ordinary boot test (not a soak): `PANIC` at 115s, recorded in
+`bench/boot-history.jsonl`. Serial preserved at
+`build/hang-catches/knulljump-20260904-be4600d6a.serial.txt`.
+
+```
+[mmap] Unmapped 1 frames at 0x600003c000..0x6000040000
+[thread] Process 218 has no threads left — now zombie
+[sched] Task 180 exiting
+[mmap] Committed mapped 0x600008c000..0x6000090000 (1 frames)
+[mmap] Committed mapped 0x6000090000..0x6000094000 (1 frames)
+EXCEPTION: Invalid Opcode (#UD) at 0xffffffff82a8f5b0
+  CS=0x8 RFLAGS=0x10282 RSP=0xffffc100005630b8
+  Instruction bytes: ff ff 00 00 01 00 00 00 d8 5b 83 82 ff ff ff ff
+  Task: 181 ("fastpy-countin."), cpu 0
+  Backtrace (2 frames):
+    # 0: 0xffffffff80a5d6c2      <- handle_invalid_opcode+0x3a2
+    # 1: 0xffffffff80a4f252      <- isr_invalid_opcode+0x2c
+FATAL: Unrecoverable kernel #UD. Halting.
+```
+
+**Same bug, same boundary.** The trigger signature matches this entry exactly:
+the fault fires immediately after the previous test's task exited
+(`Process 218 … now zombie` / `Task 180 exiting`), at the
+zombie-cleanup→next-spawn boundary, in the *next* task — here task 181 running
+the freshly-`exec`'d fastpy `countin`, two demand-page commits into its new
+image. It is a Path-Z fastpy spawn, consistent with "not tcc-signal-specific …
+it strikes at *any* Path-Z spawn/teardown boundary".
+
+**What is new: the landing address was not null, and that is informative.**
+`scripts/symbolize.py` resolves `0xffffffff82a8f5b0` to
+`kernel::ktrace::CATEGORY_MASK [d]` — a live `AtomicU32` in `.data`, not a
+freed or zeroed cell. The dumped bytes confirm the symbolization independently:
+`CATEGORY_MASK` is declared `AtomicU32::new(0xFFFF)` (ktrace.rs:281) and the
+first four bytes read `ff ff 00 00`. So the hijacked pointer held a **plausible,
+correctly-formed kernel address that simply was not a function** — the following
+qword `d8 5b 83 82 ff ff ff ff` is itself another kernel pointer, i.e. RIP had
+branched into a *table of pointers*.
+
+That distinguishes this capture from the 2026-07-15 one (`RIP=0x0`). A null RIP
+is consistent with "the object was freed and zeroed"; a valid-looking `.data`
+address is not. Whatever scribbles the victim is writing **real pointer values**,
+which points at a type-confused or off-by-N read of a live structure — reading a
+code pointer from the wrong offset — rather than at reading cleared memory.
+
+**Why this capture is nearly useless for root-causing, and why that is now
+fixed.** Whether a wild jump reports `#PF` or `#UD` is decided by nothing more
+interesting than whether the garbage address happens to be mapped. `RIP=0x0` is
+unmapped → `#PF`, which is the handler that received three rounds of hardening
+(re-entrancy guard, early `cli()`, stack-scan-before-`panic_diagnostics`).
+`&CATEGORY_MASK` is mapped → `#UD`, and `handle_invalid_opcode` had **none** of
+it: no `cli()`, no `FATAL_FAULT_IN_PROGRESS`, no `dump_stack_scan` at all, and
+`sched::panic_diagnostics()` (a locked deref of the scheduler `BTreeMap` — this
+bug's own pinned victim) running *before* any scan. The prediction recorded
+above, that "the **next** B-KNULLJUMP occurrence should finally emit the
+stack-scan naming the null pointer's caller," did not hold: the occurrence came
+through the sibling handler, and all we got was a two-frame RBP walk of the
+fault handler's own frames.
+
+**Fix (this session, `kernel/src/idt.rs` `handle_invalid_opcode`):** mirrored the
+fatal-`#PF` branch into the kernel-`#UD` branch — `cpu::cli()` first, then
+`FATAL_FAULT_IN_PROGRESS.swap` with a `NESTED #UD` one-liner, then
+`dump_stack_scan(frame.rsp, 64)` *before* the instruction-byte dump,
+`panic_diagnostics()` and `print_current()`. Placed after the ring-3 early
+return, since a userspace `#UD` is routine (CFI traps, the deliberate
+compiler-trap self-test) and must not arm a fatal guard or disable interrupts.
+The next occurrence on either path should now name the caller.
+
+**Not a regression from this batch.** The tree under test contained no scheduler,
+mm, proc or exec change from lane A; the batch was boot-test instrumentation,
+script gates, and lane C application work. The bug predates it by seven weeks.
+
 ### B-PTHREAD-TEARDOWN-PF. Intermittent kernel `#PF` (read @ 0x97) in a `cloned-thread` task during glibc-pthread thread teardown — WATCH (non-fatal, rare) 2026-07-15
 
 **Symptom (1 occurrence in ~5 boots, 2026-07-15):** During the
@@ -16029,6 +16104,162 @@ Two consequences for the eventual (d):
 The 0xFF case (line 6027, which drops any candidate whose name is not UTF-8)
 is unchanged and still waits on (c) for the byte-clean word path — but it is
 now clearly the *second* reason completion is wrong, not the first.
+
+**[A] Correction 7 (2026-09-04) — (c) is named after the wrong function, and
+the name has been making it look ~10× bigger than it is. Read this before
+planning (c).**
+
+**In short:** the entry says stage (c) is "convert `execute_single` to bytes",
+and describes `execute_single` as a full bash-like parser — which it is, and
+which is why nobody has started. But converting *that function* would not fix
+anything, because it is not where the byte dies. Measured against the file
+today, the byte dies one call further down, at a function that is 20 lines
+long and already has a proven conversion mechanism sitting next to it.
+
+*Where the byte actually dies.* `execute_single` (6408) does no text work of
+its own — it is the ERR-trap wrapper around `execute_single_inner` (6438).
+The line reaches `dispatch` (7271), whose whole relevant body is:
+
+```rust
+let mut parts = line.splitn(2, ' ');
+let cmd = parts.next().unwrap_or("");
+let raw_args = parts.next().unwrap_or("").trim();
+let dequoted = if command_parses_own_quotes(cmd) { None }
+               else { Some(remove_quotes(raw_args)) };
+let args = dequoted.as_deref().unwrap_or(raw_args);
+```
+
+`remove_quotes` returns a `String`, and `args: &str` is then handed to **651**
+`cmd_*(args: &str)` functions. So if `execute_single`'s parameter became
+`&[u8]` and nothing else changed, `dispatch` would simply `from_utf8` at its
+top: the narrowing seam moves from site 6051 to line 7271, the diff is large,
+and **no user-visible behaviour changes at all.** That is the same failure
+shape this file documents everywhere else — work that runs, passes, and is
+about the wrong thing.
+
+*Why the real seam is much cheaper than the entry implies.* Three facts, each
+checked against the file rather than inferred:
+
+| fact | consequence |
+|---|---|
+| `resolve_path` is `<P: AsRef<Path>>` (699) and `fs/path.rs:287` has `impl AsRef<Path> for [u8]` | the 15 commands written `resolve_path(args)` accept `&[u8]` with **no edit** |
+| `shell_bytes_as_str` (7084) already exists, with 6 call sites | the per-arm refusal chokepoint `dispatch_with_input` uses is directly reusable for `dispatch` |
+| `command_parses_own_quotes` already exists as an opt-in list | commands migrate one at a time, exactly as `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV` describes |
+
+So the shape of (c) is: give `dispatch` a `&[u8]` line and `&[u8]` args; let
+the path-consuming arms take them unchanged; put `shell_bytes_as_str` on the
+arms that are genuine text interpreters (`sed`, `awk`, `tr`, `cut`, `fold`,
+`grep`, `column`, `xargs` — the same set already behind the chokepoint on the
+*input* side, which is not a coincidence). `execute_single` and its sibling
+statement executors keep taking `&str` for as long as they like: a shell's
+*source line* being text is what §261 chose, and only the *expanded word* has
+to carry bytes.
+
+*What this does not change.* The ordering constraint from Correction 5 still
+binds — the `$'…'` parser and completion's re-spelling must agree, and the
+round-trip assertion is still the test that pins it. And the quote-state
+desynchronisation bug Correction 6 found in `expand_vars_bytes` (`echo $'\x41'
+$HOME` stops expanding for the rest of the line) is still live, still
+independent of all of this, and is still the cheapest thing here to fix.
+
+*Why the misnaming happened, since it is the reusable lesson.* Correction 6
+traced the decode's dependency to "site 6051 feeds `execute_single`" and
+stopped at the first function it reached that looked expensive. It named the
+*caller* rather than following the value to where it is actually narrowed. A
+dependency argument has to be walked to the point of loss, not to the first
+alarming name on the path — otherwise the write-up inherits the cost of a
+function that was never on the critical path, and the task sits untouched for
+the reason the write-up invented.
+
+**[A] 2026-09-04 — (d)'s three escaping rules are now checked against real
+bash, 59/60, and the one disagreement is a *different* bug (see
+`A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD` below).**
+
+Before writing `quote_suffix`, its rules were put to real bash the way this
+project's gates do it — the round-trip property, over 20 filenames × the three
+contexts:
+
+> what bash parses out of `<opener><already-typed><quote_suffix(rest, ctx)><closer>`
+> is the original filename, byte for byte, and is **one** word.
+
+| `Ctx` | rule | result |
+|---|---|---|
+| `Single` | pass bytes through; `'` becomes `'\''` | 20/20 |
+| `Double` | backslash-escape exactly `"` `\` `$` `` ` `` (`DQ_ESCAPABLE` minus `\n`, which a completion cannot insert) | 19/20 |
+| `Unquoted` | wrap the whole suffix in `'…'` if any byte is special; adjacent quoting concatenates, so `My` + `' Doc.txt'` stays one word | 20/20 |
+
+Names covered include a space, an apostrophe, a double quote, a backslash, a
+`$`, a backtick, `* ; & | < > ( ) ~ # ! { } [ ] ,` and an embedded newline.
+
+*Two methodology notes, because the first draft of this oracle got both wrong
+and would have "passed" while grading nothing.* It ran `bash -c` with the
+script as an **argv element**, and the Windows argv round trip ate the
+backslashes — in a check whose subject is backslashes. That is precisely the
+failure `scripts/check-shellquote-vs-bash.py` documents having been burned by,
+and `scripts/bashprobe.py` exists to prevent; using it fixed five of the seven
+apparent mismatches. The remaining two were a `str`-vs-`bytes` comparison that
+reported *every* case as a mismatch — which is the harmless direction, but only
+by luck.
+
+### A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD, so `$HOME/<TAB>` searches for a directory literally named `$HOME` — 2026-09-04 (lane A) — OPEN
+
+**In short:** in the kernel shell, press Tab after typing a path that contains
+a variable — `cat $HOME/no<TAB>`, `ls $PWD/<TAB>` — and nothing is offered.
+Completion looks for a directory whose name is the six characters `$HOME`,
+which does not exist, so it silently returns no candidates. Typing the same
+line and pressing Enter works fine, because *running* a command expands the
+variable first. So completion and execution disagree about what the word is,
+and completion is the one that is wrong.
+
+**Where:** `kernel/src/kshell.rs`, `tab_complete`. The word is taken with
+
+```rust
+let partial_owned = remove_quotes(text_before.get(word_start..).unwrap_or(""));
+```
+
+— `remove_quotes` and nothing else. `execute` (kshell.rs:6101) runs
+`expand_vars(line)` and then `expand_braces(&expanded)` *before* dispatch, so
+the command receives a name this stage never computed.
+
+**The code says otherwise, which is the part worth fixing first.** The comment
+directly above that line reads:
+
+> `remove_quotes` is the same stage the dispatcher applies to a finished
+> command, so completion now searches for exactly the name the command would
+> receive.
+
+That is false in the direction that matters: the dispatcher applies
+`remove_quotes` to a line that has *already* been through `expand_vars` and
+`expand_braces`. A future reader who trusts the comment will conclude the
+lookup is already correct and look elsewhere.
+
+**How it was found:** not by reading, but as the single residual disagreement
+when the `quote_suffix` rules for TD-KSHELL (d) were put to real bash. The
+`Ctx::Double` case for a file named `$HOME.txt` round-tripped to `/root.txt`,
+because the `$` sat in the prefix the user had typed rather than in the suffix
+completion inserts. Chasing why the prefix was unescaped is what surfaced that
+completion never expands at all.
+
+**What the proper fix looks like.** Expand the word before looking it up, and
+complete against the *expansion* while inserting into the *source*. Those are
+two different strings and the mapping between them is the whole difficulty:
+having matched `/root/notes.txt` against the typed `$HOME/no`, what gets
+inserted must be `tes.txt` — a suffix of the expansion appended to unexpanded
+source text. That works whenever the variable lies wholly within the already
+typed prefix, which is the only case worth supporting; a candidate that would
+require *editing* the user's `$HOME` is one completion should decline.
+
+**Related but distinct.** `A-KSHELL-TAB-COMPLETION-DOES-NOT-KNOW-WHAT-A-WORD-IS`
+(fixed 2026-09-03) was about where the word *begins*; TD-KSHELL (d) is about
+what completion *inserts*. This one is about what it *looks up*. Three
+independent defects in one function, each invisible to the other two.
+
+**Reproduce:** in the kernel shell, `ls $HOME/<TAB>` — no candidates. `HOME` is
+set to `/` at startup (kshell.rs:3936), so the right answer is every entry in
+the root directory, which is exactly what the otherwise-identical `ls /<TAB>`
+does offer. Any variable reproduces it; a version that does not lean on the
+default is a bare `FOO=/` (which persists — kshell.rs:6523) followed by
+`ls $FOO/<TAB>`.
 
 ### B-KSHELL-APPEND-TRUNCATES-BINARY-FILES. `cmd >> file` silently discarded the entire existing contents of any file that was not valid UTF-8, and reported success — 2026-08-24 — ✅ FIXED 2026-08-24 by lane A (`kernel/src/kshell.rs`, `redirect_write`)
 
@@ -115024,6 +115255,80 @@ from Linux, which is a real portability defect even when no tracked file is
 touched. `newline=""` costs nothing anywhere, so there is no scope worth arguing
 about.
 
+### All three steps are done — 2026-09-04
+
+`scripts/check-text-mode-writes.py` exists, 87 sites across 29 files carry an
+explicit `newline=`, and `strip-workspace-sections.py` is deleted. Corrections
+to the numbers recorded above, since they were the input to the plan and two of
+them were wrong:
+
+| | recorded above | actual |
+|---|---:|---:|
+| sites needing an edit | 79 | **87** |
+| `write_text` | 40 | 38 |
+| `open()` | 39 | 40 |
+| `os.fdopen()` | — | **8** |
+| `NamedTemporaryFile(mode=…)` | — | **1** |
+| mode is computed, so undecidable | 41 | **0** |
+
+The `actual` column is the gate's own count, taken by running its `analyse`
+over the *pre-edit* blobs (`git show 2785dd1c4:<path>`) rather than over the
+diff, and it sums: 40 + 38 + 8 + 1 = 87. That distinction is worth writing
+down, because counting the diff is what produced the two wrong numbers this
+paragraph replaces. `git show --stat` reports 89 changed lines, and two of
+those are continuation lines from calls that had to be split across two lines
+to fit the new keyword — so the line count overstates the site count by two,
+and the commit message of `37ebb7a49` says "89 sites" where it should say 87.
+A changed line is not a call site, and a gate that can count call sites should
+be asked rather than a diff.
+
+Two errors, in opposite directions. The census missed `os.fdopen` and
+`tempfile` entirely — nine sites, all real, all in the same class. And the "41
+calls pass no literal mode" figure was a miscount: those 41 are `open(p)` with
+**no mode argument at all**, whose default is `"r"`. They are reads, not
+undecidable writes. The tree has *zero* statically-unreadable modes, so the rule
+the plan said the gate would need most turns out to cost nothing today — it is
+in the gate anyway, because a rule that is free now and correct later is worth
+having, and because a gate that shrugs at what it cannot decide reports no
+findings, which reads like a clean tree.
+
+**Reads are deliberately not graded.** 107 text-mode reads pass no `newline=`
+and nearly all are correct: reading in text mode *normalises* CRLF to `\n`,
+which is what a reader wants. It is only a defect in a read-modify-write round
+trip, and that is caught at the write end, which is graded. Adding ~107 findings
+that are each individually fine to buy no new coverage is how a gate becomes one
+nobody believes.
+
+### The blanket scope earned itself on the first run — 2026-09-04
+
+The third justification for the blanket scope was speculative when it was
+written: "a CRLF *fixture* makes a self-test behave differently on Windows from
+Linux". The sweep found an instance of exactly that, in
+`scripts/test-ctest-fixtures.py:137`, in a test written *for this bug family*:
+
+```python
+# What git does: rewrite the same bytes, leaving a fresh mtime.
+ps1.write_text(ps1.read_text(encoding="utf-8"), encoding="utf-8")
+```
+
+The fixture is created LF (`write_bytes(b"# flags\n")`, :101). In text mode the
+read folds CRLF to `\n` and the write turns every `\n` back into CRLF, so on
+Windows that line did not rewrite the same bytes — it converted the fixture to
+CRLF. **The test passed anyway**, because `compute_sysroot` hashes text inputs
+with CRLF folded to LF (lane B's 2026-08-16 fix) and so could not see the
+difference.
+
+Which means one line of source was asserting two different claims: *"a
+CRLF-ified file is not drift"* on Windows, *"a byte-identical file is not drift"*
+on Linux. Only the second is the claim its docstring makes, and only the second
+is the bug it was written for. Fixed to `write_bytes(read_bytes())` — which is
+what the comment above it always said it did, and which no longer depends on the
+CRLF-folding rule staying as it is.
+
+This is the seventh sighting of the shape this tree keeps finding, in its
+subtlest form yet: not a gate that discovered nothing, but a gate that
+discovered *something else* and reported it in the same words.
+
 **If the residue is never addressed:** it is presently harmless — `rustc`
 accepts CRLF — so nothing is red. The cost is that the tree carries two
 line-ending conventions with no rule stating which is intended, and the
@@ -115441,9 +115746,9 @@ suite asserts it stays at one entry, that it never names a `scripts/` path, and
 that the directory still exists, so it cannot silently widen into a way of
 switching the gate off.
 
-## A-FIXTURE-CLEANUP-LEAVES-EMPTY-DIRECTORIES-IN-BUILD-AND-CANNOT-TELL-YOU (lane A, 2026-09-04)
+## A-FIXTURE-CLEANUP-LEAVES-EMPTY-DIRECTORIES-IN-BUILD-AND-CANNOT-TELL-YOU (lane A, 2026-09-04) — FIXED 2026-09-04
 
-**Status: OPEN.** Cosmetic today, but the mechanism is not, and the mechanism is
+**Status: FIXED the same day it was filed; see "Fixed, and the retry count settles the diagnosis" at the end. Filed as:** Cosmetic today, but the mechanism is not, and the mechanism is
 this file's recurring one.
 
 `build/` in the lane-A worktree currently holds **fourteen leaked directories**:
@@ -115566,6 +115871,218 @@ per test case, so the seven leaks are seven cases spread across the three, and
 repairing the three `mkdtemp`/`rmtree` pairs covers all of them. There is no
 fourth site: these are the only `mkdtemp(dir=…)` calls anywhere in `scripts/`.
 
+### Fixed, and the retry count settles the diagnosis — 2026-09-04
+
+All four steps landed, in the order the entry set out.
+
+1. `FIXTURE_PREFIX = "slateos-boot-test-fixture-"`, applied through a single
+   `new_fixture()` helper that replaces the three bare `mkdtemp(dir=build)`
+   calls.
+2. `drop_fixture()` replaces `shutil.rmtree(tmp, ignore_errors=True)`. It
+   retries the whole `rmtree` — not just the final `os.rmdir` — so a fixture
+   stuck on a *file* is retried too, sleeps `0.05 s × attempt` between tries,
+   bounds at ten, and records what each teardown cost. It still never raises:
+   a teardown that threw would fail a test that had already passed, which is
+   the one thing `ignore_errors=True` got right. The difference is that a
+   refusal is now recorded rather than discarded.
+3. `sweep_stale_fixtures()` runs first in `main()`, collecting anything an
+   earlier run could not — a suite killed by Ctrl-C or by `run-timeout.py`
+   firing never reaches its own `finally`. It announces itself only when it
+   finds something: a line that prints "0" on every clean run is a line nobody
+   reads on the run where it says 3.
+4. The twenty-one pre-fix leftovers are deleted. `build/tmp` — the real,
+   unrelated directory — was checked and left alone, which is the whole reason
+   step 1 had to come first.
+
+**The measurement the entry asked for.** The prediction was that a survivor
+after a sleeping retry would mean the milliseconds-long-window diagnosis was
+wrong. The first run under the fix reports:
+
+```
+fixture teardown: 11 removed, 7 needed a retry, worst 2 of 10 attempts
+```
+
+**Seven needed a retry, and the worst case was the second attempt** — one 50 ms
+sleep. Seven is exactly the number that used to leak per run, and eleven minus
+seven is exactly the four teardowns that never had a problem. So the diagnosis
+holds precisely: the handle is always still open when we first ask, and always
+released well before we ask again. Nothing leaked; the run left zero
+directories behind.
+
+**What did not change, deliberately.** A fixture that survives all ten attempts
+is reported as a named `WARNING` with its path, whether it still has contents,
+and the underlying `OSError` — but it does **not** fail the suite. It is not a
+`boot-test.sh` defect, and a red suite for a held file handle would be a flaky
+red that gets bypassed by habit, which is how this tree loses gates. The
+distance between that and the `ignore_errors=True` it replaces is the whole
+point: the old code produced *no output at all*, so twenty-one directories
+accumulated under a suite that printed `PASSED`. A named warning plus a sweep
+on the next run is visible, greppable, and self-clearing.
+
+**Still open, and out of scope here:** the other three `mkdtemp` calls in the
+file (`:166`, `:199`, `:351`) also pass `ignore_errors=True`, but they write to
+the *system* temp directory with explicit prefixes, so a leak there is the
+platform's to collect rather than debris in a directory people read. They were
+left alone rather than swept up silently, because whether they leak at all has
+not been measured and a fix to something unmeasured is a guess.
+
+## TD-A-AN-ABSENT-OPERAND-AND-AN-EMPTY-ONE-ARE-THE-SAME-STRING-IN-KSHELL (lane A, 2026-09-04)
+
+**In short:** in the kernel shell, a command that was given no filename and a
+command that was given the filename `''` (two quote marks — an empty name) look
+identical to the code, because both end up as the empty string. The empty string
+then gets turned into "the current directory" on its way to the filesystem. So
+`fold ''` does not say *"there is no file called that"*; it goes and reads the
+current directory instead, and complains about **`/`** — a path the user never
+typed. Nothing is corrupted and nothing reports false success, but the error
+message names the wrong thing, which is the kind of misdirection that costs an
+hour when it eventually matters.
+
+### Where it lives
+
+`resolve_path` (`kernel/src/kshell.rs:699`) joins its argument onto the current
+working directory and normalises the result. For the empty string that join is a
+no-op, the component loop sees no components, and `parts.is_empty()` returns
+`/`:
+
+```rust
+if parts.is_empty() {
+    return PathBuf::from("/");
+}
+```
+
+That is *correct and wanted* for the great majority of its 257 callers, which
+pass a command's whole argument line: `ls`, `du`, `df` and friends are written
+as `let path = resolve_path(args);` precisely so that a bare `ls` means the cwd.
+The empty string is doing double duty — "no argument was given" for those, and
+"an argument was given and it is empty" for the handful of commands that collect
+a list of operands.
+
+### How it became reachable
+
+TD-KSHELL (b′) — `split_words` now keeps an explicitly quoted empty word, so
+`fold ''` produces a one-element file list whose element is `""`. Before that
+the word was discarded by the splitter and the command saw no operand at all.
+The commands that take operands through `split_words` are `sed`, `awk`, `tr`,
+`cut`, `fold`, `base64`, `column`, `touch` and `printf`.
+
+That commit audited all of them and fixed every case where the empty word
+produced a *wrong answer*: `tr a ''` now refuses as GNU refuses, `column -s ''`
+separates on nothing as util-linux does, `sed ''` and `awk ''` are valid empty
+programs. `touch ''` reaches the same `file_path.is_empty()` guard as a missing
+operand and is refused. What is left is only the three that pass the empty name
+through to the filesystem — `cut`, `fold`, `base64` — where the outcome is a
+refusal with exit 1, but with `/` in the message instead of `''`.
+
+### Why it was not fixed there
+
+The obvious one-line fix — have `resolve_path("")` return an empty `PathBuf`
+rather than `/` — breaks every bare-argument command in the same file, because
+those 257 call sites *want* the empty string to mean the cwd. Making that change
+safely means auditing all of them and giving "no argument" its own
+representation (`Option<&str>`, or a separate entry point), which is a
+restructuring of the shell's argument plumbing and not a line in a commit about
+word splitting.
+
+### What the proper fix is
+
+Give the two meanings two representations, at the point the operand is read
+rather than at the point the path is resolved:
+
+1. Commands that collect an operand **list** (`files: Vec<String>`) reject an
+   empty element when they collect it, with GNU's wording —
+   `fold: '': No such file or directory`, exit 1. That is three parsers
+   (`parse_cut_args`, `parse_fold_args`, `parse_base64_args`) and is the whole
+   user-visible fix.
+2. Separately, and larger: audit the `resolve_path(args)` sites so that "the
+   command was given no argument" is expressed as something other than an empty
+   string. Until that is done, `resolve_path("") == "/"` must be treated as a
+   documented property rather than an accident, which is what this entry makes
+   it.
+
+Step 1 is worth doing on its own and does not depend on step 2.
+
+### How to reproduce
+
+In the kernel shell: `fold ''`. Expect `fold: '': No such file or directory`;
+observe a message naming `/`. Same for `cut -d, -f1 ''` and `base64 ''`.
+
+**[A] 2026-09-04 — the list of nine above had one member the fix never reached:
+`printf`. Found by a boot panic, ~47 rungs after the last one that had ever
+executed.**
+
+The sentence higher up this entry — *"The commands that take operands through
+`split_words` are `sed`, `awk`, `tr`, `cut`, `fold`, `base64`, `column`,
+`touch` and `printf`"* — is nine commands.
+`command_parses_own_quotes` (`kernel/src/kshell.rs:1508`) listed **eight**. The
+missing one was `printf`, and being off that list is not a cosmetic difference:
+it is what decides whether `dispatch` hands the command its raw argument text
+or a copy with the quotes already removed.
+
+So for `printf` the empty word was destroyed one stage *upstream* of the
+splitter that TD-KSHELL (b′) had just taught to preserve it. `printf '%s|%s|'
+'' zzb` printed `zzb||` — `zzb` sitting in the slot the empty string should
+have filled, plus a spurious extra format pass to consume it — where GNU prints
+`|zzb|`. Fixing `split_words` could not help, because by the time it ran there
+was no `''` left in the string to split.
+
+**This is the third time in two days that a write-up has named the wrong
+function**, and the three are the same mistake at different scales:
+
+| Where | Named | Actually |
+|---|---|---|
+| TD-KSHELL (c), Correction 7 | `execute_single` | `dispatch` |
+| `tab_complete`'s comment | "the same stage the dispatcher applies" | the dispatcher also expands first |
+| this rung's comment | `split_words` discarded the `''` | `dispatch` did, before `split_words` ran |
+
+The common shape: a stage was blamed because it is the stage where the loss
+becomes *visible*, not the stage where it happens. A shell pipes one string
+through many hands, and the last hand holding it when the damage shows is
+rarely the one that did it.
+
+**The fix, in two parts** — the second is required by the first:
+
+1. Add `printf` to `command_parses_own_quotes`.
+2. Replace `cmd_printf`'s private format-vs-operands split with `split_words`.
+   Part 1 alone would have been a regression. That function found the format's
+   closing quote with `args.find('"')` (or `find('\'')`) — no backslash
+   awareness, no notion of the other quote character: precisely the shape of
+   the eleven scanners `shellquote` was written to retire. It had survived
+   *because* `printf` was off the list, which made those branches unreachable.
+   Putting `printf` on the list would have woken them up, and `printf "a b" x`
+   would have run with the format `a`, with `b` demoted to an operand.
+
+That second part is the interesting one. **An opt-in migration list is also a
+list of code that is not being exercised.** Every command still off
+`command_parses_own_quotes` may be carrying its own dead quote parser, written
+before the consolidation and never removed, which will come back to life on the
+day that command is migrated. Whoever migrates the next one should check for
+that parser first rather than after.
+
+**Why it took a boot to find:** the rung had been written but never run — not
+once, from the commit that wrote it to the commit that fixed it.
+
+`e97f88c38` (TD-KSHELL b′) added both the fix to `split_words` *and* this rung
+asserting it. The rung was correct about what should happen and wrong about
+whether it did, and nothing said so, because no boot got that far:
+
+| boot | commit | reached |
+|---|---|---|
+| 2026-09-04 08:17 | `26545e857` | PASS — but predates `e97f88c38`; the rung did not exist yet |
+| 2026-09-04 13:44 | `be4600d6a` | `#UD` in `fastpy-countin.`, before the kshell battery |
+| 2026-09-04 16:11 | `7631f6906` | rung 53 (`sed` usage text) |
+| 2026-09-04 18:41 | `685c618ee` | **rung 100 — first execution of everything past 53** |
+
+So the earlier green boots are not evidence about this rung; they are evidence
+about a tree that did not contain it. A rung that has never run is
+indistinguishable, in the source, from one that passes — and the gap here was
+long enough that the write-up above went on citing `split_words` as fixed for
+all nine commands while one of the nine had never been tried.
+
+The practical consequence for anyone reading a self-test: **a rung's existence
+is not evidence, and neither is a green boot from before it was written.** The
+only thing that counts is a boot whose tree contained the rung, which
+`bench/boot-history.jsonl` can answer by commit.
 ## TD-B-SIX-TRACKED-FILES-HELD-CRLF-IN-THE-LANE-B-WORKTREE-AND-THE-WRITER-IS-UNIDENTIFIED (lane B, 2026-09-04)
 
 **In short:** the boot test refused to build because six files declared
@@ -115808,11 +116325,27 @@ differed.
 
 **The writers are fixed even though the writer is not identified.** Two scripts
 in this tree really did emit CRLF into tracked files through Python's default
-text mode, and both are corrected in `825acee84`:
-`scan-orphan-modules.py` (rewriting its own tracked baseline) and
-`strip-workspace-sections.py` (rewriting sub-crate manifests). Neither is proven
-to be *the* writer — see hypothesis 2 — but both were capable of it, so the
-population of possible causes is smaller by two regardless.
+text mode. Neither is proven to be *the* writer — see hypothesis 2 — but both
+were capable of it, so the population of possible causes is smaller by two
+regardless:
+
+- `scan-orphan-modules.py`, which rewrote its own tracked `.txt` baseline —
+  a file `check-eol` itself reads. Fixed in `825acee84`; converged with an
+  independent fix from `origin/main` on merge, both adding `newline=`.
+- `strip-workspace-sections.py`, which rewrote every sub-crate `Cargo.toml`.
+  I fixed it in `825acee84`; **`origin/main` deleted it instead (`291ca193b`),
+  and deletion is the better answer.** It was a one-shot written for the
+  2026-08-13 workspace consolidation, that migration is not repeatable, and
+  `git grep` found no caller — not `boot-test.sh`, not a hook, not CI. A script
+  nobody runs cannot earn the audit its two write sites would need, and leaving
+  it in the tree looking like a tool is itself the hazard. The deletion was
+  taken on merge and my repair discarded.
+
+The second one is worth noting as a pattern and not just an outcome: two lanes
+found the same defect within hours and picked repair versus deletion. **Repair
+was the reflex and deletion was the better move**, because it also removes the
+chance of a future run. The question to ask before fixing a script is whether
+anything invokes it.
 
 **A-27's "Still to do" is now partly closed.** Item 1, "normalise the 27 files",
 is done for lane B, and lane A's own worktree measured 0 of 13 907 on
@@ -116257,6 +116790,65 @@ the test count says otherwise: the tests above prove the *argument handling*
 and the path arithmetic, and nothing at all about the traversal. All four
 defects here were found by reading, not by a failing test, and a fifth of the
 same kind would have to be found the same way.
+
+## A-BOOT-TEST-NO-LONGER-FITS-THE-TIMEOUT-ITS-CALLERS-PASS (lane A, 2026-09-04)
+
+**In short:** The boot test's checking phase has grown to 103 minutes. A caller
+that gives it the customary two hours now has the checks eat almost the whole
+budget, so the run gets killed *after* every check passed and the kernel built
+— at the moment QEMU is starting. The run reports failure, but nothing was
+wrong with the code: the harness simply ran out of time before it could look.
+
+Measured on `eb2003eb7`, `python scripts/run-timeout.py 7200 bash
+scripts/boot-test.sh`:
+
+| phase | seconds |
+|---|---|
+| gate + self-test phase (`=== Gates OK ===`) | **6178** |
+| of which `cfg(unix)` arms compile+lint | 2071 |
+| of which kernel clippy | 386 |
+| kernel build + stage + lock | ~660 |
+| QEMU booting when the outer timeout fired | ~360 of its own 2400 |
+| **outer timeout** | **7200** |
+
+So the gate phase alone is 86% of a 7200s budget, and the phase the test exists
+to run — the boot — got 15% of the time it is allowed to take.
+
+Why this is a trap rather than a slow test: the failure is indistinguishable at
+a glance from a real one. `run-timeout.py` exits 124 and the last lines of the
+log are QEMU starting, so it reads as "the boot hung". It did not; it never got
+to finish. The verdict rule (`bench/boot-history.jsonl`, never the exit code)
+protects against misreading it as a *pass*, but nothing protects against
+misreading it as a **kernel fault**, which is the more expensive mistake — it
+sends the next reader looking for a hang that does not exist.
+
+**What to do until this is fixed:** pass at least `14400` to `run-timeout.py`
+for a full boot test on this tree (gates ~6200 + build ~700 + QEMU up to its own
+2400 = ~9300s, plus headroom). Do not lower QEMU's own `--timeout` to make the
+outer number fit; that trades a harness timeout for a real one.
+
+**The proper fix, not yet done.** Two candidates, and they are not exclusive:
+
+1. **Let a caller skip a gate phase that has already passed on this exact
+   tree.** `scripts/pre-boot.py` already runs the gate phase without the boot,
+   so the split exists in one direction but not the other: there is no
+   `--no-gates`, and `boot-test.sh`'s flag list is `--no-build`, `--no-stage`,
+   `--bench`, `--usb-image`, `--no-rootfs` and friends — none of them skip
+   checking. The obvious shape is to key it on `BT_SRC_DIGEST`: a run may skip
+   the gates only if a previous run recorded them green *for the identical
+   digest*, which makes the skip unforgeable rather than a flag that turns
+   checking off. A plain `--no-gates` would be the wrong fix and should not be
+   added: a way to skip the gates is a way to skip the gates.
+
+2. **Make the cost visible before it is paid.** `boot-test.sh` knows the gate
+   phase's historical duration; it could print the expected total against the
+   time actually available and say plainly that the budget is short, instead of
+   discovering it 6841 seconds in. A test that cannot reach its own subject
+   should say so at the start, not at the end.
+
+Filed rather than fixed because the tree was mid-re-run when it was found, and
+because option 1 touches the gate/boot seam, which deserves its own change
+rather than a rider on a rebooted test.
 
 ---
 
@@ -116706,3 +117298,188 @@ Cheap test, worth applying to any error text you write: **would this sentence
 still be true if the call had been intercepted?** If not, it is naming a
 component on faith. See `design-decisions.md` §768 and
 `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`.
+
+### Lesson 115: a blanket `allow(dead_code)` turns "this subsystem is unused" into a fact nobody is told (lane C, 2026-09-04)
+
+`apps/undelete` offers two scan modes, and the module doc describes the second
+as "a deep scan mode for sector-by-sector file signature detection". The crate
+has a `SignatureDetector` holding a table of twenty-odd file signatures -- JPEG's
+`FF D8 FF`, PNG's eight-byte header, `%PDF`, `PK\x03\x04` with a `word/`
+secondary for DOCX -- a `detect`, a `detect_best`, and a `scan_sectors` that
+walks a buffer sector by sector reporting what it finds. Thirteen tests cover
+`detect`. Every one passes.
+
+Nothing used it. `RecoveryEngine` constructed a `SignatureDetector`, stored it in
+a field, and never read the field. `scan_deep` returned a hard-coded list of ten
+`(offset, kind, size)` triples. The whole table could have been wrong -- every
+magic byte, every offset, the DOCX secondary -- and no screen would have
+differed, because the deep scan's answers never passed through it.
+
+**The compiler knew.** `field signature_detector is never read` is a warning
+rustc emits by default, and it was switched off at the top of the file:
+
+    #![allow(dead_code)]
+
+One line, no reason recorded, and it is the only thing standing between this
+defect and a build that names it. Removing it surfaced the field immediately,
+along with `scan_sectors`, `detect`, and seventeen other functions with no
+caller -- including the entire filter builder (`with_file_type`, `with_min_size`,
+`with_min_confidence`, `with_search`...), which is four more of the module doc's
+bullet points.
+
+**The tests could not have caught it, and it is worth being precise about why.**
+`test_jpeg_signature_detection` calls `detector.detect(...)` and asserts the
+answer. That is a correct test of a correct function. It says nothing whatever
+about whether the *program* calls it -- and no test of a component ever can,
+because the question is about the component's callers, not the component. The
+signal for "is this used" is the one the `allow` deleted.
+
+**The repair is not to delete the detector.** It is to put it on the path it was
+written for. There is no device to read here, so the simulation now *plants* the
+sectors -- writing each file type's real magic bytes, taken from the detector's
+own table, into a sector each -- and the deep scan reads them back through
+`scan_sectors`. The finds are the detector's answers rather than the plan's, so
+a wrong entry in the table now costs a file type in the results, which is the
+same failure a real disk would produce. That is what makes the thirteen tests
+worth having: they now fail *and* the program breaks.
+
+**The rule:** a blanket `#![allow(dead_code)]` in a crate is a statement that
+nobody wants to know which parts of it are connected. Prefer scoped
+`#[allow(dead_code, reason = "...")]` per item -- as `apps/kanban` now has, 22 of
+them -- so the next unused thing is still reported.
+
+
+### Lesson 116: a fast path in front of a table becomes a second table, and the fast one wins (lane C, 2026-09-04)
+
+`apps/netscan` resolves a port number to a service name. It had two ways to do
+it:
+
+* `service_database()` -- 125 entries, each with a port, a protocol, a service
+  name and a description. The module doc advertises it: "service detection with
+  100+ port-to-service mappings".
+* `lookup_service(port)` -- a 57-arm `match`, introduced by this comment:
+
+      // Use a static-like approach; match on common ports for O(1) lookup of
+      // the most frequently queried ports, falling back to the database for
+      // the rest.
+
+It did not fall back. The `match` ended `_ => None`, and `service_database` had
+no caller anywhere in the crate. So 68 of the 125 entries were unreachable: a
+scan that found port 43 open showed `-` where the table said `whois`.
+
+**The part worth remembering is not that it was incomplete.** It is that the
+shadowing copy was *less accurate* than the table it shadowed. Where both knew a
+port, they disagreed four times, and every disagreement lost information:
+
+| port | the match said | the table said |
+|---|---|---|
+| 137 | `netbios` | `netbios-ns` |
+| 139 | `netbios` | `netbios-ssn` |
+| 67 | `dhcp` | `dhcp-server` |
+| 68 | `dhcp` | `dhcp-client` |
+
+Four services under two names. That is what a hand-written fast path drifts
+towards: it is written from memory, in a hurry, for the "common" cases, and the
+carefully-sourced table beside it is the one nobody reads.
+
+The repair was to delete the `match` outright rather than make it agree.
+125 entries is a few hundred bytes to scan, once per open port on screen; the
+performance argument for the fast path was never measured and would not have
+survived being measured. One table cannot disagree with itself.
+
+**How to find the next one:** grep for a lookup function that returns a
+`'static` answer and check whether the data structure it is named after has a
+caller. A `match` with more than a dozen arms that duplicates a nearby table is
+the shape. The test that now guards it walks the whole table and asserts every
+entry is reachable through the lookup -- which is cheap, and which no test of
+either half alone would have caught.
+
+### Lesson 117: a surviving mutation sometimes means the code is redundant, not that the test is weak (lane C, 2026-09-04)
+
+Twice this week a mutation survived and the correct response was to delete code
+rather than to write a test.
+
+* `apps/systemrestore`'s `advance_operation` ended a running operation two ways:
+  a `progress.complete` check, and running out of frames. Deleting the first
+  changed nothing observable, because the filmstrip's finished frame *is* its
+  last one -- so the second condition always fired on the same tick.
+* `apps/netscan`'s `start_scan` already reset both scroll offsets at the end,
+  with a comment explaining why and a test covering it. I added a second reset
+  at the top without reading that far. The mutation that deleted mine survived,
+  because the real one was still there.
+
+The reflex on a survivor is "my test is too loose". Check the other possibility
+first, because it is quicker to check and the fix is better: **if removing a
+line changes nothing, ask whether some other line is already doing the job.**
+The tell is a survivor on code you *just wrote* to fix something -- if the
+behaviour was already correct, the thing you added is a duplicate, and the
+duplicate is the defect.
+
+
+### Lesson 118: a witness the code already satisfies is not a witness (lane C, 2026-09-04)
+
+`apps/tmux` gained copy and paste. The test read:
+
+```rust
+prefixed(&mut mux, 'y');              // yank
+let copied = mux.clipboard.clone();
+prefixed(&mut mux, ']');              // paste
+assert!(pane_text(&mux).contains(copied.trim()));
+```
+
+It passes with the paste deleted. The text was *yanked from that pane*, so it
+is on that screen either way; the assertion asks whether some words are visible
+and they were visible before the operation under test ran.
+
+The repair is to paste somewhere the text cannot already be — a freshly split
+pane, which starts empty — and to assert that it starts empty first, so the
+premise is checked rather than assumed:
+
+```rust
+prefixed(&mut mux, '%');
+assert!(pane_text(&mux).trim().is_empty(), "or this proves nothing either");
+prefixed(&mut mux, ']');
+assert!(pane_text(&mux).contains(copied.trim()));
+```
+
+This is the same family as lesson 54 (a fixture where two quantities happen to
+be equal) and lesson 58 (a witness more than one rule explains), and it has a
+sharper tell than either: **the test's subject and its witness were the same
+object.** Copy took text *out of* the pane and paste put text *into* it, and
+both ends were checked against the same screen. Whenever a round trip is tested
+by looking at where it started, the return leg is untested.
+
+The general check, cheap enough to apply to every test that asserts something
+is present: *ask what the assertion would say if the operation were deleted.* If
+the answer is "the same thing", the assertion is about the fixture.
+
+### Lesson 119: an unreachable-pattern warning is a keybinding collision (lane C, 2026-09-04)
+
+Adding a copy-mode mark to `apps/tmux`, I bound it to Ctrl+B Space. The build
+said:
+
+    warning: unreachable pattern
+      --> apps/tmux/src/main.rs:2404:13
+       |
+    2365 |             ' ' => {
+       |             --- matches all the relevant values
+
+Ctrl+B Space was already `next-layout`, forty lines further down the same
+`match`. My arm came first, so the existing feature became unreachable —
+silently, from a user's point of view: the layout key simply stopped working.
+
+Worth writing down because of what the warning is *usually* taken to mean. An
+unreachable pattern reads like a tidiness complaint about a redundant arm. In a
+keymap it is a **regression report**: some binding that used to work no longer
+does, and the compiler knows exactly which one and where. In a `match` on a
+`char` with fifty arms spread over a hundred lines, it is the only thing that
+knows.
+
+Two consequences for this tree:
+
+* Never `#[allow(unreachable_patterns)]` on a keymap. The one place the warning
+  is most often suppressed as noise is the one place it carries the most.
+* When adding a binding, read the whole `match` first — or add it and let the
+  compiler check, which is what happened here and is why the collision cost a
+  minute instead of a bug report. `v` was the right key anyway: it is what
+  tmux's own vi copy mode uses for begin-selection.

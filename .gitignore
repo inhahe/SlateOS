@@ -185,3 +185,10 @@ __pycache__/
 # `scratch_*` precisely so a stray one is obvious, and `git add -A` has swept
 # two of them into commits already.
 scratch_*.py
+
+# Per-session runtime lock: a session id, a PID and a timestamp, rewritten
+# every time a Claude session starts. It is machine state, not source, and
+# with three lanes sharing one repository it churns on every merge -- it has
+# been rewritten by 15 commits and swept into others by `git add -A` without
+# anyone meaning to. Untracked here; the file itself stays where it is.
+.claude/scheduled_tasks.lock

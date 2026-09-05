@@ -289,7 +289,7 @@ def test_the_marker_set_emptying_out_is_visible():
 
 def test_no_history_is_no_verdict_not_a_pass(tmpdir):
     path = os.path.join(tmpdir, "empty.jsonl")
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write("")
     check("an empty history exits 0", gate.main(["--history", path]), 0)
 
@@ -299,7 +299,7 @@ def test_no_history_is_no_verdict_not_a_pass(tmpdir):
 # --------------------------------------------------------------------------
 
 def _write(path: str, rows: list[dict]) -> None:
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         for rec in rows:
             handle.write(json.dumps(rec) + "\n")
 
@@ -319,7 +319,7 @@ def test_main_passes_on_a_healthy_history(tmpdir):
 
 def test_main_survives_a_malformed_line(tmpdir):
     path = os.path.join(tmpdir, "bad.jsonl")
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write("{not json\n")
         for rec in _rows(10, {M1: False}):
             handle.write(json.dumps(rec) + "\n")

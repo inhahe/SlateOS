@@ -1508,7 +1508,7 @@ fn remove_quotes(s: &str) -> String {
 fn command_parses_own_quotes(cmd: &str) -> bool {
     matches!(
         cmd,
-        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed" | "column" | "touch"
+        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed" | "column" | "touch" | "printf"
     )
 }
 
@@ -3337,25 +3337,54 @@ fn eval_arith_stmt(expr: &str) -> Result<i64, ArithError> {
 /// - `"foo bar"` → single word `foo bar`.
 /// - `'foo bar'` → single word `foo bar`.
 /// - Quotes can appear mid-word: `a"b c"d` → `ab cd`.
+/// - `''` and `""` → one **empty** word. See below; this is not the same thing
+///   as no word at all.
+///
+/// # An explicitly quoted empty word counts
+///
+/// `echo a '' b` passes three arguments in bash, not two, and the middle one is
+/// the empty string. This function dropped that middle word until TD-KSHELL
+/// (b′), because the substitution that introduced [`shellquote`] wanted to be a
+/// pure like-for-like replacement and dropping empties was how it stayed one.
+///
+/// The distinction the splitter can make, and a naive filter cannot, is between
+/// a word that is empty *because the user wrote quotes around nothing* and a
+/// stretch of whitespace that is not a word at all. [`split_bare_words`] never
+/// emits an empty range for the latter — a run of blanks produces no `Word` —
+/// so a `Word` whose text strips to empty is necessarily one the user quoted,
+/// and `Word::quoted` says so directly. Keeping empties *iff* `quoted` is
+/// therefore not a heuristic: it is reading a fact the splitter already
+/// recorded.
+///
+/// What changed for callers, from the fourteen-site audit that accompanied this:
+/// `select`/`for` gain a genuine empty menu item or loop iteration, function
+/// arguments get the `$#` bash gives them, `printf '%s|' ''` prints `|`, and
+/// `awk ''`/`cut ''`/`touch ''` get an empty operand that errors the way GNU
+/// errors instead of vanishing and re-reading the *next* word as the operand
+/// that went missing. The one place the arity change was not sufficient on its
+/// own is `sed ''`, which GNU treats as a valid empty script — an empty word
+/// merely moved it from one exit-1 to another until [`parse_sed_scripts`]
+/// learned to skip it, which is why that fix lands with this one.
+///
+/// [`split_bare_words`]: shellquote::split_bare_words
+/// [`Word::quoted`]: shellquote::Word::quoted
 fn split_words(s: &str) -> Vec<String> {
     // The nested loops this replaces had the classic defect of the twelve
     // scanners: on `"a'b" c` the inner `"`-loop stopped at the closing quote
     // correctly, but nothing knew about backslashes, so `a\ b` split into two
     // words where bash makes one. Splitting and quote removal are now the
     // same traversal the rest of the shell uses.
-    //
-    // ARITY IS DELIBERATELY UNCHANGED HERE. `split_bare_words` reports the
-    // explicitly quoted empty word — bash gives `set -- ''` one argument, and
-    // that is the behaviour we eventually want — but adopting it changes the
-    // argument count seen by fifteen callers, two of which branch on
-    // `split_words(args).is_empty()`. Dropping empties keeps this commit a
-    // pure substitution; the arity fix is TD-KSHELL (b') and gets its own
-    // commit with those fifteen sites audited.
     shellquote::split_bare_words(s.as_bytes())
         .into_iter()
         .filter_map(|w| {
             let word = shellquote::strip_quotes(s.as_bytes().get(w.start..w.end)?);
-            if word.is_empty() {
+            // An empty word survives only if the user wrote quotes to make it.
+            // `w.quoted` is the splitter's own record of that, so this is not
+            // re-deriving anything: a bare run of blanks never becomes a `Word`
+            // at all, and a `Word` that strips to empty without being quoted
+            // cannot be constructed by the splitter. The check is belt-and-
+            // braces against a future splitter change, not a live filter.
+            if word.is_empty() && !w.quoted {
                 return None;
             }
             // Unreachable for the same reason as in `remove_quotes`: only
@@ -13455,6 +13484,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "expression recognition must not depend on the record"
             );
         }
+
+        // An empty program has no rules, so nothing runs and nothing prints --
+        // gawk's answer, and the opposite end of this rung's subject: a program
+        // that cannot be run whole is refused (exit 2), and a program with
+        // nothing in it runs to completion (exit 0). Neither is a partial run.
+        //
+        // Reachable only since TD-KSHELL (b'). The `program.trim().is_empty()`
+        // refusal that used to stand in `parse_awk_args` was unreachable while
+        // `split_words` discarded the `''`, and making it live would have put
+        // this shell at odds with gawk on an input it already answers.
+        let out = piped("awk ''", data);
+        assert_eq!(out.as_slice(), b"", "an empty program prints nothing");
+        assert_eq!(last_exit(), 0, "and is not an error");
+
+        // No program operand at all is still refused -- an empty operand and a
+        // missing one are different inputs, which is the whole point.
+        let out = piped("awk", data);
+        assert_eq!(last_exit(), 1, "awk with no program is still refused");
+        assert_output_contains(
+            "with the usage, not a diagnostic about an empty program",
+            &out,
+            b"Usage:",
+        );
     }
 
     serial_println!(
@@ -13800,6 +13852,37 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"xxx\n",
             "a short SET2 pads with its last character"
         );
+
+        // An *empty* SET2 is refused, in GNU's words. Reachable only since
+        // TD-KSHELL (b'): before it the `''` was discarded and this was a
+        // missing operand. Without the refusal the padding rule above has
+        // nothing to pad from, so every member of SET1 maps to itself, the
+        // input is copied out unchanged and the status says it worked -- a
+        // wrong answer where there had been a missing one.
+        let out = piped("tr a ''", b"abc\n");
+        assert_eq!(last_exit(), 1, "a translation to nothing is refused");
+        assert!(
+            out.starts_with(b"tr: when not truncating set1, string2 must be non-empty"),
+            "in GNU's words, so a user who knows tr recognises it"
+        );
+
+        // An empty SET1 is *not* an error, in either mode: there is simply
+        // nothing to map from, so the input passes through. Both of these exit
+        // 0 in GNU. Asserted because the refusal above is one condition away
+        // from catching them too, and `tr '' ''` sits on both sides at once.
+        let out = piped("tr '' x", b"abc\n");
+        assert_eq!(out.as_slice(), b"abc\n", "an empty SET1 maps nothing");
+        assert_eq!(last_exit(), 0, "and is not an error");
+        let out = piped("tr '' ''", b"abc\n");
+        assert_eq!(
+            out.as_slice(),
+            b"abc\n",
+            "both sets empty is still not an error -- GNU exits 0 here"
+        );
+        assert_eq!(last_exit(), 0, "and says so");
+        let out = piped("tr -d ''", b"abc\n");
+        assert_eq!(out.as_slice(), b"abc\n", "nor is an empty -d set");
+        assert_eq!(last_exit(), 0, "and it too exits 0");
 
         let _ = crate::fs::Vfs::remove(bin);
     }
@@ -14644,6 +14727,43 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(out.as_slice(), b"XX\nb\n", "plain substitution");
         let out = piped("sed '2d'", b"a\nb\nc\n");
         assert_eq!(out.as_slice(), b"a\nc\n", "delete by line number");
+
+        // An empty script is a script: no commands, so every line is printed
+        // at the end of its cycle and sed is `cat`. GNU exits 0 here.
+        //
+        // Reachable only since TD-KSHELL (b'), and the one site in that change
+        // where passing the empty word through was not by itself an
+        // improvement: `parse_sed_command("")` reaches its fallthrough and
+        // returns `Unknown`, so without `parse_sed_scripts` learning to skip an
+        // empty script this would merely have moved from one exit-1 (sed's
+        // usage, because the word had vanished) to another.
+        let out = piped("sed ''", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"a\nb\n", "an empty script is cat");
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        // ...and it composes: an empty `-e` among real ones contributes
+        // nothing rather than failing the whole invocation.
+        let out = piped("sed -e '' -e '/a/d'", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"b\n", "the real script still runs");
+        assert_eq!(last_exit(), 0, "and the empty one is not an error");
+
+        // No script at all is still a failure -- the distinction the change
+        // turns on is between an empty operand and a missing one.
+        let out = piped("sed", b"a\n");
+        assert_eq!(last_exit(), 1, "sed with no script is still refused");
+        // `Usage: cmd | sed`, not `Usage: sed`: the banner leads with the pipe
+        // because every form sed accepts here reads from one.  The first
+        // spelling of this assertion was written from what the usage *ought* to
+        // say rather than from what it does say, so it could never match -- and
+        // because this rung had never executed, nothing said so until now.  The
+        // point of the check is only that the failure produced the usage rather
+        // than an empty-script diagnostic, so anchor on the longest prefix that
+        // is actually there.
+        assert_output_contains(
+            "with the usage, not a diagnostic about an empty script",
+            &out,
+            b"Usage: cmd | sed",
+        );
     }
 
     serial_println!(
@@ -15450,16 +15570,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "the default split collapses the run, so the previous case proves -s arrived"
         );
 
-        // An empty separator argument is refused rather than ignored.
-        // `split_words` yields no word for `''`, so `-s` finds nothing after it
-        // -- and a `-s` the user typed but that reached nothing is exactly the
-        // silent-guess shape, so it must not fall back to the default.
-        let out = piped("column -t -s ''", b"zz_a zz_b\n");
+        // An empty separator set separates on nothing, so the whole line is
+        // one field and comes out as it went in. That is util-linux's answer
+        // (`printf 'a b\n' | column -t -s ''` prints `a b`), and the assertion
+        // that matters is that the run of blanks is *not* collapsed -- folding
+        // the empty set to "no -s given" would split on blanks, which is the
+        // opposite of what was asked, done silently, with exit 0.
+        //
+        // Reachable only since TD-KSHELL (b'). This case previously asserted a
+        // refusal, which was the splitter discarding the `''` and `-s` finding
+        // nothing after it, not a decision about empty separators.
+        let out = piped("column -t -s ''", b"zz_a  zz_b\n");
+        assert_eq!(last_exit(), 0, "an empty separator set is not an error");
         assert_eq!(
-            last_exit(),
-            1,
-            "an empty -s argument is refused, not silently ignored"
+            out.as_slice(),
+            b"zz_a  zz_b\n",
+            "nothing separates, so the line is one field and its blanks survive"
         );
+
+        // ...and `-s` with genuinely nothing after it is still a missing
+        // argument. Kept next to the case above because the two were the same
+        // input until (b'), and the point of the change is that they are not.
+        let out = piped("column -t -s", b"zz_a zz_b\n");
+        assert_eq!(last_exit(), 1, "a missing -s argument is still refused");
         assert!(
             out.starts_with(b"column: -s requires a separator"),
             "and says so"
@@ -20539,6 +20672,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"0\n".as_slice(),
             "a missing operand converts to zero in silence"
         );
+
+        // An operand that is present and empty is a different thing again, and
+        // the difference is positional: it fills its own conversion rather than
+        // letting the next operand slide into it. This printed `zzb||` -- `b`
+        // in the slot the empty string should have had, and a spurious extra
+        // pass to consume it. GNU prints `|zzb|`.
+        //
+        // This rung was written with TD-KSHELL (b'), which taught
+        // `split_words` to keep an explicitly quoted empty word, and it still
+        // failed -- because for `printf` the word never reached `split_words`.
+        // (b')'s audit lists nine commands that take operands that way and
+        // `printf` is the ninth, but only the other eight were added to
+        // `command_parses_own_quotes`, so `dispatch` went on handing `printf`
+        // a dequoted string in which the `''` had already ceased to exist.
+        // Fixing the splitter cannot help a word that was destroyed upstream
+        // of it; that is why the rung asserts a *round trip through
+        // `capture_command`* rather than calling `split_words` directly.
+        let out = capture_command("printf '%s|%s|' '' zzb");
+        assert_eq!(
+            out.as_slice(),
+            b"|zzb|".as_slice(),
+            "an empty operand fills its own conversion, and does not shift the next one"
+        );
     }
 
     serial_println!(
@@ -22179,6 +22335,44 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "an apostrophe inside double quotes does not swallow the split"
         );
 
+        // --- split_words: an explicitly quoted empty word is a word. --------
+        //
+        // TD-KSHELL (b'). Arity, not content, is what these assert: the
+        // interesting number is `.len()`, because dropping the middle word is
+        // what the splitter used to do and every caller counts its operands.
+        assert_eq!(
+            split_words("a '' b"),
+            alloc::vec!["a", "", "b"],
+            "'' is an argument -- bash passes three words here, not two"
+        );
+        assert_eq!(
+            split_words("a \"\" b"),
+            alloc::vec!["a", "", "b"],
+            "and so is \"\""
+        );
+        assert_eq!(
+            split_words("''"),
+            alloc::vec![""],
+            "on its own it is one word, so a caller's is_empty() is false"
+        );
+        assert_eq!(
+            split_words("   "),
+            Vec::<String>::new(),
+            "but bare whitespace is still no word at all -- this is the \
+             distinction `Word::quoted` records, and the reason the empty word \
+             can be kept without keeping every run of blanks"
+        );
+        assert_eq!(
+            split_words(""),
+            Vec::<String>::new(),
+            "nor does an empty command line become a one-empty-word one"
+        );
+        assert_eq!(
+            split_words("a '' ''"),
+            alloc::vec!["a", "", ""],
+            "two of them are two words, not one and not none"
+        );
+
         // --- expand_braces: quoting suppresses it. --------------------------
         assert_eq!(
             expand_braces("x{1,2}y"),
@@ -22688,35 +22882,34 @@ fn cmd_printf(args: &str) {
         return;
     }
 
-    // Split format string from arguments.
-    // The format string may be quoted.
-    let (format, rest) = if args.starts_with('"') {
-        // Find closing quote.
-        if let Some(end) = args.get(1..).and_then(|s| s.find('"')) {
-            let fmt = args.get(1..end.saturating_add(1)).unwrap_or("");
-            let rest = args.get(end.saturating_add(2)..).unwrap_or("").trim_start();
-            (fmt, rest)
-        } else {
-            (args.get(1..).unwrap_or(""), "")
-        }
-    } else if args.starts_with('\'') {
-        if let Some(end) = args.get(1..).and_then(|s| s.find('\'')) {
-            let fmt = args.get(1..end.saturating_add(1)).unwrap_or("");
-            let rest = args.get(end.saturating_add(2)..).unwrap_or("").trim_start();
-            (fmt, rest)
-        } else {
-            (args.get(1..).unwrap_or(""), "")
-        }
-    } else {
-        // Unquoted: first word is the format string.
-        let end = args.find(' ').unwrap_or(args.len());
-        let fmt = args.get(..end).unwrap_or("");
-        let rest = args.get(end..).unwrap_or("").trim_start();
-        (fmt, rest)
-    };
-
-    // Parse arguments (space-separated, quote-aware).
-    let arg_list = split_words(rest);
+    // The format and the operands come off one traversal -- the same
+    // [`shellquote`] scan the rest of the shell uses -- rather than a private
+    // one for the format and `split_words` for the remainder.
+    //
+    // This function used to find the format's closing quote with `find('"')`
+    // (or `find('\'')`), which knew nothing of backslashes and nothing of the
+    // *other* quote character: exactly the shape of the eleven disagreeing
+    // scanners `shellquote` was written to retire. It survived because
+    // `printf` was not on [`command_parses_own_quotes`], so `dispatch` had
+    // already stripped the quotes and those branches were unreachable. Adding
+    // `printf` to that list -- which is what makes `printf '%s|%s|' '' zzb`
+    // able to see its empty operand at all -- would have made them reachable
+    // again, and `printf "a b" x` would have run with the format `a` while
+    // `b` became an operand.
+    //
+    // Splitting here also *is* the fix: `split_words` keeps an explicitly
+    // quoted empty word, so `''` fills its own conversion instead of letting
+    // the next operand slide into it.
+    let mut words = split_words(args);
+    if words.is_empty() {
+        // Reachable when `args` is all blanks: `dispatch` trims, but a quoted
+        // run of spaces is not trimmed and strips to no words at all.
+        shell_println!("Usage: printf FORMAT [ARGS...]");
+        set_exit(1);
+        return;
+    }
+    let arg_list = words.split_off(1);
+    let format = words.first().map_or("", String::as_str);
     let mut idx = 0usize;
     let mut faults: Vec<(PrintfNumFault, String)> = Vec::new();
 
@@ -23279,12 +23472,17 @@ struct ColumnArgs {
 /// [`command_parses_own_quotes`] for this reason, exactly as `cut` is for
 /// `cut -d' ' -f1`.
 ///
-/// One consequence to know about: `split_words` produces no word at all for an
-/// empty quoted argument, so `column -s ''` arrives as a bare `-s` and is
-/// refused with "`-s` requires a separator". That is a better answer than the
-/// silent fallback it replaced — an empty separator set is not something a user
-/// can have meant — but it is a refusal where this function's older comment
-/// promised a fallback, so it is stated rather than left to be discovered.
+/// `column -s ''` is an *empty separator set*, not a missing one: nothing
+/// separates, so each line is a single field and comes out unchanged. That is
+/// util-linux's answer to the same input. It is distinct from `column -s` with
+/// nothing after it, which is a missing argument and is refused.
+///
+/// Until TD-KSHELL (b′) the two were the same input here, because `split_words`
+/// discarded the `''` and left a bare `-s`; this function's comment recorded
+/// the resulting refusal as though it were the decision. It was the splitter's
+/// doing, and both halves of the code that would have implemented the real
+/// reading — `split_on_any_of`'s empty-set branch, and the `Some(vec![])` this
+/// now builds — were unreachable while it stood.
 fn column_parse_args(args: &str) -> Option<ColumnArgs> {
     let mut table_mode = false;
     let mut sep: Option<Vec<Vec<u8>>> = None;
@@ -23332,12 +23530,26 @@ fn column_parse_args(args: &str) -> Option<ColumnArgs> {
                     c.encode_utf8(&mut buf).as_bytes().to_vec()
                 })
                 .collect();
-            // An empty set means "no explicit separator", which is what the
-            // default blank split already is -- carrying `Some(vec![])` would
-            // reach `split_on_any_of` and make it decide the same thing again.
-            // Not reachable through `split_words`, which drops an empty word;
-            // kept because `set` is derived rather than assumed non-empty.
-            sep = if set.is_empty() { None } else { Some(set) };
+            // An empty set is carried as `Some(vec![])`, *not* folded to
+            // `None`. The two are different answers: `None` is "no -s was
+            // given", which falls back to the blank split, while `Some(vec![])`
+            // is "-s was given and separates on nothing", which
+            // `split_on_any_of` already answers by making the whole line one
+            // field. That is what util-linux does -- `printf 'a b\n' | column
+            // -t -s ''` prints `a b` unchanged -- and folding to `None` would
+            // instead split on blanks, i.e. do the opposite of what was asked
+            // and report success.
+            //
+            // This branch was unreachable until TD-KSHELL (b'), because
+            // `split_words` discarded the `''` and `-s` saw nothing after it.
+            // The refusal that produced ("-s requires a separator") was an
+            // accident of the splitter rather than a decision, and it is not
+            // what the reference implementation does; an explicitly empty
+            // separator is a thing a user can write and it has a defined
+            // meaning. `-s` with genuinely nothing after it is still refused,
+            // by the `else` above -- that is the missing-argument case and is
+            // unrelated.
+            sep = Some(set);
         } else {
             shell_println!("column: unrecognized option `{}'", w);
             set_exit(1);
@@ -124518,6 +124730,18 @@ enum TrParseError {
     /// Two count-less repeats in one SET2. Each claims the whole remaining
     /// length, so together they do not determine one.
     TwoPads,
+    /// `tr a ''` — SET2 is present but empty, and a translation has nothing to
+    /// translate *to*. Distinct from [`Self::MissingSet2`], which is `tr a`
+    /// with no second operand at all: here the user supplied the operand and
+    /// what they supplied has no reading, so the message names the emptiness
+    /// rather than the absence — as GNU's does.
+    ///
+    /// Reachable only since TD-KSHELL (b′). Before it, `split_words` discarded
+    /// the `''` and `tr a ''` was `MissingSet2`. Left unhandled after it,
+    /// `tr_byte_table`'s `unwrap_or(c)` would have mapped every member of SET1
+    /// to itself, copied the input out unchanged and exited 0 — a wrong answer
+    /// reported as a success, which is strictly worse than the missing one.
+    EmptySet2,
 }
 
 impl TrParseError {
@@ -124541,6 +124765,9 @@ impl TrParseError {
             Self::MissingSet2(ref set1) => {
                 shell_println!("tr: missing operand after '{}'", set1);
                 shell_println!("Usage: tr SET1 SET2 [file]  or  tr -d SET1 [file]");
+            }
+            Self::EmptySet2 => {
+                shell_println!("tr: when not truncating set1, string2 must be non-empty");
             }
             Self::ExtraOperand(ref word) => {
                 shell_println!("tr: extra operand '{}'", word);
@@ -124710,6 +124937,18 @@ fn parse_tr_args(args: &str) -> Result<TrSpec, TrParseError> {
     } else {
         expand_tr_set(operands.get(1).map_or("", String::as_str), Some(set1.len()))?
     };
+    // A translation to nothing is refused, as GNU refuses it. Checked on the
+    // *expanded* set rather than on the operand text so that anything that
+    // expands to nothing is caught by the same rule — today that is only the
+    // empty string, since `[c*0]` is the padding form and not a zero-length
+    // repeat, but the check should not depend on that staying true.
+    //
+    // SET1 being empty is not an error either way: `tr '' x` and `tr -d ''`
+    // both copy their input out unchanged and exit 0 in GNU, and here they do
+    // the same by having no members to build a mapping from.
+    if !delete && set2.is_empty() && !set1.is_empty() {
+        return Err(TrParseError::EmptySet2);
+    }
     Ok(TrSpec {
         set1,
         set2,
@@ -124828,10 +125067,19 @@ fn tr_byte_table(spec: &TrSpec) -> [Option<TrAction>; 256] {
         } else {
             // A short SET2 repeats its last character, which is GNU's default
             // (`-t` asks for the other reading and is refused). An *empty*
-            // SET2 cannot reach here — `split_words` drops an empty quoted
-            // word, so `tr a ''` is a missing operand — but if it did, leaving
-            // the character alone is what the character path's `unwrap_or(ch)`
-            // does.
+            // SET2 cannot reach here because `parse_tr_args` refuses it
+            // (`EmptySet2`) whenever SET1 has members — and when SET1 has
+            // none, this loop has no iterations. The `unwrap_or(c)` is
+            // therefore unreachable and stays only because `set2` is derived
+            // rather than assumed non-empty; leaving the character alone is
+            // what the character path's `unwrap_or(ch)` does, so the two paths
+            // agree even in the case neither can reach.
+            //
+            // That refusal is load-bearing, not tidiness: until TD-KSHELL (b′)
+            // `split_words` discarded the `''`, so `tr a ''` was a missing
+            // operand and never got here. With the word passed through and no
+            // refusal, this `unwrap_or(c)` would map every member of SET1 to
+            // itself and exit 0.
             TrAction::Emit(
                 spec.set2
                     .get(pos)
@@ -140282,9 +140530,29 @@ impl SedParseError {
 ///
 /// Returns `None` having already printed the diagnostic and set the status, so
 /// a caller's whole error path is `let Some(parsed) = … else { return };`.
+///
+/// # An empty script is a script
+///
+/// `sed '' f` and `sed -e '' -e 's/a/b/' f` are both valid GNU: an empty
+/// expression contributes no commands, so on its own it is `cat`. That is
+/// handled *here* rather than in [`parse_sed_command`] because an empty string
+/// is not a command that happens to do nothing — it is the absence of one, and
+/// `parse_sed_command`'s contract is to parse exactly one. Handing it the empty
+/// string reaches the fallthrough and returns `Unknown`, which is the right
+/// answer to the question it was asked and the wrong answer to the question the
+/// user asked.
+///
+/// This mattered from the moment [`split_words`] stopped discarding an
+/// explicitly quoted empty word (TD-KSHELL (b′)): before that, `sed ''` lost
+/// its `''` in the splitter and failed with sed's usage message, so the gap was
+/// invisible. Passing the word through without this would have moved it from
+/// one wrong exit-1 to another.
 fn parse_sed_scripts(commands: &[alloc::string::String]) -> Option<alloc::vec::Vec<SedCmd>> {
     let mut parsed = alloc::vec::Vec::with_capacity(commands.len());
     for (idx, script) in commands.iter().enumerate() {
+        if script.is_empty() {
+            continue;
+        }
         match parse_sed_command(script) {
             Ok(cmd) => parsed.push(cmd),
             Err(e) => {
@@ -140827,12 +141095,19 @@ fn parse_awk_args(args: &str) -> Result<AwkSpec, AwkParseError> {
         }
     }
 
+    // No program *operand* is an error; an operand that happens to be empty is
+    // not. `awk '' f` is a program with no rules, which gawk runs to completion
+    // with no output and exit 0 — and this shell already does the same thing
+    // once it gets there, because `parse_awk_program` returns no rules for it
+    // and `awk_run`'s `needs_input` is then false, so not even the file is
+    // opened. The `program.trim().is_empty()` refusal that stood here was dead
+    // code until TD-KSHELL (b′) — `split_words` could not produce an empty word
+    // — and turning it live would have made this shell disagree with gawk on an
+    // input it can already answer correctly. Same call as `sed ''`, for the
+    // same reason and in the same commit.
     let Some(program) = program else {
         return Err(AwkParseError::MissingProgram);
     };
-    if program.trim().is_empty() {
-        return Err(AwkParseError::MissingProgram);
-    }
 
     Ok(AwkSpec { fs, program, files })
 }

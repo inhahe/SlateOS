@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refuse a `check-*.py` gate that cannot fail when run the way it is run.
+"""Refuse a gate that cannot fail when run the way it is run.
 
 WHY THIS EXISTS
 ---------------
@@ -28,12 +28,36 @@ because the bug is not in any gate's subject matter: it is in the seam between
 a gate's argument parsing and its exit status, and that seam has the same shape
 in every one of them.
 
+A GATE IS NOT ALWAYS A PYTHON SCRIPT
+------------------------------------
+On 2026-09-04 this file's title still read "a `check-*.py` gate", and the day
+`check-gates-are-wired.py` learned that a gate bound to a shell variable can be
+a `.sh`, `scripts/coreutils-check.sh` entered this corpus and was reported as
+`could not be parsed: closing parenthesis ')' does not match opening
+parenthesis '['` -- an `ast.parse` of shell. The corpus is imported from that
+file (see `wired_gates()`), so widening the definition of "gate" there widened
+it here, in a file that then had exactly one way to read a gate.
+
+The tempting fix -- skip `.sh` -- is the defect this whole file exists to
+catch, one level up: a corpus that omits a file reports the same "ok" as one
+that includes it and finds nothing wrong. A shell gate that scans, prints and
+exits 0 is `check-doc-links.py`'s bug written in a different language, and it
+would be exempt from the only question asked here. So shell gates are graded
+as shell, by `_shell_refusal_reachable` below, to the same conservative
+standard: unanalysable clears, and only a script that cannot reach a non-zero
+status at all is reported.
+
 WHAT IT ACTUALLY CHECKS
 -----------------------
-For each `scripts/check-*.py`: assuming a **bare** invocation (no arguments,
-so every `store_true` flag is False and every optional defaults to None), is
-any non-zero exit reachable? If no, the gate cannot refuse anything and is
-reported.
+For each gate in the corpus, assuming a **bare** invocation:
+
+* Python (no arguments, so every `store_true` flag is False and every optional
+  defaults to None) -- is any non-zero exit reachable?
+* Shell -- is any non-zero status reachable: a literal `exit`/`return` with a
+  non-zero or computed operand, a bare `exit` (which propagates `$?`), or
+  `set -e` (under which any failing command ends the script non-zero)?
+
+If no, the gate cannot refuse anything and is reported.
 
 This is a static, conservative approximation and deliberately so. It does not
 know what any gate checks and does not need to; it needs only to know that
@@ -66,11 +90,52 @@ import argparse
 import ast
 import contextlib
 import io
+import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
+
+
+_WIRING_PARSER: tuple[object | None, str] | None = None
+
+
+def _wiring_parser() -> tuple[object | None, str]:
+    """Load `check-gates-are-wired.py`, or say why it could not be loaded.
+
+    Located next to THIS FILE, not under `SCRIPTS`. The two are the same
+    directory in normal use and deliberately are not under `--selftest`, which
+    repoints `SCRIPTS` at a temp dir holding one known-bad fixture in order to
+    grade this file's own exit-code contract. The parser's location is a fact
+    about the installation; `SCRIPTS` is the corpus root being varied. Reading
+    the first from the second made a bare run decline with exit 2 under the
+    selftest -- which the selftest caught, and which is the reason it asserts
+    the contract by running `main()` rather than by reading it.
+
+    Cached, because both the corpus (`wired_gates`) and the shell reader
+    (`_shell_lines`) need it and a gate corpus of fifty would otherwise import
+    and execute the same module fifty times.
+    """
+    global _WIRING_PARSER
+    if _WIRING_PARSER is not None:
+        return _WIRING_PARSER
+
+    import importlib.util
+
+    src = Path(__file__).resolve().parent / "check-gates-are-wired.py"
+    spec = importlib.util.spec_from_file_location("_gates_are_wired", src)
+    if spec is None or spec.loader is None:
+        _WIRING_PARSER = (None, f"{src.name} is not importable")
+        return _WIRING_PARSER
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:  # noqa: BLE001 -- any failure here is a decline
+        _WIRING_PARSER = (None, f"{src.name} would not load ({exc})")
+        return _WIRING_PARSER
+    _WIRING_PARSER = (mod, "")
+    return _WIRING_PARSER
 
 
 def wired_gates() -> tuple[list[Path], str | None]:
@@ -97,27 +162,9 @@ def wired_gates() -> tuple[list[Path], str | None]:
     and drift, and the drift would show up as this file quietly grading a
     corpus that no longer matches the build's.  One parser, one home.
     """
-    import importlib.util
-
-    # Located next to THIS FILE, not under `SCRIPTS`. The two are the same
-    # directory in normal use and deliberately are not under `--selftest`,
-    # which repoints `SCRIPTS` at a temp dir holding one known-bad fixture in
-    # order to grade this file's own exit-code contract. The parser's location
-    # is a fact about the installation; `SCRIPTS` is the corpus root being
-    # varied. Reading the first from the second made a bare run decline with
-    # exit 2 under the selftest -- which the selftest caught, and which is the
-    # reason it asserts the contract by running `main()` rather than by reading
-    # it.
-    src = Path(__file__).resolve().parent / "check-gates-are-wired.py"
-    spec = importlib.util.spec_from_file_location("_gates_are_wired", src)
-    if spec is None or spec.loader is None:
-        return [], f"cannot determine the gate corpus: {src.name} is not importable"
-    mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
-    except Exception as exc:  # noqa: BLE001 -- any failure here is a decline
-        return [], (f"cannot determine the gate corpus: {src.name} would not "
-                    f"load ({exc})")
+    mod, why_not = _wiring_parser()
+    if mod is None:
+        return [], f"cannot determine the gate corpus: {why_not}"
 
     names: set[str] = set()
     for rel in mod.CALLERS:
@@ -336,9 +383,93 @@ def _refusal_reachable_bare(fn: ast.FunctionDef, dests: dict[str, object],
     return found
 
 
+# `exit` / `return` and whatever word follows it. The operand stops at the
+# first shell separator so `exit 1; fi` yields `1`, not `1; fi`.
+_SH_STATUS = re.compile(r"\b(?:exit|return)\b[ \t]*([^\s;&|)]*)")
+# `set -e` in any of its spellings -- `set -e`, `set -eu`, `set -euo pipefail`,
+# `set -o errexit`. Under it, any command that fails ends the script non-zero,
+# which is a route to refusal whether or not the author wrote one.
+_SH_ERREXIT = re.compile(r"^\s*set\s+(?:-[a-zA-Z]*e[a-zA-Z]*\b|-o\s+errexit\b)")
+
+
+def _shell_refusal_reachable(text: str, read_lines) -> bool:
+    """Can this shell gate reach a non-zero status at all?
+
+    Deliberately cruder than the Python analysis, and allowed to be, because
+    the two are conservative in the same direction: everything unresolved
+    clears. Shell has no argparse, so there is no equivalent of "this flag is
+    False in a bare run" to model -- a `--check`-guarded refusal in shell reads
+    as a plain `if`, and inferring that its variable is empty needs dataflow
+    this does not have. It therefore finds only the unguarded shape: a script
+    that has no `set -e` and whose every `exit`/`return` is a literal zero.
+    That is exactly `check-doc-links.py`'s defect, which is the shape this file
+    was written for; the flag-guarded shell variant would slip through, and is
+    recorded here rather than papered over so the next reader knows the edge
+    of the tool rather than trusting a silence it did not earn.
+    """
+    saw_status = False
+    for line in read_lines(text):
+        if _SH_ERREXIT.search(line):
+            return True
+        for operand in _SH_STATUS.findall(line):
+            saw_status = True
+            # A bare `exit` is `exit $?` -- it propagates whatever the previous
+            # command returned, so it can refuse. A computed one (`exit $rc`,
+            # `exit "$status"`) is unanalysable, and unanalysable clears.
+            if not operand.isdigit():
+                return True
+            if int(operand) != 0:
+                return True
+    # A script that never writes `exit` at all ends with the status of its last
+    # command, which this cannot read. Unanalysable clears, as everywhere else
+    # here -- the reportable shape needs a deliberate `exit 0`, because that is
+    # the one that overrides a failure rather than merely failing to cause one.
+    return not saw_status
+
+
+def _shell_lines() -> tuple[object | None, str]:
+    """The sibling's comment/continuation reader, or why it is unavailable.
+
+    Imported rather than reimplemented for the reason `wired_gates()` gives:
+    one parser, one home. This is the cheap half of that parser -- joining
+    `\\` continuations and dropping comment lines -- but a second copy would
+    still be a second thing to keep in step, and the divergence would show up
+    as this file grading a slightly different text than the build's wiring
+    check does.
+    """
+    mod, why_not = _wiring_parser()
+    if mod is None:
+        return None, why_not
+    return mod._executable_lines, ""
+
+
 def audit(paths: list[Path]) -> list[tuple[str, str]]:
     findings: list[tuple[str, str]] = []
     for path in paths:
+        if path.suffix == ".sh":
+            read_lines, why_not = _shell_lines()
+            if read_lines is None:
+                findings.append((path.name, f"could not be read: {why_not}"))
+            elif not _shell_refusal_reachable(
+                    path.read_text(encoding="utf-8", errors="replace"),
+                    read_lines):
+                findings.append((
+                    path.name,
+                    "no non-zero status is reachable: no `set -e`, and every "
+                    "exit/return is a literal 0 -- this gate cannot refuse "
+                    "anything"))
+            continue
+        if path.suffix != ".py":
+            # The corpus admits `.py` and `.sh` only (check-gates-are-wired's
+            # `_ANY_SCRIPT`). A third kind means the two files have drifted,
+            # and the one thing that must not happen is grading it as neither
+            # and reporting "ok" -- that is this file's own subject matter.
+            findings.append((
+                path.name,
+                f"not graded: this tool knows how to read .py and .sh, not "
+                f"{path.suffix or 'an extensionless file'} -- the gate corpus "
+                f"and this grader have drifted apart"))
+            continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
         except (OSError, SyntaxError) as exc:
@@ -497,6 +628,66 @@ def main():
 )
 
 
+# The same ladder in shell. The first is the doc-links defect transliterated:
+# it looks, it prints what it found, and it tells the caller everything is
+# fine. Before 2026-09-04 no shell gate was graded at all, so this shape was
+# not merely missed -- it was outside the corpus.
+_SH_FIXTURES: tuple[tuple[str, bool, str], ...] = (
+    ("""#!/usr/bin/env bash
+for f in $(git ls-files); do
+    grep -n 'TODO' "$f" && echo "found one in $f"
+done
+exit 0
+""", True, "shell: scans, prints, and exits 0 regardless"),
+    ("""#!/usr/bin/env bash
+rc=0
+for f in $(git ls-files); do
+    grep -qn 'TODO' "$f" && rc=1
+done
+if [ "$rc" -ne 0 ]; then
+    exit 1
+fi
+exit 0
+""", False, "shell: a literal non-zero exit clears"),
+    ("""#!/usr/bin/env bash
+set -euo pipefail
+verify_everything
+exit 0
+""", False, "shell: set -e alone is a route to refusal, so it clears"),
+    ("""#!/usr/bin/env bash
+set -o errexit
+verify_everything
+exit 0
+""", False, "shell: set -o errexit is recognised too"),
+    ("""#!/usr/bin/env bash
+run_the_checks
+status=$?
+exit "$status"
+""", False, "shell: a computed status is unanalysable, so it clears"),
+    ("""#!/usr/bin/env bash
+grep -q 'marker' build.log
+exit
+""", False, "shell: a bare exit propagates $?, so it clears"),
+    ("""#!/usr/bin/env bash
+grep -q 'marker' build.log
+""", False, "shell: no exit at all leaves the last command's status, so it "
+            "clears"),
+    ("""#!/usr/bin/env bash
+die() { echo "$1" >&2; return 3; }
+look || die "cannot look"
+exit 0
+""", False, "shell: a helper that returns non-zero clears"),
+    ("""#!/usr/bin/env bash
+# exit 1 -- this comment must not be mistaken for a refusal
+case "$1" in
+    -h|--help) usage; exit 0 ;;
+esac
+report_findings
+exit 0
+""", True, "shell: a refusal that exists only inside a comment is not one"),
+)
+
+
 def selftest() -> int:
     import tempfile
 
@@ -513,10 +704,48 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         for i, (src, want, why) in enumerate(_FIXTURES):
             p = Path(tmp) / f"check-fixture{i}.py"
-            p.write_text(src, encoding="utf-8")
+            p.write_text(src, encoding="utf-8", newline="")
             got = bool(audit([p]))
             check(got == want,
                   f"{why}: reported={got}, expected {want}")
+
+        for i, (src, want, why) in enumerate(_SH_FIXTURES):
+            p = Path(tmp) / f"check-fixture{i}.sh"
+            p.write_text(src, encoding="utf-8", newline="")
+            got = bool(audit([p]))
+            check(got == want,
+                  f"{why}: reported={got}, expected {want}")
+
+        # A shell gate must not be read as Python. This is the regression that
+        # put it here: `ast.parse` on a `case ... esac` reports a mismatched
+        # bracket, which arrives in the same list as a real finding and refuses
+        # the build for a reason that has nothing to do with the gate.
+        py_shaped = Path(tmp) / "check-shellshape.sh"
+        py_shaped.write_text(_SH_FIXTURES[1][0], encoding="utf-8", newline="")
+        check(not any("could not be parsed" in why
+                      for _, why in audit([py_shaped])),
+              "a .sh gate must be read as shell, not handed to ast.parse")
+
+        # A kind this file cannot read must be reported, never waved through.
+        # Silence about an ungraded gate is the one outcome this whole file
+        # exists to prevent, so drift between the corpus and this grader has to
+        # be loud.
+        odd = Path(tmp) / "check-something.pl"
+        odd.write_text("exit 1;\n", encoding="utf-8", newline="")
+        check(bool(audit([odd])),
+              "a gate this tool cannot read must be reported, not skipped")
+
+        # Every shell gate the build actually runs clears today. Stated against
+        # the live corpus rather than a named file, so lane B renaming or
+        # retiring `coreutils-check.sh` does not turn into a lane A failure --
+        # but a shell gate that genuinely cannot refuse still does.
+        real_wired, real_why = wired_gates()
+        if real_why is None:
+            real_sh = [p for p in real_wired if p.suffix == ".sh"]
+            sh_findings = audit(real_sh)
+            check(not sh_findings,
+                  f"the {len(real_sh)} shell gate(s) this build runs must all "
+                  f"be gradeable and able to refuse, got {sh_findings!r}")
 
         # THE EXIT-CODE CONTRACT -- the very defect this file exists to catch,
         # asserted against this file. A gate that reports a finding and then
@@ -527,7 +756,7 @@ def selftest() -> int:
             bad_dir = Path(tmp) / "bad"
             bad_dir.mkdir()
             (bad_dir / "check-cannot-refuse.py").write_text(
-                _FIXTURES[0][0], encoding="utf-8")
+                _FIXTURES[0][0], encoding="utf-8", newline="")
             for argv, want, why in (
                 (["x"], 1, "a finding must make a bare run FAIL"),
                 (["x", "--list"], 0, "--list reports without failing"),
@@ -539,6 +768,20 @@ def selftest() -> int:
                         contextlib.redirect_stderr(buf):
                     got_rc = main()
                 check(got_rc == want, f"{why}: exit {got_rc}, want {want}")
+
+            # The same contract on the shell path, aimed explicitly because a
+            # `check-*.sh` is not what the fallback glob looks for. A finding
+            # is a finding whatever language it was written in.
+            bad_sh = bad_dir / "check-cannot-refuse.sh"
+            bad_sh.write_text(_SH_FIXTURES[0][0], encoding="utf-8", newline="")
+            sys.argv = ["x", str(bad_sh)]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), \
+                    contextlib.redirect_stderr(buf):
+                got_rc = main()
+            check(got_rc == 1,
+                  f"a shell gate that cannot refuse must make the run FAIL: "
+                  f"exit {got_rc}, want 1")
 
             # An empty corpus is exit 2, not a pass: "nothing to judge" must
             # never be able to look like "judged, and fine".

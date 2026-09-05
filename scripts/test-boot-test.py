@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOOT_TEST = os.path.join(REPO_ROOT, "scripts", "boot-test.sh")
@@ -59,6 +60,112 @@ import srcload  # noqa: E402
 gitenv.scrub_environ()
 
 _FAILURES = []
+
+# ---------------------------------------------------------------------------
+# Fixture directories: naming, teardown, and why teardown is not one line.
+#
+# Every fixture in this file lives under the repo's own gitignored `build/`
+# rather than the system temp directory, because the bash these tests spawn is
+# sandboxed to the project tree and cannot see `%TEMP%`. That is deliberate and
+# is explained again at each call site. What was *not* deliberate is what it
+# cost, which was found on 2026-09-04 and is written up in `known-issues.md` as
+# `A-FIXTURE-CLEANUP-LEAVES-EMPTY-DIRECTORIES-IN-BUILD-AND-CANNOT-TELL-YOU`:
+#
+#   * The three `mkdtemp` calls passed no `prefix=`, so a leaked fixture was
+#     named `tmpXXXXXXXX` -- unattributable, and *unsweepable*, because
+#     `build/tmp` is a real unrelated directory and `rm -rf build/tmp*` would
+#     take it too. A leak nobody can safely glob for is a leak nobody cleans.
+#   * Teardown was `shutil.rmtree(tmp, ignore_errors=True)`, which discards the
+#     one signal it produces. Twenty-one directories had accumulated, and the
+#     suite printed `PASSED` on every run that made them.
+#
+# The failure is not intermittent. Three runs each leaked exactly seven, and
+# every leftover was *empty* -- so `rmtree` deleted the contents fine and failed
+# only on the final `os.rmdir`, the ordinary Windows outcome when something
+# still holds a handle on the directory in the moment after its last child goes
+# away (see `open-questions.md` A-Q7). A 100% rate is what dictates the shape
+# below: a retry that merely spins would fail all its attempts exactly as
+# reliably as the single try did, so the retry *sleeps*, with a backoff, and
+# reports how many attempts it needed.
+#
+# The retry calls `rmtree` again rather than `os.rmdir`, so that a fixture stuck
+# on a *file* is retried too -- and if one ever survives, the report says
+# whether it still has contents. That distinction is precisely the one
+# `ignore_errors=True` could not make: an empty leftover is cosmetic, a
+# non-empty one is a real disk leak, and the old code reported them identically,
+# which is to say not at all.
+FIXTURE_PREFIX = "slateos-boot-test-fixture-"
+
+#: Attempts and the per-attempt backoff step. Ten attempts with a linear
+#: backoff is ~2.75 s of sleeping in the worst case, per fixture that refuses --
+#: bounded, and never paid at all when the first attempt works.
+_RMTREE_ATTEMPTS = 10
+_RMTREE_BACKOFF = 0.05
+
+#: How many attempts each successful teardown actually needed. Reported by
+#: `main()`. This is the number that decides whether the diagnosis above is
+#: right: if teardowns routinely need more than a handful, the window is not
+#: milliseconds and the retry is a plaster rather than a fix.
+_FIXTURE_ATTEMPTS = []
+
+#: Fixtures that survived every attempt: `(path, entries_left, last_error)`.
+_FIXTURE_LEAKS = []
+
+
+def _fixture_root():
+    root = os.path.join(REPO_ROOT, "build")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def new_fixture():
+    """Create a fixture directory under `build/`, named so a leak is traceable."""
+    return tempfile.mkdtemp(prefix=FIXTURE_PREFIX, dir=_fixture_root())
+
+
+def drop_fixture(path):
+    """Remove a fixture, retrying with a sleep, and record what it took.
+
+    Never raises: a teardown that threw would fail a test that had already
+    passed, which is the one thing the old `ignore_errors=True` got right. The
+    difference is that a refusal is now *recorded* instead of discarded, so
+    `main()` can say so.
+    """
+    for attempt in range(1, _RMTREE_ATTEMPTS + 1):
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            last = exc
+            time.sleep(_RMTREE_BACKOFF * attempt)
+            continue
+        _FIXTURE_ATTEMPTS.append(attempt)
+        return
+    try:
+        left = len(os.listdir(path))
+    except OSError:
+        left = -1
+    _FIXTURE_LEAKS.append((path, left, last))
+
+
+def sweep_stale_fixtures():
+    """Collect fixtures orphaned by an earlier run, before starting a new one.
+
+    A run killed part-way -- Ctrl-C, or `run-timeout.py` firing on a genuine
+    hang -- cannot run its own teardown, so without this the debris is
+    permanent. Matching on `FIXTURE_PREFIX` is what makes the sweep safe to
+    write at all: it can only ever name directories this file created, never
+    `build/tmp` or any other artifact.
+    """
+    root = os.path.join(REPO_ROOT, "build")
+    if not os.path.isdir(root):
+        return 0
+    stale = [os.path.join(root, n) for n in sorted(os.listdir(root))
+             if n.startswith(FIXTURE_PREFIX)]
+    for path in stale:
+        drop_fixture(path)
+    return len(stale)
 
 
 def check(label, got, want):
@@ -529,9 +636,7 @@ def _run_clippy_gate(probe_body, commit_wait, timeout=60):
         "(exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)\n"
     )
 
-    fixture_root = os.path.join(REPO_ROOT, "build")
-    os.makedirs(fixture_root, exist_ok=True)
-    tmp = tempfile.mkdtemp(dir=fixture_root)
+    tmp = new_fixture()
     try:
         with open(os.path.join(tmp, "crash.txt"), "w",
                   encoding="utf-8", newline="\n") as handle:
@@ -580,10 +685,9 @@ def _run_clippy_gate(probe_body, commit_wait, timeout=60):
         except subprocess.TimeoutExpired:
             return None
     finally:
-        # `ignore_errors` because Windows can hold the directory briefly after
-        # the child exits; a leftover under gitignored `build/` is harmless,
-        # whereas a cleanup exception would fail a test that had already passed.
-        shutil.rmtree(tmp, ignore_errors=True)
+        # Retried-with-a-sleep, and a refusal is recorded rather than swallowed;
+        # see FIXTURE_PREFIX at the top for why one line was not enough.
+        drop_fixture(tmp)
 
 
 # A probe that alternates below/above the floor on successive calls. This is the
@@ -703,9 +807,7 @@ def _run_prune_hook(free_gb, below_gb, pruner_rc=0):
     relative-path and `build/`-fixture constraints as `_run_clippy_gate`; see
     its docstring for why absolute paths do not survive the MSYS boundary.
     """
-    fixture_root = os.path.join(REPO_ROOT, "build")
-    os.makedirs(fixture_root, exist_ok=True)
-    tmp = tempfile.mkdtemp(dir=fixture_root)
+    tmp = new_fixture()
     try:
         os.makedirs(os.path.join(tmp, "target"))
         # A real Python file, because the hook picks the interpreter itself and
@@ -742,7 +844,7 @@ def _run_prune_hook(free_gb, below_gb, pruner_rc=0):
                 argv = handle.read()
         return proc.returncode, proc.stdout, argv
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        drop_fixture(tmp)
 
 
 def test_the_cache_prune_only_fires_when_the_volume_is_getting_full():
@@ -837,9 +939,7 @@ def _run_python_suites(suites):
 
     Returns `(returncode, combined output)`.
     """
-    fixture_root = os.path.join(REPO_ROOT, "build")
-    os.makedirs(fixture_root, exist_ok=True)
-    tmp = tempfile.mkdtemp(dir=fixture_root)
+    tmp = new_fixture()
     try:
         scripts_dir = os.path.join(tmp, "scripts")
         os.makedirs(scripts_dir)
@@ -869,7 +969,7 @@ def _run_python_suites(suites):
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         return proc.returncode, proc.stdout
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        drop_fixture(tmp)
 
 
 def test_a_suite_that_skips_a_group_cannot_report_only_that_it_passed():
@@ -1005,10 +1105,48 @@ def main():
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
               f"suite has at least 3. Discovery is broken, not the code.")
         return 1
+
+    # Before anything, collect fixtures an earlier run could not: a suite killed
+    # part-way never reaches its own `finally`. Announced only when it finds
+    # something, because a line that prints "0" on every clean run is a line
+    # nobody reads on the run where it says 3.
+    swept = sweep_stale_fixtures()
+    if swept:
+        print(f"swept {swept} fixture director{'y' if swept == 1 else 'ies'} "
+              f"left by an earlier run")
+
     for _name, fn in tests:
         fn(**{p: {}[p] for p in inspect.signature(fn).parameters})
 
     print()
+
+    # Teardown accounting. The retry is only a fix if the window it assumes is
+    # real, so say what it cost rather than asserting that it worked: a run
+    # where every fixture came away first try is the claim, and any run that
+    # needed more says so with the worst case named.
+    if _FIXTURE_ATTEMPTS:
+        worst = max(_FIXTURE_ATTEMPTS)
+        retried = sum(1 for a in _FIXTURE_ATTEMPTS if a > 1)
+        if worst > 1:
+            print(f"fixture teardown: {len(_FIXTURE_ATTEMPTS)} removed, "
+                  f"{retried} needed a retry, worst {worst} of "
+                  f"{_RMTREE_ATTEMPTS} attempts")
+    if _FIXTURE_LEAKS:
+        # Not folded into _FAILURES: this is not a boot-test.sh defect, and a
+        # red suite for a held file handle would be a flaky red that gets
+        # bypassed. It is loud, named, and swept by the next run -- which is the
+        # whole distance between this and the `ignore_errors=True` it replaces.
+        print(f"WARNING: {len(_FIXTURE_LEAKS)} fixture(s) survived "
+              f"{_RMTREE_ATTEMPTS} removal attempts:")
+        for path, left, exc in _FIXTURE_LEAKS:
+            shape = ("empty" if left == 0 else
+                     "unreadable" if left < 0 else f"{left} entr"
+                     f"{'y' if left == 1 else 'ies'} left")
+            print(f"  {path} ({shape}): {exc}")
+        print("  Empty means only the final rmdir failed -- cosmetic, and the "
+              "next run sweeps it. Anything else is a real leak; see "
+              "known-issues.md A-FIXTURE-CLEANUP-LEAVES-EMPTY-DIRECTORIES.")
+
     if _FAILURES:
         print(f"{len(_FAILURES)} FAILED: {', '.join(_FAILURES)}")
         return 1

@@ -77,10 +77,35 @@ wrong number -- the first three before this file existed, the fourth inside it:
    parse is indistinguishable from a complete parse of something irrelevant.
    Which is method 1's mistake wearing different clothes.
 
+5. **Assume a gate is a Python script.**  Under-counts, and this one refused a
+   build rather than merely miscounting.  `_ANY_SCRIPT` matched `\.py` alone,
+   so `scripts/coreutils-check.sh` -- a real gate, wired by the push hook as
+
+       cucheck="${repo_root:-.}/scripts/coreutils-check.sh"
+       ...
+       run_checker --may-skip coreutils-unix-half bash "$cucheck" --only linux
+
+   bound nothing on the assignment and resolved to nothing on the call, so the
+   call fell through to "cannot tell what this runs" every single time.  Not a
+   parse this file could not do; a parse it declined to attempt because of the
+   extension.
+
+   Which is this file's own title -- "a gate is what `run_checker` runs, not
+   what it is named" -- violated one level up.  The commit that wrote that
+   title fixed the *name* filter (`check-*` vs anything else) and left the
+   *extension* filter standing, and the two are the same assumption about
+   spelling wearing different clothes.  A gate is what `run_checker` runs, in
+   whatever language it happens to be written.
+
+   Worth noting how long it hid: the hook line and this resolver were authored
+   on different lanes, and lane B's last green boot had the tightened resolver
+   but not the hook line, so the pair first met on `main` and the first lane to
+   boot afterwards ate the refusal.  Neither change was wrong on its own.
+
 So: join `\` continuations, drop comment lines, resolve simple
-`var=<path>.py` assignments, read the script argument of each `run_checker`
-call -- and report, rather than interpret, any call that builds the filename
-itself out of a variable.
+`var=<path>.py` and `var=<path>.sh` assignments, read the script argument of
+each `run_checker` call -- and report, rather than interpret, any call that
+builds the filename itself out of a variable.
 
 THE CONSERVATIVE DIRECTION
 --------------------------
@@ -198,7 +223,7 @@ PINNED: dict[str, str] = {
 # gates in the only sense that matters (each can refuse the build), and were
 # all invisible here because of how they are spelled.
 _GATE_NAME = re.compile(r"(check-[A-Za-z0-9_.-]+\.py)")
-_ANY_SCRIPT = re.compile(r"[A-Za-z0-9_.-]+\.py")
+_ANY_SCRIPT = re.compile(r"[A-Za-z0-9_.-]+\.(?:py|sh)")
 _ASSIGN = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
 # `run_checker` in command position: line start, after a separator, or after
 # `if`/`elif`/`then`/`!`. Not inside an echo, and not as a bare substring.
@@ -216,7 +241,8 @@ _VARREF = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 # checker whose entire job is to not under-count, arrived at by the same route
 # as every wrong answer in the docstring above: a partial parse mistaken for a
 # complete one.
-_INTERPOLATED_NAME = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[A-Za-z0-9_.-]*\.py")
+_INTERPOLATED_NAME = re.compile(
+    r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[A-Za-z0-9_.-]*\.(?:py|sh)")
 # Both spellings are live in this repo. A call carrying either runs the gate's
 # own cases, not the gate, and must not count as wiring.
 _SELFTEST_FLAG = re.compile(r"--self-?test\b")
@@ -470,6 +496,9 @@ if ! run_checker sto-selftest "$py" "$root/scripts/check-selftest-only.py" --sel
 if ! run_checker sto2-selftest "$py" "$root/scripts/check-hyphen-selftest-only.py" --self-test; then :; fi
 run_checker interp "$py" "$root/scripts/$g.py"
 run_checker interp-st "$py" "$root/scripts/${gate}-thing.py" --self-test
+cucheck="$root/scripts/shellgate-check.sh"
+run_checker --may-skip shellhalf bash "$cucheck" --only linux
+run_checker shell-literal bash "$root/scripts/shellgate-literal.sh"
 """
 
 
@@ -488,7 +517,7 @@ def selftest() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         caller = Path(tmp) / "fixture.sh"
-        caller.write_text(_FIXTURE_CALLER, encoding="utf-8")
+        caller.write_text(_FIXTURE_CALLER, encoding="utf-8", newline="")
         runs, tested, unresolved = analyse(caller)
 
         # Each of these was a real wrong answer before this file existed.
@@ -504,6 +533,21 @@ def selftest() -> int:
               "shape b5246478b added")
         check(any("mystery" in u for u in unresolved),
               f"an unresolvable call must be reported, got {unresolved!r}")
+
+        # A gate written in bash is still a gate. `_ANY_SCRIPT` matched `.py`
+        # alone, so the push hook's real call --
+        #     cucheck=".../coreutils-check.sh"; run_checker ... bash "$cucheck"
+        # -- bound nothing and resolved to nothing, and was reported as
+        # unreadable on every run. Both spellings are pinned here: bound to a
+        # variable (the shape that actually occurs) and written out literally.
+        check("shellgate-check.sh" in runs,
+              f"a .sh gate bound to a variable must count as wiring, got "
+              f"{sorted(runs)!r}")
+        check("shellgate-literal.sh" in runs,
+              "a .sh gate named literally must count as wiring")
+        check(not any("shellhalf" in u for u in unresolved),
+              f"a resolvable .sh call must NOT be reported as unreadable -- "
+              f"this is the refusal that blocked main, got {unresolved!r}")
         check(not any("outofscope" in u for u in unresolved),
               "a resolvable non-gate script is out of scope, not unresolved")
 
@@ -550,9 +594,9 @@ def selftest() -> int:
         # prints a full report drowns its own verdict.
         fake = Path(tmp) / "tree"
         (fake / "scripts" / "hooks").mkdir(parents=True)
-        (fake / "scripts" / "check-orphan.py").write_text("", encoding="utf-8")
-        (fake / "scripts" / "boot-test.sh").write_text("", encoding="utf-8")
-        (fake / "scripts" / "hooks" / "pre-push").write_text("", encoding="utf-8")
+        (fake / "scripts" / "check-orphan.py").write_text("", encoding="utf-8", newline="")
+        (fake / "scripts" / "boot-test.sh").write_text("", encoding="utf-8", newline="")
+        (fake / "scripts" / "hooks" / "pre-push").write_text("", encoding="utf-8", newline="")
 
         findings, _, _ = audit(fake, {})
         check(any("check-orphan.py" in f for f in findings),
@@ -585,7 +629,7 @@ def selftest() -> int:
             # And a pinned entry that is now wired.
             (fake / "scripts" / "boot-test.sh").write_text(
                 'run_checker orphan "$py" "$r/scripts/check-orphan.py"\n',
-                encoding="utf-8")
+                encoding="utf-8", newline="")
             check(any("something runs it now" in f
                       for f in audit(fake, {"check-orphan.py": "stale"})[0]),
                   "a stale exemption must be reported")
@@ -600,7 +644,7 @@ def selftest() -> int:
             # Third arm: the gate is wired, ships a self-test, and nothing
             # runs it. Live case when this was written: check-option-refusal.py.
             (fake / "scripts" / "check-orphan.py").write_text(
-                'if "--self-test" in sys.argv:\n    pass\n', encoding="utf-8")
+                'if "--self-test" in sys.argv:\n    pass\n', encoding="utf-8", newline="")
             gate_f, self_f, _ = audit(fake, {})
             check(any("nothing runs" in f for f in self_f),
                   "a wired gate whose self-test nothing runs must be reported")
@@ -632,7 +676,7 @@ def selftest() -> int:
                 'run_checker orphan "$py" "$r/scripts/check-orphan.py"\n'
                 'run_checker orphan-selftest "$py" '
                 '"$r/scripts/check-orphan.py" --self-test\n',
-                encoding="utf-8")
+                encoding="utf-8", newline="")
             rc, text = run_out(["x"])
             check(rc == 0, "adding the self-test call must clear it")
             # A clean run prints neither heading. Asserted because the split
@@ -649,7 +693,7 @@ def selftest() -> int:
             # the split creates a new way for this to rot, since a message
             # that moved to the list this case does not read looks identical
             # to a message that was correctly suppressed.
-            (fake / "scripts" / "boot-test.sh").write_text("", encoding="utf-8")
+            (fake / "scripts" / "boot-test.sh").write_text("", encoding="utf-8", newline="")
             gate_f, self_f, _ = audit(fake, {})
             check(not any("ships a self-test" in f
                           for f in gate_f + self_f),

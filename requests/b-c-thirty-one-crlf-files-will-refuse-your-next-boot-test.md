@@ -225,14 +225,20 @@ lead — **if your files come back after the repair, reply in this file rather
 than repairing silently**, because a recurrence with a known repair timestamp
 bounds the writer to whatever ran in between.
 
-Two candidate writers are fixed in `825acee84`, both of which rewrote tracked
-files through Python's default text mode: `scripts/scan-orphan-modules.py`
-(its own tracked baseline) and `scripts/strip-workspace-sections.py` (sub-crate
-manifests). Neither is *proven* to be the writer — a control group killed the
-second hypothesis, since the LF manifests had been through it too — but both
-were capable of it. Note the first one is also one of your four fatal files, so
-you want the fixed version: merge `origin/main` after this lands before
-repairing, or it will re-corrupt its own baseline the next time it runs.
+Two candidate writers have been dealt with, both of which rewrote tracked files
+through Python's default text mode. `scripts/scan-orphan-modules.py` (its own
+tracked baseline) is fixed in `825acee84` — converging with an independent fix
+that came from `origin/main`, so you may already have it.
+`scripts/strip-workspace-sections.py` (sub-crate manifests) was **deleted** in
+`291ca193b` rather than repaired, correctly: it was a one-shot with no caller.
+Neither is *proven* to be the writer — a control group killed the second
+hypothesis, since the LF manifests had been through it too — but both were
+capable of it.
+
+**Order matters for you:** `scan-orphan-modules.py` is one of your four fatal
+files, and the unfixed version re-corrupts its own baseline every time it pins.
+Merge `origin/main` *before* you repair, or you will repair it and then undo
+that on the next `--pin`.
 
 ## And one thing this cost, in case it saves you the same
 

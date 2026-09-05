@@ -111,7 +111,7 @@ def _make_victim(tmp):
     git(tmp, "config", "user.name", "victim")
     os.makedirs(os.path.join(tmp, "requests"))
     for name in ("keep-me.md", "and-me.md"):
-        with open(os.path.join(tmp, "requests", name), "w", encoding="utf-8") as fh:
+        with open(os.path.join(tmp, "requests", name), "w", encoding="utf-8", newline="") as fh:
             fh.write("# a request that must survive\n")
     git(tmp, "add", "-A")
     git(tmp, "commit", "--quiet", "-m", "the victim's only commit")
@@ -265,16 +265,30 @@ def test_a_repository_with_no_trunk_is_skipped_not_failed():
         git(tmp, "branch", "-m", "main", "not-main")
         scripts = os.path.join(tmp, "scripts")
         os.makedirs(scripts, exist_ok=True)
-        # `gitenv.py` travels with it: the checker imports it, so a copy without
-        # it does not start. Listing the dependency here rather than copying
-        # `scripts/` wholesale is deliberate -- this assertion is what fails if
-        # the checker grows a second import, which is a thing worth being told
-        # about in a gate that has to run in a fresh clone.
-        for source in (CHECKER, os.path.join(REPO_ROOT, "scripts", "gitenv.py")):
+        # `gitenv.py` and `gittree.py` travel with it: the checker imports both,
+        # so a copy without them does not start. Listing the dependencies here
+        # rather than copying `scripts/` wholesale is deliberate -- this
+        # assertion is what fails if the checker grows another import, which is
+        # a thing worth being told about in a gate that has to run in a fresh
+        # clone.
+        #
+        # `gittree.py` is the second one, and it arrived without this list being
+        # updated: gate 9 learned to read the waiver list out of the commit
+        # instead of off the disk, which needs a tree reader, and this test then
+        # failed as designed -- `ModuleNotFoundError: No module named 'gittree'`,
+        # surfacing as the no-trunk case exiting 1 instead of skipping with 0.
+        # It is listed rather than reached transitively on purpose: the point of
+        # the fixture is that the checker runs from a directory holding only
+        # what it truly needs, and a copy that pulled in imports automatically
+        # would stop being able to say what that is. `gittree` imports `gitenv`,
+        # which is why the two-name list is still closed.
+        for source in (CHECKER,
+                       os.path.join(REPO_ROOT, "scripts", "gitenv.py"),
+                       os.path.join(REPO_ROOT, "scripts", "gittree.py")):
             with open(source, encoding="utf-8") as src:
                 body = src.read()
             with open(os.path.join(scripts, os.path.basename(source)),
-                      "w", encoding="utf-8") as dst:
+                      "w", encoding="utf-8", newline="") as dst:
                 dst.write(body)
         installed = os.path.join(scripts, os.path.basename(CHECKER))
 

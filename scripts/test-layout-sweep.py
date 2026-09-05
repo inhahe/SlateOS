@@ -463,7 +463,7 @@ def test_the_sweep_actually_threads_each_arms_key_to_the_next(ls):
     import types
 
     handle = tempfile.NamedTemporaryFile(
-        suffix=".txt", delete=False, mode="w", encoding="utf-8")
+        suffix=".txt", delete=False, mode="w", encoding="utf-8", newline="")
     handle.close()
     serial = handle.name
     seen = []
@@ -476,7 +476,7 @@ def test_the_sweep_actually_threads_each_arms_key_to_the_next(ls):
         # Stand in for the build+boot: emit the banner the sweep re-reads to
         # confirm the kernel it got is the kernel it asked for.
         pad = env["SLATEOS_TEXT_PAD"]
-        with open(serial, "w", encoding="utf-8") as out:
+        with open(serial, "w", encoding="utf-8", newline="") as out:
             out.write(f"[boot] build profile: sanitizer=off textpad={pad}\n")
         return types.SimpleNamespace(returncode=0)
 

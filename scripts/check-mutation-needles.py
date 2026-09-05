@@ -311,7 +311,7 @@ def self_test() -> int:
     def directory(files):
         td = tempfile.mkdtemp(prefix="needles-")
         for name, text in files.items():
-            (Path(td) / name).write_text(text, encoding="utf-8")
+            (Path(td) / name).write_text(text, encoding="utf-8", newline="")
         return td
 
     for files, want, must_say, why in (

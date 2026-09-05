@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Assert that files declared `text eol=lf` really do have LF endings *on disk*.
+"""Assert that tracked text files really do have LF endings *on disk*.
+
+(Scope note: this read "files declared `text eol=lf`" until 2026-09-04, which is
+where the gate started and is now only where the `text` *assertion* comes from.
+See "Why the scope is now every *tracked* file" below.)
 
 `.gitattributes` promises, in as many words, that "a shell script must arrive in
 the working tree with LF endings, on every platform and in every worktree". That
@@ -133,8 +137,11 @@ A gate that stops three agents' work over a byte that harms nothing gets
 bypassed, and then it is not protecting the `.sh` files either. So the two
 questions are now answered separately:
 
-* **Is anything reported?** Every declared file, exactly as argued above. The
-  size of the cause stays visible; nothing is hidden.
+* **Is anything reported?** Every tracked file, exactly as argued above. (This
+  said "every declared file" when §764 was written, and the scope change of
+  2026-09-04 widened it -- which strengthens the argument rather than altering
+  it: the size of the cause stays visible, and there is now two thirds more of
+  it to see.)
 * **Does the build stop?** Only if a CR is in a file some machine *executes*
   from disk -- a `.sh`, or anything with a `#!`. See `is_run_from_disk`.
 
@@ -148,16 +155,33 @@ Recorded in `design-decisions.md` §764.
 
 ## Cost
 
-Reading the ~1440 declared files is ~37 MB. That is 93 s single-threaded on this
-host and about a fifth of that across a thread pool, because the cost is
-per-file antivirus interception rather than bandwidth (see `open-questions.md`
-A-Q7, which is about exactly that tax). The pool is why this is affordable at
+Reading all 13 908 tracked files is ~195 MB, and takes 44 s at `READ_THREADS`.
+The cost is per-file antivirus interception rather than bandwidth (see
+`open-questions.md` A-Q7, which is about exactly that tax), which is why it
+parallelises nearly perfectly and why the pool is what makes this affordable at
 all; if A-Q7 is ever answered the whole thing drops into the noise.
 
-It earns that by running *first*. The equivalent evidence exists inside
-`check_shellcheck`, which sits some forty-five minutes into the sweep and only
-covers `.sh` -- so a CR discovered there costs a whole boot test, which is what
-it cost on 2026-09-03.
+This paragraph read "~1440 declared files is ~37 MB ... 93 s single-threaded"
+until 2026-09-04. Both the population and the thread count changed under it on
+the same day, from two different lanes' edits, and a stale cost paragraph is
+worse than none: it is the number someone quotes when deciding whether the gate
+is affordable. Measurements are in the scope section above, which is where they
+are derived; this says what it costs today.
+
+It earns that by running before anything is compiled or booted. The two gates
+ahead of it in `boot-test.sh` -- `check_prerequisites` (are the tools present)
+and `check_requests_not_deleted` (one git query) -- cost seconds between them,
+so a CR found here is found within the first minute and costs only itself. The
+equivalent evidence exists inside `check_shellcheck`, which sits some forty-five
+minutes into the sweep and only covers `.sh` -- so a CR discovered *there* costs
+a whole boot test, which is what it cost on 2026-09-03.
+
+Stated as "before anything is compiled" rather than as a position in the list on
+purpose. This paragraph said "by running *first*" until 2026-09-04, by which
+time two gates had been inserted above it and the sentence was simply false --
+an ordinal is a claim about every other gate in the file, so it goes stale when
+any of them moves and nothing rechecks it. What actually matters is not being
+third or first; it is being on the cheap side of the first `cargo` invocation.
 
 ## `--self-test` grades the gate against real files
 
@@ -169,17 +193,28 @@ nothing about whether the gate is still attached to the tree.
 The fragile half here is not "does `\r` appear in these bytes" -- that cannot
 drift. It is the *attribute query*: this shells out to `git check-attr -z
 --stdin` and walks a NUL-separated stream three fields at a time. If that framing
-ever changes, or the invocation grows a typo, the declared set becomes empty and
-this gate reports a clean tree in a fraction of a second, forever, on every host.
-So the self-test asserts the query returns a set with real files in it, that it
-puts a known `.sh` inside and a known `.rs` outside, and that a CR planted in a
-real declared file's real bytes is reported while the same CR planted in an
-undeclared file's bytes is not. Nothing is written to disk.
+ever changes, or the invocation grows a typo, the declared set becomes empty. So
+the self-test asserts the query returns a set with real files in it, and that it
+puts a known `.sh` inside and a known `.rs` outside.
+
+Note what that failure now costs, because the scope change of 2026-09-04 changed
+it: an empty declared set used to make this gate report a clean tree in a
+fraction of a second, forever, on every host -- the whole worktree went dark. It
+no longer can. The scope comes from `git ls-files`, and the declared set only
+feeds the NUL override, so the same breakage now costs one narrow thing: a
+NUL-bearing file that was being scanned *because* it was asserted text (the 4.5
+MB `known-issues.md` case) would be skipped as binary. That is a real loss and a
+far smaller one, and it is the main practical argument for the new scope beyond
+the measurement.
+
+Correspondingly the self-test no longer pins "a CR in an undeclared file is not
+reported" -- it pins the opposite, since that is now the point. Nothing is
+written to disk inside the worktree.
 
 Exit codes:
-    0   no declared file that is executed from disk has a CR. Prose files with
-        CRs are printed and do not change this code -- see the severity split
-        above; `--list` and the summary line still say how many there were.
+    0   no file that is executed from disk has a CR. Files nothing executes are
+        printed with their CRs and do not change this code -- see the severity
+        split above; `--list` and the summary line still say how many there were.
     1   a file that some machine executes from disk has a CR (the finding)
     2   could not look: not a git worktree, or fewer files found than the floor
 

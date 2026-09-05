@@ -761,6 +761,14 @@ class _Args:
     # and boot-test.sh omits the flag, so the key must stay out of the record
     # rather than land as a 0 that reads like an instant build.
     build_seconds = None
+    # The two phases added 2026-09-04, and they are here for the reason spelled
+    # out four comments down rather than as boilerplate: `build_record` reads
+    # them off `args`, so omitting them from this stub does not produce a test
+    # that skips the new field -- it produces an AttributeError in every test
+    # that builds a record at all. That is exactly how 034dffe2c broke the whole
+    # suite with `free_gb_min`.
+    gates_seconds = None
+    script_seconds = None
     # Same shape, and the same reason: a run whose floor check was disabled with
     # --min-free-gb=0, or whose `df` was unreadable, did not observe zero GiB
     # free. These must match argparse's own defaults (None and "") or the stub
@@ -1465,7 +1473,7 @@ def test_list_shows_the_accelerator(bh, tmpdir):
     import io
     path = os.path.join(tmpdir, "h.jsonl")
     accels = ("QEMU TCG", "Hyper-V/WHPX", "bare metal", None)
-    with open(path, "w", encoding="utf-8") as fh:
+    with open(path, "w", encoding="utf-8", newline="") as fh:
         for accel in accels:
             # An explicit `sanitizer` so the column beside this one renders as
             # `-`. Leave it out and *it* prints `?`, and a test that merely
@@ -1478,11 +1486,27 @@ def test_list_shows_the_accelerator(bh, tmpdir):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         bh.cmd_list(path, 10)
-    rows = [line.split() for line in buf.getvalue().splitlines() if line.strip()]
+    lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+    # Two lines of preamble -- the header and its note -- then one line per
+    # record. Dropped by count rather than by matching their text, because the
+    # assertion below is about the data rows and a preamble that changed
+    # wording should not fail it.
+    rows = [ln.split() for ln in lines[2:]]
     check("one row per record", len(rows), len(accels))
-    # Column 5: ts, commit, verdict, wall, sanitizer, accel, label, fingerprints.
+    # Located by NAME, not by a hard-coded index. The index moved on 2026-09-04
+    # when the `total` column landed between `qemu` and `san`. The old `r[5]`
+    # did fail, loudly -- but it failed saying "expected tcg, got -", which
+    # describes neither the change that caused it nor the column it was reading,
+    # and which a reader would most naturally "fix" by adjusting the expectation.
+    # It was luck that the neighbouring column held different text; had `total`
+    # landed next to another `-`, the same edit would have left the test green
+    # while it silently asserted about the wrong column. A positional index into
+    # a format string is a claim about layout dressed up as a claim about data.
+    col = [name for name, _ in bh.LIST_COLUMNS].index("accel")
     check("each accelerator gets its own token, and 'cannot say' is not one of "
-          "them", [r[5] for r in rows], ["tcg", "whpx", "metal", "?"])
+          "them", [r[col] for r in rows], ["tcg", "whpx", "metal", "?"])
+    check("the header names every column the row prints",
+          len(bh.LIST_COLUMNS), len(rows[0]))
 
 
 # --------------------------------------------------------------------------
@@ -1733,7 +1757,7 @@ def test_the_real_history_has_a_uniform_utc_offset(bh):
 
 def _markers_file(tmpdir, *literals):
     path = os.path.join(tmpdir, "gated-markers.json")
-    with open(path, "w", encoding="utf-8") as fh:
+    with open(path, "w", encoding="utf-8", newline="") as fh:
         json.dump({"root": "main.rs",
                    "markers": {lit: {"sites": [1], "tests": ["x::self_test"]}
                                for lit in literals}}, fh)
@@ -1825,7 +1849,7 @@ def test_malformed_marker_files_do_not_cost_the_row(bh, tmpdir):
     """
     bad = os.path.join(tmpdir, "bad.json")
     for content in ("{not json", "[]", '{"markers": "not an object"}', "null"):
-        with open(bad, "w", encoding="utf-8") as fh:
+        with open(bad, "w", encoding="utf-8", newline="") as fh:
             fh.write(content)
         check(f"{content[:20]!r} yields unknown, not a crash",
               bh.load_gated_markers(bad), None)
@@ -2139,7 +2163,7 @@ def test_a_missing_qemu_stderr_is_absence_of_evidence(bh, tmpdir):
     check("a path that is not a file", bh.read_qemu_stderr(tmpdir), "")
 
     real = os.path.join(tmpdir, "qemu-stderr.txt")
-    with open(real, "w", encoding="utf-8") as fh:
+    with open(real, "w", encoding="utf-8", newline="") as fh:
         fh.write(E_HOST_OOM)
     check("and a real file is read", bh.read_qemu_stderr(real), E_HOST_OOM)
 
@@ -2258,6 +2282,97 @@ def test_the_host_verdict_is_documented_for_the_reader(bh):
     check_true("HOST_FAIL has help text", bool(bh.VERDICT_HELP.get("HOST_FAIL")))
     check("and it is not counted as clean",
           "HOST_FAIL" in bh.CLEAN_VERDICTS, False)
+
+
+def test_the_two_new_phases_are_absent_not_zero(bh):
+    """A run whose gates never finished did not run them in no time.
+
+    The distinction is sharper for `gates_seconds` than for `build_seconds`,
+    which shares the rule. A run omits `build_seconds` on purpose (--no-build),
+    so absence there is a *choice*; a run omits `gates_seconds` only when the
+    gate phase did not reach its end, which is a fault. Writing 0 for either
+    would put a fabricated sample into a median.
+    """
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check("no gate phase recorded -> no field", "gates_seconds" in rec, False)
+    check("no total recorded -> no field", "script_seconds" in rec, False)
+
+    args = _Args()
+    args.gates_seconds = 0.0
+    args.script_seconds = 0.0
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    # The half that a `if args.gates_seconds:` truthiness test would get wrong,
+    # and the reason the implementation says `is not None`. A genuinely
+    # instantaneous phase is a measurement and has to survive to the row; only
+    # an *unmeasured* one is absent.
+    check("but a measured zero is a measurement and is written",
+          rec["gates_seconds"], 0.0)
+    check("...for both", rec["script_seconds"], 0.0)
+
+
+def test_the_phase_breakdown_names_the_time_no_phase_claims(bh):
+    """The residual is the point of the breakdown, not a rounding artefact.
+
+    `gates + build + qemu` does not equal the run: between them sit the
+    free-space checks, the commit-headroom wait that blocks behind another
+    lane's build, and the cross-worktree boot lock. Those are minutes, not
+    seconds -- a 2026-08-31 run spent ~3000s before QEMU started -- and they are
+    the answer to "why did this take ninety minutes" on precisely the runs where
+    the answer is not about the kernel.
+    """
+    rec = {"script_seconds": 1000.0, "gates_seconds": 600.0,
+           "build_seconds": 200.0, "wall_seconds": 100.0}
+    check("the four phases come back in run order, residual last",
+          bh.phase_breakdown(rec),
+          [("gates", 600.0), ("build", 200.0), ("qemu", 100.0),
+           ("other", 100.0)])
+    check("and they sum to the total",
+          sum(v for _, v in bh.phase_breakdown(rec)), 1000.0)
+
+
+def test_a_breakdown_of_a_row_that_has_no_total_is_refused(bh):
+    """Three numbers with no denominator are not a breakdown.
+
+    Every row written before 2026-09-04 has `wall_seconds` and most have
+    `build_seconds`, so a breakdown that simply skipped the missing total would
+    happily report "gates 0s, build 200s, qemu 100s, other -300s" for hundreds
+    of historical rows. Refusing is what keeps the old rows readable as old
+    rows rather than as runs with impossible arithmetic.
+    """
+    check("no script_seconds -> no breakdown at all",
+          bh.phase_breakdown({"wall_seconds": 100.0, "build_seconds": 200.0}),
+          [])
+    check("a bool is not a duration, even though it is an int in Python",
+          bh.phase_breakdown({"script_seconds": True}), [])
+
+
+def test_a_partial_row_charges_the_missing_phase_to_the_residual(bh):
+    """--no-build is the common case and must not distort the split.
+
+    A run that skipped Step 1 has no `build_seconds`. The breakdown must then
+    show three entries whose residual absorbs nothing extra -- not a `build 0s`
+    entry, which would assert the build was free.
+    """
+    rec = {"script_seconds": 800.0, "gates_seconds": 600.0,
+           "wall_seconds": 100.0}
+    parts = bh.phase_breakdown(rec)
+    check("the phase that did not happen is not listed",
+          [n for n, _ in parts], ["gates", "qemu", "other"])
+    check("and the residual is the honest remainder",
+          dict(parts)["other"], 100.0)
+
+
+def test_a_backwards_clock_is_shown_not_hidden(bh):
+    """A negative residual should look wrong, because it is.
+
+    Four independent `date +%s` pairs stamp these phases, so a clock step
+    between two of them can make the parts exceed the whole. Clamping to zero
+    would turn an impossible row into a plausible one and retire the only
+    evidence that the stamping is broken.
+    """
+    rec = {"script_seconds": 100.0, "gates_seconds": 600.0}
+    check("the contradiction survives to the reader",
+          dict(bh.phase_breakdown(rec))["other"], -500.0)
 
 
 def main():

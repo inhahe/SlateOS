@@ -489,7 +489,7 @@ def selftest() -> int:
 
     def classify(src: str) -> int:
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "x.rs").write_text(src, encoding="utf-8")
+            (Path(d) / "x.rs").write_text(src, encoding="utf-8", newline="")
             # Through a real `WorkTree`, not a bare read, so the selftest
             # exercises the same seam the gate does. A selftest that bypasses
             # the seam cannot see a seam-shaped defect.
@@ -625,7 +625,7 @@ def selftest() -> int:
         p.write_text(
             'fn f() { eprintln!("a: {}: {e}", x); eprintln!("b: {}: {e}", y); }',
             encoding="utf-8",
-        )
+        newline="")
         with gittree.WorkTree(d) as tree:
             expect("sites", len(sites(tree, "x.rs")), 2)
             expect("findings", len(analyse(tree, "x.rs")), 1)

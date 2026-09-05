@@ -393,15 +393,17 @@ pub struct Word {
     pub end: usize,
     /// The word contained at least one quote or escape character. This is how
     /// an explicitly quoted empty word (`''`) is distinguished from no word at
-    /// all — the distinction `split_words` currently loses.
+    /// all: a run of bare whitespace never becomes a `Word`, so a `Word` that
+    /// strips to nothing is necessarily one the user wrote quotes around.
+    /// `kshell::split_words` keeps empty words on exactly this condition — it
+    /// dropped them unconditionally until TD-KSHELL (b′).
     pub quoted: bool,
 }
 
 /// Split into words on bare whitespace, keeping the pieces verbatim.
 ///
-/// Unlike the current `kshell::split_words`, an explicitly quoted empty word
-/// (`cmd ''`) is a word: `''` is an argument, and dropping it changes the
-/// command's arity.
+/// An explicitly quoted empty word (`cmd ''`) is a word: `''` is an argument,
+/// and dropping it changes the command's arity.
 #[must_use]
 pub fn split_bare_words(bytes: &[u8]) -> Vec<Word> {
     let mut out = Vec::new();

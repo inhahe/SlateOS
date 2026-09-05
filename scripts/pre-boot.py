@@ -528,7 +528,7 @@ def main() -> int:
     log = ROOT / "build" / "clippy-preboot.log"
     try:
         log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(out, encoding="utf-8", errors="replace")
+        log.write_text(out, encoding="utf-8", errors="replace", newline="")
     except OSError as exc:
         # Not fatal: the gate's verdict is in `rc`, and losing the transcript
         # costs a re-run, not a wrong answer.

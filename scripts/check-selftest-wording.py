@@ -945,7 +945,7 @@ def self_test() -> int:
 
     failures = 0
     tmp = pathlib.Path(tempfile.gettempdir()) / "_selftest_wording_fixture.rs"
-    tmp.write_text(_SELFTEST_FIXTURE, encoding="utf-8")
+    tmp.write_text(_SELFTEST_FIXTURE, encoding="utf-8", newline="")
     try:
         # No exemptions: an ALLOWED list written for `kshell.rs` would either
         # mask a fixture finding or report itself stale against the fixture.

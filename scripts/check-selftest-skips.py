@@ -549,7 +549,7 @@ def self_test() -> int:
         print(f"FAIL closure: expected ['helper', 'self_test'], got {suite}")
 
     tmp = Path(tempfile.gettempdir()) / "_selftest_skips_fixture.rs"
-    tmp.write_text(_SELFTEST_FIXTURE, encoding="utf-8")
+    tmp.write_text(_SELFTEST_FIXTURE, encoding="utf-8", newline="")
     try:
         found = check_file(tmp, "fixture.rs")
     finally:

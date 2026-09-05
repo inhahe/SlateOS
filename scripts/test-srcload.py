@@ -59,7 +59,7 @@ def check(label, got, want):
 
 
 def _write(path, text, mtime):
-    with open(path, "w", encoding="utf-8") as fh:
+    with open(path, "w", encoding="utf-8", newline="") as fh:
         fh.write(text)
     os.utime(path, (mtime, mtime))
 

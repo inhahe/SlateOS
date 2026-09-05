@@ -102,13 +102,16 @@ entries.
   22:07, still `w/crlf` with a fresh mtime. Editors preserve existing line
   endings, so mtime is the last touch by any tool. Do not spend time
   correlating mtimes.
-- **Two capable writers found and fixed** in `825acee84` — both wrote tracked
-  files through Python's default text mode, which on Windows turns every `\n`
-  into `\r\n`: `scripts/scan-orphan-modules.py` (rewriting its own tracked
-  baseline) and `scripts/strip-workspace-sections.py` (rewriting sub-crate
-  manifests). Neither is *proven* to be the writer — a control group refuted the
-  second, since LF manifests had the same history — but the population of
-  suspects is smaller by two.
+- **Two capable writers found and dealt with** — both wrote tracked files
+  through Python's default text mode, which on Windows turns every `\n` into
+  `\r\n`. `scripts/scan-orphan-modules.py` (rewriting its own tracked baseline)
+  is fixed in `825acee84`, converging with an independent fix that arrived from
+  `origin/main`. `scripts/strip-workspace-sections.py` (rewriting sub-crate
+  manifests) I also fixed — and `origin/main` **deleted** it in `291ca193b`,
+  which is the better answer: it was a one-shot for the 2026-08-13 workspace
+  consolidation with no caller anywhere. The deletion was taken on merge. Neither
+  is *proven* to be the writer — a control group refuted the second, since the LF
+  manifests had the same history — but the suspect population is smaller by two.
 
 ## One caveat about the gate you should know before it runs on your tree
 

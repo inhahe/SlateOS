@@ -327,7 +327,7 @@ def main() -> int:
         BASELINE.write_text(
             (header + "\n# ---8<---\n" if header else "") + "\n".join(seen) + "\n",
             encoding="utf-8",
-        )
+        newline="")
         print(f"[selftest-reinit] pinned {len(seen)} file(s) to {BASELINE.name}")
         return 0
 

@@ -168,7 +168,7 @@ SUITE = [f"bench_{i:02d}" for i in range(40)]
 def replay(path, names, per_line=0.03, preamble=True):
     """Append a synthetic suite to `path`, one result line at a time."""
     def write():
-        with open(path, "a", encoding="utf-8") as handle:
+        with open(path, "a", encoding="utf-8", newline="") as handle:
             if preamble:
                 handle.write("[bench] TSC calibrated: ...\n")
                 handle.write(result_line("self_test_nop") + "\n")
@@ -211,7 +211,7 @@ def run_controller(serial, extra, wait_for=None, delay=0.0, spinners=0):
         if wait_for is not None:
             wait_for()
         time.sleep(delay)
-        with open(stop_path, "w", encoding="utf-8"):
+        with open(stop_path, "w", encoding="utf-8", newline=""):
             pass
         out = proc.communicate(timeout=90)[0]
         with open(record_path, encoding="utf-8") as handle:
@@ -437,7 +437,7 @@ def run_validation(extra, known):
     with tempfile.TemporaryDirectory() as tmp:
         names_path = os.path.join(tmp, "names.txt")
         if known is not None:
-            with open(names_path, "w", encoding="utf-8") as handle:
+            with open(names_path, "w", encoding="utf-8", newline="") as handle:
                 handle.write("\n".join(known) + "\n")
         proc = subprocess.run(
             [sys.executable, CANARY_LOAD, "--serial",
@@ -505,7 +505,7 @@ print("scorecard names")
 # nor the source's structure can be made to yield it.
 with tempfile.TemporaryDirectory() as tmpdir:
     serial = os.path.join(tmpdir, "serial.txt")
-    with open(serial, "w", encoding="utf-8") as handle:
+    with open(serial, "w", encoding="utf-8", newline="") as handle:
         handle.write(
             "[bench] vfs_write_16k: min=100 cycles (27ns), mean=1 cycles\n"
             "[bench] SCORE vfs_throughput_16k_write 27 50000 PASS 30 100 0\n"
@@ -536,7 +536,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
     check("and so do the pairings", aliases, {"scored_two": "b_two"})
 
     # A file written before pairings existed must still read as a name list.
-    with open(names_path, "w", encoding="utf-8") as handle:
+    with open(names_path, "w", encoding="utf-8", newline="") as handle:
         handle.write("b_one\nb_two\n")
     names, aliases, _ = cl.read_known_names(names_path)
     check("an older names file still reads as names", names, {"b_one", "b_two"})
@@ -584,7 +584,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 with tempfile.TemporaryDirectory() as tmpdir:
     serial = os.path.join(tmpdir, "serial.txt")
-    with open(serial, "w", encoding="utf-8") as handle:
+    with open(serial, "w", encoding="utf-8", newline="") as handle:
         handle.write("[bench] SCORE page_alloc_free 601 1000 PASS 1319 500 16\n"
                      "[bench] SCORE page_alloc_zeroed_free 3592 - TRACK 3791 5 0\n"
                      "[bench] b_one: min=1 cycles\n")

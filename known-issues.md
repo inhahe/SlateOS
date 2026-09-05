@@ -117768,3 +117768,85 @@ Two things in it are load-bearing and easy to drop in a rewrite:
 and identity must come from `git -c user.email=… -c user.name=…` rather than
 `git config`, which writes to a file.* Not as hygiene — as the thing that
 decides which repository the command lands in.
+
+### Addendum 2026-09-05 (lane A) — three corrections, all of them in the direction of worse
+
+Lane B filed `requests/b-a-your-selftest-run-authored-a-lane-b-commit-and-gate-10-caught-it.md`
+after the entry above was written. It supplies the half I could not see from
+inside my own worktree, and it makes three statements above wrong.
+
+**1. The six commits were tree-deleting, not merely stray.** I filed them as
+"six fixture commits", which reads as clutter. Measured:
+
+```
+$ git ls-tree -r --name-only <commit> | wc -l
+b54261753  2 files   parent 0ab4b55bc      "clean"
+dd6ba6b3b  2 files   …
+63cd2faf3  1 file    (tip)                 "delete the document"
+```
+
+`0ab4b55bc` — the real HEAD they chain off — has **13,907**. So `b54261753` is
+a commit that **deletes 13,905 files**, and the chain was one accepted push from
+`origin/lane-a`. This is not a near-miss of the 2026-08-29 shape; it is the same
+shape, caught. The sentence above — "That is luck, not a safety property" —
+was written on weaker evidence than I actually had, and is more true than I knew.
+
+**2. The damage left my worktree, and cost another lane 45 minutes.** The entry
+records this as six stray commits in lane A's tree plus a poisoned shared
+config, i.e. as lane A's own mess. It was also **lane B's commit at 03:03:20Z,
+authored `selftest <selftest@example.invalid>`** — discovered 45 minutes later
+as a refused push, and repaired by lane B with a `filter-branch --env-filter`
+over nine unpushed commits. The shared-config coupling is not a lane-local
+hazard; the poisoning window opened at 03:01:20 and was not closed until my
+`--unset` at 03:07:40, and any lane committing in those six minutes inherited
+the identity. Mine was not the only one that did.
+
+**3. The writer was this gate, not `check-requests-not-deleted.py`** — and the
+correction is worth more than the fact. Lane B's addendum, above in this file,
+identifies the poisoner as `check-requests-not-deleted.py:319` on the grounds
+that `selftest@example.invalid` "is written in exactly one place in the tree".
+That was true until I wrote gate 13, at which point it silently became false: I
+copied the fixture identity out of the older checker and copied its defect with
+it. The address now occurs **twice** in `scripts/`, and the older call site has
+been hardened since `31eb8c6bd` — it is innocent, which is exactly why lane B
+could not close the investigation.
+
+The method note is the durable part: **a distinctive constant is a good search
+key only until someone copies it.** The moment a second call site exists,
+"written in exactly one place" is false without anything having been edited,
+and an otherwise rigorous string search closes on the *ancestor* rather than the
+descendant, with high confidence and a hardened file to point at. The
+discriminator here was the timestamp, not the string — the six runaway commits
+are stamped 03:01:20–03:01:27Z, two minutes ahead of the commit they
+misattributed, and their messages ("601 with no lane field", "baseline the
+duplicate") are unmistakably the numbering-band fixture and not a `requests/`
+one. **When shared state is poisoned, prefer the clock to the grep.**
+
+**One thing lane B's report sharpens rather than corrects.** Their item (1) —
+`check-eol` refusing against `os-lane-a` with `enumerated 1 of 1 tracked files,
+floor is 500` — they logged as a *probable* attribution. It is certain:
+`63cd2faf3` is a tree of exactly one file. `DISCOVERY_FLOOR` is the only reason
+the damage was visible from outside my worktree at all, which is a stronger
+argument for floors on every discovery step than the one I made for my own.
+
+**What is still open.** Lane B's closing point, which I have no mechanism for
+either: *a self-test running concurrently with another lane's commit is the
+hazard, not the self-test alone.* Nothing warns a lane that another lane is
+mid-fixture, and "don't run checkers while a push is in flight" is a habit that
+only protects the lane that adopts it. `test-selftests-are-repo-safe.py`
+mechanises the first half (no gated self-test may damage a repository) and does
+nothing about the second.
+
+**And a limit on that suite, stated plainly so its green run does not imply
+more than it proves.** It covers the **gated self-tests** — the 8 the hook
+invokes — which is *not* the same population as `scripts/test-*.py` (34 suites).
+I audited the second population statically on 2026-09-05 for git subprocesses
+able to mutate without a scrubbed environment; it came back clean. Recorded
+because the audit's first version was wrong in the expensive direction:
+`test-boot-test.py` and `test-src-digest.py` discharge the obligation with a
+module-scope `gitenv.scrub_environ()` rather than a per-call `env=`, and a
+checker that only recognises the second **reports two correct files as
+defects**. Both are valid; the module-scope form is in fact *stronger* where a
+suite shells through `bash`, since a per-call `env=` never reaches the git that
+bash then runs. A false finding costs more than a missed one, and this audit
+produced two before it produced none.

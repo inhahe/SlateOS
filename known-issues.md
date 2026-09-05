@@ -57303,7 +57303,7 @@ and that is exactly the shape that survives a reading.
 screenful of information that is a constant compiled into the program. The
 drawing is real, the filtering and sorting and searching are real, the parsing
 is real — and there is no source. This entry names the pattern, because it has
-now been found seven times and writing it up seven times separately would train
+now been found eight times and writing it up eight times separately would train
 the reader to skim it.
 
 **`email` is the sharpest case and the least fixable today.** The client is
@@ -57338,6 +57338,7 @@ promise to break.
 | `sysmonitor` | processes, live graphs, alerts | a real process source, but the *clock* is now real | the refresh interval |
 | `finance` | accounts, budgets, transactions | both a source and a way to enter anything; see its own entry | `None`, documented |
 | `email` | an inbox, folders, threads, filters | a network. Every IMAP and SMTP command it can build -- `login`, `select`, `fetch`, `ehlo`, `mail_from`, twenty in all -- returns a protocol string with no socket to write it to | `None`, documented |
+| `rssreader` | feeds, folders, articles, search | an HTTP client. Its RSS/Atom parser is real and now runs at startup on one sample feed, but nothing can fetch a second one, so `global_auto_refresh_seconds` has nothing to refresh | `None`, documented |
 | `spreadsheet` | a sheet a user can actually fill in | nothing to *show* — the gap is the other way round: `import_csv`/`export_csv` work on a `String` and there is no file dialog, command line or system clipboard to carry one | `None`, documented |
 
 **The rule that came out of it, and it is not "wire a tick".** In each case the

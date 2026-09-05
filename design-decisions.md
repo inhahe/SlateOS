@@ -66215,6 +66215,7 @@ And not the tally name, which stays `coreutils-unix-half` while
 `requests/b-a-check-gates-are-wired-cannot-see-a-gate-written-in-bash.md` quotes
 those lines to lane A; renaming the text being quoted would make that report
 read as already-fixed.
+
 ---
 
 ## 811. An application's window title is re-read every batch, and a spreadsheet sort aimed at one cell covers the block around it

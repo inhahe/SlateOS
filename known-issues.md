@@ -116522,3 +116522,72 @@ line changes nothing, ask whether some other line is already doing the job.**
 The tell is a survivor on code you *just wrote* to fix something -- if the
 behaviour was already correct, the thing you added is a duplicate, and the
 duplicate is the defect.
+
+
+### Lesson 118: a witness the code already satisfies is not a witness (lane C, 2026-09-04)
+
+`apps/tmux` gained copy and paste. The test read:
+
+```rust
+prefixed(&mut mux, 'y');              // yank
+let copied = mux.clipboard.clone();
+prefixed(&mut mux, ']');              // paste
+assert!(pane_text(&mux).contains(copied.trim()));
+```
+
+It passes with the paste deleted. The text was *yanked from that pane*, so it
+is on that screen either way; the assertion asks whether some words are visible
+and they were visible before the operation under test ran.
+
+The repair is to paste somewhere the text cannot already be — a freshly split
+pane, which starts empty — and to assert that it starts empty first, so the
+premise is checked rather than assumed:
+
+```rust
+prefixed(&mut mux, '%');
+assert!(pane_text(&mux).trim().is_empty(), "or this proves nothing either");
+prefixed(&mut mux, ']');
+assert!(pane_text(&mux).contains(copied.trim()));
+```
+
+This is the same family as lesson 54 (a fixture where two quantities happen to
+be equal) and lesson 58 (a witness more than one rule explains), and it has a
+sharper tell than either: **the test's subject and its witness were the same
+object.** Copy took text *out of* the pane and paste put text *into* it, and
+both ends were checked against the same screen. Whenever a round trip is tested
+by looking at where it started, the return leg is untested.
+
+The general check, cheap enough to apply to every test that asserts something
+is present: *ask what the assertion would say if the operation were deleted.* If
+the answer is "the same thing", the assertion is about the fixture.
+
+### Lesson 119: an unreachable-pattern warning is a keybinding collision (lane C, 2026-09-04)
+
+Adding a copy-mode mark to `apps/tmux`, I bound it to Ctrl+B Space. The build
+said:
+
+    warning: unreachable pattern
+      --> apps/tmux/src/main.rs:2404:13
+       |
+    2365 |             ' ' => {
+       |             --- matches all the relevant values
+
+Ctrl+B Space was already `next-layout`, forty lines further down the same
+`match`. My arm came first, so the existing feature became unreachable —
+silently, from a user's point of view: the layout key simply stopped working.
+
+Worth writing down because of what the warning is *usually* taken to mean. An
+unreachable pattern reads like a tidiness complaint about a redundant arm. In a
+keymap it is a **regression report**: some binding that used to work no longer
+does, and the compiler knows exactly which one and where. In a `match` on a
+`char` with fifty arms spread over a hundred lines, it is the only thing that
+knows.
+
+Two consequences for this tree:
+
+* Never `#[allow(unreachable_patterns)]` on a keymap. The one place the warning
+  is most often suppressed as noise is the one place it carries the most.
+* When adding a binding, read the whole `match` first — or add it and let the
+  compiler check, which is what happened here and is why the collision cost a
+  minute instead of a bug report. `v` was the right key anyway: it is what
+  tmux's own vi copy mode uses for begin-selection.

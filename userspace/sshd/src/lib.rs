@@ -3668,6 +3668,20 @@ enum PubkeyOutcome {
 /// connection being replayed on another, and binding the user and service name
 /// is what stops a signature for one account being presented for a different
 /// one.
+///
+/// # Why this is a wrapper
+///
+/// Everything here except the file read is in [`decide_pubkey_auth`]. The read
+/// goes through `fs_read_file`, which issues a raw SlateOS syscall that returns
+/// `-ENOSYS` on a developer machine, so any test that reached this function
+/// would exercise only its first failure branch — which is to say the *entire*
+/// server-side publickey decision would be unreachable from a test, in the one
+/// crate where nothing else can check it.
+///
+/// This is the same split [`HostKey::load_from_file`] and
+/// `HostKey::from_openssh_text` already have, made for the same reason and
+/// after the same discovery: a key file `sshd` could not read was invisible for
+/// as long as the only path to the parser went through a syscall.
 fn handle_pubkey_auth(
     payload: &[u8],
     offset: usize,
@@ -3677,18 +3691,47 @@ fn handle_pubkey_auth(
     session_id: &[u8; 32],
     config: &SshdConfig,
 ) -> Result<PubkeyOutcome, SshdError> {
+    let keys_path = format!("/home/{username}/{}", config.authorized_keys_file);
+    // A file we cannot read authorises no keys, so the error is discarded
+    // rather than propagated: the overwhelmingly common cause is that the user
+    // has no `authorized_keys` at all, which is not a fault and must not fail
+    // the connection -- the client still has the password method to try. The
+    // outcome is identical to an empty file's, and deliberately so; reporting
+    // *which* it was would tell an unauthenticated peer whether an account
+    // exists.
+    let Ok(data) = fs_read_file(&keys_path) else {
+        return Ok(PubkeyOutcome::Rejected);
+    };
+    let keys_content = String::from_utf8_lossy(&data).into_owned();
+
+    decide_pubkey_auth(
+        payload,
+        offset,
+        user_bytes,
+        service_bytes,
+        session_id,
+        &keys_content,
+    )
+}
+
+/// The whole of the publickey decision, given the `authorized_keys` text.
+///
+/// Split from [`handle_pubkey_auth`] so that it can be called at all off a
+/// SlateOS kernel; see that function's docs. Everything that decides whether a
+/// client gets in lives here.
+fn decide_pubkey_auth(
+    payload: &[u8],
+    offset: usize,
+    user_bytes: &[u8],
+    service_bytes: &[u8],
+    session_id: &[u8; 32],
+    keys_content: &str,
+) -> Result<PubkeyOutcome, SshdError> {
     let (has_sig, off) = read_bool(payload, offset)?;
     let (algorithm, off) = read_ssh_string(payload, off)?;
     let (key_blob, sig_off) = read_ssh_string(payload, off)?;
 
-    // Read authorized_keys for this user.
-    let keys_path = format!("/home/{username}/{}", config.authorized_keys_file);
-    let keys_content = match fs_read_file(&keys_path) {
-        Ok(data) => String::from_utf8_lossy(&data).into_owned(),
-        Err(_) => return Ok(PubkeyOutcome::Rejected),
-    };
-
-    let authorized = parse_authorized_keys(&keys_content);
+    let authorized = parse_authorized_keys(keys_content);
     if !authorized.iter().any(|ak| ak.key_data == key_blob) {
         return Ok(PubkeyOutcome::Rejected);
     }
@@ -6796,6 +6839,37 @@ Z
             blob
         }
 
+        /// The tail of the client's `SSH_MSG_USERAUTH_REQUEST`, from the byte
+        /// [`decide_pubkey_auth`]'s `offset` argument points at.
+        ///
+        /// The auth loop has already consumed the message number and the user,
+        /// service and method strings by the time it calls in, so those are not
+        /// rebuilt here; what follows is the whole of the `publickey`-specific
+        /// part of RFC 4252 §7's request.
+        ///
+        /// With `signed` false this is the *query* form: the client asking
+        /// whether the key would be acceptable before troubling an agent — or
+        /// the user — for a signature.
+        fn request_tail(&self, signed: bool) -> Vec<u8> {
+            let mut tail = Vec::new();
+            tail.push(u8::from(signed));
+            tail.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+            tail.extend_from_slice(&ssh_string(&self.key_blob()));
+            if signed {
+                tail.extend_from_slice(&ssh_string(&self.sig_blob()));
+            }
+            tail
+        }
+
+        /// This key as one line of an `authorized_keys` file.
+        fn authorized_keys_line(&self) -> String {
+            format!(
+                "ssh-ed25519 {} {}@test\n",
+                base64_encode(&self.key_blob()),
+                String::from_utf8_lossy(&self.user)
+            )
+        }
+
         /// Run the server's check, optionally against a different context than
         /// the one the signature was made for.
         fn verified_against(&self, server: &PubkeyAttempt) -> bool {
@@ -6929,6 +7003,298 @@ Z
             b"ssh-ed25519",
             &a.key_blob(),
         ));
+    }
+
+    // ---- the publickey *decision* (RFC 4252 section 7) ----
+    //
+    // Everything above tests `verify_pubkey_signature`: given a signature and
+    // the context it should cover, does it verify. That is the authentication
+    // half. The authorisation half -- is this key one the account permits, and
+    // what does the server say when it is not -- ran only inside
+    // `handle_pubkey_auth`, which reads `authorized_keys` through a raw SlateOS
+    // syscall stubbed to -ENOSYS off the kernel. So on any machine these tests
+    // run on, that function returned `Rejected` from its first branch and the
+    // decision underneath was unreachable. `decide_pubkey_auth` is that
+    // decision with the file read lifted out.
+
+    /// The ordinary success: a listed key, a genuine signature.
+    #[test]
+    fn a_listed_key_with_a_genuine_signature_is_accepted() {
+        let a = PubkeyAttempt::valid();
+        let outcome = decide_pubkey_auth(
+            &a.request_tail(true),
+            0,
+            &a.user,
+            &a.service,
+            &a.session_id,
+            &a.authorized_keys_line(),
+        )
+        .expect("a well-formed request is not a protocol error");
+        assert!(matches!(outcome, PubkeyOutcome::Accepted));
+    }
+
+    /// A perfect signature under a key the account does not list is refused.
+    ///
+    /// This is the authorisation gate, and nothing tested it before. Every
+    /// signature test above holds the algorithm to account; this one holds the
+    /// *account* to account. The attacker here has done nothing wrong
+    /// cryptographically -- it owns its key and signs correctly over the right
+    /// session, user and service -- and must still be turned away, because
+    /// `authorized_keys` is the only thing that says which keys speak for this
+    /// user.
+    #[test]
+    fn a_genuine_signature_under_an_unlisted_key_is_rejected() {
+        let victim = PubkeyAttempt::valid();
+        let attacker = PubkeyAttempt {
+            seed: [0x99u8; 32],
+            ..PubkeyAttempt::valid()
+        };
+        let outcome = decide_pubkey_auth(
+            &attacker.request_tail(true),
+            0,
+            &attacker.user,
+            &attacker.service,
+            &attacker.session_id,
+            &victim.authorized_keys_line(),
+        )
+        .expect("a well-formed request is not a protocol error");
+        assert!(
+            matches!(outcome, PubkeyOutcome::Rejected),
+            "a key absent from authorized_keys was accepted because its \
+             signature was valid; a valid signature proves possession of a \
+             key, not permission to use it here"
+        );
+    }
+
+    /// The query form gets `PK_OK`, not a failure.
+    ///
+    /// RFC 4252 §7 lets a client ask whether a key would be acceptable before
+    /// producing a signature, and OpenSSH asks for every key in the agent. The
+    /// distinction is not cosmetic: answering the probe with
+    /// `SSH_MSG_USERAUTH_FAILURE` makes the client give up on a key it was
+    /// about to sign with, so a server that collapses `Query` into `Rejected`
+    /// refuses logins that should succeed -- and does it only against clients
+    /// that probe, which ours does not, so our own interop test would not see
+    /// it.
+    #[test]
+    fn a_query_for_a_listed_key_is_answered_pk_ok_and_not_a_failure() {
+        let a = PubkeyAttempt::valid();
+        let outcome = decide_pubkey_auth(
+            &a.request_tail(false),
+            0,
+            &a.user,
+            &a.service,
+            &a.session_id,
+            &a.authorized_keys_line(),
+        )
+        .expect("a well-formed query is not a protocol error");
+        match outcome {
+            PubkeyOutcome::Query {
+                algorithm,
+                key_blob,
+            } => {
+                // §7 requires the two fields echoed back verbatim; a client
+                // that gets a different blob back cannot tell which of its
+                // keys was accepted.
+                assert_eq!(algorithm, b"ssh-ed25519");
+                assert_eq!(key_blob, a.key_blob());
+            }
+            _ => panic!("a probe for a listed key must be answered PK_OK"),
+        }
+    }
+
+    /// A query for a key the account does not list is refused, not answered.
+    ///
+    /// Otherwise the daemon is an oracle: anyone could ask it, unauthenticated,
+    /// whether a given public key is authorised for a given user, and read the
+    /// answer off which message came back. That turns `authorized_keys` into a
+    /// remotely queryable database.
+    #[test]
+    fn a_query_for_an_unlisted_key_is_refused_rather_than_answered() {
+        let victim = PubkeyAttempt::valid();
+        let stranger = PubkeyAttempt {
+            seed: [0x11u8; 32],
+            ..PubkeyAttempt::valid()
+        };
+        let outcome = decide_pubkey_auth(
+            &stranger.request_tail(false),
+            0,
+            &stranger.user,
+            &stranger.service,
+            &stranger.session_id,
+            &victim.authorized_keys_line(),
+        )
+        .expect("a well-formed query is not a protocol error");
+        assert!(matches!(outcome, PubkeyOutcome::Rejected));
+    }
+
+    /// A key type this build cannot verify is refused even when listed.
+    ///
+    /// "We cannot check this one" must never resolve to "yes". The line here is
+    /// a legitimate `authorized_keys` entry that an OpenSSH server would honour
+    /// -- so the failure mode being excluded is a real administrator's real
+    /// file, not a crafted one.
+    #[test]
+    fn a_listed_key_of_a_type_we_cannot_verify_is_refused_not_waved_through() {
+        let a = PubkeyAttempt::valid();
+
+        // An ssh-rsa blob, listed, and offered with the algorithm name that
+        // matches it. Its "signature" is whatever the client likes, because the
+        // point is that we never get as far as looking.
+        let mut rsa_blob = Vec::new();
+        rsa_blob.extend_from_slice(&ssh_string(b"ssh-rsa"));
+        rsa_blob.extend_from_slice(&ssh_string(&[0x7Eu8; 128]));
+
+        let mut tail = Vec::new();
+        tail.push(1);
+        tail.extend_from_slice(&ssh_string(b"ssh-rsa"));
+        tail.extend_from_slice(&ssh_string(&rsa_blob));
+        tail.extend_from_slice(&ssh_string(&[0u8; 64]));
+
+        let listing = format!("ssh-rsa {} admin@test\n", base64_encode(&rsa_blob));
+
+        // Without this the test proves nothing. An RSA line the parser failed
+        // to read would also produce `Rejected`, so the assertion below would
+        // pass while the algorithm gate it names went untested -- the refusal
+        // would be coming from the authorisation gate instead.
+        assert!(
+            parse_authorized_keys(&listing)
+                .iter()
+                .any(|k| k.key_data == rsa_blob),
+            "the RSA line must parse and match for this test to reach the \
+             algorithm gate at all"
+        );
+
+        let outcome = decide_pubkey_auth(&tail, 0, &a.user, &a.service, &a.session_id, &listing)
+            .expect("a well-formed request is not a protocol error");
+        assert!(
+            matches!(outcome, PubkeyOutcome::Rejected),
+            "an RSA key was accepted on the strength of being listed, without \
+             its signature being checked -- which nothing in this build can do"
+        );
+    }
+
+    /// The listed key is found however the file is laid out around it.
+    ///
+    /// Comments, blank lines, CRLF terminators and a preceding entry for a
+    /// different key are all ordinary in a real `authorized_keys`, and a parser
+    /// that stopped at the first line, or that let a comment become a key,
+    /// would lock a user out of their own account.
+    #[test]
+    fn the_listed_key_is_found_wherever_it_sits_in_the_file() {
+        let a = PubkeyAttempt::valid();
+        let other = PubkeyAttempt {
+            seed: [0x0Eu8; 32],
+            ..PubkeyAttempt::valid()
+        };
+        let listing = format!(
+            "# keys for alice\r\n\
+             \r\n\
+             {}\
+             \r\n\
+             # the laptop\r\n\
+             {}",
+            other.authorized_keys_line(),
+            a.authorized_keys_line()
+        );
+        let outcome = decide_pubkey_auth(
+            &a.request_tail(true),
+            0,
+            &a.user,
+            &a.service,
+            &a.session_id,
+            &listing,
+        )
+        .expect("a well-formed request is not a protocol error");
+        assert!(matches!(outcome, PubkeyOutcome::Accepted));
+    }
+
+    /// An empty or absent `authorized_keys` authorises nobody.
+    ///
+    /// The empty case is what [`handle_pubkey_auth`] produces for a file it
+    /// cannot read, so this is also the behaviour of a user who has never set
+    /// up a key.
+    #[test]
+    fn no_authorized_keys_means_no_key_is_authorized() {
+        let a = PubkeyAttempt::valid();
+        for listing in ["", "\n", "# nothing here\n", "not-a-key-type AAAA c\n"] {
+            let outcome = decide_pubkey_auth(
+                &a.request_tail(true),
+                0,
+                &a.user,
+                &a.service,
+                &a.session_id,
+                listing,
+            )
+            .expect("a well-formed request is not a protocol error");
+            assert!(
+                matches!(outcome, PubkeyOutcome::Rejected),
+                "authorized_keys {listing:?} authorised a key"
+            );
+        }
+    }
+
+    /// A truncated request is an error, and never an acceptance.
+    ///
+    /// Every prefix of a genuine request, including the empty one. The outcome
+    /// that must not appear is `Accepted`; `Err` and `Rejected` are both
+    /// honest answers to a request that does not parse, and which one comes
+    /// back depends on where the cut falls.
+    #[test]
+    fn a_truncated_pubkey_request_is_never_an_acceptance() {
+        let a = PubkeyAttempt::valid();
+        let full = a.request_tail(true);
+        let listing = a.authorized_keys_line();
+        for cut in 0..full.len() {
+            let outcome = decide_pubkey_auth(
+                &full[..cut],
+                0,
+                &a.user,
+                &a.service,
+                &a.session_id,
+                &listing,
+            );
+            assert!(
+                !matches!(outcome, Ok(PubkeyOutcome::Accepted)),
+                "a request truncated to {cut} of {} bytes authenticated",
+                full.len()
+            );
+        }
+        // The whole thing still works, so the loop above was not vacuous.
+        assert!(matches!(
+            decide_pubkey_auth(&full, 0, &a.user, &a.service, &a.session_id, &listing),
+            Ok(PubkeyOutcome::Accepted)
+        ));
+    }
+
+    /// The decision binds the session, user and service, not just the maths.
+    ///
+    /// `verify_pubkey_signature` is tested for these above; this checks that
+    /// the decision actually routes them through, rather than passing a
+    /// placeholder the way the server once did to the exchange hash.
+    #[test]
+    fn the_decision_rejects_a_signature_made_for_another_context() {
+        let a = PubkeyAttempt::valid();
+        let listing = a.authorized_keys_line();
+        let tail = a.request_tail(true);
+        let wrong_contexts = [
+            ("session", [0x44u8; 32], a.user.clone(), a.service.clone()),
+            ("user", a.session_id, b"root".to_vec(), a.service.clone()),
+            (
+                "service",
+                a.session_id,
+                a.user.clone(),
+                b"ssh-userauth".to_vec(),
+            ),
+        ];
+        for (field, session_id, user, service) in wrong_contexts {
+            let outcome = decide_pubkey_auth(&tail, 0, &user, &service, &session_id, &listing)
+                .expect("a well-formed request is not a protocol error");
+            assert!(
+                matches!(outcome, PubkeyOutcome::Rejected),
+                "a signature made for a different {field} was accepted"
+            );
+        }
     }
 
     #[test]

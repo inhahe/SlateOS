@@ -2574,6 +2574,69 @@ pub fn ed25519_public_blob(public: &[u8; 32]) -> Vec<u8> {
     blob
 }
 
+/// The `publickey` `SSH_MSG_USERAUTH_REQUEST` up to but not including the
+/// signature (RFC 4252 §7).
+///
+/// ```text
+/// byte      SSH_MSG_USERAUTH_REQUEST
+/// string    user name
+/// string    service name
+/// string    "publickey"
+/// boolean   TRUE
+/// string    public key algorithm name
+/// string    public key blob
+/// ```
+///
+/// # Why this is separate from [`pubkey_signed_blob`]
+///
+/// RFC 4252 §7 defines the signature as covering *these same fields* with the
+/// session identifier prepended — the client sends this, then appends a
+/// signature over `string(session_id) || this`. So the bytes on the wire and
+/// the bytes under the signature are, by the specification, one sequence
+/// written down once.
+///
+/// Writing them out twice — once to send and once to sign — is available and is
+/// what a straightforward implementation does. It is also exactly the shape of
+/// mistake this crate exists to make impossible: two writers of one byte
+/// sequence, where a divergence produces no decode error at either end, only a
+/// signature that fails to verify. `pubkey_signed_blob` is therefore *defined*
+/// as a prefix plus this function's result, so the client's wire request and
+/// both ends' signature input cannot disagree about a field without a compiler
+/// error.
+///
+/// A caller that only verifies (the server) never needs this on its own; a
+/// caller that authenticates (the client) needs both, which is why both exist.
+#[must_use]
+pub fn pubkey_request_fields(
+    user_bytes: &[u8],
+    service_bytes: &[u8],
+    algorithm: &[u8],
+    key_blob: &[u8],
+) -> Vec<u8> {
+    let mut fields = Vec::new();
+    fields.push(msg::SSH_MSG_USERAUTH_REQUEST);
+    fields.extend_from_slice(&ssh_string(user_bytes));
+    fields.extend_from_slice(&ssh_string(service_bytes));
+    // Not a parameter: §7 fixes this field to the method name of the request
+    // being signed, and the only method whose request carries a signature is
+    // `publickey`. A caller able to vary it could only produce a blob no
+    // verifier builds.
+    fields.extend_from_slice(&ssh_string(b"publickey"));
+    // The boolean is TRUE by definition: a request with FALSE here carries no
+    // signature, so there is nothing to sign over. `read_bool` is what turns
+    // the received byte back into a bool; this is the encoding side of it.
+    //
+    // A client may also send the FALSE form — a *query*, asking whether the key
+    // would be accepted before paying for a signature. That request is not this
+    // one and is not signed, so it is built at the call site rather than here:
+    // a flag on this function would offer a "signed blob" over a request that
+    // carries no signature, which is not a thing RFC 4252 defines.
+    fields.push(1);
+    fields.extend_from_slice(&ssh_string(algorithm));
+    fields.extend_from_slice(&ssh_string(key_blob));
+    fields
+}
+
 /// The exact byte sequence a `publickey` signature covers (RFC 4252 §7).
 ///
 /// ```text
@@ -2586,6 +2649,11 @@ pub fn ed25519_public_blob(public: &[u8; 32]) -> Vec<u8> {
 /// string    public key algorithm name
 /// string    public key blob
 /// ```
+///
+/// Everything from the message code down is [`pubkey_request_fields`] — the
+/// same bytes the client puts on the wire — and this function is that plus the
+/// session identifier in front. See that function for why the relationship is
+/// expressed in code rather than written out twice.
 ///
 /// The client builds this and signs it; the server builds it again and verifies
 /// against it. Nothing on the wire carries the blob itself — that is the whole
@@ -2625,22 +2693,13 @@ pub fn pubkey_signed_blob(
     algorithm: &[u8],
     key_blob: &[u8],
 ) -> Vec<u8> {
-    let mut signed = Vec::new();
-    signed.extend_from_slice(&ssh_string(session_id));
-    signed.push(msg::SSH_MSG_USERAUTH_REQUEST);
-    signed.extend_from_slice(&ssh_string(user_bytes));
-    signed.extend_from_slice(&ssh_string(service_bytes));
-    // Not a parameter: §7 fixes this field to the method name of the request
-    // being signed, and the only method whose request carries a signature is
-    // `publickey`. A caller able to vary it could only produce a blob no
-    // verifier builds.
-    signed.extend_from_slice(&ssh_string(b"publickey"));
-    // The boolean is TRUE by definition: a request with FALSE here carries no
-    // signature, so there is nothing to sign over. `read_bool` is what turns
-    // the received byte back into a bool; this is the encoding side of it.
-    signed.push(1);
-    signed.extend_from_slice(&ssh_string(algorithm));
-    signed.extend_from_slice(&ssh_string(key_blob));
+    let mut signed = ssh_string(session_id);
+    signed.extend_from_slice(&pubkey_request_fields(
+        user_bytes,
+        service_bytes,
+        algorithm,
+        key_blob,
+    ));
     signed
 }
 
@@ -5037,6 +5096,40 @@ mod tests {
     }
 
     // ---- the publickey signed blob (RFC 4252 §7) ----
+
+    /// The request fields are the exact byte sequence RFC 4252 §7 lays out.
+    ///
+    /// Written out here a second time as literals for the same reason as the
+    /// signed-blob test below, and *separately* from it rather than derived
+    /// from it. `pubkey_signed_blob` is defined as a prefix plus this
+    /// function's result, so a test that compared the two would hold however
+    /// wrong both were; the only thing that pins either is an expectation
+    /// written from the RFC.
+    ///
+    /// These bytes go on the wire, so unlike the signed blob a fault in them
+    /// *is* visible to the far end — but only as a rejected request, and the
+    /// client cannot tell a request the server could not parse from a key the
+    /// server would not accept.
+    #[test]
+    fn the_request_fields_are_the_byte_sequence_rfc_4252_lays_out() {
+        let got = pubkey_request_fields(b"alice", b"ssh-connection", b"ssh-ed25519", b"KEY");
+
+        let mut want: Vec<u8> = Vec::new();
+        want.push(50); // byte SSH_MSG_USERAUTH_REQUEST
+        want.extend_from_slice(&[0, 0, 0, 5]); // string user name
+        want.extend_from_slice(b"alice");
+        want.extend_from_slice(&[0, 0, 0, 14]); // string service name
+        want.extend_from_slice(b"ssh-connection");
+        want.extend_from_slice(&[0, 0, 0, 9]); // string "publickey"
+        want.extend_from_slice(b"publickey");
+        want.push(1); // boolean TRUE
+        want.extend_from_slice(&[0, 0, 0, 11]); // string algorithm name
+        want.extend_from_slice(b"ssh-ed25519");
+        want.extend_from_slice(&[0, 0, 0, 3]); // string public key blob
+        want.extend_from_slice(b"KEY");
+
+        assert_eq!(got, want);
+    }
 
     /// The signed blob is the exact byte sequence RFC 4252 §7 lays out.
     ///

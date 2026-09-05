@@ -3,6 +3,23 @@
 //! A simplified SSH-2 protocol client for SlateOS. Supports password
 //! authentication, interactive shell sessions, and remote command execution.
 //!
+//! # Why this is a library with a three-line binary on top
+//!
+//! The client and the daemon implement the two halves of one protocol, and
+//! every bug this pair has produced — six of them now — has been a place where
+//! the halves disagreed while each half's own tests passed. The only test that
+//! could have caught any of them is one that runs the real client against the
+//! real server, and that test cannot exist while both are `main.rs` files:
+//! a binary crate has no library to link against, so no third crate can call
+//! into it.
+//!
+//! So the client is a library, `main.rs` is a shim over [`run_cli`], and the
+//! public surface below is deliberately the smallest one an interop test can
+//! be written against — a [`Config`], an [`SshSession`], the two handshake
+//! phases and the [session id](SshSession::session_id) both ends must derive
+//! identically. Everything else stays private. See `known-issues.md`
+//! `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
+//!
 //! # Usage
 //!
 //! ```text
@@ -80,7 +97,6 @@ use sshwire::{
 use std::env;
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::process;
 
 // ============================================================================
 // Syscall numbers (from kernel/src/syscall/number.rs)
@@ -284,8 +300,10 @@ impl Transport for TcpTransport {
 // Error type
 // ============================================================================
 
+/// Everything that can stop this client, from a name that will not resolve to
+/// a server whose host key is not the one we trusted.
 #[derive(Debug)]
-enum SshError {
+pub enum SshError {
     DnsFailure(String),
     ConnectionFailed(String),
     SendFailed,
@@ -926,7 +944,15 @@ fn base64_decode(input: &str) -> Vec<u8> {
 // Argument parsing
 // ============================================================================
 
-struct Config {
+/// Everything one invocation of `ssh(1)` was told to do.
+///
+/// The fields stay private and there is no public constructor that takes them
+/// one by one. A caller outside this crate builds one by parsing an argument
+/// list with [`parse_args_from`], which is deliberate: a test that assembles a
+/// `Config` by hand is testing a configuration no command line can produce,
+/// and the defaults it silently picks are exactly the ones a real invocation
+/// gets from the parser rather than from the struct.
+pub struct Config {
     user: String,
     hostname: String,
     port: u16,
@@ -948,8 +974,25 @@ enum StrictHostKey {
     Ask,
 }
 
+/// Parse this process's own command line.
 fn parse_args() -> Result<Config, String> {
-    let args: Vec<String> = env::args().collect();
+    parse_args_from(env::args().collect())
+}
+
+/// Parse an argument list, `argv[0]` included, into a [`Config`].
+///
+/// Split from [`parse_args`] so that a caller outside this crate can produce a
+/// `Config` without the process's arguments being the only possible source of
+/// one. That is the whole reason it is public: an interop test needs a client
+/// configured the way a command line configures one, and reaching for the real
+/// parser is the only way to be sure the defaults under test are the defaults
+/// that ship.
+///
+/// # Errors
+///
+/// The usage message, or a description of the first malformed option, as a
+/// string suitable for printing after `ssh: `.
+pub fn parse_args_from(args: Vec<String>) -> Result<Config, String> {
     if args.len() < 2 {
         return Err(format!(
             "Usage: {} [-p port] [-v] [-o option=value] [user@]hostname [command...]",
@@ -1075,14 +1118,27 @@ enum RemoteExit {
     Signal { name: String, core_dumped: bool },
 }
 
-struct SshSession {
+/// One SSH-2 connection, from the version banner to the remote command's exit
+/// status.
+pub struct SshSession {
     transport: Box<dyn Transport>,
     buf: StreamBuffer,
     config: Config,
     server_version: String,
     client_kexinit: Vec<u8>,
     server_kexinit: Vec<u8>,
-    session_id: [u8; 32],
+    /// The exchange hash of the *first* key exchange, which RFC 4253 §7.2 fixes
+    /// as the session identifier for the life of the connection.
+    ///
+    /// `None` until that first exchange completes. This was `[u8; 32]` with
+    /// all-zeros standing in for "not set yet" — the daemon has always spelled
+    /// the same field `Option<[u8; 32]>`, which is the eleventh place these two
+    /// programs described one protocol value two different ways. The sentinel
+    /// was not reachably wrong (an all-zero SHA-256 is not something an
+    /// attacker can arrange) but it is a state the type permitted and the
+    /// protocol does not, and the accessor below would have had to invent an
+    /// answer for it.
+    session_id: Option<[u8; 32]>,
     /// The packet layer: framing, cipher, MAC and both sequence numbers.
     codec: PacketCodec,
     channel_id: u32,
@@ -1101,7 +1157,12 @@ struct SshSession {
 }
 
 impl SshSession {
-    fn new(transport: Box<dyn Transport>, config: Config) -> Self {
+    /// Open a session over an already-connected `transport`.
+    ///
+    /// Nothing is sent until [`version_exchange`](Self::version_exchange) or
+    /// [`run`](Self::run) is called.
+    #[must_use]
+    pub fn new(transport: Box<dyn Transport>, config: Config) -> Self {
         Self {
             transport,
             buf: StreamBuffer::new(),
@@ -1109,7 +1170,7 @@ impl SshSession {
             server_version: String::new(),
             client_kexinit: Vec::new(),
             server_kexinit: Vec::new(),
-            session_id: [0u8; 32],
+            session_id: None,
             codec: PacketCodec::new(),
             channel_id: 0,
             remote_channel_id: 0,
@@ -1126,16 +1187,33 @@ impl SshSession {
     /// would be a downgrade attack with a spelling. The callers are tests,
     /// which need a handshake that produces the same bytes twice.
     ///
-    /// The `cfg(test)` is that sentence made structural: the shipped binary is
-    /// not compiled with any way to substitute a source, so the guarantee does
-    /// not rest on nobody calling this. When the interop test moves into a
-    /// crate of its own it will need this too, and the gate should then widen
-    /// to a Cargo feature that only a `dev-dependency` turns on — not vanish.
-    #[cfg(test)]
+    /// The `cfg` is that sentence made structural rather than promised: the
+    /// shipped binary is not compiled with any way to substitute a source, so
+    /// the guarantee does not rest on nobody calling this. The
+    /// `deterministic-secrets` feature exists because the interop test lives in
+    /// a crate of its own and cannot use `cfg(test)`, which is per-crate; it is
+    /// enabled only through that crate's `dev-dependencies`, so it is absent
+    /// from any build that does not compile dev-dependencies — which is every
+    /// build that produces a release artifact.
+    #[cfg(any(test, feature = "deterministic-secrets"))]
     #[must_use]
-    fn with_secret_source(mut self, secrets: SecretSource) -> Self {
+    pub fn with_secret_source(mut self, secrets: SecretSource) -> Self {
         self.secrets = secrets;
         self
+    }
+
+    /// The session identifier both ends derive, once the first key exchange has
+    /// produced it (RFC 4253 §7.2). `None` before that.
+    ///
+    /// Public because it is the single value an interop test exists to compare:
+    /// if the client and the daemon agree on this, they agreed on the version
+    /// banners, both KEXINIT payloads, the host key blob, both Diffie-Hellman
+    /// public values and the shared secret, because every one of those is a
+    /// field of the hash. If they disagree, one of them is wrong about the
+    /// protocol and neither one's own test suite can say which.
+    #[must_use]
+    pub fn session_id(&self) -> Option<&[u8; 32]> {
+        self.session_id.as_ref()
     }
 
     /// The process exit code this client should exit with.
@@ -1204,7 +1282,17 @@ impl SshSession {
     // (`classify_version_line`, which decides what each line read here *is*,
     // is a free function below so that it can be tested without a socket.)
 
-    fn version_exchange(&mut self) -> Result<(), SshError> {
+    /// Send our version banner and read the server's (RFC 4253 §4.2).
+    ///
+    /// Public so an interop test can run the handshake one phase at a time and
+    /// say which phase disagreed, rather than only that [`run`](Self::run)
+    /// failed somewhere.
+    ///
+    /// # Errors
+    ///
+    /// If the banner cannot be sent, or the server's is absent, malformed, or
+    /// announces a protocol version this client does not speak.
+    pub fn version_exchange(&mut self) -> Result<(), SshError> {
         self.verbose("sending client version");
 
         // Send our version string.
@@ -1257,7 +1345,23 @@ impl SshSession {
 
     // === Phase 2: Key exchange ===
 
-    fn key_exchange(&mut self) -> Result<(), SshError> {
+    /// Exchange KEXINITs, run Diffie-Hellman, verify the host key and activate
+    /// the negotiated cipher (RFC 4253 §7 and §8).
+    ///
+    /// On success [`session_id`](Self::session_id) is set and every packet
+    /// afterwards is encrypted.
+    ///
+    /// Public for the same reason as
+    /// [`version_exchange`](Self::version_exchange): this is the phase where
+    /// two independently-written implementations of one protocol actually find
+    /// out whether they agree.
+    ///
+    /// # Errors
+    ///
+    /// If no algorithm is common to both ends, if the server's Diffie-Hellman
+    /// value is out of range, if the host key signature does not verify, or if
+    /// the key is not the one `known_hosts` records for this host.
+    pub fn key_exchange(&mut self) -> Result<(), SshError> {
         self.verbose("beginning key exchange");
 
         // Build and send our KEXINIT.
@@ -1444,10 +1548,9 @@ impl SshSession {
         // whether that key is the one we expect.
         self.verify_host_key(&k_s, key_type, &fingerprint)?;
 
-        // The first exchange hash is used as the session ID.
-        if self.session_id == [0u8; 32] {
-            self.session_id = h;
-        }
+        // RFC 4253 §7.2: the session identifier is the *first* exchange hash
+        // and never changes afterwards, so a rekey must not overwrite it.
+        let session_id = *self.session_id.get_or_insert(h);
 
         // Send and receive NEWKEYS.
         let newkeys_payload = [msg::SSH_MSG_NEWKEYS];
@@ -1470,7 +1573,7 @@ impl SshSession {
         // daemon, rather than a block of code here that has to stay the
         // daemon's mirror image by hand.
         self.codec
-            .activate(Role::Client, &k_bytes, &h, &self.session_id)?;
+            .activate(Role::Client, &k_bytes, &h, &session_id)?;
 
         self.verbose("encryption activated");
 
@@ -2175,14 +2278,22 @@ impl SshSession {
 /// The whole point of reserving one code is that `ssh host cmd; echo $?` can
 /// distinguish "cmd failed" from "cmd never ran". 255 is the value OpenSSH
 /// documents, so scripts written against OpenSSH keep working.
-const EXIT_SSH_FAILURE: i32 = 255;
+pub const EXIT_SSH_FAILURE: i32 = 255;
 
-fn main() {
+/// Run the `ssh(1)` command line and report the status the process should
+/// exit with.
+///
+/// Returns the code rather than calling `process::exit` itself. That is the
+/// whole difference between this and the `main` it replaces, and it is what
+/// makes the binary a shim: ending the process is the binary's business, and a
+/// library that can end its caller's process is not one a test can call.
+#[must_use]
+pub fn run_cli() -> i32 {
     let config = match parse_args() {
         Ok(c) => c,
         Err(msg) => {
             eprintln!("ssh: {msg}");
-            process::exit(EXIT_SSH_FAILURE);
+            return EXIT_SSH_FAILURE;
         }
     };
 
@@ -2200,7 +2311,7 @@ fn main() {
         Ok(ip) => ip,
         Err(e) => {
             eprintln!("ssh: {e}");
-            process::exit(EXIT_SSH_FAILURE);
+            return EXIT_SSH_FAILURE;
         }
     };
 
@@ -2220,7 +2331,7 @@ fn main() {
                 "ssh: connect to host {} port {}: {e}",
                 config.hostname, config.port
             );
-            process::exit(EXIT_SSH_FAILURE);
+            return EXIT_SSH_FAILURE;
         }
     };
 
@@ -2242,18 +2353,16 @@ fn main() {
             // client failed", as distinct from any status a remote command
             // could return — the distinction a caller needs in order to tell
             // "the command failed" from "ssh could not run it".
-            process::exit(EXIT_SSH_FAILURE);
+            return EXIT_SSH_FAILURE;
         }
     }
 
     session.close();
 
-    // Exit with the remote command's status. Computed after the socket is
-    // closed because `process::exit` runs no destructors.
-    let code = session.exit_code();
-    if code != 0 {
-        process::exit(code);
-    }
+    // Report the remote command's status. Read after the socket is closed
+    // because the caller ends the process the moment this returns, and a
+    // `process::exit` there runs no destructors.
+    session.exit_code()
 }
 
 // ============================================================================

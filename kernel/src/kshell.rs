@@ -5974,11 +5974,13 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
         // Escapes have the same effect -- `cat My\ Doc` was one word to every
         // other stage of the shell and two to this one.
         //
-        // What this does NOT yet fix is the other half: the text inserted is
-        // still the raw filename, so completing `My Doc.txt` yields two
-        // arguments. shellquote::quote_word exists for that; it is TD-KSHELL
-        // (d) because it also has to decide what to do about the quote the
-        // user has already opened.
+        // The other half -- escaping what is *inserted*, so completing
+        // `My Doc.txt` does not yield two arguments -- is TD-KSHELL (d) and is
+        // now done too, by `shellquote::quote_suffix` at the two insertion
+        // sites below. It could not be done first: emitting an escape is only
+        // correct once something honours it, and until the word-start scan
+        // above agreed with the parser, every spelling of a completed name
+        // containing a space was wrong in a different way.
         let word_start = shellquote::word_start_at(text_before.as_bytes(), text_before.len());
 
         // The word as typed still carries its quoting, and no file is named
@@ -6026,9 +6028,24 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
             return (String::new(), Vec::new());
         };
 
+        // Which quoting region the inserted text lands in decides how it has to
+        // be escaped, and the answer is the same for both insertion sites, so
+        // ask once. It is the context *at the cursor*, which is why an
+        // unterminated quote is the normal case here rather than an error: the
+        // user is mid-word by definition.
+        let ctx = shellquote::trailing_context(text_before.as_bytes());
+
         if matches.len() == 1 {
             // Unique match.
-            let mut result: String = first_name.get(name_prefix.len()..).unwrap_or("").into();
+            let raw = first_name.get(name_prefix.len()..).unwrap_or("");
+            // Escape it for the region it lands in. Inserting the raw name is
+            // how `cat My<TAB>` used to produce `cat My Doc.txt` -- a line the
+            // user never typed, naming two files that do not exist, written by
+            // the shell itself. A candidate that cannot be spelled at all is
+            // declined rather than inserted mis-quoted.
+            let Some(mut result) = shellquote::quote_suffix_str(raw, ctx) else {
+                return (String::new(), Vec::new());
+            };
             // Add trailing slash for directories, space for files.
             if first.entry_type == crate::fs::EntryType::Directory {
                 result.push('/');
@@ -6038,8 +6055,9 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
                 // completing `cat "My Fi` produced `cat "My File.txt `, whose
                 // unterminated quote swallows the rest of the line. The
                 // completion is only correct if the line is still parseable
-                // after it.
-                match shellquote::trailing_context(text_before.as_bytes()) {
+                // after it. (`Ctx::Unquoted` needs nothing: `quote_suffix`
+                // closes any quoting it opened itself.)
+                match ctx {
                     shellquote::Ctx::Single => result.push('\''),
                     shellquote::Ctx::Double => result.push('"'),
                     shellquote::Ctx::Unquoted => {}
@@ -6052,7 +6070,14 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
         // Multiple matches — complete common prefix.
         let names: Vec<&str> = matches.iter().map(|(_, n)| *n).collect();
         let common = longest_common_prefix(&names);
-        let suffix: String = common.get(name_prefix.len()..).unwrap_or("").into();
+        // Escaped the same way, and for the same reason. No closer is added
+        // here: the word is *not* finished, so a quote the user opened stays
+        // open for them to keep typing into.
+        let Some(suffix) =
+            shellquote::quote_suffix_str(common.get(name_prefix.len()..).unwrap_or(""), ctx)
+        else {
+            return (String::new(), Vec::new());
+        };
         let display: Vec<String> = matches
             .iter()
             .map(|(e, n)| {
@@ -22569,6 +22594,87 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         *CWD.lock() = saved_cwd;
         assert!(cleaned, "the rung-118 fixture outlived the rung");
+    }
+
+    // --- 119: what completion inserts refers to the file it matched.
+    //
+    // Rung 116 covers where the word *begins*; this covers what gets *put
+    // there*. They are separate defects and were fixed a day apart: with the
+    // word start correct and the insertion raw, `cat /tmp/zz_tja<TAB>` produced
+    //
+    //     cat /tmp/zz_tja one.txt
+    //
+    // -- two arguments, both naming files that do not exist, in a line the
+    // user did not type. The shell wrote it for them.
+    //
+    // The assertion is the round trip and not the spelling: build the line the
+    // editor would end up with, split it with the parser's own scanner, unquote
+    // it with the dispatcher's own stage, and require the original path back
+    // as ONE word. That is a property of the whole pipeline, so it stays true
+    // if the escaping style ever changes; asserting the literal `'` placement
+    // would only pin today's spelling.
+    {
+        // One name per context, each with the awkward byte *after* the point
+        // the user stops typing -- otherwise the escaping is never exercised.
+        const SPACED: &str = "/tmp/zz_tja one.txt";
+        const APOS: &str = "/tmp/zz_tjbdon't.txt";
+        const DOLLAR: &str = "/tmp/zz_tjc$v\"x.txt";
+        let mut made = 0usize;
+        for p in [SPACED, APOS, DOLLAR] {
+            if crate::fs::Vfs::write_file(p, b"x").is_ok() {
+                made = made.saturating_add(1);
+            }
+        }
+        assert_eq!(made, 3, "could not build the rung-119 fixture");
+
+        // (typed-so-far, the file it must end up naming). The three contexts:
+        // unquoted, inside `'…'`, inside `"…"`.
+        for (typed, want) in [
+            ("cat /tmp/zz_tja", SPACED),
+            ("cat '/tmp/zz_tjb", APOS),
+            ("cat \"/tmp/zz_tjc", DOLLAR),
+        ] {
+            let (suffix, _) = tab_complete(typed, typed.len());
+            assert!(!suffix.is_empty(), "completion declined a unique match");
+            let mut line = String::from(typed);
+            line.push_str(&suffix);
+            let words = shellquote::split_bare_words(line.as_bytes());
+            // `cat` and the path. A third word is the bug this rung exists for.
+            assert_eq!(words.len(), 2, "completion produced more than one argument");
+            let w = *words
+                .get(1)
+                .ok_or(crate::error::KernelError::InternalError)?;
+            let raw = line
+                .get(w.start..w.end)
+                .ok_or(crate::error::KernelError::InternalError)?;
+            assert_eq!(
+                remove_quotes(raw),
+                want,
+                "the completed word does not name the file it matched"
+            );
+        }
+
+        // The other half of "still parseable": the line the user is left with
+        // has no quote hanging open, so whatever they type next is not
+        // swallowed into the filename.
+        for typed in ["cat /tmp/zz_tja", "cat '/tmp/zz_tjb", "cat \"/tmp/zz_tjc"] {
+            let (suffix, _) = tab_complete(typed, typed.len());
+            let mut line = String::from(typed);
+            line.push_str(&suffix);
+            assert_eq!(
+                shellquote::trailing_context(line.as_bytes()),
+                shellquote::Ctx::Unquoted,
+                "a finished completion left a quote open"
+            );
+        }
+
+        let mut cleaned = 0usize;
+        for p in [SPACED, APOS, DOLLAR] {
+            if crate::fs::Vfs::remove(p).is_ok() {
+                cleaned = cleaned.saturating_add(1);
+            }
+        }
+        assert_eq!(cleaned, 3, "the rung-119 fixture outlived the rung");
     }
 
     serial_println!("  kshell::self_test PASSED");

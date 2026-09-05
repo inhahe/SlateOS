@@ -513,6 +513,91 @@ pub fn quote_word(word: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Escape `suffix` so it can be appended to a word the user has already begun
+/// typing, without re-spelling the part they typed.
+///
+/// [`quote_word`] is the wrong tool for tab completion, and the reason is not
+/// stylistic. Completion never gets to write the whole word: the user has
+/// already typed `cat "My Fi`, and the only edit a completion may make is an
+/// *insertion at the cursor*. It therefore has to emit bytes that are correct
+/// **inside the region the user has already opened** — which is a different
+/// escaping problem in each of the three contexts, and in none of them is the
+/// answer "wrap it in single quotes":
+///
+/// | `ctx` | rule | why |
+/// |---|---|---|
+/// | [`Ctx::Single`] | pass bytes through; `'` becomes `'\''` | nothing else is special inside `'…'`, so an arbitrary byte needs no thought |
+/// | [`Ctx::Double`] | backslash-escape `"` `\` `$` `` ` `` | the four bytes that are still live inside `"…"` |
+/// | [`Ctx::Unquoted`] | wrap in `'…'` if any byte is special | adjacent quoting concatenates, so `My` + `' Doc.txt'` is still one word |
+///
+/// [`DQ_ESCAPABLE`]'s fifth member, `\n`, is deliberately *not* escaped in the
+/// double-quoted case: `\<newline>` inside double quotes is a line
+/// continuation in bash and would **delete** the byte rather than protect it.
+/// A raw newline is already literal there, and the line editor's buffer cannot
+/// hold one anyway, so the correct escaping is none.
+///
+/// The property that pins all three rules — asserted in [`self_test`], and
+/// checked against real bash over 20 filenames × 3 contexts before this was
+/// written — is that what a parser reads out of
+/// `<opener><already-typed><quote_suffix(rest, ctx)><closer>` is the original
+/// filename, byte for byte, and is **one** word.
+///
+/// An empty suffix yields an empty result rather than `''`: there is nothing
+/// to insert, and [`quote_word`]'s empty-word quoting exists to preserve an
+/// argument's *arity*, which a suffix has no say in.
+#[must_use]
+pub fn quote_suffix(suffix: &[u8], ctx: Ctx) -> Vec<u8> {
+    if suffix.is_empty() {
+        return Vec::new();
+    }
+    match ctx {
+        Ctx::Unquoted => quote_word(suffix),
+        Ctx::Single => {
+            let mut out = Vec::with_capacity(suffix.len());
+            for &b in suffix {
+                if b == b'\'' {
+                    // close, escaped apostrophe, reopen -- the same idiom
+                    // `quote_word` uses, and it leaves us back inside the
+                    // single-quoted region so the caller's closing `'` still
+                    // balances.
+                    out.extend_from_slice(b"'\\''");
+                } else {
+                    out.push(b);
+                }
+            }
+            out
+        }
+        Ctx::Double => {
+            let mut out = Vec::with_capacity(suffix.len());
+            for &b in suffix {
+                if b != b'\n' && DQ_ESCAPABLE.contains(&b) {
+                    out.push(b'\\');
+                }
+                out.push(b);
+            }
+            out
+        }
+    }
+}
+
+/// [`quote_suffix`] for a caller whose buffer is a `String`.
+///
+/// The line editor holds the command line as a `String`
+/// (`TD-KSHELL-LINE-EDITOR-IS-UTF8`), so tab completion needs the escaped
+/// suffix as text. This is a wrapper and not a second implementation on
+/// purpose: two spellings of one escaping rule is exactly the disease this
+/// module was written to cure, and a `char`-oriented copy would drift from the
+/// byte-oriented original the first time one of them is corrected.
+///
+/// Returns `None` if the result is not UTF-8. That cannot happen for a `&str`
+/// input — every byte the escaping adds is ASCII — but it is *reported* rather
+/// than asserted: a kernel that panics on a Tab keypress is worse than one
+/// that declines to complete.
+#[must_use]
+pub fn quote_suffix_str(suffix: &str, ctx: Ctx) -> Option<alloc::string::String> {
+    alloc::string::String::from_utf8(quote_suffix(suffix.as_bytes(), ctx)).ok()
+}
+
 /// Boot-time self test. Registered next to [`crate::bytestr::self_test`].
 ///
 /// # Errors
@@ -644,6 +729,108 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let mut s = scan(b"echo \"oops");
     let _: Vec<Tok> = s.by_ref().collect();
     assert_eq!(s.context(), Ctx::Double);
+
+    serial_println!("  shellquote::self_test 8: quote_suffix spells the three rules");
+    // The round-trip below is checked with *our* scanner, so a wrong-but-self-
+    // consistent escaping would satisfy it. These pin the actual spellings,
+    // which were checked against real bash (via `scripts/bashprobe.py`, never
+    // `bash -c` with the script as an argv element -- the Windows argv round
+    // trip eats backslashes, in a check whose subject is backslashes).
+    assert_eq!(quote_suffix(b"a'b", Ctx::Single), b"a'\\''b".to_vec());
+    assert_eq!(
+        quote_suffix(b"a\"b$c`d\\e", Ctx::Double),
+        b"a\\\"b\\$c\\`d\\\\e".to_vec()
+    );
+    // ...and the one member of DQ_ESCAPABLE that must NOT be escaped: inside
+    // double quotes `\<newline>` is a line continuation, so escaping a newline
+    // deletes it.
+    assert_eq!(quote_suffix(b"a\nb", Ctx::Double), b"a\nb".to_vec());
+    assert_eq!(quote_suffix(b"a b", Ctx::Unquoted), b"'a b'".to_vec());
+    // The flagship case, and the one whose correctness is least obvious:
+    // completing `My Doc.txt` from a typed `My` inserts a quoted *fragment*,
+    // and `My' Doc.txt'` is one word because adjacent quoting concatenates.
+    assert_eq!(
+        quote_suffix(b" Doc.txt", Ctx::Unquoted),
+        b"' Doc.txt'".to_vec()
+    );
+    // Nothing to insert is nothing, not `''`: `quote_word`'s empty-word
+    // quoting protects an argument's arity, which a suffix has no say in.
+    assert_eq!(quote_suffix(b"", Ctx::Unquoted), Vec::new());
+
+    serial_println!("  shellquote::self_test 9: quote_suffix round-trips into an open region");
+    // The property, over every filename x every split point x every context:
+    // what a parser reads out of `<opener><typed><quote_suffix(rest)><closer>`
+    // is the original name, byte for byte, and is ONE word.
+    //
+    // This does not model variable *expansion* of the already-typed prefix --
+    // `strip_quotes` does not expand, and a real shell does. That gap is a
+    // separate defect with its own entry
+    // (A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD): completion looks
+    // the word up unexpanded, so `$HOME/<TAB>` finds nothing at all. It is not
+    // this function's to fix and must not be silently absorbed into this
+    // property.
+    for name in [
+        &b"plain.txt"[..],
+        &b"My Doc.txt"[..],
+        &b"don't.txt"[..],
+        &b"re\xffport.txt"[..],
+        &b"$HOME.txt"[..],
+        &b"a\\b.txt"[..],
+        &b"a\"b.txt"[..],
+        &b"back`tick.txt"[..],
+        &b"a\nb.txt"[..],
+        &b"*;&|<>()~#!{}[],.txt"[..],
+    ] {
+        for cut in 0..=name.len() {
+            let (typed, rest) = name.split_at(cut);
+            for (ctx, quote) in [
+                (Ctx::Unquoted, &b""[..]),
+                (Ctx::Single, &b"'"[..]),
+                (Ctx::Double, &b"\""[..]),
+            ] {
+                // A prefix the user could not have typed *in this region* is
+                // not a case: a raw `"` inside `"…"` would have closed it, and
+                // a raw space outside quotes would have ended the word. Those
+                // lines never reach completion, so asserting about them would
+                // be asserting about a state the shell cannot be in.
+                //
+                // One exclusion is worth naming, because it looks like a
+                // convenient dodge and is not. The `Unquoted` arm also drops any
+                // prefix ending in a lone trailing backslash -- `quote_word`
+                // escapes it, so it fails the equality. That case is precisely
+                // the one documented divergence from bash this module already
+                // carries: `strip_quotes(b"a\\")` yields `a\` where bash yields
+                // `a`, and it is pinned as a divergence in
+                // check-shellquote-vs-bash.py rather than quietly tolerated.
+                // Round-tripping it here would assert our own known-wrong answer
+                // as correct, and the two statements would then disagree. One
+                // place says what we do differently; this loop does not
+                // re-assert it.
+                let typable = match ctx {
+                    Ctx::Unquoted => typed.is_empty() || quote_word(typed) == typed,
+                    Ctx::Single => !typed.contains(&b'\''),
+                    Ctx::Double => !typed.iter().any(|&b| b == b'"' || b == b'\\'),
+                };
+                if !typable {
+                    continue;
+                }
+                let mut line = Vec::from(&b"cat "[..]);
+                line.extend_from_slice(quote);
+                line.extend_from_slice(typed);
+                line.extend_from_slice(&quote_suffix(rest, ctx));
+                line.extend_from_slice(quote);
+                let words = split_bare_words(&line);
+                assert_eq!(words.len(), 2, "completion produced more than one word");
+                let w = *words
+                    .get(1)
+                    .ok_or(crate::error::KernelError::InternalError)?;
+                let raw = line
+                    .get(w.start..w.end)
+                    .ok_or(crate::error::KernelError::InternalError)?;
+                assert_eq!(strip_quotes(raw), name.to_vec(), "quote_suffix round-trip");
+            }
+        }
+    }
 
     serial_println!("  shellquote::self_test PASSED");
     Ok(())

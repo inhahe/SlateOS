@@ -114,11 +114,38 @@ skipped on NUL alone would reproduce that bug exactly, and would go quiet about
 precisely the file the attribute was added to protect.
 
 So the NUL test is overridden by the attribute rather than replacing it: a file
-declared `text eol=lf` is *asserted* to be text and is scanned whatever bytes it
-holds. That is what `text` means, and it is the one job the attribute query is
-still doing here -- narrower than before, and no longer able to hide anything by
-returning an empty set, since an empty declared set now costs the NUL override
+declared `text` is *asserted* to be text and is scanned whatever bytes it holds.
+That is what `text` means, and it is the one job the attribute query is still
+doing here -- narrower than before, and no longer able to hide anything by
+returning an empty set, since an empty asserted set now costs the NUL override
 and not the entire scope.
+
+### Ask for `text`, never for `eol` (2026-09-05)
+
+Until A-27 this query asked for `eol` and kept the files answering `lf`, which
+was the same set: `.gitattributes` then listed the text types one line at a
+time, `*.sh text eol=lf` and friends, so "has `eol=lf`" and "is asserted text"
+picked out the same files by construction.
+
+A-27 replaced that list with a catch-all, `* text=auto eol=lf`, and the two came
+apart in the worst direction. `eol` is now `lf` on **every tracked path** --
+13 915 of 13 915, PNGs and firmware images included, because a later `binary`
+line unsets `text` and says nothing about `eol`. `.gitattributes` calls that
+inert, and for git's own checkout conversion it is. It was not inert here: this
+gate read `eol=lf` as "asserted text", so every binary in the tree entered the
+asserted set, the NUL override fired on all of them, and the skip went to zero.
+The run printed 22 findings for the `\r` bytes inside PNGs, `.deb`, `.fd`,
+`.EFI` and `.o` files -- noise, in a gate whose entire value is that its output
+means something.
+
+`text` is the attribute that actually carries the assertion, and it has three
+values where `eol` has one: `set` for a type declared text, `unset` for the
+`binary` macro, and `auto` for everything the catch-all leaves to git's own
+heuristic. Only `set` is an assertion; `auto` is by definition the absence of
+one. Keeping `set` alone restores exactly the pre-A-27 membership while being
+immune to the shape `.gitattributes` happens to have -- which is the property
+that was missing, since the old query was correct only for as long as nobody
+wrote a catch-all.
 
 ## Why *reporting* is that wide but *refusing* is not (2026-09-04)
 
@@ -245,7 +272,7 @@ from pathlib import Path
 # likely to suffer is finding nothing and calling that clean -- the same failure
 # it exists to catch elsewhere.
 #
-# It guards `tracked_files` and not `declared_lf`, which is the change of
+# It guards `tracked_files` and not `declared_text`, which is the change of
 # 2026-09-04: the declared set is no longer the scope, only the NUL override, so
 # a query that empties out now costs one heuristic rather than the whole gate.
 # There is a self-test case pinning that the declared set is still non-empty, so
@@ -263,9 +290,14 @@ DISCOVERY_FLOOR = 500
 READ_THREADS = 48
 
 
-def _git(args: list[str], stdin: bytes | None = None) -> subprocess.CompletedProcess:
+def _git(args: list[str], stdin: bytes | None = None,
+         cwd: str | None = None) -> subprocess.CompletedProcess:
+    # `cwd` exists for the self-test, which builds a scratch repository with a
+    # `.gitattributes` of its own. See `self_test`: the alignment fixtures used
+    # to be two real files from this tree, and A-27 dissolved the distinction
+    # they rested on.
     return subprocess.run(
-        ["git", *args], input=stdin, capture_output=True, check=False)
+        ["git", *args], input=stdin, capture_output=True, check=False, cwd=cwd)
 
 
 def tracked_files() -> list[bytes]:
@@ -281,8 +313,15 @@ def tracked_files() -> list[bytes]:
     return [p for p in r.stdout.split(b"\0") if p]
 
 
-def declared_lf(paths: list[bytes]) -> list[bytes]:
-    """The subset of `paths` whose `eol` attribute is `lf`.
+def declared_text(paths: list[bytes], cwd: str | None = None) -> list[bytes]:
+    """The subset of `paths` whose `text` attribute is `set`.
+
+    `set` and not merely "present": `text` takes three values here and only one
+    of them is an assertion. `set` is a type `.gitattributes` declares to be
+    text; `unset` is the `binary` macro; `auto` is the catch-all handing the
+    question back to git's NUL heuristic, which is the absence of an assertion
+    rather than a weak one. The module docstring's "Ask for `text`, never for
+    `eol`" section records what asking the wrong attribute cost.
 
     `git check-attr -z --stdin <attr>` emits three NUL-terminated fields per
     input path -- path, attribute name, value -- so the stream is walked in
@@ -296,8 +335,8 @@ def declared_lf(paths: list[bytes]) -> list[bytes]:
     """
     if not paths:
         return []
-    r = _git(["check-attr", "-z", "--stdin", "eol"],
-             stdin=b"\0".join(paths) + b"\0")
+    r = _git(["check-attr", "-z", "--stdin", "text"],
+             stdin=b"\0".join(paths) + b"\0", cwd=cwd)
     if r.returncode != 0:
         return []
     fields = r.stdout.split(b"\0")
@@ -307,7 +346,7 @@ def declared_lf(paths: list[bytes]) -> list[bytes]:
     # at len-4. Walking to len-2 would read past it; walking in steps of three
     # from 0 while i+2 is in range is the honest bound.
     for i in range(0, len(fields) - 2, 3):
-        if fields[i + 2] == b"lf":
+        if fields[i + 2] == b"set":
             out.append(fields[i])
     return out
 
@@ -521,37 +560,39 @@ def self_test() -> int:
             "cannot self-test: `git ls-files` returned nothing",
             "Being unable to run the grading is not the same as running it and\n"
             "failing. Run this from inside the worktree.")
-    declared = declared_lf(paths)
+    declared = declared_text(paths)
     dset = {p for p in declared}
 
     # Two real files, chosen for what they prove rather than for convenience:
-    # one that `.gitattributes` covers by an explicit rule, and one it does not
-    # cover at all. If the query ever starts answering `lf` for everything --
-    # or for nothing -- exactly one of these two flips.
+    # one that `.gitattributes` asserts is text by an explicit rule, and one it
+    # leaves to git's heuristic. If the query ever starts answering `set` for
+    # everything -- or for nothing -- exactly one of these two flips.
     #
     # BOTH are drawn from `paths`, never from `declared`. Picking the `.sh` out
     # of the declared set was the first version of this, and it made the
     # assertion below a tautology: whatever the query returned was, by
-    # construction, a file the query had returned. It passed a mutant that
-    # walked the check-attr stream two fields at a time instead of three --
-    # which is precisely the misalignment this pair of cases exists to catch.
+    # construction, a file the query had returned.
     #
-    # `.rs` is the undeclared side, and since 2026-09-04 that fact carries a
-    # second meaning worth stating: it is no longer "the type this gate ignores"
-    # but "the type this gate reads *without* an attribute telling it to". The
-    # scope stopped depending on the attribute; only the NUL override still
-    # does. If a later change ever declares `*.rs` -- see `A-27-...` in
-    # `known-issues.md`, which proposes exactly that -- this fixture must move
-    # to a type that is still undeclared, and the case below will say so by
-    # failing rather than by silently becoming vacuous.
+    # HOW THIS PAIR WAS LOST ONCE, WHICH IS WHY THE ALIGNMENT CASES NO LONGER
+    # USE IT. The pair used to rest on the `eol` attribute, and the comment here
+    # said in as many words that if a later change ever declared `*.rs` the
+    # fixture "must move to a type that is still undeclared". A-27 then declared
+    # *everything*, with `* text=auto eol=lf`, and there was no such type left
+    # to move to: `eol` came back `lf` for all 13 915 tracked paths and the
+    # distinction the pair was built on had ceased to exist in this tree. The
+    # answer is not a cleverer choice of real file. It is to stop asking a
+    # question whose answer is the production `.gitattributes` -- so the
+    # alignment cases below build a scratch repository with an attributes file
+    # of their own, and this pair now only states what the real tree's policy
+    # is, which is a thing worth stating but is not load-bearing for alignment.
     sh = next((p for p in paths if p.endswith(b".sh")), None)
     rs = next((p for p in paths if p.endswith(b".rs")), None)
     if sh is None or rs is None:
         return _decline(
             "cannot self-test: the tree has no tracked .sh or no tracked .rs",
-            "Both are needed as fixtures: one file the attribute covers and one\n"
-            "it does not. Their absence means this is not the tree this gate\n"
-            "was written for, which is a reason to stop rather than to pass.")
+            "Both are needed as fixtures: one file declared text outright and one\n"
+            "left to the heuristic. Their absence means this is not the tree this\n"
+            "gate was written for, which is a reason to stop rather than to pass.")
 
     real = Path(sh.decode("utf-8", "surrogateescape")).read_bytes()
     other = Path(rs.decode("utf-8", "surrogateescape")).read_bytes()
@@ -610,6 +651,28 @@ def self_test() -> int:
             rc_blob_asserted = check([str(blob_f).encode()],
                                      frozenset({str(blob_f).encode()}))
         blob_asserted = assert_buf.getvalue()
+
+        # A scratch repository with an attributes file this test owns, for the
+        # alignment cases below.
+        #
+        # They need a two-path query whose answer is known: one asserted-text
+        # path and one that is not. Taking that pair from the real tree is what
+        # A-27 broke -- the tree's policy is not this test's to fix, and for a
+        # day there was no unasserted type in it at all. Here the policy is two
+        # lines long and cannot drift, so the cases grade the *parser* and only
+        # the parser, which is what they were always for.
+        #
+        # Nothing is added or committed: `check-attr` consults `.gitattributes`
+        # in the worktree and never stats the paths it is asked about, so the
+        # files need not exist. `git init` is required only because the command
+        # refuses to run outside a repository.
+        scratch = Path(td) / "attrs"
+        scratch.mkdir()
+        _git(["init", "--quiet"], cwd=str(scratch))
+        (scratch / ".gitattributes").write_bytes(b"*.sh text eol=lf\n")
+        s_sh, s_rs = b"a.sh", b"b.rs"
+        align_declared_first = declared_text([s_sh, s_rs], cwd=str(scratch))
+        align_undeclared_first = declared_text([s_rs, s_sh], cwd=str(scratch))
 
     cases: list[tuple[str, object, object]] = [
         # -- the verdict, end to end
@@ -689,15 +752,27 @@ def self_test() -> int:
 
         # -- the attribute query, which is the half that can silently empty out
         ("the declared set is not empty", bool(dset), True),
-        (f"a real .sh ({sh.decode()}) is declared eol=lf", sh in dset, True),
+        (f"a real .sh ({sh.decode()}) is asserted text", sh in dset, True),
+        # `auto`, not `set`: the catch-all leaves `.rs` to git's NUL heuristic,
+        # which is the absence of an assertion. If this ever flips, the tree has
+        # started asserting text for types nobody declared -- which is exactly
+        # what asking `eol` instead of `text` did, silently, for one day.
         (f"a real .rs ({rs.decode()}) is not", rs in dset, False),
-        ("the declared set is smaller than the tracked set",
+        ("the asserted set is smaller than the tracked set",
          len(declared) < len(paths), True),
+        # The binary side of the same claim, stated on a real file rather than
+        # inferred: a `binary` line unsets `text`, so a PNG must be outside the
+        # asserted set and must keep its NUL skip. Asking `eol` put all 22 of
+        # this tree's binaries *inside* it -- `binary` says nothing about `eol`
+        # -- and the run printed a CR count for every PNG, `.deb`, `.fd`, `.EFI`
+        # and `.o` in the tree while reporting "0 binary and skipped".
+        ("a declared binary is outside the asserted set",
+         any(p in dset for p in paths if p.endswith(b".png")), False),
         # The structural invariant, and the one that does not depend on picking
         # a lucky pair of fixtures: everything the query calls a declared file
         # must be a file. A stream walked out of alignment yields the attribute
-        # *name* and its *value* as paths -- `eol`, `lf` -- and those are in no
-        # tracked set, so this fails immediately however the misalignment
+        # *name* and its *value* as paths -- `text`, `set` -- and those are in
+        # no tracked set, so this fails immediately however the misalignment
         # happens to land.
         ("every declared path is a tracked path",
          set(declared) - set(paths), set()),
@@ -710,18 +785,24 @@ def self_test() -> int:
         ("the attribute query still returns a plausible set",
          len(declared) >= DISCOVERY_FLOOR, True),
         # Alignment, pinned from both sides with a two-element query whose
-        # answer is known: one declared file and one undeclared one. Order
-        # matters and both orders are asserted, because a stream walked two
-        # fields at a time instead of three still returns the right answer for
-        # `[declared, undeclared]` by luck and the wrong one for the reverse.
+        # answer is known: one asserted path and one that is not. Order matters
+        # and both orders are asserted, because a stream walked two fields at a
+        # time instead of three still returns the right answer for
+        # `[asserted, unasserted]` by luck and the wrong one for the reverse.
         # Over the whole tree that same mutant silently returns every *other*
         # file -- a plausible-looking count, all real paths, all genuinely
-        # declared -- which is why no assertion about the shape of the big
+        # asserted -- which is why no assertion about the shape of the big
         # result can catch it and this small one can.
-        ("a two-file query, declared first, returns just the declared one",
-         declared_lf([sh, rs]), [sh]),
-        ("a two-file query, undeclared first, returns just the declared one",
-         declared_lf([rs, sh]), [sh]),
+        #
+        # Both fixtures come from the scratch repository above, not from this
+        # tree. That is the repair for the way these two cases failed on
+        # 2026-09-05: they were grading the parser, but they were phrased as
+        # claims about `.gitattributes`, so a policy change that had nothing to
+        # do with parsing turned them red and stopped every lane's boot test.
+        ("a two-file query, asserted first, returns just the asserted one",
+         align_declared_first, [s_sh]),
+        ("a two-file query, unasserted first, returns just the asserted one",
+         align_undeclared_first, [s_sh]),
 
         # -- the CR test, against those same real files' real bytes
         ("the real .sh is clean as it stands", scan_bytes(real)[0], 0),
@@ -786,7 +867,7 @@ def main() -> int:
     # NUL-bearing text file from being mistaken for a binary one. A failure here
     # therefore costs one heuristic rather than the whole gate, so it is not
     # worth declining over; the self-test grades it instead.
-    return check(paths, frozenset(declared_lf(paths)), show_list=args.list)
+    return check(paths, frozenset(declared_text(paths)), show_list=args.list)
 
 
 NOTICE = """

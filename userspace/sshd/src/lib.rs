@@ -1929,6 +1929,10 @@ pub struct SshdConfig {
     permit_root_login: PermitRootLogin,
     password_authentication: bool,
     pubkey_authentication: bool,
+    /// Where each account's `authorized_keys` lives, as a pattern rather than a
+    /// path: relative to that account's home directory unless it is absolute,
+    /// with `%h`/`%u`/`%U`/`%%` expanded. Resolved per connection by
+    /// [`authorized_keys_path`], which is where the rules are written down.
     authorized_keys_file: String,
     max_auth_tries: u32,
     login_grace_time: u32,
@@ -3737,6 +3741,99 @@ enum PubkeyOutcome {
     Rejected,
 }
 
+/// Where an account's `authorized_keys` file lives, given the configured pattern.
+///
+/// # The bug this replaces
+///
+/// This path was built as `format!("/home/{username}/{}", …)` -- an assumption
+/// that every account's home directory is `/home/` followed by its name. `root`'s
+/// is `/root`. A service account's is wherever the package that created it put
+/// it. Any account an administrator has relocated is somewhere else again. For
+/// every one of those, publickey authentication read a file that does not exist,
+/// and a file that does not exist authorises no keys, so the method simply never
+/// worked for them.
+///
+/// It never said so, either, and that is what let it survive: the client is told
+/// its key was not accepted, which is exactly what it is told for a key that
+/// genuinely is not listed. The two are indistinguishable from the outside, so
+/// the symptom of "publickey is broken for root" is "root's key isn't working,
+/// must be something about the key". Meanwhile the daemon already parses
+/// `/etc/passwd` into a [`PasswdEntry`] carrying this very account's home
+/// directory, a few hundred lines away in this same file.
+///
+/// The same `format!` mangled an absolute `AuthorizedKeysFile`. The shipped-config
+/// idiom for taking the file out of user-writable space --
+/// `AuthorizedKeysFile /etc/ssh/authorized_keys/%u` -- became
+/// `/home/alice//etc/ssh/authorized_keys/%u`, so an administrator who had
+/// deliberately moved authority out of the user's own directory got it silently
+/// put back under it.
+///
+/// # The rules
+///
+/// OpenSSH's, matched to the letter, because an operator carrying a config across
+/// expects it to mean the same thing:
+///
+/// - A path that is absolute *after* token expansion is used exactly as written.
+/// - Anything else is relative to the account's home directory.
+/// - Four tokens expand: `%%` to a literal `%`, `%h` to the home directory, `%u`
+///   to the user name, `%U` to the numeric uid.
+///
+/// Expansion happens before the absolute test, not after, which is what makes the
+/// common `%h/.ssh/authorized_keys` resolve to the home directory rather than to
+/// a path underneath it.
+///
+/// Not supported: OpenSSH also accepts several space-separated paths in one
+/// `AuthorizedKeysFile` (which is how `.ssh/authorized_keys2` survives). A
+/// pattern containing a space is one path with a space in it here. That is a
+/// deliberate omission rather than an oversight -- see known-issues.md.
+fn authorized_keys_path(pattern: &str, user: &PasswdEntry) -> String {
+    let expanded = expand_path_tokens(pattern, user);
+    if expanded.starts_with('/') {
+        expanded
+    } else {
+        // The home directory's own trailing slash is dropped rather than doubled.
+        // `//` at the *start* of a POSIX path is implementation-defined, so a home
+        // of `/` producing `//.ssh/...` would be a genuinely different path on
+        // some systems; in the middle it is merely ugly, but a path that appears
+        // in a log ought to be one an administrator can paste.
+        format!("{}/{expanded}", user.home.trim_end_matches('/'))
+    }
+}
+
+/// Expand the `%` tokens in an `AuthorizedKeysFile` pattern.
+///
+/// One pass over the pattern, by construction: replacement text is pushed to the
+/// output and never looked at again. That is not a micro-optimisation, it is the
+/// security property. A repeat-until-stable or search-and-replace implementation
+/// would expand a `%h` that came *out of* a user name -- and at this point in the
+/// connection the user name is a string the unauthenticated peer chose.
+fn expand_path_tokens(pattern: &str, user: &PasswdEntry) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('%') => out.push('%'),
+            Some('h') => out.push_str(&user.home),
+            Some('u') => out.push_str(&user.username),
+            Some('U') => out.push_str(&user.uid.to_string()),
+            // Left as written. A `%` followed by something we do not recognise is
+            // far more likely to be a literal `%` in a directory name than a typo
+            // for a token, and dropping it would silently name a different file --
+            // the failure mode this whole function exists to remove.
+            Some(other) => {
+                out.push('%');
+                out.push(other);
+            }
+            None => out.push('%'),
+        }
+    }
+    out
+}
+
 /// Handle public key authentication (RFC 4252 section 7).
 ///
 /// # The bug this replaces
@@ -3772,7 +3869,8 @@ enum PubkeyOutcome {
 ///
 /// # Why this is a wrapper
 ///
-/// Everything here except the file read is in [`decide_pubkey_auth`]. The split
+/// Everything here except finding and reading the file is in
+/// [`decide_pubkey_auth`]; *which* file is in [`authorized_keys_path`]. The split
 /// was originally forced: `fs_read_file` issued a raw SlateOS syscall that
 /// returned `-ENOSYS` on a developer machine, so a test reaching this function
 /// exercised only its first failure branch, and the *entire* server-side
@@ -3793,7 +3891,19 @@ fn handle_pubkey_auth(
     session_id: &[u8; 32],
     config: &SshdConfig,
 ) -> Result<PubkeyOutcome, SshdError> {
-    let keys_path = format!("/home/{username}/{}", config.authorized_keys_file);
+    // The account's own home directory, out of `/etc/passwd` -- not `/home/` plus
+    // the name the peer sent. See [`authorized_keys_path`].
+    //
+    // An account with no `/etc/passwd` entry is refused here. It has no home to
+    // resolve a relative pattern against, and it could not be given a session even
+    // if it did authenticate, because `session_command` refuses to run anything
+    // for a name it cannot look up. The refusal is the same `Rejected` an unlisted
+    // key gets, deliberately: distinguishing them would tell an unauthenticated
+    // peer whether the account exists.
+    let Some(user) = lookup_passwd(username) else {
+        return Ok(PubkeyOutcome::Rejected);
+    };
+    let keys_path = authorized_keys_path(&config.authorized_keys_file, &user);
     // A file we cannot read authorises no keys, so the error is discarded
     // rather than propagated: the overwhelmingly common cause is that the user
     // has no `authorized_keys` at all, which is not a fault and must not fail
@@ -6968,6 +7078,152 @@ DenyGroups nogroup
         let keys = parse_authorized_keys(content);
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].comment, "");
+    }
+
+    // ---- Where authorized_keys lives ----
+    //
+    // The path resolution, kept in its own section from the parsing above because
+    // the two fail differently and only one of the two failures is visible. A
+    // misparsed key is a key that does not match; a mis-resolved *path* is a file
+    // that is not there, which authorises nothing at all and reports itself as
+    // "your key was not accepted" -- identical to the answer a genuinely unlisted
+    // key gets. That is how `/home/{username}` survived here: for every account it
+    // was wrong about, publickey auth did not look broken, it just was never
+    // usable.
+
+    /// An account, for the resolver to resolve against.
+    fn account(username: &str, uid: u32, home: &str) -> PasswdEntry {
+        PasswdEntry {
+            username: username.into(),
+            uid,
+            gid: uid,
+            home: home.into(),
+            shell: DEFAULT_LOGIN_SHELL.into(),
+        }
+    }
+
+    /// The regression test for the bug this replaced: `root`'s home is `/root`,
+    /// and the old code looked in `/home/root`, so the superuser could not use
+    /// publickey authentication at all.
+    #[test]
+    fn a_relative_pattern_resolves_against_the_accounts_own_home_not_slash_home() {
+        let config = SshdConfig::default_config();
+        assert_eq!(
+            authorized_keys_path(&config.authorized_keys_file, &account("root", 0, "/root")),
+            "/root/.ssh/authorized_keys"
+        );
+        assert_eq!(
+            authorized_keys_path(
+                &config.authorized_keys_file,
+                &account("daemon", 1, "/var/lib/daemon")
+            ),
+            "/var/lib/daemon/.ssh/authorized_keys"
+        );
+    }
+
+    /// The one case the old code did get right, which is why it lasted.
+    #[test]
+    fn an_ordinary_account_under_slash_home_resolves_as_it_always_did() {
+        assert_eq!(
+            authorized_keys_path(
+                ".ssh/authorized_keys",
+                &account("alice", 1000, "/home/alice")
+            ),
+            "/home/alice/.ssh/authorized_keys"
+        );
+    }
+
+    /// An administrator moving the file out of user-writable space must get the
+    /// path they wrote, not that path appended to a home directory.
+    #[test]
+    fn an_absolute_pattern_is_used_exactly_as_written() {
+        assert_eq!(
+            authorized_keys_path(
+                "/etc/ssh/authorized_keys/%u",
+                &account("alice", 1000, "/home/alice")
+            ),
+            "/etc/ssh/authorized_keys/alice"
+        );
+    }
+
+    /// `%h` expands *before* the absolute test, so the common OpenSSH form names
+    /// the home directory rather than something underneath it.
+    #[test]
+    fn a_pattern_that_becomes_absolute_by_expanding_percent_h_is_not_joined_again() {
+        assert_eq!(
+            authorized_keys_path("%h/.ssh/authorized_keys", &account("bob", 1001, "/srv/bob")),
+            "/srv/bob/.ssh/authorized_keys"
+        );
+    }
+
+    #[test]
+    fn the_uid_token_expands_to_the_number_from_etc_passwd() {
+        assert_eq!(
+            authorized_keys_path("/var/ssh/%U/keys", &account("bob", 1001, "/srv/bob")),
+            "/var/ssh/1001/keys"
+        );
+    }
+
+    #[test]
+    fn a_doubled_percent_is_one_literal_percent_and_is_not_a_token_prefix() {
+        // `%%u` is a literal `%` then a literal `u`, never the user name.
+        assert_eq!(
+            authorized_keys_path("/etc/keys/%%u", &account("alice", 1000, "/home/alice")),
+            "/etc/keys/%u"
+        );
+    }
+
+    /// A `%` in a directory name is left alone. Swallowing it would silently name
+    /// a different file, which is the failure this resolver exists to remove.
+    #[test]
+    fn an_unrecognised_token_is_left_as_written_rather_than_dropped() {
+        assert_eq!(
+            authorized_keys_path("/etc/keys/%d/%u", &account("alice", 1000, "/home/alice")),
+            "/etc/keys/%d/alice"
+        );
+    }
+
+    #[test]
+    fn a_pattern_ending_in_a_bare_percent_keeps_it() {
+        assert_eq!(
+            authorized_keys_path("/etc/keys/x%", &account("alice", 1000, "/home/alice")),
+            "/etc/keys/x%"
+        );
+    }
+
+    /// The user name is chosen by a peer that has not authenticated yet. A
+    /// resolver that substituted repeatedly would expand tokens that came out of
+    /// it -- letting a `%h` inside a name reach the home directory, and a `../`
+    /// alongside it reach any file the daemon can read. One pass is what makes the
+    /// expansion a substitution rather than an evaluation.
+    #[test]
+    fn a_token_inside_the_user_name_is_not_expanded_again() {
+        assert_eq!(
+            authorized_keys_path("/etc/keys/%u", &account("%h%%%u", 1000, "/home/x")),
+            "/etc/keys/%h%%%u"
+        );
+    }
+
+    #[test]
+    fn a_home_directory_with_a_trailing_slash_does_not_produce_a_doubled_separator() {
+        assert_eq!(
+            authorized_keys_path(
+                ".ssh/authorized_keys",
+                &account("alice", 1000, "/home/alice/")
+            ),
+            "/home/alice/.ssh/authorized_keys"
+        );
+    }
+
+    /// A home of `/` is the one place the trailing-slash trim matters for more
+    /// than tidiness: a leading `//` is implementation-defined in POSIX, so it is
+    /// not merely an ugly spelling of the same path.
+    #[test]
+    fn an_account_whose_home_is_the_root_directory_gets_a_single_leading_slash() {
+        assert_eq!(
+            authorized_keys_path(".ssh/authorized_keys", &account("nobody", 65534, "/")),
+            "/.ssh/authorized_keys"
+        );
     }
 
     // ---- Channel message handling ----

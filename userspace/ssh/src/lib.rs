@@ -865,8 +865,21 @@ fn add_known_host(
 /// A private key this client can authenticate with.
 ///
 /// The public half here is the one **derived from the seed**, never the one the
-/// file claimed. See [`identity_from_openssh_text`].
-struct Identity {
+/// file claimed. See [`Identity::from_openssh_text`].
+///
+/// # Why this is public
+///
+/// So that something outside this crate can drive a real `publickey` request
+/// into the real server. `sshd`'s side of RFC 4252 §7 and this side of it are
+/// two writers of one byte sequence, and a suite that only ever talks to itself
+/// cannot notice that it is wrong in a way it is *consistently* wrong — see
+/// known-issues.md
+/// `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`
+/// for the tally of what that has cost so far.
+///
+/// The type is public; its two fields are not, because a seed a caller supplied
+/// field-by-field is not a key that any file produced.
+pub struct Identity {
     seed: [u8; 32],
     public: [u8; 32],
 }
@@ -904,46 +917,50 @@ fn identity_path(identity_file: Option<&str>) -> String {
     format!("{home}/.ssh/id_ed25519")
 }
 
-/// Read a private key out of the text of an `openssh-key-v1` file.
-///
-/// Takes the file's *text* rather than its path, so the decision this function
-/// makes is reachable from a test without a filesystem. That split is the same
-/// one `sshd::HostKey::from_openssh_text` and `sshd::decide_pubkey_auth` have,
-/// and for the same reason.
-///
-/// # The check that is not the codec's job
-///
-/// `sshwire` hands back the public key **the file holds**, because deriving one
-/// from the seed is Ed25519 arithmetic and that lives in `posix`, which
-/// `sshwire` deliberately does not depend on. So this function derives it and
-/// compares, and returns the derived value rather than the stored one.
-///
-/// That check is not theoretical bookkeeping. `ssh-keygen` in this tree derived
-/// the wrong public key for every key it ever wrote — it disagreed with RFC
-/// 8032's own test vector — so the two halves of those files do not match. A
-/// client that trusted the stored half would send a key blob the server sees,
-/// sign with a seed that does not correspond to it, and get back a bare
-/// `SSH_MSG_USERAUTH_FAILURE` with nothing to point at. Deriving and comparing
-/// turns that into a sentence naming the file.
-///
-/// # Errors
-///
-/// A description of what is wrong with the container, or that its two halves
-/// disagree, suitable for printing after the file's name.
-fn identity_from_openssh_text(text: &str) -> Result<Identity, String> {
-    let key = sshwire::decode_openssh_private_key(text).map_err(|e| e.to_string())?;
-    let derived = posix::ed25519::public_key(&key.seed);
-    if derived != key.public {
-        return Err(
-            "the public key stored in the file does not match its private seed, so the \
-             file is damaged or was written by a tool that derived it wrongly"
-                .to_string(),
-        );
+impl Identity {
+    /// Read a private key out of the text of an `openssh-key-v1` file.
+    ///
+    /// Takes the file's *text* rather than its path, so the decision this
+    /// function makes is reachable from a test without a filesystem. That split
+    /// is the same one `sshd::HostKey::from_openssh_text` and
+    /// `sshd::decide_publickey_request` have, and for the same reason — and it
+    /// is spelled the same way as the first of those deliberately, so that the
+    /// two ends of this protocol load a key by the same name.
+    ///
+    /// # The check that is not the codec's job
+    ///
+    /// `sshwire` hands back the public key **the file holds**, because deriving
+    /// one from the seed is Ed25519 arithmetic and that lives in `posix`, which
+    /// `sshwire` deliberately does not depend on. So this function derives it
+    /// and compares, and returns the derived value rather than the stored one.
+    ///
+    /// That check is not theoretical bookkeeping. `ssh-keygen` in this tree
+    /// derived the wrong public key for every key it ever wrote — it disagreed
+    /// with RFC 8032's own test vector — so the two halves of those files do not
+    /// match. A client that trusted the stored half would send a key blob the
+    /// server sees, sign with a seed that does not correspond to it, and get
+    /// back a bare `SSH_MSG_USERAUTH_FAILURE` with nothing to point at. Deriving
+    /// and comparing turns that into a sentence naming the file.
+    ///
+    /// # Errors
+    ///
+    /// A description of what is wrong with the container, or that its two halves
+    /// disagree, suitable for printing after the file's name.
+    pub fn from_openssh_text(text: &str) -> Result<Self, String> {
+        let key = sshwire::decode_openssh_private_key(text).map_err(|e| e.to_string())?;
+        let derived = posix::ed25519::public_key(&key.seed);
+        if derived != key.public {
+            return Err(
+                "the public key stored in the file does not match its private seed, so the \
+                 file is damaged or was written by a tool that derived it wrongly"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            seed: key.seed,
+            public: derived,
+        })
     }
-    Ok(Identity {
-        seed: key.seed,
-        public: derived,
-    })
 }
 
 /// Load the key to authenticate with, if there is one to load.
@@ -1006,7 +1023,7 @@ fn load_identity_from(path: &str, explicit: bool) -> Result<Option<Identity>, Ss
         }
     };
 
-    match identity_from_openssh_text(&text) {
+    match Identity::from_openssh_text(&text) {
         Ok(identity) => Ok(Some(identity)),
         Err(why) if explicit => Err(SshError::AuthFailed(format!("cannot use {path}: {why}"))),
         Err(why) => {
@@ -1016,39 +1033,53 @@ fn load_identity_from(path: &str, explicit: bool) -> Result<Option<Identity>, Ss
     }
 }
 
-/// Build the `publickey` request for `identity`, signature included.
-///
-/// The bytes that go on the wire and the bytes the signature covers are one
-/// sequence written down once, in [`sshwire::pubkey_request_fields`]; this
-/// function is where that sequence is signed and the signature appended. The
-/// server reconstructs the signed form with `sshwire::pubkey_signed_blob`,
-/// which is defined in terms of the same function — so the two ends cannot
-/// disagree about a field, which is the one failure mode a `publickey` exchange
-/// reports as nothing more informative than "no".
-fn pubkey_auth_request(
-    identity: &Identity,
-    user_bytes: &[u8],
-    service_bytes: &[u8],
-    session_id: &[u8; 32],
-) -> Vec<u8> {
-    let key_blob = sshwire::ed25519_public_blob(&identity.public);
-    let algorithm = sshwire::OPENSSH_KEY_TYPE_ED25519;
+impl Identity {
+    /// Build the signed `publickey` `SSH_MSG_USERAUTH_REQUEST` for this key.
+    ///
+    /// The bytes that go on the wire and the bytes the signature covers are one
+    /// sequence written down once, in [`sshwire::pubkey_request_fields`]; this
+    /// function is where that sequence is signed and the signature appended. The
+    /// server reconstructs the signed form with `sshwire::pubkey_signed_blob`,
+    /// which is defined in terms of the same function — so the two ends cannot
+    /// disagree about a field, which is the one failure mode a `publickey`
+    /// exchange reports as nothing more informative than "no".
+    ///
+    /// The result is a complete request, from the `SSH_MSG_USERAUTH_REQUEST`
+    /// byte onward — not a tail from some offset — because that is what the
+    /// server is handed and what `sshd::decide_publickey_request` takes. An
+    /// offset agreed by convention between two crates is one more thing the two
+    /// can disagree about silently, and it was not worth having.
+    #[must_use]
+    pub fn auth_request(
+        &self,
+        user_bytes: &[u8],
+        service_bytes: &[u8],
+        session_id: &[u8; 32],
+    ) -> Vec<u8> {
+        let key_blob = sshwire::ed25519_public_blob(&self.public);
+        let algorithm = sshwire::OPENSSH_KEY_TYPE_ED25519;
 
-    let signed =
-        sshwire::pubkey_signed_blob(session_id, user_bytes, service_bytes, algorithm, &key_blob);
-    let signature = posix::ed25519::sign(&identity.seed, &signed);
+        let signed = sshwire::pubkey_signed_blob(
+            session_id,
+            user_bytes,
+            service_bytes,
+            algorithm,
+            &key_blob,
+        );
+        let signature = posix::ed25519::sign(&self.seed, &signed);
 
-    // RFC 4253 §6.6: a signature on the wire is the algorithm name and the
-    // signature blob, wrapped in one more string. The extra layer is what lets
-    // a verifier reject a signature made under a different algorithm than the
-    // key it was offered under.
-    let mut sig_blob = ssh_string(algorithm);
-    sig_blob.extend_from_slice(&ssh_string(&signature));
+        // RFC 4253 §6.6: a signature on the wire is the algorithm name and the
+        // signature blob, wrapped in one more string. The extra layer is what
+        // lets a verifier reject a signature made under a different algorithm
+        // than the key it was offered under.
+        let mut sig_blob = ssh_string(algorithm);
+        sig_blob.extend_from_slice(&ssh_string(&signature));
 
-    let mut payload =
-        sshwire::pubkey_request_fields(user_bytes, service_bytes, algorithm, &key_blob);
-    payload.extend_from_slice(&ssh_string(&sig_blob));
-    payload
+        let mut payload =
+            sshwire::pubkey_request_fields(user_bytes, service_bytes, algorithm, &key_blob);
+        payload.extend_from_slice(&ssh_string(&sig_blob));
+        payload
+    }
 }
 
 /// The server's verdict on one authentication attempt.
@@ -1917,12 +1948,8 @@ impl SshSession {
         })?;
 
         self.verbose("offering public key");
-        let payload = pubkey_auth_request(
-            identity,
-            self.config.user.as_bytes(),
-            b"ssh-connection",
-            &session_id,
-        );
+        let payload =
+            identity.auth_request(self.config.user.as_bytes(), b"ssh-connection", &session_id);
         self.send_packet(&payload)?;
         self.read_auth_reply()
     }
@@ -3557,7 +3584,7 @@ mod tests {
             "alice@test",
             0x0102_0304,
         );
-        let id = identity_from_openssh_text(&text).expect("a key this crate wrote must load");
+        let id = Identity::from_openssh_text(&text).expect("a key this crate wrote must load");
         assert_eq!(id.seed, RFC_8032_SEED);
         assert_eq!(
             id.public, RFC_8032_PUBLIC,
@@ -3583,7 +3610,7 @@ mod tests {
             0x0102_0304,
         );
 
-        let err = identity_from_openssh_text(&text).expect_err("halves disagree");
+        let err = Identity::from_openssh_text(&text).expect_err("halves disagree");
         assert!(
             err.contains("does not match"),
             "the message must say what is wrong: {err}"
@@ -3592,7 +3619,7 @@ mod tests {
 
     #[test]
     fn text_that_is_not_a_key_file_at_all_is_refused_with_a_reason() {
-        let err = identity_from_openssh_text("hello\n").expect_err("not a key");
+        let err = Identity::from_openssh_text("hello\n").expect_err("not a key");
         assert!(!err.is_empty(), "a refusal must say something");
     }
 
@@ -3683,7 +3710,7 @@ mod tests {
     #[test]
     fn the_request_is_the_publickey_userauth_request_rfc_4252_specifies() {
         let id = test_identity();
-        let payload = pubkey_auth_request(&id, b"alice", b"ssh-connection", &[0x11; 32]);
+        let payload = id.auth_request(b"alice", b"ssh-connection", &[0x11; 32]);
 
         assert_eq!(
             payload.first().copied(),
@@ -3735,7 +3762,7 @@ mod tests {
     fn the_signature_verifies_under_the_key_the_request_offers() {
         let id = test_identity();
         let session_id = [0x11_u8; 32];
-        let payload = pubkey_auth_request(&id, b"alice", b"ssh-connection", &session_id);
+        let payload = id.auth_request(b"alice", b"ssh-connection", &session_id);
 
         let (user, off) = read_ssh_string(&payload, 1).expect("user");
         let (service, off) = read_ssh_string(&payload, off).expect("service");
@@ -3766,8 +3793,8 @@ mod tests {
         // client that left it out, or hashed a constant, would still produce
         // requests a matching implementation accepted. Two sessions, one key.
         let id = test_identity();
-        let first = pubkey_auth_request(&id, b"alice", b"ssh-connection", &[0x11; 32]);
-        let second = pubkey_auth_request(&id, b"alice", b"ssh-connection", &[0x22; 32]);
+        let first = id.auth_request(b"alice", b"ssh-connection", &[0x11; 32]);
+        let second = id.auth_request(b"alice", b"ssh-connection", &[0x22; 32]);
         assert_ne!(
             first, second,
             "the same key in two sessions must not sign the same bytes"
@@ -3802,8 +3829,8 @@ mod tests {
     #[test]
     fn a_request_for_one_account_does_not_authenticate_another() {
         let id = test_identity();
-        let alice = pubkey_auth_request(&id, b"alice", b"ssh-connection", &[0x11; 32]);
-        let root = pubkey_auth_request(&id, b"root", b"ssh-connection", &[0x11; 32]);
+        let alice = id.auth_request(b"alice", b"ssh-connection", &[0x11; 32]);
+        let root = id.auth_request(b"root", b"ssh-connection", &[0x11; 32]);
         assert_ne!(alice, root);
 
         let key_blob = sshwire::ed25519_public_blob(&RFC_8032_PUBLIC);

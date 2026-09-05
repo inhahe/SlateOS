@@ -3515,6 +3515,63 @@ fn handle_service_request(conn: &mut ConnectionState) -> Result<(), SshdError> {
     Ok(())
 }
 
+/// The header every `SSH_MSG_USERAUTH_REQUEST` begins with (RFC 4252 §5).
+///
+/// ```text
+/// byte      SSH_MSG_USERAUTH_REQUEST
+/// string    user name
+/// string    service name
+/// string    method name
+/// ...       whatever that method defines
+/// ```
+///
+/// The three names are **borrowed out of the packet**, not copied through a
+/// `String`. A `publickey` signature covers the bytes the client actually sent
+/// for the user and the service, and `String::from_utf8_lossy` of a name that is
+/// not valid UTF-8 is a different byte sequence -- so a verifier working from
+/// the lossy copy would reject every such account for a reason nothing anywhere
+/// reports. The loop below keeps lossy `String`s too, for lookups and logging,
+/// which is a different job.
+struct UserauthRequest<'a> {
+    user: &'a [u8],
+    service: &'a [u8],
+    method: &'a [u8],
+    /// Where the method's own fields begin -- the first byte after the header.
+    method_fields: usize,
+}
+
+/// Read that header, or say why the packet does not have one.
+///
+/// # Why this is a function rather than four lines in the loop
+///
+/// It was four lines in the loop, and [`decide_publickey_request`] needs the
+/// same four. Writing them again there would put a second copy of a wire format
+/// in the same crate as the first -- the defect catalogued in known-issues.md
+/// `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`,
+/// and the one that an offset passed between two crates by convention would
+/// reintroduce at the crate boundary instead.
+///
+/// # Errors
+///
+/// The packet is not an `SSH_MSG_USERAUTH_REQUEST` at all, or one of its length
+/// prefixes runs off the end of it.
+fn parse_userauth_request(payload: &[u8]) -> Result<UserauthRequest<'_>, SshdError> {
+    if payload.first().copied() != Some(msg::SSH_MSG_USERAUTH_REQUEST) {
+        return Err(SshdError::ProtocolError(
+            "not an SSH_MSG_USERAUTH_REQUEST".into(),
+        ));
+    }
+    let (user, off) = read_ssh_string(payload, 1)?;
+    let (service, off) = read_ssh_string(payload, off)?;
+    let (method, method_fields) = read_ssh_string(payload, off)?;
+    Ok(UserauthRequest {
+        user,
+        service,
+        method,
+        method_fields,
+    })
+}
+
 /// Perform user authentication loop.
 ///
 /// `auth` is borrowed from the daemon rather than created here on purpose: its
@@ -3556,18 +3613,17 @@ fn do_user_auth(
             continue;
         }
 
-        let (username_bytes, off) = read_ssh_string(&payload, 1)?;
+        let request = parse_userauth_request(&payload)?;
         // The publickey signature is computed over the *bytes* the client sent
         // for the user and service names, so those are kept alongside the lossy
         // strings the rest of the loop uses for lookups and logging. A username
         // that is not valid UTF-8 would otherwise be re-encoded with U+FFFD and
         // every signature over it would fail for a reason nothing reports.
-        let user_bytes = username_bytes.to_vec();
-        let username = String::from_utf8_lossy(username_bytes).into_owned();
-        let (service_bytes, off) = read_ssh_string(&payload, off)?;
-        let service_bytes = service_bytes.to_vec();
-        let (method_bytes, off) = read_ssh_string(&payload, off)?;
-        let method = String::from_utf8_lossy(method_bytes).into_owned();
+        let user_bytes = request.user.to_vec();
+        let username = String::from_utf8_lossy(request.user).into_owned();
+        let service_bytes = request.service.to_vec();
+        let method = String::from_utf8_lossy(request.method).into_owned();
+        let off = request.method_fields;
 
         conn.debug_log(&format!("auth request: user={username} method={method}"));
         username.clone_into(&mut conn.username);
@@ -3722,7 +3778,12 @@ fn handle_password_auth(
 }
 
 /// The outcome of examining one `publickey` `SSH_MSG_USERAUTH_REQUEST`.
-enum PubkeyOutcome {
+///
+/// Public because [`decide_publickey_request`] returns it; `PartialEq` because
+/// the whole point of that function is that something outside this crate can
+/// assert on the answer.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PubkeyOutcome {
     /// The client proved possession of an authorised key. Let it in.
     Accepted,
     /// The client asked, without a signature, whether this key would be
@@ -4033,6 +4094,64 @@ fn decide_pubkey_auth(
     } else {
         Ok(PubkeyOutcome::Rejected)
     }
+}
+
+/// This daemon's answer to one complete `publickey` authentication request,
+/// given the `authorized_keys` text that governs the account it names.
+///
+/// # What it is for
+///
+/// This is the whole server side of RFC 4252 §7, reachable from outside the
+/// crate. `ssh` and `sshd` are two writers of one byte sequence — the client
+/// signs [`sshwire::pubkey_signed_blob`] and the server rebuilds it — and a
+/// disagreement about any field in it produces no decode error at either end,
+/// only a signature that fails to verify, which the protocol reports as a bare
+/// `SSH_MSG_USERAUTH_FAILURE`. Nothing distinguishes that from a key that
+/// genuinely is not listed. So the two sides have to be compared by something
+/// holding both, which is what `ssh-interop` is; this function is the half of
+/// that comparison the daemon owns.
+///
+/// # Why it takes the whole request and no offset
+///
+/// [`decide_pubkey_auth`] takes an offset into the packet and the user and
+/// service names beside it, because its caller — the auth loop — has already
+/// read all three. A caller in another crate has not, and would have to
+/// reproduce the header parse to supply them. That is a second copy of a wire
+/// format across a crate boundary, arrived at by exactly the reasoning that put
+/// every entry in that catalogue there.
+///
+/// It also removes a way to ask the wrong question. The user and service names
+/// a `publickey` signature covers are *fields of the request*: passing them
+/// separately allows passing ones the request does not contain, and the
+/// signature would then be checked against something the client never sent.
+/// Reading them out of `request` makes that unspellable.
+///
+/// # Errors
+///
+/// The packet is not a well-formed `SSH_MSG_USERAUTH_REQUEST`, or it is one for
+/// a method other than `publickey`. Neither is a verdict: a malformed packet is
+/// a protocol error, and answering "rejected" would tell a caller that a
+/// question it never managed to ask had been answered.
+pub fn decide_publickey_request(
+    request: &[u8],
+    session_id: &[u8; 32],
+    authorized_keys: &str,
+) -> Result<PubkeyOutcome, SshdError> {
+    let header = parse_userauth_request(request)?;
+    if header.method != b"publickey" {
+        return Err(SshdError::ProtocolError(format!(
+            "not a publickey request: the method is {}",
+            String::from_utf8_lossy(header.method)
+        )));
+    }
+    decide_pubkey_auth(
+        request,
+        header.method_fields,
+        header.user,
+        header.service,
+        session_id,
+        authorized_keys,
+    )
 }
 
 /// Build the RFC 4252 section 7 signed blob and check `sig_blob` against it.

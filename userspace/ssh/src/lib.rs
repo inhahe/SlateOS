@@ -1,7 +1,8 @@
 //! Slate OS SSH-2 Client
 //!
-//! A simplified SSH-2 protocol client for SlateOS. Supports password
-//! authentication, interactive shell sessions, and remote command execution.
+//! A simplified SSH-2 protocol client for SlateOS. Supports public key and
+//! password authentication, interactive shell sessions, and remote command
+//! execution.
 //!
 //! # Why this is a library with a three-line binary on top
 //!
@@ -27,6 +28,7 @@
 //! ssh -p 2222 user@hostname          Connect on custom port
 //! ssh user@hostname ls -la           Execute remote command
 //! ssh -v user@hostname               Verbose protocol debugging
+//! ssh -i ~/.ssh/id_ed25519 user@host Authenticate with a named private key
 //! ssh -o ConnectTimeout=10 user@host Set connection timeout
 //! ssh -o StrictHostKeyChecking=no user@host  Skip host key check
 //! ```
@@ -39,7 +41,7 @@
 //! - Host key: ssh-ed25519 (RFC 8032, via `posix::ed25519`)
 //! - Encryption: AES-128-CTR
 //! - MAC: HMAC-SHA256
-//! - User auth: password method
+//! - User auth: publickey (ssh-ed25519), falling back to password
 //! - Channel: session with PTY and shell/exec
 //!
 //! # What the host key check actually proves
@@ -857,6 +859,228 @@ fn add_known_host(
 }
 
 // ============================================================================
+// Public key authentication (RFC 4252 §7)
+// ============================================================================
+
+/// A private key this client can authenticate with.
+///
+/// The public half here is the one **derived from the seed**, never the one the
+/// file claimed. See [`identity_from_openssh_text`].
+struct Identity {
+    seed: [u8; 32],
+    public: [u8; 32],
+}
+
+/// Written by hand rather than derived, because a derived one prints `seed`.
+///
+/// That is not a hypothetical leak. `Debug` is what `expect`, `unwrap`,
+/// `assert_eq!` and every `{:?}` in a diagnostic reach for, so a derived impl
+/// puts the user's private key into a panic message, a verbose log line, or a
+/// test failure — places whose whole purpose is to be copied into a bug report.
+/// The public half is printed in full because it is public.
+impl fmt::Debug for Identity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Identity")
+            .field("seed", &"<redacted>")
+            .field(
+                "public",
+                &host_key_fingerprint(&sshwire::ed25519_public_blob(&self.public)),
+            )
+            .finish()
+    }
+}
+
+/// Where the private key lives.
+///
+/// `-i` and `-o IdentityFile=` override it, as in OpenSSH. Only `id_ed25519` is
+/// looked for because Ed25519 is the only key type this stack implements —
+/// there is no `id_rsa` to fall back to, and offering one that could never be
+/// loaded would turn "you have no key" into "your key is broken".
+fn identity_path(identity_file: Option<&str>) -> String {
+    if let Some(path) = identity_file {
+        return path.to_string();
+    }
+    let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    format!("{home}/.ssh/id_ed25519")
+}
+
+/// Read a private key out of the text of an `openssh-key-v1` file.
+///
+/// Takes the file's *text* rather than its path, so the decision this function
+/// makes is reachable from a test without a filesystem. That split is the same
+/// one `sshd::HostKey::from_openssh_text` and `sshd::decide_pubkey_auth` have,
+/// and for the same reason.
+///
+/// # The check that is not the codec's job
+///
+/// `sshwire` hands back the public key **the file holds**, because deriving one
+/// from the seed is Ed25519 arithmetic and that lives in `posix`, which
+/// `sshwire` deliberately does not depend on. So this function derives it and
+/// compares, and returns the derived value rather than the stored one.
+///
+/// That check is not theoretical bookkeeping. `ssh-keygen` in this tree derived
+/// the wrong public key for every key it ever wrote — it disagreed with RFC
+/// 8032's own test vector — so the two halves of those files do not match. A
+/// client that trusted the stored half would send a key blob the server sees,
+/// sign with a seed that does not correspond to it, and get back a bare
+/// `SSH_MSG_USERAUTH_FAILURE` with nothing to point at. Deriving and comparing
+/// turns that into a sentence naming the file.
+///
+/// # Errors
+///
+/// A description of what is wrong with the container, or that its two halves
+/// disagree, suitable for printing after the file's name.
+fn identity_from_openssh_text(text: &str) -> Result<Identity, String> {
+    let key = sshwire::decode_openssh_private_key(text).map_err(|e| e.to_string())?;
+    let derived = posix::ed25519::public_key(&key.seed);
+    if derived != key.public {
+        return Err(
+            "the public key stored in the file does not match its private seed, so the \
+             file is damaged or was written by a tool that derived it wrongly"
+                .to_string(),
+        );
+    }
+    Ok(Identity {
+        seed: key.seed,
+        public: derived,
+    })
+}
+
+/// Load the key to authenticate with, if there is one to load.
+///
+/// # Why a missing file is two different things
+///
+/// `Ok(None)` means "authenticate some other way"; `Err` means "stop". Which
+/// one an unusable file produces depends on whether the user named it:
+///
+/// | | file absent | file present but unusable |
+/// |---|---|---|
+/// | `-i` given | error | error |
+/// | no `-i` | silent | warning, then continue |
+///
+/// An explicit `-i` is a statement of intent. Falling back to a password prompt
+/// after failing to load it means the user types their password into a session
+/// they believed was using a key — and gets in, so nothing ever tells them the
+/// key was not used. OpenSSH only warns here; that leniency is a well-worn
+/// source of "why does it keep asking for my password". Naming the problem and
+/// stopping costs a retry and buys an accurate answer.
+///
+/// The default path is the opposite case: most invocations of this client have
+/// no key at all, and a message about a file the user never mentioned is noise
+/// on every single one. But a default path that *exists* and cannot be read is
+/// not the same as one that is absent — something meant it to be a key — so it
+/// warns and carries on rather than passing over it in silence.
+///
+/// See design-decisions.md §778.
+///
+/// # Errors
+///
+/// [`SshError::AuthFailed`] naming the file and what was wrong with it, when
+/// the user named the file themselves.
+fn load_identity(identity_file: Option<&str>) -> Result<Option<Identity>, SshError> {
+    load_identity_from(&identity_path(identity_file), identity_file.is_some())
+}
+
+/// [`load_identity`], with the path already chosen and the policy stated
+/// outright.
+///
+/// Split out because the interesting half of `load_identity` is the *`None`*
+/// case — the default path — and that case reads `$HOME/.ssh/id_ed25519`. A
+/// test of it that went through `load_identity` would either pass or fail
+/// depending on whether the operator running it happens to own a key, which is
+/// not a test of anything. With the two decisions separated, `explicit` can be
+/// set to `false` over a scratch file and the default-path policy is checked
+/// without a single reference to the developer's home directory.
+///
+/// # Errors
+///
+/// As [`load_identity`].
+fn load_identity_from(path: &str, explicit: bool) -> Result<Option<Identity>, SshError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) => {
+            if explicit {
+                return Err(SshError::AuthFailed(format!("cannot read {path}: {e}")));
+            }
+            return Ok(None);
+        }
+    };
+
+    match identity_from_openssh_text(&text) {
+        Ok(identity) => Ok(Some(identity)),
+        Err(why) if explicit => Err(SshError::AuthFailed(format!("cannot use {path}: {why}"))),
+        Err(why) => {
+            eprintln!("Warning: ignoring {path}: {why}");
+            Ok(None)
+        }
+    }
+}
+
+/// Build the `publickey` request for `identity`, signature included.
+///
+/// The bytes that go on the wire and the bytes the signature covers are one
+/// sequence written down once, in [`sshwire::pubkey_request_fields`]; this
+/// function is where that sequence is signed and the signature appended. The
+/// server reconstructs the signed form with `sshwire::pubkey_signed_blob`,
+/// which is defined in terms of the same function — so the two ends cannot
+/// disagree about a field, which is the one failure mode a `publickey` exchange
+/// reports as nothing more informative than "no".
+fn pubkey_auth_request(
+    identity: &Identity,
+    user_bytes: &[u8],
+    service_bytes: &[u8],
+    session_id: &[u8; 32],
+) -> Vec<u8> {
+    let key_blob = sshwire::ed25519_public_blob(&identity.public);
+    let algorithm = sshwire::OPENSSH_KEY_TYPE_ED25519;
+
+    let signed =
+        sshwire::pubkey_signed_blob(session_id, user_bytes, service_bytes, algorithm, &key_blob);
+    let signature = posix::ed25519::sign(&identity.seed, &signed);
+
+    // RFC 4253 §6.6: a signature on the wire is the algorithm name and the
+    // signature blob, wrapped in one more string. The extra layer is what lets
+    // a verifier reject a signature made under a different algorithm than the
+    // key it was offered under.
+    let mut sig_blob = ssh_string(algorithm);
+    sig_blob.extend_from_slice(&ssh_string(&signature));
+
+    let mut payload =
+        sshwire::pubkey_request_fields(user_bytes, service_bytes, algorithm, &key_blob);
+    payload.extend_from_slice(&ssh_string(&sig_blob));
+    payload
+}
+
+/// The server's verdict on one authentication attempt.
+///
+/// There is no `Error` variant: a reply that could not be read at all is an
+/// [`SshError`], because the connection is then in a state this client cannot
+/// reason about. This type is only the two answers the protocol defines.
+#[derive(Debug, PartialEq, Eq)]
+enum AuthReply {
+    Success,
+    /// `SSH_MSG_USERAUTH_FAILURE`, carrying the methods that may still work.
+    ///
+    /// Not the same as "wrong password": RFC 4252 §5.1 sends this for a method
+    /// the server never offered, for an account that does not exist, and for a
+    /// key that is not authorized, all identically. That is deliberate — the
+    /// alternative tells an unauthenticated peer which accounts exist.
+    Failure {
+        methods: String,
+    },
+}
+
+/// Is `password` among the methods this list names?
+///
+/// The field is a comma-separated list of names (RFC 4252 §5.1), so this is a
+/// split on commas rather than a substring search. `contains("password")` would
+/// also match a hypothetical `password-expired` or `gssapi-with-password`, and
+/// would then prompt for a secret the server had not asked for.
+fn offers_password(methods: &str) -> bool {
+    methods.split(',').any(|m| m.trim() == "password")
+}
+
+// ============================================================================
 // Argument parsing
 // ============================================================================
 
@@ -877,6 +1101,14 @@ pub struct Config {
     strict_host_key: StrictHostKey,
     /// `-o UserKnownHostsFile=`; `None` means `$HOME/.ssh/known_hosts`.
     known_hosts_file: Option<String>,
+    /// `-i` or `-o IdentityFile=`; `None` means "try `$HOME/.ssh/id_ed25519`
+    /// and say nothing if it is not there".
+    ///
+    /// The distinction between `Some` and `None` is not just a default: it is
+    /// the difference between a user who asked for a key and a user who did
+    /// not, and [`load_identity`] treats a failure to use the file very
+    /// differently in the two cases. See design-decisions.md §778.
+    identity_file: Option<String>,
     // Parsed from -o ConnectTimeout=N; consumed by the future socket
     // connect path that wires a real timeout into the TCP handshake.
     #[allow(dead_code)]
@@ -911,7 +1143,8 @@ fn parse_args() -> Result<Config, String> {
 pub fn parse_args_from(args: Vec<String>) -> Result<Config, String> {
     if args.len() < 2 {
         return Err(format!(
-            "Usage: {} [-p port] [-v] [-o option=value] [user@]hostname [command...]",
+            "Usage: {} [-p port] [-v] [-i identity_file] [-o option=value] \
+             [user@]hostname [command...]",
             args.first().map(|s| s.as_str()).unwrap_or("ssh")
         ));
     }
@@ -920,6 +1153,7 @@ pub fn parse_args_from(args: Vec<String>) -> Result<Config, String> {
     let mut verbose = false;
     let mut strict_host_key = StrictHostKey::Ask;
     let mut known_hosts_file: Option<String> = None;
+    let mut identity_file: Option<String> = None;
     let mut connect_timeout: u32 = 30;
     let mut destination: Option<String> = None;
     let mut command_parts: Vec<String> = Vec::new();
@@ -944,6 +1178,15 @@ pub fn parse_args_from(args: Vec<String>) -> Result<Config, String> {
             "-v" => {
                 verbose = true;
             }
+            // `-i` takes a path and, unlike `-p`, has no usable default to fall
+            // back on: an empty one would name the current directory. A missing
+            // value is therefore an error rather than a shrug.
+            "-i" => {
+                let val = it
+                    .next()
+                    .ok_or_else(|| "-i requires a path to a private key".to_string())?;
+                identity_file = Some(val);
+            }
             "-o" => {
                 let opt = it
                     .next()
@@ -958,6 +1201,12 @@ pub fn parse_args_from(args: Vec<String>) -> Result<Config, String> {
                     };
                 } else if let Some(val) = opt.strip_prefix("UserKnownHostsFile=") {
                     known_hosts_file = Some(val.to_string());
+                } else if let Some(val) = opt.strip_prefix("IdentityFile=") {
+                    // The same setting as `-i`, and deliberately the same
+                    // variable: OpenSSH accepts both spellings, and a program
+                    // that honoured one and ignored the other would silently
+                    // authenticate as somebody else's key for half its callers.
+                    identity_file = Some(val.to_string());
                 }
                 // Silently ignore unknown options (like OpenSSH).
             }
@@ -1009,6 +1258,7 @@ pub fn parse_args_from(args: Vec<String>) -> Result<Config, String> {
         verbose,
         strict_host_key,
         known_hosts_file,
+        identity_file,
         connect_timeout,
     })
 }
@@ -1590,10 +1840,43 @@ impl SshSession {
         }
         self.verbose("service accepted: ssh-userauth");
 
-        // Prompt for password.
+        // The key is loaded before anything is sent, so a `-i` naming a file
+        // that cannot be used fails before the user is asked for a password
+        // they did not intend to type. See `load_identity`.
+        let identity = load_identity(self.config.identity_file.as_deref())?;
+
+        let refused_methods = match identity {
+            Some(identity) => match self.try_publickey_auth(&identity)? {
+                AuthReply::Success => {
+                    self.verbose("authentication successful (publickey)");
+                    return Ok(());
+                }
+                AuthReply::Failure { methods } => {
+                    self.verbose(&format!(
+                        "public key not accepted; server offers: {methods}"
+                    ));
+                    Some(methods)
+                }
+            },
+            None => None,
+        };
+
+        // Asking for a password the server has already said it will not look at
+        // is worse than useless: the user types a real secret, at a prompt, into
+        // a session that will reject it -- and if the far end is not the host
+        // they think it is, they have just handed it over for nothing. The
+        // failure message names what the server *will* accept instead.
+        if let Some(methods) = &refused_methods
+            && !offers_password(methods)
+        {
+            return Err(SshError::AuthFailed(format!(
+                "the public key was not accepted, and this server does not offer \
+                 password authentication. Available methods: {methods}"
+            )));
+        }
+
         let password = self.read_password()?;
 
-        // Send USERAUTH_REQUEST with password method.
         self.verbose("sending password authentication");
         let mut auth_payload = Vec::new();
         auth_payload.push(msg::SSH_MSG_USERAUTH_REQUEST);
@@ -1604,20 +1887,70 @@ impl SshSession {
         auth_payload.extend_from_slice(&ssh_string(password.as_bytes()));
         self.send_packet(&auth_payload)?;
 
-        // Handle response.
+        match self.read_auth_reply()? {
+            AuthReply::Success => {
+                self.verbose("authentication successful (password)");
+                Ok(())
+            }
+            AuthReply::Failure { methods } => Err(SshError::AuthFailed(format!(
+                "password rejected. Available methods: {methods}"
+            ))),
+        }
+    }
+
+    /// Offer `identity` and a signature proving we hold it (RFC 4252 §7).
+    ///
+    /// The query form of the request — `has_signature` FALSE, asking whether
+    /// the key *would* be accepted before paying to sign — is not sent. It
+    /// exists to spare an agent or a hardware token a signature that will be
+    /// thrown away; this client holds the seed in memory, so the query would
+    /// cost a round trip to save an operation that takes microseconds.
+    fn try_publickey_auth(&mut self, identity: &Identity) -> Result<AuthReply, SshError> {
+        // The signature binds the session identifier, so there is nothing to
+        // sign before the first key exchange has produced one. Reaching here
+        // without it would mean authentication had been attempted on an
+        // unencrypted connection.
+        let session_id = self.session_id.ok_or_else(|| {
+            SshError::ProtocolError(
+                "cannot authenticate with a public key before the key exchange".into(),
+            )
+        })?;
+
+        self.verbose("offering public key");
+        let payload = pubkey_auth_request(
+            identity,
+            self.config.user.as_bytes(),
+            b"ssh-connection",
+            &session_id,
+        );
+        self.send_packet(&payload)?;
+        self.read_auth_reply()
+    }
+
+    /// Wait for the server's verdict on one authentication attempt.
+    ///
+    /// Banners are printed and the wait continues: RFC 4252 §5.4 lets one
+    /// arrive at any point during authentication, and it is not a verdict.
+    /// Anything else is logged and ignored rather than treated as a failure,
+    /// because a message this client does not implement is not the server
+    /// saying no.
+    fn read_auth_reply(&mut self) -> Result<AuthReply, SshError> {
         loop {
             let reply = self.recv_packet()?;
             match reply.first().copied() {
-                Some(msg::SSH_MSG_USERAUTH_SUCCESS) => {
-                    self.verbose("authentication successful");
-                    return Ok(());
-                }
+                Some(msg::SSH_MSG_USERAUTH_SUCCESS) => return Ok(AuthReply::Success),
                 Some(msg::SSH_MSG_USERAUTH_FAILURE) => {
                     let (methods, _) = read_ssh_string(&reply, 1)?;
-                    let methods_str = std::str::from_utf8(methods).unwrap_or("(unknown)");
-                    return Err(SshError::AuthFailed(format!(
-                        "password rejected. Available methods: {methods_str}"
-                    )));
+                    // Not `from_utf8_lossy`: this is a protocol field RFC 4252
+                    // §5.1 defines as a comma-separated list of method names,
+                    // all of which are US-ASCII. Bytes that are not that are a
+                    // broken server, and saying so beats printing replacement
+                    // characters as if they were method names.
+                    return Ok(AuthReply::Failure {
+                        methods: std::str::from_utf8(methods)
+                            .unwrap_or("(unreadable)")
+                            .to_string(),
+                    });
                 }
                 Some(msg::SSH_MSG_USERAUTH_BANNER) => {
                     // Display the banner message.
@@ -2313,6 +2646,11 @@ mod tests {
             // open or create it, so it is "a file that is not there" stated in
             // a way that cannot accidentally become a file that is.
             known_hosts_file: Some(String::new()),
+            // `None` here would be `~/.ssh/id_ed25519`, so a test that reached
+            // authentication would behave differently depending on whether the
+            // operator owns a key. The empty path is "a file that is not there"
+            // for the same reason as the trust store above.
+            identity_file: Some(String::new()),
             connect_timeout: 0,
         }
     }
@@ -3112,5 +3450,402 @@ mod tests {
 
         let default = known_hosts_path(None);
         assert_ne!(default, file, "the named file must not be the default one");
+    }
+
+    // ---- publickey authentication (RFC 4252 §7) ----
+
+    /// The seed and public key of RFC 8032 §7.1's first Ed25519 test vector.
+    ///
+    /// An external anchor, and the reason these tests use it rather than
+    /// `[7u8; 32]`: the public half below was written by the IETF, not by this
+    /// tree. `ssh-keygen` in this repository derived a *different* public key
+    /// for every key it wrote, and every test it had passed, because each one
+    /// compared its arithmetic against its own arithmetic. A fixture whose two
+    /// halves come from outside cannot do that.
+    const RFC_8032_SEED: [u8; 32] = [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
+        0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
+        0x7f, 0x60,
+    ];
+    const RFC_8032_PUBLIC: [u8; 32] = [
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07,
+        0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07,
+        0x51, 0x1a,
+    ];
+
+    fn test_identity() -> Identity {
+        Identity {
+            seed: RFC_8032_SEED,
+            public: RFC_8032_PUBLIC,
+        }
+    }
+
+    // ---- -i / -o IdentityFile= ----
+
+    #[test]
+    fn without_the_option_the_key_is_the_users_own_file() {
+        let path = identity_path(None);
+        assert!(
+            path.ends_with("/.ssh/id_ed25519"),
+            "default identity moved: {path}"
+        );
+    }
+
+    #[test]
+    fn the_identity_option_names_the_file_and_nothing_is_appended_to_it() {
+        assert_eq!(identity_path(Some("/tmp/k")), "/tmp/k");
+    }
+
+    #[test]
+    fn both_spellings_of_the_identity_option_set_the_same_thing() {
+        // OpenSSH accepts `-i` and `-o IdentityFile=` interchangeably. A client
+        // that honoured one and ignored the other would, for half its callers,
+        // silently authenticate with a key they did not ask for -- and succeed,
+        // so nothing would ever say so.
+        let dash_i = parse_args_from(vec![
+            "ssh".into(),
+            "-i".into(),
+            "/tmp/k".into(),
+            "host".into(),
+        ])
+        .expect("valid");
+        let dash_o = parse_args_from(vec![
+            "ssh".into(),
+            "-o".into(),
+            "IdentityFile=/tmp/k".into(),
+            "host".into(),
+        ])
+        .expect("valid");
+
+        assert_eq!(dash_i.identity_file.as_deref(), Some("/tmp/k"));
+        assert_eq!(dash_o.identity_file, dash_i.identity_file);
+    }
+
+    #[test]
+    fn no_identity_option_leaves_the_choice_to_the_default() {
+        let c = parse_args_from(vec!["ssh".into(), "host".into()]).expect("valid");
+        assert_eq!(
+            c.identity_file, None,
+            "`None` is what tells `load_identity` the user did not name a file"
+        );
+    }
+
+    #[test]
+    fn a_dash_i_with_no_path_is_an_error_rather_than_an_empty_path() {
+        // An empty path would name the current directory, which is not a key
+        // file and never will be; taking it silently would report the mistake
+        // as "cannot read ''" from somewhere much further along.
+        // Not `expect_err`: that would need `Config: Debug`, which it does not
+        // have -- and should not grow, since it is the struct a passphrase
+        // field would land in.
+        let Err(err) = parse_args_from(vec!["ssh".into(), "-i".into()]) else {
+            panic!("a `-i` with no path must not parse");
+        };
+        assert!(
+            err.contains("-i"),
+            "the message must name the option: {err}"
+        );
+    }
+
+    // ---- reading a key file ----
+
+    #[test]
+    fn a_well_formed_key_file_yields_the_seed_and_the_public_half_the_rfc_gives() {
+        let text = sshwire::encode_openssh_private_key(
+            &RFC_8032_SEED,
+            &RFC_8032_PUBLIC,
+            "alice@test",
+            0x0102_0304,
+        );
+        let id = identity_from_openssh_text(&text).expect("a key this crate wrote must load");
+        assert_eq!(id.seed, RFC_8032_SEED);
+        assert_eq!(
+            id.public, RFC_8032_PUBLIC,
+            "the loaded public half must be RFC 8032's, not whatever we derived"
+        );
+    }
+
+    #[test]
+    fn a_key_file_whose_two_halves_disagree_is_refused() {
+        // This is not a hypothetical. `ssh-keygen` in this tree derived the
+        // wrong public key for every key it ever wrote, so real files in this
+        // shape exist. Accepting one means signing with a seed that does not
+        // correspond to the key blob we offered: the server rejects it with a
+        // bare USERAUTH_FAILURE, which is the same thing it says for a key that
+        // is simply not authorized. The user would have no way to tell those
+        // apart, and the file would stay broken.
+        let wrong_public = [0xAA_u8; 32];
+        assert_ne!(wrong_public, RFC_8032_PUBLIC);
+        let text = sshwire::encode_openssh_private_key(
+            &RFC_8032_SEED,
+            &wrong_public,
+            "broken@test",
+            0x0102_0304,
+        );
+
+        let err = identity_from_openssh_text(&text).expect_err("halves disagree");
+        assert!(
+            err.contains("does not match"),
+            "the message must say what is wrong: {err}"
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_a_key_file_at_all_is_refused_with_a_reason() {
+        let err = identity_from_openssh_text("hello\n").expect_err("not a key");
+        assert!(!err.is_empty(), "a refusal must say something");
+    }
+
+    // ---- what an unusable identity file does, and why it depends ----
+
+    #[test]
+    fn an_identity_the_user_named_and_that_is_not_there_stops_the_client() {
+        // The reason for the whole `explicit` distinction. Falling back to a
+        // password prompt here means the user types their password believing
+        // the key was used, gets in, and is never told otherwise.
+        let scratch = scratchdir::ScratchDir::new("ssh-identity-missing");
+        let path = scratch.path("id_ed25519");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+
+        let err = load_identity_from(file, true).expect_err("an explicit key must not be skipped");
+        let msg = err.to_string();
+        assert!(msg.contains(file), "the message must name the file: {msg}");
+    }
+
+    #[test]
+    fn a_default_identity_that_is_not_there_is_not_an_error() {
+        // Most invocations of this client have no key at all. Reporting the
+        // absence of a file the user never mentioned would put a message on
+        // every one of them.
+        let scratch = scratchdir::ScratchDir::new("ssh-identity-default-missing");
+        let path = scratch.path("id_ed25519");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+
+        let got = load_identity_from(file, false).expect("an absent default is not an error");
+        assert!(got.is_none(), "there is no key, so there is no identity");
+    }
+
+    #[test]
+    fn a_default_identity_that_cannot_be_used_is_skipped_rather_than_fatal() {
+        // Distinct from the case above: the file exists, so something meant it
+        // to be a key. That earns a warning on stderr -- but not a refusal to
+        // connect, because the user never asked for this file by name.
+        let scratch = scratchdir::ScratchDir::new("ssh-identity-default-broken");
+        let path = scratch.path("id_ed25519");
+        std::fs::write(&path, "not a key at all\n").expect("write");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+
+        let got = load_identity_from(file, false).expect("a broken default must not be fatal");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn an_identity_the_user_named_and_that_cannot_be_used_stops_the_client() {
+        let scratch = scratchdir::ScratchDir::new("ssh-identity-explicit-broken");
+        let path = scratch.path("id_ed25519");
+        std::fs::write(&path, "not a key at all\n").expect("write");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+
+        let err = load_identity_from(file, true).expect_err("an explicit key must not be skipped");
+        let msg = err.to_string();
+        assert!(msg.contains(file), "the message must name the file: {msg}");
+    }
+
+    #[test]
+    fn a_key_file_written_here_is_read_back_through_the_real_file_path() {
+        // The two halves of `load_identity_from` -- the read and the decode --
+        // exercised together over a real file, so a change that broke the
+        // reading rather than the parsing is still caught.
+        let scratch = scratchdir::ScratchDir::new("ssh-identity-roundtrip");
+        let path = scratch.path("id_ed25519");
+        std::fs::write(
+            &path,
+            sshwire::encode_openssh_private_key(&RFC_8032_SEED, &RFC_8032_PUBLIC, "alice@test", 7),
+        )
+        .expect("write");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+
+        let id = load_identity_from(file, true)
+            .expect("readable")
+            .expect("present");
+        assert_eq!(id.seed, RFC_8032_SEED);
+        assert_eq!(id.public, RFC_8032_PUBLIC);
+    }
+
+    // ---- the request that goes on the wire ----
+
+    /// Take the request apart the way a server does, and check every field.
+    ///
+    /// Written out field by field rather than compared against a second call
+    /// to the builder: the builder agreeing with itself is not evidence. What
+    /// this pins is the *layout* RFC 4252 §7 specifies, and it is the layout
+    /// that the server -- a different program, in a different crate -- parses.
+    #[test]
+    fn the_request_is_the_publickey_userauth_request_rfc_4252_specifies() {
+        let id = test_identity();
+        let payload = pubkey_auth_request(&id, b"alice", b"ssh-connection", &[0x11; 32]);
+
+        assert_eq!(
+            payload.first().copied(),
+            Some(msg::SSH_MSG_USERAUTH_REQUEST)
+        );
+        let (user, off) = read_ssh_string(&payload, 1).expect("user name");
+        assert_eq!(user, b"alice");
+        let (service, off) = read_ssh_string(&payload, off).expect("service name");
+        assert_eq!(service, b"ssh-connection");
+        let (method, off) = read_ssh_string(&payload, off).expect("method name");
+        assert_eq!(method, b"publickey");
+        let (has_sig, off) = read_byte(&payload, off).expect("has-signature flag");
+        assert_eq!(
+            has_sig, 1,
+            "a request with no signature proves nothing and is not what this sends"
+        );
+        let (algorithm, off) = read_ssh_string(&payload, off).expect("algorithm name");
+        assert_eq!(algorithm, b"ssh-ed25519");
+        let (key_blob, off) = read_ssh_string(&payload, off).expect("key blob");
+        let (sig_blob, off) = read_ssh_string(&payload, off).expect("signature blob");
+        assert_eq!(off, payload.len(), "nothing may follow the signature");
+
+        // The key blob is itself `string(algorithm) string(point)` (RFC 8709).
+        let (blob_alg, boff) = read_ssh_string(key_blob, 0).expect("blob algorithm");
+        assert_eq!(blob_alg, b"ssh-ed25519");
+        let (point, boff) = read_ssh_string(key_blob, boff).expect("blob point");
+        assert_eq!(point, RFC_8032_PUBLIC, "the offered key must be ours");
+        assert_eq!(boff, key_blob.len());
+
+        // And the signature blob is `string(algorithm) string(64 bytes)`
+        // (RFC 4253 §6.6) -- the wrapper is what stops a signature made under
+        // one algorithm being presented as one made under another.
+        let (sig_alg, soff) = read_ssh_string(sig_blob, 0).expect("signature algorithm");
+        assert_eq!(sig_alg, b"ssh-ed25519");
+        let (signature, soff) = read_ssh_string(sig_blob, soff).expect("signature");
+        assert_eq!(signature.len(), 64, "an Ed25519 signature is 64 bytes");
+        assert_eq!(soff, sig_blob.len());
+    }
+
+    /// The signature verifies under the key the request *offers*.
+    ///
+    /// Deliberately verified against the point parsed back out of the payload
+    /// rather than against `identity.public`, because the failure this guards
+    /// is precisely the two coming apart: a client that signs with one key and
+    /// offers another produces a request that is well-formed, parses cleanly at
+    /// both ends, and is rejected with a bare `USERAUTH_FAILURE` naming no
+    /// cause. That is the `ssh-keygen` bug wearing a different hat.
+    #[test]
+    fn the_signature_verifies_under_the_key_the_request_offers() {
+        let id = test_identity();
+        let session_id = [0x11_u8; 32];
+        let payload = pubkey_auth_request(&id, b"alice", b"ssh-connection", &session_id);
+
+        let (user, off) = read_ssh_string(&payload, 1).expect("user");
+        let (service, off) = read_ssh_string(&payload, off).expect("service");
+        let (_method, off) = read_ssh_string(&payload, off).expect("method");
+        let (_flag, off) = read_byte(&payload, off).expect("flag");
+        let (algorithm, off) = read_ssh_string(&payload, off).expect("algorithm");
+        let (key_blob, off) = read_ssh_string(&payload, off).expect("key blob");
+        let (sig_blob, _) = read_ssh_string(&payload, off).expect("signature blob");
+        let (_sig_alg, soff) = read_ssh_string(sig_blob, 0).expect("signature algorithm");
+        let (signature, _) = read_ssh_string(sig_blob, soff).expect("signature");
+
+        // Rebuilt the way the server rebuilds it -- from the fields the request
+        // carried, plus a session identifier the request does not carry at all.
+        let signed = sshwire::pubkey_signed_blob(&session_id, user, service, algorithm, key_blob);
+        let (_, poff) = read_ssh_string(key_blob, 0).expect("blob algorithm");
+        let (point, _) = read_ssh_string(key_blob, poff).expect("blob point");
+
+        assert!(
+            posix::ed25519::verify_slices(point, &signed, signature),
+            "the signature does not verify under the key the request offered"
+        );
+    }
+
+    #[test]
+    fn a_signature_made_for_one_session_does_not_verify_in_another() {
+        // The session identifier is the whole replay defence, and it is the one
+        // field of the signed blob that never appears on the wire -- so a
+        // client that left it out, or hashed a constant, would still produce
+        // requests a matching implementation accepted. Two sessions, one key.
+        let id = test_identity();
+        let first = pubkey_auth_request(&id, b"alice", b"ssh-connection", &[0x11; 32]);
+        let second = pubkey_auth_request(&id, b"alice", b"ssh-connection", &[0x22; 32]);
+        assert_ne!(
+            first, second,
+            "the same key in two sessions must not sign the same bytes"
+        );
+
+        // Stronger than "the bytes differ": the first session's signature must
+        // actually fail against the second session's blob.
+        let key_blob = sshwire::ed25519_public_blob(&RFC_8032_PUBLIC);
+        let other_signed = sshwire::pubkey_signed_blob(
+            &[0x22; 32],
+            b"alice",
+            b"ssh-connection",
+            b"ssh-ed25519",
+            &key_blob,
+        );
+        let (_, off) = read_ssh_string(&first, 1).expect("user");
+        let (_, off) = read_ssh_string(&first, off).expect("service");
+        let (_, off) = read_ssh_string(&first, off).expect("method");
+        let (_, off) = read_byte(&first, off).expect("flag");
+        let (_, off) = read_ssh_string(&first, off).expect("algorithm");
+        let (_, off) = read_ssh_string(&first, off).expect("key blob");
+        let (sig_blob, _) = read_ssh_string(&first, off).expect("signature blob");
+        let (_, soff) = read_ssh_string(sig_blob, 0).expect("signature algorithm");
+        let (signature, _) = read_ssh_string(sig_blob, soff).expect("signature");
+
+        assert!(
+            !posix::ed25519::verify_slices(&RFC_8032_PUBLIC, &other_signed, signature),
+            "a signature from one session verified in another: it is not bound to the session"
+        );
+    }
+
+    #[test]
+    fn a_request_for_one_account_does_not_authenticate_another() {
+        let id = test_identity();
+        let alice = pubkey_auth_request(&id, b"alice", b"ssh-connection", &[0x11; 32]);
+        let root = pubkey_auth_request(&id, b"root", b"ssh-connection", &[0x11; 32]);
+        assert_ne!(alice, root);
+
+        let key_blob = sshwire::ed25519_public_blob(&RFC_8032_PUBLIC);
+        let as_root = sshwire::pubkey_signed_blob(
+            &[0x11; 32],
+            b"root",
+            b"ssh-connection",
+            b"ssh-ed25519",
+            &key_blob,
+        );
+        let (_, off) = read_ssh_string(&alice, 1).expect("user");
+        let (_, off) = read_ssh_string(&alice, off).expect("service");
+        let (_, off) = read_ssh_string(&alice, off).expect("method");
+        let (_, off) = read_byte(&alice, off).expect("flag");
+        let (_, off) = read_ssh_string(&alice, off).expect("algorithm");
+        let (_, off) = read_ssh_string(&alice, off).expect("key blob");
+        let (sig_blob, _) = read_ssh_string(&alice, off).expect("signature blob");
+        let (_, soff) = read_ssh_string(sig_blob, 0).expect("signature algorithm");
+        let (signature, _) = read_ssh_string(sig_blob, soff).expect("signature");
+
+        assert!(
+            !posix::ed25519::verify_slices(&RFC_8032_PUBLIC, &as_root, signature),
+            "alice's signature authenticated root: the user name is not bound"
+        );
+    }
+
+    // ---- whether to prompt for a password at all ----
+
+    #[test]
+    fn the_method_list_is_read_as_a_list_and_not_as_text() {
+        assert!(offers_password("publickey,password"));
+        assert!(offers_password("password"));
+        assert!(
+            offers_password("publickey, password"),
+            "a server that pads the list still offers the method"
+        );
+        assert!(!offers_password("publickey"));
+        assert!(!offers_password(""));
+        // The reason this is a split rather than `contains`: these name other
+        // methods, and prompting for a password on either would be asking the
+        // user for a secret the server never offered to accept.
+        assert!(!offers_password("gssapi-with-password"));
+        assert!(!offers_password("keyboard-interactive,password-expired"));
     }
 }

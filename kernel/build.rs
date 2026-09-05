@@ -232,6 +232,27 @@ fn ada_stamp(ada: &Path) -> String {
 }
 
 fn verify_against_toolchain(gcc: &Path, ada: &Path, prebuilt: &Path) {
+    // GNAT rejects a `--RTS=` path that has no `adalib/`, before it looks at a
+    // single line of Ada: `gnat1: RTS path not valid: missing adalib directory`.
+    // Our RTS is a stub whose `adalib/` is legitimately *empty* -- we link no
+    // Ada runtime -- and git cannot track an empty directory, so for as long as
+    // this check has existed it deleted itself on every fresh checkout and the
+    // failure was absorbed by the warning arm below. `adalib/.gitkeep` is what
+    // keeps the directory in the tree; this assert is what makes its removal
+    // say so, instead of quietly reverting to a build that verifies nothing.
+    //
+    // A hard error and not a warning, because the two failures below are not
+    // the same kind of thing: this one is a defect in the *repository*, is
+    // identical on every machine, and is fixed by a commit. The compile failure
+    // below is a property of the developer's own toolchain install.
+    assert!(
+        ada.join("rts").join("adalib").is_dir(),
+        "kernel/ada/rts/adalib/ is missing, so GNAT will reject --RTS and the \
+         committed object cannot be verified against the compiler. It is meant \
+         to be an empty directory held in git by adalib/.gitkeep -- restore it \
+         with: git checkout -- kernel/ada/rts"
+    );
+
     let out =
         PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| ".".into())).join("adaverify");
     if std::fs::create_dir_all(&out).is_err() {
@@ -252,12 +273,23 @@ fn verify_against_toolchain(gcc: &Path, ada: &Path, prebuilt: &Path) {
 
         match status {
             Ok(s) if s.success() => {}
-            // A toolchain that is present but broken should not fail a build
-            // that the committed object can satisfy. Warn loudly instead: the
-            // stamp already guarantees the object matches the sources.
+            // A toolchain that is present but broken is a property of this
+            // machine, not of the tree, so it must not fail a build that every
+            // other machine completes. Warn instead -- but do not claim the
+            // check was made. What survives is only the stamp, and the stamp
+            // answers a *different* question: it records what the object should
+            // have been built from, never what it contains (see the comment at
+            // the call site). A tampered or mis-generated object is invisible
+            // to it, which is the entire reason this function exists. So the
+            // warning has to say the verification was SKIPPED; a reader who
+            // takes "the stamp still passed" as reassurance has been told the
+            // opposite of the truth.
             _ => {
                 println!(
-                    "cargo:warning=Ada toolchain found but failed to compile {unit}; using the committed object. The stamp check still passed."
+                    "cargo:warning=Ada toolchain found but failed to compile {unit}. \
+                     The committed object was NOT verified against the compiler this build; \
+                     only the source stamp was checked, and the stamp cannot detect a \
+                     modified object. Fix the toolchain, or run: python kernel/ada/regen-prebuilt.py --check"
                 );
                 continue;
             }

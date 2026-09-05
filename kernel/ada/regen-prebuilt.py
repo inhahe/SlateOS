@@ -121,6 +121,19 @@ def stamp() -> str:
 
 
 def compile_units(gcc: Path, outdir: Path) -> None:
+    # GNAT refuses a --RTS path with no adalib/ ("RTS path not valid: missing
+    # adalib directory") before reading any Ada.  Ours is legitimately empty --
+    # we link no Ada runtime -- and git cannot track an empty directory, so it
+    # is held in the tree by adalib/.gitkeep.  Diagnose its absence here rather
+    # than letting it surface as a compiler error about a path, because the
+    # remedy is a checkout and nothing about gnat1's wording suggests that.
+    if not (ADA / "rts" / "adalib").is_dir():
+        sys.exit(
+            "kernel/ada/rts/adalib/ is missing, so GNAT will reject --RTS.\n"
+            "It is an intentionally empty directory kept in git by adalib/.gitkeep.\n"
+            "Restore it with:  git checkout -- kernel/ada/rts"
+        )
+
     for unit in UNITS:
         cmd = [
             str(gcc), "-c", str(ADA / "src" / f"{unit}.adb"),

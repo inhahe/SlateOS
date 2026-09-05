@@ -1,0 +1,23 @@
+This directory is intentionally empty, and intentionally tracked.
+
+`kernel/build.rs` and `kernel/ada/regen-prebuilt.py` both compile the Ada
+sources with `--RTS=kernel/ada/rts`. GNAT validates that path before reading
+any Ada, and rejects it outright if there is no `adalib/` beside `adainclude/`:
+
+    gnat1: RTS path not valid: missing adalib directory
+
+We link no Ada runtime -- `adainclude/system.ads` is a stub and there are no
+library objects -- so `adalib/` has nothing to hold. But it must exist, and git
+cannot track an empty directory, which is why this file is here.
+
+Deleting it is not cosmetic. Without the directory the compile fails, and the
+failure lands in build.rs's warning arm, which downgrades to a cargo:warning and
+carries on. The build still succeeds; what is silently lost is the check that
+`kernel/ada/prebuilt/virtqueue_descriptors.o` is byte-for-byte what the compiler
+actually produces. The source stamp does not cover that -- it records what the
+object should have been built from, never what it contains -- so a tampered or
+mis-generated object would link with nothing to catch it.
+
+That is not hypothetical: the directory was absent from the repository from the
+day the check was written until 2026-09-05, so the verification had never once
+run on any machine.

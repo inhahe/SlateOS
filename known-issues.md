@@ -39730,7 +39730,7 @@ mode it guards against has already destroyed a source file once.
 
 ---
 
-## A-27-KERNEL-SOURCES-ARE-CRLF-IN-THE-WORKING-TREE-WHILE-EVERY-BLOB-IS-LF (lane A, 2026-08-18) — **tooling fixed; the divergence itself remains**
+## A-27-KERNEL-SOURCES-ARE-CRLF-IN-THE-WORKING-TREE-WHILE-EVERY-BLOB-IS-LF (lane A, 2026-08-18) — **CLOSED 2026-09-05** (`design-decisions.md` §911)
 
 **In short:** twenty-seven of the kernel's `.rs` files end their lines with
 carriage-return + newline; every other file, and every version of *all* of them
@@ -117866,3 +117866,69 @@ defects**. Both are valid; the module-scope form is in fact *stronger* where a
 suite shells through `bash`, since a per-call `env=` never reaches the git that
 bash then runs. A false finding costs more than a missed one, and this audit
 produced two before it produced none.
+
+---
+
+### Addendum 2026-09-05 (lane A) — A-27 is closed, and the argument that closed it was about a file with no extension
+
+**Item 2 is done.** `.gitattributes` no longer lists the file types that are
+text; it declares `* text=auto eol=lf` and names the binaries instead
+(`*.png`, `*.deb`, `*.fd`, `*.efi`, `*.o`, all as the `binary` macro). Full
+rationale, both options and the revert recipe: `design-decisions.md` §911.
+Filed to lane B as
+`requests/a-b-a-27-is-closed-the-answer-is-yes-and-wider-because-the-push-hook-has-no-extension.md`.
+
+**The deciding argument is not in this entry, in §769, or in lane B's request,
+and all three of us were arguing about the wrong axis.** A-27 proposed
+`*.rs text eol=lf`; §769 rejected it as "still a suffix list" that would go
+stale against `.c`, `.json`, an `.ld` script; lane B's request restated both
+positions and handed the choice back. Every one of those reasons about **types**.
+But:
+
+> `scripts/hooks/pre-push` has no file extension. It is bash, it runs on every
+> push, and `*.sh` does not match it.
+
+A CR in that file turns `set -u` into `set -u$'\r'` and the push gate dies in a
+way that reads as a bug in the gate — the exact failure mode `.gitattributes`'
+own header describes for the differential harnesses. No maintenance of a suffix
+list reaches it, because the defect is in the *shape* of a suffix list, not its
+contents. Three documents debated whether to add one more entry to a list that
+structurally could not cover the file it most needed to cover.
+
+**Second correction, to this entry's own foundation.** A-27 says, and lane B's
+request repeats, that "`core.autocrlf` is `input` in these worktrees." That is
+true and it is not reassuring, because of where the setting lives:
+
+```
+$ git config --show-origin --get-all core.autocrlf
+file:C:/Program Files/Git/etc/gitconfig   input
+```
+
+**System scope, and nowhere else.** An installer-owned, untracked file outside
+the repository. Every "every blob in the repository is LF" claim in this
+entry — including the verified one about `handle.rs` — was true by accident of
+one machine's git installation, and stops being true on a fresh clone anywhere
+else, where git's default `autocrlf=false` normalises nothing at all. The
+attribute moves that guarantee inside the repository. This is the reason item 2
+had merit independent of the gate, and neither the entry nor §769 identified
+it; both framed the remaining value as prevention-at-checkout, which §769 then
+correctly rated weak.
+
+**What the change does not do**, so this is not overclaimed: it does not
+prevent the actual failures. Every CRLF occurrence recorded here came from a
+tool rewriting a tracked file long after checkout, and no attribute intercepts
+that. §769's gate remains the only thing that catches those, and it is the one
+with no list to maintain. Detection is unscoped; prevention now has a list of
+binaries, which is the list that stops growing.
+
+**Measured, not assumed:** `git add --renormalize .` across all 13 907 tracked
+files stages **zero** paths under the new attributes — run twice, once with the
+binaries as `-text` and once as `binary`. Not one stored byte differs, so the
+change is provably content-neutral and its revert is free.
+
+**One correction owed to lane B**, whose request argued the change was safe
+because "with all three worktrees at 0, there is nothing left to convert": the
+same request's own table gives `os-lane-c` as 65 CRLF files, 4 fatal, so the
+premise is wrong. The conclusion holds for a different reason — an attribute
+never rewrites a worktree on its own, so nothing converts either way, and lane
+C's files are neither repaired nor broken by this.

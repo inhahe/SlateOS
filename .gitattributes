@@ -1,3 +1,67 @@
+# The default is "this is text, store it with LF". Everything below is either
+# an exception to that or a merge rule.
+#
+# WHY A CATCH-ALL RATHER THAN A LIST OF TEXT TYPES
+#
+# Until 2026-09-05 this file listed the types that are text (`*.sh`, `*.py`,
+# `*.md`, ...). Three things killed that shape, in increasing order of how hard
+# they are to argue with:
+#
+#  1. It went stale exactly as predicted. `*.rs` and `*.toml` are 9 449 of the
+#     13 907 tracked files and were declared by nothing, so 27 of them sat CRLF
+#     in a worktree while `git status` called it clean. See
+#     `known-issues.md` -> `A-27-KERNEL-SOURCES-ARE-CRLF-...` and
+#     `design-decisions.md` 769.
+#  2. **A list keyed on extensions cannot cover a file that has none, and the
+#     most important script in this tree has none: `scripts/hooks/pre-push`.**
+#     It is bash, it runs on every push, and `*.sh` does not match it. A CR in
+#     it turns `set -u` into `set -u$'\r'` and the push gate dies in a way that
+#     looks like the script being wrong -- the exact failure described further
+#     down for the differential harnesses. No amount of maintaining the list
+#     fixes this; the shape is wrong.
+#  3. The repository's LF guarantee was resting on a file outside the
+#     repository. `core.autocrlf=input` is set **only** at system scope, in
+#     `C:/Program Files/Git/etc/gitconfig` -- installer-owned, untracked, and
+#     not present on a fresh clone anywhere else. Every "the blobs are always
+#     LF" claim in these documents was true by accident of one machine's git
+#     installation. `text=auto` moves that guarantee into the repository, where
+#     it is versioned and reviewed like everything else.
+#
+# `text=auto` asks git to decide text-vs-binary with its own NUL-byte scan.
+# That heuristic is not trusted here -- `kernel/ada/.gitattributes` says so at
+# length, and `known-issues.md` records it misfiring on a 4.5 MB document -- so
+# it is not *relied* on: every binary in the tree is declared below, and every
+# document that the heuristic is known to misjudge is declared further down.
+# The heuristic only decides files in neither list, and the inversion is the
+# point: the set of binary types here is small and nearly closed (22 files),
+# while the set of text types grows with every commit.
+* text=auto eol=lf
+
+# The binaries, named rather than inferred. `kernel/ada/.gitattributes` makes
+# the argument for this in full: git would almost certainly infer "binary" from
+# the NUL bytes in these, "but that is an inference, and it is the sort that
+# holds until the day it doesn't." A single translated byte in a disk image or
+# a signed EFI binary is not a formatting problem, it is a boot failure.
+# Spelled with the built-in `binary` macro, which expands to `-diff -merge
+# -text`. All three matter: `-text` stops the conversion, `-diff` stops a
+# textual diff of a PNG being printed as thousands of junk lines, and `-merge`
+# stops git from ever attempting a three-way merge of two disk images, which
+# cannot produce a valid one.
+#
+# These lines still match the `eol=lf` above, and `git check-attr` will show
+# `eol: lf` on them. That is inert: once `text` is explicitly unset git takes
+# the binary path and does no conversion at all, whatever `eol` says. Verified
+# rather than assumed -- `git add --renormalize .` across all 13 907 tracked
+# files stages exactly zero of them, these 22 included.
+*.png  binary
+*.deb  binary
+*.fd   binary
+*.efi  binary
+*.EFI  binary
+# Also declared in `kernel/ada/.gitattributes`, which wins for that directory.
+# Repeated here so a `.o` committed anywhere else is covered too.
+*.o    binary
+
 # A shell script must arrive in the working tree with LF endings, on every
 # platform and in every worktree.
 #

@@ -2234,6 +2234,125 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# GATE 13 — design-decisions.md's per-lane numbering bands.
+#
+# WHY IT IS HERE AND NOT ONLY IN THE BOOT TEST. It was only in the boot test,
+# and that is precisely how it failed. `scripts/boot-test.sh` runs this checker,
+# and the standing decision recorded at the top of this file argues that the
+# boot test is enough because it "is required before any merge to `main`".
+# That premise is documented and unenforced, and the gap is not uniform across
+# lanes: of 648 boot-history records, lane A has 619, lane B 28 and lane C
+# **zero**. So the lane whose band is the most active is the one lane for which
+# this gate did not exist.
+#
+# On 2026-09-04 lane C's section 811 landed with no `**Lane:**` field, `main`
+# went red for all three lanes, and it stayed red until a lane that does run
+# the boot test tripped over it. `--head 79e2d6009` reproduces exactly that
+# failure, which is what says this gate placed here would have caught it at the
+# push that introduced it.
+#
+# This is not a reversal of the standing decision above -- that one is about
+# running the *tooling suites* at push time, which is a multi-minute cost. This
+# is one checker over one file, measured at well under a second because
+# `GitTree.read` fetches two blobs instead of indexing ~13,800 paths.
+#
+# WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. `--head "$sha"` is what makes the
+# gate read what is being pushed. Without it the 811 case would have passed the
+# moment its author typed the missing field on disk, committed or not -- and
+# worse, an uncommitted `--update-baseline` would forgive any duplicate in the
+# commit, because the baseline is the input that *grandfathers*. The checker
+# reads both the document and the baseline from the same tree for that reason.
+#
+# Bypass: ALLOW_UNCHECKED_BANDS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+skip_bands=0
+# `${VAR:-0}` and `= "1"`, matching the other bypasses, and neither half is
+# cosmetic. The default is what keeps this legal under `set -u` (line 116) --
+# a bare `$ALLOW_UNCHECKED_BANDS` aborts the whole hook when the variable is
+# unset, which is every push. Comparing to "1" rather than testing non-empty
+# is so that `ALLOW_UNCHECKED_BANDS=0` means what it says.
+if [ "${ALLOW_UNCHECKED_BANDS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNCHECKED_BANDS=1 set — skipping the numbering-band gate." >&2
+    skip_bands=1
+fi
+[ -n "$py" ] || skip_bands=1
+
+bands="${repo_root:-.}/scripts/check-design-decisions-bands.py"
+[ -f "$bands" ] || skip_bands=1
+# Checker and baseline in scope alongside the document, per gate 8: a baseline
+# edited by hand is judged by the push that edits it, and a change to the
+# checker changes every judgement it makes.
+touches design-decisions.md scripts/check-design-decisions-bands.py \
+        scripts/design-decisions-baseline.json || skip_bands=1
+# Nothing being published is nothing to judge — and this is also what stops the
+# `--head` loop below from silently degrading to zero runs while `note_gate`
+# had already reported the gate as having run.
+[ -n "${pushed_shas# }" ] || skip_bands=1
+note_gate bands "$skip_bands"
+
+bands_failed=0
+if [ "$skip_bands" != "1" ]; then
+    # Check the checker first, as gates 3-5 do. No `--head` on the selftest,
+    # for their reason: it builds its own scratch repository and never reads
+    # this one, so there is no worktree-versus-commit question for it to get
+    # wrong.
+    if ! run_checker bands-selftest "$py" "$bands" --selftest; then
+        echo "pre-push: check-design-decisions-bands.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        bands_failed=1
+    else
+        for sha in $pushed_shas; do
+            # Per-sha gate name, for gate 9's reason: a shared name lets a
+            # later clean sha delete the kept log of an earlier failing one.
+            if ! run_checker "bands-$sha" "$py" "$bands" \
+                             --head "$sha" --quiet; then
+                bands_failed=1
+            fi
+        done
+    fi
+fi
+
+if [ "$bands_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — design-decisions.md breaks its numbering bands.
+
+The file is written by three lanes at once, and *position*, not number, is what
+makes a merge conflict: if each lane inserts inside its own numeric band, the
+three insertion points are different line offsets and git never compares them.
+Append at end of file instead and all three lanes edit the same offset — which
+is how lanes A and B once wrote two section 626s hours apart and got a 350-line
+CONFLICT that never mentioned the number.
+
+The errors above name the line. The usual ones:
+
+  * a new section with no \`**Lane:**\` field — add it; that field is what makes
+    a band collision visible in the diff instead of findable only by grep. This
+    is the one that turned \`main\` red for all three lanes on 2026-09-04.
+  * a number outside your lane's open band, or below the band's high-water
+    mark — take the next number the summary prints. Never reissue a spent one;
+    they are cited from source comments and from other entries.
+
+See the file's own "Numbering and file order" header, which is also the table
+this gate parses — it is not hardcoded here.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/check-design-decisions-bands.py --head <sha>
+
+or against your worktree, which is what the boot test checks:
+
+    python scripts/check-design-decisions-bands.py
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_UNCHECKED_BANDS=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # The tally. Unconditional, and on stderr with the rest of the hook's output.
 #
 # This is the line whose absence means "the hook did not run" — the one reading

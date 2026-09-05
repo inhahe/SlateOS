@@ -64,11 +64,33 @@ The document numbers its sections with a section sign, but this runs from
 that character prints as a replacement box. So every message here says
 "section 626" and "500-599" in plain ASCII.
 
+Why it can judge the commit, not the worktree
+---------------------------------------------
+
+``--head REV`` reads the document *and the baseline* out of ``REV`` instead of
+off the disk. The push hook passes it, for the reason three earlier gates were
+converted for (0dc5d0d4b, gate 7, 93305193a): a gate that reads the working
+tree grades whatever the author happens to have on disk, which is not what is
+being pushed. Here that gap is not theoretical in either direction:
+
+* An **uncommitted fix** hides a violation. Lane C's section 811 landed with no
+  ``**Lane:**`` field, turning ``main`` red for all three lanes; a worktree-only
+  read would have passed the moment the author typed the field in, whether or
+  not they committed it.
+* An **uncommitted baseline** is worse, because the baseline's whole job is to
+  grandfather. ``--update-baseline`` on disk silently forgives every duplicate
+  in the pushed commit. So the baseline must come from the same tree as the
+  document -- reading one from the commit and the other from disk would
+  reintroduce exactly the defect ``--head`` exists to close. That pairing is
+  gate 9's, and it is deliberate here: see `read_doc_and_baseline`.
+
 Usage
 -----
 
     python scripts/check-design-decisions-bands.py
     python scripts/check-design-decisions-bands.py --update-baseline
+    python scripts/check-design-decisions-bands.py --head Y  # judge commit Y
+    python scripts/check-design-decisions-bands.py --selftest
 
 Exit codes: 0 clean (warnings still print), 1 violations found, 2 the file or
 the baseline could not be read/parsed.
@@ -81,7 +103,15 @@ import collections
 import json
 import os
 import re
+import subprocess
 import sys
+
+# Only `GitTree` is wanted here, not a full `git ls-tree -r` index: this gate
+# reads exactly two blobs out of a commit, and indexing ~13,800 paths to answer
+# two questions costs ~3.8s on every push. `GitTree.read` is the same seam
+# without the index. (Same reasoning as gate 9; see scripts/gittree.py.)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gittree  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(HERE)
@@ -299,13 +329,95 @@ def find_lane_field(lines, heading):
     return None
 
 
-def load_baseline(path):
-    with open(path, encoding="utf-8") as fh:
-        data = json.load(fh)
+def parse_baseline(text):
+    """Turn baseline JSON *text* into the grandfathered-count Counter.
+
+    Split out from `load_baseline` so the `--head` path parses the blob it read
+    from the commit through this exact code rather than a second copy. Two
+    parsers for one format is how the committed and on-disk answers drift.
+    """
+    data = json.loads(text)
     counts = data.get("counts")
     if not isinstance(counts, dict):
         raise ValueError("baseline has no 'counts' object")
     return collections.Counter({int(k): int(v) for k, v in counts.items()})
+
+
+def load_baseline(path):
+    with open(path, encoding="utf-8") as fh:
+        return parse_baseline(fh.read())
+
+
+def _decode(raw, what):
+    """Decode a blob read out of a commit, refusing silent corruption.
+
+    `errors="replace"` would be wrong here rather than merely lax: a heading
+    whose number the parser cannot see is invisible to every check in this
+    file (that is how nine duplicates survived), so a mojibake heading would
+    be *silently* unchecked. Failing with exit 2 says so instead.
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{what} is not valid UTF-8: {exc}") from exc
+
+
+def _repo_rel(path, repo=None):
+    """Turn a filesystem path into the repo-relative path git names it by.
+
+    `--file`/`--baseline` are filesystem paths, but a tree lookup needs a path
+    *inside* the commit. Anything outside the repository has no such name, so
+    this refuses rather than inventing one -- under `--head` a path outside the
+    checkout is a caller error, and answering it with a lookup of some
+    accidental sibling would be worse than an error message.
+    """
+    repo = PROJECT_ROOT if repo is None else repo
+    try:
+        rel = os.path.relpath(os.path.abspath(path), repo)
+    except ValueError as exc:
+        # relpath() raises across Windows drive letters -- not hypothetical:
+        # the tests use the temp directory, which is on C: while the checkout
+        # is on D:.
+        raise ValueError(f"{path} is not inside {repo}") from exc
+    rel = rel.replace("\\", "/")
+    if rel == ".." or rel.startswith("../"):
+        raise ValueError(f"{path} is not inside {repo}")
+    return rel
+
+
+def read_doc_and_baseline(head, doc_rel, baseline_rel, repo=None):
+    """Read both files out of commit *head*. Returns (lines, baseline).
+
+    Both, from the same tree, deliberately -- see the module docstring. The
+    baseline grandfathers duplicates, so sourcing it from disk while the
+    document came from the commit would let an uncommitted `--update-baseline`
+    forgive a duplicate that is actually being pushed.
+
+    A missing file is an error, not an empty read. `GitTree.read` spells
+    absence as `None`, and treating that as "" would grade a commit that
+    deleted `design-decisions.md` as clean.
+    """
+    with gittree.GitTree(str(PROJECT_ROOT if repo is None else repo)) as git_tree:
+        doc_raw = git_tree.read(head, doc_rel)
+        if doc_raw is None:
+            raise ValueError(f"{doc_rel} does not exist in {head}")
+        base_raw = git_tree.read(head, baseline_rel)
+        if base_raw is None:
+            raise ValueError(f"{baseline_rel} does not exist in {head}")
+    lines = _decode(doc_raw, doc_rel).split("\n")
+    return lines, parse_baseline(_decode(base_raw, baseline_rel))
+
+
+def _rev_exists(rev, repo=None):
+    """True if *rev* names a commit in *repo* (the checkout by default)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT if repo is None else repo),
+             "rev-parse", "--verify", f"{rev}^{{commit}}"],
+            capture_output=True, text=True, check=False)
+    except OSError:
+        return False
+    return out.returncode == 0
 
 
 def write_baseline(path, headings, doc_rel):
@@ -548,6 +660,201 @@ def check(lines, baseline):
     return errors, warnings, info
 
 
+# --------------------------------------------------------------------------
+# Self-test
+#
+# Scope is deliberately narrow: the *rules* are covered by the 40-odd cases in
+# scripts/test-check-design-decisions-bands.py, which the boot test runs. What
+# that suite cannot cover is the seam this gate grew in order to be pushable --
+# `--head` -- because proving it needs a real repository with a real difference
+# between the commit and the worktree. That is what runs here, at push time,
+# for the reason gates 3-5 embed one: a gate whose own correctness is only
+# checked by a suite nobody ran before pushing is a gate that can go quietly
+# wrong in exactly the window it is supposed to be guarding.
+# --------------------------------------------------------------------------
+
+_SECT, _EMDASH, _ENDASH = "\u00a7", "\u2014", "\u2013"
+
+_SELFTEST_TABLE = "\n".join([
+    "## Numbering and file order",
+    "",
+    "| Band | Owner | Status | Region |",
+    "|---|---|---|---|",
+    f"| {_SECT}600{_ENDASH}{_SECT}699 | **lane A** | **open** | mid |",
+    f"| {_SECT}700{_ENDASH}{_SECT}799 | **lane B** | **open** | the tail |",
+    "",
+])
+
+
+def _selftest_section(number, lane):
+    lane_line = f"**Lane:** {lane}\n" if lane else ""
+    return (f"## {number}. a decision\n\n"
+            f"**Date:** 2026-09-04\n"
+            f"**Decided by:** Claude (autonomous)\n"
+            f"{lane_line}\n"
+            f"**In short:** something was decided.\n")
+
+
+def _selftest():
+    import shutil
+    import tempfile
+
+    failures = []
+
+    def expect(label, got, want):
+        ok = got == want
+        print(f"  {'ok  ' if ok else 'FAIL'}  {label}")
+        if not ok:
+            print(f"          got {got!r}, want {want!r}")
+            failures.append(label)
+
+    tmp = tempfile.mkdtemp(prefix="ddbands-")
+    try:
+        def git(*a):
+            subprocess.run(["git", "-C", tmp, *a], check=True,
+                           capture_output=True, text=True)
+
+        def write(rel, text):
+            path = os.path.join(tmp, rel.replace("/", os.sep))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # newline="" so the bytes committed are the bytes written: this
+            # gate reads blobs out of a commit, and letting the platform
+            # rewrite the line endings would test the translation, not the
+            # gate.
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(text)
+
+        def doc(*sections):
+            return _SELFTEST_TABLE + "\n" + "\n".join(sections)
+
+        def baseline(counts):
+            return json.dumps({"file": DOC_REL, "counts": counts})
+
+        DOC_REL = "design-decisions.md"
+        BASE_REL = "scripts/design-decisions-baseline.json"
+        doc_abs = os.path.join(tmp, DOC_REL)
+        base_abs = os.path.join(tmp, BASE_REL.replace("/", os.sep))
+
+        def check_head(rev):
+            """Run the whole gate the way the hook runs it."""
+            try:
+                lines, base = read_doc_and_baseline(rev, DOC_REL, BASE_REL,
+                                                    repo=tmp)
+            except (ValueError, gittree.GitTreeError) as exc:
+                return f"ERROR: {exc}"
+            errors, _warnings, _info = check(lines, base)
+            return errors
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "selftest@example.invalid")
+        git("config", "user.name", "selftest")
+
+        write(DOC_REL, doc(_selftest_section(600, "A")))
+        write(BASE_REL, baseline({}))
+        git("add", "-A")
+        git("commit", "-qm", "clean")
+        clean = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
+                               capture_output=True, text=True,
+                               check=True).stdout.strip()
+
+        expect("a clean commit has no errors", check_head(clean), [])
+
+        # --- The 811 case: committed without a Lane field. -----------------
+        write(DOC_REL, doc(_selftest_section(600, "A"),
+                           _selftest_section(601, None)))
+        git("add", "-A")
+        git("commit", "-qm", "601 with no lane field")
+        bad = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
+                             capture_output=True, text=True,
+                             check=True).stdout.strip()
+        expect("a missing Lane field in the commit is caught",
+               len(check_head(bad)), 1)
+
+        # The whole point of --head. Fixing it on disk without committing is
+        # what a worktree-reading gate would have accepted.
+        write(DOC_REL, doc(_selftest_section(600, "A"),
+                           _selftest_section(601, "A")))
+        expect("...and an UNCOMMITTED fix does not hide it from --head",
+               len(check_head(bad)), 1)
+        expect("...while the worktree read, which the boot test uses, is clean",
+               len(check(open(doc_abs, encoding="utf-8").read().split("\n"),
+                         load_baseline(base_abs))[0]), 0)
+
+        git("add", "-A")
+        git("commit", "-qm", "add the lane field")
+        fixed = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
+                               capture_output=True, text=True,
+                               check=True).stdout.strip()
+        expect("...and a COMMITTED fix does clear it", check_head(fixed), [])
+
+        # --- The baseline half, which is why both come from one tree. ------
+        # A duplicate number is a violation unless the baseline grandfathers
+        # it. If the baseline were read off disk, `--update-baseline` would
+        # forgive a duplicate that is actually being pushed.
+        write(DOC_REL, doc(_selftest_section(600, "A"),
+                           _selftest_section(601, "A"),
+                           _selftest_section(601, "A")))
+        git("add", "-A")
+        git("commit", "-qm", "a duplicate 601")
+        dupe = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
+                              capture_output=True, text=True,
+                              check=True).stdout.strip()
+        expect("a new duplicate number is caught", len(check_head(dupe)), 1)
+
+        # `600: 1` is not padding. The baseline is the *whole* grandfathered
+        # set, not a waiver list, so a number missing from it reads as new --
+        # and a new 600 sitting below an existing 601 is itself a violation.
+        # Waiving only the duplicate would swap one error for another and the
+        # case would prove nothing about the baseline's source.
+        write(BASE_REL, baseline({"600": 1, "601": 2}))
+        expect("...and an UNCOMMITTED baseline does not grandfather it",
+               len(check_head(dupe)), 1)
+        git("add", "-A")
+        git("commit", "-qm", "baseline the duplicate")
+        waived = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
+                                capture_output=True, text=True,
+                                check=True).stdout.strip()
+        expect("...and a COMMITTED one does", check_head(waived), [])
+        expect("a waiver is not backdated onto the commit before it",
+               len(check_head(dupe)), 1)
+
+        # --- Absence is an error, not an empty read. ----------------------
+        git("rm", "-q", DOC_REL)
+        git("commit", "-qm", "delete the document")
+        gone = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
+                              capture_output=True, text=True,
+                              check=True).stdout.strip()
+        expect("a commit that deletes the document errors, not passes",
+               str(check_head(gone)).startswith("ERROR:"), True)
+
+        expect("a rev that is not a commit is rejected",
+               _rev_exists("no-such-rev", repo=tmp), False)
+        expect("...and a real one is not", _rev_exists(clean, repo=tmp), True)
+
+        # --- Paths outside the repo have no name inside a commit. ---------
+        try:
+            _repo_rel(os.path.join(tmp, "..", "elsewhere.md"), repo=tmp)
+            outside = "accepted"
+        except ValueError:
+            outside = "refused"
+        expect("a path outside the repo is refused, not guessed",
+               outside, "refused")
+    finally:
+        # git makes objects read-only, which shutil.rmtree cannot remove on
+        # Windows without this.
+        def _force(func, path, _exc):
+            os.chmod(path, 0o700)
+            func(path)
+        shutil.rmtree(tmp, onerror=_force)
+
+    if failures:
+        print(f"check-design-decisions-bands: self-test FAILED "
+              f"({len(failures)} case(s))", file=sys.stderr)
+        return False
+    print("check-design-decisions-bands: self-test passed")
+    return True
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Enforce design-decisions.md's per-lane numbering bands."
@@ -560,15 +867,49 @@ def main(argv=None):
     )
     ap.add_argument("--quiet", action="store_true",
                     help="suppress the per-band summary on success")
+    ap.add_argument(
+        "--head", metavar="REV", default=None,
+        help="read the document AND the baseline out of commit REV instead of "
+             "the working tree (what the push hook passes)",
+    )
+    ap.add_argument("--selftest", action="store_true",
+                    help="prove the --head seam against a scratch repo")
     args = ap.parse_args(argv)
 
-    try:
-        with open(args.file, encoding="utf-8") as fh:
-            lines = fh.read().split("\n")
-    except OSError as exc:
-        print(f"check-design-decisions-bands: cannot read {args.file}: {exc}",
-              file=sys.stderr)
+    if args.selftest:
+        return 0 if _selftest() else 1
+
+    # `--update-baseline` rewrites a file on disk, so a commit-read source for
+    # it is a contradiction rather than an unsupported combination. Say so
+    # instead of quietly baselining the worktree while the caller believes it
+    # baselined a commit.
+    if args.head is not None and args.update_baseline:
+        print("check-design-decisions-bands: --head and --update-baseline are "
+              "mutually exclusive; --update-baseline writes to the working "
+              "tree, which --head is defined not to read.", file=sys.stderr)
         return 2
+
+    baseline = None
+    if args.head is not None:
+        if not _rev_exists(args.head):
+            print(f"check-design-decisions-bands: --head {args.head!r} is not "
+                  f"a commit", file=sys.stderr)
+            return 2
+        try:
+            lines, baseline = read_doc_and_baseline(
+                args.head, _repo_rel(args.file), _repo_rel(args.baseline))
+        except (ValueError, gittree.GitTreeError, json.JSONDecodeError) as exc:
+            print(f"check-design-decisions-bands: cannot read {args.head}: "
+                  f"{exc}", file=sys.stderr)
+            return 2
+    else:
+        try:
+            with open(args.file, encoding="utf-8") as fh:
+                lines = fh.read().split("\n")
+        except OSError as exc:
+            print(f"check-design-decisions-bands: cannot read {args.file}: "
+                  f"{exc}", file=sys.stderr)
+            return 2
 
     if args.update_baseline:
         headings, heading_errors = parse_headings(lines)

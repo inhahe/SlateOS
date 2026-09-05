@@ -100,7 +100,9 @@
 
 use std::env;
 use std::fmt;
+use std::fs;
 use std::io;
+use std::io::Read as _;
 #[allow(unused_imports)]
 use std::io::Write;
 use std::process;
@@ -134,10 +136,17 @@ const SYS_SLEEP: u64 = 11;
 #[allow(dead_code)]
 const SYS_PROCESS_SPAWN: u64 = 500;
 const SYS_PROCESS_ID: u64 = 502;
+// The three filesystem calls below are no longer issued from here: file access
+// goes through `std::fs`, which reaches these same numbers through libc. They
+// stay in the table under the rule stated above — it is a complete copy of the
+// kernel ABI, not a list of what happens to be called today.
+#[allow(dead_code)]
 const SYS_FS_READ_FILE: u64 = 600;
+#[allow(dead_code)]
 const SYS_FS_WRITE_FILE: u64 = 601;
 #[allow(dead_code)]
 const SYS_FS_STAT: u64 = 606;
+#[allow(dead_code)]
 const SYS_FS_SET_PERMS: u64 = 631;
 #[allow(dead_code)]
 const SYS_TCP_CONNECT: u64 = 800;
@@ -275,116 +284,178 @@ unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     -38 // ENOSYS
 }
 
-/// Issue a 4-argument syscall.
-///
-/// # Safety
-///
-/// The caller must ensure `nr` is a valid syscall number and all arguments
-/// are valid for the specific syscall.
-#[cfg(target_vendor = "slateos")]
-unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller guarantees arguments are valid.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Host stub for `syscall4` — see the gated definition above.
-///
-/// On a development host there is no SlateOS kernel to talk to, and a raw
-/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
-/// actually running, with this crate's SlateOS call number in RAX. Those
-/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
-/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
-/// run` and `clippy` on the host honest instead of dangerous.
-///
-/// See known-issues.md
-/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
-#[cfg(not(target_vendor = "slateos"))]
-unsafe fn syscall4(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64) -> i64 {
-    -38 // ENOSYS
-}
-
 // ============================================================================
-// Syscall wrappers
+// File access
 // ============================================================================
+//
+// Through `std::fs`, not through a raw `syscall`. A SlateOS program is built
+// for `x86_64-slateos`, whose target spec is `os: linux`, `env: musl`,
+// `target-family: ["unix"]` — so it links a real libc and `std::fs` reaches
+// the SlateOS kernel by the same route every other program does.
+//
+// The raw-syscall version this replaced was an anomaly rather than a design.
+// `userspace/ssh` reads its `known_hosts` and identity files with `std::fs`;
+// `userspace/authlib` reads `/etc/shadow` with `std::fs`; only this crate
+// hand-rolled the calls. The cost was not stylistic: the host stub for
+// `syscall4` returned `-ENOSYS` unconditionally, so on a developer machine
+// *every* file this daemon touches was unreadable, and the whole server-side
+// file surface — the host key, `/etc/passwd`, the banner, the config file, and
+// `authorized_keys`, which is to say the entire publickey authentication path —
+// could not be exercised by a test at all. That is how publickey auth came to
+// be written with no test that a real client's signature satisfies it.
+//
+// See known-issues.md
+// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
 
-/// Read an entire file into a byte vector via the kernel filesystem.
+/// The most any file this daemon reads may contain, in bytes.
+///
+/// Every file read here is small by nature: a host key, a banner, `/etc/passwd`,
+/// the config file, an `authorized_keys`. Only the last has a size chosen by
+/// someone other than the administrator — it lives in the home directory of the
+/// account being logged into, and is read *before* that account has
+/// authenticated — so a cap is what keeps an unprivileged local user from
+/// choosing how much the daemon allocates on behalf of an anonymous peer.
+///
+/// A mebibyte is on the order of ten thousand Ed25519 lines: far past any real
+/// `authorized_keys`, and far short of a size worth worrying about.
+const MAX_FILE_BYTES: usize = 1 << 20;
+
+/// One byte more than [`MAX_FILE_BYTES`], which is what a size check has to read
+/// to be a size check: stopping *at* the cap cannot distinguish a file that is
+/// exactly that long from one that is longer.
+const READ_PROBE_BYTES: u64 = MAX_FILE_BYTES as u64 + 1;
+
+/// Read an entire file into a byte vector.
+///
+/// # Errors
+///
+/// [`SshdError::IoError`] if the file cannot be opened or read, or if it holds
+/// more than [`MAX_FILE_BYTES`].
+///
+/// # Why an error rather than a truncation
+///
+/// This read into a fixed 64 KiB buffer and kept whatever fit. That is not a
+/// limit, it is silent data loss, and the file it lost most of was
+/// `authorized_keys`: one byte over the buffer and the last key stopped
+/// working, with the cut landing mid-line so the remains parsed as a malformed
+/// entry rather than as the key it was. Nobody would have been told. Refusing an
+/// oversized file says what happened and names the file.
 fn fs_read_file(path: &str) -> Result<Vec<u8>, SshdError> {
-    let mut buf = vec![0u8; 65536];
-    // SAFETY: We pass a valid path pointer+len and a valid output buffer
-    // pointer+len. The kernel reads the path and writes file contents into buf.
-    let ret = unsafe {
-        syscall4(
-            SYS_FS_READ_FILE,
-            path.as_ptr() as u64,
-            path.len() as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(SshdError::IoError(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("cannot read {path}: error {ret}"),
-        )));
+    let file = fs::File::open(path).map_err(|e| {
+        SshdError::IoError(io::Error::new(e.kind(), format!("cannot read {path}: {e}")))
+    })?;
+    let mut buf = Vec::new();
+    file.take(READ_PROBE_BYTES)
+        .read_to_end(&mut buf)
+        .map_err(|e| {
+            SshdError::IoError(io::Error::new(e.kind(), format!("cannot read {path}: {e}")))
+        })?;
+    if buf.len() > MAX_FILE_BYTES {
+        return Err(SshdError::IoError(io::Error::other(format!(
+            "cannot read {path}: larger than the {MAX_FILE_BYTES} byte limit"
+        ))));
     }
-    buf.truncate(ret as usize);
     Ok(buf)
 }
 
-/// Write a whole file through the kernel filesystem, creating or truncating it.
-fn fs_write_file(path: &str, data: &[u8]) -> Result<(), SshdError> {
-    // SAFETY: We pass a valid path pointer+len and a valid data pointer+len.
-    // The kernel reads both and writes nothing back through them.
-    let ret = unsafe {
-        syscall4(
-            SYS_FS_WRITE_FILE,
-            path.as_ptr() as u64,
-            path.len() as u64,
-            data.as_ptr() as u64,
-            data.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(SshdError::IoError(io::Error::other(format!(
-            "cannot write {path}: error {ret}"
-        ))));
-    }
-    Ok(())
+/// Write a whole file that only its owner may read, creating or truncating it.
+///
+/// This is the daemon's *only* writer, and the restriction is not a parameter,
+/// because everything `sshd` writes is a host key. If that ever stops being
+/// true, add a second function rather than a flag: a boolean called
+/// `private: bool` at a call site is the form in which "this one file is fine
+/// world-readable" gets written by accident.
+///
+/// # Errors
+///
+/// [`SshdError::IoError`] if the file cannot be created, written, or restricted.
+///
+/// # Why not a plain write followed by [`fs_set_mode`]
+///
+/// Because between those two calls the file exists on disk with whatever the
+/// umask gave it, and a private key that was world-readable for even an instant
+/// has to be treated as compromised — nothing afterwards can undo that.
+/// Creating it `0600` closes the window: the file never exists with any other
+/// mode.
+///
+/// The mode is then set a second time, which is not redundant: `O_CREAT`'s mode
+/// applies only when the call *creates* the file, so overwriting a permissive
+/// file somebody else left at that path would otherwise inherit its
+/// permissions.
+#[cfg(unix)]
+fn fs_write_private_file(path: &str, data: &[u8]) -> Result<(), SshdError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| {
+            SshdError::IoError(io::Error::new(
+                e.kind(),
+                format!("cannot write {path}: {e}"),
+            ))
+        })?;
+    file.write_all(data).map_err(|e| {
+        SshdError::IoError(io::Error::new(
+            e.kind(),
+            format!("cannot write {path}: {e}"),
+        ))
+    })?;
+    drop(file);
+    fs_set_mode(path, 0o600)
+}
+
+/// Write an owner-only file — the non-unix build, where there is no such thing.
+///
+/// This host has no mode bits worth setting (see [`fs_set_mode`], which exists
+/// only on unix for that reason), so the file is written and the restriction is
+/// simply not made. The target this daemon runs on is unix; this arm exists so
+/// the crate builds and tests on a Windows development host, where a host key
+/// is a fixture rather than a secret.
+///
+/// # Errors
+///
+/// [`SshdError::IoError`] if the file cannot be written.
+#[cfg(not(unix))]
+fn fs_write_private_file(path: &str, data: &[u8]) -> Result<(), SshdError> {
+    fs::write(path, data).map_err(|e| {
+        SshdError::IoError(io::Error::new(
+            e.kind(),
+            format!("cannot write {path}: {e}"),
+        ))
+    })
 }
 
 /// Set a file's permission bits.
+///
+/// Unix only, because its one caller is the unix arm of
+/// [`fs_write_private_file`] and there is nothing for a non-unix arm to do:
+/// `std::fs::set_permissions` on Windows sets one bit, read-only, which is not
+/// what `0o600` asks for and would not withhold the file from other users if it
+/// succeeded. A stub returning `Ok(())` would be a function that reports having
+/// restricted a private key it did not restrict, which is the one lie worth
+/// going out of the way to avoid; a stub returning an error would make host key
+/// generation fail on a development host for a reason that has nothing to do
+/// with SSH. Having no such function on that host is the honest third answer,
+/// and the target this daemon runs on is unix anyway (`x86_64-slateos` declares
+/// `target-family: ["unix"]`).
+///
+/// # Errors
+///
+/// [`SshdError::IoError`] if the mode cannot be set.
+#[cfg(unix)]
 fn fs_set_mode(path: &str, mode: u32) -> Result<(), SshdError> {
-    // SAFETY: We pass a valid path pointer+len; `mode` and the no-follow flag
-    // are scalars. The kernel reads the path and writes nothing back.
-    let ret = unsafe {
-        syscall4(
-            SYS_FS_SET_PERMS,
-            path.as_ptr() as u64,
-            path.len() as u64,
-            u64::from(mode & 0o7777),
-            0,
-        )
-    };
-    if ret < 0 {
-        return Err(SshdError::IoError(io::Error::other(format!(
-            "cannot set mode on {path}: error {ret}"
-        ))));
-    }
-    Ok(())
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777)).map_err(|e| {
+        SshdError::IoError(io::Error::new(
+            e.kind(),
+            format!("cannot set mode on {path}: {e}"),
+        ))
+    })
 }
 
 /// The monotonic clock in milliseconds, or `None` if the kernel could not
@@ -1748,13 +1819,19 @@ impl HostKey {
     /// Parse an OpenSSH private key file that has already been read.
     ///
     /// Split from [`Self::load_from_file`] because the two halves fail for
-    /// unrelated reasons — the file was unreadable, or its contents were not a
-    /// key — and because only this half can be tested: `load_from_file` reads
-    /// through a SlateOS `fs_read_file` syscall that does not exist on a
-    /// developer's machine, so a check reachable only through it is a check
-    /// that never runs.
+    /// unrelated reasons: the file was unreadable, or its contents were not a
+    /// key. A caller that already has the text — one that received it over a
+    /// channel, or a test with a fixture — should not have to put it in a file
+    /// to find out whether it parses.
     ///
-    /// Public for that reason and no other. `ssh-interop` calls it to assert
+    /// The split was originally forced rather than chosen: `load_from_file`
+    /// read through a raw SlateOS syscall stubbed to `-ENOSYS` off the kernel,
+    /// so every check reachable only through it was a check that never ran.
+    /// That is fixed — file access goes through `std::fs` now, and
+    /// `load_from_file` is tested directly — but the split is worth keeping on
+    /// its own merits.
+    ///
+    /// Public because `ssh-interop` calls it to assert
     /// that a key `ssh-keygen` writes is a key this daemon accepts — the
     /// question nothing could ask while the two ends wrote different formats,
     /// and both suites passed.
@@ -1789,6 +1866,11 @@ impl HostKey {
 /// real container rather than a bare 32-byte seed file means a key this daemon
 /// generates can be inspected with `ssh-keygen -lf` and copied to another
 /// machine.
+///
+/// # Errors
+///
+/// [`SshdError::ConfigError`] if the system random number generator is
+/// unavailable, or [`SshdError::IoError`] if the file cannot be written.
 fn write_openssh_private_key(
     path: &str,
     seed: &[u8; 32],
@@ -1797,22 +1879,41 @@ fn write_openssh_private_key(
     // The two checkints are compared on read to detect a wrong passphrase. We
     // never encrypt, so any value works as long as they match — but a constant
     // would give every key file this daemon writes a recognisable byte pattern,
-    // so it comes from the CSPRNG. `sshwire` takes it as an argument rather
-    // than drawing it, which is what keeps that codec testable against a fixed
-    // expected file.
+    // so it comes from the CSPRNG.
     let mut checkint = [0u8; 4];
     randrange::fill_secret(&mut checkint)
         .map_err(|e| SshdError::ConfigError(format!("cannot generate a host key: {e}")))?;
 
-    let text =
-        encode_openssh_private_key(seed, public, "slateos-sshd", u32::from_be_bytes(checkint));
+    write_openssh_private_key_with_checkint(path, seed, public, u32::from_be_bytes(checkint))
+}
 
-    fs_write_file(path, text.as_bytes())?;
-    // Order matters: the file is created by the write above with whatever the
-    // umask gives it, so tighten it immediately. A host key readable by other
-    // users is a host key that has already been compromised.
-    fs_set_mode(path, 0o600)?;
-    Ok(())
+/// [`write_openssh_private_key`] with the `checkint` supplied rather than drawn.
+///
+/// Split off for the same reason `sshwire::encode_openssh_private_key` takes the
+/// `checkint` as an argument instead of drawing one: a function that reaches the
+/// CSPRNG cannot be called from a test on a development host, where
+/// `randrange::fill_secret` reports the generator unavailable (see
+/// known-issues.md
+/// `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`). That
+/// would leave "a key this daemon writes is a key this daemon reads" — the
+/// question this whole file-format arc exists to ask — unaskable off a SlateOS
+/// kernel.
+///
+/// # Errors
+///
+/// [`SshdError::IoError`] if the file cannot be written.
+fn write_openssh_private_key_with_checkint(
+    path: &str,
+    seed: &[u8; 32],
+    public: &[u8; 32],
+    checkint: u32,
+) -> Result<(), SshdError> {
+    let text = encode_openssh_private_key(seed, public, "slateos-sshd", checkint);
+
+    // Not `fs_write_file` — the file must be `0600` from the moment it exists,
+    // not from the moment a second call gets round to it. See that function's
+    // docs.
+    fs_write_private_file(path, text.as_bytes())
 }
 
 // ============================================================================
@@ -3671,17 +3772,18 @@ enum PubkeyOutcome {
 ///
 /// # Why this is a wrapper
 ///
-/// Everything here except the file read is in [`decide_pubkey_auth`]. The read
-/// goes through `fs_read_file`, which issues a raw SlateOS syscall that returns
-/// `-ENOSYS` on a developer machine, so any test that reached this function
-/// would exercise only its first failure branch — which is to say the *entire*
-/// server-side publickey decision would be unreachable from a test, in the one
-/// crate where nothing else can check it.
+/// Everything here except the file read is in [`decide_pubkey_auth`]. The split
+/// was originally forced: `fs_read_file` issued a raw SlateOS syscall that
+/// returned `-ENOSYS` on a developer machine, so a test reaching this function
+/// exercised only its first failure branch, and the *entire* server-side
+/// publickey decision was unreachable — in the one crate where nothing else can
+/// check it. File access goes through `std::fs` now and this function is
+/// testable directly, but the split stays: where the `authorized_keys` text came
+/// from is not part of deciding what it authorises, and a caller holding that
+/// text should not need a filesystem to ask.
 ///
 /// This is the same split [`HostKey::load_from_file`] and
-/// `HostKey::from_openssh_text` already have, made for the same reason and
-/// after the same discovery: a key file `sshd` could not read was invisible for
-/// as long as the only path to the parser went through a syscall.
+/// `HostKey::from_openssh_text` have, made for the same reason.
 fn handle_pubkey_auth(
     payload: &[u8],
     offset: usize,
@@ -3716,8 +3818,8 @@ fn handle_pubkey_auth(
 
 /// The whole of the publickey decision, given the `authorized_keys` text.
 ///
-/// Split from [`handle_pubkey_auth`] so that it can be called at all off a
-/// SlateOS kernel; see that function's docs. Everything that decides whether a
+/// Split from [`handle_pubkey_auth`] so that the decision can be asked without
+/// a filesystem; see that function's docs. Everything that decides whether a
 /// client gets in lives here.
 fn decide_pubkey_auth(
     payload: &[u8],
@@ -5993,6 +6095,275 @@ DenyGroups nogroup
         assert_eq!(config.deny_groups, vec!["nogroup"]);
     }
 
+    // ---- File access ----
+    //
+    // These are new because until now they could not exist. `fs_read_file` and
+    // the host key writer issued raw SlateOS syscalls, and the host stub for
+    // those answered `-ENOSYS` unconditionally, so on every machine `cargo test`
+    // runs on, every file this daemon touches was unreadable and unwritable.
+    // That is not a gap in coverage of two helpers: it made the host key loader,
+    // `/etc/passwd`, the banner, the config file and `authorized_keys` — the
+    // whole publickey authentication path — untestable, which is how publickey
+    // auth came to be written with no test that a real client satisfies it.
+    //
+    // Fixtures are written with `std::fs`, not with this crate's own writer.
+    // Checking a reader against its sibling writer is the arrangement that let
+    // the SSH wire layer diverge twice while both suites stayed green: a codec
+    // that agrees with itself passes a round trip no matter what it does.
+
+    /// A path in a throwaway directory, and the guard that owns it.
+    ///
+    /// The guard must stay bound for as long as the path is used; binding it as
+    /// `_` drops it immediately and deletes the directory. See
+    /// [`authenticator_with_shadow`] for the same warning, and the bug that
+    /// earned it.
+    fn scratch_path(name: &str) -> (String, ScratchDir) {
+        let dir = ScratchDir::new("sshd_files");
+        let path = dir.path(name).to_string_lossy().into_owned();
+        (path, dir)
+    }
+
+    #[test]
+    fn a_file_is_read_back_byte_for_byte() {
+        let (path, _dir) = scratch_path("roundtrip");
+        // Not text: a host key in raw-seed form is 32 arbitrary bytes, an
+        // `authorized_keys` may hold any bytes at all, and a reader that went
+        // through `String` would corrupt them silently.
+        let data: Vec<u8> = (0u8..=255).chain([0, 0xff, 0x80]).collect();
+        fs::write(&path, &data).expect("write the fixture");
+
+        assert_eq!(fs_read_file(&path).expect("read"), data);
+    }
+
+    #[test]
+    fn an_empty_file_reads_back_as_no_bytes_rather_than_as_an_error() {
+        let (path, _dir) = scratch_path("empty");
+        fs::write(&path, b"").expect("write the fixture");
+
+        // An empty `authorized_keys` is an ordinary thing to find, and it means
+        // "no keys are authorised" rather than "something went wrong".
+        assert_eq!(fs_read_file(&path).expect("read"), b"");
+    }
+
+    #[test]
+    fn reading_a_file_that_is_not_there_says_which_file() {
+        let (path, _dir) = scratch_path("absent");
+
+        let err = fs_read_file(&path).expect_err("a file that was never written");
+        assert!(
+            err.to_string().contains(&path),
+            "the error must name the file it could not read, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_file_exactly_at_the_size_limit_is_read_whole() {
+        let (path, _dir) = scratch_path("at_the_limit");
+        fs::write(&path, vec![b'k'; MAX_FILE_BYTES]).expect("write the fixture");
+
+        // The boundary is the interesting case for a reader that has to read one
+        // byte past the cap to know whether it has reached it.
+        assert_eq!(fs_read_file(&path).expect("read").len(), MAX_FILE_BYTES);
+    }
+
+    /// The regression test for silent truncation.
+    ///
+    /// The previous reader took a fixed 64 KiB buffer and kept whatever fit. An
+    /// `authorized_keys` one byte over that lost its last key with no error
+    /// anywhere, and a cut landing mid-line left a partial base64 blob that
+    /// parsed as a malformed entry rather than as the key it was.
+    #[test]
+    fn a_file_one_byte_over_the_limit_is_refused_rather_than_truncated() {
+        let (path, _dir) = scratch_path("over_the_limit");
+        fs::write(&path, vec![b'k'; MAX_FILE_BYTES + 1]).expect("write the fixture");
+
+        let err = fs_read_file(&path).expect_err("a file over the cap");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&path) && msg.contains("limit"),
+            "the error must name the file and say it was too large, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn writing_a_key_into_a_directory_that_does_not_exist_says_which_file() {
+        let (dir_path, _dir) = scratch_path("no_such_directory");
+        let path = format!("{dir_path}/key");
+
+        let seed = [1u8; 32];
+        let err = write_openssh_private_key_with_checkint(
+            &path,
+            &seed,
+            &posix::ed25519::public_key(&seed),
+            0,
+        )
+        .expect_err("a write under a missing directory");
+        assert!(
+            err.to_string().contains(&path),
+            "the error must name the file it could not write, got: {err}"
+        );
+    }
+
+    #[test]
+    fn writing_a_key_replaces_the_previous_contents_rather_than_appending() {
+        let (path, _dir) = scratch_path("overwritten_key");
+        fs::write(&path, vec![b'x'; 4096]).expect("write the fixture");
+
+        let seed = [6u8; 32];
+        write_openssh_private_key_with_checkint(
+            &path,
+            &seed,
+            &posix::ed25519::public_key(&seed),
+            0,
+        )
+        .expect("write the key");
+
+        // A key file that still had the old file's tail after it would parse —
+        // the container's base64 body ends before the trailer — so the failure
+        // this pins is a file that grows every time the daemon regenerates a key.
+        let loaded = HostKey::load_from_file(&path).expect("load");
+        assert_eq!(loaded.fingerprint(), HostKey::from_seed(seed).fingerprint());
+        assert!(
+            fs_read_file(&path).expect("read").len() < 4096,
+            "the previous contents must be gone, not appended to"
+        );
+    }
+
+    /// The whole host key round trip through a real file: this daemon's writer,
+    /// this daemon's loader.
+    ///
+    /// Neither end of this could be asked before. The writer's file never
+    /// arrived and the loader's first statement was a syscall that always
+    /// failed, so what `sshd` did with a host key file it could read was not
+    /// checked in this crate at all — in a stack where six bugs have now come
+    /// out of two ends disagreeing about a format while both suites passed.
+    #[test]
+    fn a_host_key_this_daemon_writes_is_the_host_key_it_reads_back() {
+        let (path, _dir) = scratch_path("ssh_host_ed25519_key");
+        let seed = [7u8; 32];
+        let public = posix::ed25519::public_key(&seed);
+
+        write_openssh_private_key_with_checkint(&path, &seed, &public, 0x1234_5678)
+            .expect("write the key");
+        let loaded = HostKey::load_from_file(&path).expect("load the key");
+
+        assert_eq!(
+            loaded.fingerprint(),
+            HostKey::from_seed(seed).fingerprint(),
+            "the key on disk must be the key that was generated"
+        );
+    }
+
+    /// The file must be a real OpenSSH container, not merely one this daemon
+    /// happens to accept — `ssh-keygen -lf` has to be able to read it, and a
+    /// codec that agreed with itself would pass a round trip regardless.
+    #[test]
+    fn the_host_key_file_is_an_openssh_container_and_not_a_private_format() {
+        let (path, _dir) = scratch_path("ssh_host_ed25519_key");
+        let seed = [9u8; 32];
+        write_openssh_private_key_with_checkint(
+            &path,
+            &seed,
+            &posix::ed25519::public_key(&seed),
+            1,
+        )
+        .expect("write the key");
+
+        let text = String::from_utf8(fs_read_file(&path).expect("read")).expect("utf-8");
+        assert!(text.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----\n"));
+        assert!(text.ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
+    }
+
+    /// The loader's final fall-through, which `from_openssh_text` cannot reach.
+    ///
+    /// The file below carries no OpenSSH header, is not 32 bytes, and is not 64
+    /// hex digits — so it matches none of the three accepted formats and lands
+    /// past all of them. The old loader answered `sha256(first_line)` there: it
+    /// started the daemon with a host key unrelated to the file named, and the
+    /// operator's only clue was every client reporting a changed host key.
+    #[test]
+    fn a_key_file_in_no_recognised_format_is_refused_rather_than_hashed_into_a_seed() {
+        let (path, _dir) = scratch_path("not_a_key");
+        fs::write(&path, b"-----BEGIN RSA PRIVATE KEY-----\nnope\n").expect("write the fixture");
+
+        let err = HostKey::load_from_file(&path).expect_err("a file that is not a host key");
+        assert!(
+            err.to_string().contains(&path),
+            "the error must name the file, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_host_key_stored_as_sixty_four_hex_digits_is_accepted() {
+        let (path, _dir) = scratch_path("hex_key");
+        let seed = [0x5au8; 32];
+        let hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+        fs::write(&path, hex.as_bytes()).expect("write the fixture");
+
+        let loaded = HostKey::load_from_file(&path).expect("load");
+        assert_eq!(loaded.fingerprint(), HostKey::from_seed(seed).fingerprint());
+    }
+
+    #[test]
+    fn a_host_key_stored_as_thirty_two_raw_bytes_is_accepted() {
+        let (path, _dir) = scratch_path("raw_key");
+        let seed = [0xa5u8; 32];
+        fs::write(&path, seed).expect("write the fixture");
+
+        let loaded = HostKey::load_from_file(&path).expect("load");
+        assert_eq!(loaded.fingerprint(), HostKey::from_seed(seed).fingerprint());
+    }
+
+    /// A host key file must not be readable by anyone but its owner, and must
+    /// not have been readable at any point in between either — which is why it
+    /// is created `0600` rather than created and then tightened.
+    #[cfg(unix)]
+    #[test]
+    fn a_host_key_file_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (path, _dir) = scratch_path("private_key");
+        let seed = [3u8; 32];
+        write_openssh_private_key_with_checkint(
+            &path,
+            &seed,
+            &posix::ed25519::public_key(&seed),
+            2,
+        )
+        .expect("write the key");
+
+        let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a host key must not be readable by other users"
+        );
+    }
+
+    /// Overwriting a permissive file left at the key's path must not inherit its
+    /// permissions. `O_CREAT`'s mode applies only on creation, so this is the
+    /// case the second `chmod` exists for.
+    #[cfg(unix)]
+    #[test]
+    fn a_host_key_written_over_a_world_readable_file_is_still_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (path, _dir) = scratch_path("was_permissive");
+        fs::write(&path, b"whatever was here before").expect("write the fixture");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let seed = [4u8; 32];
+        write_openssh_private_key_with_checkint(
+            &path,
+            &seed,
+            &posix::ed25519::public_key(&seed),
+            3,
+        )
+        .expect("write the key");
+
+        let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the previous file's mode must not survive");
+    }
+
     // ---- User authentication logic ----
 
     #[test]
@@ -7011,11 +7382,12 @@ Z
     // the context it should cover, does it verify. That is the authentication
     // half. The authorisation half -- is this key one the account permits, and
     // what does the server say when it is not -- ran only inside
-    // `handle_pubkey_auth`, which reads `authorized_keys` through a raw SlateOS
-    // syscall stubbed to -ENOSYS off the kernel. So on any machine these tests
+    // `handle_pubkey_auth`, which read `authorized_keys` through a raw SlateOS
+    // syscall stubbed to -ENOSYS off the kernel. So on every machine these tests
     // run on, that function returned `Rejected` from its first branch and the
-    // decision underneath was unreachable. `decide_pubkey_auth` is that
-    // decision with the file read lifted out.
+    // decision underneath was unreachable. `decide_pubkey_auth` is that decision
+    // with the file read lifted out. (The syscall is gone -- file access goes
+    // through `std::fs` now -- but the split earned its keep and stays.)
 
     /// The ordinary success: a listed key, a genuine signature.
     #[test]

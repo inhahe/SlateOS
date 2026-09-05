@@ -118826,20 +118826,25 @@ below.
 
 ## TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE (lane B)
 
-**Status:** PARTLY FIXED, 2026-09-05. Items 1–3 below are done for the whole
-*wire codec* — encoders, decoders, the identification line, and the
-key-exchange arithmetic. `userspace/sshwire` exists, both binaries depend on
-it, and neither keeps a private copy of `ssh_string`, `ssh_u32`,
-`encode_mpint`, `strip_leading_zeros`, `read_byte`, `read_bool`, `read_u32`,
-`read_ssh_string`, `read_mpint`, the RFC 4253 §4.2 identification line, the §8
-exchange hash or §7.2 key derivation. The **transport crypto** followed on
-2026-09-05 as well — HMAC-SHA256, the packet MAC, the constant-time comparison
-and the whole of AES-128-CTR — because the two copies of the cipher had drifted
-into a confidentiality bug; see
-`TD-B-THE-AES-CTR-COUNTER-IS-REUSED-BY-THE-CLIENT-AND-INVENTED-BY-THE-SERVER`.
-**Still open:** `build_packet` — RFC 4253 §6 framing — is the last function
-written twice. **Item 4 — an interop test — is untouched, and is the item that
-matters most**; see the note at the end.
+**Status:** PARTLY FIXED, 2026-09-05. **Items 1–3 below are done.** Nothing in
+the wire and transport layer is written twice any more: encoders, decoders, the
+identification line, the key-exchange arithmetic, the transport crypto and — as
+of the last change — the RFC 4253 §6 packet framing all live in
+`userspace/sshwire`, and neither binary keeps a private copy of any of them.
+The framing moved last and as `PacketCodec`, a stateful type rather than a pair
+of free functions, because §6.4 makes the MAC `HMAC(key, sequence_number ||
+packet)`: the sequence number is an *input to the framing*, not bookkeeping
+kept beside it. See
+`TD-B-THE-SERVERS-PACKET-DECODER-TRUSTED-A-LENGTH-IT-HAD-NOT-CHECKED-AND-A-MAC-IT-HAD-NOT-VERIFIED`
+for the two faults that move fixed, and
+`TD-B-THE-AES-CTR-COUNTER-IS-REUSED-BY-THE-CLIENT-AND-INVENTED-BY-THE-SERVER`
+for the confidentiality bug that drove the crypto across.
+
+**Item 4 — an interop test — is untouched, and is the item that matters most**;
+see the note at the end. `PacketCodec` narrows the gap slightly on its own:
+`what_one_end_encodes_the_other_end_decodes` is the first test in this stack
+that runs one end against the other rather than against its own output. It
+covers the framing only, not the state machines above it.
 
 Filed 2026-09-05 alongside the fix above, which is the first bug this
 arrangement produced and the one that found it.
@@ -118864,7 +118869,7 @@ result was a server no client could connect to.
 | `read_ssh_string`, `read_mpint`, `read_u32`, `read_byte`, `read_bool` | wire decoding — the server's copies were the *un-hardened* ones, see below | shared |
 | `compute_mac`, `hmac_sha256`, `constant_time_eq` | RFC 4253 §6.4 packet MAC | shared |
 | `aes128_encrypt_block`, AES-CTR | the cipher — **the second bug this arrangement produced**, and a confidentiality one | shared, as the stateful `Aes128Ctr` |
-| `build_packet` | RFC 4253 §6 framing | **still twice** |
+| `build_packet`, `read_packet`, `try_parse_packet` | RFC 4253 §6 framing | shared, as the stateful `PacketCodec` — **the third bug this arrangement produced**, two faults in the server's decoder |
 
 The first extraction stopped at the line between total functions and fallible
 ones: everything that returns a value moved as-is, while everything returning
@@ -118873,8 +118878,15 @@ crate cannot name either error type. That is now resolved by
 `sshwire::WireError` (`Truncated { what, needed, available }` /
 `LengthOutOfRange { len }`) plus a `From<WireError>` impl on each binary's error
 enum, so every call site keeps using `?` and keeps reporting failures the way
-the rest of that binary does. The readers moved on the back of it, and the
-cipher followed. Only the framing has not.
+the rest of that binary does. The readers moved on the back of it, the cipher
+followed, and the framing last.
+
+**One thing the framing move deliberately did not take.** `PacketCodec::encode`
+takes the padding as a parameter rather than generating it, and offers
+`padding_len` to say how much is wanted. Entropy is a syscall and it can fail;
+a shared crate has no business deciding whether a daemon that cannot get any
+should panic, send zeros, or drop the connection. Each binary answers that where
+it can also report it.
 
 **What the reader move turned up.** The two copies were not merely duplicated,
 they were *unequal*, and the server had the worse one. Both had originally
@@ -118939,15 +118951,18 @@ not merely adjacent to the hash, it *is* two of the hash's eight inputs, so
 deriving it is as much a two-program contract as hashing it, and it now lives in
 `sshwire` on the same reasoning as everything else there.
 
-Four such bugs, plus the server's un-hardened readers, have now been found by
+Six such bugs, plus the server's un-hardened readers, have now been found by
 one person reading two files at once, and none by a test. The fourth
 (`TD-B-THE-AES-CTR-COUNTER-IS-REUSED-BY-THE-CLIENT-AND-INVENTED-BY-THE-SERVER`)
 is the one that shows how far a test suite can be from the truth here: *both*
 crates had an AES-CTR test, both passed, and the test each had was structurally
 incapable of seeing that the cipher was reusing one keystream for the whole
 session — because encrypt-then-decrypt with the same wrong counter returns the
-plaintext perfectly. That ratio is the argument for item 4, which is the
-outstanding work here.
+plaintext perfectly. The fifth and sixth
+(`TD-B-THE-SERVERS-PACKET-DECODER-TRUSTED-A-LENGTH-IT-HAD-NOT-CHECKED-AND-A-MAC-IT-HAD-NOT-VERIFIED`)
+make the neighbouring point: a wrong guard is invisible for as long as the only
+caller happens to make it unreachable, and both of those were pre-auth. That
+ratio is the argument for item 4, which is the outstanding work here.
 
 **Known obstacle to item 4:** both crates' `syscall0/1/3/4` are host stubs that
 return `-ENOSYS` on the Windows host build *and* on the WSL Linux build, so
@@ -119157,6 +119172,12 @@ blocks consumed. There is one per direction, created at `NEWKEYS` and carried in
 each crate's `EncryptionState`. `peek_block` exists for the
 length-field peek that must not consume, and takes `&self`.
 
+*(Updated 2026-09-05: `EncryptionState` no longer exists in either crate. The
+two ciphers now live in `sshwire::PacketCodec` alongside the two sequence
+numbers, and `NEWKEYS` is a single `codec.activate(role, k, h, session_id)`
+call. Nothing about the cipher itself changed; there is simply one fewer
+per-crate struct wrapping it.)*
+
 Because the counter is now inside the cipher, `seq` is no longer a parameter of
 anything in this path — there is nowhere for a `seq * 256` to be reintroduced.
 And because both ends construct the same type from the same crate, the two
@@ -119194,3 +119215,111 @@ Deleted rather than moved: sshd's `test_aes_encrypt_decrypt_roundtrip` and ssh's
 `aes_ctr_round_trips_a_length_that_is_not_a_block_multiple`, for the reason
 above; and ssh's `aes_ctr_declines_a_short_key_or_iv_rather_than_encrypting_with_padding`,
 because `Aes128Ctr::new` takes `&[u8; 16]` and a short key no longer compiles.
+
+
+### TD-B-THE-SERVERS-PACKET-DECODER-TRUSTED-A-LENGTH-IT-HAD-NOT-CHECKED-AND-A-MAC-IT-HAD-NOT-VERIFIED
+
+**Status: FIXED** 2026-09-05 (`userspace/sshwire/src/lib.rs`, `PacketCodec`;
+`userspace/sshd/src/main.rs`, `try_parse_packet` deleted). The fifth and sixth
+bugs found by reading the client's and the server's copies of the same function
+side by side, and — like the four before them — neither was found by a test.
+
+**In short:** the SSH server's routine for taking apart an arriving packet had
+two broken checks. One read a byte from *outside* the packet if the sender
+declared an impossibly small one. The other, on being handed a too-short
+message-authentication code (the tag that proves the packet was not tampered
+with), skipped the check entirely and accepted the packet as genuine. Both were
+reachable by anyone who could open a TCP connection to the daemon, before
+logging in. Neither could actually be triggered through the code path that
+existed, because the buffering around them happened to make the bad inputs
+unreachable — which is precisely why nobody noticed the checks were wrong.
+
+#### The two faults
+
+**1. No floor on the declared packet length.** RFC 4253 §6 lays a packet out as
+`[u32 packet_length][u8 padding_length][payload][padding]`, where
+`packet_length` counts everything after itself — so the smallest legal value is
+5 (one padding-length byte plus the four bytes of padding §6 requires as a
+minimum). The client's decoder rejected anything below that. The server's
+checked only the ceiling:
+
+```rust
+if packet_length > MAX_PACKET_SIZE { ... }   // sshd: no floor
+```
+
+A peer declaring 0 or 1 therefore produced a four- or five-byte packet, and the
+`padding_length` byte at offset 4 — which §6 puts *inside* the packet — was read
+from past the end of it. `userspace/sshd/src/main.rs` carries a crate-level
+`#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]`, so the
+lint that exists precisely to catch this shape is switched off across the whole
+file; what it reaches is a panic, i.e. a pre-auth remote kill of the connection
+handler. Removing that blanket allow is tracked separately.
+
+**2. A fail-open MAC comparison.** The verification read:
+
+```rust
+if mac_data.len() >= mac_len && !constant_time_eq(&mac_data[..mac_len], &expected) {
+    return Err(...);
+}
+```
+
+The `&&` means: *if the MAC is too short, do not compare it* — and then fall
+through to accept the packet. Authentication is not optional; the honest form
+of "I do not have enough bytes to check this" is a refusal, not a pass. As
+written, a peer that has authenticated nothing to anybody could have had a
+packet accepted unauthenticated by sending a truncated tag.
+
+#### Why neither fired
+
+The same structural reason as the other four, in a slightly different key.
+There, two copies of a function had *drifted* and no test compared them. Here,
+one copy was simply wrong, and its only caller happened to make the wrong input
+unreachable: sshd's `StreamBuffer` never handed `try_parse_packet` a buffer it
+had not already sized, so the short-MAC branch had no way to be entered from
+inside this program. The guard was wrong and the caller was what made it
+harmless — an arrangement that survives exactly until someone refactors the
+caller, and one that no test of *this* file could ever have flagged, because
+from inside the file the behaviour is correct.
+
+That is the argument for extraction stated from the other side. Sharing a
+function does not only stop two copies drifting; it puts the copy that is wrong
+somewhere its own callers cannot keep covering for it.
+
+#### The fix
+
+Both faults are gone by construction, because there is now one decoder:
+
+```rust
+if !(MIN_PACKET_LENGTH..=MAX_PACKET_SIZE).contains(&packet_length) {
+    return Err(WireError::PacketLength { len: packet_length });
+}
+...
+let received = mac_data.get(..mac_len).ok_or(WireError::Truncated {
+    what: "MAC", needed: mac_len, available: mac_data.len(),
+})?;
+if !constant_time_eq(received, &expected) {
+    return Err(WireError::MacMismatch);
+}
+```
+
+`MacMismatch` deliberately carries no data: an error that reported *where* the
+tags differed, or what was expected, would be an oracle handed to the peer who
+supplied the packet.
+
+Tests in `sshwire`: `a_length_outside_the_permitted_range_is_refused`,
+`padding_longer_than_the_packet_is_refused`,
+`a_short_mac_is_rejected_rather_than_skipped`, `a_modified_packet_is_refused`,
+`a_packet_replayed_out_of_order_is_refused`.
+
+**One thing worth recording about testing this layer.** `a_modified_packet_is_refused`
+cannot simply flip a byte and expect `MacMismatch`, because SSH encrypts the
+length field but does not authenticate it *ahead of the packet it introduces* —
+the MAC covers the whole plaintext packet, so the length has to be trusted
+before there is anything to check it against. Corrupting a length byte therefore
+yields a range error or a wait-for-more-bytes, never a MAC failure. The test
+states all three outcomes by position rather than pretending the first one is
+the only one, and `a_packet_replayed_out_of_order_is_refused` asserts only
+`is_err()` for the same reason: by the time a packet is replayed the receiving
+counter has moved on, so its length field decrypts to noise and the packet is
+refused before its MAC is ever reached. Both are still refusals; neither is the
+refusal a naive test would have asserted.

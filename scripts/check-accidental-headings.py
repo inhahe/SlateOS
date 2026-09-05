@@ -47,6 +47,8 @@ checker could not reach a verdict.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import os
 import pathlib
 import re
@@ -208,8 +210,8 @@ def analyse_one(path: str, text: str, f: Findings) -> None:
             )
 
 
-def _git(args: list[str], cwd: str) -> str:
-    """Run git with a scrubbed environment.
+def _git_raw(args: list[str], cwd: str, stdin: bytes | None = None) -> bytes:
+    """Run git with a scrubbed environment and return raw stdout.
 
     `git -C <dir>` does **not** name a repository: an inherited `GIT_DIR`
     outranks both `-C` and the working directory, and git exports `GIT_DIR`
@@ -218,7 +220,7 @@ def _git(args: list[str], cwd: str) -> str:
     for -- which, in a four-worktree tree, is not necessarily this one.
     """
     proc = subprocess.run(
-        ["git", "-C", cwd] + args,
+        ["git", "-C", cwd] + args, input=stdin,
         capture_output=True, env=gitenv.clean_env(), check=False,
     )
     if proc.returncode != 0:
@@ -226,21 +228,124 @@ def _git(args: list[str], cwd: str) -> str:
             "git " + " ".join(args) + " failed: "
             + proc.stderr.decode("utf-8", "replace").strip()
         )
-    return proc.stdout.decode("utf-8", "replace")
+    return proc.stdout
 
 
-def collect_from_head(root: str, rev: str) -> list[tuple[str, str]]:
-    """`(path, text)` for every `*.md` in `rev`."""
+def _git(args: list[str], cwd: str) -> str:
+    return _git_raw(args, cwd).decode("utf-8", "replace")
+
+
+# `<mode> <type> <oid>\t<path>`, which is what `ls-tree -r -z` emits. `-z` also
+# turns off git's path quoting, so the path after the tab is the literal bytes.
+LS_TREE_RE = re.compile(r"^\d+ (\w+) ([0-9a-f]+)\t(.*)$", re.DOTALL)
+
+
+def changed_md_paths(root: str, rev: str) -> list[str]:
+    """The `*.md` paths `rev` adds or modifies, relative to its first parent.
+
+    `--diff-filter=d` drops deletions: a document the commit removed is not in
+    `rev`'s tree, so asking for its blob would fail, and a deleted document
+    cannot carry a heading anyone will read.
+
+    `--root` is what makes a root commit list its whole tree instead of nothing.
+    That case is not hypothetical for this checker -- `test-checkers-honour-head.py`
+    builds scratch repositories whose first commit is a root commit, and without
+    `--root` every one of those fixtures would report an empty corpus and pass.
+    """
+    out = _git_raw(["diff-tree", "-r", "--root", "--no-commit-id",
+                    "--name-only", "-z", "--diff-filter=d", rev], root)
+    return [p for p in out.decode("utf-8", "replace").split("\0")
+            if p.endswith(".md")]
+
+
+def collect_from_head(root: str, rev: str,
+                      paths: list[str] | None = None) -> list[tuple[str, str]]:
+    """`(path, text)` for every `*.md` in `rev`, or just `paths` if given.
+
+    WHY `cat-file --batch` AND NOT A `git show` PER FILE. The obvious loop is
+    one subprocess per document, and it was what this function shipped with. On
+    this tree that is ~310 process spawns, measured at **43 seconds** for a
+    single revision (2026-09-05, the filesystem of open-questions A-Q7). One
+    `--batch` process streams every blob down one pipe and brought the same
+    revision in 22 s.
+
+    WHY THAT WAS STILL NOT ENOUGH, AND WHAT `paths` IS FOR. Measuring where the
+    remaining 22 s went says something worth writing down: the cost here is
+    **per object, not per byte**. The two largest documents in the tree are
+    13 MB together and `cat-file` returns them in 3 s; the other 306, totalling
+    6 MB, take 47 s. That is ~150 ms of pure lookup latency per object, which no
+    amount of streaming removes -- it is the same filesystem pathology as A-Q7.
+
+    So the push gate does not read the corpus. It reads the documents the commit
+    changed, which is also the more correct question for a gate to ask: gate 14
+    exists to refuse to *publish a new* accidental heading, and a lane must not
+    be blocked from pushing by a pre-existing defect in another lane's document
+    that it has no business editing. The whole-corpus sweep is still what
+    `scripts/boot-test.sh` and a bare invocation run.
+    """
     try:
         _git(["rev-parse", "--verify", f"{rev}^{{commit}}"], root)
     except ValueError as exc:
         raise ValueError(f"{rev!r} is not a commit: {exc}") from exc
-    listing = _git(["ls-tree", "-r", "--name-only", "-z", rev], root)
-    paths = [p for p in listing.split("\0") if p.endswith(".md")]
-    out = []
-    for p in paths:
-        blob = _git(["show", f"{rev}:{p}"], root)
-        out.append((p, blob))
+
+    if paths is None:
+        # Whole corpus: the tree has to be listed before it can be read.
+        listing = _git_raw(["ls-tree", "-r", "-z", rev], root)
+        wanted = []
+        for entry in listing.split(b"\0"):
+            if not entry:
+                continue
+            m = LS_TREE_RE.match(entry.decode("utf-8", "replace"))
+            # A tree entry this regex cannot parse is a shape change in git's
+            # output, not a document to skip quietly: reporting a clean corpus
+            # over a listing we failed to read is the failure the floor exists
+            # to catch, and it would be reached before the floor if this
+            # silently dropped entries.
+            if m is None:
+                raise ValueError(f"cannot parse ls-tree entry {entry!r}")
+            kind, oid, path = m.group(1), m.group(2), m.group(3)
+            if kind == "blob" and path.endswith(".md"):
+                wanted.append((oid, path))
+    else:
+        # Scoped: `cat-file --batch` takes any revision syntax, so `<rev>:<path>`
+        # fetches the blob without a listing step. One fewer git spawn, which on
+        # this filesystem is worth about a second of a gate's budget.
+        wanted = [(f"{rev}:{p}", p) for p in paths]
+
+    return _read_blobs(root, wanted)
+
+
+def _read_blobs(root: str, wanted: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Fetch `[(request, path)]` through one `cat-file --batch`.
+
+    `--batch` answers each request with `<oid> <type> <size>\\n`, then exactly
+    `size` bytes, then one `\\n`. Walked by byte offset rather than split on
+    newlines because a document's own content contains both newlines and lines
+    that look like headers -- splitting would resynchronise on the first line of
+    prose that happened to have three space-separated words.
+    """
+    if not wanted:
+        return []
+    stdin = ("\n".join(req for req, _ in wanted) + "\n").encode("utf-8")
+    blob = _git_raw(["cat-file", "--batch"], root, stdin=stdin)
+
+    out: list[tuple[str, str]] = []
+    pos = 0
+    for req, path in wanted:
+        nl = blob.find(b"\n", pos)
+        if nl < 0:
+            raise ValueError(f"cat-file output ended before {path}")
+        header = blob[pos:nl].decode("utf-8", "replace").split()
+        # `<name> missing` is what an unresolvable request returns, and it is two
+        # fields, not three. Raising rather than skipping matters: a silently
+        # skipped document is a document reported clean.
+        if len(header) != 3 or header[1] != "blob":
+            raise ValueError(
+                f"cat-file answered {' '.join(header)!r} for {path}")
+        size = int(header[2])
+        start = nl + 1
+        out.append((path, blob[start:start + size].decode("utf-8", "replace")))
+        pos = start + size + 1                  # the trailing newline
     return out
 
 
@@ -301,19 +406,60 @@ def fix_sites(root: str, sites: list[tuple[str, int]]) -> int:
     return fixed
 
 
-def analyse_corpus(docs: list[tuple[str, str]]) -> Findings:
+def analyse_corpus(docs: list[tuple[str, str]],
+                   floor: int = MIN_DOCS) -> Findings:
+    """Analyse every document, refusing a verdict over an implausibly thin one.
+
+    `floor` is a parameter and not a constant because the two callers ask
+    different questions. A whole-tree sweep that comes back with four documents
+    has a broken enumeration, and saying "no failures" about it would be the
+    exact false green this checker exists to prevent -- so it gets the real
+    floor. A push gate scoped to *the documents this commit changed* legitimately
+    sees one, or zero; there the enumeration is `git diff-tree`, whose failure
+    mode is a non-zero exit rather than a short list, so a floor there would
+    reject correct pushes and teach people to bypass the gate.
+    """
     f = Findings()
     for path, text in docs:
         analyse_one(path, text, f)
-    if f.docs_read < MIN_DOCS:
+    if f.docs_read < floor:
         raise ValueError(
             f"only {f.docs_read} Markdown document(s) found, below the floor "
-            f"of {MIN_DOCS}. Either the enumeration broke or the tree lost its "
+            f"of {floor}. Either the enumeration broke or the tree lost its "
             "documentation; both want a human, and reporting 'no failures' "
             "over a corpus this thin is the failure this checker exists to "
             "prevent"
         )
     return f
+
+
+def report(f: Findings, quiet: bool) -> int:
+    """Print the verdict and return the exit status.
+
+    Split out of `main` for one reason: so the self-test can prove that
+    `--quiet` silences *only* the pass. A `--quiet` that also swallowed a
+    finding would make gate 14 — the only caller that passes it — report a
+    clean push over a broken document, which is the exact shape of failure
+    every gate in `scripts/hooks/pre-push` exists to make impossible. Left
+    inline in `main` the claim would be untestable without a 30-second corpus
+    scan (measured 2026-09-05; see open-questions A-Q7 on this filesystem), so
+    it would not have been tested.
+    """
+    for w in f.warnings:
+        print(f"  warning: {w}")
+
+    if f.failures:
+        print(f"\n{len(f.failures)} accidental heading(s):", file=sys.stderr)
+        for d in f.failures:
+            print(f"  - {d}", file=sys.stderr)
+        return 1
+
+    if not quiet:
+        tail = (f", {len(f.warnings)} warning(s)" if f.warnings
+                else ", no warnings")
+        print(f"check-accidental-headings: OK ({f.docs_read} document(s), "
+              f"{f.lines_read} line(s), {f.rules_seen} separator(s){tail})")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +588,68 @@ def self_test() -> int:
         failures.append("thin corpus did not raise")
         print("FAIL  a thin corpus did not refuse")
 
+    # The flag names, because they are an interface with `scripts/hooks/pre-push`
+    # and that file cannot be type-checked. Gate 14 invokes `--selftest`,
+    # `--head` and `--quiet`; a rename here that left `main` working would break
+    # the gate into an exit-2 "checker fell over" on every push.
+    p = build_parser()
+    check("--selftest is accepted (the spelling the hook writes)",
+          p.parse_args(["--selftest"]).self_test is True)
+    check("--self-test is accepted too", p.parse_args(["--self-test"]).self_test
+          is True)
+    check("--head takes a revision",
+          p.parse_args(["--head", "abc123"]).head == "abc123")
+    check("--quiet is accepted", p.parse_args(["--quiet"]).quiet is True)
+    check("...and nothing is quiet by default", p.parse_args([]).quiet is False)
+
+    # `--quiet` must silence only the pass, driven through the real reporting
+    # path rather than asserted about it. The gate is the only caller that
+    # passes the flag, so if it could swallow a finding nothing else would ever
+    # notice.
+    def captured(f: Findings, quiet: bool) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = report(f, quiet)
+        return rc, out.getvalue(), err.getvalue()
+
+    clean = one("intro\n\n---\n\ndone\n")
+    rc, out, err = captured(clean, quiet=True)
+    check("--quiet prints nothing on a clean pass", (rc, out, err) == (0, "", ""))
+    rc, out, err = captured(clean, quiet=False)
+    check("...and without it the OK line is printed", rc == 0 and "OK (" in out)
+
+    dirty = one("prose that becomes a heading\n---\n")
+    rc, out, err = captured(dirty, quiet=True)
+    check("--quiet still fails on a real finding", rc == 1)
+    check("...and still names it, on stderr",
+          "prose that becomes a heading" in err)
+
+    warned = one("Heading text\n===\n\nbody\n")
+    rc, out, err = captured(warned, quiet=True)
+    check("--quiet still prints warnings", rc == 0 and "warning:" in out)
+
+    check("--changed-only is accepted",
+          p.parse_args(["--changed-only", "--head", "x"]).changed_only is True)
+    # Refused, not ignored: a gate that passed it without `--head` would look
+    # scoped and be judging the whole corpus.
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = main(["--changed-only"])
+    check("--changed-only without --head is refused, not ignored",
+          rc == 2 and "needs --head" in err.getvalue())
+
+    # The two floors, which are the reason `analyse_corpus` takes the parameter
+    # at all. A scoped run legitimately sees one document; a sweep that sees one
+    # has a broken enumeration and must refuse.
+    count += 1
+    try:
+        analyse_corpus([("a.md", "x\n")], floor=0)
+    except ValueError:
+        failures.append("floor=0 refused a legitimately scoped corpus")
+        print("FAIL  floor=0 refused a one-document corpus")
+    else:
+        print("  ok    a scoped corpus of one document is allowed")
+
     if failures:
         print(f"\n{len(failures)} of {count} self-test(s) FAILED")
         return 1
@@ -449,21 +657,62 @@ def self_test() -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Split out from `main` so the self-test can assert the flag *names*.
+
+    The names are an interface with `scripts/hooks/pre-push`, not an internal
+    detail: the hook writes them as literal strings in a shell script, so a
+    rename here is a silent break there that nothing else in this file would
+    notice.
+    """
     parser = argparse.ArgumentParser(
         description="Find `---` separators that Markdown renders as headings.")
-    parser.add_argument("--self-test", action="store_true",
+    # Both spellings. `--selftest` is what the twelve gate-wired checkers use
+    # and therefore what `scripts/hooks/pre-push` writes; `--self-test` is what
+    # this file shipped with and what the newer checkers use. A gate that
+    # invokes the flag the checker does not have gets argparse's exit status 2,
+    # which `run_checker` correctly reports as "the checker fell over" -- but
+    # only after the push it was meant to judge has already been refused for the
+    # wrong reason. Accepting both costs one word and removes that failure mode.
+    parser.add_argument("--self-test", "--selftest", dest="self_test",
+                        action="store_true",
                         help="run the built-in fixtures and exit")
     parser.add_argument("--head", metavar="REV", default=None,
                         help="read the documents from REV instead of the "
                              "working tree (what a push gate must do)")
     parser.add_argument("--fix", action="store_true",
                         help="insert the missing blank lines in place")
-    args = parser.parse_args(argv)
+    # What makes gate 14 affordable, and what makes it ask a gate's question
+    # rather than an audit's. See `collect_from_head`'s docstring for both
+    # halves of the argument and the measurements behind them.
+    parser.add_argument("--changed-only", action="store_true",
+                        help="with --head, judge only the documents that "
+                             "revision changed (what a push gate wants)")
+    # For the push gate, which runs this once per pushed commit: the OK line is
+    # worth printing once and not eight times. Failures and warnings are never
+    # suppressed -- a `--quiet` that could hide a finding would be a bug, not an
+    # option.
+    parser.add_argument("--quiet", action="store_true",
+                        help="print nothing on success")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if args.fix and args.head is not None:
         print("check-accidental-headings: --fix writes the working tree and "
               "--head reads a commit; pick one", file=sys.stderr)
+        return 2
+
+    # Refused rather than silently ignored. `--changed-only` without `--head`
+    # has no revision to diff against, and the tempting reading -- "changed in
+    # the working tree" -- is the working-tree-versus-commit confusion that
+    # `--head` exists to end. A flag that quietly means nothing is worse than
+    # one that is rejected, because the gate that passes it would look wired.
+    if args.changed_only and args.head is None:
+        print("check-accidental-headings: --changed-only needs --head; there "
+              "is no revision to take the change set from", file=sys.stderr)
         return 2
 
     if args.self_test:
@@ -475,18 +724,23 @@ def main(argv: list[str] | None = None) -> int:
 
     root = str(pathlib.Path(__file__).resolve().parent.parent)
     try:
-        docs = (collect_from_head(root, args.head) if args.head
-                else collect_from_worktree(root))
-        f = analyse_corpus(docs)
+        if args.head:
+            paths = (changed_md_paths(root, args.head) if args.changed_only
+                     else None)
+            docs = collect_from_head(root, args.head, paths)
+        else:
+            paths = None
+            docs = collect_from_worktree(root)
+        # The floor is a whole-corpus claim; see `analyse_corpus`.
+        f = analyse_corpus(docs, floor=0 if paths is not None else MIN_DOCS)
     except ValueError as exc:
         print(f"check-accidental-headings: cannot reach a verdict: {exc}",
               file=sys.stderr)
         return 2
 
-    for w in f.warnings:
-        print(f"  warning: {w}")
-
     if args.fix and f.sites:
+        for w in f.warnings:
+            print(f"  warning: {w}")
         try:
             n = fix_sites(root, f.sites)
         except (OSError, ValueError) as exc:
@@ -497,16 +751,7 @@ def main(argv: list[str] | None = None) -> int:
               "re-run without --fix to confirm")
         return 0
 
-    if f.failures:
-        print(f"\n{len(f.failures)} accidental heading(s):", file=sys.stderr)
-        for d in f.failures:
-            print(f"  - {d}", file=sys.stderr)
-        return 1
-
-    tail = f", {len(f.warnings)} warning(s)" if f.warnings else ", no warnings"
-    print(f"check-accidental-headings: OK ({f.docs_read} document(s), "
-          f"{f.lines_read} line(s), {f.rules_seen} separator(s){tail})")
-    return 0
+    return report(f, args.quiet)
 
 
 if __name__ == "__main__":

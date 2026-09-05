@@ -731,6 +731,17 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         HandleKind::PtyMaster => {
             // Writing to the master delivers keystrokes into the slave's
             // line discipline — this is the emulator typing at the shell.
+            //
+            // `O_NONBLOCK` is *not* honoured here, unlike in `read` above.
+            // That is a missing syscall, not a decision: there is a
+            // `SYS_PTY_MASTER_TRY_READ` (547) and no write-side twin, so
+            // there is nothing to call.  A caller that has set `O_NONBLOCK`
+            // and writes into a full input ring therefore blocks.  Until the
+            // syscall exists, the workaround is to `poll` for `POLLOUT`
+            // first — which narrows the window but cannot close it, since
+            // another writer on a dup'd master can fill the ring in between.
+            // Filed as
+            // `requests/b-a-a-pty-master-write-cannot-be-non-blocking-there-is-no-try-write.md`.
             let ret = syscall3(SYS_PTY_MASTER_WRITE, entry.handle, buf as u64, count as u64);
             if ret == errno::native::CHANNEL_CLOSED {
                 // Every slave is gone: nothing can ever read these bytes.

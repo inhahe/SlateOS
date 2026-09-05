@@ -1366,9 +1366,7 @@ const SSH_SERVER_VERSION: &str = "SSH-2.0-SlateOS_SSHD_1.0";
 mod msg {
     pub const SSH_MSG_DISCONNECT: u8 = 1;
     pub const SSH_MSG_IGNORE: u8 = 2;
-    #[allow(dead_code)]
     pub const SSH_MSG_UNIMPLEMENTED: u8 = 3;
-    #[allow(dead_code)]
     pub const SSH_MSG_DEBUG: u8 = 4;
     pub const SSH_MSG_SERVICE_REQUEST: u8 = 5;
     pub const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
@@ -1383,6 +1381,10 @@ mod msg {
     pub const SSH_MSG_USERAUTH_BANNER: u8 = 53;
     #[allow(dead_code)]
     pub const SSH_MSG_USERAUTH_PK_OK: u8 = 60;
+    pub const SSH_MSG_GLOBAL_REQUEST: u8 = 80;
+    #[allow(dead_code)]
+    pub const SSH_MSG_REQUEST_SUCCESS: u8 = 81;
+    pub const SSH_MSG_REQUEST_FAILURE: u8 = 82;
     pub const SSH_MSG_CHANNEL_OPEN: u8 = 90;
     pub const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
     pub const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
@@ -3890,6 +3892,18 @@ impl ConnectionState {
         Ok(payload)
     }
 
+    /// The sequence number of the packet currently being dispatched.
+    ///
+    /// Both receive paths advance `recv_seq` the moment a packet is produced,
+    /// so by the time a handler runs the counter already names the *next*
+    /// packet. RFC 4253 §11.4's `SSH_MSG_UNIMPLEMENTED` must carry the number of
+    /// the packet it is rejecting, and sending the counter as-is would name a
+    /// packet the client has not sent yet — a reply the client would attribute
+    /// to the wrong message, or to none at all.
+    fn current_recv_seq(&self) -> u32 {
+        self.recv_seq.wrapping_sub(1)
+    }
+
     /// Log a debug message.
     fn debug_log(&self, msg: &str) {
         if self.debug_mode {
@@ -4748,19 +4762,106 @@ fn dispatch_channel_message(conn: &mut ConnectionState, payload: &[u8]) -> Resul
                 return Ok(Flow::Stop);
             }
         }
+        msg::SSH_MSG_GLOBAL_REQUEST => {
+            handle_global_request(conn, payload)?;
+        }
         msg::SSH_MSG_DISCONNECT => {
             conn.debug_log("client sent DISCONNECT");
             return Ok(Flow::Stop);
         }
-        msg::SSH_MSG_IGNORE => {
-            // Ignore.
+        msg::SSH_MSG_IGNORE | msg::SSH_MSG_DEBUG => {
+            // Both are advisory by definition and neither is answered: IGNORE
+            // exists to be discarded (RFC 4253 §11.2), and DEBUG carries text
+            // for a human, not a request (§11.3).
+        }
+        msg::SSH_MSG_UNIMPLEMENTED => {
+            // Answering this would be answering an answer. If a peer ever sent
+            // UNIMPLEMENTED for our UNIMPLEMENTED, a reply would ping-pong the
+            // two ends until one of them ran out of socket buffer.
+            conn.debug_log("client sent UNIMPLEMENTED");
+        }
+        msg::SSH_MSG_KEXINIT => {
+            // A rekey request. We do not implement rekeying, and this arm exists
+            // to say so in the log rather than to handle it: dropping it silently
+            // is what makes the session hang, because an OpenSSH client holds all
+            // other traffic until the key exchange it started completes. Tracked
+            // as TD-B-SSHD-DOES-NOT-REKEY-SO-A-LONG-SESSION-HANGS in
+            // known-issues.md. Deliberately *not* answered with UNIMPLEMENTED:
+            // KEXINIT is a message we recognise, so that reply would be a lie
+            // about which of the two problems the client is looking at.
+            conn.debug_log("client requested rekey (KEXINIT); unsupported, ignoring");
         }
         _ => {
-            conn.debug_log(&format!("unhandled message type: {msg_type}"));
+            // RFC 4253 §11.4: an unrecognised message must be answered, and the
+            // answer carries the sequence number of the packet being rejected so
+            // the peer can tell *which* of its messages we did not understand.
+            let rejected_seq = conn.current_recv_seq();
+            conn.debug_log(&format!(
+                "unhandled message type: {msg_type} (seq {rejected_seq}); replying UNIMPLEMENTED"
+            ));
+            conn.send_packet(&unimplemented_packet(rejected_seq))?;
         }
     }
 
     Ok(Flow::Continue)
+}
+
+/// Handle `SSH_MSG_GLOBAL_REQUEST` (RFC 4254 §4).
+///
+/// We implement no global requests — there is no TCP forwarding in this daemon
+/// — so every one of them is refused. The point of the arm is not the refusal
+/// but the *reply*: §4 says a request with `want_reply` set must be answered,
+/// and a client that asked and heard nothing has no way to distinguish "refused"
+/// from "the server is gone".
+///
+/// That distinction is the whole feature for the request people actually send.
+/// `ServerAliveInterval` makes an OpenSSH client emit
+/// `keepalive@openssh.com` with `want_reply = true`, and it picks that name
+/// precisely *because* no server implements it: a `REQUEST_FAILURE` is proof the
+/// server is alive and parsing, which is all the probe wanted. Dropping it means
+/// the liveness probe times out `ServerAliveCountMax` times and the client kills
+/// a perfectly healthy session — so the option a user sets to keep a session up
+/// through a NAT is exactly the one that tears it down.
+fn handle_global_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
+    let (name, reply) = global_request_reply(payload)?;
+    conn.debug_log(&format!(
+        "global request: {name} (unsupported, refusing; replying={})",
+        reply.is_some()
+    ));
+    if let Some(reply) = reply {
+        conn.send_packet(&reply)?;
+    }
+    Ok(())
+}
+
+/// Build an `SSH_MSG_UNIMPLEMENTED` naming the packet being rejected.
+///
+/// RFC 4253 §11.4: `byte SSH_MSG_UNIMPLEMENTED`, `uint32 packet sequence number
+/// of rejected message`.
+fn unimplemented_packet(rejected_seq: u32) -> Vec<u8> {
+    let mut reply = Vec::with_capacity(5);
+    reply.push(msg::SSH_MSG_UNIMPLEMENTED);
+    reply.extend_from_slice(&rejected_seq.to_be_bytes());
+    reply
+}
+
+/// Decide what a global request is owed, without touching the socket.
+///
+/// Returns the request's name — for the log — and the reply payload if one is
+/// owed. Split out from [`handle_global_request`] so the decision can be tested
+/// on its own: the reply is the entire observable behaviour here, and a test
+/// that needed a live socket to see it would not be run.
+fn global_request_reply(payload: &[u8]) -> Result<(String, Option<Vec<u8>>), SshdError> {
+    let (name_bytes, off) = read_ssh_string(payload, 1)?;
+    let name = String::from_utf8_lossy(name_bytes).into_owned();
+    let (want_reply, _) = read_bool(payload, off)?;
+
+    let reply = if want_reply {
+        Some(vec![msg::SSH_MSG_REQUEST_FAILURE])
+    } else {
+        None
+    };
+    Ok((name, reply))
 }
 
 /// Handle `CHANNEL_OPEN`.
@@ -4958,7 +5059,7 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
             // The pixel dimensions are optional in practice — clients that do
             // not know them send zeros — so a short payload updates what it
             // carries and leaves the rest alone.
-            if off + 8 <= payload.len() {
+            let applied = if off + 8 <= payload.len() {
                 let (width, next) = read_u32(payload, off)?;
                 let (height, next) = read_u32(payload, next)?;
                 channel.term_width = width;
@@ -4987,8 +5088,26 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
                 if resized == Some(false) {
                     conn.debug_log("window-change: TIOCSWINSZ failed");
                 }
+                true
+            } else {
+                // Fewer than eight bytes cannot contain the two dimensions the
+                // request exists to carry, so there is nothing to apply.
+                conn.debug_log("window-change: payload too short for a size");
+                false
+            };
+
+            // RFC 4254 §6.7 says `want_reply` SHOULD be false here, and every
+            // client this daemon has met sets it false — but SHOULD is not MUST,
+            // and a client that sets it waits for an answer that used to never
+            // arrive. Answering costs one packet on a path that runs once per
+            // window drag; not answering hangs a session on a technicality.
+            if want_reply {
+                if applied {
+                    send_channel_success(conn, remote_id)?;
+                } else {
+                    send_channel_failure(conn, remote_id)?;
+                }
             }
-            // No reply needed for window-change.
         }
         _ => {
             conn.debug_log(&format!("unknown channel request: {req_type}"));
@@ -8567,5 +8686,90 @@ DenyGroups nogroup
         // Never offered to the client at all; still the account's own.
         assert_eq!(value_of("HOME"), Some("/home/alice".to_string()));
         assert_eq!(value_of("USER"), Some("alice".to_string()));
+    }
+
+    // ---- Global requests (RFC 4254 §4) ----
+
+    /// `byte SSH_MSG_GLOBAL_REQUEST`, `string name`, `boolean want_reply`, and
+    /// whatever request-specific bytes follow.
+    fn global_request_payload(name: &str, want_reply: bool, extra: &[u8]) -> Vec<u8> {
+        let mut out = vec![msg::SSH_MSG_GLOBAL_REQUEST];
+        out.extend_from_slice(&ssh_string(name.as_bytes()));
+        out.push(u8::from(want_reply));
+        out.extend_from_slice(extra);
+        out
+    }
+
+    #[test]
+    fn a_keepalive_probe_is_answered_so_the_client_does_not_kill_the_session() {
+        // The regression this guards is the whole reason the arm exists. An
+        // OpenSSH client with `ServerAliveInterval` set sends exactly this, and
+        // reads a REQUEST_FAILURE as proof of life; hearing nothing, it counts
+        // the probe as lost and tears down a healthy session after
+        // `ServerAliveCountMax` of them.
+        let payload = global_request_payload("keepalive@openssh.com", true, &[]);
+        let (name, reply) = global_request_reply(&payload).unwrap();
+        assert_eq!(name, "keepalive@openssh.com");
+        assert_eq!(reply, Some(vec![msg::SSH_MSG_REQUEST_FAILURE]));
+    }
+
+    #[test]
+    fn a_request_that_wants_no_reply_gets_none() {
+        // RFC 4254 §4: a reply is owed only when it was asked for. Sending one
+        // anyway would leave the client an unsolicited packet to account for.
+        let payload = global_request_payload("hostkeys-00@openssh.com", false, &[0xAA, 0xBB]);
+        let (name, reply) = global_request_reply(&payload).unwrap();
+        assert_eq!(name, "hostkeys-00@openssh.com");
+        assert_eq!(reply, None);
+    }
+
+    #[test]
+    fn a_forwarding_request_is_refused_rather_than_ignored() {
+        // We implement no forwarding. Refusing says so; silence does not, and a
+        // client cannot tell silence from a dead server.
+        let mut extra = 0u32.to_be_bytes().to_vec();
+        extra.splice(0..0, ssh_string(b"0.0.0.0"));
+        let payload = global_request_payload("tcpip-forward", true, &extra);
+        let (name, reply) = global_request_reply(&payload).unwrap();
+        assert_eq!(name, "tcpip-forward");
+        assert_eq!(reply, Some(vec![msg::SSH_MSG_REQUEST_FAILURE]));
+    }
+
+    #[test]
+    fn a_truncated_global_request_is_an_error_not_a_silent_refusal() {
+        // Name present, `want_reply` byte missing. Guessing `false` here would
+        // let a malformed packet suppress a reply the client is waiting on.
+        let mut payload = vec![msg::SSH_MSG_GLOBAL_REQUEST];
+        payload.extend_from_slice(&ssh_string(b"keepalive@openssh.com"));
+        assert!(global_request_reply(&payload).is_err());
+    }
+
+    // ---- UNIMPLEMENTED (RFC 4253 §11.4) ----
+
+    #[test]
+    fn unimplemented_names_the_packet_it_rejects() {
+        assert_eq!(
+            unimplemented_packet(0x0102_0304),
+            vec![msg::SSH_MSG_UNIMPLEMENTED, 0x01, 0x02, 0x03, 0x04]
+        );
+    }
+
+    #[test]
+    fn the_sequence_number_reported_is_the_one_being_dispatched() {
+        // The off-by-one that would make every UNIMPLEMENTED name the wrong
+        // packet: `recv_seq` is bumped as soon as a packet is produced, so
+        // during dispatch it already points past the packet in hand.
+        let mut conn = conn_with_channel(32768);
+        conn.recv_seq = 7;
+        assert_eq!(conn.current_recv_seq(), 6);
+    }
+
+    #[test]
+    fn the_sequence_number_wraps_instead_of_underflowing() {
+        // Sequence numbers are explicitly modulo 2^32 (RFC 4253 §6.4), so the
+        // packet before number 0 is number 2^32-1 and not a panic.
+        let mut conn = conn_with_channel(32768);
+        conn.recv_seq = 0;
+        assert_eq!(conn.current_recv_seq(), u32::MAX);
     }
 }

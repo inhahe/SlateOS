@@ -119019,6 +119019,13 @@ fix simply had no route to the copy in the server, which is a worse place to be
 slow. Duplication does not only propagate bugs; it blocks fixes. That ratio was
 the argument for item 4, which has since been built.
 
+The count above stops at seven because it was written before `ssh-keygen` was
+brought into the same arrangement. It is now **eight live divergences out of
+fourteen duplications**, and the eighth is the one that breaks the "found by
+reading, never by a test" streak — see the `ssh-keygen` note at the end of this
+entry. It was found by a test, on that test's first run, and reading would not
+have found it.
+
 **Known obstacle to item 4:** both crates' `syscall0/1/3/4` are host stubs that
 return `-ENOSYS` on the Windows host build *and* on the WSL Linux build, so
 neither `ssh` nor `sshd` can open a socket in a `cargo test`. An interop test
@@ -119156,6 +119163,96 @@ the second proves more. Neither is blocked on another lane.
 > through the encrypted transport — so the *state machines* above the handshake
 > are still each end tested against its own expectations. Extending it that far
 > is the obvious next increment, and it is cheap now that the harness exists.
+
+> **The third program: `ssh-keygen`, 2026-09-05.** Everything above concerns two
+> programs. There is a third, and it had diverged worse than either — twice, in
+> ways that made it not merely inconsistent but *broken*, and both found in one
+> sitting once it was pulled into the same arrangement.
+>
+> **Divergences 12–14: base64, the key container, and the public key blob.** All
+> three were the same shape as the table above. `ssh-keygen` carried a fourth
+> copy of base64 (the tree's third), a fourth copy of RFC 4253 §6's
+> length-prefixed string, and a private key container of its own invention. All
+> three now come from `sshwire`, and the crate gained a `lib.rs` with a
+> three-line `main.rs` over it, for the same reason `ssh` and `sshd` did.
+>
+> **The seventh live divergence, and the first that a user could hit by
+> following the documentation.** `ssh-keygen` wrote
+> `-----BEGIN ED25519 PRIVATE KEY-----` around a bare `seed || public ||
+> comment` blob. Nothing else in this tree — or anywhere else — can read that,
+> so the documented two-command setup
+>
+> ```text
+> ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
+> sshd
+> ```
+>
+> ended with the daemon refusing to start on the key its own key tool had just
+> written. Both crates' suites were green: each tested its encoder against its
+> own decoder, which is the one arrangement that structurally cannot notice a
+> disagreement. Fixed in `7e43e99ce`; the container is now `openssh-key-v1`,
+> unencrypted, from `sshwire`.
+>
+> **The eighth live divergence is the worst one in this entry, and it is the
+> only one a test found rather than a reading.** The interop test written to
+> close the item above — build a key with `ssh-keygen`, hand it to
+> `sshd::HostKey`, then make the daemon serve a whole handshake on it — failed
+> on its first run, but not on the container. `sshd` said *"the public key in the
+> file does not match the private seed"*.
+>
+> `ssh-keygen` implemented Ed25519 itself: a `Fe` field element over five 51-bit
+> limbs, an `EdPoint` in extended coordinates, a scalar multiply and a private
+> SHA-512, about 560 lines. Given RFC 8032 §7.1's first test vector it derived
+>
+> ```text
+> got e000725923fbbcd2f42112493aaf11599423a8fadb3a1e5630b6704e53591403
+> rfc d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+> ```
+>
+> So **the public half of every key this tool ever generated did not correspond
+> to its private half.** An `authorized_keys` line copied from its output
+> rejects its own owner; a host key it writes makes every client report a bad
+> signature. This was not a formatting problem with a recoverable key inside —
+> the keys themselves were not usable keys.
+>
+> Its suite was green and could not have been otherwise. Every test of the
+> derivation compared one of its outputs against another of its outputs. The
+> three that looked like coverage of exactly this were
+> `test_ed25519_keygen_from_zero_seed`, `..._from_ones_seed` and
+> `test_ed25519_deterministic` — "non-zero", "non-zero", "the same seed gives
+> the same answer" — all three of which a function returning a fixed constant
+> passes. Below them, the field and curve tests checked `x + 0 == x`,
+> `x - x == 0`, `-(-x) == x`, `0*G == identity`: internal identities that a
+> self-consistent implementation of the *wrong curve* satisfies by construction.
+> They were deleted with the code they tested, and nothing was lost.
+>
+> Fixed in `e74f049d9` by the same move as everything else here: the private
+> Ed25519 is gone and `posix::ed25519` is called instead — the copy `sshd`
+> already verifies host key signatures with, checked against all four RFC 8032
+> §7.1 vectors for derivation, signing *and* verification. The private SHA-512
+> went with it, having had no other caller. 543 lines removed.
+> `the_public_key_derived_here_is_the_one_rfc_8032_specifies` replaces the three
+> self-referential tests and deliberately keeps the vector on `ssh-keygen`'s
+> side of the call, so a future reintroduction of a private derivation is
+> noticed in the crate that did it rather than two crates away.
+>
+> **This is the sentence the whole entry has been building toward.** Eleven
+> duplications of this stack were found by a human reading two files side by
+> side, and none by a test. The eighth live divergence was invisible to that
+> method — the arithmetic *looks* right, and checking it by eye means
+> reimplementing Ed25519 in your head — and the first cross-crate test that
+> could see it found it in under a second, before anyone went looking. The
+> argument for item 4 was always that it catches the class. It also catches
+> things reading never will.
+>
+> **The general lesson, stated plainly because it generalises past SSH:** a test
+> that compares an implementation against itself certifies whatever the
+> implementation does. Round-trip tests, "same input gives the same output"
+> tests, and internal algebraic identities all have this property. At least one
+> assertion per algorithm must compare against a number that came from outside
+> this tree — a published test vector, or a second independent implementation
+> made to agree. Everything else is a consistency check, and consistency with a
+> mistake is a mistake.
 
 ### TD-B-SSH-RE-ENCODED-THE-SERVER-VERSION-BEFORE-HASHING-IT
 

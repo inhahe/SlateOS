@@ -12,12 +12,21 @@ description = "Runs the real SSH client against the real SSH server, in one proc
 # suites is exactly the state this project has been in for every one of the
 # following bugs.
 #
-# Eleven duplications of the wire layer have been found here, and every one was
-# found by a human reading two files side by side -- never by a test. Six of
-# them were live divergences: the exchange hash hashed a placeholder client
-# version on the server, so no client could verify a host key signature; the
-# KEXINIT cookie was a constant on the server; and so on. Both suites were
+# Fourteen duplications of the wire layer have been found here. Every one of the
+# first thirteen was found by a human reading two files side by side -- never by
+# a test. Seven of those were live divergences: the exchange hash hashed a
+# placeholder client version on the server, so no client could verify a host key
+# signature; the KEXINIT cookie was a constant on the server; ssh-keygen wrote a
+# private key container nothing else could read; and so on. Both suites were
 # green throughout.
+#
+# The fourteenth is why this crate earns its keep. The first test written here
+# against `ssh-keygen` found, on its first run, that the tool derived the WRONG
+# ED25519 PUBLIC KEY -- disagreeing with RFC 8032's own vector, so the public
+# half of every key it ever wrote did not match its private half. Reading could
+# not have found that one: the arithmetic looks right, and checking it by eye
+# means reimplementing the curve in your head. See known-issues.md
+# `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
 #
 # `sshwire` is what stopped the *encodings* diverging, by giving both ends one
 # copy. This crate is the other half: it checks that the two programs built on

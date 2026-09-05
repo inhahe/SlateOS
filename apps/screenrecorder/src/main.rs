@@ -22,10 +22,14 @@
 
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::path::PathBuf;
 
@@ -158,24 +162,42 @@ impl FpsPreset {
 
     /// Milliseconds between frames at this rate.
     pub fn frame_interval_ms(self) -> u32 {
-        1000 / self.value()
+        // `checked_div` states the non-zero divisor in the arithmetic; every
+        // preset's `value` is a positive constant, so the `else` is
+        // unreachable and 1000 -- one frame a second -- is the safe answer if
+        // one ever is not.
+        1000_u32.checked_div(self.value()).unwrap_or(1000)
     }
 
     /// Estimated bytes per frame for a given resolution (32-bit BGRA).
     pub fn bytes_per_frame(self, width: u32, height: u32) -> u64 {
         let _ = self; // FPS doesn't affect per-frame size
-        u64::from(width) * u64::from(height) * u64::from(BMP_BYTES_PER_PIXEL)
+        // Saturating: a 4-billion-pixel frame is not a frame, and a byte count
+        // that wrapped would report a huge recording as a small one -- which
+        // is the direction that matters, because it is the one the file-size
+        // limit is checked against.
+        u64::from(width)
+            .saturating_mul(u64::from(height))
+            .saturating_mul(u64::from(BMP_BYTES_PER_PIXEL))
     }
 
     /// Estimated bytes per second for a given resolution (uncompressed BMP).
     pub fn bytes_per_second(self, width: u32, height: u32) -> u64 {
-        self.bytes_per_frame(width, height) * u64::from(self.value())
+        self.bytes_per_frame(width, height)
+            .saturating_mul(u64::from(self.value()))
     }
 }
 
 // ============================================================================
 // Recording state machine
 // ============================================================================
+
+/// How far one press of the trim keys moves a handle.
+///
+/// A quarter-second: fine enough to cut on a word, coarse enough to cross a
+/// minute of footage without holding the key down for ever. Shift moves the end
+/// handle, so both ends are reachable from the same two keys.
+const TRIM_STEP_SECS: f64 = 0.25;
 
 /// Recording lifecycle states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -624,10 +646,7 @@ impl OutputSettings {
         let date_str = format!("{:04}{:02}{:02}", year, month, day);
         let time_str = format!("{:02}{:02}{:02}", hour, min, sec);
 
-        
-
-        self
-            .filename_template
+        self.filename_template
             .replace("{date}", &date_str)
             .replace("{time}", &time_str)
             .replace("{n}", &format!("{:04}", self.auto_increment))
@@ -1067,7 +1086,12 @@ impl HotkeyAction {
 
     /// All available actions.
     pub fn all() -> &'static [HotkeyAction] {
-        &[Self::StartStop, Self::PauseResume, Self::Screenshot, Self::Cancel]
+        &[
+            Self::StartStop,
+            Self::PauseResume,
+            Self::Screenshot,
+            Self::Cancel,
+        ]
     }
 }
 
@@ -1105,13 +1129,7 @@ pub struct ScheduledRecording {
 
 impl ScheduledRecording {
     /// Create a new scheduled recording.
-    pub fn new(
-        id: u32,
-        start_hour: u8,
-        start_minute: u8,
-        duration_secs: u64,
-        label: &str,
-    ) -> Self {
+    pub fn new(id: u32, start_hour: u8, start_minute: u8, duration_secs: u64, label: &str) -> Self {
         Self {
             id,
             start_hour: start_hour.min(23),
@@ -1720,6 +1738,335 @@ pub struct ScreenRecorderApp {
 }
 
 impl ScreenRecorderApp {
+    // ====================================================================
+    // Input
+    //
+    // This program had none. Thirty-two functions had no caller outside the
+    // tests, and they are the whole of it: `start_recording` (twelve tests),
+    // `stop_recording`, `pause_recording`, `resume_recording`,
+    // `tick_countdown`, `tick_elapsed`, `record_frame`, the region drag, the
+    // trim editor, the volumes. A screen recorder that could not start, stop,
+    // pause, count down, capture a frame or select a region.
+    // ====================================================================
+
+    /// Move the history selection by `delta` entries.
+    ///
+    /// Held as a flag on the entry rather than an index -- see
+    /// `RecordingHistory::select` -- so this finds the current one, steps, and
+    /// selects by id. Stops at the ends rather than wrapping: a list that jumps
+    /// from the newest recording to the oldest is one the user has to notice.
+    fn move_history_selection(&mut self, delta: isize) {
+        let ids: Vec<u32> = self.history.entries.iter().map(|e| e.id).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let last = (ids.len() as isize).saturating_sub(1);
+        let current = self
+            .history
+            .selected()
+            .and_then(|sel| ids.iter().position(|id| *id == sel.id));
+        let next = match current {
+            Some(index) => (index as isize).saturating_add(delta).clamp(0, last),
+            None if delta < 0 => last,
+            None => 0,
+        };
+        if let Some(id) = ids.get(next.unsigned_abs()) {
+            self.history.select(*id);
+        }
+    }
+
+    /// Move to `target` if the state machine allows it.
+    ///
+    /// `true` if the move happened. Every state change in this file goes
+    /// through here, so `RecordingState::allowed_transitions` is the single
+    /// statement of what is legal -- rather than a table that agrees with the
+    /// code by coincidence, which is what it was: it had fifteen tests and no
+    /// caller while `start_recording`, `stop_recording`, `pause_recording` and
+    /// `resume_recording` each wrote their own `if` about the current state.
+    fn enter(&mut self, target: RecordingState) -> bool {
+        if !self.recording_state.can_transition_to(target) {
+            return false;
+        }
+        self.recording_state = target;
+        true
+    }
+
+    /// Handle one event from the window.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window wider than 16 million pixels does not exist"
+                )]
+                {
+                    self.window_width = *width as f32;
+                    self.window_height = *height as f32;
+                }
+                EventResult::Consumed
+            }
+            Event::Tick { .. } => self.handle_tick(),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// One tick of whatever is running.
+    ///
+    /// During the countdown that is one second; while recording it is one
+    /// frame, at the chosen rate -- so `tick_elapsed` is called once every
+    /// `fps` frames rather than once per tick, or a 60 fps recording would
+    /// report a minute of elapsed time per second.
+    fn handle_tick(&mut self) -> EventResult {
+        match self.recording_state {
+            RecordingState::Countdown => {
+                self.tick_countdown();
+                EventResult::Consumed
+            }
+            RecordingState::Recording => {
+                let bytes = self.frame_bytes();
+                self.record_frame(bytes);
+                let fps = self.fps_preset.value().max(1);
+                if self.total_frames.is_multiple_of(fps) {
+                    self.tick_elapsed();
+                    // Once a second, which is what a recording light does.
+                    // `toggle_blink` had no caller, so the indicator was lit
+                    // steadily and could not be told from a still image of
+                    // itself.
+                    self.indicator.toggle_blink();
+                }
+                // A size limit that is never checked is a disk that fills up.
+                // `OutputSettings::exceeds_limit` had no caller either.
+                if self.output.exceeds_limit(self.total_bytes) {
+                    self.finish_recording();
+                }
+                EventResult::Consumed
+            }
+            RecordingState::Idle | RecordingState::Paused | RecordingState::Stopped => {
+                EventResult::Ignored
+            }
+        }
+    }
+
+    /// How large one captured frame is.
+    ///
+    /// From the region being captured and `FpsPreset::bytes_per_frame`, which
+    /// is the file-size arithmetic this program already had and nothing used --
+    /// so the indicator's "file size" was whatever the caller passed, and there
+    /// was no caller.
+    fn frame_bytes(&self) -> u64 {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a capture region is positive and smaller than a screen"
+        )]
+        let (w, h) = match self.selected_region {
+            Some((_, _, w, h)) => (w.max(1.0) as u32, h.max(1.0) as u32),
+            None => (
+                self.window_width.max(1.0) as u32,
+                self.window_height.max(1.0) as u32,
+            ),
+        };
+        self.fps_preset.bytes_per_frame(w, h)
+    }
+
+    /// Handle a key press.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // The recording controls, which the module doc lists as "start / stop /
+        // pause / resume with keyboard shortcuts" and which had none.
+        match key.key {
+            Key::F9 => {
+                match self.recording_state {
+                    RecordingState::Idle | RecordingState::Stopped => {
+                        // `reset` first, because Stopped's only legal move is
+                        // to Idle -- and it is the method this file already
+                        // had for exactly this. A private
+                        // `reset_for_new_recording` stood here briefly and was
+                        // a third copy of the same four lines:
+                        // `start_recording` zeroes the counters too. A
+                        // surviving mutation is what said so.
+                        self.reset();
+                        self.start_recording();
+                    }
+                    // F9 is the one key that both starts and stops, which is
+                    // what a global record hotkey has to be: the window is not
+                    // in front of you when you press it the second time.
+                    _ => self.finish_recording(),
+                }
+                EventResult::Consumed
+            }
+            Key::F10 => {
+                match self.recording_state {
+                    RecordingState::Recording => self.pause_recording(),
+                    RecordingState::Paused => self.resume_recording(),
+                    _ => {}
+                }
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                if self.region_selector.dragging {
+                    // Abandoning a drag: the rectangle is thrown away rather
+                    // than kept, which is what Escape means.
+                    let _abandoned = self.region_selector.end_drag();
+                    EventResult::Consumed
+                } else if self.recording_state.is_active() {
+                    self.finish_recording();
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            // The four views. `ActiveView` had four variants and nothing that
+            // moved between them.
+            Key::Tab => {
+                self.active_view = match self.active_view {
+                    ActiveView::Record => ActiveView::History,
+                    ActiveView::History => ActiveView::Trim,
+                    ActiveView::Trim => ActiveView::Settings,
+                    ActiveView::Settings => ActiveView::Record,
+                };
+                EventResult::Consumed
+            }
+            // Move through the history, and open the trim editor on what is
+            // selected. `setup_trim_for_selected` had no caller, so the trim
+            // view could never be given a recording to trim.
+            Key::Up | Key::Down if self.active_view == ActiveView::History => {
+                self.move_history_selection(if key.key == Key::Down { 1 } else { -1 });
+                EventResult::Consumed
+            }
+            Key::Enter if self.active_view == ActiveView::History => {
+                self.setup_trim_for_selected();
+                EventResult::Consumed
+            }
+            // Discard the selected recording. `RecordingHistory::remove` was
+            // written, tested, and called by nothing, so nothing ever left the
+            // list.
+            Key::Delete if self.active_view == ActiveView::History => {
+                if let Some(id) = self.history.selected().map(|e| e.id) {
+                    self.history.remove(id);
+                    if self.trim.is_some() {
+                        // The clip being trimmed has gone.
+                        self.trim = None;
+                        self.active_view = ActiveView::History;
+                    }
+                }
+                EventResult::Consumed
+            }
+            // The trim handles. `set_start` and `set_end` clamp against each
+            // other and against the clip's length -- six tests each, no caller,
+            // so the trim editor could be opened and not used.
+            Key::Left | Key::Right if self.active_view == ActiveView::Trim => {
+                let delta = if key.key == Key::Right {
+                    TRIM_STEP_SECS
+                } else {
+                    -TRIM_STEP_SECS
+                };
+                if let Some(trim) = self.trim.as_mut() {
+                    if key.modifiers.shift {
+                        let end = trim.end_secs + delta;
+                        trim.set_end(end);
+                    } else {
+                        let start = trim.start_secs + delta;
+                        trim.set_start(start);
+                    }
+                }
+                EventResult::Consumed
+            }
+            // Capture mode.
+            Key::Num1 => {
+                self.capture_mode = CaptureMode::FullScreen;
+                self.selected_region = None;
+                EventResult::Consumed
+            }
+            Key::Num2 => {
+                self.capture_mode = CaptureMode::SelectedWindow;
+                EventResult::Consumed
+            }
+            Key::Num3 => {
+                self.capture_mode = CaptureMode::CustomRegion;
+                self.region_selector.activate();
+                EventResult::Consumed
+            }
+            // Frame rate, through the presets the program already knows.
+            Key::F if key.modifiers.ctrl => {
+                self.fps_preset = match self.fps_preset {
+                    FpsPreset::Fps15 => FpsPreset::Fps24,
+                    FpsPreset::Fps24 => FpsPreset::Fps30,
+                    FpsPreset::Fps30 => FpsPreset::Fps60,
+                    FpsPreset::Fps60 => FpsPreset::Fps15,
+                };
+                EventResult::Consumed
+            }
+            // Audio. `set_system_volume` and `set_microphone_volume` clamp,
+            // and neither had a caller.
+            Key::S if key.modifiers.ctrl => {
+                self.audio.system_audio_enabled = !self.audio.system_audio_enabled;
+                EventResult::Consumed
+            }
+            Key::M if key.modifiers.ctrl => {
+                self.audio.microphone_enabled = !self.audio.microphone_enabled;
+                EventResult::Consumed
+            }
+            Key::Up | Key::Down if key.modifiers.ctrl => {
+                let delta = if key.key == Key::Up { 0.1 } else { -0.1 };
+                let system = self.audio.system_volume + delta;
+                self.audio.set_system_volume(system);
+                EventResult::Consumed
+            }
+            Key::Up | Key::Down if key.modifiers.shift => {
+                let delta = if key.key == Key::Up { 0.1 } else { -0.1 };
+                let mic = self.audio.microphone_volume + delta;
+                self.audio.set_microphone_volume(mic);
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Stop, and keep what was recorded.
+    ///
+    /// `save_to_history` had no caller, so a finished recording went nowhere --
+    /// the history list this program draws could only ever be empty.
+    fn finish_recording(&mut self) {
+        if !self.recording_state.is_active() {
+            return;
+        }
+        let had_frames = self.total_frames > 0;
+        self.stop_recording();
+        if had_frames {
+            self.save_to_history();
+        }
+    }
+
+    /// Handle a mouse event.
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        // The region selector, which is the only thing in this program that
+        // wants the pointer: `begin_drag`, `update_drag` and `end_drag` were
+        // written, tested, and called by nothing, so "custom region (drag to
+        // select)" could not be dragged.
+        match mouse.kind {
+            MouseEventKind::Press(MouseButton::Left) if self.region_selector.active => {
+                self.region_selector.begin_drag(mouse.x, mouse.y);
+                EventResult::Consumed
+            }
+            MouseEventKind::Move if self.region_selector.dragging => {
+                self.region_selector.update_drag(mouse.x, mouse.y);
+                EventResult::Consumed
+            }
+            MouseEventKind::Release(MouseButton::Left) if self.region_selector.dragging => {
+                // `end_drag` hands back the rectangle, so there is no second
+                // place that derives it from the two corners.
+                self.selected_region = self.region_selector.end_drag();
+                if self.selected_region.is_some() {
+                    self.capture_mode = CaptureMode::CustomRegion;
+                }
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
     /// Create a new application instance with default settings.
     pub fn new() -> Self {
         Self {
@@ -1754,12 +2101,18 @@ impl ScreenRecorderApp {
 
     /// Start a new recording (with countdown if configured).
     pub fn start_recording(&mut self) {
-        if self.recording_state != RecordingState::Idle {
-            return;
-        }
+        // Through the transition table rather than a hand-written test of the
+        // current state. `RecordingState::can_transition_to` has fifteen tests
+        // and had no caller: every verb in this file checked the state its own
+        // way, so the table said what was legal and the code decided for
+        // itself. `enter` is the one gate now.
         if self.countdown.duration_secs > 0 {
-            self.recording_state = RecordingState::Countdown;
+            if !self.enter(RecordingState::Countdown) {
+                return;
+            }
             self.countdown.start();
+        } else if !self.enter(RecordingState::Recording) {
+            return;
         } else {
             self.recording_state = RecordingState::Recording;
         }
@@ -1772,26 +2125,29 @@ impl ScreenRecorderApp {
 
     /// Stop the current recording.
     pub fn stop_recording(&mut self) {
-        if !self.recording_state.is_active() {
+        // A countdown that has not yet started recording can only go back to
+        // Idle -- the table says so -- so stopping during one cancels it.
+        if self.recording_state == RecordingState::Countdown {
+            self.enter(RecordingState::Idle);
+            self.indicator.visible = false;
+            self.countdown.cancel();
             return;
         }
-        self.recording_state = RecordingState::Stopped;
+        if !self.enter(RecordingState::Stopped) {
+            return;
+        }
         self.indicator.visible = false;
         self.countdown.cancel();
     }
 
     /// Pause the recording.
     pub fn pause_recording(&mut self) {
-        if self.recording_state == RecordingState::Recording {
-            self.recording_state = RecordingState::Paused;
-        }
+        self.enter(RecordingState::Paused);
     }
 
     /// Resume a paused recording.
     pub fn resume_recording(&mut self) {
-        if self.recording_state == RecordingState::Paused {
-            self.recording_state = RecordingState::Recording;
-        }
+        self.enter(RecordingState::Recording);
     }
 
     /// Reset to idle state (discard current recording).
@@ -1826,7 +2182,8 @@ impl ScreenRecorderApp {
         }
         self.total_frames = self.total_frames.saturating_add(1);
         self.total_bytes = self.total_bytes.saturating_add(frame_bytes);
-        self.indicator.update(self.elapsed_secs, self.total_bytes, self.fps_preset.value());
+        self.indicator
+            .update(self.elapsed_secs, self.total_bytes, self.fps_preset.value());
         self.total_frames
     }
 
@@ -1834,7 +2191,8 @@ impl ScreenRecorderApp {
     pub fn tick_elapsed(&mut self) {
         if self.recording_state == RecordingState::Recording {
             self.elapsed_secs = self.elapsed_secs.saturating_add(1);
-            self.indicator.update(self.elapsed_secs, self.total_bytes, self.fps_preset.value());
+            self.indicator
+                .update(self.elapsed_secs, self.total_bytes, self.fps_preset.value());
         }
     }
 
@@ -1874,7 +2232,13 @@ impl ScreenRecorderApp {
     // ========================================================================
 
     /// Render the full application UI.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    /// Draw the whole window.
+    ///
+    /// Not `render`: [`App::render`] is the one the window calls, and an
+    /// inherent method of the same name shadows a trait method at equal arity.
+    /// The other three `render` methods in this file are on panel types the
+    /// trait knows nothing about, so they keep the name.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Main background
@@ -1907,10 +2271,18 @@ impl ScreenRecorderApp {
         });
 
         match self.active_view {
-            ActiveView::Record => cmds.extend(self.render_record_view(content_x, content_y, content_w, content_h)),
-            ActiveView::History => cmds.extend(self.render_history_view(content_x, content_y, content_w, content_h)),
-            ActiveView::Trim => cmds.extend(self.render_trim_view(content_x, content_y, content_w, content_h)),
-            ActiveView::Settings => cmds.extend(self.render_settings_view(content_x, content_y, content_w, content_h)),
+            ActiveView::Record => {
+                cmds.extend(self.render_record_view(content_x, content_y, content_w, content_h));
+            }
+            ActiveView::History => {
+                cmds.extend(self.render_history_view(content_x, content_y, content_w, content_h));
+            }
+            ActiveView::Trim => {
+                cmds.extend(self.render_trim_view(content_x, content_y, content_w, content_h));
+            }
+            ActiveView::Settings => {
+                cmds.extend(self.render_settings_view(content_x, content_y, content_w, content_h));
+            }
         }
 
         cmds.push(RenderCommand::PopClip);
@@ -2010,7 +2382,11 @@ impl ScreenRecorderApp {
                 });
             }
 
-            let text_color = if is_active { colors::TEXT } else { colors::SUBTEXT0 };
+            let text_color = if is_active {
+                colors::TEXT
+            } else {
+                colors::SUBTEXT0
+            };
             cmds.push(RenderCommand::Text {
                 x: PADDING + 8.0,
                 y: y + 9.0,
@@ -2063,7 +2439,11 @@ impl ScreenRecorderApp {
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: badge_y + 22.0,
-            text: format!("{} | {}", self.capture_mode.label(), self.fps_preset.label()),
+            text: format!(
+                "{} | {}",
+                self.capture_mode.label(),
+                self.fps_preset.label()
+            ),
             font_size: 11.0,
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
@@ -2854,13 +3234,26 @@ impl ScreenRecorderApp {
 
         match self.settings_tab {
             SettingsTab::Output => {
-                cmds.extend(self.render_output_settings(x + PADDING, content_y, width - PADDING * 2.0));
+                cmds.extend(self.render_output_settings(
+                    x + PADDING,
+                    content_y,
+                    width - PADDING * 2.0,
+                ));
             }
             SettingsTab::Hotkeys => {
-                cmds.extend(self.render_hotkey_settings(x + PADDING, content_y, width - PADDING * 2.0));
+                cmds.extend(self.render_hotkey_settings(
+                    x + PADDING,
+                    content_y,
+                    width - PADDING * 2.0,
+                ));
             }
             SettingsTab::Schedule => {
-                cmds.extend(self.render_schedule_settings(x + PADDING, content_y, width - PADDING * 2.0, content_h));
+                cmds.extend(self.render_schedule_settings(
+                    x + PADDING,
+                    content_y,
+                    width - PADDING * 2.0,
+                    content_h,
+                ));
             }
         }
 
@@ -3336,11 +3729,80 @@ impl Default for ScreenRecorderApp {
 // Entry point
 // ============================================================================
 
-fn main() {
-    // Placeholder: the actual event loop is provided by the OS windowing system.
-    // For now this validates that the application compiles and types are wired
-    // together correctly.
-    let _app = ScreenRecorderApp::new();
+impl App for ScreenRecorderApp {
+    fn title(&self) -> String {
+        // What the recorder is doing and for how long, because a recording in
+        // progress is the one thing you want to see without raising the window.
+        // The harness re-reads this as the program runs.
+        match self.recording_state {
+            RecordingState::Recording | RecordingState::Paused => format!(
+                "{} {} - Screen Recorder",
+                self.recording_state.label(),
+                format_duration(self.elapsed_secs)
+            ),
+            RecordingState::Countdown => format!(
+                "Starting in {} - Screen Recorder",
+                self.countdown.remaining_secs
+            ),
+            _ => "Screen Recorder".to_string(),
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (self.window_width as u32, self.window_height as u32)
+        }
+    }
+
+    /// A clock while a recording is running, and only then.
+    ///
+    /// Two rates, because there are two things to advance. The countdown counts
+    /// whole seconds; a recording captures frames at the chosen rate, which is
+    /// what `FpsPreset::frame_interval_ms` is for and what nothing called.
+    ///
+    /// `None` when idle or stopped: a settings window has nothing to redraw,
+    /// and waking the machine 60 times a second to find that out is the cost of
+    /// `known-issues.md` lesson 47 with none of its benefit.
+    fn tick_interval(&self) -> Option<Duration> {
+        match self.recording_state {
+            RecordingState::Countdown => Some(Duration::from_secs(1)),
+            RecordingState::Recording => Some(Duration::from_millis(u64::from(
+                self.fps_preset.frame_interval_ms(),
+            ))),
+            RecordingState::Idle | RecordingState::Paused | RecordingState::Stopped => None,
+        }
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // From the frame being drawn rather than the last `Resize`: the first
+        // frame is drawn before any `Resize` arrives, and the region selector's
+        // drag coordinates are in this space.
+        self.window_width = width;
+        self.window_height = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = ScreenRecorderApp::new();
+    app::launch("screenrecorder", &mut app)
 }
 
 // ============================================================================
@@ -3349,7 +3811,532 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis, not a hazard. The defensive lints
+    // exist to keep panics out of code that runs on a user's data, which this
+    // is not.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Wiring
+    //
+    // This program had no input handling of any kind, and thirty-two
+    // functions had no caller outside the tests -- start, stop, pause,
+    // resume, the countdown, the frame capture, the region drag, the trim
+    // editor. A screen recorder that could not record.
+    // ------------------------------------------------------------------
+
+    fn key_ev(key: Key, ctrl: bool, shift: bool) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        modifiers.shift = shift;
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn press(k: Key) -> Event {
+        key_ev(k, false, false)
+    }
+
+    fn tick() -> Event {
+        Event::Tick { elapsed_ms: 33 }
+    }
+
+    fn mouse(kind: MouseEventKind, x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    /// The whole lifecycle, which is what F9 and F10 are for and what nothing
+    /// could reach.
+    #[test]
+    fn f9_starts_and_stops_and_f10_pauses_and_resumes() {
+        let mut app = ScreenRecorderApp::new();
+        app.countdown = CountdownTimer::new(0);
+        assert_eq!(app.recording_state, RecordingState::Idle);
+        assert_eq!(app.tick_interval(), None, "an idle window needs no clock");
+
+        app.handle_event(&press(Key::F9));
+        assert_eq!(app.recording_state, RecordingState::Recording);
+        assert!(app.tick_interval().is_some(), "a recording does");
+
+        app.handle_event(&press(Key::F10));
+        assert_eq!(app.recording_state, RecordingState::Paused);
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "a paused recording captures nothing, so it needs no clock either"
+        );
+
+        app.handle_event(&press(Key::F10));
+        assert_eq!(app.recording_state, RecordingState::Recording);
+
+        app.handle_event(&press(Key::F9));
+        assert_eq!(app.recording_state, RecordingState::Stopped);
+    }
+
+    /// The 3-2-1 the module doc promises. `tick_countdown` had no caller, so
+    /// the countdown started and never counted.
+    #[test]
+    fn the_countdown_runs_down_and_then_recording_begins() {
+        let mut app = ScreenRecorderApp::new();
+        app.countdown = CountdownTimer::new(3);
+
+        app.handle_event(&press(Key::F9));
+        assert_eq!(app.recording_state, RecordingState::Countdown);
+        assert_eq!(app.tick_interval(), Some(Duration::from_secs(1)));
+
+        let mut seen = vec![app.countdown.remaining_secs];
+        for _ in 0..5 {
+            if app.recording_state == RecordingState::Recording {
+                break;
+            }
+            app.handle_event(&tick());
+            seen.push(app.countdown.remaining_secs);
+        }
+        assert_eq!(
+            app.recording_state,
+            RecordingState::Recording,
+            "got {seen:?}"
+        );
+        assert!(
+            seen.windows(2).any(|w| w[1] < w[0]),
+            "it never counted: {seen:?}"
+        );
+    }
+
+    /// `record_frame` and `tick_elapsed` had no caller, so the indicator's
+    /// frame count, byte total and elapsed time never left zero.
+    #[test]
+    fn recording_captures_frames_and_counts_the_seconds() {
+        let mut app = ScreenRecorderApp::new();
+        app.countdown = CountdownTimer::new(0);
+        app.fps_preset = FpsPreset::Fps30;
+        app.handle_event(&press(Key::F9));
+
+        for _ in 0..30 {
+            app.handle_event(&tick());
+        }
+        assert_eq!(app.total_frames, 30, "one frame per tick");
+        assert!(app.total_bytes > 0, "and each frame has a size");
+        assert_eq!(
+            app.elapsed_secs, 1,
+            "thirty frames at 30 fps is one second, not thirty"
+        );
+    }
+
+    /// The recording light. `toggle_blink` had no caller, so the indicator was
+    /// lit steadily and could not be told from a picture of itself.
+    #[test]
+    fn the_indicator_blinks_once_a_second() {
+        let mut app = ScreenRecorderApp::new();
+        app.countdown = CountdownTimer::new(0);
+        app.fps_preset = FpsPreset::Fps15;
+        app.handle_event(&press(Key::F9));
+
+        let fps = app.fps_preset.value() as usize;
+        let start = app.indicator.blink_on;
+        for _ in 0..fps {
+            app.handle_event(&tick());
+        }
+        assert_ne!(
+            app.indicator.blink_on, start,
+            "a second passed and it did not blink"
+        );
+        for _ in 0..fps {
+            app.handle_event(&tick());
+        }
+        assert_eq!(
+            app.indicator.blink_on, start,
+            "and back again the next second"
+        );
+    }
+
+    /// The tick rate follows the chosen frame rate, which is what
+    /// `frame_interval_ms` is for.
+    #[test]
+    fn the_clock_runs_at_the_chosen_frame_rate() {
+        let mut app = ScreenRecorderApp::new();
+        app.countdown = CountdownTimer::new(0);
+        app.handle_event(&press(Key::F9));
+
+        app.fps_preset = FpsPreset::Fps15;
+        let slow = app.tick_interval().expect("recording");
+        app.fps_preset = FpsPreset::Fps60;
+        let fast = app.tick_interval().expect("recording");
+        assert!(
+            fast < slow,
+            "60 fps should tick faster than 15: {fast:?} vs {slow:?}"
+        );
+    }
+
+    /// A size limit nothing checks is a disk that fills up.
+    #[test]
+    fn a_recording_stops_itself_at_the_size_limit() {
+        let mut app = ScreenRecorderApp::new();
+        app.countdown = CountdownTimer::new(0);
+        app.output.max_file_size = 1;
+        app.handle_event(&press(Key::F9));
+        assert_eq!(app.recording_state, RecordingState::Recording);
+
+        app.handle_event(&tick());
+        assert_eq!(
+            app.recording_state,
+            RecordingState::Stopped,
+            "one frame is already past a one-byte limit"
+        );
+    }
+
+    /// Every state change goes through the transition table, which had fifteen
+    /// tests and no caller while each verb wrote its own `if`.
+    #[test]
+    fn the_state_machine_refuses_what_its_table_forbids() {
+        let mut app = ScreenRecorderApp::new();
+        app.countdown = CountdownTimer::new(0);
+
+        // Idle cannot pause.
+        app.handle_event(&press(Key::F10));
+        assert_eq!(app.recording_state, RecordingState::Idle);
+
+        app.handle_event(&press(Key::F9));
+        app.handle_event(&press(Key::F9));
+        assert_eq!(app.recording_state, RecordingState::Stopped);
+
+        // Stopped cannot pause or resume either.
+        app.handle_event(&press(Key::F10));
+        assert_eq!(app.recording_state, RecordingState::Stopped);
+
+        const STATES: [RecordingState; 5] = [
+            RecordingState::Idle,
+            RecordingState::Countdown,
+            RecordingState::Recording,
+            RecordingState::Paused,
+            RecordingState::Stopped,
+        ];
+        for state in STATES {
+            for target in STATES {
+                if state.can_transition_to(target) {
+                    continue;
+                }
+                let mut probe = ScreenRecorderApp::new();
+                probe.recording_state = state;
+                assert!(
+                    !probe.enter(target),
+                    "{state:?} -> {target:?} is not in the table and was allowed"
+                );
+                assert_eq!(probe.recording_state, state);
+            }
+        }
+    }
+
+    /// A second recording must not continue the first one's counters.
+    #[test]
+    fn a_new_recording_starts_from_zero() {
+        let mut app = ScreenRecorderApp::new();
+        app.countdown = CountdownTimer::new(0);
+        app.handle_event(&press(Key::F9));
+        for _ in 0..5 {
+            app.handle_event(&tick());
+        }
+        app.handle_event(&press(Key::F9));
+        assert_eq!(app.total_frames, 5);
+
+        app.handle_event(&press(Key::F9));
+        assert_eq!(app.recording_state, RecordingState::Recording);
+        assert_eq!(app.total_frames, 0, "the counters carried over");
+        assert_eq!(app.total_bytes, 0);
+        assert_eq!(app.elapsed_secs, 0);
+    }
+
+    /// `save_to_history` had no caller, so a finished recording went nowhere
+    /// and the history list could only ever be empty.
+    #[test]
+    fn a_finished_recording_is_kept() {
+        let mut app = ScreenRecorderApp::new();
+        app.history = RecordingHistory::new();
+        app.countdown = CountdownTimer::new(0);
+        app.handle_event(&press(Key::F9));
+        app.handle_event(&tick());
+        app.handle_event(&press(Key::F9));
+        assert_eq!(app.history.entries.len(), 1, "the recording was not saved");
+    }
+
+    #[test]
+    fn a_recording_with_no_frames_is_not_kept() {
+        let mut app = ScreenRecorderApp::new();
+        app.history = RecordingHistory::new();
+        app.countdown = CountdownTimer::new(0);
+        app.handle_event(&press(Key::F9));
+        app.handle_event(&press(Key::F9));
+        assert!(
+            app.history.entries.is_empty(),
+            "an empty recording is not worth a history entry"
+        );
+    }
+
+    // -- the region selector --
+
+    /// "Custom region (drag to select)", which could not be dragged:
+    /// `begin_drag`, `update_drag` and `end_drag` had no caller.
+    #[test]
+    fn a_region_can_be_dragged_out_and_becomes_the_capture_area() {
+        let mut app = ScreenRecorderApp::new();
+        app.handle_event(&press(Key::Num3));
+        assert!(app.region_selector.active, "3 should arm the selector");
+
+        app.handle_event(&mouse(
+            MouseEventKind::Press(MouseButton::Left),
+            100.0,
+            80.0,
+        ));
+        assert!(app.region_selector.dragging);
+        app.handle_event(&mouse(MouseEventKind::Move, 300.0, 260.0));
+        app.handle_event(&mouse(
+            MouseEventKind::Release(MouseButton::Left),
+            300.0,
+            260.0,
+        ));
+
+        let (x, y, w, h) = app.selected_region.expect("a region was dragged out");
+        assert!((x - 100.0).abs() < 0.01 && (y - 80.0).abs() < 0.01);
+        assert!((w - 200.0).abs() < 0.01 && (h - 180.0).abs() < 0.01);
+        assert_eq!(app.capture_mode, CaptureMode::CustomRegion);
+    }
+
+    #[test]
+    fn escape_abandons_a_drag_without_setting_a_region() {
+        let mut app = ScreenRecorderApp::new();
+        app.handle_event(&press(Key::Num3));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), 10.0, 10.0));
+        app.handle_event(&mouse(MouseEventKind::Move, 200.0, 200.0));
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.region_selector.dragging);
+        assert_eq!(app.selected_region, None, "an abandoned drag sets nothing");
+    }
+
+    /// The frame size follows the region, which is what makes the file-size
+    /// figure mean anything.
+    #[test]
+    fn a_smaller_region_makes_smaller_frames() {
+        let mut app = ScreenRecorderApp::new();
+        app.countdown = CountdownTimer::new(0);
+        let full = app.frame_bytes();
+        app.selected_region = Some((0.0, 0.0, 100.0, 100.0));
+        assert!(app.frame_bytes() < full);
+    }
+
+    // -- history and trim --
+
+    #[test]
+    fn the_history_can_be_walked_and_pruned() {
+        let mut app = ScreenRecorderApp::new();
+        app.history = RecordingHistory::mock_entries();
+        let total = app.history.entries.len();
+        assert!(total > 1);
+        app.active_view = ActiveView::History;
+
+        app.handle_event(&press(Key::Down));
+        let first = app.history.selected().map(|e| e.id).expect("a selection");
+        app.handle_event(&press(Key::Down));
+        assert_ne!(app.history.selected().map(|e| e.id), Some(first));
+
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(app.history.entries.len(), total - 1);
+    }
+
+    /// Stopping rather than wrapping: a list that jumps from the newest
+    /// recording to the oldest is one the user has to notice and undo.
+    #[test]
+    fn the_history_selection_stops_at_the_ends() {
+        let mut app = ScreenRecorderApp::new();
+        app.history = RecordingHistory::mock_entries();
+        let total = app.history.entries.len();
+        assert!(total > 1);
+        app.active_view = ActiveView::History;
+
+        for _ in 0..(total + 3) {
+            app.handle_event(&press(Key::Down));
+        }
+        let last = app.history.entries.last().map(|e| e.id);
+        assert_eq!(
+            app.history.selected().map(|e| e.id),
+            last,
+            "walking past the bottom should stay on the last entry"
+        );
+
+        for _ in 0..(total + 3) {
+            app.handle_event(&press(Key::Up));
+        }
+        let first = app.history.entries.first().map(|e| e.id);
+        assert_eq!(
+            app.history.selected().map(|e| e.id),
+            first,
+            "and past the top should stay on the first"
+        );
+    }
+
+    /// `setup_trim_for_selected` had no caller, so the trim view could never be
+    /// given a recording to trim; `set_start`/`set_end` had none either.
+    #[test]
+    fn enter_opens_the_trim_editor_and_the_handles_move() {
+        let mut app = ScreenRecorderApp::new();
+        app.history = RecordingHistory::mock_entries();
+        app.active_view = ActiveView::History;
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Enter));
+
+        assert_eq!(app.active_view, ActiveView::Trim);
+        let trim = app.trim.as_ref().expect("a range to trim");
+        let (start, end) = (trim.start_secs, trim.end_secs);
+
+        app.handle_event(&press(Key::Right));
+        let moved = app.trim.as_ref().expect("still trimming").start_secs;
+        assert!(moved > start, "the start handle did not move");
+
+        app.handle_event(&key_ev(Key::Left, false, true));
+        let moved_end = app.trim.as_ref().expect("still trimming").end_secs;
+        assert!(moved_end < end, "shift should move the end handle");
+        assert!(
+            app.trim.as_ref().expect("trim").is_trimmed(),
+            "moving either handle is a trim"
+        );
+    }
+
+    /// The handles clamp against each other, so a trim cannot invert.
+    #[test]
+    fn the_trim_handles_cannot_cross() {
+        let mut app = ScreenRecorderApp::new();
+        app.history = RecordingHistory::mock_entries();
+        app.active_view = ActiveView::History;
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Enter));
+
+        for _ in 0..1000 {
+            app.handle_event(&press(Key::Right));
+        }
+        let trim = app.trim.as_ref().expect("still trimming");
+        assert!(
+            trim.start_secs < trim.end_secs,
+            "start {} ran past end {}",
+            trim.start_secs,
+            trim.end_secs
+        );
+    }
+
+    #[test]
+    fn deleting_the_clip_being_trimmed_closes_the_editor() {
+        let mut app = ScreenRecorderApp::new();
+        app.history = RecordingHistory::mock_entries();
+        app.active_view = ActiveView::History;
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Enter));
+        assert!(app.trim.is_some());
+
+        app.active_view = ActiveView::History;
+        app.handle_event(&press(Key::Delete));
+        assert!(
+            app.trim.is_none(),
+            "the clip is gone; the editor should be too"
+        );
+        assert_eq!(app.active_view, ActiveView::History);
+    }
+
+    // -- settings --
+
+    #[test]
+    fn ctrl_f_cycles_the_frame_rate_and_the_audio_keys_toggle() {
+        let mut app = ScreenRecorderApp::new();
+        let before = app.fps_preset;
+        app.handle_event(&key_ev(Key::F, true, false));
+        assert_ne!(app.fps_preset, before);
+
+        let sys = app.audio.system_audio_enabled;
+        app.handle_event(&key_ev(Key::S, true, false));
+        assert_ne!(app.audio.system_audio_enabled, sys);
+
+        let mic = app.audio.microphone_enabled;
+        app.handle_event(&key_ev(Key::M, true, false));
+        assert_ne!(app.audio.microphone_enabled, mic);
+    }
+
+    /// The volume setters clamp, which is why they exist -- and neither had a
+    /// caller.
+    #[test]
+    fn the_volume_keys_move_the_levels_and_stop_at_the_ends() {
+        let mut app = ScreenRecorderApp::new();
+        for _ in 0..40 {
+            app.handle_event(&key_ev(Key::Up, true, false));
+        }
+        assert!((app.audio.system_volume - 1.0).abs() < 0.001);
+        for _ in 0..40 {
+            app.handle_event(&key_ev(Key::Down, true, false));
+        }
+        assert!(app.audio.system_volume.abs() < 0.001);
+
+        for _ in 0..40 {
+            app.handle_event(&key_ev(Key::Down, false, true));
+        }
+        assert!(app.audio.microphone_volume.abs() < 0.001);
+    }
+
+    // -- the window --
+
+    #[test]
+    fn tab_moves_through_the_four_views() {
+        let mut app = ScreenRecorderApp::new();
+        let mut seen = vec![app.active_view];
+        for _ in 0..4 {
+            app.handle_event(&press(Key::Tab));
+            seen.push(app.active_view);
+        }
+        assert_eq!(seen.first(), seen.last(), "four presses should come round");
+        for view in [
+            ActiveView::Record,
+            ActiveView::History,
+            ActiveView::Trim,
+            ActiveView::Settings,
+        ] {
+            assert!(seen.contains(&view), "{view:?} was skipped: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn the_layout_follows_the_window_it_is_given() {
+        let mut app = ScreenRecorderApp::new();
+        let _ = App::render(&mut app, 1600.0, 900.0);
+        assert!((app.window_width - 1600.0).abs() < 0.01);
+        assert!((app.window_height - 900.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_title_says_what_the_recorder_is_doing() {
+        let mut app = ScreenRecorderApp::new();
+        app.countdown = CountdownTimer::new(0);
+        assert_eq!(app.title(), "Screen Recorder");
+
+        app.handle_event(&press(Key::F9));
+        for _ in 0..app.fps_preset.value() {
+            app.handle_event(&tick());
+        }
+        let title = app.title();
+        assert!(title.starts_with("Recording "), "got {title:?}");
+        assert!(
+            title.contains("00:01"),
+            "the title should show elapsed time, got {title:?}"
+        );
+    }
 
     // -- CaptureMode tests --------------------------------------------------
 
@@ -3634,7 +4621,10 @@ mod tests {
         let cmds = ann.render();
         assert!(!cmds.is_empty());
         // Should contain a StrokeRect
-        assert!(cmds.iter().any(|c| matches!(c, RenderCommand::StrokeRect { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+        );
     }
 
     #[test]
@@ -3661,11 +4651,19 @@ mod tests {
 
     #[test]
     fn test_annotation_render_highlight() {
-        let mut ann = Annotation::new(AnnotationTool::Highlight, 0.0, 0.0, Color::rgba(255, 255, 0, 80));
+        let mut ann = Annotation::new(
+            AnnotationTool::Highlight,
+            0.0,
+            0.0,
+            Color::rgba(255, 255, 0, 80),
+        );
         ann.end_x = 50.0;
         ann.end_y = 50.0;
         let cmds = ann.render();
-        assert!(cmds.iter().any(|c| matches!(c, RenderCommand::FillRect { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, RenderCommand::FillRect { .. }))
+        );
     }
 
     // -- OutputSettings tests -----------------------------------------------
@@ -3817,8 +4815,28 @@ mod tests {
     #[test]
     fn test_history_total_size() {
         let mut h = RecordingHistory::new();
-        h.add(HistoryEntry::new(0, "a".into(), PathBuf::new(), 10, 100, 30, 30, 1920, 1080));
-        h.add(HistoryEntry::new(0, "b".into(), PathBuf::new(), 10, 200, 30, 30, 1920, 1080));
+        h.add(HistoryEntry::new(
+            0,
+            "a".into(),
+            PathBuf::new(),
+            10,
+            100,
+            30,
+            30,
+            1920,
+            1080,
+        ));
+        h.add(HistoryEntry::new(
+            0,
+            "b".into(),
+            PathBuf::new(),
+            10,
+            200,
+            30,
+            30,
+            1920,
+            1080,
+        ));
         assert_eq!(h.total_size(), 300);
     }
 
@@ -3832,8 +4850,18 @@ mod tests {
 
     #[test]
     fn test_history_entry_displays() {
-        let e = HistoryEntry::new(1, "test".into(), PathBuf::new(), 3661, 1_048_576, 300, 30, 1920, 1080)
-            .with_timestamp(2026, 5, 18, 14, 30, 0);
+        let e = HistoryEntry::new(
+            1,
+            "test".into(),
+            PathBuf::new(),
+            3661,
+            1_048_576,
+            300,
+            30,
+            1920,
+            1080,
+        )
+        .with_timestamp(2026, 5, 18, 14, 30, 0);
         assert_eq!(e.duration_display(), "01:01:01");
         assert_eq!(e.size_display(), "1.0 MiB");
         assert_eq!(e.resolution_display(), "1920x1080");
@@ -4242,7 +5270,7 @@ mod tests {
 
         assert!(!app.tick_countdown()); // 3 -> 2
         assert!(!app.tick_countdown()); // 2 -> 1
-        assert!(app.tick_countdown());  // 1 -> 0, recording starts
+        assert!(app.tick_countdown()); // 1 -> 0, recording starts
         assert_eq!(app.recording_state, RecordingState::Recording);
     }
 
@@ -4310,7 +5338,7 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let app = ScreenRecorderApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
         // Should start with the background FillRect
         assert!(matches!(cmds.first(), Some(RenderCommand::FillRect { .. })));
@@ -4319,7 +5347,7 @@ mod tests {
     #[test]
     fn test_render_contains_sidebar() {
         let app = ScreenRecorderApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Should contain text "Screen Recorder" somewhere
         let has_title = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
@@ -4334,7 +5362,7 @@ mod tests {
     #[test]
     fn test_render_record_view() {
         let app = ScreenRecorderApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_preview = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "Preview"
@@ -4349,7 +5377,7 @@ mod tests {
     fn test_render_history_view() {
         let mut app = ScreenRecorderApp::new();
         app.active_view = ActiveView::History;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_history_title = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "Recording History"
@@ -4364,7 +5392,7 @@ mod tests {
     fn test_render_settings_view() {
         let mut app = ScreenRecorderApp::new();
         app.active_view = ActiveView::Settings;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_output = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "Output"
@@ -4379,7 +5407,7 @@ mod tests {
     fn test_render_trim_view_no_selection() {
         let mut app = ScreenRecorderApp::new();
         app.active_view = ActiveView::Trim;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_msg = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text.contains("Select a recording")
@@ -4395,7 +5423,7 @@ mod tests {
         let mut app = ScreenRecorderApp::new();
         app.trim = Some(TrimRange::new(60.0));
         app.active_view = ActiveView::Trim;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_apply = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "Apply Trim"
@@ -4410,7 +5438,7 @@ mod tests {
     fn test_render_countdown_overlay() {
         let mut app = ScreenRecorderApp::new();
         app.start_recording(); // triggers countdown
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_get_ready = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text.contains("Get ready")
@@ -4427,7 +5455,7 @@ mod tests {
         app.countdown.set_duration(0);
         app.start_recording();
         app.indicator.update(10, 50000, 30);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Should have the indicator overlay with time/fps
         let has_fps = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
@@ -4444,7 +5472,7 @@ mod tests {
         let mut app = ScreenRecorderApp::new();
         app.active_view = ActiveView::Settings;
         app.settings_tab = SettingsTab::Hotkeys;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_f9 = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "F9"
@@ -4460,7 +5488,7 @@ mod tests {
         let mut app = ScreenRecorderApp::new();
         app.active_view = ActiveView::Settings;
         app.settings_tab = SettingsTab::Schedule;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_add = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "+ Add Schedule"
@@ -4476,8 +5504,9 @@ mod tests {
         let mut app = ScreenRecorderApp::new();
         app.active_view = ActiveView::Settings;
         app.settings_tab = SettingsTab::Schedule;
-        app.schedules.add(ScheduledRecording::new(0, 14, 0, 300, "Daily standup"));
-        let cmds = app.render();
+        app.schedules
+            .add(ScheduledRecording::new(0, 14, 0, 300, "Daily standup"));
+        let cmds = app.render_commands();
         let has_label = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "Daily standup"
@@ -4494,7 +5523,7 @@ mod tests {
         app.countdown.set_duration(0);
         app.start_recording();
         app.annotation_toolbar_visible = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_rect_tool = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "Rectangle"
@@ -4508,7 +5537,7 @@ mod tests {
     #[test]
     fn test_render_status_bar_idle() {
         let app = ScreenRecorderApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_ready = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "Ready to record"
@@ -4527,7 +5556,7 @@ mod tests {
         app.total_frames = 100;
         app.total_bytes = 50000;
         app.elapsed_secs = 5;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_stats = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text.contains("100 frames")

@@ -3173,34 +3173,40 @@ fn parse_authorized_keys(content: &str) -> Vec<AuthorizedKey> {
 }
 
 /// Check if a username is allowed by the allow/deny user/group lists.
+///
+/// All four directives are *pattern* lists, matched by [`pattern_list_matches`]
+/// — `AllowUsers admin*` is the shape `sshd_config(5)` documents and the shape
+/// an administrator who knows OpenSSH will write. Comparing them literally,
+/// which this did until 2026-09-05, fails in both directions at once: an
+/// `AllowUsers` pattern matches no account and locks everybody out, while a
+/// `DenyUsers` pattern matches no account and quietly lets the very people it
+/// names straight in.
 fn is_user_allowed(username: &str, groups: &[String], config: &SshdConfig) -> bool {
     // DenyUsers takes precedence.
-    if !config.deny_users.is_empty() && config.deny_users.iter().any(|u| u == username) {
+    if pattern_list_matches(&config.deny_users, username) {
         return false;
     }
 
     // DenyGroups.
-    if !config.deny_groups.is_empty() {
-        for group in groups {
-            if config.deny_groups.iter().any(|g| g == group) {
-                return false;
-            }
-        }
+    if groups
+        .iter()
+        .any(|group| pattern_list_matches(&config.deny_groups, group))
+    {
+        return false;
     }
 
-    // AllowUsers: if specified, user must be in the list.
-    if !config.allow_users.is_empty() && !config.allow_users.iter().any(|u| u == username) {
+    // AllowUsers: if specified, user must match one of the patterns.
+    if !config.allow_users.is_empty() && !pattern_list_matches(&config.allow_users, username) {
         return false;
     }
 
     // AllowGroups: if specified, at least one group must match.
-    if !config.allow_groups.is_empty() {
-        let has_match = groups
+    if !config.allow_groups.is_empty()
+        && !groups
             .iter()
-            .any(|g| config.allow_groups.iter().any(|ag| ag == g));
-        if !has_match {
-            return false;
-        }
+            .any(|group| pattern_list_matches(&config.allow_groups, group))
+    {
+        return false;
     }
 
     true
@@ -6716,6 +6722,57 @@ DenyGroups nogroup
         config.allow_users = vec!["alice".into()];
         config.deny_users = vec!["alice".into()];
         assert!(!is_user_allowed("alice", &[], &config));
+    }
+
+    /// The fail-closed half of comparing patterns literally: `admin*` matched
+    /// no account, so the directive that was meant to admit the admins locked
+    /// out everyone including them.
+    #[test]
+    fn an_allowusers_pattern_admits_the_accounts_it_names() {
+        let mut config = SshdConfig::default_config();
+        config.allow_users = vec!["admin*".into(), "ops-?".into()];
+        assert!(is_user_allowed("admin1", &[], &config));
+        assert!(is_user_allowed("admin", &[], &config));
+        assert!(is_user_allowed("ops-a", &[], &config));
+        assert!(!is_user_allowed("ops-ab", &[], &config));
+        assert!(!is_user_allowed("mallory", &[], &config));
+    }
+
+    /// The fail-*open* half, and the one that matters: a `DenyUsers` pattern
+    /// compared literally names nobody, so the accounts an administrator
+    /// believes are blocked log straight in.
+    #[test]
+    fn a_denyusers_pattern_actually_blocks_the_accounts_it_names() {
+        let mut config = SshdConfig::default_config();
+        config.deny_users = vec!["guest*".into()];
+        assert!(!is_user_allowed("guest1", &[], &config));
+        assert!(!is_user_allowed("guest", &[], &config));
+        assert!(is_user_allowed("alice", &[], &config));
+    }
+
+    #[test]
+    fn group_patterns_match_on_both_sides() {
+        let mut config = SshdConfig::default_config();
+        config.deny_groups = vec!["no-*".into()];
+        assert!(!is_user_allowed("alice", &["no-login".into()], &config));
+        assert!(is_user_allowed("alice", &["staff".into()], &config));
+
+        let mut config = SshdConfig::default_config();
+        config.allow_groups = vec!["dev-*".into()];
+        assert!(is_user_allowed("alice", &["dev-web".into()], &config));
+        assert!(!is_user_allowed("alice", &["contractors".into()], &config));
+        // No groups at all cannot satisfy an AllowGroups list.
+        assert!(!is_user_allowed("alice", &[], &config));
+    }
+
+    /// Negation carries over from the pattern matcher, which is what lets an
+    /// administrator write the common "everyone in the group except one".
+    #[test]
+    fn a_negated_pattern_carves_an_exception_out_of_an_allow_list() {
+        let mut config = SshdConfig::default_config();
+        config.allow_users = vec!["dev*".into(), "!dev-intern".into()];
+        assert!(is_user_allowed("dev-alice", &[], &config));
+        assert!(!is_user_allowed("dev-intern", &[], &config));
     }
 
     #[test]

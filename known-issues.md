@@ -118359,7 +118359,8 @@ environment); clippy clean on both.
 
 ## TD-B-SSHD-ALLOWUSERS-IS-DOCUMENTED-AS-A-PATTERN-LIST-AND-COMPARED-AS-A-STRING (lane B)
 
-**Status:** OPEN — 2026-09-05
+**Status:** FIXED — 2026-09-05 (filed and fixed within the hour; see "How it
+was fixed" at the end)
 
 **In short:** `sshd_config` lets an administrator write `AllowUsers admin*` to
 mean "any account whose name starts with `admin`". Ours compares the whole line
@@ -118407,3 +118408,28 @@ config yet, which is the only reason this is not urgent.
 
 **If never fixed:** the first real deployment that writes a `Deny` pattern gets
 an access-control rule that quietly does nothing.
+
+### How it was fixed — 2026-09-05 (lane B)
+
+All four comparisons now go through `pattern_list_matches`, the matcher written
+an hour earlier for `AcceptEnv`. `AllowUsers admin*` admits the admins;
+`DenyUsers guest*` blocks the guests; `AllowGroups dev-*` and `DenyGroups no-*`
+likewise; and `!` negation carries over, so `AllowUsers dev* !dev-intern` says
+the thing it looks like it says.
+
+The `Deny` side lost its `is_empty()` guard rather than gaining a pattern one:
+an empty pattern list matches nothing by construction, so the guard was
+restating the matcher's own base case in a second place where it could later
+disagree with it.
+
+**Tests, one per failure direction** — `an_allowusers_pattern_admits_the_accounts_it_names`
+(was fail-closed: locked everyone out) and
+`a_denyusers_pattern_actually_blocks_the_accounts_it_names` (was fail-open: let
+the named accounts in), plus `group_patterns_match_on_both_sides` and
+`a_negated_pattern_carves_an_exception_out_of_an_allow_list`. 184 tests pass on
+the host and under WSL's linux half; clippy clean on both.
+
+The behaviour change flagged above is real and intended: a configuration
+containing `AllowUsers admin*` used to deny everybody and now admits the
+`admin*` accounts. That is the directive doing what it says — the previous
+behaviour was not a stricter policy but a broken one.

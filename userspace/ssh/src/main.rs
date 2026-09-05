@@ -73,8 +73,8 @@ use quoting::quoteaf_os;
 // here: see that crate's module docs for why one definition shared by both ends
 // is the point, and `ssh/Cargo.toml` for what a second copy cost the last time.
 use sshwire::{
-    ExchangeHashInput, compute_exchange_hash, derive_key, encode_mpint, ssh_string,
-    strip_leading_zeros,
+    ExchangeHashInput, compute_exchange_hash, derive_key, encode_mpint, read_byte, read_mpint,
+    read_ssh_string, read_u32, ssh_string,
 };
 use std::env;
 use std::fmt;
@@ -318,6 +318,20 @@ impl fmt::Display for SshError {
 impl From<io::Error> for SshError {
     fn from(e: io::Error) -> Self {
         Self::IoError(e)
+    }
+}
+
+/// A malformed packet is a protocol error like any other, so `?` on a shared
+/// reader reports the same way a local check did.
+///
+/// This impl is the whole reason the readers could move to `sshwire`: a shared
+/// decoder cannot return `SshError`, and until there was a shared error to
+/// convert *from*, every call site's `?` pinned the decoders to this crate —
+/// which is exactly why the server kept an unhardened copy of them long after
+/// the client's was fixed.
+impl From<sshwire::WireError> for SshError {
+    fn from(e: sshwire::WireError) -> Self {
+        Self::ProtocolError(e.to_string())
     }
 }
 
@@ -641,60 +655,11 @@ fn classify_version_line(line: &[u8]) -> Result<VersionLine, SshError> {
     )))
 }
 
-// The encoders -- `ssh_string`, `encode_mpint`, `strip_leading_zeros` -- live in
-// `sshwire`, not here. Each is one half of a contract with whatever is at the
-// other end of the socket, and a private copy of one half is a copy that can
-// drift without any test in this crate noticing. The readers below stay for now
-// because they return `SshError`; moving them needs a shared error type first.
-/// Read an SSH `string` from a byte slice at the given offset.
-/// Returns (value, new_offset).
-///
-/// The length prefix is entirely the server's to choose, so it is added to the
-/// offset with `checked_add` and turned into a range only by `get`, which
-/// returns `None` rather than panicking when the server claims more bytes than
-/// it sent. The previous `offset + 4 > data.len()` guard was itself the hazard:
-/// the addition it performed to decide whether indexing was safe could
-/// overflow, and on overflow it concluded that it was.
-fn read_ssh_string(data: &[u8], offset: usize) -> Result<(&[u8], usize), SshError> {
-    let (len, start) = read_u32(data, offset)?;
-    let len = usize::try_from(len)
-        .map_err(|_| SshError::ProtocolError(format!("string length {len} out of range")))?;
-    let end = start
-        .checked_add(len)
-        .ok_or_else(|| SshError::ProtocolError("string length overflow".into()))?;
-    let value = data.get(start..end).ok_or_else(|| {
-        SshError::ProtocolError(format!(
-            "string length {len} exceeds packet (have {})",
-            data.len().saturating_sub(start)
-        ))
-    })?;
-    Ok((value, end))
-}
-
-/// Read a u32 from a byte slice at the given offset.
-fn read_u32(data: &[u8], offset: usize) -> Result<(u32, usize), SshError> {
-    let bytes = data
-        .get(offset..)
-        .and_then(<[u8]>::first_chunk::<4>)
-        .ok_or_else(|| SshError::ProtocolError("truncated u32".into()))?;
-    Ok((u32::from_be_bytes(*bytes), offset.saturating_add(4)))
-}
-
-/// Read a byte from a slice at the given offset.
-fn read_byte(data: &[u8], offset: usize) -> Result<(u8, usize), SshError> {
-    let byte = *data
-        .get(offset)
-        .ok_or_else(|| SshError::ProtocolError("truncated byte".into()))?;
-    Ok((byte, offset.saturating_add(1)))
-}
-
-/// Read an SSH `mpint` from a byte slice, returning unsigned big-endian bytes.
-fn read_mpint(data: &[u8], offset: usize) -> Result<(Vec<u8>, usize), SshError> {
-    let (raw, next) = read_ssh_string(data, offset)?;
-    // Strip leading zero padding that SSH adds for sign.
-    let stripped = strip_leading_zeros(raw);
-    Ok((stripped.to_vec(), next))
-}
+// The wire codec -- `ssh_string`, `encode_mpint`, `strip_leading_zeros`, and the
+// `read_*` readers below -- lives in `sshwire`, not here. Each function is one
+// half of a contract with whatever is at the other end of the socket, and a
+// private copy of one half is a copy that can drift without any test in this
+// crate noticing. They are imported at the top of this file with the rest.
 
 // ============================================================================
 // Minimal big-integer arithmetic for Diffie-Hellman
@@ -2308,7 +2273,7 @@ impl SshSession {
         // pin the shared secret to a value the server chose, and f = p-1 has
         // order 2, so K would be one of two values. A server doing this is
         // arranging for the session keys to be guessable.
-        let f = BigUint::from_bytes_be(&f_bytes);
+        let f = BigUint::from_bytes_be(f_bytes);
         let p_minus_1 = p.sub(&BigUint::one());
         if f.cmp_unsigned(&BigUint::one()) != std::cmp::Ordering::Greater
             || f.cmp_unsigned(&p_minus_1) != std::cmp::Ordering::Less
@@ -2331,7 +2296,7 @@ impl SshSession {
             server_kexinit: &self.server_kexinit,
             host_key_blob: &k_s,
             client_e: &e_bytes,
-            server_f: &f_bytes,
+            server_f: f_bytes,
             shared_secret: &k_bytes,
         });
         self.verbose(&format!("exchange hash: {}", bytes_to_hex(&h)));
@@ -4025,24 +3990,13 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_read_mpint_undoes_what_the_shared_encoder_did() {
-        // `encode_mpint` itself is `sshwire`'s, and is tested there against
-        // RFC 4251 §5's own published examples. Re-asserting the encoding here
-        // would grow a second, weaker statement of it in one of the two crates
-        // the shared one exists to stop having private opinions. What is still
-        // local, and so still this crate's to test, is the *reader* -- checked
-        // here against the shared writer rather than against itself.
-        for value in [&[0x7f][..], &[0x80][..], &[0x01, 0x00, 0xff][..]] {
-            let (decoded, next) = read_mpint(&encode_mpint(value), 0).unwrap();
-            assert_eq!(decoded, value, "roundtrip changed the value");
-            assert_eq!(next, encode_mpint(value).len());
-        }
-        // The pad the encoder adds for the sign bit is not part of the value,
-        // so the reader must take it back off.
-        let (decoded, _) = read_mpint(&encode_mpint(&[0x80]), 0).unwrap();
-        assert_eq!(decoded, vec![0x80]);
-    }
+    // The `mpint` reader/writer roundtrip that used to be asserted here is now
+    // `sshwire`'s -- `an_mpint_roundtrips_through_the_shared_writer` and
+    // `an_mpint_comes_back_without_the_sign_pad_the_writer_added` -- because
+    // both halves of it are. A copy here would test the same two functions a
+    // second time and, worse, would keep passing if this crate ever grew a
+    // private reader again, which is the failure the shared crate exists to
+    // make impossible.
 
     // ------------------------------------------------------------------
     // AES-128 and AES-128-CTR

@@ -118825,16 +118825,15 @@ below.
 
 ## TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE (lane B)
 
-**Status:** PARTLY FIXED, 2026-09-05. Items 1–3 below are done for the
-*encoders and the key-exchange arithmetic*: `userspace/sshwire` exists, both
-binaries depend on it, and neither keeps a private copy of `ssh_string`,
-`ssh_u32`, `encode_mpint`, `strip_leading_zeros`, the RFC 4253 §8 exchange hash
-or §7.2 key derivation. **Still open:** the fallible *readers*
-(`read_ssh_string`, `read_mpint`, `read_u32`, `read_bool`), `build_packet`,
-`compute_mac` and AES-CTR are still written twice — they return each crate's own
-error type, so moving them needs a shared `WireError` with a `From` impl on each
-side first. **Item 4 — an interop test — is untouched, and is the item that
-matters most**; see the note at the end.
+**Status:** PARTLY FIXED, 2026-09-05. Items 1–3 below are done for the whole
+*wire codec* — encoders, decoders, the identification line, and the
+key-exchange arithmetic. `userspace/sshwire` exists, both binaries depend on
+it, and neither keeps a private copy of `ssh_string`, `ssh_u32`,
+`encode_mpint`, `strip_leading_zeros`, `read_byte`, `read_bool`, `read_u32`,
+`read_ssh_string`, `read_mpint`, the RFC 4253 §4.2 identification line, the §8
+exchange hash or §7.2 key derivation. **Still open:** `build_packet`,
+`compute_mac` and AES-CTR are still written twice. **Item 4 — an interop test —
+is untouched, and is the item that matters most**; see the note at the end.
 
 Filed 2026-09-05 alongside the fix above, which is the first bug this
 arrangement produced and the one that found it.
@@ -118856,15 +118855,39 @@ result was a server no client could connect to.
 | `derive_key` / `derive_keys` | RFC 4253 §7.2 key derivation | shared |
 | `ssh_string`, `encode_mpint` | wire encoding | shared |
 | identification-line handling | RFC 4253 §4.2 — derives `V_C` / `V_S`, i.e. the *inputs* to the hash above; **drifted twice** | shared |
-| `read_ssh_string`, `read_mpint`, `read_u32`, `read_bool` | wire decoding | **still twice** |
+| `read_ssh_string`, `read_mpint`, `read_u32`, `read_byte`, `read_bool` | wire decoding — the server's copies were the *un-hardened* ones, see below | shared |
 | `build_packet`, `compute_mac` | RFC 4253 §6 framing and MAC | **still twice** |
 | `aes128_encrypt_block`, AES-CTR | the cipher | **still twice** |
 
-The split is not arbitrary: everything in the first group is total and returns a
-value, so it moved as-is. Everything in the second returns `Result<_, SshError>`
-or `Result<_, SshdError>`, and a shared crate cannot name either. That wants a
-`sshwire::WireError` with `From<WireError>` on each crate's error type — which
-is a fine change, just a different one from the extraction itself.
+The first extraction stopped at the line between total functions and fallible
+ones: everything that returns a value moved as-is, while everything returning
+`Result<_, SshError>` or `Result<_, SshdError>` could not, because a shared
+crate cannot name either error type. That is now resolved by
+`sshwire::WireError` (`Truncated { what, needed, available }` /
+`LengthOutOfRange { len }`) plus a `From<WireError>` impl on each binary's error
+enum, so every call site keeps using `?` and keeps reporting failures the way
+the rest of that binary does. The readers moved on the back of it; the framing
+and the cipher have not yet.
+
+**What the reader move turned up.** The two copies were not merely duplicated,
+they were *unequal*, and the server had the worse one. Both had originally
+guarded with `if offset + 4 > data.len()`, then indexed `data[offset]`. That
+guard is itself the hazard: the addition it performs in order to decide whether
+indexing is safe can wrap, and on wrapping it concludes that it is — so a large
+`offset` produces an approved out-of-bounds index and a panic. The client's
+copies had been rewritten to `get(..).and_then(first_chunk)` / `checked_add` at
+some earlier point; sshd's had not, and there was no mechanism by which the fix
+could reach it, because the function could not be shared. sshd reads these
+fields *before* the client has authenticated, so the consequence there is worse
+than in the client where it was fixed. `sshwire`'s test
+`an_offset_near_the_top_of_the_address_space_does_not_wrap_into_a_read` pins the
+case for both ends; neither crate's own tests had ever covered it.
+
+Eight tests were deleted from sshd and one from ssh in the same change. They
+tested each crate's private readers against the shared writer, which was the
+right test while the readers were private; keeping copies of them would now test
+the same functions twice and, worse, would go on passing if either crate grew a
+private reader again.
 
 `sha2`, `randrange` and `posix::ed25519` were already extracted into shared
 crates for exactly this reason, so the precedent and the mechanism both exist.
@@ -118909,9 +118932,9 @@ not merely adjacent to the hash, it *is* two of the hash's eight inputs, so
 deriving it is as much a two-program contract as hashing it, and it now lives in
 `sshwire` on the same reasoning as everything else there.
 
-Three such bugs have now been found by one person reading two files at once, and
-none by a test. That ratio is the argument for item 4, which is the outstanding
-work here.
+Three such bugs, plus the server's un-hardened readers, have now been found by
+one person reading two files at once, and none by a test. That ratio is the
+argument for item 4, which is the outstanding work here.
 
 **Known obstacle to item 4:** both crates' `syscall0/1/3/4` are host stubs that
 return `-ENOSYS` on the Windows host build *and* on the WSL Linux build, so

@@ -192,6 +192,172 @@ pub fn strip_leading_zeros(data: &[u8]) -> &[u8] {
 }
 
 // ============================================================================
+// Wire decoding (RFC 4253 §5)
+// ============================================================================
+
+/// Why a value could not be read out of a packet.
+///
+/// Both binaries convert this into their own error type, so a call site keeps
+/// using `?` and keeps reporting failures the way the rest of that binary does.
+/// The reason a decoder cannot simply return each binary's error type is what
+/// kept the decoders duplicated until now: a shared function needs a shared
+/// error, and there wasn't one.
+///
+/// Every variant means "the peer's bytes do not describe what they claim to" —
+/// a protocol fault, never a bug on this side. That is deliberate: none of the
+/// readers below can fail for any other reason, because none of them can panic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireError {
+    /// The packet ended before the value did.
+    ///
+    /// `what` names the value being read, `needed` is how many more bytes it
+    /// required, and `available` is how many the packet still had. The counts
+    /// are carried rather than formatted immediately because they are the
+    /// difference between "a truncated packet" and "a peer claiming a 4 GiB
+    /// string", which read identically without them.
+    Truncated {
+        /// The name of the value that was being read, for the message.
+        what: &'static str,
+        /// How many bytes the value needed.
+        needed: usize,
+        /// How many bytes the packet still had.
+        available: usize,
+    },
+    /// A length prefix does not fit in this machine's address space.
+    ///
+    /// Unreachable on a 64-bit target, where every `u32` is a valid `usize`.
+    /// It exists so the conversion is a `TryFrom` and not an `as`, which would
+    /// silently truncate the length on a 16-bit target and read the wrong
+    /// number of bytes rather than refusing to.
+    LengthOutOfRange {
+        /// The length the peer asked for.
+        len: u32,
+    },
+}
+
+impl core::fmt::Display for WireError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::Truncated {
+                what,
+                needed,
+                available,
+            } => write!(
+                f,
+                "truncated {what}: needs {needed} more bytes, packet has {available}"
+            ),
+            Self::LengthOutOfRange { len } => {
+                write!(f, "length {len} does not fit this machine's address space")
+            }
+        }
+    }
+}
+
+impl core::error::Error for WireError {}
+
+/// How many bytes of `data` remain at `offset`, saturating at zero.
+fn remaining(data: &[u8], offset: usize) -> usize {
+    data.len().saturating_sub(offset)
+}
+
+/// Read an SSH `byte` at `offset`. Returns the value and the offset after it.
+///
+/// # Errors
+///
+/// [`WireError::Truncated`] if the packet ends at or before `offset`.
+pub fn read_byte(data: &[u8], offset: usize) -> Result<(u8, usize), WireError> {
+    let byte = *data.get(offset).ok_or(WireError::Truncated {
+        what: "byte",
+        needed: 1,
+        available: remaining(data, offset),
+    })?;
+    Ok((byte, offset.saturating_add(1)))
+}
+
+/// Read an SSH `boolean` at `offset`, which §5 defines as any nonzero byte.
+///
+/// The RFC requires senders to use 1 and requires readers to accept anything
+/// nonzero, so a strict reader here would reject peers the protocol permits.
+///
+/// # Errors
+///
+/// [`WireError::Truncated`] if the packet ends at or before `offset`.
+pub fn read_bool(data: &[u8], offset: usize) -> Result<(bool, usize), WireError> {
+    let (byte, next) = read_byte(data, offset)?;
+    Ok((byte != 0, next))
+}
+
+/// Read an SSH `uint32` (big-endian) at `offset`.
+///
+/// # Errors
+///
+/// [`WireError::Truncated`] if fewer than four bytes remain at `offset`.
+pub fn read_u32(data: &[u8], offset: usize) -> Result<(u32, usize), WireError> {
+    let bytes = data
+        .get(offset..)
+        .and_then(<[u8]>::first_chunk::<4>)
+        .ok_or(WireError::Truncated {
+            what: "uint32",
+            needed: 4,
+            available: remaining(data, offset),
+        })?;
+    Ok((u32::from_be_bytes(*bytes), offset.saturating_add(4)))
+}
+
+/// Read an SSH `string` at `offset`: a `uint32` length, then that many bytes.
+///
+/// The length prefix is entirely the peer's to choose, so it is added to the
+/// offset with `checked_add` and turned into a range only by `get`, which
+/// returns `None` rather than panicking when the peer claims more bytes than it
+/// sent. A guard of the form `offset + 4 > data.len()` — which is what both
+/// binaries used to have, and what the server still had after the client was
+/// fixed — is itself the hazard: the addition it performs to decide whether
+/// indexing is safe can overflow, and on overflow it concludes that it is.
+///
+/// The bytes are borrowed from `data` rather than copied. A `string` in SSH is
+/// arbitrary binary, not text, and is not decoded here — §5 says so explicitly,
+/// and a decoder that guessed UTF-8 would corrupt keys and filenames alike.
+///
+/// # Errors
+///
+/// [`WireError::Truncated`] if the length or the bytes run past the end of the
+/// packet, [`WireError::LengthOutOfRange`] if the length exceeds `usize`.
+pub fn read_ssh_string(data: &[u8], offset: usize) -> Result<(&[u8], usize), WireError> {
+    let (len, start) = read_u32(data, offset)?;
+    let len_usize = usize::try_from(len).map_err(|_| WireError::LengthOutOfRange { len })?;
+    let end = start
+        .checked_add(len_usize)
+        .ok_or(WireError::LengthOutOfRange { len })?;
+    let value = data.get(start..end).ok_or(WireError::Truncated {
+        what: "string",
+        needed: len_usize,
+        available: remaining(data, start),
+    })?;
+    Ok((value, end))
+}
+
+/// Read an SSH `mpint` at `offset`, returning unsigned big-endian bytes.
+///
+/// The sign byte [`encode_mpint`] adds is not part of the number, so it comes
+/// back off here. Leaving it on would make `f` a different integer at one end
+/// of the key exchange than at the other, which is a signature failure with no
+/// diagnosable cause.
+///
+/// A negative `mpint` — one whose top bit is set after the leading zeros are
+/// gone — is not rejected here, because this crate is used only where the
+/// protocol defines the value as unsigned (the Diffie-Hellman `e` and `f`), and
+/// range-checking those against the group prime is the caller's job and is
+/// stricter than a sign check.
+///
+/// # Errors
+///
+/// As [`read_ssh_string`].
+pub fn read_mpint(data: &[u8], offset: usize) -> Result<(&[u8], usize), WireError> {
+    let (raw, next) = read_ssh_string(data, offset)?;
+    Ok((strip_leading_zeros(raw), next))
+}
+
+// ============================================================================
 // Key exchange (RFC 4253 §7.2, §8)
 // ============================================================================
 
@@ -297,6 +463,10 @@ pub fn derive_key(k: &[u8], h: &[u8; 32], x: u8, session_id: &[u8; 32], needed: 
 }
 
 #[cfg(test)]
+// A test that gets an `Err` where it asserted a value should stop, loudly, at
+// the line that was wrong -- which is what these lints exist to prevent in
+// production code and what makes them counterproductive here.
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -617,5 +787,156 @@ mod tests {
             derive_key(&[0x00, 0x09], h, b'C', sid, 32),
             derive_key(&[0x09], h, b'C', sid, 32)
         );
+    }
+
+    // ---- wire decoding (RFC 4253 §5) ----
+
+    #[test]
+    fn a_byte_reads_and_advances_by_one() {
+        assert_eq!(read_byte(b"\x2a\x00", 0), Ok((0x2a, 1)));
+        assert_eq!(read_byte(b"\x2a\x07", 1), Ok((0x07, 2)));
+    }
+
+    #[test]
+    fn a_byte_past_the_end_is_truncated_not_a_panic() {
+        assert_eq!(
+            read_byte(b"", 0),
+            Err(WireError::Truncated {
+                what: "byte",
+                needed: 1,
+                available: 0
+            })
+        );
+        assert!(read_byte(b"\x00", 1).is_err());
+    }
+
+    #[test]
+    fn any_nonzero_byte_is_true_because_the_rfc_says_so() {
+        // §5 requires readers to accept any nonzero value, so rejecting
+        // anything but 1 would refuse peers the protocol allows.
+        assert_eq!(read_bool(b"\x00", 0), Ok((false, 1)));
+        assert_eq!(read_bool(b"\x01", 0), Ok((true, 1)));
+        assert_eq!(read_bool(b"\xff", 0), Ok((true, 1)));
+    }
+
+    #[test]
+    fn a_uint32_roundtrips_through_the_shared_writer() {
+        // Checked against `ssh_u32` rather than against a hand-written byte
+        // string: the pair is the contract, and a reader tested only against
+        // its own idea of the encoding is the failure this crate exists to end.
+        for value in [0u32, 1, 0x0102_0304, u32::MAX] {
+            assert_eq!(read_u32(&ssh_u32(value), 0), Ok((value, 4)));
+        }
+    }
+
+    #[test]
+    fn a_uint32_needs_all_four_bytes() {
+        for have in 0..4usize {
+            let data = vec![0u8; have];
+            assert_eq!(
+                read_u32(&data, 0),
+                Err(WireError::Truncated {
+                    what: "uint32",
+                    needed: 4,
+                    available: have
+                }),
+                "{have} bytes should not satisfy a uint32"
+            );
+        }
+    }
+
+    #[test]
+    fn an_offset_near_the_top_of_the_address_space_does_not_wrap_into_a_read() {
+        // This is the bug the `get`/`first_chunk` form exists to prevent. The
+        // old guard was `offset + 4 > data.len()`: at this offset that addition
+        // wraps to 3, concludes the read is in bounds, and indexes past the end
+        // of an 8-byte buffer. An attacker does not reach this offset directly,
+        // but every caller that adds an attacker-supplied length to an offset
+        // can hand one over.
+        let data = [0u8; 8];
+        assert!(read_u32(&data, usize::MAX - 1).is_err());
+        assert!(read_byte(&data, usize::MAX).is_err());
+        assert!(read_ssh_string(&data, usize::MAX - 1).is_err());
+    }
+
+    #[test]
+    fn a_string_roundtrips_through_the_shared_writer() {
+        for payload in [&b""[..], &b"x"[..], &b"ssh-ed25519"[..], &[0xff; 300][..]] {
+            let encoded = ssh_string(payload);
+            let (value, next) = read_ssh_string(&encoded, 0).expect("roundtrip");
+            assert_eq!(value, payload);
+            assert_eq!(next, encoded.len());
+        }
+    }
+
+    #[test]
+    fn a_string_is_bytes_and_an_empty_one_is_a_value_not_an_error() {
+        // A zero-length string is legal and common (an empty banner, an empty
+        // language tag), so it must read back as an empty slice.
+        assert_eq!(read_ssh_string(&[0, 0, 0, 0], 0), Ok((&[][..], 4)));
+    }
+
+    #[test]
+    fn a_string_longer_than_the_packet_is_refused_with_both_numbers() {
+        // The report has to distinguish "the packet was cut short" from "the
+        // peer claimed four gigabytes", because they are the same failure with
+        // very different causes.
+        let mut data = ssh_u32(u32::MAX).to_vec();
+        data.extend_from_slice(b"three");
+        assert_eq!(
+            read_ssh_string(&data, 0),
+            Err(WireError::Truncated {
+                what: "string",
+                needed: usize::try_from(u32::MAX).expect("u32 fits usize on this target"),
+                available: 5
+            })
+        );
+    }
+
+    #[test]
+    fn reads_chain_by_offset_the_way_a_packet_is_actually_parsed() {
+        let mut packet = vec![0x14u8]; // a message number
+        packet.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+        packet.extend_from_slice(&ssh_u32(7));
+        packet.push(1); // a boolean
+        let (msg, off) = read_byte(&packet, 0).expect("byte");
+        let (name, off) = read_ssh_string(&packet, off).expect("string");
+        let (n, off) = read_u32(&packet, off).expect("uint32");
+        let (flag, off) = read_bool(&packet, off).expect("boolean");
+        assert_eq!((msg, name, n, flag), (0x14, &b"ssh-ed25519"[..], 7, true));
+        assert_eq!(off, packet.len(), "the parse consumed exactly the packet");
+    }
+
+    #[test]
+    fn an_mpint_comes_back_without_the_sign_pad_the_writer_added() {
+        // 0x80 has its top bit set, so `encode_mpint` prepends a zero to keep
+        // it positive. That zero is framing: reading it as part of the number
+        // makes `f` a different integer here than at the far end, and the only
+        // symptom is a host-key signature that fails for no visible reason.
+        let encoded = encode_mpint(&[0x80]);
+        assert_eq!(encoded.len(), 6, "writer should have padded");
+        assert_eq!(read_mpint(&encoded, 0), Ok((&[0x80][..], 6)));
+    }
+
+    #[test]
+    fn an_mpint_roundtrips_through_the_shared_writer() {
+        for value in [
+            &b""[..],
+            &[0x7f][..],
+            &[0x80][..],
+            &[0x01, 0x00, 0xff][..],
+            &[0xff; 256][..],
+        ] {
+            let encoded = encode_mpint(value);
+            let (decoded, next) = read_mpint(&encoded, 0).expect("roundtrip");
+            assert_eq!(decoded, strip_leading_zeros(value));
+            assert_eq!(next, encoded.len());
+        }
+    }
+
+    #[test]
+    fn a_zero_mpint_is_the_empty_string_in_both_directions() {
+        assert_eq!(encode_mpint(&[0, 0, 0]), vec![0, 0, 0, 0]);
+        assert_eq!(read_mpint(&[0, 0, 0, 0], 0), Ok((&[][..], 4)));
     }
 }

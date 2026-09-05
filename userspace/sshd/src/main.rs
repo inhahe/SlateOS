@@ -102,8 +102,8 @@ use std::process;
 // shared by both ends is the point, and `sshd/Cargo.toml` for what a second copy
 // cost the last time.
 use sshwire::{
-    ExchangeHashInput, compute_exchange_hash, derive_key, encode_mpint, ssh_string,
-    strip_leading_zeros,
+    ExchangeHashInput, compute_exchange_hash, derive_key, encode_mpint, read_bool, read_mpint,
+    read_ssh_string, read_u32, ssh_string, strip_leading_zeros,
 };
 
 // ============================================================================
@@ -1364,6 +1364,22 @@ impl From<io::Error> for SshdError {
     }
 }
 
+/// A malformed packet is a protocol error like any other, so `?` on a shared
+/// reader reports the same way a local check did.
+///
+/// This impl is the whole reason the readers could move to `sshwire`: a shared
+/// decoder cannot return `SshdError`, and until there was a shared error to
+/// convert *from*, every call site's `?` pinned the decoders to this crate.
+/// That is not a stylistic point — the client's readers were hardened against
+/// an overflow that concluded an out-of-bounds index was in bounds, and this
+/// crate's copies, which face the same attacker earlier in the handshake, did
+/// not get the fix because there was no way to share it.
+impl From<sshwire::WireError> for SshdError {
+    fn from(e: sshwire::WireError) -> Self {
+        Self::ProtocolError(e.to_string())
+    }
+}
+
 // ============================================================================
 // SSH-2 constants
 // ============================================================================
@@ -1623,67 +1639,20 @@ impl StreamBuffer {
 // SSH data encoding helpers
 // ============================================================================
 
-// The encoders -- `ssh_string`, `encode_mpint`, `strip_leading_zeros` -- live in
-// `sshwire`, not here. Each is one half of a contract with whatever is at the
-// other end of the socket, and a private copy of one half is a copy that can
-// drift without any test in this crate noticing. The readers below stay for now
-// because they return `SshdError`; moving them needs a shared error type first.
-/// Read an SSH `string` from a byte slice at the given offset.
-fn read_ssh_string(data: &[u8], offset: usize) -> Result<(&[u8], usize), SshdError> {
-    if offset + 4 > data.len() {
-        return Err(SshdError::ProtocolError("truncated string length".into()));
-    }
-    let len = u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ]) as usize;
-    let start = offset + 4;
-    let end = start + len;
-    if end > data.len() {
-        return Err(SshdError::ProtocolError(format!(
-            "string length {len} exceeds packet (have {})",
-            data.len() - start
-        )));
-    }
-    Ok((&data[start..end], end))
-}
-
-/// Read a u32 from a byte slice at the given offset.
-fn read_u32(data: &[u8], offset: usize) -> Result<(u32, usize), SshdError> {
-    if offset + 4 > data.len() {
-        return Err(SshdError::ProtocolError("truncated u32".into()));
-    }
-    let v = u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ]);
-    Ok((v, offset + 4))
-}
-
-/// Read a byte from a slice at the given offset.
-fn read_byte(data: &[u8], offset: usize) -> Result<(u8, usize), SshdError> {
-    if offset >= data.len() {
-        return Err(SshdError::ProtocolError("truncated byte".into()));
-    }
-    Ok((data[offset], offset + 1))
-}
-
-/// Read an SSH `mpint` from a byte slice, returning unsigned big-endian bytes.
-fn read_mpint(data: &[u8], offset: usize) -> Result<(Vec<u8>, usize), SshdError> {
-    let (raw, next) = read_ssh_string(data, offset)?;
-    let stripped = strip_leading_zeros(raw);
-    Ok((stripped.to_vec(), next))
-}
-
-/// Read a boolean from the data at the given offset.
-fn read_bool(data: &[u8], offset: usize) -> Result<(bool, usize), SshdError> {
-    let (b, next) = read_byte(data, offset)?;
-    Ok((b != 0, next))
-}
+// The wire codec -- `ssh_string`, `encode_mpint`, `strip_leading_zeros`, and the
+// `read_*` readers -- lives in `sshwire`, not here; they are imported at the top
+// of this file with the rest. Each function is one half of a contract with
+// whatever is at the other end of the socket, and a private copy of one half is
+// a copy that can drift without any test in this crate noticing.
+//
+// The readers in particular were the last things here to be copies, and they
+// were the *worse* of the two copies: the client's had been rewritten to use
+// `checked_add` and `get` after its `offset + 4 > data.len()` guard was found to
+// wrap and thereby approve an out-of-bounds index, and this crate — which reads
+// the same fields from the same attacker before authentication rather than after
+// — kept the original. There was no mechanism by which that fix could reach
+// here, because a shared function cannot return `SshdError`. `sshwire::WireError`
+// is that mechanism.
 
 // ============================================================================
 // Minimal big-integer arithmetic for Diffie-Hellman
@@ -4076,7 +4045,7 @@ fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
 
     // Parse client's DH public value (e).
     let (client_e_bytes, _) = read_mpint(&dh_init, 1)?;
-    let client_e = BigUint::from_bytes_be(&client_e_bytes);
+    let client_e = BigUint::from_bytes_be(client_e_bytes);
 
     // Generate our DH keypair.
     let p = dh_group14_prime();
@@ -6499,62 +6468,16 @@ mod tests {
 
     // ---- SSH encoding helpers ----
 
-    #[test]
-    // `ssh_string` and `encode_mpint` are `sshwire`'s, and are tested there
-    // against RFC 4251 §5's own published examples. Re-asserting them here would
-    // grow a second, weaker statement of the same encoding in the crate that the
-    // shared one exists to stop having its own opinion. The roundtrip below is
-    // different in kind and stays: it checks sshd's *reader*, which is still
-    // local, against the shared writer.
-    fn test_read_ssh_string_roundtrip() {
-        let encoded = ssh_string(b"test data");
-        let (val, next) = read_ssh_string(&encoded, 0).unwrap();
-        assert_eq!(val, b"test data");
-        assert_eq!(next, encoded.len());
-    }
-
-    #[test]
-    fn test_read_ssh_string_truncated() {
-        assert!(read_ssh_string(&[0, 0, 0], 0).is_err());
-    }
-
-    #[test]
-    fn test_read_ssh_string_oversized() {
-        let data = [0, 0, 0, 10, 1, 2, 3]; // Claims 10 bytes but only 3 available.
-        assert!(read_ssh_string(&data, 0).is_err());
-    }
-
-    #[test]
-    fn test_read_u32() {
-        let data = [0, 0, 0, 42];
-        let (val, next) = read_u32(&data, 0).unwrap();
-        assert_eq!(val, 42);
-        assert_eq!(next, 4);
-    }
-
-    #[test]
-    fn test_read_u32_truncated() {
-        assert!(read_u32(&[0, 0], 0).is_err());
-    }
-
-    #[test]
-    fn test_read_byte() {
-        let (val, next) = read_byte(&[0xFF], 0).unwrap();
-        assert_eq!(val, 0xFF);
-        assert_eq!(next, 1);
-    }
-
-    #[test]
-    fn test_read_byte_empty() {
-        assert!(read_byte(&[], 0).is_err());
-    }
-
-    #[test]
-    fn test_read_mpint_roundtrip() {
-        let encoded = encode_mpint(&[0x42, 0x43]);
-        let (val, _) = read_mpint(&encoded, 0).unwrap();
-        assert_eq!(val, vec![0x42, 0x43]);
-    }
+    // The wire codec's own tests -- both halves of it, readers included -- are
+    // `sshwire`'s now, and are stated there against RFC 4251 §5's published
+    // examples and against the matching writer. The seven tests that used to
+    // stand here checked this crate's private readers; keeping copies of them
+    // would test the same functions twice and, worse, would go on passing if
+    // this crate ever grew private readers again, which is precisely the
+    // failure the shared crate exists to make impossible. The truncation and
+    // oversize cases they covered are `a_uint32_needs_all_four_bytes` and
+    // `a_string_longer_than_the_packet_is_refused_with_both_numbers`, joined
+    // there by an overflow case neither copy here ever had.
 
     // ---- Config parsing ----
 

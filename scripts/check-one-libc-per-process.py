@@ -484,9 +484,16 @@ def _self_test() -> int:
 
     tmp = Path(tempfile.mkdtemp(prefix="one-libc-selftest-"))
     try:
+        # `newline=""` on every write below. These fixtures live in a temp dir
+        # and cannot corrupt a tracked file, so `scripts/check-text-mode-writes.py`
+        # is what forces the keyword here -- but it is right on the merits too:
+        # the fixtures are Rust source that `check_callers` then matches line by
+        # line, and a fixture whose bytes differ between Windows and Linux makes
+        # this self-test grade something slightly different on each.
         (tmp / "posix" / "src").mkdir(parents=True)
         (tmp / "posix" / "src" / "ed25519.rs").write_text(
-            "pub fn sign(m: &[u8]) -> [u8; 64] { [0; 64] }\n", encoding="utf-8"
+            "pub fn sign(m: &[u8]) -> [u8; 64] { [0; 64] }\n",
+            encoding="utf-8", newline="",
         )
         (tmp / "posix" / "src" / "crypt.rs").write_text(
             'use crate::errno;\n'
@@ -496,7 +503,7 @@ def _self_test() -> int:
             "    errno::set_errno(errno::EINVAL);\n"
             "    core::ptr::null_mut()\n"
             "}\n",
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
 
         def crate(name: str, body: str, dep: str = 'posix = { path = "../../posix" }') -> None:
@@ -504,9 +511,9 @@ def _self_test() -> int:
             d.mkdir(parents=True)
             (tmp / "userspace" / name / "Cargo.toml").write_text(
                 f'[package]\nname = "{name}"\n\n[dependencies]\n{dep}\n',
-                encoding="utf-8",
+                encoding="utf-8", newline="",
             )
-            (d / "main.rs").write_text(body, encoding="utf-8")
+            (d / "main.rs").write_text(body, encoding="utf-8", newline="")
 
         crate("good", "fn f() { let _ = posix::ed25519::sign(b\"x\"); }\n")
         crate("stateful", "fn f() { posix::random::fill(&mut []); }\n")
@@ -534,7 +541,7 @@ def _self_test() -> int:
         (tmp / "posix" / "src" / "crypt.rs").write_text(
             "use crate::errno;\n"
             "pub fn buf() -> [u8; 8] { errno::set_errno(0); [0; 8] }\n",
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
         rotted = check_allowlist(tmp)
         expect("catches an allowlist that has rotted", len(rotted), 1)

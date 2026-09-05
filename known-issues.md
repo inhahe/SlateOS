@@ -116406,3 +116406,131 @@ entries does not need them.
 collision is a coin-flip away. Each one costs more to disentangle later than
 allocating from a band costs now, and the cost lands on whoever is reading a
 citation months from now rather than on whoever wrote it.
+
+## TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT (lane B, 2026-09-04)
+
+**In short:** A SlateOS program that lists `posix` as a Rust dependency gets a
+*second copy of the C library* compiled into it, and in that copy every single
+syscall is replaced by a stub returning `-ENOSYS`. The real libc is still there,
+linked in the normal way, still working. Nothing warns; the two copies simply
+disagree. This was not a theory — it made `ssh` and `sshd` unable to run at all,
+because both drew their secret keys through the broken copy.
+
+**Fixed for the entropy calls (2026-09-04). The underlying trap is still open**
+and will catch the next caller; the gate that would close it is proposed at the
+bottom of this entry.
+
+### The chain, every link measured rather than argued
+
+| # | Link | How it was checked |
+|---|---|---|
+| 1 | The SlateOS program target says `target_os = "linux"` | `rustc +nightly --print cfg --target toolchain/x86_64-slateos.json -Zunstable-options` → `target_os="linux"`, `target_vendor="slateos"` |
+| 2 | Every syscall in `posix` is gated `#[cfg(target_os = "none")]` | ~1,845 such gates; `target_os = "none"` is the *staticlib* build that produces `libc.a` |
+| 3 | So a program's rlib copy of `posix` takes the host arm | `cargo check-slateos -p sshd` prints `Checking posix v0.1.0` — it is compiled fresh, for `linux`, not reused from `libc.a` |
+| 4 | On that arm `syscallN` returns `HOST_ENOSYS` | `posix/src/syscall.rs:900` — `pub(crate) const HOST_ENOSYS: i64 = -38;` |
+| 5 | `posix::random::fill` reads `-38` as "no kernel here" | `classify_refusal` (`random.rs:251`), `not(target_os = "none")` arm → `KernelFill::Absent` |
+| 6 | …and falls through to its userspace pool | `pool_fill` (483) → `seed_material` (389) → `hw_word` (331) |
+| 7 | …which needs RDRAND/RDSEED | `hw_rng_kind` (289): CPUID leaf 1 ECX bit 30, leaf 7 EBX bit 18 |
+| 8 | The guest CPU has neither | `QEMU_CPU="qemu64,+smep,+smap,+umip"` (`boot-test.sh:6260`); feature set recorded at `known-issues.md:43677` — no RDRAND |
+
+**Result:** `Err(EIO)`. `sshd` could not generate or persist a host key and could
+not generate a Diffie-Hellman exponent; `ssh` could not generate its exponent or
+its KEXINIT cookie. Neither program could complete a connection.
+
+### Why it was invisible for so long
+
+Three reasons compounding:
+
+1. **The error blamed the wrong component.** The message read "cannot generate a
+   host key: the kernel CSPRNG returned errno 5" — naming a kernel that had
+   never been asked. A reader chasing that goes to `kernel/src/`, which is both
+   another lane's tree and entirely innocent.
+2. **The gate's own documentation omits this case.** `posix/src/syscall.rs`'s
+   comment describes exactly two builds: `target_os = "none"` (the real
+   staticlib) and "any host build … used by `cargo test` against the host
+   triple". The third build — *the rlib linked into an actual SlateOS program* —
+   is not mentioned, so the stub reads as test-only scaffolding.
+3. **The correct route existed and looked identical at the call site.**
+   `randrange` had a private `fill_from_kernel` going through the linked libc's
+   `getrandom` symbol, and `ssh-keygen` had hand-written the same extern a third
+   time. `posix::random::fill(&mut b)` and `randrange::fill_secret(&mut b)` are
+   the same shape, the same length, and one of them is silently broken.
+
+### Blast radius, measured
+
+**11 crates** depend on `posix` as an rlib. Only two `posix::` module families
+are actually named by any of them:
+
+| Module family | Nature | Effect of the duplicate copy |
+|---|---|---|
+| `ed25519`, `crypt::*` | pure arithmetic over caller-owned buffers; no syscall, no global state | **harmless.** A second copy computes the same answer. |
+| `random::fill` | reaches the kernel, and falls back to per-thread state on failure | **catastrophic**, per the chain above. 5 call sites, all now converted. |
+
+This is why the fix is not a crate-wide `compile_error!` on `posix` for
+non-`none` targets: `apps/lockscreen` (lane C) uses `crypt` and is unaffected in
+behaviour, and red-lighting another lane's build over a harmless use is how a
+gate gets deleted rather than obeyed.
+
+### The fix that was applied
+
+All five entropy draws now go through one public
+`randrange::fill_secret(&mut [u8]) -> Result<(), EntropyError>`, which reaches
+the kernel CSPRNG through the *linked libc's* `getrandom` C symbol:
+
+- `userspace/sshd` — host key seed, OpenSSH `checkint`, DH exponent
+- `userspace/ssh` — DH exponent, KEXINIT cookie
+- `userspace/ssh-keygen` — its private `fill_random`/`getrandom` block deleted in
+  favour of the shared one
+
+Each crate's `Cargo.toml` now says in a comment that `posix` is depended on for
+`ed25519` **only**, and why that limit exists.
+
+### The fix that was considered and rejected
+
+Widening posix's ~1,845 gates from `#[cfg(target_os = "none")]` to
+`#[cfg(any(target_os = "none", target_vendor = "slateos"))]`, so the rlib copy
+issues real syscalls.
+
+**This would make the problem worse, not better.** The rlib copy has its own
+`errno` cell, its own fd table, and its own per-thread block
+(`perthread::current()`'s `not(target_os = "none")` arm is a `thread_local!`,
+which is a *different* TLS slot from the linked libc's). Letting it issue real
+syscalls converts a loud, uniform `-ENOSYS` into silent divergence between two
+libcs that each believe they own the process — a file closed through one and
+read through the other, an `errno` set in one and read from the other. A stub
+that fails every call is a bad state; two live libcs disagreeing is a worse one.
+
+**The rule this establishes: one libc per process.** Anything in `posix` that
+touches the kernel, holds global state, or holds per-thread state is reachable
+from a program only through the C ABI (the symbols in `libc.a`), never as a Rust
+dependency. Pure computation over caller-owned buffers is exempt because it has
+nothing to disagree about. Recorded as `design-decisions.md` §768.
+
+### What is still open
+
+**Nothing enforces the rule.** The next crate to write
+`posix::something_stateful::call()` gets the same silent stub, and its author
+gets the same misdirected error message. The proposed gate has two halves:
+
+1. Fail when a crate outside `posix/` names a `posix::` module that is not on an
+   allowlist of provably pure modules (currently `ed25519`, `crypt`).
+2. Fail when an allowlisted module gains a reference to `syscall` or `perthread`
+   outside `#[cfg(test)]` — because that is the moment an entry on the allowlist
+   stops deserving to be there, and half a gate that trusts a stale allowlist is
+   worse than none.
+
+The second half is the part that matters: without it the allowlist is a claim
+made once and never rechecked, which is the shape of every rule in this tree
+that has quietly stopped being true.
+
+**A third possibility worth recording:** `posix/src/syscall.rs`'s stub arm could
+`compile_error!` when `target_vendor = "slateos"` — turning the silent stub into
+a build failure at exactly the point of misuse, with no allowlist to maintain.
+It was not done immediately because it fails the *whole* crate rather than the
+offending call, so a crate using only `ed25519` would stop building. Worth
+revisiting if the allowlist proves hard to keep honest.
+
+**If it is never fixed:** the entropy bug is gone, so nothing is broken today.
+The cost is paid by whoever next reaches for a stateful `posix::` API from a
+program — as a failure that names the kernel, sits in another lane's tree, and
+is not there.

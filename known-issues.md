@@ -117983,3 +117983,72 @@ defects**. Both are valid; the module-scope form is in fact *stronger* where a
 suite shells through `bash`, since a per-call `env=` never reaches the git that
 bash then runs. A false finding costs more than a missed one, and this audit
 produced two before it produced none.
+
+
+## TD-B-A-GREEN-CLIPPY-ON-THE-WINDOWS-HOST-PROVES-LITTLE-ABOUT-GATE-12 (lane B)
+
+**Status:** OPEN — 2026-09-05
+
+**In short:** Before pushing, we run `cargo clippy` on this machine and take a
+clean run as evidence the push will pass. It is not evidence. The clippy that
+runs here and the clippy the push gate runs inside WSL are **five months
+apart** — 0.1.95 (2026-04-14) here, 0.1.100 (2026-09-03) there — so the gate
+routinely rejects code the local run called clean. Nothing is broken by this;
+it just means a failed push is the *first* time you learn, and on a crate the
+gate has to compile from cold that costs about seventeen minutes per attempt.
+
+**How to see it:**
+
+```
+$ cargo clippy --version
+clippy 0.1.95 (59807616e1 2026-04-14)          # windows-gnu host
+
+$ wsl -e sh -c '$HOME/.cargo/bin/cargo +nightly clippy --version'
+clippy 0.1.100 (a69a63265c 2026-09-03)         # what gate 12 runs
+```
+
+**Where it bit.** Pushing the sshd interactive-session work on 2026-09-05. A
+local `cargo clippy -p sshd --all-targets --target x86_64-pc-windows-gnu`
+exited 0 with zero warnings. Gate 12 then failed the push on
+`clippy::needless_late_init` at `userspace/sshd/src/main.rs:1583` — a lint on
+**platform-independent** code (`hmac_sha256`), in a function nobody had touched
+in that change. The older clippy simply does not raise it. That is the
+important half: this is *not* only about `#[cfg(unix)]` arms the host never
+compiles, which is the failure mode gate 12 was built for and which everyone
+already expects. A lint-version skew rejects code that has no conditional
+compilation in it at all, so "I only changed portable code, the local run is
+enough" is exactly the wrong inference.
+
+**Why it is this way.** The two toolchains were installed at different times
+and nothing pins them together. `rust-toolchain.toml` would pin the *channel*,
+which both already agree on ("nightly"); it does not pin the date, and these
+are two independent rustup installations in two operating systems.
+
+**What the proper fix is.** Update the windows-gnu nightly so the two agree,
+and thereafter move them together. **This is deliberately not being done as
+part of this task**: a rustup update invalidates every lane's `target/` cache
+at once, and lane A's kernel builds against a custom target JSON with
+`-Zjson-target-spec`, which is precisely the sort of unstable interface a
+five-month toolchain jump can change under it. That is a cross-lane,
+everybody-rebuilds action and it should be taken deliberately by whoever can
+watch all three trees, not slipped into a userspace commit. Pinning both sides
+to one dated nightly afterwards is what stops the gap reopening.
+
+**Workaround until then** — the gate tells you this itself, but it is worth
+having in one place, because the useful time to read it is *before* the push:
+
+```
+bash scripts/coreutils-check.sh --only linux --dir userspace/<crate>
+```
+
+runs exactly what gate 12 runs, on the warm WSL target cache, and takes a
+fraction of a push. Run it on any crate you changed that the gate will pick up.
+
+**Cost while unfixed:** one wasted push cycle per surprise, paid by whichever
+lane touches a crate gate 12 compiles. Nothing reaches `origin` broken — the
+gate is doing its job, and doing it is the only reason this was ever noticed.
+The cost is purely the length of the feedback loop.
+
+**If never fixed:** the gap widens. Every month the two clippies diverge
+further, so the local run's predictive value keeps falling and the share of
+pushes that fail on a lint nobody could have seen locally keeps rising.

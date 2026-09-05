@@ -3812,6 +3812,13 @@ struct ConnectionState {
     config: SshdConfig,
     host_key: HostKey,
     enc: EncryptionState,
+    /// The client's version identification line, without its CRLF.
+    ///
+    /// Kept because RFC 4253 §8 makes it `V_C`, the first field of the exchange
+    /// hash — the value we sign with the host key and the client recomputes
+    /// independently. It is not merely logged: a server that does not remember
+    /// what the client said cannot compute a hash the client will agree with.
+    client_version: String,
     session_id: Option<[u8; 32]>,
     send_seq: u32,
     recv_seq: u32,
@@ -3833,6 +3840,7 @@ impl ConnectionState {
             config,
             host_key,
             enc: EncryptionState::none(),
+            client_version: String::new(),
             session_id: None,
             send_seq: 0,
             recv_seq: 0,
@@ -3992,6 +4000,11 @@ fn do_version_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
         )));
     }
 
+    // Keep it. This line used to be read, logged and dropped, and the exchange
+    // hash substituted a fixed "SSH-2.0-client" for it — which made every
+    // handshake unverifiable. See `compute_exchange_hash`.
+    conn.client_version = client_version;
+
     Ok(())
 }
 
@@ -4087,6 +4100,7 @@ fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
 
     // Compute exchange hash H.
     let exchange_hash = compute_exchange_hash(
+        &conn.client_version,
         SSH_SERVER_VERSION,
         &client_kexinit,
         &server_kexinit,
@@ -4171,6 +4185,7 @@ fn build_kexinit() -> Vec<u8> {
 
 /// Compute the SSH exchange hash H (RFC 4253, Section 8).
 fn compute_exchange_hash(
+    client_version: &str,
     server_version: &str,
     client_kexinit: &[u8],
     server_kexinit: &[u8],
@@ -4181,8 +4196,20 @@ fn compute_exchange_hash(
 ) -> [u8; 32] {
     let mut hash_input = Vec::new();
 
-    // V_C: client version (we use a placeholder since we don't store it).
-    hash_input.extend_from_slice(&ssh_string(b"SSH-2.0-client"));
+    // V_C: client version, as the client actually sent it.
+    //
+    // This was a fixed `b"SSH-2.0-client"`, with a comment saying we did not
+    // store the real one. That single substitution made the daemon unusable by
+    // any client at all, ours included: `H` is what we sign with the host key,
+    // and the client recomputes it from its own view of the handshake and
+    // checks our signature against *that*. Two different `V_C` values give two
+    // different hashes, so the signature could never verify and every
+    // connection died at host-key verification, before authentication.
+    //
+    // It survived because both ends are unit-tested against themselves and
+    // there is no test that makes them agree. See known-issues.md
+    // `TD-B-SSHD-SIGNS-AN-EXCHANGE-HASH-OVER-A-CLIENT-VERSION-THE-CLIENT-NEVER-SENT`.
+    hash_input.extend_from_slice(&ssh_string(client_version.as_bytes()));
     // V_S: server version.
     hash_input.extend_from_slice(&ssh_string(server_version.as_bytes()));
     // I_C: client KEXINIT payload.
@@ -8762,6 +8789,131 @@ DenyGroups nogroup
         let mut conn = conn_with_channel(32768);
         conn.recv_seq = 7;
         assert_eq!(conn.current_recv_seq(), 6);
+    }
+
+    // ---- Exchange hash (RFC 4253 §8) ----
+
+    /// The RFC 4253 §8 construction, written out longhand.
+    ///
+    /// `H = HASH(V_C || V_S || I_C || I_S || K_S || e || f || K)`, with the two
+    /// version strings and the three blobs as `string` and the three numbers as
+    /// `mpint`.
+    ///
+    /// This deliberately does not call `compute_exchange_hash`. A test that
+    /// asserts a function equals itself catches nothing, and the bug this
+    /// guards was a *missing input* — the real client version replaced by a
+    /// fixed one — which only an independent statement of what the hash should
+    /// cover can catch.
+    #[allow(clippy::too_many_arguments)]
+    fn rfc4253_exchange_hash(
+        v_c: &str,
+        v_s: &str,
+        i_c: &[u8],
+        i_s: &[u8],
+        k_s: &[u8],
+        e: &[u8],
+        f: &[u8],
+        k: &[u8],
+    ) -> [u8; 32] {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&ssh_string(v_c.as_bytes()));
+        buf.extend_from_slice(&ssh_string(v_s.as_bytes()));
+        buf.extend_from_slice(&ssh_string(i_c));
+        buf.extend_from_slice(&ssh_string(i_s));
+        buf.extend_from_slice(&ssh_string(k_s));
+        buf.extend_from_slice(&encode_mpint(e));
+        buf.extend_from_slice(&encode_mpint(f));
+        buf.extend_from_slice(&encode_mpint(k));
+        sha256(&buf)
+    }
+
+    #[test]
+    fn the_exchange_hash_is_the_one_rfc_4253_specifies() {
+        let v_c = "SSH-2.0-OpenSSH_9.6";
+        let (i_c, i_s) = (&[0x14u8, 1, 2, 3][..], &[0x14u8, 9, 8, 7][..]);
+        let k_s = &[0xAAu8; 51][..];
+        let e = &[0x11u8; 32][..];
+        let f = &[0x22u8; 32][..];
+        let k = &[0x33u8; 32][..];
+
+        assert_eq!(
+            compute_exchange_hash(v_c, SSH_SERVER_VERSION, i_c, i_s, k_s, e, f, k),
+            rfc4253_exchange_hash(v_c, SSH_SERVER_VERSION, i_c, i_s, k_s, e, f, k),
+        );
+    }
+
+    #[test]
+    fn the_clients_own_version_reaches_the_exchange_hash() {
+        // The regression, stated as the thing that was actually wrong: the hash
+        // did not depend on what the client said, because a constant stood in
+        // for it. Under the old code these two calls returned the same digest.
+        let (i_c, i_s) = (&[0x14u8, 1][..], &[0x14u8, 2][..]);
+        let k_s = &[0xAAu8; 51][..];
+        let e = &[0x11u8; 32][..];
+        let f = &[0x22u8; 32][..];
+        let k = &[0x33u8; 32][..];
+
+        let openssh = compute_exchange_hash(
+            "SSH-2.0-OpenSSH_9.6",
+            SSH_SERVER_VERSION,
+            i_c,
+            i_s,
+            k_s,
+            e,
+            f,
+            k,
+        );
+        let ours = compute_exchange_hash(
+            "SSH-2.0-SlateOS_1.0",
+            SSH_SERVER_VERSION,
+            i_c,
+            i_s,
+            k_s,
+            e,
+            f,
+            k,
+        );
+        assert_ne!(
+            openssh, ours,
+            "V_C must be an input to H, or the signature binds nothing about the client"
+        );
+    }
+
+    #[test]
+    fn the_placeholder_version_is_no_longer_what_gets_hashed() {
+        // Pins the specific fabricated string out of existence. Our own client
+        // sends `SSH-2.0-SlateOS_1.0`; the old code hashed `SSH-2.0-client`
+        // whatever the client sent, so this equality was what shipped.
+        let (i_c, i_s) = (&[0x14u8][..], &[0x14u8][..]);
+        let (k_s, e, f, k) = (
+            &[0u8; 51][..],
+            &[1u8; 32][..],
+            &[2u8; 32][..],
+            &[3u8; 32][..],
+        );
+        let real = compute_exchange_hash(
+            "SSH-2.0-SlateOS_1.0",
+            SSH_SERVER_VERSION,
+            i_c,
+            i_s,
+            k_s,
+            e,
+            f,
+            k,
+        );
+        let placeholder =
+            compute_exchange_hash("SSH-2.0-client", SSH_SERVER_VERSION, i_c, i_s, k_s, e, f, k);
+        assert_ne!(real, placeholder);
+    }
+
+    #[test]
+    fn a_fresh_connection_has_not_learned_a_client_version_yet() {
+        // `client_version` starts empty and is filled by the version exchange.
+        // If a future refactor ever computed the hash before that ran, this is
+        // the field that would be silently wrong, so its initial value is
+        // pinned rather than assumed.
+        let conn = conn_with_channel(32768);
+        assert!(conn.client_version.is_empty());
     }
 
     #[test]

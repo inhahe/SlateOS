@@ -110,8 +110,8 @@ use std::process;
 // shared by both ends is the point, and `sshd/Cargo.toml` for what a second copy
 // cost the last time.
 use sshwire::{
-    ExchangeHashInput, PacketCodec, Role, compute_exchange_hash, encode_mpint, read_bool,
-    read_mpint, read_ssh_string, read_u32, ssh_string, strip_leading_zeros,
+    BigUint, ExchangeHashInput, PacketCodec, Role, compute_exchange_hash, encode_mpint, read_bool,
+    read_mpint, read_ssh_string, read_u32, ssh_string,
 };
 
 // ============================================================================
@@ -1544,297 +1544,22 @@ impl StreamBuffer {
 // here, because a shared function cannot return `SshdError`. `sshwire::WireError`
 // is that mechanism.
 
-// ============================================================================
-// Minimal big-integer arithmetic for Diffie-Hellman
-// ============================================================================
-
-/// Big-endian unsigned big integer.
-#[derive(Clone, Debug)]
-struct BigUint {
-    bytes: Vec<u8>,
-}
-
-impl BigUint {
-    fn zero() -> Self {
-        Self { bytes: Vec::new() }
-    }
-
-    fn one() -> Self {
-        Self { bytes: vec![1] }
-    }
-
-    fn from_bytes_be(data: &[u8]) -> Self {
-        let stripped = strip_leading_zeros(data);
-        Self {
-            bytes: stripped.to_vec(),
-        }
-    }
-
-    fn to_bytes_be(&self) -> Vec<u8> {
-        if self.bytes.is_empty() {
-            return vec![0];
-        }
-        self.bytes.clone()
-    }
-
-    fn is_zero(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
-    #[expect(
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-    )]
-    fn bit_length(&self) -> usize {
-        if self.bytes.is_empty() {
-            return 0;
-        }
-        let top = self.bytes[0];
-        let top_bits = 8 - top.leading_zeros() as usize;
-        (self.bytes.len() - 1) * 8 + top_bits
-    }
-
-    #[expect(
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-    )]
-    fn bit(&self, pos: usize) -> bool {
-        let byte_idx = pos / 8;
-        let bit_idx = pos % 8;
-        if byte_idx >= self.bytes.len() {
-            return false;
-        }
-        let idx = self.bytes.len() - 1 - byte_idx;
-        (self.bytes[idx] >> bit_idx) & 1 == 1
-    }
-
-    /// Modular exponentiation: self^exp mod modulus.
-    fn mod_pow(&self, exp: &BigUint, modulus: &BigUint) -> BigUint {
-        if modulus.is_zero() {
-            return BigUint::zero();
-        }
-        let mut result = BigUint::one();
-        let mut base = self.mod_reduce(modulus);
-        let bits = exp.bit_length();
-        for i in 0..bits {
-            if exp.bit(i) {
-                result = result.mod_mul(&base, modulus);
-            }
-            base = base.mod_mul(&base, modulus);
-        }
-        result
-    }
-
-    fn mod_mul(&self, other: &BigUint, modulus: &BigUint) -> BigUint {
-        let product = self.mul_big(other);
-        product.mod_reduce(modulus)
-    }
-
-    fn mod_reduce(&self, modulus: &BigUint) -> BigUint {
-        if modulus.is_zero() {
-            return BigUint::zero();
-        }
-        self.div_rem(modulus).1
-    }
-
-    /// Full multiplication (schoolbook, O(n^2)).
-    #[expect(
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-    )]
-    fn mul_big(&self, other: &BigUint) -> BigUint {
-        if self.is_zero() || other.is_zero() {
-            return BigUint::zero();
-        }
-        let a = &self.bytes;
-        let b = &other.bytes;
-        let mut result = vec![0u32; a.len() + b.len()];
-
-        for (i, &av) in a.iter().enumerate().rev() {
-            let ai = a.len() - 1 - i;
-            for (j, &bv) in b.iter().enumerate().rev() {
-                let bj = b.len() - 1 - j;
-                let pos = ai + bj;
-                let prod = u32::from(av) * u32::from(bv) + result[pos];
-                result[pos] = prod & 0xFF;
-                if pos + 1 < result.len() {
-                    result[pos + 1] += prod >> 8;
-                }
-            }
-        }
-
-        // Propagate carries.
-        for i in 0..result.len() - 1 {
-            if result[i] > 255 {
-                result[i + 1] += result[i] >> 8;
-                result[i] &= 0xFF;
-            }
-        }
-
-        let mut bytes: Vec<u8> = result.iter().rev().map(|&v| v as u8).collect();
-        while bytes.len() > 1 && bytes[0] == 0 {
-            bytes.remove(0);
-        }
-        if bytes == [0] {
-            bytes.clear();
-        }
-        BigUint { bytes }
-    }
-
-    /// Division with remainder.
-    #[expect(
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-    )]
-    fn div_rem(&self, divisor: &BigUint) -> (BigUint, BigUint) {
-        if divisor.is_zero() {
-            return (BigUint::zero(), BigUint::zero());
-        }
-        if self.cmp_unsigned(divisor) == std::cmp::Ordering::Less {
-            return (BigUint::zero(), self.clone());
-        }
-
-        let mut remainder = BigUint::zero();
-        let mut quotient_bits = Vec::new();
-
-        for i in (0..self.bit_length()).rev() {
-            remainder = remainder.shl1();
-            if self.bit(i) {
-                remainder = remainder.add_small(1);
-            }
-            if remainder.cmp_unsigned(divisor) != std::cmp::Ordering::Less {
-                remainder = remainder.sub_big(divisor);
-                quotient_bits.push(i);
-            }
-        }
-
-        if quotient_bits.is_empty() {
-            return (BigUint::zero(), remainder);
-        }
-
-        let max_bit = quotient_bits[0];
-        let num_bytes = max_bit / 8 + 1;
-        let mut qbytes = vec![0u8; num_bytes];
-        for pos in quotient_bits {
-            let byte_idx = pos / 8;
-            let bit_idx = pos % 8;
-            let idx = num_bytes - 1 - byte_idx;
-            qbytes[idx] |= 1 << bit_idx;
-        }
-        while qbytes.len() > 1 && qbytes[0] == 0 {
-            qbytes.remove(0);
-        }
-        if qbytes == [0] {
-            qbytes.clear();
-        }
-        (BigUint { bytes: qbytes }, remainder)
-    }
-
-    #[expect(
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-    )]
-    fn shl1(&self) -> BigUint {
-        if self.is_zero() {
-            return BigUint::zero();
-        }
-        let mut result = vec![0u8; self.bytes.len() + 1];
-        let mut carry = 0u8;
-        for i in (0..self.bytes.len()).rev() {
-            let v = (u16::from(self.bytes[i]) << 1) | u16::from(carry);
-            result[i + 1] = v as u8;
-            carry = (v >> 8) as u8;
-        }
-        result[0] = carry;
-        while result.len() > 1 && result[0] == 0 {
-            result.remove(0);
-        }
-        if result == [0] {
-            result.clear();
-        }
-        BigUint { bytes: result }
-    }
-
-    #[expect(
-        clippy::arithmetic_side_effects,
-        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-    )]
-    fn add_small(&self, val: u8) -> BigUint {
-        if val == 0 {
-            return self.clone();
-        }
-        if self.is_zero() {
-            return BigUint { bytes: vec![val] };
-        }
-        let mut result = self.bytes.clone();
-        let mut carry = u16::from(val);
-        for b in result.iter_mut().rev() {
-            let sum = u16::from(*b) + carry;
-            *b = sum as u8;
-            carry = sum >> 8;
-        }
-        if carry > 0 {
-            result.insert(0, carry as u8);
-        }
-        BigUint { bytes: result }
-    }
-
-    #[expect(
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-    )]
-    fn sub_big(&self, other: &BigUint) -> BigUint {
-        if other.is_zero() {
-            return self.clone();
-        }
-        let a = &self.bytes;
-        let b = &other.bytes;
-        let len = a.len();
-        let mut result = vec![0u8; len];
-        let mut borrow: i16 = 0;
-
-        for i in (0..len).rev() {
-            let av = i16::from(a[i]);
-            let bi = i as isize - (len as isize - b.len() as isize);
-            let bv = if bi >= 0 {
-                i16::from(b[bi as usize])
-            } else {
-                0
-            };
-            let diff = av - bv - borrow;
-            if diff < 0 {
-                result[i] = (diff + 256) as u8;
-                borrow = 1;
-            } else {
-                result[i] = diff as u8;
-                borrow = 0;
-            }
-        }
-
-        while result.len() > 1 && result[0] == 0 {
-            result.remove(0);
-        }
-        if result == [0] {
-            result.clear();
-        }
-        BigUint { bytes: result }
-    }
-
-    fn cmp_unsigned(&self, other: &BigUint) -> std::cmp::Ordering {
-        let a = strip_leading_zeros(&self.bytes);
-        let b = strip_leading_zeros(&other.bytes);
-        match a.len().cmp(&b.len()) {
-            std::cmp::Ordering::Equal => a.cmp(b),
-            ord => ord,
-        }
-    }
-}
+// The big-integer arithmetic for Diffie-Hellman is `sshwire`'s, not this
+// file's -- for the same reason as everything else that moved there, and with
+// the sharpest consequence of any of them. This file's copy was big-endian
+// bytes with long division done one *bit* at a time, allocating three vectors
+// per bit; `ssh` had been rewritten to little-endian limbs and Knuth's
+// algorithm D when that shape was measured at over eighty seconds of CPU for a
+// single key exchange. The fix had no route here while the type was private to
+// a binary, so this daemon went on spending that eighty seconds per connection
+// -- twice over, since it computes both `g^y` and `e^y` -- *before* the client
+// had authenticated anything. That is not a slow handshake, it is a denial of
+// service available to anyone who can reach the port.
+//
+// Twenty-one of this file's suppressed panic sites were in that copy, and they
+// are gone with it rather than audited: `sshwire::BigUint` indexes through
+// `get`/`get_mut` throughout, and states a bound for each of the four places it
+// does unchecked arithmetic.
 
 // ============================================================================
 // SHA-256
@@ -1873,39 +1598,15 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 
 // ============================================================================
 // Diffie-Hellman group 14 parameters (RFC 3526)
+//
+// The prime and the generator are `sshwire`'s. This file held its own
+// transcription of the same 512 hex digits, and its own hex parser to turn
+// them into bytes -- a parser that built a two-character `String` per byte and
+// swallowed a bad digit as zero. Both ends must agree about the group down to
+// the last bit or the handshake produces two different secrets, so the group
+// is exactly the kind of thing that must be written once. See
+// `sshwire::DH_GROUP14_P_HEX`.
 // ============================================================================
-
-/// DH group 14 prime (2048-bit MODP group).
-fn dh_group14_prime() -> BigUint {
-    let p_hex = concat!(
-        "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1",
-        "29024E088A67CC74020BBEA63B139B22514A08798E3404DD",
-        "EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245",
-        "E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED",
-        "EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3D",
-        "C2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F",
-        "83655D23DCA3AD961C62F356208552BB9ED529077096966D",
-        "670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B",
-        "E39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9",
-        "DE2BCBF6955817183995497CEA956AE515D2261898FA0510",
-        "15728E5A8AACAA68FFFFFFFFFFFFFFFF"
-    );
-
-    let mut bytes = Vec::new();
-    let mut chars = p_hex.chars();
-    while let Some(hi) = chars.next() {
-        if let Some(lo) = chars.next() {
-            let byte = u8::from_str_radix(&format!("{hi}{lo}"), 16).unwrap_or(0);
-            bytes.push(byte);
-        }
-    }
-    BigUint::from_bytes_be(&bytes)
-}
-
-/// DH group 14 generator.
-fn dh_group14_generator() -> BigUint {
-    BigUint::from_bytes_be(&[2])
-}
 
 /// Draw a Diffie-Hellman private exponent from the kernel CSPRNG.
 ///
@@ -3699,15 +3400,15 @@ fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
     let client_e = BigUint::from_bytes_be(client_e_bytes);
 
     // Generate our DH keypair.
-    let p = dh_group14_prime();
-    let g = dh_group14_generator();
+    let p = sshwire::dh_group14_prime();
+    let g = BigUint::from_bytes_be(&[sshwire::DH_GROUP14_G]);
 
     // RFC 4253 section 8: "values of e or f that are not in the range
     // [1, p-1]" must be rejected. Without this a client can send e = 0 or
     // e = 1 and pin the shared secret to 0 or 1 -- a value it knows, and
     // therefore session keys it knows, with no need to break anything.
     // e = p-1 is excluded too: it has order 2, so K is one of two values.
-    let p_minus_1 = p.sub_big(&BigUint::one());
+    let p_minus_1 = p.sub(&BigUint::one());
     if client_e.cmp_unsigned(&BigUint::one()) != std::cmp::Ordering::Greater
         || client_e.cmp_unsigned(&p_minus_1) != std::cmp::Ordering::Less
     {

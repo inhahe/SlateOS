@@ -29,6 +29,9 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::{scroll_window, wheel};
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use std::collections::VecDeque;
 
@@ -58,6 +61,24 @@ const OVERLAY0: Color = Color::from_hex(0x6C7086);
 // ============================================================================
 // Layout Constants
 // ============================================================================
+
+/// How often a connecting session or a running transfer takes a step.
+///
+/// Both are simulated -- there is no RDP, VNC or SSH client behind this -- so
+/// this is the pace of the animation and not of any network. Slow enough that
+/// "Authenticating" is legible, fast enough that a connection does not feel
+/// stuck.
+const WORK_STEP: Duration = Duration::from_millis(400);
+
+/// How many bytes one [`WORK_STEP`] moves, for a transfer of `size`.
+///
+/// A share of the whole rather than a fixed rate, so a small file does not take
+/// as long as a large one and a large one does not take all afternoon. Twenty
+/// steps end to end, which at `WORK_STEP` is about eight seconds -- long enough
+/// to watch a bar move, short enough to see it finish.
+fn transfer_step(size: u64) -> u64 {
+    (size / 20).max(1)
+}
 
 const WINDOW_WIDTH: f32 = 1100.0;
 const WINDOW_HEIGHT: f32 = 750.0;
@@ -505,6 +526,18 @@ pub struct ConnectionProfile {
     pub auto_reconnect: bool,
 }
 
+/// The wall clock, in seconds since the epoch.
+///
+/// `0` if the system clock is before 1970 or unreadable, which is what the
+/// history entries carried unconditionally before -- with the comment "would
+/// use real time in production" beside it, so every connection in the history
+/// was stamped 1 January 1970 and they all sorted equal.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 impl ConnectionProfile {
     pub fn new_default(id: u32) -> Self {
         Self {
@@ -512,7 +545,11 @@ impl ConnectionProfile {
             display_name: String::new(),
             group: "Default".into(),
             hostname: String::new(),
-            port: 3389,
+            // From the protocol rather than written out again: `default_port`
+            // existed, was tested for all three protocols, and had no caller,
+            // while `3389` sat here as a literal. Change the protocol above and
+            // the port used to stay wrong.
+            port: Protocol::Rdp.default_port(),
             username: String::new(),
             protocol: Protocol::Rdp,
             quality: QualityPreset::Auto,
@@ -632,6 +669,16 @@ pub struct RemoteDesktopApp {
     // --- Misc ---
     pub status_message: Option<String>,
     pub confirm_delete: Option<usize>,
+
+    /// How wide the window is, in pixels.
+    ///
+    /// Every layout and every hit test read the `WINDOW_WIDTH` constant, so the
+    /// program drew a 1100x750 picture in whatever window it was given -- and
+    /// because the hit tests read it too, a resized window put the sidebar
+    /// boundary and the view tabs where the pointer could not find them.
+    pub window_width: f32,
+    /// How tall the window is, in pixels.
+    pub window_height: f32,
 }
 
 impl Default for RemoteDesktopApp {
@@ -711,6 +758,8 @@ impl RemoteDesktopApp {
             content_wheel: wheel::Accumulator::default(),
             status_message: None,
             confirm_delete: None,
+            window_width: WINDOW_WIDTH,
+            window_height: WINDOW_HEIGHT,
         };
         app.load_sample_data();
         app
@@ -996,9 +1045,13 @@ impl RemoteDesktopApp {
     }
 
     /// Height of the main content area.
+    ///
+    /// Takes `&self` because the window's height is state now rather than a
+    /// constant -- which is the whole point, and is why this could be an
+    /// associated function before.
     #[must_use]
-    pub fn content_height() -> f32 {
-        WINDOW_HEIGHT - Self::content_top() - STATUS_BAR_HEIGHT
+    pub fn content_height(&self) -> f32 {
+        self.window_height - Self::content_top() - STATUS_BAR_HEIGHT
     }
 
     /// The shape of whichever list the content pane is currently showing.
@@ -1008,7 +1061,7 @@ impl RemoteDesktopApp {
     /// list ends — which is precisely the mistake the sidebar's hit-test made
     /// against its own renderer.
     fn content_list_metrics(&self) -> Option<ListMetrics> {
-        let avail = Self::content_height();
+        let avail = self.content_height();
         match self.current_view {
             MainView::FileTransfer => Some(ListMetrics {
                 total: self.transfers.len(),
@@ -1047,7 +1100,7 @@ impl RemoteDesktopApp {
     /// The furthest the sidebar can usefully be scrolled, for the list the
     /// current view puts there. See [`Self::max_content_scroll`].
     fn max_sidebar_scroll(&self) -> usize {
-        let avail = Self::content_height();
+        let avail = self.content_height();
         match self.current_view {
             MainView::Connections => {
                 let rows = self.sidebar_rows();
@@ -1079,19 +1132,20 @@ impl RemoteDesktopApp {
         };
         let id = session.id;
         self.next_session_id = self.next_session_id.saturating_add(1);
-        self.sessions.push(session);
-        self.history.push_front(HistoryEntry {
+        let entry = HistoryEntry {
             profile_name: profile.display_name.clone(),
             hostname: profile.hostname.clone(),
             protocol: profile.protocol,
-            timestamp: 0, // would use real time in production
+            timestamp: now_secs(),
             duration_secs: 0,
             success: true,
-        });
-        // Trim history
-        while self.history.len() > 50 {
-            self.history.pop_back();
-        }
+        };
+        self.sessions.push(session);
+        // Through `add_history_entry`, which had no caller while this pushed
+        // and trimmed by hand -- and the two disagreed about how much history
+        // to keep: 100 entries there, 50 here. Two copies of a rule keep one
+        // number each.
+        self.add_history_entry(entry);
         Some(id)
     }
 
@@ -1293,8 +1347,85 @@ impl RemoteDesktopApp {
         match event {
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Key(key) => self.handle_key(key),
+            Event::Resize { width, height } => {
+                self.window_width = *width as f32;
+                self.window_height = *height as f32;
+                EventResult::Consumed
+            }
+            Event::Tick { .. } => self.handle_tick(),
             _ => EventResult::Ignored,
         }
+    }
+
+    /// The quality preset of the selected profile, or `Auto` with none
+    /// selected -- which is the preset a new profile is created with.
+    fn selected_quality(&self) -> QualityPreset {
+        self.selected_profile
+            .and_then(|i| self.profiles.get(i))
+            .map_or(QualityPreset::Auto, |p| p.quality)
+    }
+
+    /// The transfer the Delete key acts on: the first one still running.
+    ///
+    /// The file-transfer view has no selection of its own -- there is nothing
+    /// in the state for one and nothing on screen that marks a row -- so
+    /// "cancel" means the transfer at the top of the queue, and with none
+    /// running the key sweeps up the finished ones instead. A selection would
+    /// be better and is a bigger change than wiring the keys that exist.
+    fn selected_transfer_index(&self) -> Option<usize> {
+        self.transfers
+            .iter()
+            .position(|t| matches!(t.state, TransferState::Queued | TransferState::InProgress))
+    }
+
+    /// Whether anything on screen is still moving.
+    ///
+    /// A session part-way through connecting, or a transfer with bytes left to
+    /// move. When neither is true the window is a list of saved profiles and
+    /// has nothing to redraw, so [`App::tick_interval`] asks for no clock.
+    pub fn has_work_in_flight(&self) -> bool {
+        self.sessions.iter().any(|s| {
+            matches!(
+                s.state,
+                SessionState::Connecting
+                    | SessionState::Authenticating
+                    | SessionState::Reconnecting
+            )
+        }) || self
+            .transfers
+            .iter()
+            .any(|t| matches!(t.state, TransferState::Queued | TransferState::InProgress))
+    }
+
+    /// One step of everything in flight.
+    ///
+    /// `advance_session_state` and `update_transfer_progress` were both written
+    /// and both had no caller, so a session stayed on "Connecting" for the life
+    /// of the process and a transfer's progress bar never left zero -- in an
+    /// application whose module doc leads with session management and file
+    /// transfer with progress bars.
+    fn handle_tick(&mut self) -> EventResult {
+        if !self.has_work_in_flight() {
+            return EventResult::Ignored;
+        }
+
+        for index in 0..self.sessions.len() {
+            self.advance_session_state(index);
+        }
+
+        for index in 0..self.transfers.len() {
+            let Some(next) = self.transfers.get(index).and_then(|t| {
+                matches!(t.state, TransferState::Queued | TransferState::InProgress).then(|| {
+                    t.transferred_bytes
+                        .saturating_add(transfer_step(t.size_bytes))
+                })
+            }) else {
+                continue;
+            };
+            self.update_transfer_progress(index, next);
+        }
+
+        EventResult::Consumed
     }
 
     fn handle_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> EventResult {
@@ -1467,6 +1598,89 @@ impl RemoteDesktopApp {
                 }
                 EventResult::Consumed
             }
+            // Answer the confirmation. `delete_profile` had no caller, so the
+            // dialog opened and there was no key that went through with it --
+            // and none that dismissed it either, so it stayed on screen.
+            Key::Y | Key::Enter if self.confirm_delete.is_some() => {
+                if let Some(index) = self.confirm_delete.take() {
+                    let name = self
+                        .profiles
+                        .get(index)
+                        .map(|p| p.display_name.clone())
+                        .unwrap_or_default();
+                    if self.delete_profile(index) {
+                        self.status_message = Some(format!("deleted {name}"));
+                    }
+                }
+                EventResult::Consumed
+            }
+            Key::N | Key::Escape if self.confirm_delete.is_some() => {
+                self.confirm_delete = None;
+                EventResult::Consumed
+            }
+            // Quality presets for the selected profile: Q cycles them. Written
+            // and tested, and `apply_quality_preset` had no caller -- so a
+            // profile's colour depth, refresh rate and scaling were whatever
+            // they were created with, for ever.
+            Key::Q if self.current_view == MainView::Connections => {
+                let next = match self.selected_quality() {
+                    QualityPreset::Auto => QualityPreset::LowBandwidth,
+                    QualityPreset::LowBandwidth => QualityPreset::Balanced,
+                    QualityPreset::Balanced => QualityPreset::HighQuality,
+                    QualityPreset::HighQuality => QualityPreset::Auto,
+                };
+                self.apply_quality_preset(next);
+                self.status_message = Some(format!("quality: {}", next.label()));
+                EventResult::Consumed
+            }
+            // Span every remote monitor, or go back to the first one. The
+            // module doc promises remote monitor detection and selection, and
+            // `set_monitor_mode` had no caller.
+            Key::M if self.current_view == MainView::ActiveSessions => {
+                let next = match self.monitor_mode {
+                    MonitorMode::SpanAll => MonitorMode::SingleMonitor(0),
+                    MonitorMode::SingleMonitor(_) => MonitorMode::SpanAll,
+                };
+                let label = next.label();
+                self.set_monitor_mode(next);
+                self.status_message = Some(format!("monitors: {label}"));
+                EventResult::Consumed
+            }
+            // Disconnect and reconnect the selected session. Both were
+            // written, both tested, and neither had a key: a session could be
+            // started and never stopped.
+            Key::D if self.current_view == MainView::ActiveSessions => {
+                if let Some(index) = self.selected_session {
+                    self.disconnect_session(index);
+                }
+                EventResult::Consumed
+            }
+            Key::R if self.current_view == MainView::ActiveSessions => {
+                if let Some(index) = self.selected_session {
+                    self.reconnect_session(index);
+                }
+                EventResult::Consumed
+            }
+            // Drop the sessions that have finished, which is the only way the
+            // list ever gets shorter.
+            Key::Delete if self.current_view == MainView::ActiveSessions => {
+                self.cleanup_sessions();
+                EventResult::Consumed
+            }
+            // Cancel a running transfer, and sweep up the finished ones.
+            Key::Delete if self.current_view == MainView::FileTransfer => {
+                if let Some(index) = self.selected_transfer_index() {
+                    self.cancel_transfer(index);
+                } else {
+                    self.clear_finished_transfers();
+                }
+                EventResult::Consumed
+            }
+            Key::Delete if self.current_view == MainView::History => {
+                self.clear_history();
+                self.status_message = Some("history cleared".to_string());
+                EventResult::Consumed
+            }
             // New profile
             Key::N if key.modifiers.ctrl => {
                 let profile = ConnectionProfile::new_default(0);
@@ -1515,15 +1729,19 @@ impl RemoteDesktopApp {
     // ========================================================================
 
     /// Produce all render commands for the current frame.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    /// Draw the whole window.
+    ///
+    /// Not `render`: [`App::render`] is the one the window calls, and an
+    /// inherent method of the same name shadows a trait method at equal arity.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(256);
 
         // Background
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
+            width: self.window_width,
+            height: self.window_height,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1533,13 +1751,13 @@ impl RemoteDesktopApp {
         self.render_tabs(&mut cmds);
 
         let content_y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + TAB_HEIGHT;
-        let content_h = WINDOW_HEIGHT - content_y - STATUS_BAR_HEIGHT;
+        let content_h = self.window_height - content_y - STATUS_BAR_HEIGHT;
 
         // Content area
         cmds.push(RenderCommand::PushClip {
             x: 0.0,
             y: content_y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: content_h,
         });
 
@@ -1566,7 +1784,7 @@ impl RemoteDesktopApp {
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: TITLE_BAR_HEIGHT,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
@@ -1615,7 +1833,7 @@ impl RemoteDesktopApp {
         // Fullscreen indicator
         if self.fullscreen {
             cmds.push(RenderCommand::FillRect {
-                x: WINDOW_WIDTH - 120.0,
+                x: self.window_width - 120.0,
                 y: 8.0,
                 width: 80.0,
                 height: 22.0,
@@ -1623,7 +1841,7 @@ impl RemoteDesktopApp {
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: WINDOW_WIDTH - 112.0,
+                x: self.window_width - 112.0,
                 y: 12.0,
                 text: "Fullscreen".into(),
                 font_size: 11.0,
@@ -1638,7 +1856,7 @@ impl RemoteDesktopApp {
         cmds.push(RenderCommand::Line {
             x1: 0.0,
             y1: TITLE_BAR_HEIGHT,
-            x2: WINDOW_WIDTH,
+            x2: self.window_width,
             y2: TITLE_BAR_HEIGHT,
             color: SURFACE0,
             width: 1.0,
@@ -1652,7 +1870,7 @@ impl RemoteDesktopApp {
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: TOOLBAR_HEIGHT,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
@@ -1694,7 +1912,7 @@ impl RemoteDesktopApp {
 
         // Quality preset selector on right side
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 200.0,
+            x: self.window_width - 200.0,
             y: y + 10.0,
             text: "Quality:".into(),
             font_size: 12.0,
@@ -1710,7 +1928,7 @@ impl RemoteDesktopApp {
             .map_or(QualityPreset::Auto, |p| p.quality);
 
         cmds.push(RenderCommand::FillRect {
-            x: WINDOW_WIDTH - 140.0,
+            x: self.window_width - 140.0,
             y: y + 6.0,
             width: 120.0,
             height: 24.0,
@@ -1718,7 +1936,7 @@ impl RemoteDesktopApp {
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 132.0,
+            x: self.window_width - 132.0,
             y: y + 10.0,
             text: preset.label().into(),
             font_size: 12.0,
@@ -1732,7 +1950,7 @@ impl RemoteDesktopApp {
         cmds.push(RenderCommand::Line {
             x1: 0.0,
             y1: y + TOOLBAR_HEIGHT,
-            x2: WINDOW_WIDTH,
+            x2: self.window_width,
             y2: y + TOOLBAR_HEIGHT,
             color: SURFACE0,
             width: 1.0,
@@ -1745,7 +1963,7 @@ impl RemoteDesktopApp {
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: TAB_HEIGHT,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
@@ -1813,7 +2031,7 @@ impl RemoteDesktopApp {
         cmds.push(RenderCommand::Line {
             x1: 0.0,
             y1: y + TAB_HEIGHT,
-            x2: WINDOW_WIDTH,
+            x2: self.window_width,
             y2: y + TAB_HEIGHT,
             color: SURFACE0,
             width: 1.0,
@@ -1987,7 +2205,7 @@ impl RemoteDesktopApp {
         _content_h: f32,
     ) {
         let px = SIDEBAR_WIDTH + SECTION_PADDING;
-        let pw = WINDOW_WIDTH - SIDEBAR_WIDTH - 2.0 * SECTION_PADDING;
+        let pw = self.window_width - SIDEBAR_WIDTH - 2.0 * SECTION_PADDING;
 
         // Detail tab bar
         let detail_tabs = [
@@ -2389,7 +2607,7 @@ impl RemoteDesktopApp {
 
         // Session detail panel
         let px = SIDEBAR_WIDTH + SECTION_PADDING;
-        let pw = WINDOW_WIDTH - SIDEBAR_WIDTH - 2.0 * SECTION_PADDING;
+        let pw = self.window_width - SIDEBAR_WIDTH - 2.0 * SECTION_PADDING;
 
         if let Some(idx) = self.selected_session {
             if let Some(session) = self.sessions.get(idx) {
@@ -2450,7 +2668,7 @@ impl RemoteDesktopApp {
 
     fn render_file_transfer(&self, cmds: &mut Vec<RenderCommand>, content_y: f32, content_h: f32) {
         let px = SECTION_PADDING;
-        let pw = WINDOW_WIDTH - 2.0 * SECTION_PADDING;
+        let pw = self.window_width - 2.0 * SECTION_PADDING;
 
         // Header
         cmds.push(RenderCommand::Text {
@@ -2482,7 +2700,7 @@ impl RemoteDesktopApp {
         cmds.push(RenderCommand::PushClip {
             x: 0.0,
             y: list_y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: content_h - (list_y - content_y),
         });
 
@@ -2629,7 +2847,7 @@ impl RemoteDesktopApp {
 
     fn render_history(&self, cmds: &mut Vec<RenderCommand>, content_y: f32, content_h: f32) {
         let px = SECTION_PADDING;
-        let pw = WINDOW_WIDTH - 2.0 * SECTION_PADDING;
+        let pw = self.window_width - 2.0 * SECTION_PADDING;
 
         // Header
         cmds.push(RenderCommand::Text {
@@ -2645,7 +2863,7 @@ impl RemoteDesktopApp {
 
         render_button(
             cmds,
-            WINDOW_WIDTH - SECTION_PADDING - 100.0,
+            self.window_width - SECTION_PADDING - 100.0,
             content_y + SECTION_PADDING - 2.0,
             100.0,
             28.0,
@@ -2657,7 +2875,7 @@ impl RemoteDesktopApp {
         cmds.push(RenderCommand::PushClip {
             x: 0.0,
             y: list_y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: content_h - (list_y - content_y),
         });
 
@@ -2764,12 +2982,12 @@ impl RemoteDesktopApp {
     }
 
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        let y = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
+        let y = self.window_height - STATUS_BAR_HEIGHT;
 
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: STATUS_BAR_HEIGHT,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
@@ -2779,7 +2997,7 @@ impl RemoteDesktopApp {
         cmds.push(RenderCommand::Line {
             x1: 0.0,
             y1: y,
-            x2: WINDOW_WIDTH,
+            x2: self.window_width,
             y2: y,
             color: SURFACE0,
             width: 1.0,
@@ -2849,7 +3067,7 @@ impl RemoteDesktopApp {
 
         // Latency on right side
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 160.0,
+            x: self.window_width - 160.0,
             y: y + 7.0,
             text: format!("{:.1}ms", self.perf_metrics.latency_ms),
             font_size: 11.0,
@@ -2861,7 +3079,7 @@ impl RemoteDesktopApp {
 
         // FPS
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 80.0,
+            x: self.window_width - 80.0,
             y: y + 7.0,
             text: format!("{:.0} fps", self.perf_metrics.frame_rate),
             font_size: 11.0,
@@ -2873,7 +3091,7 @@ impl RemoteDesktopApp {
     }
 
     fn render_perf_overlay(&self, cmds: &mut Vec<RenderCommand>) {
-        let ox = WINDOW_WIDTH - 240.0;
+        let ox = self.window_width - 240.0;
         let oy = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + TAB_HEIGHT + 10.0;
         let ow = 220.0;
         let oh = 160.0;
@@ -3125,19 +3343,67 @@ fn format_duration(secs: u64) -> String {
 // Entry point
 // ============================================================================
 
-fn main() {
-    let mut app = RemoteDesktopApp::new();
-    let _cmds = app.render();
+impl App for RemoteDesktopApp {
+    fn title(&self) -> String {
+        // What is connected, because that is what a remote-desktop window is
+        // about and what a taskbar entry needs to distinguish two of them. The
+        // harness re-reads this as the program runs.
+        match self
+            .sessions
+            .iter()
+            .find(|s| s.state == SessionState::Connected)
+        {
+            Some(session) => format!("{} - Remote Desktop", session.display_name),
+            None => "Remote Desktop".to_string(),
+        }
+    }
 
-    // The actual event loop would be driven by the compositor.
-    // For now, verify rendering and event handling work.
-    let test_event = Event::Key(KeyEvent {
-        key: Key::F11,
-        pressed: true,
-        modifiers: Modifiers::NONE,
-        text: String::new(),
-    });
-    let _result = app.handle_event(&test_event);
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// A clock while anything is in flight.
+    ///
+    /// Two things age on their own: a session works through
+    /// Connecting -> Authenticating -> Connected, and a queued file transfer
+    /// moves bytes. Neither could: `advance_session_state` and
+    /// `update_transfer_progress` had no caller, so a connection sat on
+    /// "Connecting" for the life of the process and a transfer's progress bar
+    /// stayed at zero.
+    ///
+    /// `None` when nothing is in flight, rather than a permanent heartbeat: a
+    /// window showing a list of saved profiles has nothing to redraw, and
+    /// waking a sleeping machine to find that out is `known-issues.md` lesson
+    /// 47's cost paid for none of its benefit.
+    fn tick_interval(&self) -> Option<Duration> {
+        self.has_work_in_flight().then_some(WORK_STEP)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // From the frame being drawn rather than the last `Resize`: the first
+        // frame is drawn before any `Resize` arrives, and every hit test in
+        // this file is derived from these two numbers.
+        self.window_width = width;
+        self.window_height = height;
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = RemoteDesktopApp::new();
+    app::launch("remotedesktop", &mut app)
 }
 
 // ============================================================================
@@ -3149,15 +3415,384 @@ mod tests {
     // A test that indexes out of range should fail loudly and point at the
     // line that did it — that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
+    // Nor is exact float comparison a hazard in a test that asserts a size came
+    // back exactly as it was handed in: an epsilon there would weaken the
+    // assertion rather than strengthen it.
     #![allow(
         clippy::indexing_slicing,
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::arithmetic_side_effects
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
     )]
 
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Wiring
+    //
+    // Twenty-one functions had no caller outside the tests, and the list is
+    // most of what this program does: delete, disconnect, reconnect, queue,
+    // cancel, sync, clear, and the two that make anything move at all.
+    // ------------------------------------------------------------------
+
+    fn key_ev(key: Key, ctrl: bool) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn press(k: Key) -> Event {
+        key_ev(k, false)
+    }
+
+    fn tick() -> Event {
+        Event::Tick { elapsed_ms: 400 }
+    }
+
+    /// The app with its sample sessions and transfers cleared away.
+    ///
+    /// `new` seeds both -- which is right, and is what the window opens on --
+    /// but a test about *one* session or *one* transfer has to be able to name
+    /// the one it made. Several of these tests were written against
+    /// `transfers[0]` on the assumption it was theirs; it was a sample.
+    fn empty() -> RemoteDesktopApp {
+        let mut app = RemoteDesktopApp::new();
+        app.sessions.clear();
+        app.selected_session = None;
+        app.transfers.clear();
+        app
+    }
+
+    /// `advance_session_state` had no caller, so a session sat on "Connecting"
+    /// for the life of the process.
+    #[test]
+    fn a_connecting_session_works_through_to_connected() {
+        let mut app = empty();
+        app.selected_profile = Some(0);
+        let id = app.connect_profile(0).expect("a profile to connect");
+        let index = app
+            .sessions
+            .iter()
+            .position(|s| s.id == id)
+            .expect("the session");
+        assert_eq!(app.sessions[index].state, SessionState::Connecting);
+        assert_eq!(
+            app.tick_interval(),
+            Some(WORK_STEP),
+            "a connecting session needs a clock"
+        );
+
+        let mut seen = vec![app.sessions[index].state];
+        for _ in 0..8 {
+            app.handle_event(&tick());
+            seen.push(app.sessions[index].state);
+            if app.sessions[index].state == SessionState::Connected {
+                break;
+            }
+        }
+        assert_eq!(app.sessions[index].state, SessionState::Connected);
+        assert!(
+            seen.contains(&SessionState::Authenticating),
+            "it should pass through authenticating, got {seen:?}"
+        );
+    }
+
+    /// And the clock stops once nothing is moving: a list of saved profiles has
+    /// nothing to redraw.
+    #[test]
+    fn an_idle_window_asks_for_no_clock() {
+        let mut app = empty();
+        assert_eq!(app.tick_interval(), None);
+
+        app.connect_profile(0);
+        assert!(app.tick_interval().is_some());
+        for _ in 0..8 {
+            app.handle_event(&tick());
+        }
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "everything has finished; the clock should stop"
+        );
+        assert_eq!(
+            app.handle_event(&tick()),
+            EventResult::Ignored,
+            "and a stray tick should not ask for a frame"
+        );
+    }
+
+    /// A transfer that has finished must not keep the clock running: the whole
+    /// point of `tick_interval` returning `None` is that an idle window lets
+    /// the machine sleep, and "there is a transfer in the list" is not the same
+    /// question as "there is a transfer still moving".
+    #[test]
+    fn a_finished_transfer_does_not_keep_the_clock_running() {
+        let mut app = empty();
+        app.queue_transfer("done.bin".to_string(), 100, TransferDirection::Upload);
+        for _ in 0..40 {
+            if app.transfers[0].state == TransferState::Completed {
+                break;
+            }
+            app.handle_event(&tick());
+        }
+        assert_eq!(app.transfers[0].state, TransferState::Completed);
+        assert!(
+            !app.transfers.is_empty(),
+            "the row is still on screen -- that is the point"
+        );
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "a completed transfer still in the list should not keep waking the              machine"
+        );
+
+        // Nor should a cancelled one.
+        app.queue_transfer("gone.bin".to_string(), 100, TransferDirection::Upload);
+        let index = app.transfers.len().saturating_sub(1);
+        app.cancel_transfer(index);
+        assert_eq!(app.tick_interval(), None);
+    }
+
+    /// `update_transfer_progress` had no caller, so a transfer's bar stayed at
+    /// zero -- in an app whose module doc promises progress bars.
+    #[test]
+    fn a_queued_transfer_moves_its_bytes_and_finishes() {
+        let mut app = empty();
+        app.queue_transfer("notes.txt".to_string(), 4096, TransferDirection::Upload);
+        let start = app.transfers[0].transferred_bytes;
+        assert_eq!(start, 0);
+
+        app.handle_event(&tick());
+        assert!(
+            app.transfers[0].transferred_bytes > start,
+            "the first tick should have moved bytes"
+        );
+        assert_eq!(app.transfers[0].state, TransferState::InProgress);
+
+        for _ in 0..40 {
+            if app.transfers[0].state == TransferState::Completed {
+                break;
+            }
+            app.handle_event(&tick());
+        }
+        assert_eq!(app.transfers[0].state, TransferState::Completed);
+        assert_eq!(app.transfers[0].transferred_bytes, 4096);
+    }
+
+    // -- the confirmation dialog --
+
+    /// Delete opened a confirmation and `delete_profile` had no caller, so
+    /// there was no key that went through with it and none that dismissed it.
+    #[test]
+    fn the_delete_confirmation_can_be_answered_either_way() {
+        let mut app = RemoteDesktopApp::new();
+        let before = app.profiles.len();
+        assert!(before > 1);
+        app.selected_profile = Some(0);
+        app.current_view = MainView::Connections;
+
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(app.confirm_delete, Some(0));
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(app.confirm_delete, None, "Escape should dismiss it");
+        assert_eq!(app.profiles.len(), before, "and delete nothing");
+
+        app.handle_event(&press(Key::Delete));
+        app.handle_event(&press(Key::Y));
+        assert_eq!(app.confirm_delete, None);
+        assert_eq!(
+            app.profiles.len(),
+            before - 1,
+            "Y should go through with it"
+        );
+    }
+
+    // -- sessions --
+
+    #[test]
+    fn a_session_can_be_disconnected_reconnected_and_swept_up() {
+        let mut app = empty();
+        app.connect_profile(0);
+        app.current_view = MainView::ActiveSessions;
+        app.selected_session = Some(0);
+
+        app.handle_event(&press(Key::D));
+        assert_eq!(app.sessions[0].state, SessionState::Disconnected);
+
+        app.handle_event(&press(Key::R));
+        assert_eq!(app.sessions[0].state, SessionState::Reconnecting);
+
+        app.handle_event(&press(Key::D));
+        app.handle_event(&press(Key::Delete));
+        assert!(
+            app.sessions.is_empty(),
+            "Delete should clear the disconnected sessions"
+        );
+    }
+
+    // -- transfers --
+
+    #[test]
+    fn delete_cancels_a_running_transfer_then_sweeps_the_finished_ones() {
+        let mut app = empty();
+        app.current_view = MainView::FileTransfer;
+        app.queue_transfer("a.bin".to_string(), 1000, TransferDirection::Download);
+
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(app.transfers[0].state, TransferState::Cancelled);
+
+        app.handle_event(&press(Key::Delete));
+        assert!(
+            app.transfers.is_empty(),
+            "with nothing running, Delete should clear the finished ones"
+        );
+    }
+
+    // -- history --
+
+    /// `connect_profile` pushed history by hand and trimmed at 50, while
+    /// `add_history_entry` -- which had no caller -- trimmed at 100. Two copies
+    /// of one rule, each with its own number.
+    #[test]
+    fn the_history_is_trimmed_by_one_rule() {
+        let mut app = RemoteDesktopApp::new();
+        app.clear_history();
+        for _ in 0..150 {
+            app.connect_profile(0);
+        }
+        assert_eq!(
+            app.history.len(),
+            100,
+            "the bound is `add_history_entry`'s, and there is only one"
+        );
+    }
+
+    /// Every entry was stamped `0`, with a comment saying real time would be
+    /// used in production, so the whole history sorted equal at 1 January 1970.
+    #[test]
+    fn a_connection_is_recorded_with_the_time_it_happened() {
+        let mut app = RemoteDesktopApp::new();
+        app.clear_history();
+        app.connect_profile(0);
+        let entry = app.history.front().expect("an entry");
+        assert!(
+            entry.timestamp > 1_700_000_000,
+            "the entry is stamped {}, which is not a time this happened",
+            entry.timestamp
+        );
+    }
+
+    #[test]
+    fn delete_clears_the_history() {
+        let mut app = RemoteDesktopApp::new();
+        app.connect_profile(0);
+        app.current_view = MainView::History;
+        assert!(!app.history.is_empty());
+        app.handle_event(&press(Key::Delete));
+        assert!(app.history.is_empty());
+    }
+
+    // -- settings --
+
+    /// `apply_quality_preset` had no caller, so a profile kept whatever colour
+    /// depth, refresh rate and scaling it was created with.
+    #[test]
+    fn q_cycles_the_quality_preset_of_the_selected_profile() {
+        let mut app = RemoteDesktopApp::new();
+        app.current_view = MainView::Connections;
+        app.selected_profile = Some(0);
+
+        let mut seen = vec![app.profiles[0].quality];
+        for _ in 0..4 {
+            app.handle_event(&press(Key::Q));
+            seen.push(app.profiles[0].quality);
+        }
+        assert_eq!(
+            seen.first(),
+            seen.last(),
+            "four presses of a four-way cycle should come back round: {seen:?}"
+        );
+        let mut distinct = seen.clone();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 5, "every press should change it: {seen:?}");
+        for preset in [
+            QualityPreset::Auto,
+            QualityPreset::LowBandwidth,
+            QualityPreset::Balanced,
+            QualityPreset::HighQuality,
+        ] {
+            assert!(seen.contains(&preset), "{preset:?} was skipped: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn m_switches_between_one_monitor_and_all_of_them() {
+        let mut app = RemoteDesktopApp::new();
+        app.current_view = MainView::ActiveSessions;
+        let before = app.monitor_mode.clone();
+        app.handle_event(&press(Key::M));
+        assert_ne!(app.monitor_mode, before);
+        app.handle_event(&press(Key::M));
+        assert_eq!(app.monitor_mode, before, "and back again");
+    }
+
+    /// The port belongs to the protocol. `default_port` was tested for all
+    /// three and had no caller, while `3389` sat in the constructor.
+    ///
+    /// This one cannot be mutation-checked, and it is worth saying why rather
+    /// than leaving a survivor unexplained: RDP's default port *is* 3389, so
+    /// putting the literal back changes no behaviour today. What the change
+    /// buys is that an edit to the default protocol carries the port with it --
+    /// a failure in a future edit, which no mutation of the present code can
+    /// express. The assertion states the invariant anyway, because that is what
+    /// a later reader needs to see.
+    #[test]
+    fn a_new_profile_takes_its_port_from_its_protocol() {
+        let profile = ConnectionProfile::new_default(7);
+        assert_eq!(profile.port, profile.protocol.default_port());
+    }
+
+    // -- the window --
+
+    /// Every layout *and every hit test* read the size constants, so a resized
+    /// window put the controls where the pointer could not find them.
+    #[test]
+    fn the_layout_follows_the_window_it_is_given() {
+        let mut app = RemoteDesktopApp::new();
+        let tall = app.content_height();
+        let _ = App::render(&mut app, WINDOW_WIDTH, WINDOW_HEIGHT + 300.0);
+        assert!(
+            app.content_height() > tall,
+            "a taller window should have a taller content area"
+        );
+        assert_eq!(app.window_height, WINDOW_HEIGHT + 300.0);
+    }
+
+    #[test]
+    fn the_title_names_what_is_connected() {
+        let mut app = empty();
+        assert_eq!(
+            app.title(),
+            "Remote Desktop",
+            "with nothing connected there is nothing to name"
+        );
+        app.connect_profile(0);
+        for _ in 0..8 {
+            app.handle_event(&tick());
+        }
+        assert!(
+            app.title().ends_with(" - Remote Desktop") && app.title() != "Remote Desktop",
+            "got {:?}",
+            app.title()
+        );
+    }
 
     // ====================================================================
     // Profile CRUD tests
@@ -3854,7 +4489,7 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let app = RemoteDesktopApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3864,7 +4499,7 @@ mod tests {
     #[test]
     fn test_render_starts_with_background() {
         let app = RemoteDesktopApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         match &cmds[0] {
             RenderCommand::FillRect {
                 x,
@@ -3888,7 +4523,7 @@ mod tests {
     fn test_render_connections_view() {
         let mut app = RemoteDesktopApp::new();
         app.current_view = MainView::Connections;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Should produce a reasonable number of commands
         assert!(cmds.len() > 20);
     }
@@ -3897,7 +4532,7 @@ mod tests {
     fn test_render_sessions_view() {
         let mut app = RemoteDesktopApp::new();
         app.current_view = MainView::ActiveSessions;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10);
     }
 
@@ -3905,7 +4540,7 @@ mod tests {
     fn test_render_file_transfer_view() {
         let mut app = RemoteDesktopApp::new();
         app.current_view = MainView::FileTransfer;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10);
     }
 
@@ -3913,7 +4548,7 @@ mod tests {
     fn test_render_history_view() {
         let mut app = RemoteDesktopApp::new();
         app.current_view = MainView::History;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10);
     }
 
@@ -3921,7 +4556,7 @@ mod tests {
     fn test_render_perf_overlay() {
         let mut app = RemoteDesktopApp::new();
         app.show_perf_overlay = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Should include overlay rendering (more commands)
         assert!(cmds.len() > 30);
     }
@@ -3931,7 +4566,7 @@ mod tests {
         let mut app = RemoteDesktopApp::new();
         app.sessions.clear();
         app.current_view = MainView::ActiveSessions;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Should have a message about no active sessions
         let has_text = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
@@ -3948,7 +4583,7 @@ mod tests {
         let mut app = RemoteDesktopApp::new();
         app.selected_profile = None;
         app.current_view = MainView::Connections;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_empty_state = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text.contains("Select a connection")
@@ -3963,7 +4598,7 @@ mod tests {
     fn test_render_fullscreen_indicator() {
         let mut app = RemoteDesktopApp::new();
         app.fullscreen = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_indicator = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text.contains("Fullscreen")

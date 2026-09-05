@@ -155,7 +155,11 @@ Recorded in `design-decisions.md` §764.
 
 ## Cost
 
-Reading all 13 908 tracked files is ~195 MB, and takes 44 s at `READ_THREADS`.
+Reading every tracked file -- ~13 900 of them, ~195 MB -- takes 44 s at
+`READ_THREADS`. Deliberately not written as an exact count: the tree gains files
+every day, so a precise number here is stale by the next commit and invites the
+same rot as the "by running *first*" sentence below. The measured figures behind
+this live in the scope section above, where they are dated.
 The cost is per-file antivirus interception rather than bandwidth (see
 `open-questions.md` A-Q7, which is about exactly that tax), which is why it
 parallelises nearly perfectly and why the pool is what makes this affordable at

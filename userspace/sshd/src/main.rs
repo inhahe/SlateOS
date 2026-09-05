@@ -2788,6 +2788,16 @@ struct SshdConfig {
     deny_users: Vec<String>,
     allow_groups: Vec<String>,
     deny_groups: Vec<String>,
+    /// Names of environment variables a client may set on its session, as
+    /// shell-glob patterns.
+    ///
+    /// Empty by default, and that emptiness is the security property rather
+    /// than an omission: a client's environment is attacker-controlled input to
+    /// a process this daemon is about to run as the authenticated user, and
+    /// `LD_PRELOAD`, `PATH`, `IFS` and `BASH_ENV` turn "set a variable" into
+    /// "choose the code that runs". OpenSSH makes the same choice; its shipped
+    /// config opts in to `LANG` and `LC_*` and nothing else.
+    accept_env: Vec<String>,
 }
 
 /// Root login policy.
@@ -2818,6 +2828,7 @@ impl SshdConfig {
             deny_users: Vec::new(),
             allow_groups: Vec::new(),
             deny_groups: Vec::new(),
+            accept_env: Vec::new(),
         }
     }
 
@@ -2910,6 +2921,14 @@ impl SshdConfig {
                         config.deny_users.push(user.into());
                     }
                 }
+                // Repeated `AcceptEnv` lines accumulate rather than replace,
+                // which is OpenSSH's behaviour and the only one that lets a
+                // drop-in file add a variable without restating the base list.
+                "acceptenv" => {
+                    for pattern in value.split_whitespace() {
+                        config.accept_env.push(pattern.into());
+                    }
+                }
                 "allowgroups" => {
                     for group in value.split_whitespace() {
                         config.allow_groups.push(group.into());
@@ -2971,12 +2990,95 @@ impl SshdConfig {
         if !self.deny_groups.is_empty() {
             lines.push(format!("denygroups {}", self.deny_groups.join(" ")));
         }
+        if !self.accept_env.is_empty() {
+            lines.push(format!("acceptenv {}", self.accept_env.join(" ")));
+        }
         // Each directive on its own line, with a trailing newline to match the
         // historical per-line `push_str(... "\n")` output.
         let mut out = lines.join("\n");
         out.push('\n');
         out
     }
+}
+
+/// Match `name` against one shell-glob `pattern`: `*` for any run of
+/// characters, `?` for exactly one, everything else literal.
+///
+/// This is the matcher `sshd_config` has always implied — `AcceptEnv LC_*` is
+/// the line OpenSSH's own shipped config uses — so a pattern that is only ever
+/// compared literally is a directive that silently does nothing.
+///
+/// The loop backtracks, but only ever to the *most recent* `*`, and each
+/// backtrack advances the text position by one. That is what keeps it linear
+/// in practice rather than exponential in the number of stars: a naive
+/// recursive matcher on `a*a*a*a*b` against a long run of `a`s is the classic
+/// way to hand a remote client an unbounded amount of the daemon's CPU.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = name.chars().collect();
+    let mut pi = 0usize;
+    let mut ti = 0usize;
+    // Where the most recent `*` sits, and how much of the text it had consumed
+    // when we passed it. `None` means there is nothing to fall back to and a
+    // mismatch is final.
+    let mut resume: Option<(usize, usize)> = None;
+
+    loop {
+        let p = pat.get(pi).copied();
+        let t = text.get(ti).copied();
+        match (p, t) {
+            (Some('*'), _) => {
+                resume = Some((pi, ti));
+                pi = pi.saturating_add(1);
+            }
+            (Some('?'), Some(_)) => {
+                pi = pi.saturating_add(1);
+                ti = ti.saturating_add(1);
+            }
+            (Some(pc), Some(tc)) if pc == tc => {
+                pi = pi.saturating_add(1);
+                ti = ti.saturating_add(1);
+            }
+            _ => {
+                if p.is_none() && t.is_none() {
+                    return true;
+                }
+                let Some((star_pi, star_ti)) = resume else {
+                    return false;
+                };
+                // Give the `*` one more character. Running past the end of the
+                // text means even the greediest reading of it cannot match.
+                let next_ti = star_ti.saturating_add(1);
+                if next_ti > text.len() {
+                    return false;
+                }
+                resume = Some((star_pi, next_ti));
+                pi = star_pi.saturating_add(1);
+                ti = next_ti;
+            }
+        }
+    }
+}
+
+/// Match `name` against a list of patterns, where a leading `!` negates.
+///
+/// A negated match wins outright, so `LC_*` `!LC_ALL` accepts every locale
+/// variable except that one regardless of the order the two are written in.
+/// This is OpenSSH's `match_pattern_list` rule, and order-independence is the
+/// point: a configuration whose meaning depends on which line came first is one
+/// an administrator will eventually get wrong.
+fn pattern_list_matches(patterns: &[String], name: &str) -> bool {
+    let mut matched = false;
+    for pattern in patterns {
+        if let Some(negated) = pattern.strip_prefix('!') {
+            if glob_matches(negated, name) {
+                return false;
+            }
+        } else if glob_matches(pattern, name) {
+            matched = true;
+        }
+    }
+    matched
 }
 
 /// Parse a boolean config value.
@@ -3071,34 +3173,40 @@ fn parse_authorized_keys(content: &str) -> Vec<AuthorizedKey> {
 }
 
 /// Check if a username is allowed by the allow/deny user/group lists.
+///
+/// All four directives are *pattern* lists, matched by [`pattern_list_matches`]
+/// — `AllowUsers admin*` is the shape `sshd_config(5)` documents and the shape
+/// an administrator who knows OpenSSH will write. Comparing them literally,
+/// which this did until 2026-09-05, fails in both directions at once: an
+/// `AllowUsers` pattern matches no account and locks everybody out, while a
+/// `DenyUsers` pattern matches no account and quietly lets the very people it
+/// names straight in.
 fn is_user_allowed(username: &str, groups: &[String], config: &SshdConfig) -> bool {
     // DenyUsers takes precedence.
-    if !config.deny_users.is_empty() && config.deny_users.iter().any(|u| u == username) {
+    if pattern_list_matches(&config.deny_users, username) {
         return false;
     }
 
     // DenyGroups.
-    if !config.deny_groups.is_empty() {
-        for group in groups {
-            if config.deny_groups.iter().any(|g| g == group) {
-                return false;
-            }
-        }
+    if groups
+        .iter()
+        .any(|group| pattern_list_matches(&config.deny_groups, group))
+    {
+        return false;
     }
 
-    // AllowUsers: if specified, user must be in the list.
-    if !config.allow_users.is_empty() && !config.allow_users.iter().any(|u| u == username) {
+    // AllowUsers: if specified, user must match one of the patterns.
+    if !config.allow_users.is_empty() && !pattern_list_matches(&config.allow_users, username) {
         return false;
     }
 
     // AllowGroups: if specified, at least one group must match.
-    if !config.allow_groups.is_empty() {
-        let has_match = groups
+    if !config.allow_groups.is_empty()
+        && !groups
             .iter()
-            .any(|g| config.allow_groups.iter().any(|ag| ag == g));
-        if !has_match {
-            return false;
-        }
+            .any(|group| pattern_list_matches(&config.allow_groups, group))
+    {
+        return false;
     }
 
     true
@@ -3204,6 +3312,19 @@ fn default_path_for_uid(uid: u32) -> &'static str {
 /// with whatever init happened to be holding, and passing that to a remote
 /// user leaks the daemon's configuration to them and lets a variable set at
 /// boot silently change how their commands behave.
+/// Apply the variables the client asked for and `AcceptEnv` allowed.
+///
+/// Called after [`session_env`] has laid down the base, so an allowlisted name
+/// that also appears there wins — which is the point of an administrator having
+/// listed it. The names that must *not* be overridable are refused at the
+/// request instead, where the client can be told (see `REFUSED_SESSION_ENV`);
+/// silently dropping them here would recreate the exact bug this replaced.
+fn apply_client_env(cmd: &mut process::Command, client_env: &[(String, String)]) {
+    for (key, value) in client_env {
+        cmd.env(key, value);
+    }
+}
+
 fn session_env(user: &PasswdEntry) -> Vec<(String, String)> {
     vec![
         ("HOME".to_string(), user.home.clone()),
@@ -3309,7 +3430,11 @@ fn classify_exit(status: &std::process::ExitStatus) -> SessionExit {
 /// therefore runs as root; if it spawned a session without dropping to the
 /// authenticated account, every user who could log in would get root, which
 /// is a worse failure than having no session support at all.
-fn session_command(user: &PasswdEntry, command_line: &str) -> process::Command {
+fn session_command(
+    user: &PasswdEntry,
+    command_line: &str,
+    client_env: &[(String, String)],
+) -> process::Command {
     let mut cmd = process::Command::new(&user.shell);
     cmd.arg("-c").arg(command_line);
 
@@ -3319,6 +3444,7 @@ fn session_command(user: &PasswdEntry, command_line: &str) -> process::Command {
     for (key, value) in session_env(user) {
         cmd.env(key, value);
     }
+    apply_client_env(&mut cmd, client_env);
 
     // All three are pipes, stdin included. Running the command on `/dev/null`
     // instead — which is what this did while `exec` was a one-shot — makes
@@ -3353,8 +3479,9 @@ fn session_command(user: &PasswdEntry, command_line: &str) -> process::Command {
 fn spawn_session_command(
     user: &PasswdEntry,
     command_line: &str,
+    client_env: &[(String, String)],
 ) -> Result<process::Child, io::Error> {
-    spawn_in_home(user, || session_command(user, command_line))
+    spawn_in_home(user, || session_command(user, command_line, client_env))
 }
 
 /// Spawn the command `build` produces from `user`'s home directory, retrying
@@ -3417,7 +3544,11 @@ fn login_argv0(shell_path: &str) -> String {
 /// same reason: sshd binds port 22 and runs as root, so a session that did not
 /// drop to the authenticated account would hand out root to everyone who could
 /// log in.
-fn login_shell_command(user: &PasswdEntry, term: &str) -> process::Command {
+fn login_shell_command(
+    user: &PasswdEntry,
+    term: &str,
+    client_env: &[(String, String)],
+) -> process::Command {
     let mut cmd = process::Command::new(&user.shell);
 
     // Start from an empty environment; see `session_env` for why the daemon's
@@ -3426,9 +3557,12 @@ fn login_shell_command(user: &PasswdEntry, term: &str) -> process::Command {
     for (key, value) in session_env(user) {
         cmd.env(key, value);
     }
+    apply_client_env(&mut cmd, client_env);
     // `TERM` is the one variable the client is allowed to choose, because it
     // describes the client's own display and nothing on this end can know it.
-    // It is set last so a client cannot use it to overwrite `PATH` or `HOME`.
+    // It is set last, and `env` requests naming it are refused outright, so
+    // there is one path by which it can arrive: the `pty-req` that describes
+    // the terminal it belongs to.
     if !term.is_empty() {
         cmd.env("TERM", term);
     }
@@ -3456,8 +3590,12 @@ fn login_shell_command(user: &PasswdEntry, term: &str) -> process::Command {
 /// the pty version; only the attachment differs. In particular it still gets
 /// the login `argv[0]`, because a script piped through a remote shell has the
 /// same claim on `/etc/profile` as an interactive login does.
-fn shell_command_pipes(user: &PasswdEntry, term: &str) -> process::Command {
-    let mut cmd = login_shell_command(user, term);
+fn shell_command_pipes(
+    user: &PasswdEntry,
+    term: &str,
+    client_env: &[(String, String)],
+) -> process::Command {
+    let mut cmd = login_shell_command(user, term, client_env);
     cmd.stdin(process::Stdio::piped());
     cmd.stdout(process::Stdio::piped());
     cmd.stderr(process::Stdio::piped());
@@ -3465,8 +3603,13 @@ fn shell_command_pipes(user: &PasswdEntry, term: &str) -> process::Command {
 }
 
 /// The login shell attached to the pty slave `slave_fd`.
-fn shell_command(user: &PasswdEntry, term: &str, slave_fd: i32) -> process::Command {
-    let mut cmd = login_shell_command(user, term);
+fn shell_command(
+    user: &PasswdEntry,
+    term: &str,
+    slave_fd: i32,
+    client_env: &[(String, String)],
+) -> process::Command {
+    let mut cmd = login_shell_command(user, term, client_env);
 
     // The three standard descriptors are wired to `/dev/null` and then
     // immediately replaced: `login_tty` dup2s the slave over 0, 1 and 2 in the
@@ -3593,6 +3736,15 @@ struct Channel {
     /// drains, or the last of the client's data would be discarded by the very
     /// message that says it has all been sent.
     input_eof: bool,
+    /// Variables the client asked for and the configuration allowed, applied to
+    /// the child when `shell`/`exec`/`subsystem` spawns it.
+    ///
+    /// Only names matching an `AcceptEnv` pattern ever land here, and that list
+    /// is empty unless an administrator wrote one — see
+    /// [`SshdConfig::accept_env`]. RFC 4254 §6.4 puts these before the session
+    /// request, so collecting them on the channel and applying them at spawn is
+    /// the order the protocol already prescribes.
+    env: Vec<(String, String)>,
 }
 
 impl Channel {
@@ -3615,6 +3767,7 @@ impl Channel {
             exit: None,
             pending_input: Vec::new(),
             input_eof: false,
+            env: Vec::new(),
         }
     }
 }
@@ -4798,13 +4951,7 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
             start_pipe_session(conn, recipient, remote_id, &command, want_reply)?;
         }
         "env" => {
-            // Accept environment variable requests silently.
-            if want_reply {
-                let mut success = Vec::new();
-                success.push(msg::SSH_MSG_CHANNEL_SUCCESS);
-                success.extend_from_slice(&remote_id.to_be_bytes());
-                conn.send_packet(&success)?;
-            }
+            handle_env_request(conn, recipient, remote_id, payload, off, want_reply)?;
         }
         "window-change" => {
             // RFC 4254 §6.7: columns, rows, width in pixels, height in pixels.
@@ -4873,6 +5020,129 @@ fn send_channel_failure(conn: &mut ConnectionState, remote_id: u32) -> Result<()
     conn.send_packet(&reply)
 }
 
+/// The most variables one channel will remember for its session.
+///
+/// OpenSSH's limit, and it exists because the client chooses both how many
+/// requests to send and how large each is: without a cap, a session that never
+/// starts can still make the daemon hold an arbitrary amount of memory.
+const MAX_SESSION_ENV: usize = 128;
+
+/// The most bytes of names and values one channel will remember.
+///
+/// The count limit alone is not enough — 128 variables of a megabyte each is
+/// still a megabyte times 128 — and a real session's whole environment is a few
+/// kilobytes, so this is far above any honest use.
+const MAX_SESSION_ENV_BYTES: usize = 64 * 1024;
+
+/// Variables a client may never set on its session, whatever `AcceptEnv` says.
+///
+/// These are not preferences; they are the server's answers to "who is this
+/// session and where does it live", taken from `/etc/passwd` after
+/// authentication. A client that could rewrite `HOME` or `SHELL` would be
+/// choosing which dotfiles the login shell sources — and `LOGNAME`/`USER`
+/// disagreeing with the account that actually authenticated turns every audit
+/// log downstream into a lie.
+///
+/// `TERM` is here for a different reason: it *is* the client's to choose, but
+/// it arrives in the `pty-req` that describes the terminal it belongs to.
+/// Letting a second, unrelated request set it as well creates two sources for
+/// one value, and no ordering of the two is obviously right.
+const REFUSED_SESSION_ENV: [&str; 5] = ["HOME", "USER", "LOGNAME", "SHELL", "TERM"];
+
+/// Decide whether `name` may be set by the client, given the configuration.
+///
+/// Split out from the request handler so the policy can be tested without a
+/// connection, and so there is exactly one place where the answer is decided —
+/// the reply sent to the client and the variable applied to the child must
+/// never be able to disagree.
+fn env_request_allowed(config: &SshdConfig, name: &str, value: &str) -> bool {
+    // A name is not a name if it cannot be one. `=` would let a single request
+    // smuggle in a second variable through any implementation that later joins
+    // the pair with one, and a NUL truncates the string at the `execve`
+    // boundary, so what the daemon logged and what the child received would
+    // differ. Both are rejected before the patterns are consulted, because a
+    // pattern list is an administrator's statement about *names*, and neither
+    // of these is one.
+    if name.is_empty() || name.contains('=') || name.contains('\0') || value.contains('\0') {
+        return false;
+    }
+    if REFUSED_SESSION_ENV.contains(&name) {
+        return false;
+    }
+    pattern_list_matches(&config.accept_env, name)
+}
+
+/// Handle an `env` channel request (RFC 4254 §6.4).
+///
+/// Answering SUCCESS to every request and discarding the variable — which is
+/// what this used to do — is a lie the client has no way to detect, because the
+/// reply is the only signal the protocol gives it. A refusal is not a defeat:
+/// FAILURE means "not set", the client can act on it, and OpenSSH answers
+/// exactly the same way for a name outside `AcceptEnv`.
+fn handle_env_request(
+    conn: &mut ConnectionState,
+    local_id: u32,
+    remote_id: u32,
+    payload: &[u8],
+    offset: usize,
+    want_reply: bool,
+) -> Result<(), SshdError> {
+    let (name_bytes, off) = read_ssh_string(payload, offset)?;
+    let (value_bytes, _) = read_ssh_string(payload, off)?;
+    let name = String::from_utf8_lossy(name_bytes).into_owned();
+    let value = String::from_utf8_lossy(value_bytes).into_owned();
+
+    if !env_request_allowed(&conn.config, &name, &value) {
+        conn.debug_log(&format!("env refused: {name} is not in AcceptEnv"));
+        if want_reply {
+            send_channel_failure(conn, remote_id)?;
+        }
+        return Ok(());
+    }
+
+    let Some(idx) = conn.channels.iter().position(|ch| ch.local_id == local_id) else {
+        if want_reply {
+            send_channel_failure(conn, remote_id)?;
+        }
+        return Ok(());
+    };
+
+    // Setting a variable twice replaces it rather than appending, so the child
+    // cannot receive two entries for one name — and a client cannot use
+    // repetition of an allowed name to fill the limits below.
+    let channel = &mut conn.channels[idx];
+    if let Some(slot) = channel.env.iter_mut().find(|(k, _)| k == &name) {
+        slot.1 = value;
+        if want_reply {
+            send_channel_success(conn, remote_id)?;
+        }
+        return Ok(());
+    }
+
+    let used: usize = channel
+        .env
+        .iter()
+        .map(|(k, v)| k.len().saturating_add(v.len()))
+        .sum();
+    let addition = name.len().saturating_add(value.len());
+    if channel.env.len() >= MAX_SESSION_ENV || used.saturating_add(addition) > MAX_SESSION_ENV_BYTES
+    {
+        conn.debug_log(&format!(
+            "env refused: {name} exceeds the per-session limit"
+        ));
+        if want_reply {
+            send_channel_failure(conn, remote_id)?;
+        }
+        return Ok(());
+    }
+
+    channel.env.push((name, value));
+    if want_reply {
+        send_channel_success(conn, remote_id)?;
+    }
+    Ok(())
+}
+
 /// Resolve the account a session request will run as, refusing the request if
 /// there is no such account.
 ///
@@ -4939,6 +5209,10 @@ fn start_shell_session(
         return Ok(());
     }
     let term = conn.channels[idx].term.clone();
+    // Cloned rather than borrowed: the spawn closure below runs while `conn` is
+    // borrowed mutably to answer the request, and a session's accepted
+    // variables are a few hundred bytes at most.
+    let client_env = conn.channels[idx].env.clone();
 
     let Some(slave_fd) = conn.channels[idx].io.pty().map(Pty::slave_fd) else {
         // No terminal: `ssh -T`. The login shell runs on pipes instead, with no
@@ -4950,11 +5224,11 @@ fn start_shell_session(
             remote_id,
             "shell",
             want_reply,
-            spawn_in_home(&user, || shell_command_pipes(&user, &term)),
+            spawn_in_home(&user, || shell_command_pipes(&user, &term, &client_env)),
         );
     };
 
-    match spawn_in_home(&user, || shell_command(&user, &term, slave_fd)) {
+    match spawn_in_home(&user, || shell_command(&user, &term, slave_fd, &client_env)) {
         Ok(child) => {
             // The parent must give up its own copy of the slave now. Hangup on
             // the master means "the last slave closed", and while this daemon
@@ -5009,7 +5283,8 @@ fn start_pipe_session(
         }
         return Ok(());
     }
-    let spawned = spawn_session_command(&user, command_line);
+    let client_env = conn.channels[idx].env.clone();
+    let spawned = spawn_session_command(&user, command_line, &client_env);
     start_pipe_session_with(conn, idx, local_id, remote_id, "exec", want_reply, spawned)
 }
 
@@ -6447,6 +6722,57 @@ DenyGroups nogroup
         config.allow_users = vec!["alice".into()];
         config.deny_users = vec!["alice".into()];
         assert!(!is_user_allowed("alice", &[], &config));
+    }
+
+    /// The fail-closed half of comparing patterns literally: `admin*` matched
+    /// no account, so the directive that was meant to admit the admins locked
+    /// out everyone including them.
+    #[test]
+    fn an_allowusers_pattern_admits_the_accounts_it_names() {
+        let mut config = SshdConfig::default_config();
+        config.allow_users = vec!["admin*".into(), "ops-?".into()];
+        assert!(is_user_allowed("admin1", &[], &config));
+        assert!(is_user_allowed("admin", &[], &config));
+        assert!(is_user_allowed("ops-a", &[], &config));
+        assert!(!is_user_allowed("ops-ab", &[], &config));
+        assert!(!is_user_allowed("mallory", &[], &config));
+    }
+
+    /// The fail-*open* half, and the one that matters: a `DenyUsers` pattern
+    /// compared literally names nobody, so the accounts an administrator
+    /// believes are blocked log straight in.
+    #[test]
+    fn a_denyusers_pattern_actually_blocks_the_accounts_it_names() {
+        let mut config = SshdConfig::default_config();
+        config.deny_users = vec!["guest*".into()];
+        assert!(!is_user_allowed("guest1", &[], &config));
+        assert!(!is_user_allowed("guest", &[], &config));
+        assert!(is_user_allowed("alice", &[], &config));
+    }
+
+    #[test]
+    fn group_patterns_match_on_both_sides() {
+        let mut config = SshdConfig::default_config();
+        config.deny_groups = vec!["no-*".into()];
+        assert!(!is_user_allowed("alice", &["no-login".into()], &config));
+        assert!(is_user_allowed("alice", &["staff".into()], &config));
+
+        let mut config = SshdConfig::default_config();
+        config.allow_groups = vec!["dev-*".into()];
+        assert!(is_user_allowed("alice", &["dev-web".into()], &config));
+        assert!(!is_user_allowed("alice", &["contractors".into()], &config));
+        // No groups at all cannot satisfy an AllowGroups list.
+        assert!(!is_user_allowed("alice", &[], &config));
+    }
+
+    /// Negation carries over from the pattern matcher, which is what lets an
+    /// administrator write the common "everyone in the group except one".
+    #[test]
+    fn a_negated_pattern_carves_an_exception_out_of_an_allow_list() {
+        let mut config = SshdConfig::default_config();
+        config.allow_users = vec!["dev*".into(), "!dev-intern".into()];
+        assert!(is_user_allowed("dev-alice", &[], &config));
+        assert!(!is_user_allowed("dev-intern", &[], &config));
     }
 
     #[test]
@@ -8029,5 +8355,217 @@ DenyGroups nogroup
         let (worked, finished) = pump_channel_output(&mut conn, 0, 1).unwrap();
         assert!(!worked);
         assert!(finished);
+    }
+
+    // ---- Environment requests (RFC 4254 §6.4) ----
+    //
+    // The request path is exercised with `want_reply = false` throughout, so
+    // nothing is written to a socket and the assertions are about what the
+    // channel *remembers* — which is the half that used to be missing
+    // entirely. The reply itself is a two-line function tested by the fact that
+    // both arms below reach it.
+
+    /// An `env` request payload: two SSH strings, name then value.
+    fn env_payload(name: &str, value: &str) -> Vec<u8> {
+        let mut out = ssh_string(name.as_bytes());
+        out.extend_from_slice(&ssh_string(value.as_bytes()));
+        out
+    }
+
+    fn conn_accepting(patterns: &[&str]) -> ConnectionState {
+        let mut conn = conn_with_channel(32768);
+        conn.config.accept_env = patterns.iter().map(|p| (*p).to_string()).collect();
+        conn
+    }
+
+    fn send_env(conn: &mut ConnectionState, name: &str, value: &str) {
+        let payload = env_payload(name, value);
+        handle_env_request(conn, 1, 2, &payload, 0, false).unwrap();
+    }
+
+    #[test]
+    fn a_literal_pattern_matches_only_itself() {
+        assert!(glob_matches("LANG", "LANG"));
+        assert!(!glob_matches("LANG", "LANGUAGE"));
+        assert!(!glob_matches("LANG", "LAN"));
+        assert!(!glob_matches("LANG", "lang"));
+    }
+
+    #[test]
+    fn a_star_matches_any_run_including_an_empty_one() {
+        assert!(glob_matches("LC_*", "LC_ALL"));
+        assert!(glob_matches("LC_*", "LC_"));
+        assert!(!glob_matches("LC_*", "LC"));
+        assert!(glob_matches("*", ""));
+        assert!(glob_matches("*_*", "A_B"));
+        assert!(glob_matches("a*c", "abbbbc"));
+        assert!(!glob_matches("a*c", "abbbb"));
+    }
+
+    #[test]
+    fn a_question_mark_matches_exactly_one_character() {
+        assert!(glob_matches("LC_?", "LC_A"));
+        assert!(!glob_matches("LC_?", "LC_"));
+        assert!(!glob_matches("LC_?", "LC_AB"));
+    }
+
+    /// The pathological shape a naive recursive matcher turns exponential.
+    /// It is included because the input is remote-controlled: if this ever
+    /// stops returning promptly, a client has been handed the daemon's CPU.
+    #[test]
+    fn a_pattern_dense_with_stars_still_terminates() {
+        let name = "a".repeat(64);
+        assert!(!glob_matches("a*a*a*a*a*a*b", &name));
+        assert!(glob_matches("a*a*a*a*a*a*a", &name));
+    }
+
+    #[test]
+    fn a_negated_pattern_wins_whatever_order_it_is_written_in() {
+        let before = vec!["!LC_ALL".to_string(), "LC_*".to_string()];
+        let after = vec!["LC_*".to_string(), "!LC_ALL".to_string()];
+        assert!(!pattern_list_matches(&before, "LC_ALL"));
+        assert!(!pattern_list_matches(&after, "LC_ALL"));
+        assert!(pattern_list_matches(&before, "LC_TIME"));
+        assert!(pattern_list_matches(&after, "LC_TIME"));
+    }
+
+    #[test]
+    fn an_empty_pattern_list_matches_nothing() {
+        assert!(!pattern_list_matches(&[], "LANG"));
+        assert!(!pattern_list_matches(&[], ""));
+    }
+
+    #[test]
+    fn the_default_configuration_accepts_no_variable() {
+        let config = SshdConfig::default_config();
+        assert!(config.accept_env.is_empty());
+        assert!(!env_request_allowed(&config, "LANG", "en_US.UTF-8"));
+    }
+
+    #[test]
+    fn acceptenv_lines_accumulate_and_survive_a_round_trip() {
+        let config = SshdConfig::parse("acceptenv LANG LC_*\nacceptenv TZ\n").unwrap();
+        assert_eq!(config.accept_env, vec!["LANG", "LC_*", "TZ"]);
+        let reparsed = SshdConfig::parse(&config.dump()).unwrap();
+        assert_eq!(reparsed.accept_env, config.accept_env);
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_name_is_refused_before_the_patterns_are_read() {
+        let mut config = SshdConfig::default_config();
+        // `*` would otherwise accept everything, which is the point: these are
+        // rejected for what they are, not for failing to match.
+        config.accept_env = vec!["*".to_string()];
+        assert!(!env_request_allowed(&config, "", "x"));
+        assert!(!env_request_allowed(&config, "A=B", "x"));
+        assert!(!env_request_allowed(&config, "A\0B", "x"));
+        assert!(!env_request_allowed(&config, "A", "x\0y"));
+        assert!(env_request_allowed(&config, "A", "x"));
+    }
+
+    #[test]
+    fn the_session_identity_variables_are_refused_even_by_a_wildcard() {
+        let mut config = SshdConfig::default_config();
+        config.accept_env = vec!["*".to_string()];
+        for name in REFUSED_SESSION_ENV {
+            assert!(
+                !env_request_allowed(&config, name, "anything"),
+                "{name} must not be settable by the client"
+            );
+        }
+    }
+
+    #[test]
+    fn an_accepted_variable_is_remembered_for_the_session() {
+        let mut conn = conn_accepting(&["LANG", "LC_*"]);
+        send_env(&mut conn, "LANG", "en_US.UTF-8");
+        send_env(&mut conn, "LC_TIME", "C");
+        assert_eq!(
+            conn.channels[0].env,
+            vec![
+                ("LANG".to_string(), "en_US.UTF-8".to_string()),
+                ("LC_TIME".to_string(), "C".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refused_variable_is_not_remembered() {
+        let mut conn = conn_accepting(&["LANG"]);
+        send_env(&mut conn, "LD_PRELOAD", "/tmp/evil.so");
+        assert!(conn.channels[0].env.is_empty());
+    }
+
+    #[test]
+    fn setting_a_variable_twice_replaces_it_rather_than_appending() {
+        let mut conn = conn_accepting(&["LANG"]);
+        send_env(&mut conn, "LANG", "C");
+        send_env(&mut conn, "LANG", "en_GB.UTF-8");
+        assert_eq!(
+            conn.channels[0].env,
+            vec![("LANG".to_string(), "en_GB.UTF-8".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_client_cannot_make_the_daemon_hold_unbounded_variables() {
+        let mut conn = conn_accepting(&["*"]);
+        for i in 0..(MAX_SESSION_ENV + 50) {
+            send_env(&mut conn, &format!("VAR{i}"), "x");
+        }
+        assert_eq!(conn.channels[0].env.len(), MAX_SESSION_ENV);
+    }
+
+    #[test]
+    fn a_client_cannot_make_the_daemon_hold_unbounded_bytes() {
+        let mut conn = conn_accepting(&["*"]);
+        let big = "x".repeat(MAX_SESSION_ENV_BYTES / 4);
+        for i in 0..8 {
+            send_env(&mut conn, &format!("VAR{i}"), &big);
+        }
+        let held: usize = conn.channels[0]
+            .env
+            .iter()
+            .map(|(k, v)| k.len() + v.len())
+            .sum();
+        assert!(held <= MAX_SESSION_ENV_BYTES, "held {held} bytes");
+        assert!(
+            !conn.channels[0].env.is_empty(),
+            "the limit refused all of it"
+        );
+    }
+
+    /// The base environment is the server's, and an accepted variable layers
+    /// over it — that is what an administrator listing the name asked for.
+    #[test]
+    fn an_accepted_variable_reaches_the_child_and_the_identity_ones_do_not() {
+        let user = PasswdEntry {
+            username: "alice".to_string(),
+            uid: 1000,
+            gid: 1000,
+            home: "/home/alice".to_string(),
+            shell: "/bin/sh".to_string(),
+        };
+        let client_env = vec![
+            ("LANG".to_string(), "en_US.UTF-8".to_string()),
+            ("PATH".to_string(), "/opt/bin".to_string()),
+        ];
+        let cmd = session_command(&user, "true", &client_env);
+        let seen: Vec<(String, String)> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+        let value_of = |name: &str| seen.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        assert_eq!(value_of("LANG"), Some("en_US.UTF-8".to_string()));
+        // Listed by the administrator, so it wins over the default.
+        assert_eq!(value_of("PATH"), Some("/opt/bin".to_string()));
+        // Never offered to the client at all; still the account's own.
+        assert_eq!(value_of("HOME"), Some("/home/alice".to_string()));
+        assert_eq!(value_of("USER"), Some("alice".to_string()));
     }
 }

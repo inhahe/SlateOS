@@ -1769,15 +1769,21 @@ impl HostKey {
     ///
     /// Split from [`Self::load_from_file`] because the two halves fail for
     /// unrelated reasons — the file was unreadable, or its contents were not a
-    /// key — and because only this half can be tested: there is no filesystem
-    /// under `cargo test`, so a check reachable only through a `read` syscall
-    /// is a check that never runs.
+    /// key — and because only this half can be tested: `load_from_file` reads
+    /// through a SlateOS `fs_read_file` syscall that does not exist on a
+    /// developer's machine, so a check reachable only through it is a check
+    /// that never runs.
+    ///
+    /// Public for that reason and no other. `ssh-interop` calls it to assert
+    /// that a key `ssh-keygen` writes is a key this daemon accepts — the
+    /// question nothing could ask while the two ends wrote different formats,
+    /// and both suites passed.
     ///
     /// # Errors
     ///
     /// A message naming what was wrong with the container, or that its two
     /// halves disagree.
-    fn from_openssh_text(text: &str) -> Result<Self, String> {
+    pub fn from_openssh_text(text: &str) -> Result<Self, String> {
         let key = decode_openssh_private_key(text).map_err(|e| e.to_string())?;
         // `sshwire` hands back the public key the *file* holds rather than one
         // derived from the seed, because deriving it is Ed25519 and that lives

@@ -187,6 +187,20 @@ mod tests {
     /// neither `SshSession` nor `ConnectionState` may cross a thread boundary;
     /// what crosses is the [`sshwire::MemoryTransport`], which is `Send`.
     fn one_handshake(known_hosts: &Path) -> ([u8; 32], [u8; 32]) {
+        one_handshake_with(sshd::HostKey::from_seed(HOST_KEY_SEED), known_hosts)
+    }
+
+    /// As [`one_handshake`], but the daemon serves the host key it is handed.
+    ///
+    /// Split out for [`the_daemon_starts_on_the_key_its_own_key_tool_writes`],
+    /// which needs a key that came back out of a *file* rather than one built
+    /// from a seed in memory. Every other caller wants the seed, so that stays
+    /// the default rather than becoming a thing each test spells out.
+    ///
+    /// A `HostKey` may be moved onto the server's thread even though the peers
+    /// themselves may not: it is two byte arrays, so it is `Send`. It is the
+    /// `Box<dyn Transport>` inside `ConnectionState` that is not.
+    fn one_handshake_with(host_key: sshd::HostKey, known_hosts: &Path) -> ([u8; 32], [u8; 32]) {
         let (client_side, server_side) = sshwire::memory_pair();
 
         let server = thread::spawn(move || {
@@ -194,7 +208,7 @@ mod tests {
             let mut conn = sshd::ConnectionState::new(
                 Box::new(server_side),
                 sshd::SshdConfig::default_config(),
-                sshd::HostKey::from_seed(HOST_KEY_SEED),
+                host_key,
                 false,
             )
             .with_secret_source(secrets);
@@ -302,6 +316,75 @@ mod tests {
             "the handshake transcript changed. If that was deliberate, update \
              RECORDED_SESSION_ID -- after checking the change is right on *both* \
              sides, which is the whole reason this constant exists."
+        );
+    }
+
+    /// The daemon starts on a key file its own key tool wrote.
+    ///
+    /// This is the test that was missing while the documented way to set the
+    /// daemon up did not work:
+    ///
+    /// ```text
+    /// ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
+    /// sshd
+    /// ```
+    ///
+    /// `ssh-keygen` wrapped `-----BEGIN ED25519 PRIVATE KEY-----` around a bare
+    /// `seed || public || comment` blob — a container of its own invention that
+    /// nothing else in this tree, or anywhere else, can read — so the second
+    /// command failed on the key the first had just written. Both crates' test
+    /// suites were green the whole time, because each one tested its encoder
+    /// against its own decoder. That is the one arrangement that cannot notice a
+    /// disagreement, and it is why this assertion has to live in a third crate
+    /// that links both programs.
+    ///
+    /// It deliberately goes further than "the daemon parses the file". Parsing
+    /// only proves the container survived the round trip; a key file could
+    /// decode cleanly and still carry the wrong 32 bytes, or the right bytes
+    /// under a name the client rejects. So the loaded key is put to work: it
+    /// serves a whole handshake, the client verifies the signature it makes over
+    /// the exchange hash, and the resulting session id is compared against the
+    /// same recorded transcript the seed-built key produces. Nothing short of
+    /// the file carrying exactly the key `ssh-keygen` generated, under the name
+    /// both ends agree on, gets that far.
+    #[test]
+    fn the_daemon_starts_on_the_key_its_own_key_tool_writes() {
+        // `encode_private_key` rather than `generate_key`: the latter draws a
+        // seed and a checkint from `randrange`, which refuses on this host (see
+        // open-questions.md), and a generated key would make the transcript
+        // differ per run anyway. The `checkint` being a parameter is what lets a
+        // test pin it; it is the format's own integrity field, two copies of the
+        // same random word, and its *value* is not what is under test here.
+        let keypair = ssh_keygen::Ed25519KeyPair::from_seed(HOST_KEY_SEED);
+        let key_file = ssh_keygen::encode_private_key(
+            &keypair.seed,
+            &keypair.public,
+            "interop@slateos",
+            0x1234_5678,
+        );
+
+        let host_key = sshd::HostKey::from_openssh_text(&key_file).unwrap_or_else(|e| {
+            panic!(
+                "sshd refused the private key ssh-keygen wrote: {e}\n\
+                 The file begins:\n{}",
+                key_file.lines().next().unwrap_or("<empty>")
+            )
+        });
+
+        let scratch = scratchdir::ScratchDir::new("ssh-interop-keygen-host-key");
+        let (client_id, server_id) = one_handshake_with(host_key, &scratch.path("known_hosts"));
+
+        assert_eq!(
+            client_id, server_id,
+            "the client and the daemon disagreed about a handshake the daemon \
+             ran on a key ssh-keygen wrote"
+        );
+        assert_eq!(
+            hex(&client_id),
+            RECORDED_SESSION_ID,
+            "the daemon read the key file without complaint but served a \
+             different host key than the one ssh-keygen generated, so the file \
+             does not carry the key it claims to"
         );
     }
 

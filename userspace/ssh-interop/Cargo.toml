@@ -47,9 +47,24 @@ description = "Runs the real SSH client against the real SSH server, in one proc
 # `scratchdir` because the client writes a `known_hosts` entry for a host it
 # has not seen before, and a test that writes into `$HOME/.ssh/known_hosts`
 # would be editing the developer's real trust store.
+#
+# `ssh-keygen` is the third program in this stack and the one whose divergence
+# was user-visible rather than merely latent. It wrapped
+# `-----BEGIN ED25519 PRIVATE KEY-----` around a bare `seed || public ||
+# comment` blob, so the two documented commands
+#
+#     ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
+#     sshd
+#
+# ended with the daemon refusing to start on the key its own key tool had just
+# written. Both crates' suites were green: each tested its encoder against its
+# own decoder, which is the one arrangement that cannot notice a disagreement.
+# The test that catches it needs the generator and the daemon in one process,
+# so it can only live here.
 [dev-dependencies]
 ssh = { path = "../ssh", features = ["deterministic-secrets"] }
 sshd = { path = "../sshd", features = ["deterministic-secrets"] }
+ssh-keygen = { path = "../ssh-keygen" }
 sshwire = { path = "../sshwire" }
 randrange = { path = "../../randrange" }
 scratchdir = { path = "../scratchdir" }

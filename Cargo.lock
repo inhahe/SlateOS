@@ -16752,6 +16752,7 @@ dependencies = [
  "randrange",
  "scratchdir",
  "ssh",
+ "ssh-keygen",
  "sshd",
  "sshwire",
 ]
@@ -16760,8 +16761,10 @@ dependencies = [
 name = "ssh-keygen"
 version = "0.1.0"
 dependencies = [
+ "posix",
  "randrange",
  "sha2",
+ "sshwire",
 ]
 
 [[package]]

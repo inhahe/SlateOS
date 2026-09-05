@@ -102628,7 +102628,7 @@ defect it introduced and the harness caught:
   through. `tar-diff.sh`'s `emptysym` case is what found it — ours said
   "Invalid argument" where GNU said "No such file or directory". `c_target` now
   refuses only the NUL, and `dirfd`'s new test asserts *which layer* rejected
-  the empty target rather than that it was rejected. Written up as Lesson 110.
+  the empty target rather than that it was rejected. Written up as Lesson 110 (lane B).
 
 `dirfd::Stat` gained an `mtime` for this — see `design-decisions.md` §756 for
 why a shared type was widened for one caller — and `dirfd::Dir` gained
@@ -114022,12 +114022,22 @@ longer exists.
 
 ## TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT (lane B, 2026-09-03)
 
-**STATUS 2026-09-04: steps 1 and 2 of the proper fix have landed** — the checker
-exists and pre-push gate 12 runs it. Left open rather than marked RESOLVED
-because the automation covers exactly one crate: `-p coreutils`, on a push that
-touches `userspace/coreutils`. Every other crate in this lane — `posix`,
-`userspace/shell`, the ~30 support crates — still has the whole defect below,
-unmeasured, and step 4 is what would close it.
+**RESOLVED 2026-09-04.** All four steps landed. The checker exists (step 1),
+pre-push gate 12 runs it (step 2), and its scope is no longer one crate but is
+**computed from the push** (step 4): every crate this lane owns that a push
+changes and that contains a `cfg(unix)`/`cfg(windows)` arm is compiled and
+tested for `x86_64-unknown-linux-gnu` before the push is allowed.
+
+Step 4 is worth reading even though it is closed, because **its own premise was
+wrong and a measurement is what showed it.** It named `posix` and
+`userspace/shell` as the crates to widen to; both have zero `cfg(unix)` arms,
+so compiling them for Linux would have added 8m41s a push to type-check source
+the host build had just type-checked — while 32 crates that *do* have such arms
+were on nobody's list. The fix was to stop listing.
+
+What remains unautomated is deliberate and named in step 4: crates outside this
+lane's globs, and the *dependencies* of a checked crate (a dependency whose API
+changes breaks the host build too, which everything else already catches).
 
 **In short:** the coreutils crates are built, linted and tested against the
 *Windows* host target, because that is the toolchain the machine has. Every
@@ -114117,9 +114127,12 @@ to abandon it.
    drives real pushes through the real hook against a stub checker and asserts
    on whether the checker was *invoked* — because a declined gate and a passing
    gate both allow the push, and only the invocation count tells them apart.
-3. Step 2 has landed, but the gate is scoped to `userspace/coreutils` and only
-   fires on a push. **Run step 1's script by hand after touching any
-   `#[cfg(unix)]` arm** in a crate it does not cover, and while iterating:
+3. ~~Step 2 has landed, but the gate is scoped to `userspace/coreutils` and only
+   fires on a push.~~ **Largely obsolete since step 4 (2026-09-04):** the gate
+   now covers *any* crate in this lane that a push changes and that has a
+   platform-conditional arm, so the manual run is no longer the only thing
+   standing between an unchecked `cfg(unix)` arm and origin. It remains the way
+   to iterate — a push is a slow edit-compile loop — so:
 
    ```sh
    scripts/coreutils-check.sh --only linux            # both halves by default
@@ -114129,13 +114142,47 @@ to abandon it.
    First measured run, 2026-09-03: the whole `coreutils` lib reports **416**
    passing tests on the Linux target, `dirfd` alone **24** — against 0 of
    either on the host, since `dirfd`'s unix arm does not compile there at all.
-4. **Widen it past `coreutils`.** Gate 12 compiles one crate because that is
+4. **Widen it past `coreutils`.** ~~Gate 12 compiles one crate because that is
    where the defect was found and because the price is per-crate; the argument
    for it applies unchanged to `posix`, `userspace/shell` and the support
    crates, which are equally host-only-checked today. What is missing is a
    measurement per crate rather than a design: the gate already takes `-p`, and
-   widening it is a matter of deciding how many minutes a push may cost. Do
+   widening it is a matter of deciding how many minutes a push may cost.~~ Do
    that with numbers, not with the instinct that blocked step 2 for a day.
+
+   **DONE 2026-09-04, and the numbers refuted the step as written.** It asked
+   for `posix` and `userspace/shell` by name. Neither belongs:
+
+   | crate | `cfg(unix)`/`cfg(windows)` arms | linux half costs | tests there |
+   |---|---:|---:|---:|
+   | `userspace/coreutils` | 719 | 2m16s warm, ~6m cold | 405 (host: 361) |
+   | `oils` + `cpio` + `stat` | 108 + 20 + 18 | 5m03s together | 4 binaries, clean |
+   | `posix` | **0** | 6m16s | 20,652 |
+   | `userspace/shell` | **0** | 2m25s | **0** |
+
+   `posix`'s conditionals are real but they are `target_os = "none"` — 1,845 of
+   them — which is false on the Windows host and false on Linux alike, and is
+   already compiled by the default `x86_64-unknown-none` build. `userspace/shell`
+   is a 159-line toolchain-validation stub, not a shell. Compiling either for
+   Linux type-checks precisely the source the host build already type-checked,
+   for 8m41s a push. The step's premise — "the argument applies unchanged" —
+   was false; the argument is *entirely* about `cfg(unix)` arms, and those two
+   crates have none.
+
+   Meanwhile the same census found **32 other crates in this lane that do have
+   such arms and were on nobody's list**: `oils` 108, `cpio` 20, `stat` 18,
+   `htop` 9, then `wall`/`vi`/`tput`/`tar`/`stty`/`pkg`/`nano`/`mktemp` 6 each,
+   `ssh-keygen`/`man`/`getopt`/`authlib` 5, `sftp`/`service`/`rsync`/`quoting`/
+   `less` 4, `sshd`/`chown`/`backup` 3, `scp`/`notimpl`/`lsof`/`logind`/
+   `localtime`/`firejail`/`du` 2, `file` 1.
+
+   So the answer was not a longer list — a list is wrong the day it is written
+   and rots from there. **Gate 12's scope is now computed** from the crates a
+   push changed, minus those with no platform-conditional arm at all, the
+   filter being a `git grep` against the pushed commit. It costs nothing on a
+   push that touches no such crate, cannot go stale, and reached `stat` and
+   `oils` without anyone naming them. See `design-decisions.md` §767 and the
+   five new cases in `scripts/test-pre-push-unixhalf-gate.py`.
 
 **If it is never fixed:** warnings and dead code accumulate in the unix half
 where nobody sees them, and — much worse — a unix-only test can rot into a
@@ -114578,7 +114625,7 @@ thing you are inferring from is the *absence* of a row.** Truncation and
 absence are indistinguishable in the output, and the reading you will reach for
 is the one that says the process is gone — which is also the reading that makes
 you take action. Every other kind of command can be sampled; this one cannot.
-It is the same defect as Lesson 111's fixture, in a different costume: an
+It is the same defect as Lesson 111 (lane B)'s fixture, in a different costume: an
 observation whose two possible causes produce identical output, mistaken for
 evidence of one of them.
 
@@ -114657,7 +114704,7 @@ make the collapse happen where the streams originate.** A verdict sharing a
 file with unbounded tool output is a verdict you have merely been lucky to keep
 reading.
 
-And the reason this was caught at all is Lesson 112's postscript, applied
+And the reason this was caught at all is Lesson 112 (lane B)'s postscript, applied
 without meaning to: I was reasoning from the **absence** of a line. That entry
 says never to infer from an absence in truncated output; the wider rule this
 adds is that a missing line has *three* causes, not two — it was never written,
@@ -116158,7 +116205,7 @@ true and the file grew 6× behind it. This is exactly the shape
 `deferred-questions.md` exists to hold — an explicit trigger, in a file that
 gets re-read — and A-27 predates that file, so it never got one.
 
-**The lesson is the same one as Lesson 112's postscript, and I had already
+**The lesson is the same one as Lesson 112 (lane B)'s postscript, and I had already
 written that postscript before making this mistake.** There the truncated view
 was `| head` on a process query; here it was an auto-backgrounded command whose
 first line arrived and whose remaining two did not. Both times the partial
@@ -116660,6 +116707,82 @@ outer number fit; that trades a harness timeout for a real one.
 Filed rather than fixed because the tree was mid-re-run when it was found, and
 because option 1 touches the gate/boot seam, which deserves its own change
 rather than a rider on a rebooted test.
+
+---
+
+## TD-B-A-CARGO-RUN-IN-THIS-TREE-IS-82-PERCENT-ONE-REPEATED-WARNING (lane B, 2026-09-04)
+
+**In short:** Every `cargo build`/`clippy`/`test` in this workspace prints the
+same warning about two thousand times, once per crate, and that one warning is
+**82% of the output by volume**. Nothing is broken by it; what is broken is
+anyone's ability to read a build log, including this session's — a real error
+scrolls past inside four megabytes of identical paragraphs.
+
+**Measured, 2026-09-04**, on the `--only linux` run of `oils`+`cpio`+`stat`
+(four cargo invocations, log kept at 5.02 MB):
+
+| | |
+|---|---:|
+| log total | 5.02 MB |
+| `missing [lints] to inherit [workspace.lints]` | **4.11 MB (81.9%)** |
+| everything else — the compile, the lints, 4 test binaries | 0.91 MB |
+| occurrences of the warning | 8,166 (≈2,000 per cargo invocation) |
+| manifests in the tree | 2,950 |
+| manifests with a `[lints]` section | 217 |
+| manifests without one | **2,733**, of which **2,718 are under `userspace/`** |
+
+**Where it lives.** Each crate's `Cargo.toml`. The fix per crate is three
+lines:
+
+```toml
+[lints]
+workspace = true
+```
+
+`cargo::missing_lints_inheritance` is `warn` by default, and the workspace root
+does define `[workspace.lints]`, so every member that does not opt in is told
+so on every invocation.
+
+**Why this is not simply "add the three lines to 2,733 manifests", and why it
+is filed rather than fixed.** Those 2,718 `userspace/` manifests are
+overwhelmingly the stub crates behind the open question at
+`open-questions.md` → *"2,288 of the 2,756 commands in `userspace/` report
+success for work they never did. Which ones do we keep?"* (lane B, 2026-09-02),
+which is **still awaiting the operator**. The three options there are keep /
+delete / mark-unimplemented, and two of the three delete most of these
+manifests outright. Writing `[lints] workspace = true` into all 2,733 now would
+be a 2,733-file commit that the operator's answer may then largely revert —
+and, worse, it would make the stubs *inherit the workspace's strict lints*,
+which is a real behaviour change (`unwrap_used`, `indexing_slicing`,
+`arithmetic_side_effects` and friends) applied to code we may be about to
+delete, on no one's decision.
+
+So this is **deliberately blocked on that question**, not overlooked. It is
+recorded separately because it is a distinct cost — the unreadable logs are
+paid today, by every build, whatever is eventually decided about the stubs —
+and because whoever answers the open question should know that the answer
+carries this with it.
+
+**Do not "fix" it by silencing the warning** (`--cap-lints`, `-A
+cargo::missing_lints_inheritance`, or `[workspace.lints]` removal). The warning
+is correct: those crates genuinely are not covered by the lint policy
+`CLAUDE.md` requires of every crate. Silencing it would convert a loud,
+accurate statement that 2,733 crates are unlinted into silence on the same
+fact, which is the failure shape half this file is about.
+
+**If it is never fixed:** build logs stay unreadable at 5 MB a run, which makes
+every future diagnosis in this lane more expensive and makes a genuine warning
+easy to miss — and 2,733 crates stay outside the lint policy the project
+requires.
+
+**Interim workaround** for reading a build log:
+
+```sh
+grep -v -e 'missing `\[lints\]`' -e 'missing_lints_inheritance' \
+        -e 'to inherit `workspace.lints' build.log | less
+```
+---
+
 ### Lesson 110: a control that is drawn from live state looks more wired than one that is not (lane C, 2026-09-04)
 
 `apps/spreadsheet` drew a toolbar of twelve buttons. The bold button was filled
@@ -116754,3 +116877,224 @@ implementor that computes it from mutable state has written a latent bug, and no
 test of that implementor can find it, because the fault is in the *frequency of
 the call* and the implementor does not make the call. Look for these by grepping
 the harness for the call site, not the implementors for correctness.
+
+
+### Lesson 113: when the feature *is* the timer, "no clock" is not a stale display but a missing program (lane C, 2026-09-04)
+
+`apps/systemrestore` is a snapshot manager. Its headline feature, named in the
+first line of its own module doc, is "scheduled automatic snapshots with
+retention policies". It has a `ScheduleConfig` with a frequency and an enabled
+flag, a `RetentionPolicy` with count, age and size limits, a `check_schedule`
+that takes a snapshot when one is due, an `apply_retention` that prunes by the
+policy, and a Schedule view that draws a countdown to the next one.
+
+`check_schedule` and `apply_retention` had no caller. Neither did thirteen other
+methods. The program had no key handler, no mouse handler, and no `handle_event`
+of any kind: `main` built the UI, rendered one frame, and returned.
+
+This is *not* the same defect as lesson 47 (`an app that keeps time but never
+receives the clock`), though it looks like it and shares a cure. In lesson 47
+the app does something and displays a stale number while doing it. Here the
+number **is** the product. A snapshot manager that never takes a snapshot on a
+schedule is not a snapshot manager with a cosmetic fault; it is a viewer of
+sample data with a countdown drawn on it.
+
+The distinction matters when triaging a fleet of unwired apps, because it
+changes the priority. "The clock is frozen" reads like polish. "The scheduler
+never runs" reads like the program. They were the same line of code.
+
+**How to spot it without reading everything:** list the crate's functions with
+no caller outside `#[cfg(test)]` and read the *names*. Here the list was
+`check_schedule`, `apply_retention`, `delete_snapshot`, `simulate_restore`,
+`simulate_create`, `import_snapshots`, `unlock_snapshot` — take, prune, delete,
+restore, create, import, unlock. Seven verbs, and they are the seven things the
+program is for. A dead-code list that reads like a feature list is not dead
+code; it is a missing caller at the top.
+
+### Lesson 114: a constant used as a size is a window that ignores its window (lane C, 2026-09-04)
+
+Every layout in `apps/systemrestore` -- 46 lines of it -- read the `WINDOW_WIDTH`
+and `WINDOW_HEIGHT` constants directly. The status bar spanned `WINDOW_WIDTH`,
+the dialogs centred themselves in `WINDOW_WIDTH / 2.0`, the action buttons were
+right-aligned to `WINDOW_WIDTH - ...`.
+
+That is correct exactly once: in a window the compositor happens to grant at
+1050x700. Everywhere else the picture is the wrong size in a way that is
+*self-consistent* -- every element agrees with every other element, and all of
+them disagree with the frame. Widen the window and the status bar stops short of
+the edge with the background showing through; narrow it and the action buttons
+hang off the side, still perfectly spaced relative to one another.
+
+It survives review because it looks like a layout that has been thought about.
+Nothing in the file is inconsistent; the file simply has the wrong idea of how
+big it is, once, in a constant, and repeats that idea faithfully in 46 places.
+
+The cure is two fields set from `App::render`'s arguments and a mechanical
+substitution, and the reason to do it as a *substitution* rather than by
+reasoning about each site is that all 46 are the same mistake -- picking through
+them one at a time invites deciding that some of them "are fine as constants",
+which is how a layout ends up half-relative and genuinely inconsistent.
+
+The gate for this shape already exists in spirit: `App::render` is *handed* the
+width and height rather than being expected to ask, precisely so that an app
+which ignores them has to ignore an argument in front of it. This one did.
+
+---
+
+## TD-B-LESSON-NUMBERS-ARE-ALLOCATED-FIRST-COME-AND-HAVE-STARTED-COLLIDING (lane B, 2026-09-04)
+
+**In short:** The numbered "Lesson N" entries in this file are allocated
+first-come by whichever lane writes one, with no per-lane split. Lanes B and C
+both took 110, 111 and 112 — on consecutive days, without either noticing. Since
+lessons are cited by bare number (`lesson 51` appears 75 times, `lesson 47` 43
+times), a citation like "the same defect as Lesson 111's fixture" now has two
+possible referents.
+
+**This is the same defect `design-decisions.md`'s `§` numbers had**, and it was
+cured there on 2026-08-29 after eleven duplicates: per-lane bands, a required
+`**Lane:**` field, and `scripts/check-design-decisions-bands.py` wired into
+`boot-test.sh`. The Lesson numbers were never migrated. See
+`requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`
+for why the tempting fix — a lane letter on the number, `Lesson B-110` — was
+proposed, measured against a real `git merge`, and **withdrawn**: two lanes
+appending `heading / blank / text` at EOF merge the common suffix, handing the
+resolver two titles above one body, which files one lane's lesson under the
+other's title. The number is not what conflicts; the position in the file is.
+
+**Status: blocked on cross-lane agreement, proposal filed** at
+`requests/b-ac-lesson-numbers-have-the-disease-the-section-numbers-were-cured-of.md`
+— bands (A 200–299, B 300–399, C 400–499, 1–114 closed), C to move its
+110/111/112 to 400/401/402 as the second writer, and lane B to write and wire
+the gate once A and C agree. Not landed unilaterally on purpose: a gate
+encoding a convention two lanes have not accepted refuses their builds over one
+lane's opinion, which is how a gate gets bypassed instead of fixed.
+
+**Done in the meantime, and independent of the outcome:** lane B's four
+citations of its own 110/111/112 now read "Lesson 111 (lane B)". That removes
+the ambiguity a reader actually hits today without presuming the scheme.
+
+**Not proposed:** backfilling the **15 of 90** lesson headings that carry no
+`(lane X, date)` marker at all. They predate the convention, their numbers are
+not in dispute, and — as with the `§` gate — a checker that only judges *new*
+entries does not need them.
+
+**If it is never fixed:** all three lanes will pick 115 next, and the next
+collision is a coin-flip away. Each one costs more to disentangle later than
+allocating from a band costs now, and the cost lands on whoever is reading a
+citation months from now rather than on whoever wrote it.
+
+### Lesson 115: a blanket `allow(dead_code)` turns "this subsystem is unused" into a fact nobody is told (lane C, 2026-09-04)
+
+`apps/undelete` offers two scan modes, and the module doc describes the second
+as "a deep scan mode for sector-by-sector file signature detection". The crate
+has a `SignatureDetector` holding a table of twenty-odd file signatures -- JPEG's
+`FF D8 FF`, PNG's eight-byte header, `%PDF`, `PK\x03\x04` with a `word/`
+secondary for DOCX -- a `detect`, a `detect_best`, and a `scan_sectors` that
+walks a buffer sector by sector reporting what it finds. Thirteen tests cover
+`detect`. Every one passes.
+
+Nothing used it. `RecoveryEngine` constructed a `SignatureDetector`, stored it in
+a field, and never read the field. `scan_deep` returned a hard-coded list of ten
+`(offset, kind, size)` triples. The whole table could have been wrong -- every
+magic byte, every offset, the DOCX secondary -- and no screen would have
+differed, because the deep scan's answers never passed through it.
+
+**The compiler knew.** `field signature_detector is never read` is a warning
+rustc emits by default, and it was switched off at the top of the file:
+
+    #![allow(dead_code)]
+
+One line, no reason recorded, and it is the only thing standing between this
+defect and a build that names it. Removing it surfaced the field immediately,
+along with `scan_sectors`, `detect`, and seventeen other functions with no
+caller -- including the entire filter builder (`with_file_type`, `with_min_size`,
+`with_min_confidence`, `with_search`...), which is four more of the module doc's
+bullet points.
+
+**The tests could not have caught it, and it is worth being precise about why.**
+`test_jpeg_signature_detection` calls `detector.detect(...)` and asserts the
+answer. That is a correct test of a correct function. It says nothing whatever
+about whether the *program* calls it -- and no test of a component ever can,
+because the question is about the component's callers, not the component. The
+signal for "is this used" is the one the `allow` deleted.
+
+**The repair is not to delete the detector.** It is to put it on the path it was
+written for. There is no device to read here, so the simulation now *plants* the
+sectors -- writing each file type's real magic bytes, taken from the detector's
+own table, into a sector each -- and the deep scan reads them back through
+`scan_sectors`. The finds are the detector's answers rather than the plan's, so
+a wrong entry in the table now costs a file type in the results, which is the
+same failure a real disk would produce. That is what makes the thirteen tests
+worth having: they now fail *and* the program breaks.
+
+**The rule:** a blanket `#![allow(dead_code)]` in a crate is a statement that
+nobody wants to know which parts of it are connected. Prefer scoped
+`#[allow(dead_code, reason = "...")]` per item -- as `apps/kanban` now has, 22 of
+them -- so the next unused thing is still reported.
+
+
+### Lesson 116: a fast path in front of a table becomes a second table, and the fast one wins (lane C, 2026-09-04)
+
+`apps/netscan` resolves a port number to a service name. It had two ways to do
+it:
+
+* `service_database()` -- 125 entries, each with a port, a protocol, a service
+  name and a description. The module doc advertises it: "service detection with
+  100+ port-to-service mappings".
+* `lookup_service(port)` -- a 57-arm `match`, introduced by this comment:
+
+      // Use a static-like approach; match on common ports for O(1) lookup of
+      // the most frequently queried ports, falling back to the database for
+      // the rest.
+
+It did not fall back. The `match` ended `_ => None`, and `service_database` had
+no caller anywhere in the crate. So 68 of the 125 entries were unreachable: a
+scan that found port 43 open showed `-` where the table said `whois`.
+
+**The part worth remembering is not that it was incomplete.** It is that the
+shadowing copy was *less accurate* than the table it shadowed. Where both knew a
+port, they disagreed four times, and every disagreement lost information:
+
+| port | the match said | the table said |
+|---|---|---|
+| 137 | `netbios` | `netbios-ns` |
+| 139 | `netbios` | `netbios-ssn` |
+| 67 | `dhcp` | `dhcp-server` |
+| 68 | `dhcp` | `dhcp-client` |
+
+Four services under two names. That is what a hand-written fast path drifts
+towards: it is written from memory, in a hurry, for the "common" cases, and the
+carefully-sourced table beside it is the one nobody reads.
+
+The repair was to delete the `match` outright rather than make it agree.
+125 entries is a few hundred bytes to scan, once per open port on screen; the
+performance argument for the fast path was never measured and would not have
+survived being measured. One table cannot disagree with itself.
+
+**How to find the next one:** grep for a lookup function that returns a
+`'static` answer and check whether the data structure it is named after has a
+caller. A `match` with more than a dozen arms that duplicates a nearby table is
+the shape. The test that now guards it walks the whole table and asserts every
+entry is reachable through the lookup -- which is cheap, and which no test of
+either half alone would have caught.
+
+### Lesson 117: a surviving mutation sometimes means the code is redundant, not that the test is weak (lane C, 2026-09-04)
+
+Twice this week a mutation survived and the correct response was to delete code
+rather than to write a test.
+
+* `apps/systemrestore`'s `advance_operation` ended a running operation two ways:
+  a `progress.complete` check, and running out of frames. Deleting the first
+  changed nothing observable, because the filmstrip's finished frame *is* its
+  last one -- so the second condition always fired on the same tick.
+* `apps/netscan`'s `start_scan` already reset both scroll offsets at the end,
+  with a comment explaining why and a test covering it. I added a second reset
+  at the top without reading that far. The mutation that deleted mine survived,
+  because the real one was still there.
+
+The reflex on a survivor is "my test is too loose". Check the other possibility
+first, because it is quicker to check and the fix is better: **if removing a
+line changes nothing, ask whether some other line is already doing the job.**
+The tell is a survivor on code you *just wrote* to fix something -- if the
+behaviour was already correct, the thing you added is a duplicate, and the
+duplicate is the defect.

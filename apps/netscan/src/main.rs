@@ -19,8 +19,6 @@
 //! performed through Slate OS syscalls; simulated with representative
 //! data for initial development.
 
-#![allow(dead_code)]
-
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
@@ -36,6 +34,9 @@ use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::wheel;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::collections::VecDeque;
 
@@ -277,9 +278,11 @@ impl Ipv4Addr {
             return None;
         }
         let mut octets = [0u8; 4];
+        // `get_mut`, not `octets[i]`: the four-part check is a few lines up,
+        // and an index whose bound lives elsewhere is one refactor from a
+        // panic on a hostile string.
         for (i, part) in parts.iter().enumerate() {
-            let val: u8 = part.parse().ok()?;
-            octets[i] = val;
+            *octets.get_mut(i)? = part.parse().ok()?;
         }
         Some(Self { octets })
     }
@@ -498,825 +501,794 @@ pub struct ServiceMapping {
 }
 
 /// The full service database (100+ entries).
-pub fn service_database() -> Vec<ServiceMapping> {
-    vec![
-        ServiceMapping {
-            port: 1,
-            protocol: "tcp",
-            service: "tcpmux",
-            description: "TCP Port Multiplexer",
-        },
-        ServiceMapping {
-            port: 5,
-            protocol: "tcp",
-            service: "rje",
-            description: "Remote Job Entry",
-        },
-        ServiceMapping {
-            port: 7,
-            protocol: "tcp",
-            service: "echo",
-            description: "Echo Protocol",
-        },
-        ServiceMapping {
-            port: 9,
-            protocol: "tcp",
-            service: "discard",
-            description: "Discard Protocol",
-        },
-        ServiceMapping {
-            port: 11,
-            protocol: "tcp",
-            service: "systat",
-            description: "Active Users",
-        },
-        ServiceMapping {
-            port: 13,
-            protocol: "tcp",
-            service: "daytime",
-            description: "Daytime Protocol",
-        },
-        ServiceMapping {
-            port: 17,
-            protocol: "tcp",
-            service: "qotd",
-            description: "Quote of the Day",
-        },
-        ServiceMapping {
-            port: 19,
-            protocol: "tcp",
-            service: "chargen",
-            description: "Character Generator",
-        },
-        ServiceMapping {
-            port: 20,
-            protocol: "tcp",
-            service: "ftp-data",
-            description: "FTP Data Transfer",
-        },
-        ServiceMapping {
-            port: 21,
-            protocol: "tcp",
-            service: "ftp",
-            description: "FTP Control",
-        },
-        ServiceMapping {
-            port: 22,
-            protocol: "tcp",
-            service: "ssh",
-            description: "Secure Shell",
-        },
-        ServiceMapping {
-            port: 23,
-            protocol: "tcp",
-            service: "telnet",
-            description: "Telnet",
-        },
-        ServiceMapping {
-            port: 25,
-            protocol: "tcp",
-            service: "smtp",
-            description: "Simple Mail Transfer Protocol",
-        },
-        ServiceMapping {
-            port: 37,
-            protocol: "tcp",
-            service: "time",
-            description: "Time Protocol",
-        },
-        ServiceMapping {
-            port: 42,
-            protocol: "tcp",
-            service: "nameserver",
-            description: "Host Name Server",
-        },
-        ServiceMapping {
-            port: 43,
-            protocol: "tcp",
-            service: "whois",
-            description: "WHOIS",
-        },
-        ServiceMapping {
-            port: 49,
-            protocol: "tcp",
-            service: "tacacs",
-            description: "TACACS Login Host",
-        },
-        ServiceMapping {
-            port: 53,
-            protocol: "tcp",
-            service: "dns",
-            description: "Domain Name System",
-        },
-        ServiceMapping {
-            port: 67,
-            protocol: "udp",
-            service: "dhcp-server",
-            description: "DHCP Server",
-        },
-        ServiceMapping {
-            port: 68,
-            protocol: "udp",
-            service: "dhcp-client",
-            description: "DHCP Client",
-        },
-        ServiceMapping {
-            port: 69,
-            protocol: "udp",
-            service: "tftp",
-            description: "Trivial File Transfer",
-        },
-        ServiceMapping {
-            port: 70,
-            protocol: "tcp",
-            service: "gopher",
-            description: "Gopher Protocol",
-        },
-        ServiceMapping {
-            port: 79,
-            protocol: "tcp",
-            service: "finger",
-            description: "Finger Protocol",
-        },
-        ServiceMapping {
-            port: 80,
-            protocol: "tcp",
-            service: "http",
-            description: "HTTP",
-        },
-        ServiceMapping {
-            port: 88,
-            protocol: "tcp",
-            service: "kerberos",
-            description: "Kerberos Authentication",
-        },
-        ServiceMapping {
-            port: 102,
-            protocol: "tcp",
-            service: "iso-tsap",
-            description: "ISO-TSAP",
-        },
-        ServiceMapping {
-            port: 104,
-            protocol: "tcp",
-            service: "dicom",
-            description: "DICOM Medical Imaging",
-        },
-        ServiceMapping {
-            port: 109,
-            protocol: "tcp",
-            service: "pop2",
-            description: "POP Version 2",
-        },
-        ServiceMapping {
-            port: 110,
-            protocol: "tcp",
-            service: "pop3",
-            description: "POP Version 3",
-        },
-        ServiceMapping {
-            port: 111,
-            protocol: "tcp",
-            service: "sunrpc",
-            description: "Sun RPC / Portmapper",
-        },
-        ServiceMapping {
-            port: 113,
-            protocol: "tcp",
-            service: "ident",
-            description: "Identification Protocol",
-        },
-        ServiceMapping {
-            port: 115,
-            protocol: "tcp",
-            service: "sftp",
-            description: "Simple File Transfer",
-        },
-        ServiceMapping {
-            port: 118,
-            protocol: "tcp",
-            service: "sqlserv",
-            description: "SQL Services",
-        },
-        ServiceMapping {
-            port: 119,
-            protocol: "tcp",
-            service: "nntp",
-            description: "Network News Transfer",
-        },
-        ServiceMapping {
-            port: 123,
-            protocol: "udp",
-            service: "ntp",
-            description: "Network Time Protocol",
-        },
-        ServiceMapping {
-            port: 135,
-            protocol: "tcp",
-            service: "msrpc",
-            description: "Microsoft RPC",
-        },
-        ServiceMapping {
-            port: 137,
-            protocol: "udp",
-            service: "netbios-ns",
-            description: "NetBIOS Name Service",
-        },
-        ServiceMapping {
-            port: 138,
-            protocol: "udp",
-            service: "netbios-dgm",
-            description: "NetBIOS Datagram",
-        },
-        ServiceMapping {
-            port: 139,
-            protocol: "tcp",
-            service: "netbios-ssn",
-            description: "NetBIOS Session",
-        },
-        ServiceMapping {
-            port: 143,
-            protocol: "tcp",
-            service: "imap",
-            description: "IMAP",
-        },
-        ServiceMapping {
-            port: 161,
-            protocol: "udp",
-            service: "snmp",
-            description: "Simple Network Management",
-        },
-        ServiceMapping {
-            port: 162,
-            protocol: "udp",
-            service: "snmp-trap",
-            description: "SNMP Trap",
-        },
-        ServiceMapping {
-            port: 177,
-            protocol: "tcp",
-            service: "xdmcp",
-            description: "X Display Manager Control",
-        },
-        ServiceMapping {
-            port: 179,
-            protocol: "tcp",
-            service: "bgp",
-            description: "Border Gateway Protocol",
-        },
-        ServiceMapping {
-            port: 194,
-            protocol: "tcp",
-            service: "irc",
-            description: "Internet Relay Chat",
-        },
-        ServiceMapping {
-            port: 201,
-            protocol: "tcp",
-            service: "at-rtmp",
-            description: "AppleTalk Routing",
-        },
-        ServiceMapping {
-            port: 209,
-            protocol: "tcp",
-            service: "qmtp",
-            description: "Quick Mail Transfer",
-        },
-        ServiceMapping {
-            port: 213,
-            protocol: "tcp",
-            service: "ipx",
-            description: "IPX over IP",
-        },
-        ServiceMapping {
-            port: 220,
-            protocol: "tcp",
-            service: "imap3",
-            description: "IMAP Version 3",
-        },
-        ServiceMapping {
-            port: 389,
-            protocol: "tcp",
-            service: "ldap",
-            description: "Lightweight Directory Access",
-        },
-        ServiceMapping {
-            port: 427,
-            protocol: "tcp",
-            service: "svrloc",
-            description: "Service Location Protocol",
-        },
-        ServiceMapping {
-            port: 443,
-            protocol: "tcp",
-            service: "https",
-            description: "HTTP over TLS",
-        },
-        ServiceMapping {
-            port: 445,
-            protocol: "tcp",
-            service: "smb",
-            description: "Server Message Block",
-        },
-        ServiceMapping {
-            port: 464,
-            protocol: "tcp",
-            service: "kpasswd",
-            description: "Kerberos Password Change",
-        },
-        ServiceMapping {
-            port: 465,
-            protocol: "tcp",
-            service: "smtps",
-            description: "SMTP over TLS",
-        },
-        ServiceMapping {
-            port: 500,
-            protocol: "udp",
-            service: "isakmp",
-            description: "IPsec Key Exchange",
-        },
-        ServiceMapping {
-            port: 502,
-            protocol: "tcp",
-            service: "modbus",
-            description: "Modbus Protocol",
-        },
-        ServiceMapping {
-            port: 514,
-            protocol: "tcp",
-            service: "syslog",
-            description: "Syslog",
-        },
-        ServiceMapping {
-            port: 515,
-            protocol: "tcp",
-            service: "lpd",
-            description: "Line Printer Daemon",
-        },
-        ServiceMapping {
-            port: 520,
-            protocol: "udp",
-            service: "rip",
-            description: "Routing Information Protocol",
-        },
-        ServiceMapping {
-            port: 521,
-            protocol: "udp",
-            service: "ripng",
-            description: "RIPng for IPv6",
-        },
-        ServiceMapping {
-            port: 530,
-            protocol: "tcp",
-            service: "rpc",
-            description: "Remote Procedure Call",
-        },
-        ServiceMapping {
-            port: 543,
-            protocol: "tcp",
-            service: "klogin",
-            description: "Kerberos Login",
-        },
-        ServiceMapping {
-            port: 544,
-            protocol: "tcp",
-            service: "kshell",
-            description: "Kerberos Shell",
-        },
-        ServiceMapping {
-            port: 546,
-            protocol: "tcp",
-            service: "dhcpv6-client",
-            description: "DHCPv6 Client",
-        },
-        ServiceMapping {
-            port: 547,
-            protocol: "tcp",
-            service: "dhcpv6-server",
-            description: "DHCPv6 Server",
-        },
-        ServiceMapping {
-            port: 548,
-            protocol: "tcp",
-            service: "afp",
-            description: "Apple Filing Protocol",
-        },
-        ServiceMapping {
-            port: 554,
-            protocol: "tcp",
-            service: "rtsp",
-            description: "Real Time Streaming",
-        },
-        ServiceMapping {
-            port: 587,
-            protocol: "tcp",
-            service: "submission",
-            description: "Mail Submission",
-        },
-        ServiceMapping {
-            port: 593,
-            protocol: "tcp",
-            service: "http-rpc",
-            description: "HTTP RPC Endpoint Map",
-        },
-        ServiceMapping {
-            port: 631,
-            protocol: "tcp",
-            service: "ipp",
-            description: "Internet Printing Protocol",
-        },
-        ServiceMapping {
-            port: 636,
-            protocol: "tcp",
-            service: "ldaps",
-            description: "LDAP over TLS",
-        },
-        ServiceMapping {
-            port: 639,
-            protocol: "tcp",
-            service: "msdp",
-            description: "Multicast Source Discovery",
-        },
-        ServiceMapping {
-            port: 646,
-            protocol: "tcp",
-            service: "ldp",
-            description: "Label Distribution Protocol",
-        },
-        ServiceMapping {
-            port: 691,
-            protocol: "tcp",
-            service: "msexch-routing",
-            description: "MS Exchange Routing",
-        },
-        ServiceMapping {
-            port: 860,
-            protocol: "tcp",
-            service: "iscsi",
-            description: "iSCSI",
-        },
-        ServiceMapping {
-            port: 873,
-            protocol: "tcp",
-            service: "rsync",
-            description: "Rsync File Sync",
-        },
-        ServiceMapping {
-            port: 902,
-            protocol: "tcp",
-            service: "vmware-auth",
-            description: "VMware Auth Daemon",
-        },
-        ServiceMapping {
-            port: 989,
-            protocol: "tcp",
-            service: "ftps-data",
-            description: "FTPS Data",
-        },
-        ServiceMapping {
-            port: 990,
-            protocol: "tcp",
-            service: "ftps",
-            description: "FTPS Control",
-        },
-        ServiceMapping {
-            port: 993,
-            protocol: "tcp",
-            service: "imaps",
-            description: "IMAP over TLS",
-        },
-        ServiceMapping {
-            port: 995,
-            protocol: "tcp",
-            service: "pop3s",
-            description: "POP3 over TLS",
-        },
-        ServiceMapping {
-            port: 1080,
-            protocol: "tcp",
-            service: "socks",
-            description: "SOCKS Proxy",
-        },
-        ServiceMapping {
-            port: 1194,
-            protocol: "udp",
-            service: "openvpn",
-            description: "OpenVPN",
-        },
-        ServiceMapping {
-            port: 1433,
-            protocol: "tcp",
-            service: "mssql",
-            description: "Microsoft SQL Server",
-        },
-        ServiceMapping {
-            port: 1434,
-            protocol: "udp",
-            service: "mssql-monitor",
-            description: "MS SQL Monitor",
-        },
-        ServiceMapping {
-            port: 1521,
-            protocol: "tcp",
-            service: "oracle",
-            description: "Oracle Database",
-        },
-        ServiceMapping {
-            port: 1701,
-            protocol: "udp",
-            service: "l2tp",
-            description: "L2TP VPN",
-        },
-        ServiceMapping {
-            port: 1723,
-            protocol: "tcp",
-            service: "pptp",
-            description: "PPTP VPN",
-        },
-        ServiceMapping {
-            port: 1812,
-            protocol: "udp",
-            service: "radius",
-            description: "RADIUS Authentication",
-        },
-        ServiceMapping {
-            port: 1813,
-            protocol: "udp",
-            service: "radius-acct",
-            description: "RADIUS Accounting",
-        },
-        ServiceMapping {
-            port: 1883,
-            protocol: "tcp",
-            service: "mqtt",
-            description: "MQTT Messaging",
-        },
-        ServiceMapping {
-            port: 1900,
-            protocol: "udp",
-            service: "ssdp",
-            description: "SSDP / UPnP",
-        },
-        ServiceMapping {
-            port: 2049,
-            protocol: "tcp",
-            service: "nfs",
-            description: "Network File System",
-        },
-        ServiceMapping {
-            port: 2082,
-            protocol: "tcp",
-            service: "cpanel",
-            description: "cPanel",
-        },
-        ServiceMapping {
-            port: 2083,
-            protocol: "tcp",
-            service: "cpanel-ssl",
-            description: "cPanel SSL",
-        },
-        ServiceMapping {
-            port: 2181,
-            protocol: "tcp",
-            service: "zookeeper",
-            description: "Apache ZooKeeper",
-        },
-        ServiceMapping {
-            port: 2375,
-            protocol: "tcp",
-            service: "docker",
-            description: "Docker REST API",
-        },
-        ServiceMapping {
-            port: 2376,
-            protocol: "tcp",
-            service: "docker-tls",
-            description: "Docker TLS API",
-        },
-        ServiceMapping {
-            port: 3306,
-            protocol: "tcp",
-            service: "mysql",
-            description: "MySQL Database",
-        },
-        ServiceMapping {
-            port: 3389,
-            protocol: "tcp",
-            service: "rdp",
-            description: "Remote Desktop Protocol",
-        },
-        ServiceMapping {
-            port: 3690,
-            protocol: "tcp",
-            service: "svn",
-            description: "Subversion",
-        },
-        ServiceMapping {
-            port: 4443,
-            protocol: "tcp",
-            service: "https-alt",
-            description: "HTTPS Alternate",
-        },
-        ServiceMapping {
-            port: 5060,
-            protocol: "tcp",
-            service: "sip",
-            description: "Session Initiation Protocol",
-        },
-        ServiceMapping {
-            port: 5222,
-            protocol: "tcp",
-            service: "xmpp",
-            description: "XMPP Client",
-        },
-        ServiceMapping {
-            port: 5269,
-            protocol: "tcp",
-            service: "xmpp-server",
-            description: "XMPP Server",
-        },
-        ServiceMapping {
-            port: 5432,
-            protocol: "tcp",
-            service: "postgresql",
-            description: "PostgreSQL Database",
-        },
-        ServiceMapping {
-            port: 5672,
-            protocol: "tcp",
-            service: "amqp",
-            description: "RabbitMQ / AMQP",
-        },
-        ServiceMapping {
-            port: 5900,
-            protocol: "tcp",
-            service: "vnc",
-            description: "Virtual Network Computing",
-        },
-        ServiceMapping {
-            port: 5984,
-            protocol: "tcp",
-            service: "couchdb",
-            description: "CouchDB",
-        },
-        ServiceMapping {
-            port: 6379,
-            protocol: "tcp",
-            service: "redis",
-            description: "Redis",
-        },
-        ServiceMapping {
-            port: 6443,
-            protocol: "tcp",
-            service: "k8s-api",
-            description: "Kubernetes API Server",
-        },
-        ServiceMapping {
-            port: 6667,
-            protocol: "tcp",
-            service: "irc",
-            description: "IRC (alternate)",
-        },
-        ServiceMapping {
-            port: 8080,
-            protocol: "tcp",
-            service: "http-alt",
-            description: "HTTP Alternate",
-        },
-        ServiceMapping {
-            port: 8443,
-            protocol: "tcp",
-            service: "https-alt",
-            description: "HTTPS Alternate",
-        },
-        ServiceMapping {
-            port: 8883,
-            protocol: "tcp",
-            service: "mqtt-tls",
-            description: "MQTT over TLS",
-        },
-        ServiceMapping {
-            port: 9090,
-            protocol: "tcp",
-            service: "prometheus",
-            description: "Prometheus",
-        },
-        ServiceMapping {
-            port: 9092,
-            protocol: "tcp",
-            service: "kafka",
-            description: "Apache Kafka",
-        },
-        ServiceMapping {
-            port: 9200,
-            protocol: "tcp",
-            service: "elasticsearch",
-            description: "Elasticsearch HTTP",
-        },
-        ServiceMapping {
-            port: 9300,
-            protocol: "tcp",
-            service: "elasticsearch-tp",
-            description: "Elasticsearch Transport",
-        },
-        ServiceMapping {
-            port: 9418,
-            protocol: "tcp",
-            service: "git",
-            description: "Git Protocol",
-        },
-        ServiceMapping {
-            port: 11211,
-            protocol: "tcp",
-            service: "memcached",
-            description: "Memcached",
-        },
-        ServiceMapping {
-            port: 27017,
-            protocol: "tcp",
-            service: "mongodb",
-            description: "MongoDB",
-        },
-        ServiceMapping {
-            port: 27018,
-            protocol: "tcp",
-            service: "mongodb-shard",
-            description: "MongoDB Shard",
-        },
-        ServiceMapping {
-            port: 50000,
-            protocol: "tcp",
-            service: "db2",
-            description: "IBM DB2",
-        },
-    ]
+///
+/// A borrowed slice of a `const`, not a freshly built `Vec`: [`lookup_service`]
+/// consults it once per open port per frame, and allocating 125 entries to
+/// answer one question about one port is a cost with nothing behind it.
+pub fn service_database() -> &'static [ServiceMapping] {
+    SERVICES
 }
 
+/// Every port this program can name, and what it is.
+///
+/// **The authority.** `lookup_service` used to answer from a 57-arm `match`
+/// with a comment saying it fell "back to the database for the rest" -- it did
+/// not, and nothing else called this table either. 68 of these 125 entries
+/// could not be reached by any code path, so a scan that found port 43 open
+/// showed "-" rather than "whois".
+///
+/// Worse than incomplete, the match was *less accurate* where the two
+/// overlapped: it called both 137 and 139 "netbios" and both 67 and 68 "dhcp",
+/// which are four different services under two names. One table cannot
+/// disagree with itself.
+const SERVICES: &[ServiceMapping] = &[
+    ServiceMapping {
+        port: 1,
+        protocol: "tcp",
+        service: "tcpmux",
+        description: "TCP Port Multiplexer",
+    },
+    ServiceMapping {
+        port: 5,
+        protocol: "tcp",
+        service: "rje",
+        description: "Remote Job Entry",
+    },
+    ServiceMapping {
+        port: 7,
+        protocol: "tcp",
+        service: "echo",
+        description: "Echo Protocol",
+    },
+    ServiceMapping {
+        port: 9,
+        protocol: "tcp",
+        service: "discard",
+        description: "Discard Protocol",
+    },
+    ServiceMapping {
+        port: 11,
+        protocol: "tcp",
+        service: "systat",
+        description: "Active Users",
+    },
+    ServiceMapping {
+        port: 13,
+        protocol: "tcp",
+        service: "daytime",
+        description: "Daytime Protocol",
+    },
+    ServiceMapping {
+        port: 17,
+        protocol: "tcp",
+        service: "qotd",
+        description: "Quote of the Day",
+    },
+    ServiceMapping {
+        port: 19,
+        protocol: "tcp",
+        service: "chargen",
+        description: "Character Generator",
+    },
+    ServiceMapping {
+        port: 20,
+        protocol: "tcp",
+        service: "ftp-data",
+        description: "FTP Data Transfer",
+    },
+    ServiceMapping {
+        port: 21,
+        protocol: "tcp",
+        service: "ftp",
+        description: "FTP Control",
+    },
+    ServiceMapping {
+        port: 22,
+        protocol: "tcp",
+        service: "ssh",
+        description: "Secure Shell",
+    },
+    ServiceMapping {
+        port: 23,
+        protocol: "tcp",
+        service: "telnet",
+        description: "Telnet",
+    },
+    ServiceMapping {
+        port: 25,
+        protocol: "tcp",
+        service: "smtp",
+        description: "Simple Mail Transfer Protocol",
+    },
+    ServiceMapping {
+        port: 37,
+        protocol: "tcp",
+        service: "time",
+        description: "Time Protocol",
+    },
+    ServiceMapping {
+        port: 42,
+        protocol: "tcp",
+        service: "nameserver",
+        description: "Host Name Server",
+    },
+    ServiceMapping {
+        port: 43,
+        protocol: "tcp",
+        service: "whois",
+        description: "WHOIS",
+    },
+    ServiceMapping {
+        port: 49,
+        protocol: "tcp",
+        service: "tacacs",
+        description: "TACACS Login Host",
+    },
+    ServiceMapping {
+        port: 53,
+        protocol: "tcp",
+        service: "dns",
+        description: "Domain Name System",
+    },
+    ServiceMapping {
+        port: 67,
+        protocol: "udp",
+        service: "dhcp-server",
+        description: "DHCP Server",
+    },
+    ServiceMapping {
+        port: 68,
+        protocol: "udp",
+        service: "dhcp-client",
+        description: "DHCP Client",
+    },
+    ServiceMapping {
+        port: 69,
+        protocol: "udp",
+        service: "tftp",
+        description: "Trivial File Transfer",
+    },
+    ServiceMapping {
+        port: 70,
+        protocol: "tcp",
+        service: "gopher",
+        description: "Gopher Protocol",
+    },
+    ServiceMapping {
+        port: 79,
+        protocol: "tcp",
+        service: "finger",
+        description: "Finger Protocol",
+    },
+    ServiceMapping {
+        port: 80,
+        protocol: "tcp",
+        service: "http",
+        description: "HTTP",
+    },
+    ServiceMapping {
+        port: 88,
+        protocol: "tcp",
+        service: "kerberos",
+        description: "Kerberos Authentication",
+    },
+    ServiceMapping {
+        port: 102,
+        protocol: "tcp",
+        service: "iso-tsap",
+        description: "ISO-TSAP",
+    },
+    ServiceMapping {
+        port: 104,
+        protocol: "tcp",
+        service: "dicom",
+        description: "DICOM Medical Imaging",
+    },
+    ServiceMapping {
+        port: 109,
+        protocol: "tcp",
+        service: "pop2",
+        description: "POP Version 2",
+    },
+    ServiceMapping {
+        port: 110,
+        protocol: "tcp",
+        service: "pop3",
+        description: "POP Version 3",
+    },
+    ServiceMapping {
+        port: 111,
+        protocol: "tcp",
+        service: "sunrpc",
+        description: "Sun RPC / Portmapper",
+    },
+    ServiceMapping {
+        port: 113,
+        protocol: "tcp",
+        service: "ident",
+        description: "Identification Protocol",
+    },
+    ServiceMapping {
+        port: 115,
+        protocol: "tcp",
+        service: "sftp",
+        description: "Simple File Transfer",
+    },
+    ServiceMapping {
+        port: 118,
+        protocol: "tcp",
+        service: "sqlserv",
+        description: "SQL Services",
+    },
+    ServiceMapping {
+        port: 119,
+        protocol: "tcp",
+        service: "nntp",
+        description: "Network News Transfer",
+    },
+    ServiceMapping {
+        port: 123,
+        protocol: "udp",
+        service: "ntp",
+        description: "Network Time Protocol",
+    },
+    ServiceMapping {
+        port: 135,
+        protocol: "tcp",
+        service: "msrpc",
+        description: "Microsoft RPC",
+    },
+    ServiceMapping {
+        port: 137,
+        protocol: "udp",
+        service: "netbios-ns",
+        description: "NetBIOS Name Service",
+    },
+    ServiceMapping {
+        port: 138,
+        protocol: "udp",
+        service: "netbios-dgm",
+        description: "NetBIOS Datagram",
+    },
+    ServiceMapping {
+        port: 139,
+        protocol: "tcp",
+        service: "netbios-ssn",
+        description: "NetBIOS Session",
+    },
+    ServiceMapping {
+        port: 143,
+        protocol: "tcp",
+        service: "imap",
+        description: "IMAP",
+    },
+    ServiceMapping {
+        port: 161,
+        protocol: "udp",
+        service: "snmp",
+        description: "Simple Network Management",
+    },
+    ServiceMapping {
+        port: 162,
+        protocol: "udp",
+        service: "snmp-trap",
+        description: "SNMP Trap",
+    },
+    ServiceMapping {
+        port: 177,
+        protocol: "tcp",
+        service: "xdmcp",
+        description: "X Display Manager Control",
+    },
+    ServiceMapping {
+        port: 179,
+        protocol: "tcp",
+        service: "bgp",
+        description: "Border Gateway Protocol",
+    },
+    ServiceMapping {
+        port: 194,
+        protocol: "tcp",
+        service: "irc",
+        description: "Internet Relay Chat",
+    },
+    ServiceMapping {
+        port: 201,
+        protocol: "tcp",
+        service: "at-rtmp",
+        description: "AppleTalk Routing",
+    },
+    ServiceMapping {
+        port: 209,
+        protocol: "tcp",
+        service: "qmtp",
+        description: "Quick Mail Transfer",
+    },
+    ServiceMapping {
+        port: 213,
+        protocol: "tcp",
+        service: "ipx",
+        description: "IPX over IP",
+    },
+    ServiceMapping {
+        port: 220,
+        protocol: "tcp",
+        service: "imap3",
+        description: "IMAP Version 3",
+    },
+    ServiceMapping {
+        port: 389,
+        protocol: "tcp",
+        service: "ldap",
+        description: "Lightweight Directory Access",
+    },
+    ServiceMapping {
+        port: 427,
+        protocol: "tcp",
+        service: "svrloc",
+        description: "Service Location Protocol",
+    },
+    ServiceMapping {
+        port: 443,
+        protocol: "tcp",
+        service: "https",
+        description: "HTTP over TLS",
+    },
+    ServiceMapping {
+        port: 445,
+        protocol: "tcp",
+        service: "smb",
+        description: "Server Message Block",
+    },
+    ServiceMapping {
+        port: 464,
+        protocol: "tcp",
+        service: "kpasswd",
+        description: "Kerberos Password Change",
+    },
+    ServiceMapping {
+        port: 465,
+        protocol: "tcp",
+        service: "smtps",
+        description: "SMTP over TLS",
+    },
+    ServiceMapping {
+        port: 500,
+        protocol: "udp",
+        service: "isakmp",
+        description: "IPsec Key Exchange",
+    },
+    ServiceMapping {
+        port: 502,
+        protocol: "tcp",
+        service: "modbus",
+        description: "Modbus Protocol",
+    },
+    ServiceMapping {
+        port: 514,
+        protocol: "tcp",
+        service: "syslog",
+        description: "Syslog",
+    },
+    ServiceMapping {
+        port: 515,
+        protocol: "tcp",
+        service: "lpd",
+        description: "Line Printer Daemon",
+    },
+    ServiceMapping {
+        port: 520,
+        protocol: "udp",
+        service: "rip",
+        description: "Routing Information Protocol",
+    },
+    ServiceMapping {
+        port: 521,
+        protocol: "udp",
+        service: "ripng",
+        description: "RIPng for IPv6",
+    },
+    ServiceMapping {
+        port: 530,
+        protocol: "tcp",
+        service: "rpc",
+        description: "Remote Procedure Call",
+    },
+    ServiceMapping {
+        port: 543,
+        protocol: "tcp",
+        service: "klogin",
+        description: "Kerberos Login",
+    },
+    ServiceMapping {
+        port: 544,
+        protocol: "tcp",
+        service: "kshell",
+        description: "Kerberos Shell",
+    },
+    ServiceMapping {
+        port: 546,
+        protocol: "tcp",
+        service: "dhcpv6-client",
+        description: "DHCPv6 Client",
+    },
+    ServiceMapping {
+        port: 547,
+        protocol: "tcp",
+        service: "dhcpv6-server",
+        description: "DHCPv6 Server",
+    },
+    ServiceMapping {
+        port: 548,
+        protocol: "tcp",
+        service: "afp",
+        description: "Apple Filing Protocol",
+    },
+    ServiceMapping {
+        port: 554,
+        protocol: "tcp",
+        service: "rtsp",
+        description: "Real Time Streaming",
+    },
+    ServiceMapping {
+        port: 587,
+        protocol: "tcp",
+        service: "submission",
+        description: "Mail Submission",
+    },
+    ServiceMapping {
+        port: 593,
+        protocol: "tcp",
+        service: "http-rpc",
+        description: "HTTP RPC Endpoint Map",
+    },
+    ServiceMapping {
+        port: 631,
+        protocol: "tcp",
+        service: "ipp",
+        description: "Internet Printing Protocol",
+    },
+    ServiceMapping {
+        port: 636,
+        protocol: "tcp",
+        service: "ldaps",
+        description: "LDAP over TLS",
+    },
+    ServiceMapping {
+        port: 639,
+        protocol: "tcp",
+        service: "msdp",
+        description: "Multicast Source Discovery",
+    },
+    ServiceMapping {
+        port: 646,
+        protocol: "tcp",
+        service: "ldp",
+        description: "Label Distribution Protocol",
+    },
+    ServiceMapping {
+        port: 691,
+        protocol: "tcp",
+        service: "msexch-routing",
+        description: "MS Exchange Routing",
+    },
+    ServiceMapping {
+        port: 860,
+        protocol: "tcp",
+        service: "iscsi",
+        description: "iSCSI",
+    },
+    ServiceMapping {
+        port: 873,
+        protocol: "tcp",
+        service: "rsync",
+        description: "Rsync File Sync",
+    },
+    ServiceMapping {
+        port: 902,
+        protocol: "tcp",
+        service: "vmware-auth",
+        description: "VMware Auth Daemon",
+    },
+    ServiceMapping {
+        port: 989,
+        protocol: "tcp",
+        service: "ftps-data",
+        description: "FTPS Data",
+    },
+    ServiceMapping {
+        port: 990,
+        protocol: "tcp",
+        service: "ftps",
+        description: "FTPS Control",
+    },
+    ServiceMapping {
+        port: 993,
+        protocol: "tcp",
+        service: "imaps",
+        description: "IMAP over TLS",
+    },
+    ServiceMapping {
+        port: 995,
+        protocol: "tcp",
+        service: "pop3s",
+        description: "POP3 over TLS",
+    },
+    ServiceMapping {
+        port: 1080,
+        protocol: "tcp",
+        service: "socks",
+        description: "SOCKS Proxy",
+    },
+    ServiceMapping {
+        port: 1194,
+        protocol: "udp",
+        service: "openvpn",
+        description: "OpenVPN",
+    },
+    ServiceMapping {
+        port: 1433,
+        protocol: "tcp",
+        service: "mssql",
+        description: "Microsoft SQL Server",
+    },
+    ServiceMapping {
+        port: 1434,
+        protocol: "udp",
+        service: "mssql-monitor",
+        description: "MS SQL Monitor",
+    },
+    ServiceMapping {
+        port: 1521,
+        protocol: "tcp",
+        service: "oracle",
+        description: "Oracle Database",
+    },
+    ServiceMapping {
+        port: 1701,
+        protocol: "udp",
+        service: "l2tp",
+        description: "L2TP VPN",
+    },
+    ServiceMapping {
+        port: 1723,
+        protocol: "tcp",
+        service: "pptp",
+        description: "PPTP VPN",
+    },
+    ServiceMapping {
+        port: 1812,
+        protocol: "udp",
+        service: "radius",
+        description: "RADIUS Authentication",
+    },
+    ServiceMapping {
+        port: 1813,
+        protocol: "udp",
+        service: "radius-acct",
+        description: "RADIUS Accounting",
+    },
+    ServiceMapping {
+        port: 1883,
+        protocol: "tcp",
+        service: "mqtt",
+        description: "MQTT Messaging",
+    },
+    ServiceMapping {
+        port: 1900,
+        protocol: "udp",
+        service: "ssdp",
+        description: "SSDP / UPnP",
+    },
+    ServiceMapping {
+        port: 2049,
+        protocol: "tcp",
+        service: "nfs",
+        description: "Network File System",
+    },
+    ServiceMapping {
+        port: 2082,
+        protocol: "tcp",
+        service: "cpanel",
+        description: "cPanel",
+    },
+    ServiceMapping {
+        port: 2083,
+        protocol: "tcp",
+        service: "cpanel-ssl",
+        description: "cPanel SSL",
+    },
+    ServiceMapping {
+        port: 2181,
+        protocol: "tcp",
+        service: "zookeeper",
+        description: "Apache ZooKeeper",
+    },
+    ServiceMapping {
+        port: 2375,
+        protocol: "tcp",
+        service: "docker",
+        description: "Docker REST API",
+    },
+    ServiceMapping {
+        port: 2376,
+        protocol: "tcp",
+        service: "docker-tls",
+        description: "Docker TLS API",
+    },
+    ServiceMapping {
+        port: 3306,
+        protocol: "tcp",
+        service: "mysql",
+        description: "MySQL Database",
+    },
+    ServiceMapping {
+        port: 3389,
+        protocol: "tcp",
+        service: "rdp",
+        description: "Remote Desktop Protocol",
+    },
+    ServiceMapping {
+        port: 3690,
+        protocol: "tcp",
+        service: "svn",
+        description: "Subversion",
+    },
+    ServiceMapping {
+        port: 4443,
+        protocol: "tcp",
+        service: "https-alt",
+        description: "HTTPS Alternate",
+    },
+    ServiceMapping {
+        port: 5060,
+        protocol: "tcp",
+        service: "sip",
+        description: "Session Initiation Protocol",
+    },
+    ServiceMapping {
+        port: 5222,
+        protocol: "tcp",
+        service: "xmpp",
+        description: "XMPP Client",
+    },
+    ServiceMapping {
+        port: 5269,
+        protocol: "tcp",
+        service: "xmpp-server",
+        description: "XMPP Server",
+    },
+    ServiceMapping {
+        port: 5432,
+        protocol: "tcp",
+        service: "postgresql",
+        description: "PostgreSQL Database",
+    },
+    ServiceMapping {
+        port: 5672,
+        protocol: "tcp",
+        service: "amqp",
+        description: "RabbitMQ / AMQP",
+    },
+    ServiceMapping {
+        port: 5900,
+        protocol: "tcp",
+        service: "vnc",
+        description: "Virtual Network Computing",
+    },
+    ServiceMapping {
+        port: 5984,
+        protocol: "tcp",
+        service: "couchdb",
+        description: "CouchDB",
+    },
+    ServiceMapping {
+        port: 6379,
+        protocol: "tcp",
+        service: "redis",
+        description: "Redis",
+    },
+    ServiceMapping {
+        port: 6443,
+        protocol: "tcp",
+        service: "k8s-api",
+        description: "Kubernetes API Server",
+    },
+    ServiceMapping {
+        port: 6667,
+        protocol: "tcp",
+        service: "irc",
+        description: "IRC (alternate)",
+    },
+    ServiceMapping {
+        port: 8080,
+        protocol: "tcp",
+        service: "http-alt",
+        description: "HTTP Alternate",
+    },
+    ServiceMapping {
+        port: 8443,
+        protocol: "tcp",
+        service: "https-alt",
+        description: "HTTPS Alternate",
+    },
+    ServiceMapping {
+        port: 8883,
+        protocol: "tcp",
+        service: "mqtt-tls",
+        description: "MQTT over TLS",
+    },
+    ServiceMapping {
+        port: 9090,
+        protocol: "tcp",
+        service: "prometheus",
+        description: "Prometheus",
+    },
+    ServiceMapping {
+        port: 9092,
+        protocol: "tcp",
+        service: "kafka",
+        description: "Apache Kafka",
+    },
+    ServiceMapping {
+        port: 9200,
+        protocol: "tcp",
+        service: "elasticsearch",
+        description: "Elasticsearch HTTP",
+    },
+    ServiceMapping {
+        port: 9300,
+        protocol: "tcp",
+        service: "elasticsearch-tp",
+        description: "Elasticsearch Transport",
+    },
+    ServiceMapping {
+        port: 9418,
+        protocol: "tcp",
+        service: "git",
+        description: "Git Protocol",
+    },
+    ServiceMapping {
+        port: 11211,
+        protocol: "tcp",
+        service: "memcached",
+        description: "Memcached",
+    },
+    ServiceMapping {
+        port: 27017,
+        protocol: "tcp",
+        service: "mongodb",
+        description: "MongoDB",
+    },
+    ServiceMapping {
+        port: 27018,
+        protocol: "tcp",
+        service: "mongodb-shard",
+        description: "MongoDB Shard",
+    },
+    ServiceMapping {
+        port: 50000,
+        protocol: "tcp",
+        service: "db2",
+        description: "IBM DB2",
+    },
+];
+
 /// Look up a service name by port number.
+///
+/// One table, read straight. This used to be a 57-arm `match` in front of the
+/// table, described in its own comment as "falling back to the database for the
+/// rest" -- which it never did, because nothing called the database. The match
+/// is gone rather than kept as a fast path: 125 entries is a scan of a few
+/// hundred bytes, it happens once per open port on screen, and a second copy of
+/// the answer is what let 137 and 139 both come back "netbios" while the table
+/// beside it knew they were `netbios-ns` and `netbios-ssn`.
+#[must_use]
 pub fn lookup_service(port: u16) -> Option<&'static str> {
-    // Use a static-like approach; match on common ports for O(1) lookup of the
-    // most frequently queried ports, falling back to the database for the rest.
-    match port {
-        20 => Some("ftp-data"),
-        21 => Some("ftp"),
-        22 => Some("ssh"),
-        23 => Some("telnet"),
-        25 => Some("smtp"),
-        53 => Some("dns"),
-        67 => Some("dhcp"),
-        68 => Some("dhcp"),
-        80 => Some("http"),
-        88 => Some("kerberos"),
-        110 => Some("pop3"),
-        111 => Some("sunrpc"),
-        119 => Some("nntp"),
-        123 => Some("ntp"),
-        135 => Some("msrpc"),
-        137 => Some("netbios"),
-        139 => Some("netbios"),
-        143 => Some("imap"),
-        161 => Some("snmp"),
-        179 => Some("bgp"),
-        389 => Some("ldap"),
-        443 => Some("https"),
-        445 => Some("smb"),
-        465 => Some("smtps"),
-        514 => Some("syslog"),
-        515 => Some("lpd"),
-        554 => Some("rtsp"),
-        587 => Some("submission"),
-        631 => Some("ipp"),
-        636 => Some("ldaps"),
-        873 => Some("rsync"),
-        993 => Some("imaps"),
-        995 => Some("pop3s"),
-        1080 => Some("socks"),
-        1194 => Some("openvpn"),
-        1433 => Some("mssql"),
-        1521 => Some("oracle"),
-        1723 => Some("pptp"),
-        1883 => Some("mqtt"),
-        2049 => Some("nfs"),
-        3306 => Some("mysql"),
-        3389 => Some("rdp"),
-        5060 => Some("sip"),
-        5222 => Some("xmpp"),
-        5432 => Some("postgresql"),
-        5672 => Some("amqp"),
-        5900 => Some("vnc"),
-        6379 => Some("redis"),
-        6443 => Some("k8s-api"),
-        8080 => Some("http-alt"),
-        8443 => Some("https-alt"),
-        9090 => Some("prometheus"),
-        9092 => Some("kafka"),
-        9200 => Some("elasticsearch"),
-        9418 => Some("git"),
-        11211 => Some("memcached"),
-        27017 => Some("mongodb"),
-        _ => None,
-    }
+    SERVICES
+        .iter()
+        .find(|entry| entry.port == port)
+        .map(|entry| entry.service)
 }
 
 /// Common ports for quick scan profile.
@@ -1863,7 +1835,15 @@ pub fn estimate_scan_time(
         return 0.0;
     }
     let total_probes = (host_count as u64).saturating_mul(port_count as u64);
-    let batches = total_probes.saturating_add(concurrency as u64 - 1) / (concurrency as u64);
+    // Ceiling division. Written with `checked_*` because the old form was
+    // `(total + concurrency - 1) / concurrency`, and at a concurrency of zero
+    // that is an underflow followed by a division by zero -- reachable from the
+    // config panel, which lets the number be typed.
+    let batches = concurrency
+        .checked_sub(1)
+        .and_then(|c| total_probes.checked_add(c as u64))
+        .and_then(|n| n.checked_div(concurrency as u64))
+        .unwrap_or(0);
     let time_per_batch_ms = timeout_ms as f32 * 0.3; // average case: 30% of timeout
     (batches as f32 * time_per_batch_ms) / 1000.0
 }
@@ -2126,6 +2106,16 @@ pub struct NetScanApp {
     pub selected_host_idx: Option<usize>,
     pub scan_progress: Option<ScanProgress>,
     pub is_scanning: bool,
+    /// How wide the window is, in pixels.
+    ///
+    /// Every layout and every hit test in this file read the `WINDOW_WIDTH`
+    /// constant directly, so the program drew a 1200x800 picture in whatever
+    /// window it was given -- and, because the *hit tests* read it too, a
+    /// resized window put the scan button and the sidebar boundary somewhere
+    /// the pointer could not find them.
+    pub window_width: f32,
+    /// How tall the window is, in pixels.
+    pub window_height: f32,
     /// Index of the first host row drawn in the results table.
     ///
     /// A request rather than an index: an offset left over from a longer scan
@@ -2176,6 +2166,8 @@ impl Default for NetScanApp {
             selected_host_idx: None,
             scan_progress: None,
             is_scanning: false,
+            window_width: WINDOW_WIDTH,
+            window_height: WINDOW_HEIGHT,
             results_scroll: 0,
             traceroute_target: String::from("8.8.8.8"),
             traceroute_result: None,
@@ -2230,7 +2222,13 @@ impl NetScanApp {
             ports
         };
 
-        let mut rng = SimRng::new(ips.len() as u64 * 31 + scan_ports.len() as u64 * 17);
+        // Saturating: this is a seed, so any answer is as good as any other,
+        // and the arithmetic should not be the thing that decides.
+        let mut rng = SimRng::new(
+            (ips.len() as u64)
+                .saturating_mul(31)
+                .saturating_add((scan_ports.len() as u64).saturating_mul(17)),
+        );
         let mut hosts = Vec::new();
 
         for ip in &ips {
@@ -2255,7 +2253,11 @@ impl NetScanApp {
 
         let result = ScanResult {
             id,
-            timestamp: format!("2026-05-18 12:{:02}:{:02}", (id * 7) % 60, (id * 13) % 60),
+            timestamp: format!(
+                "2026-05-18 12:{:02}:{:02}",
+                id.saturating_mul(7) % 60,
+                id.saturating_mul(13) % 60
+            ),
             target_description: self.config.target_input.clone(),
             profile: self.config.profile,
             hosts,
@@ -2271,7 +2273,10 @@ impl NetScanApp {
         self.history.push_front(result.clone());
         self.results = Some(result);
         self.selected_host_idx = None;
-        self.results_scroll = 0;
+        // Back to the first row: the offset belongs to the list that was there
+        // before, and these results are a different list. Through
+        // `scroll_results_to_top`, which said exactly this and had no caller.
+        self.scroll_results_to_top();
         self.detail_port_scroll = 0;
         // The lists they belong to have been replaced, so a fraction earned
         // scrolling the old scan must not deliver a row in the new one.
@@ -2324,7 +2329,7 @@ impl NetScanApp {
         scroll_window::visible(
             total,
             TABLE_ROW_HEIGHT,
-            WINDOW_HEIGHT - RESULTS_ROWS_TOP - LIST_MORE_HEIGHT,
+            self.window_height - RESULTS_ROWS_TOP - LIST_MORE_HEIGHT,
             self.results_scroll,
         )
     }
@@ -2336,7 +2341,7 @@ impl NetScanApp {
         scroll_window::visible(
             total,
             PORT_ROW_HEIGHT,
-            WINDOW_HEIGHT - rows_top - PADDING - LIST_MORE_HEIGHT,
+            self.window_height - rows_top - PADDING - LIST_MORE_HEIGHT,
             self.detail_port_scroll,
         )
     }
@@ -2355,6 +2360,25 @@ impl NetScanApp {
         self.results_scroll = 0;
     }
 
+    /// Bring the selected host onto the screen.
+    ///
+    /// The arrow keys moved the selection through the whole host list while the
+    /// table stayed where it was, so on a long scan the selection walked off
+    /// the bottom and the sidebar filled with a host nothing on screen was
+    /// highlighting.
+    pub fn scroll_selection_into_view(&mut self) {
+        let Some(index) = self.selected_host_idx else {
+            return;
+        };
+        let window = self.results_visible_rows();
+        let page = window.count.max(1);
+        if index < window.start {
+            self.results_scroll = index;
+        } else if index >= window.start.saturating_add(page) {
+            self.results_scroll = index.saturating_sub(page).saturating_add(1);
+        }
+    }
+
     /// Scroll the sidebar's port list by `delta` rows, stopping at the top.
     pub fn scroll_detail_ports_by(&mut self, delta: isize) {
         self.detail_port_scroll = scroll_window::shift(self.detail_port_scroll, delta);
@@ -2365,6 +2389,14 @@ impl NetScanApp {
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Resize { width, height } => {
+                self.window_width = *width as f32;
+                self.window_height = *height as f32;
+                // A shorter window shows fewer rows, so an offset that was the
+                // last page a moment ago is now past the end.
+                self.scroll_selection_into_view();
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -2385,13 +2417,37 @@ impl NetScanApp {
                 // Cycle tabs
                 let tabs = ViewTab::ALL;
                 let current_idx = tabs.iter().position(|t| *t == self.active_tab).unwrap_or(0);
-                let next = (current_idx.saturating_add(1)) % tabs.len();
-                self.active_tab = tabs.get(next).copied().unwrap_or(ViewTab::Results);
+                // `checked_rem` is the emptiness test: there is no next tab in
+                // a list of none, and no remainder modulo zero.
+                let next = current_idx.saturating_add(1).checked_rem(tabs.len());
+                self.active_tab = next
+                    .and_then(|i| tabs.get(i))
+                    .copied()
+                    .unwrap_or(ViewTab::Results);
                 EventResult::Consumed
             }
             Key::Escape => {
                 self.show_export_menu = false;
                 self.selected_host_idx = None;
+                EventResult::Consumed
+            }
+            Key::Home => {
+                self.scroll_results_to_top();
+                if self.results.as_ref().is_some_and(|r| !r.hosts.is_empty()) {
+                    self.selected_host_idx = Some(0);
+                }
+                EventResult::Consumed
+            }
+            Key::PageUp => {
+                // `saturating_neg`, not `-`: a page size that came back as
+                // `isize::MIN` is the one negation that overflows.
+                let page = self.results_visible_rows().count.max(1) as isize;
+                self.scroll_results_by(page.saturating_neg());
+                EventResult::Consumed
+            }
+            Key::PageDown => {
+                let page = self.results_visible_rows().count.max(1);
+                self.scroll_results_by(page as isize);
                 EventResult::Consumed
             }
             Key::Up => {
@@ -2400,6 +2456,7 @@ impl NetScanApp {
                 {
                     self.selected_host_idx = Some(idx.saturating_sub(1));
                 }
+                self.scroll_selection_into_view();
                 EventResult::Consumed
             }
             Key::Down => {
@@ -2415,6 +2472,7 @@ impl NetScanApp {
                         _ => {}
                     }
                 }
+                self.scroll_selection_into_view();
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -2457,7 +2515,7 @@ impl NetScanApp {
                 }
 
                 // Check scan button
-                let scan_btn_x = WINDOW_WIDTH - 150.0 - PADDING;
+                let scan_btn_x = self.window_width - 150.0 - PADDING;
                 let scan_btn_y = TITLE_BAR_HEIGHT + PADDING;
                 if mx >= scan_btn_x
                     && mx <= scan_btn_x + 150.0
@@ -2474,7 +2532,7 @@ impl NetScanApp {
                     // the copy that used to live here omitted the summary bar,
                     // so it placed the first row 26px above where the renderer
                     // drew it and every click landed one row too far down.
-                    if my >= RESULTS_ROWS_TOP && mx < WINDOW_WIDTH - SIDEBAR_WIDTH {
+                    if my >= RESULTS_ROWS_TOP && mx < self.window_width - SIDEBAR_WIDTH {
                         // The click names a row on screen; the selection is an
                         // index into the whole host list. Without the scroll
                         // offset the two agree only while the table is at the
@@ -2499,8 +2557,8 @@ impl NetScanApp {
 
                 // Check export button
                 if self.active_tab == ViewTab::Results && self.results.is_some() {
-                    let export_x = WINDOW_WIDTH - SIDEBAR_WIDTH + PADDING;
-                    let export_y = WINDOW_HEIGHT - 50.0;
+                    let export_x = self.window_width - SIDEBAR_WIDTH + PADDING;
+                    let export_y = self.window_height - 50.0;
                     if mx >= export_x
                         && mx <= export_x + 120.0
                         && my >= export_y
@@ -2545,8 +2603,8 @@ impl NetScanApp {
 
                 // WOL button
                 if self.active_tab == ViewTab::Results {
-                    let wol_btn_x = WINDOW_WIDTH - SIDEBAR_WIDTH + PADDING;
-                    let wol_btn_y = WINDOW_HEIGHT - 90.0;
+                    let wol_btn_x = self.window_width - SIDEBAR_WIDTH + PADDING;
+                    let wol_btn_y = self.window_height - 90.0;
                     if mx >= wol_btn_x
                         && mx <= wol_btn_x + 120.0
                         && my >= wol_btn_y
@@ -2562,13 +2620,16 @@ impl NetScanApp {
             MouseEventKind::Scroll { dy, .. } => {
                 if self.active_tab == ViewTab::Results {
                     // Each list keeps its own remainder -- see the two fields.
-                    if mx < WINDOW_WIDTH - SIDEBAR_WIDTH {
+                    // Through `scroll_results_by`/`scroll_detail_ports_by`
+                    // rather than repeating their bodies here: both existed,
+                    // both were tested, and this handler did the same thing by
+                    // hand, which is two statements of one rule.
+                    if mx < self.window_width - SIDEBAR_WIDTH {
                         let rows = self.results_wheel.rows(*dy);
-                        self.results_scroll = scroll_window::shift(self.results_scroll, rows);
+                        self.scroll_results_by(rows);
                     } else {
                         let rows = self.ports_wheel.rows(*dy);
-                        self.detail_port_scroll =
-                            scroll_window::shift(self.detail_port_scroll, rows);
+                        self.scroll_detail_ports_by(rows);
                     }
                     EventResult::Consumed
                 } else {
@@ -2584,15 +2645,18 @@ impl NetScanApp {
     // ========================================================================
 
     /// Render the entire application into a render tree.
-    pub fn render(&self) -> RenderTree {
+    ///
+    /// Not `render`: [`App::render`] is the one the window calls, and an
+    /// inherent method of the same name shadows a trait method at equal arity.
+    pub fn render_tree(&self) -> RenderTree {
         let mut tree = RenderTree::new();
 
         // Full-window background
         tree.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
+            width: self.window_width,
+            height: self.window_height,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -2621,7 +2685,7 @@ impl NetScanApp {
         tree.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: TITLE_BAR_HEIGHT,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
@@ -2669,7 +2733,7 @@ impl NetScanApp {
         };
         let status_color = if self.is_scanning { YELLOW } else { GREEN };
         tree.push(RenderCommand::FillRect {
-            x: WINDOW_WIDTH - 200.0,
+            x: self.window_width - 200.0,
             y: TITLE_BAR_HEIGHT / 2.0 - 4.0,
             width: 8.0,
             height: 8.0,
@@ -2677,7 +2741,7 @@ impl NetScanApp {
             corner_radii: CornerRadii::all(4.0),
         });
         tree.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 188.0,
+            x: self.window_width - 188.0,
             y: 12.0,
             text: status_text.to_string(),
             color: SUBTEXT0,
@@ -2695,7 +2759,7 @@ impl NetScanApp {
         tree.push(RenderCommand::FillRect {
             x: 0.0,
             y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: CONFIG_PANEL_HEIGHT,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
@@ -2840,7 +2904,7 @@ impl NetScanApp {
         }
 
         // Scan button
-        let scan_btn_x = WINDOW_WIDTH - 150.0 - PADDING;
+        let scan_btn_x = self.window_width - 150.0 - PADDING;
         let scan_btn_y = y + PADDING;
         let btn_color = if self.is_scanning { SURFACE1 } else { GREEN };
         let btn_text_color = if self.is_scanning { SUBTEXT0 } else { CRUST };
@@ -2920,7 +2984,7 @@ impl NetScanApp {
         tree.push(RenderCommand::FillRect {
             x: 0.0,
             y: tab_y - 2.0,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: TAB_HEIGHT + 4.0,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
@@ -2984,7 +3048,7 @@ impl NetScanApp {
 
     fn render_results_view(&self, tree: &mut RenderTree) {
         let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
-        let table_width = WINDOW_WIDTH - SIDEBAR_WIDTH;
+        let table_width = self.window_width - SIDEBAR_WIDTH;
 
         // Results summary bar
         if let Some(ref result) = self.results {
@@ -3259,7 +3323,7 @@ impl NetScanApp {
             x,
             y: top_y,
             width: SIDEBAR_WIDTH,
-            height: WINDOW_HEIGHT - top_y,
+            height: self.window_height - top_y,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -3269,7 +3333,7 @@ impl NetScanApp {
             x,
             y: top_y,
             width: 1.0,
-            height: WINDOW_HEIGHT - top_y,
+            height: self.window_height - top_y,
             color: SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
@@ -3300,7 +3364,7 @@ impl NetScanApp {
             });
 
             // WOL section
-            let wol_y = WINDOW_HEIGHT - 100.0;
+            let wol_y = self.window_height - 100.0;
             tree.push(RenderCommand::Text {
                 x: x + PADDING,
                 y: wol_y,
@@ -3347,7 +3411,7 @@ impl NetScanApp {
             });
 
             // Export button
-            let export_y = WINDOW_HEIGHT - 50.0;
+            let export_y = self.window_height - 50.0;
             if self.results.is_some() {
                 tree.push(RenderCommand::FillRect {
                     x: x + PADDING,
@@ -3470,7 +3534,7 @@ impl NetScanApp {
             tree.push(RenderCommand::Text {
                 x: x + 85.0,
                 y: dy,
-                text: value.to_string(),
+                text: value.clone(),
                 color: TEXT_COLOR,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
@@ -3640,8 +3704,8 @@ impl NetScanApp {
 
     fn render_topology_view(&self, tree: &mut RenderTree) {
         let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
-        let area_w = WINDOW_WIDTH - PADDING * 2.0;
-        let area_h = WINDOW_HEIGHT - content_y - PADDING;
+        let area_w = self.window_width - PADDING * 2.0;
+        let area_h = self.window_height - content_y - PADDING;
 
         // Background
         tree.push(RenderCommand::FillRect {
@@ -3861,7 +3925,7 @@ impl NetScanApp {
         tree.push(RenderCommand::FillRect {
             x: PADDING,
             y: header_y,
-            width: WINDOW_WIDTH - PADDING * 2.0,
+            width: self.window_width - PADDING * 2.0,
             height: TABLE_HEADER_HEIGHT,
             color: SURFACE0,
             corner_radii: CornerRadii::ZERO,
@@ -3893,7 +3957,7 @@ impl NetScanApp {
         let rows_y = header_y + TABLE_HEADER_HEIGHT;
         for (i, entry) in self.history.iter().enumerate() {
             let row_y = rows_y + (i as f32) * TABLE_ROW_HEIGHT;
-            if row_y > WINDOW_HEIGHT {
+            if row_y > self.window_height {
                 break;
             }
 
@@ -3905,7 +3969,7 @@ impl NetScanApp {
             tree.push(RenderCommand::FillRect {
                 x: PADDING,
                 y: row_y,
-                width: WINDOW_WIDTH - PADDING * 2.0,
+                width: self.window_width - PADDING * 2.0,
                 height: TABLE_ROW_HEIGHT,
                 color: bg,
                 corner_radii: CornerRadii::ZERO,
@@ -3986,7 +4050,7 @@ impl NetScanApp {
         // Diff section
         if self.history.len() >= 2 {
             let diff_y = rows_y + (self.history.len() as f32) * TABLE_ROW_HEIGHT + 20.0;
-            if diff_y < WINDOW_HEIGHT - 60.0 {
+            if diff_y < self.window_height - 60.0 {
                 let newest = self.history.front();
                 let previous = self.history.get(1);
                 if let (Some(new_scan), Some(old_scan)) = (newest, previous) {
@@ -4078,7 +4142,7 @@ impl NetScanApp {
             tree.push(RenderCommand::FillRect {
                 x: PADDING,
                 y: table_y,
-                width: WINDOW_WIDTH - PADDING * 2.0,
+                width: self.window_width - PADDING * 2.0,
                 height: TABLE_HEADER_HEIGHT,
                 color: SURFACE0,
                 corner_radii: CornerRadii::ZERO,
@@ -4105,7 +4169,7 @@ impl NetScanApp {
             let rows_y = table_y + TABLE_HEADER_HEIGHT;
             for (i, hop) in hops.iter().enumerate() {
                 let row_y = rows_y + (i as f32) * TABLE_ROW_HEIGHT;
-                if row_y > WINDOW_HEIGHT {
+                if row_y > self.window_height {
                     break;
                 }
 
@@ -4117,7 +4181,7 @@ impl NetScanApp {
                 tree.push(RenderCommand::FillRect {
                     x: PADDING,
                     y: row_y,
-                    width: WINDOW_WIDTH - PADDING * 2.0,
+                    width: self.window_width - PADDING * 2.0,
                     height: TABLE_ROW_HEIGHT,
                     color: bg,
                     corner_radii: CornerRadii::ZERO,
@@ -4302,7 +4366,7 @@ impl NetScanApp {
                 tree.push(RenderCommand::Text {
                     x: PADDING + 140.0,
                     y: fy,
-                    text: value.to_string(),
+                    text: value.clone(),
                     color: TEXT_COLOR,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
@@ -4315,13 +4379,13 @@ impl NetScanApp {
     }
 
     fn render_progress_bar(&self, tree: &mut RenderTree, progress: &ScanProgress) {
-        let y = WINDOW_HEIGHT - PROGRESS_BAR_HEIGHT;
+        let y = self.window_height - PROGRESS_BAR_HEIGHT;
 
         // Background
         tree.push(RenderCommand::FillRect {
             x: 0.0,
             y,
-            width: WINDOW_WIDTH,
+            width: self.window_width,
             height: PROGRESS_BAR_HEIGHT,
             color: SURFACE0,
             corner_radii: CornerRadii::ZERO,
@@ -4332,7 +4396,7 @@ impl NetScanApp {
         tree.push(RenderCommand::FillRect {
             x: 0.0,
             y,
-            width: WINDOW_WIDTH * frac,
+            width: self.window_width * frac,
             height: PROGRESS_BAR_HEIGHT,
             color: Color::rgba(137, 180, 250, 100),
             corner_radii: CornerRadii::ZERO,
@@ -4401,7 +4465,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
     }
     let mut bytes = [0u8; 6];
     for (i, part) in parts.iter().enumerate() {
-        bytes[i] = u8::from_str_radix(part, 16).ok()?;
+        *bytes.get_mut(i)? = u8::from_str_radix(part, 16).ok()?;
     }
     Some(MacAddr { bytes })
 }
@@ -4410,22 +4474,63 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
 // Entry Point
 // ============================================================================
 
-fn main() {
+impl App for NetScanApp {
+    fn title(&self) -> String {
+        // What the last scan found, because that is the answer the user came
+        // for and the one thing worth reading from a taskbar. The harness
+        // re-reads this as the program runs.
+        match self.results.as_ref() {
+            Some(result) => format!(
+                "{} hosts up on {} - Network Scanner",
+                result.hosts.iter().filter(|h| h.is_up).count(),
+                self.config.target_input
+            ),
+            None => "Network Scanner".to_string(),
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// No clock.
+    ///
+    /// The scan is synchronous: `start_scan` fills in the whole result before
+    /// it returns, so there is no interval during which anything on screen is
+    /// changing by itself. A tick would redraw an identical frame.
+    ///
+    /// The `scan_progress` field and the progress bar drawn from it are
+    /// therefore only ever seen at 0% or 100%; making the scan stepwise -- as
+    /// `apps/undelete` now is -- is what would give this a clock, and is
+    /// written up in `known-issues.md`.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // From the frame being drawn rather than the last `Resize`: the first
+        // frame is drawn before any `Resize` arrives, and every hit test in
+        // this file is derived from these two numbers.
+        self.window_width = width;
+        self.window_height = height;
+        self.render_tree()
+    }
+}
+
+fn main() -> ExitCode {
     let mut app = NetScanApp::new();
-
-    // Initial scan for demonstration
     app.start_scan();
-
-    // Render one frame
-    let _tree = app.render();
-
-    // In real OS: enter event loop with compositor
-    // loop {
-    //     let event = wait_event();
-    //     app.handle_event(&event);
-    //     let tree = app.render();
-    //     compositor_submit(tree);
-    // }
+    app::launch("netscan", &mut app)
 }
 
 // ============================================================================
@@ -4434,7 +4539,246 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis, not a hazard. The defensive lints
+    // exist to keep panics out of code that runs on a user's data, which this
+    // is not.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
+
+    // ------------------------------------------------------------------
+    // The service table
+    // ------------------------------------------------------------------
+
+    /// `lookup_service` answered from a 57-arm `match` whose own comment said
+    /// it fell "back to the database for the rest". It did not, and nothing
+    /// else read the database either, so 68 of its 125 entries could not be
+    /// reached by any code path.
+    #[test]
+    fn every_service_in_the_database_can_be_looked_up() {
+        let db = service_database();
+        assert!(
+            db.len() >= 100,
+            "the module doc promises 100+, got {}",
+            db.len()
+        );
+        for entry in db {
+            assert_eq!(
+                lookup_service(entry.port),
+                Some(entry.service),
+                "port {} is in the table and not reachable through the lookup",
+                entry.port
+            );
+        }
+    }
+
+    /// One table cannot disagree with itself, and the two used to: the match
+    /// called both 137 and 139 "netbios" and both 67 and 68 "dhcp", which are
+    /// four services under two names.
+    #[test]
+    fn ports_that_are_different_services_have_different_names() {
+        assert_eq!(lookup_service(137), Some("netbios-ns"));
+        assert_eq!(lookup_service(139), Some("netbios-ssn"));
+        assert_ne!(lookup_service(67), lookup_service(68));
+    }
+
+    /// The entries this program can name are unique per port; two rows for one
+    /// port would make the answer depend on the order of the table.
+    #[test]
+    fn the_service_table_names_each_port_once() {
+        let mut ports: Vec<u16> = service_database().iter().map(|e| e.port).collect();
+        let before = ports.len();
+        ports.sort_unstable();
+        ports.dedup();
+        assert_eq!(ports.len(), before, "the table lists some port twice");
+    }
+
+    // ------------------------------------------------------------------
+    // Scrolling
+    // ------------------------------------------------------------------
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn scanned_with_many_hosts() -> NetScanApp {
+        let mut app = NetScanApp::new();
+        app.config.target_input = String::from("192.168.1.0/24");
+        app.start_scan();
+        assert!(
+            app.results.as_ref().is_some_and(|r| r.hosts.len() > 10),
+            "the test needs more hosts than fit on one screen"
+        );
+        app
+    }
+
+    /// The arrow keys walked the selection through the whole host list while
+    /// the table stayed where it was, so on a long scan the selection went off
+    /// the bottom and the sidebar described a host nothing on screen was
+    /// highlighting.
+    #[test]
+    fn walking_down_the_list_brings_the_selection_with_it() {
+        let mut app = scanned_with_many_hosts();
+        let total = app.results.as_ref().map_or(0, |r| r.hosts.len());
+        let page = app.results_visible_rows().count;
+        assert!(page < total, "the list has to be longer than the screen");
+
+        for _ in 0..total {
+            app.handle_event(&press(Key::Down));
+        }
+        let selected = app.selected_host_idx.expect("something is selected");
+        let window = app.results_visible_rows();
+        assert!(
+            selected >= window.start && selected < window.start + window.count,
+            "row {selected} is selected and rows {}..{} are on screen",
+            window.start,
+            window.start + window.count
+        );
+    }
+
+    /// And back up again, which is the other half and fails differently: the
+    /// selection leaves the top of the window rather than the bottom.
+    #[test]
+    fn walking_back_up_the_list_brings_the_selection_with_it() {
+        let mut app = scanned_with_many_hosts();
+        let total = app.results.as_ref().map_or(0, |r| r.hosts.len());
+        for _ in 0..total {
+            app.handle_event(&press(Key::Down));
+        }
+        for _ in 0..total {
+            app.handle_event(&press(Key::Up));
+        }
+        assert_eq!(app.selected_host_idx, Some(0));
+        assert_eq!(
+            app.results_visible_rows().start,
+            0,
+            "the table should have followed the selection back to the top"
+        );
+    }
+
+    #[test]
+    fn page_keys_move_a_screenful_at_a_time() {
+        let mut app = scanned_with_many_hosts();
+        let page = app.results_visible_rows().count;
+        assert_eq!(app.results_visible_rows().start, 0);
+
+        app.handle_event(&press(Key::PageDown));
+        assert_eq!(app.results_visible_rows().start, page);
+        app.handle_event(&press(Key::PageUp));
+        assert_eq!(app.results_visible_rows().start, 0);
+        app.handle_event(&press(Key::PageUp));
+        assert_eq!(
+            app.results_visible_rows().start,
+            0,
+            "paging up from the top stays at the top"
+        );
+    }
+
+    #[test]
+    fn home_goes_back_to_the_first_host() {
+        let mut app = scanned_with_many_hosts();
+        app.handle_event(&press(Key::PageDown));
+        app.handle_event(&press(Key::PageDown));
+        assert!(app.results_visible_rows().start > 0);
+
+        app.handle_event(&press(Key::Home));
+        assert_eq!(app.results_visible_rows().start, 0);
+        assert_eq!(app.selected_host_idx, Some(0));
+    }
+
+    /// A scroll offset belongs to the list that was there before it. A new scan
+    /// is a different list -- and possibly a shorter one, in which case the old
+    /// offset is blank space.
+    #[test]
+    fn a_new_scan_starts_at_the_top_of_its_results() {
+        let mut app = scanned_with_many_hosts();
+        app.handle_event(&press(Key::PageDown));
+        assert!(app.results_visible_rows().start > 0);
+
+        app.start_scan();
+        assert_eq!(app.results_visible_rows().start, 0);
+        assert_eq!(app.detail_port_scroll, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // The window
+    // ------------------------------------------------------------------
+
+    /// Every hit test in this file read the `WINDOW_WIDTH` constant, so a
+    /// resized window put the controls somewhere the pointer could not find
+    /// them -- the picture and the clicks disagreed about where the sidebar
+    /// began.
+    #[test]
+    fn the_sidebar_boundary_follows_the_window() {
+        let mut app = scanned_with_many_hosts();
+        app.selected_host_idx = Some(0);
+
+        // A click just left of the sidebar is on the host table; the same x
+        // in a wider window is well inside the table and must stay so.
+        let _ = App::render(&mut app, WINDOW_WIDTH + 400.0, WINDOW_HEIGHT);
+        assert_eq!(app.window_width, WINDOW_WIDTH + 400.0);
+
+        let before = app.results_visible_rows().start;
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: WINDOW_WIDTH - SIDEBAR_WIDTH + 10.0,
+            y: RESULTS_ROWS_TOP + 10.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        }));
+        assert_ne!(
+            app.results_visible_rows().start,
+            before,
+            "a wheel event over the host table should have scrolled the host \
+             table -- at this x it is only the sidebar in a 1200px window"
+        );
+    }
+
+    #[test]
+    fn a_resize_keeps_the_selection_on_screen() {
+        let mut app = scanned_with_many_hosts();
+        let total = app.results.as_ref().map_or(0, |r| r.hosts.len());
+        for _ in 0..total {
+            app.handle_event(&press(Key::Down));
+        }
+
+        app.handle_event(&Event::Resize {
+            width: WINDOW_WIDTH as u32,
+            height: 400,
+        });
+        let selected = app.selected_host_idx.expect("selected");
+        let window = app.results_visible_rows();
+        assert!(
+            selected >= window.start && selected < window.start + window.count.max(1),
+            "the shorter window shows rows {}..{} and row {selected} is selected",
+            window.start,
+            window.start + window.count
+        );
+    }
+
+    #[test]
+    fn the_title_reports_what_the_scan_found() {
+        let mut app = NetScanApp::new();
+        assert_eq!(app.title(), "Network Scanner");
+        app.start_scan();
+        let title = app.title();
+        assert!(title.contains("hosts up"), "got {title:?}");
+        assert!(
+            title.contains(&app.config.target_input),
+            "the title should name what was scanned, got {title:?}"
+        );
+    }
 
     // --- IPv4 Parsing and Representation ---
 
@@ -5178,7 +5522,7 @@ mod tests {
     fn test_app_render_no_crash() {
         let mut app = NetScanApp::new();
         app.start_scan();
-        let tree = app.render();
+        let tree = app.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5187,7 +5531,7 @@ mod tests {
         let mut app = NetScanApp::new();
         app.start_scan();
         app.active_tab = ViewTab::Topology;
-        let tree = app.render();
+        let tree = app.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5196,7 +5540,7 @@ mod tests {
         let mut app = NetScanApp::new();
         app.start_scan();
         app.active_tab = ViewTab::History;
-        let tree = app.render();
+        let tree = app.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5205,7 +5549,7 @@ mod tests {
         let mut app = NetScanApp::new();
         app.active_tab = ViewTab::Traceroute;
         app.run_traceroute();
-        let tree = app.render();
+        let tree = app.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5214,7 +5558,7 @@ mod tests {
         let mut app = NetScanApp::new();
         app.active_tab = ViewTab::Whois;
         app.run_whois();
-        let tree = app.render();
+        let tree = app.render_tree();
         assert!(!tree.is_empty());
     }
 

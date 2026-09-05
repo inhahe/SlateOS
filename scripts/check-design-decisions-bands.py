@@ -963,13 +963,23 @@ def main(argv=None):
                   + ", ".join(str(n) for n in dups))
         return 0
 
-    try:
-        baseline = load_baseline(args.baseline)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"check-design-decisions-bands: cannot read baseline "
-              f"{args.baseline}: {exc}\n"
-              f"  Create it with --update-baseline.", file=sys.stderr)
-        return 2
+    # Only when NOT reading a commit. Under `--head` the baseline came out of
+    # the same tree as the document, above, and re-reading it from disk here
+    # would throw that away -- which is precisely the defect `--head` exists to
+    # close, and it is not hypothetical: this line used to run unconditionally,
+    # so an uncommitted `--update-baseline` forgave a duplicate that was
+    # actually being pushed. The self-test did not catch it because it calls
+    # `read_doc_and_baseline` directly and so never exercised this wiring;
+    # `scripts/test-checkers-honour-head.py` drives the real command line and
+    # does.
+    if args.head is None:
+        try:
+            baseline = load_baseline(args.baseline)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"check-design-decisions-bands: cannot read baseline "
+                  f"{args.baseline}: {exc}\n"
+                  f"  Create it with --update-baseline.", file=sys.stderr)
+            return 2
 
     errors, warnings, info = check(lines, baseline)
 

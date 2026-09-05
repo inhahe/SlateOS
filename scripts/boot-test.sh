@@ -4862,6 +4862,32 @@ check_lane_c_gui_gates() {
         return 1
     fi
 
+    # A SlateOS program target is `target_os = "linux"`, but every syscall in
+    # `posix` is gated `#[cfg(target_os = "none")]` for the `libc.a` build.  So
+    # a crate that lists `posix` as a *Rust dependency* compiles a second libc
+    # into itself with every syscall stubbed to -ENOSYS, sitting beside the real
+    # one it already links.  Nothing warns.  On 2026-09-04 that made `ssh` and
+    # `sshd` unable to run at all: both drew key material through
+    # `posix::random::fill`, which read -ENOSYS as "no kernel", fell through to
+    # an RDRAND fallback the guest CPU does not have, and returned EIO while
+    # blaming a kernel it had never asked.  See design-decisions.md section 768.
+    if ! run_checker check-one-libc-selftest "$py"         "$PROJECT_ROOT/scripts/check-one-libc-per-process.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  scripts/check-one-libc-per-process.py" >&2
+        echo "no longer agrees with its own cases -- including the ones that" >&2
+        echo "prove it can still refuse -- so its verdict means nothing." >&2
+        return 1
+    fi
+
+    if ! run_checker check-one-libc "$py"         "$PROJECT_ROOT/scripts/check-one-libc-per-process.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  Either a crate reached a stateful part" >&2
+        echo "of posix as a Rust dependency -- which runs the stubbed second" >&2
+        echo "copy, not the libc the program links -- or a module on that" >&2
+        echo "script's PURE_MODULES allowlist has stopped being pure." >&2
+        return 1
+    fi
+
     return 0
 }
 

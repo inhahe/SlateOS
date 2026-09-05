@@ -110,9 +110,9 @@ use std::process;
 // shared by both ends is the point, and `sshd/Cargo.toml` for what a second copy
 // cost the last time.
 use sshwire::{
-    BigUint, ExchangeHashInput, PacketCodec, Role, StreamBuffer, Transport, TransportError,
-    compute_exchange_hash, encode_mpint, read_bool, read_mpint, read_ssh_string, read_u32,
-    ssh_string,
+    BigUint, ExchangeHashInput, PacketCodec, Role, SecretSource, StreamBuffer, Transport,
+    TransportError, compute_exchange_hash, encode_mpint, read_bool, read_mpint, read_ssh_string,
+    read_u32, ssh_string,
 };
 
 // ============================================================================
@@ -1572,19 +1572,23 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 // `sshwire::DH_GROUP14_P_HEX`.
 // ============================================================================
 
-/// Draw a Diffie-Hellman private exponent from the kernel CSPRNG.
+/// Draw a Diffie-Hellman private exponent from `secrets`.
 ///
 /// This is the secret that makes the session key secret; nothing else in the
 /// exchange hides it. It used to be derived from the process id and the
 /// monotonic clock, which is a search space small enough to enumerate, and the
 /// doc comment here described that as acceptable "for this simplified daemon".
-/// It is not, so it draws from the CSPRNG now and fails the connection if it
+/// It is not, so it draws from a CSPRNG now and fails the connection if it
 /// cannot.
-fn generate_dh_private() -> Result<BigUint, SshdError> {
+///
+/// `secrets` is [`sshwire::KERNEL_SECRETS`] in the daemon and everywhere a
+/// caller does not say otherwise; the parameter exists so a test can drive a
+/// reproducible handshake. See [`sshwire::SecretSource`].
+fn generate_dh_private(secrets: SecretSource) -> Result<BigUint, SshdError> {
     // 256 bits, per RFC 4419 section 6.2's guidance that the exponent be at
     // least twice the 128-bit security level the group14 prime provides.
     let mut bytes = [0u8; 32];
-    randrange::fill_secret(&mut bytes).map_err(|e| {
+    secrets(&mut bytes).map_err(|e| {
         SshdError::ProtocolError(format!("cannot generate a Diffie-Hellman private key: {e}"))
     })?;
     // Set the top bit so the exponent is a full 256 bits rather than however
@@ -3087,6 +3091,14 @@ struct ConnectionState {
     next_channel_id: u32,
     debug_mode: bool,
     connection_start_ms: u64,
+    /// Where this connection's unpredictable bytes come from: the packet
+    /// padding, the KEXINIT cookie and the Diffie-Hellman exponent.
+    ///
+    /// [`sshwire::KERNEL_SECRETS`] for every connection the daemon accepts —
+    /// [`ConnectionState::new`] is the only way to build one and it is the only
+    /// thing that sets this. A test replaces it with
+    /// [`ConnectionState::with_secret_source`] to get a reproducible handshake.
+    secrets: SecretSource,
 }
 
 impl ConnectionState {
@@ -3111,7 +3123,27 @@ impl ConnectionState {
             next_channel_id: 0,
             debug_mode,
             connection_start_ms: clock_monotonic_ms(),
+            secrets: sshwire::KERNEL_SECRETS,
         }
+    }
+
+    /// Draw this connection's secrets from `secrets` instead of the kernel.
+    ///
+    /// Not reachable from the command line, a config file or the network, and
+    /// deliberately so: a daemon whose entropy source could be *selected* would
+    /// be a downgrade attack with a spelling. The callers are tests, which need
+    /// a handshake that produces the same bytes twice.
+    ///
+    /// The `cfg(test)` is that sentence made structural: the shipped binary is
+    /// not compiled with any way to substitute a source, so the guarantee does
+    /// not rest on nobody calling this. When the interop test moves into a
+    /// crate of its own it will need this too, and the gate should then widen
+    /// to a Cargo feature that only a `dev-dependency` turns on — not vanish.
+    #[cfg(test)]
+    #[must_use]
+    fn with_secret_source(mut self, secrets: SecretSource) -> Self {
+        self.secrets = secrets;
+        self
     }
 
     /// Frame, encrypt and send one packet.
@@ -3125,7 +3157,7 @@ impl ConnectionState {
     /// `design-decisions.md` §773.
     fn send_packet(&mut self, payload: &[u8]) -> Result<(), SshdError> {
         let mut padding = vec![0u8; self.codec.padding_len(payload.len())];
-        randrange::fill_secret(&mut padding).map_err(|e| {
+        (self.secrets)(&mut padding).map_err(|e| {
             SshdError::ProtocolError(format!("cannot generate packet padding: {e}"))
         })?;
         let pkt = self.codec.encode(payload, &padding)?;
@@ -3344,7 +3376,7 @@ fn parse_version_string(version: &str) -> Option<&str> {
 /// Perform SSH key exchange (DH group14-sha256).
 fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
     // Build and send our KEXINIT.
-    let server_kexinit = build_kexinit();
+    let server_kexinit = build_kexinit(conn.secrets)?;
     conn.send_packet(&server_kexinit)?;
     conn.debug_log("sent KEXINIT");
 
@@ -3383,7 +3415,7 @@ fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
             "client DH value out of range (RFC 4253 section 8)".into(),
         ));
     }
-    let y = generate_dh_private()?;
+    let y = generate_dh_private(conn.secrets)?;
     let f = g.mod_pow(&y, &p); // f = g^y mod p
     let shared_secret_big = client_e.mod_pow(&y, &p); // K = e^y mod p
     let shared_secret = shared_secret_big.to_bytes_be();
@@ -3446,13 +3478,39 @@ fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
 }
 
 /// Build a KEXINIT message.
-fn build_kexinit() -> Vec<u8> {
+///
+/// # Errors
+///
+/// Fails if `secrets` cannot supply the cookie.
+fn build_kexinit(secrets: SecretSource) -> Result<Vec<u8>, SshdError> {
     let mut payload = Vec::new();
     payload.push(msg::SSH_MSG_KEXINIT);
 
-    // 16-byte cookie (pseudo-random).
-    let cookie = sha256(b"sshd-kex-cookie");
-    payload.extend_from_slice(&cookie[..16]);
+    // The cookie (RFC 4253 §7.1) must be random. I_C and I_S -- both KEXINIT
+    // payloads in full -- are fields of the exchange hash, so the cookie is
+    // each end's only unpredictable contribution to it, and the point of that
+    // is that neither end can steer the hash on its own.
+    //
+    // This was `sha256(b"sshd-kex-cookie")[..16]`: one constant, in the
+    // binary, identical on every connection this daemon has ever served,
+    // described by its comment as "pseudo-random".
+    //
+    // The fifth bug the two-copies arrangement has produced, and the second of
+    // the shape where a fix reached one copy and had no way to reach the other
+    // -- the first being the wire readers, which sshd carried in their
+    // un-hardened form long after the client's were fixed. The client sent
+    // sixteen zero bytes here; that was fixed, and the comment left behind
+    // there says the constant "gave that power to the server alone", written
+    // on the assumption that the server's cookie was real. It was not. Neither
+    // end contributed anything unpredictable, so the exchange hash was a
+    // function of the two DH public values alone. Found by reading, like the
+    // other four: each end checks its own copy against its own idea of the
+    // protocol and passes. See `known-issues.md`
+    // `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
+    let mut cookie = [0u8; 16];
+    secrets(&mut cookie)
+        .map_err(|e| SshdError::ProtocolError(format!("cannot generate the KEXINIT cookie: {e}")))?;
+    payload.extend_from_slice(&cookie);
 
     // Name-lists:
     // kex_algorithms
@@ -3480,7 +3538,7 @@ fn build_kexinit() -> Vec<u8> {
     // reserved
     payload.extend_from_slice(&0u32.to_be_bytes());
 
-    payload
+    Ok(payload)
 }
 
 /// Handle the SSH-USERAUTH service request.
@@ -7241,11 +7299,135 @@ DenyGroups nogroup
 
     // ---- KEXINIT building ----
 
+    /// A source that answers with a counter, so a KEXINIT is reproducible.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the Result is the SecretSource signature, not this function's choice"
+    )]
+    fn counting_secrets(out: &mut [u8]) -> Result<(), randrange::EntropyError> {
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::try_from(i % 251).unwrap_or(0);
+        }
+        Ok(())
+    }
+
+    /// A source that refuses, the way the kernel does when it cannot answer.
+    fn refusing_secrets(_out: &mut [u8]) -> Result<(), randrange::EntropyError> {
+        Err(randrange::EntropyError::Unavailable)
+    }
+
     #[test]
     fn test_build_kexinit() {
-        let kexinit = build_kexinit();
-        assert_eq!(kexinit[0], msg::SSH_MSG_KEXINIT);
+        let kexinit = build_kexinit(counting_secrets).expect("the stand-in answers");
+        assert_eq!(kexinit.first().copied(), Some(msg::SSH_MSG_KEXINIT));
         assert!(kexinit.len() > 17); // At least message type + 16 byte cookie.
+    }
+
+    #[test]
+    fn the_kexinit_cookie_comes_from_the_secret_source_and_not_from_a_constant() {
+        // The fault this replaces: the cookie was `sha256(b"sshd-kex-cookie")`,
+        // so it was the same sixteen bytes on every connection this daemon had
+        // ever served. RFC 4253 §7.1 wants it random because I_C and I_S are
+        // fields of the exchange hash, and a constant is one end declining to
+        // contribute anything the other end cannot predict.
+        //
+        // The old test asserted the payload started with the right message type
+        // and was longer than seventeen bytes, both of which a constant cookie
+        // satisfies for ever. That is why it certified the bug rather than
+        // catching it, and why this test asserts the cookie's *provenance*.
+        let from_counter = build_kexinit(counting_secrets).expect("the stand-in answers");
+        assert_eq!(
+            from_counter.get(1..17),
+            Some(&(0u8..16).collect::<Vec<u8>>()[..]),
+            "the sixteen cookie bytes must be the ones the source supplied"
+        );
+
+        // And the source is asked again per connection rather than once: two
+        // KEXINITs from a source that never repeats itself must differ.
+        static NEXT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+        #[expect(
+            clippy::unnecessary_wraps,
+            reason = "the Result is the SecretSource signature, not this function's choice"
+        )]
+        fn never_repeats(out: &mut [u8]) -> Result<(), randrange::EntropyError> {
+            let base = NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            for byte in out.iter_mut() {
+                *byte = base;
+            }
+            Ok(())
+        }
+        let first = build_kexinit(never_repeats).expect("the stand-in answers");
+        let second = build_kexinit(never_repeats).expect("the stand-in answers");
+        assert_ne!(
+            first.get(1..17),
+            second.get(1..17),
+            "two connections must not share a cookie"
+        );
+    }
+
+    #[test]
+    fn a_kexinit_is_not_built_when_the_cookie_cannot_be_drawn() {
+        // Fail closed: sending a KEXINIT with a cookie we could not draw would
+        // be sending a predictable one, which is the fault above wearing an
+        // apology. The connection drops instead.
+        let refused = build_kexinit(refusing_secrets);
+        assert!(matches!(refused, Err(SshdError::ProtocolError(_))));
+    }
+
+    #[test]
+    fn a_connection_draws_its_secrets_from_the_kernel_unless_a_test_says_otherwise() {
+        // The risk this guards is a daemon that ships with a test source wired
+        // in, which no test of "the cookie looks random" would ever catch.
+        let (server_side, _client_side) = sshwire::memory_pair();
+        let conn = ConnectionState::new(
+            Box::new(server_side),
+            SshdConfig::default_config(),
+            HostKey::from_seed([7u8; 32]),
+            false,
+        );
+        assert!(
+            core::ptr::fn_addr_eq(conn.secrets, sshwire::KERNEL_SECRETS),
+            "a connection the daemon accepts must draw from the kernel CSPRNG"
+        );
+    }
+
+    #[test]
+    fn a_sent_packet_is_padded_from_the_connection_source() {
+        // The third use of the source, and the one no other test reaches: the
+        // cookie and the exponent are drawn by free functions that take the
+        // source as an argument, so they are checked above by calling them.
+        // Padding is drawn by `send_packet` from `self.secrets`, and until the
+        // interop test exists this is the only thing that would notice
+        // `send_packet` going back to calling `randrange::fill_secret`
+        // directly -- which would pass every other test here and then be
+        // untestable on a host without entropy, which is where this whole
+        // seam came from.
+        let (server_side, mut client_side) = sshwire::memory_pair();
+        let mut conn = ConnectionState::new(
+            Box::new(server_side),
+            SshdConfig::default_config(),
+            HostKey::from_seed([7u8; 32]),
+            false,
+        )
+        .with_secret_source(counting_secrets);
+
+        let payload = b"hello".as_slice();
+        conn.send_packet(payload).expect("the stand-in answers");
+
+        // Before NEWKEYS the packet is on the wire in clear: uint32 length,
+        // byte padding_length, payload, padding (RFC 4253 section 6).
+        let mut wire = [0u8; 256];
+        let got = client_side.recv(&mut wire).expect("the peer end has bytes");
+        let pad_len = usize::from(*got.get(4).expect("a padding length byte"));
+        let pad_start = 5 + payload.len();
+        let padding = got
+            .get(pad_start..pad_start + pad_len)
+            .expect("the padding is inside the packet");
+        assert_eq!(
+            padding,
+            &(0u8..).take(pad_len).collect::<Vec<u8>>()[..],
+            "the padding must be the bytes the connection's source supplied"
+        );
     }
 
     // ---- Format IP ----

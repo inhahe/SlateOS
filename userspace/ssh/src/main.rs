@@ -69,6 +69,13 @@
 #![allow(clippy::module_name_repetitions)]
 
 use quoting::quoteaf_os;
+// Everything the server has to agree with byte for byte. Not re-implemented
+// here: see that crate's module docs for why one definition shared by both ends
+// is the point, and `ssh/Cargo.toml` for what a second copy cost the last time.
+use sshwire::{
+    ExchangeHashInput, compute_exchange_hash, derive_key, encode_mpint, ssh_string,
+    strip_leading_zeros,
+};
 use std::env;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -587,14 +594,11 @@ impl StreamBuffer {
 // SSH data encoding helpers
 // ============================================================================
 
-/// Encode a string/bytes as SSH `string` type: u32 length + data.
-fn ssh_string(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len().saturating_add(4));
-    out.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_be_bytes());
-    out.extend_from_slice(data);
-    out
-}
-
+// The encoders -- `ssh_string`, `encode_mpint`, `strip_leading_zeros` -- live in
+// `sshwire`, not here. Each is one half of a contract with whatever is at the
+// other end of the socket, and a private copy of one half is a copy that can
+// drift without any test in this crate noticing. The readers below stay for now
+// because they return `SshError`; moving them needs a shared error type first.
 /// Read an SSH `string` from a byte slice at the given offset.
 /// Returns (value, new_offset).
 ///
@@ -637,44 +641,12 @@ fn read_byte(data: &[u8], offset: usize) -> Result<(u8, usize), SshError> {
     Ok((byte, offset.saturating_add(1)))
 }
 
-/// Encode an SSH `mpint` from a big-endian unsigned byte array.
-/// Prepends a zero byte if the high bit is set.
-fn encode_mpint(value: &[u8]) -> Vec<u8> {
-    // Strip leading zeros.
-    let stripped = strip_leading_zeros(value);
-    let Some(&high) = stripped.first() else {
-        return vec![0, 0, 0, 0]; // mpint zero
-    };
-    // A leading byte with the top bit set would read as negative, and mpint is
-    // two's complement; the zero pad is what keeps it unsigned.
-    let needs_pad = (high & 0x80) != 0;
-    let total_len = stripped.len().saturating_add(usize::from(needs_pad));
-    let mut out = Vec::with_capacity(total_len.saturating_add(4));
-    out.extend_from_slice(&u32::try_from(total_len).unwrap_or(u32::MAX).to_be_bytes());
-    if needs_pad {
-        out.push(0);
-    }
-    out.extend_from_slice(stripped);
-    out
-}
-
 /// Read an SSH `mpint` from a byte slice, returning unsigned big-endian bytes.
 fn read_mpint(data: &[u8], offset: usize) -> Result<(Vec<u8>, usize), SshError> {
     let (raw, next) = read_ssh_string(data, offset)?;
     // Strip leading zero padding that SSH adds for sign.
     let stripped = strip_leading_zeros(raw);
     Ok((stripped.to_vec(), next))
-}
-
-fn strip_leading_zeros(data: &[u8]) -> &[u8] {
-    // `trim_ascii_start` is for whitespace; this is the same shape for zeros,
-    // expressed so the "everything was zero" case is the empty slice by
-    // construction rather than by a `position`/`unwrap_or(len)` pairing.
-    let mut rest = data;
-    while let [0, tail @ ..] = rest {
-        rest = tail;
-    }
-    rest
 }
 
 // ============================================================================
@@ -1549,75 +1521,11 @@ fn generate_dh_private() -> Result<BigUint, SshError> {
     Ok(BigUint::from_bytes_be(&bytes))
 }
 
-// ============================================================================
-// SSH key exchange hash
-// ============================================================================
-
-/// Compute the exchange hash H per RFC 4253 section 8.
-///
-/// H = SHA-256(V_C || V_S || I_C || I_S || K_S || e || f || K)
-///
-/// Where each value is SSH-encoded (string or mpint as appropriate).
-/// Inputs to the SSH key-exchange hash, per RFC 4253 section 8.
-struct ExchangeHashInput<'a> {
-    /// Client version string (without CRLF).
-    v_c: &'a str,
-    /// Server version string (without CRLF).
-    v_s: &'a str,
-    /// Client KEXINIT payload.
-    i_c: &'a [u8],
-    /// Server KEXINIT payload.
-    i_s: &'a [u8],
-    /// Server host key blob.
-    k_s: &'a [u8],
-    /// Client DH public value (big-endian).
-    e: &'a [u8],
-    /// Server DH public value (big-endian).
-    f: &'a [u8],
-    /// Shared secret (big-endian).
-    k: &'a [u8],
-}
-
-fn compute_exchange_hash(input: &ExchangeHashInput<'_>) -> [u8; 32] {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&ssh_string(input.v_c.as_bytes()));
-    buf.extend_from_slice(&ssh_string(input.v_s.as_bytes()));
-    buf.extend_from_slice(&ssh_string(input.i_c));
-    buf.extend_from_slice(&ssh_string(input.i_s));
-    buf.extend_from_slice(&ssh_string(input.k_s));
-    buf.extend_from_slice(&encode_mpint(input.e));
-    buf.extend_from_slice(&encode_mpint(input.f));
-    buf.extend_from_slice(&encode_mpint(input.k));
-    sha256(&buf)
-}
-
-/// Derive a key from the shared secret K, exchange hash H, a single-char
-/// identifier, and the session ID, per RFC 4253 section 7.2.
-///
-/// key = SHA-256(K || H || id_char || session_id)
-///
-/// If more bytes are needed, additional rounds are computed by hashing
-/// K || H || <previous_key_material>.
-fn derive_key(k: &[u8], h: &[u8; 32], id: u8, session_id: &[u8; 32], needed: usize) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&encode_mpint(k));
-    buf.extend_from_slice(h);
-    buf.push(id);
-    buf.extend_from_slice(session_id);
-    let mut result = sha256(&buf).to_vec();
-
-    // Extend if needed.
-    while result.len() < needed {
-        let mut ext_buf = Vec::new();
-        ext_buf.extend_from_slice(&encode_mpint(k));
-        ext_buf.extend_from_slice(h);
-        ext_buf.extend_from_slice(&result);
-        result.extend_from_slice(&sha256(&ext_buf));
-    }
-
-    result.truncate(needed);
-    result
-}
+// The exchange hash and RFC 4253 §7.2 key derivation are `sshwire`'s. They were
+// this file's, and the server's copy of the same construction is what drifted
+// into hashing a fabricated client version; the client verifying the server's
+// signature is only meaningful if both sides compute the value from one
+// definition. See `sshwire`'s module docs.
 
 // ============================================================================
 // Host key signature verification
@@ -2365,14 +2273,14 @@ impl SshSession {
 
         // Compute exchange hash H.
         let h = compute_exchange_hash(&ExchangeHashInput {
-            v_c: SSH_VERSION_STRING,
-            v_s: &self.server_version,
-            i_c: &self.client_kexinit,
-            i_s: &self.server_kexinit,
-            k_s: &k_s,
-            e: &e_bytes,
-            f: &f_bytes,
-            k: &k_bytes,
+            client_version: SSH_VERSION_STRING,
+            server_version: &self.server_version,
+            client_kexinit: &self.client_kexinit,
+            server_kexinit: &self.server_kexinit,
+            host_key_blob: &k_s,
+            client_e: &e_bytes,
+            server_f: &f_bytes,
+            shared_secret: &k_bytes,
         });
         self.verbose(&format!("exchange hash: {}", bytes_to_hex(&h)));
 
@@ -3981,16 +3889,22 @@ mod tests {
     }
 
     #[test]
-    fn mpint_encoding_pads_a_high_bit_and_strips_leading_zeros() {
-        // 0 encodes as an empty string.
-        assert_eq!(encode_mpint(&[]), vec![0, 0, 0, 0]);
-        assert_eq!(encode_mpint(&[0, 0, 0]), vec![0, 0, 0, 0]);
-        // Top bit clear: no pad.
-        assert_eq!(encode_mpint(&[0x7f]), vec![0, 0, 0, 1, 0x7f]);
-        // Top bit set: a zero byte goes in front so it does not read negative.
-        assert_eq!(encode_mpint(&[0x80]), vec![0, 0, 0, 2, 0x00, 0x80]);
-        // Leading zeros in the input are not part of the value.
-        assert_eq!(encode_mpint(&[0, 0, 0x01]), vec![0, 0, 0, 1, 0x01]);
+    fn a_read_mpint_undoes_what_the_shared_encoder_did() {
+        // `encode_mpint` itself is `sshwire`'s, and is tested there against
+        // RFC 4251 §5's own published examples. Re-asserting the encoding here
+        // would grow a second, weaker statement of it in one of the two crates
+        // the shared one exists to stop having private opinions. What is still
+        // local, and so still this crate's to test, is the *reader* -- checked
+        // here against the shared writer rather than against itself.
+        for value in [&[0x7f][..], &[0x80][..], &[0x01, 0x00, 0xff][..]] {
+            let (decoded, next) = read_mpint(&encode_mpint(value), 0).unwrap();
+            assert_eq!(decoded, value, "roundtrip changed the value");
+            assert_eq!(next, encode_mpint(value).len());
+        }
+        // The pad the encoder adds for the sign bit is not part of the value,
+        // so the reader must take it back off.
+        let (decoded, _) = read_mpint(&encode_mpint(&[0x80]), 0).unwrap();
+        assert_eq!(decoded, vec![0x80]);
     }
 
     // ------------------------------------------------------------------

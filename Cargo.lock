@@ -16737,6 +16737,7 @@ dependencies = [
  "quoting",
  "randrange",
  "sha2",
+ "sshwire",
 ]
 
 [[package]]

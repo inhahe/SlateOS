@@ -258,8 +258,15 @@ unsafe fn syscall5(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64) -
 
 /// Sleep for the given number of milliseconds.
 fn sleep_ms(ms: u64) {
-    // SAFETY: SYS_SLEEP takes one scalar argument (milliseconds).
-    let _ = unsafe { syscall1(SYS_SLEEP, ms) };
+    // `SYS_SLEEP`'s argument is **nanoseconds** (kernel/src/syscall/number.rs),
+    // so the millisecond count callers find natural has to be converted here.
+    // This once passed `ms` straight through, which made every sleep a million
+    // times shorter than asked. The only caller is the accept loop's idle
+    // pause, whose comment says it exists "to avoid busy-spinning" — with the
+    // unit wrong it slept 10 ns instead of 10 ms and did exactly the opposite,
+    // burning a core for the life of the daemon while looking correct.
+    // SAFETY: SYS_SLEEP takes one scalar argument and writes no memory.
+    let _ = unsafe { syscall1(SYS_SLEEP, ms.saturating_mul(1_000_000)) };
 }
 
 /// Get monotonic clock time in milliseconds.

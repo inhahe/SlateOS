@@ -95568,6 +95568,7 @@ window is already correct on the day the data arrives.
 **Where it bites:** `apps/pdfviewer/src/main.rs` — `OpenFn`, `PrintFn`,
 `PdfViewerApp::open`, `PdfViewerApp::print`, `PdfViewerApp::can_open`,
 `PdfViewerApp::can_print`, `render_disabled_button`, and `main`.
+
 ---
 
 ## `B-WHICH-DOES-NOT-READ-ALIASES-FUNCTIONS-OR-~USER` (lane B, 2026-08-27) — **open**, missing feature

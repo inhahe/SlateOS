@@ -65447,6 +65447,7 @@ Not settled here: `cut`, `fold` and `base64` still pass an empty *filename*
 through to `resolve_path`, which turns it into `/`. That is a different defect
 with a much wider blast radius — see
 `TD-A-AN-ABSENT-OPERAND-AND-AN-EMPTY-ONE-ARE-THE-SAME-STRING-IN-KSHELL`.
+
 ---
 
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers

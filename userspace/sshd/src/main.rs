@@ -4098,10 +4098,7 @@ fn handle_channels(conn: &mut ConnectionState) -> Result<(), SshdError> {
 }
 
 /// Act on one channel-layer message.
-fn dispatch_channel_message(
-    conn: &mut ConnectionState,
-    payload: &[u8],
-) -> Result<Flow, SshdError> {
+fn dispatch_channel_message(conn: &mut ConnectionState, payload: &[u8]) -> Result<Flow, SshdError> {
     if payload.is_empty() {
         return Ok(Flow::Continue);
     }
@@ -4258,9 +4255,7 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
 
             match Pty::open(width, height, wpx, hpx) {
                 Ok(pty) => {
-                    conn.debug_log(&format!(
-                        "pty allocated: term={term_name} {width}x{height}"
-                    ));
+                    conn.debug_log(&format!("pty allocated: term={term_name} {width}x{height}"));
                     if let Some(channel) =
                         conn.channels.iter_mut().find(|ch| ch.local_id == recipient)
                     {
@@ -4532,7 +4527,9 @@ fn pump_channel_input(conn: &mut ConnectionState, idx: usize) -> Result<bool, Ss
         // leaves `conn` free for `debug_log` and keeps the error path from
         // needing a second pass over the borrow checker.
         let channel = &conn.channels[idx];
-        let Some(pty) = channel.pty.as_ref() else { break };
+        let Some(pty) = channel.pty.as_ref() else {
+            break;
+        };
         let Some(rest) = channel.pending_input.get(written..) else {
             break;
         };
@@ -7045,7 +7042,10 @@ DenyGroups nogroup
         let mut buf = StreamBuffer::new();
         buf.data.extend_from_slice(&wire[..wire.len() - 1]);
 
-        assert!(matches!(try_parse_packet(&mut buf, false, 0, &enc), Ok(None)));
+        assert!(matches!(
+            try_parse_packet(&mut buf, false, 0, &enc),
+            Ok(None)
+        ));
         assert_eq!(buf.available(), wire.len() - 1);
 
         buf.data.push(wire[wire.len() - 1]);
@@ -7075,7 +7075,10 @@ DenyGroups nogroup
             .expect("second packet");
         assert_eq!(a, b"first");
         assert_eq!(b, b"second");
-        assert!(matches!(try_parse_packet(&mut buf, false, 2, &enc), Ok(None)));
+        assert!(matches!(
+            try_parse_packet(&mut buf, false, 2, &enc),
+            Ok(None)
+        ));
     }
 
     // ---- Login shell argv[0] ----

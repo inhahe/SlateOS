@@ -1,5 +1,5 @@
 #!/bin/sh
-# Thirteen gates at the push boundary. Any one of them aborts the push.
+# Fourteen gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -16,6 +16,7 @@
 #  12. Refuse to publish coreutils whose unix half was never compiled.
 #  13. Refuse to publish a `design-decisions.md` section outside its lane's
 #      numbering band, or missing the `**Lane:**` field that declares it.
+#  14. Refuse to publish a Markdown `---` that renders as a heading.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented, and it was wrong again the moment gate 13 was written --
@@ -30,8 +31,8 @@
 # tree that can introduce it, so a lane that cannot cause a given defect never
 # pays for the check or is blocked by it.
 #
-# Gates 1-11 and 13 are static checkers and the whole set costs seconds. Gate
-# 12 is a compiler, and costs minutes when it runs at all; its scope is
+# Gates 1-11, 13 and 14 are static checkers and the whole set costs seconds.
+# Gate 12 is a compiler, and costs minutes when it runs at all; its scope is
 # correspondingly narrow (one crate's own tree) and its comment argues the
 # price.
 #
@@ -2359,11 +2360,123 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 14 — a Markdown `---` that renders as a heading.
+#
+# WHAT IT CATCHES. A `---` on the line directly below a line of prose is not a
+# thematic break; it is a setext underline, so that paragraph's last line
+# renders as an `<h2>` and the separator itself disappears. Both halves are
+# wrong and neither is visible in the source. This tree writes its shared
+# documents as `entry ... --- entry ...`, so the mistake is one missing blank
+# line away at every entry boundary in `known-issues.md`,
+# `known-issues-resolved.md` and `design-decisions.md` -- and 21 of them had
+# already happened, contributed by all three lanes, before anything looked.
+#
+# WHY IT IS SCOPED TO THE COMMIT'S OWN DOCUMENTS. `--changed-only` is not only
+# about cost. A gate refuses to publish a *new* defect; blocking lane A's push
+# on a pre-existing `---` in a lane C document it must not edit would be a gate
+# that can only be satisfied by violating the ownership rules in roadmap.md.
+# The whole-corpus sweep still exists and is what a bare invocation and
+# `scripts/boot-test.sh` run -- that is where the 21 were found.
+#
+# WHAT IT COSTS, MEASURED. 5-8 s per pushed revision (2026-09-05), and only
+# when the push carries Markdown at all. That is a hundred times gate 13's
+# budget and it is worth saying why rather than hiding it: the checker's own
+# comment records that this filesystem charges ~150 ms per git object lookup
+# regardless of size, so a scoped run's floor is process startup, not work.
+# Unscoped it was 43 s, which is what would not have belonged here.
+#
+# WHY IT JUDGES THE COMMIT. `--head "$sha"`, for the reason gate 13 states at
+# length: without it the gate reads the working tree, and a commit that
+# introduces an accidental heading passes the moment its author types the blank
+# line on disk, committed or not. The evidence that this gate can go red is
+# historical rather than hypothetical -- `--head 53091f243 --changed-only`
+# names the two headings that commits e7b883133 and d320acb36 then had to fix.
+#
+# Bypass: ALLOW_UNCHECKED_HEADINGS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+skip_headings=0
+if [ "${ALLOW_UNCHECKED_HEADINGS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNCHECKED_HEADINGS=1 set — skipping the heading gate." >&2
+    skip_headings=1
+fi
+[ -n "$py" ] || skip_headings=1
+
+headings="${repo_root:-.}/scripts/check-accidental-headings.py"
+[ -f "$headings" ] || skip_headings=1
+# Every tracked Markdown file, plus the checker itself per gate 8: a change to
+# the checker changes every judgement it makes. `*.md` and not a list of the
+# three shared documents on purpose — three of the 21 real hits were in files
+# nobody would have thought to name, which is design-decisions.md §769's lesson
+# and the reason this checker was scoped to the whole corpus in the first place.
+touches '*.md' scripts/check-accidental-headings.py || skip_headings=1
+# Nothing being published is nothing to judge, and it is also what stops the
+# loop below from running zero times after `note_gate` reported a run.
+[ -n "${pushed_shas# }" ] || skip_headings=1
+note_gate headings "$skip_headings"
+
+headings_failed=0
+if [ "$skip_headings" != "1" ]; then
+    # The checker before its verdict, as gates 3-5, 9 and 13 do. No `--head`:
+    # the self-test is fixtures in memory and never reads this repository, so
+    # there is no worktree-versus-commit question for it to answer wrongly.
+    if ! run_checker headings-selftest "$py" "$headings" --selftest; then
+        echo "pre-push: check-accidental-headings.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        headings_failed=1
+    else
+        for sha in $pushed_shas; do
+            # Per-sha gate name, for gate 9's reason: a shared name lets a later
+            # clean sha delete the kept log of an earlier failing one.
+            if ! run_checker "headings-$sha" "$py" "$headings" \
+                             --head "$sha" --changed-only --quiet; then
+                headings_failed=1
+            fi
+        done
+    fi
+fi
+
+if [ "$headings_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a \`---\` in this commit renders as a heading.
+
+A \`---\` on the line directly below prose is a setext underline, not a thematic
+break. Markdown renders that paragraph's last line as an \`<h2>\` and drops the
+separator entirely, so the document gains a heading nobody wrote and loses the
+rule that was meant to end the section. Neither is visible in the source, which
+is why 21 of these accumulated across all three lanes before anything looked.
+
+The fix is one blank line above the \`---\`. The errors above name the file and
+line, and quote the text that is being turned into a heading.
+
+    python scripts/check-accidental-headings.py --fix
+
+inserts them for you, in bytes and matching each file's existing line endings.
+Re-run without \`--fix\` to confirm, and read the diff — it should be blank lines
+added and nothing else.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/check-accidental-headings.py --head <sha> --changed-only
+
+or sweep every tracked document, which is what the boot test does:
+
+    python scripts/check-accidental-headings.py
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_UNCHECKED_HEADINGS=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # The tally. Unconditional, and on stderr with the rest of the hook's output.
 #
 # This is the line whose absence means "the hook did not run" — the one reading
 # that silence could never carry. It is deliberately printed even when every
-# gate skipped, because `0 ran, 13 skipped` is the interesting case, not the
+# gate skipped, because `0 ran, 14 skipped` is the interesting case, not the
 # boring one: it says the push was judged by nothing, which for a push that
 # edits only documentation is correct, and for a push that edits a utility is a
 # bug in a `touches` pattern. Naming the skipped gates is what makes the second
@@ -2378,7 +2491,8 @@ fi
 #
 #     grep -o '^[[:space:]]*note_gate [a-z0-9-]*' "$0" | awk '{print $2}' | sort -u | wc -l
 #
-# Gate 13 (`bands`) made it 13 on 2026-09-05; if you add a gate, bump both.
+# Gate 13 (`bands`) made it 13 on 2026-09-05, and gate 14 (`headings`) made it
+# 14 the same day; if you add a gate, bump both.
 #
 # A refusing gate exits before this, so the tally is not a claim that the push
 # passed — only a record of what was asked.

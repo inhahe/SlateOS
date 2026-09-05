@@ -2115,12 +2115,19 @@ _G9_REFUSAL = "the argument that settled something"
 
 
 def _push(work: str, ref: str = "main",
-          marker: str = _G2_REFUSAL) -> tuple[str, str]:
+          marker: str = _G2_REFUSAL,
+          extra_refs: tuple[str, ...] = ()) -> tuple[str, str]:
     """(verdict, output). `allowed`, `refused`, or `error:<...>`.
 
     Only the *named gate's* refusal counts as `refused`. A suite that accepted
     any refusal would pass on a fixture that trips some other gate and never
     reach the thing it is about.
+
+    `extra_refs` pushes more than one branch in a single `git push`, which is
+    the only way to make the hook's `for sha in $pushed_shas` loop run more than
+    once: the list holds one sha per *ref*, not one per commit. A gate that read
+    `${pushed_shas# }` as a single sha -- which one block of the hook genuinely
+    does, guarded -- passes every single-ref fixture in this file.
 
     `ALLOW_FMT_DRIFT=1` because the fixture's `.rs` files are hand-written and
     gate 7 would rustfmt them; `test-pre-push-fmt-gate.py` covers that gate
@@ -2129,7 +2136,8 @@ def _push(work: str, ref: str = "main",
     """
     env = gitenv.clean_env()
     env["ALLOW_FMT_DRIFT"] = "1"
-    proc = subprocess.run(["git", "push", "origin", ref], cwd=work, env=env,
+    proc = subprocess.run(["git", "push", "origin", ref, *extra_refs],
+                          cwd=work, env=env,
                           capture_output=True, text=True, check=False)
     # Redact the fixture's own paths before anyone matches on the output. git
     # prints `To <remote>` and the hook prints its log path, so a case asserting
@@ -3507,6 +3515,398 @@ def case_gate13_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None
           "601" in blob, True)
 
 
+# --------------------------------------------------------------------------
+# Gate 14 -- check-accidental-headings.py
+#
+# The defect it looks for: a `---` on the line directly below prose, which
+# Markdown reads as a setext underline. The paragraph's last line becomes an
+# `<h2>` and the separator vanishes. One blank line is the whole difference
+# between the two, which makes the commit-versus-disk fixture as cheap as it
+# gets -- and makes the defect as easy to introduce.
+#
+# This gate is the first here with a *scope* flag as well as `--head`, and that
+# is the thing worth testing hardest. `--changed-only` derives the corpus from
+# `git diff-tree` against the pushed revision. Two ways to get that wrong are
+# both silent:
+#
+#   * taking the change set from the working tree, or from HEAD, rather than
+#     from the revision -- the same defect as reading the *document* from the
+#     wrong tree, one level up, and invisible because the answer is usually the
+#     same;
+#   * omitting `--root`, which makes `diff-tree` report nothing at all for a
+#     root commit. Every fixture in this suite starts with a root commit, so
+#     that one would have turned this entire block green while checking
+#     nothing. `case_gate14_a_root_commits_whole_tree_is_judged` is the probe
+#     that would have caught it.
+#
+# The scoping is also a *correctness* requirement and not only a speed one: a
+# lane must not be blocked from pushing by a pre-existing accidental heading in
+# another lane's document, which it is forbidden to edit.
+# `case_gate14_an_untouched_documents_existing_defect_does_not_block` pins that.
+#
+# WHAT THIS GATE DELIBERATELY DOES NOT DO. `$pushed_shas` holds one sha per
+# *ref* being pushed -- the tip -- and not one per commit in the range. So a
+# two-commit push that breaks a document and then fixes it is allowed, because
+# what gets published is the tip's tree and the tip's tree is correct. That is
+# not an oversight to be repaired later: refusing it would make an ordinary
+# fix-up commit unpushable and leave rewriting history as the only way out,
+# which is a far worse outcome than a momentarily-wrong blob in the middle of a
+# branch that nothing renders. Every other converted gate here judges the tip of
+# each ref for the same reason. What the `for sha in $pushed_shas` loop *is*
+# load-bearing for is a push carrying more than one ref, and
+# `case_gate14_the_hook_judges_a_second_ref_in_the_same_push` is what pins that.
+# --------------------------------------------------------------------------
+
+_AH_CHECKER = "check-accidental-headings.py"
+
+# The defect and its fix, differing by one blank line and nothing else.
+_AH_BAD = "# Doc\n\nan entry that ends here\n---\n\n## next\n"
+_AH_GOOD = "# Doc\n\nan entry that ends here\n\n---\n\n## next\n"
+
+_AH_FILLER = "# Filler\n\nnothing interesting.\n"
+
+# Enough filler documents that an *unscoped* run reaches a verdict instead of
+# refusing one. The checker's whole-corpus floor is `MIN_DOCS = 20`: a sweep
+# that finds four documents has a broken enumeration, so below the floor it
+# exits 2 -- "cannot reach a verdict" -- rather than reporting a clean tree.
+# Three cases here run the checker unscoped (two over the worktree, one with
+# `--head` and no `--changed-only`) and every one of them wants a real 0-or-1
+# verdict, so the fixture has to be a corpus the checker will judge.
+#
+# Not derived from the checker's constant by import, deliberately: raising
+# MIN_DOCS above this number breaks these fixtures loudly, with "below the
+# floor" in the output, which is the correct way to be told that the floor and
+# its fixtures have drifted apart. A number that followed the constant would
+# make the drift invisible.
+#
+# The *push* fixtures below get no filler at all, and that is the other half of
+# the same statement: the hook only ever invokes the checker with
+# `--changed-only`, whose floor is zero, so a two-document repository is a
+# corpus it must still judge. If the floor ever leaked into the scoped path,
+# every end-to-end case here would fail with "below the floor".
+_AH_FILLER_DOCS = 24
+
+
+def _ah_repo(tmp: str, name: str) -> str:
+    root = new_repo(tmp, name, (_AH_CHECKER,))
+    for i in range(_AH_FILLER_DOCS):
+        write(root, f"filler/f{i:02d}.md", _AH_FILLER)
+    return root
+
+
+def case_gate14_a_tidied_worktree_cannot_hide_a_committed_heading(tmp: str) -> None:
+    """The silent half: the blank line typed on disk, never committed.
+
+    This is the whole gate in one fixture. Fixing an accidental heading is
+    literally pressing Enter, so the state where the disk is right and the
+    commit is wrong is not an exotic one -- it is what the minute after
+    noticing looks like.
+    """
+    root = _ah_repo(tmp, "g14a")
+    write(root, "doc.md", _AH_BAD)
+    sha = commit(root)
+    write(root, "doc.md", _AH_GOOD)
+
+    disk = run_checker(root, _AH_CHECKER, "--quiet")
+    rev = run_checker(root, _AH_CHECKER, "--quiet", "--head", sha,
+                      "--changed-only")
+    check("gate 14: the disk's document is clean", disk.returncode, 0)
+    check("gate 14: ...and the commit is refused anyway", rev.returncode, 1)
+    check("gate 14: ...naming the document only the commit has",
+          "doc.md" in rev.stdout + rev.stderr, True)
+
+
+def case_gate14_an_uncommitted_heading_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: a half-edited document on the disk, a clean commit."""
+    root = _ah_repo(tmp, "g14b")
+    write(root, "doc.md", _AH_GOOD)
+    sha = commit(root)
+    write(root, "doc.md", _AH_BAD)
+
+    disk = run_checker(root, _AH_CHECKER, "--quiet")
+    rev = run_checker(root, _AH_CHECKER, "--quiet", "--head", sha,
+                      "--changed-only")
+    check("gate 14: the disk refuses the uncommitted heading", disk.returncode, 1)
+    check("gate 14: ...but the commit being pushed is clean", rev.returncode, 0)
+
+
+def case_gate14_the_change_set_is_taken_from_the_same_tree(tmp: str) -> None:
+    """`--changed-only` must diff the *revision*, not the working tree.
+
+    The failure this pins is one level up from the usual one: the document
+    could be read from the commit perfectly, and the gate still miss the
+    finding because it asked the working tree *which documents to look at*. Here
+    the second commit is the one that breaks `doc.md`, and by the time the gate
+    runs the worktree has been restored -- so a change set derived from
+    `git status` is empty and the corpus is empty and the verdict is a pass.
+    """
+    root = _ah_repo(tmp, "g14c")
+    write(root, "doc.md", _AH_GOOD)
+    commit(root)
+    write(root, "doc.md", _AH_BAD)
+    sha = commit(root)
+    write(root, "doc.md", _AH_GOOD)
+
+    rev = run_checker(root, _AH_CHECKER, "--quiet", "--head", sha,
+                      "--changed-only")
+    check("gate 14: the change set comes from the revision", rev.returncode, 1)
+    check("gate 14: ...and names the document that revision changed",
+          "doc.md" in rev.stdout + rev.stderr, True)
+
+
+def case_gate14_a_root_commits_whole_tree_is_judged(tmp: str) -> None:
+    """`--root`, without which `diff-tree` reports nothing for a root commit.
+
+    Every fixture in this suite -- every fixture in this *file* -- begins with a
+    root commit. Omitting `--root` therefore does not fail one case: it turns
+    the whole gate-14 block green while judging an empty corpus every time. The
+    probe is worth its lines precisely because its absence is invisible.
+    """
+    root = _ah_repo(tmp, "g14root")
+    write(root, "doc.md", _AH_BAD)
+    sha = commit(root)                       # the first commit in the repository
+
+    rev = run_checker(root, _AH_CHECKER, "--quiet", "--head", sha,
+                      "--changed-only")
+    check("gate 14: a root commit's own tree is the change set",
+          rev.returncode, 1)
+    check("gate 14: ...and the finding names the document",
+          "doc.md" in rev.stdout + rev.stderr, True)
+
+
+def case_gate14_an_untouched_documents_existing_defect_does_not_block(tmp: str) -> None:
+    """Scoping as correctness, not as speed.
+
+    `known-issues.md` is written by three lanes and each may edit only its own
+    entries. A gate that judged the whole corpus would refuse lane A's push over
+    a `---` in a lane C entry -- satisfiable only by editing a file lane A is
+    forbidden to touch, per roadmap.md. That is a gate with no legal way to go
+    green, which is a gate that gets bypassed.
+
+    The unscoped arm is asserted too, so this is a statement about what the flag
+    *does* rather than about a corpus that happened to be clean.
+    """
+    root = _ah_repo(tmp, "g14scope")
+    write(root, "theirs.md", _AH_BAD)
+    write(root, "mine.md", _AH_GOOD)
+    commit(root)
+    write(root, "mine.md", _AH_GOOD + "\nan added paragraph.\n")
+    sha = commit(root)
+
+    scoped = run_checker(root, _AH_CHECKER, "--quiet", "--head", sha,
+                         "--changed-only")
+    whole = run_checker(root, _AH_CHECKER, "--quiet", "--head", sha)
+    check("gate 14: a defect in an untouched document does not block",
+          scoped.returncode, 0)
+    check("gate 14: ...and the defect is really there to be found",
+          whole.returncode, 1)
+    check("gate 14: ...in the document this commit did not touch",
+          "theirs.md" in whole.stdout + whole.stderr, True)
+
+
+def case_gate14_a_commit_touching_no_markdown_is_a_pass_not_a_floor(tmp: str) -> None:
+    """Zero documents is a legitimate scoped corpus, and must not raise.
+
+    The whole-corpus floor exists because a sweep that finds four documents has
+    a broken enumeration. Applying the same floor to a scoped run would refuse
+    every push that carries only code -- and the refusal would read as a
+    checker crash (exit 2), which is the one verdict nobody debugs before
+    reaching for the bypass.
+    """
+    root = _ah_repo(tmp, "g14nomd")
+    write(root, "doc.md", _AH_GOOD)
+    commit(root)
+    write(root, "src/main.rs", "fn main() {}\n")
+    sha = commit(root)
+
+    rev = run_checker(root, _AH_CHECKER, "--quiet", "--head", sha,
+                      "--changed-only")
+    check("gate 14: a commit with no Markdown passes", rev.returncode, 0)
+    check("gate 14: ...without a word of complaint",
+          (rev.stdout + rev.stderr).strip(), "")
+
+
+def case_gate14_a_commit_that_deletes_a_document_is_not_a_crash(tmp: str) -> None:
+    """A deleted document has no blob in the revision to fetch.
+
+    Without `--diff-filter=d` the change set names it anyway and `cat-file`
+    answers `missing`, which this checker raises on -- correctly, since silently
+    skipping a document is a document reported clean. The result would be exit 2
+    on every push that removes a Markdown file: a gate that refuses a correct
+    push, in the shape hardest to diagnose.
+    """
+    root = _ah_repo(tmp, "g14del")
+    write(root, "doomed.md", _AH_GOOD)
+    write(root, "doc.md", _AH_GOOD)
+    commit(root)
+    remove(root, "doomed.md")
+    sha = commit(root)
+
+    rev = run_checker(root, _AH_CHECKER, "--quiet", "--head", sha,
+                      "--changed-only")
+    check("gate 14: deleting a document is not a crash", rev.returncode, 0)
+
+
+def case_gate14_a_document_absent_from_the_disk_is_still_judged(tmp: str) -> None:
+    """The commit is the input; the worktree need not contain the file at all.
+
+    A checker that fell back to reading the path from disk would report the
+    document as unreadable -- and this one's worktree collector *skips*
+    unreadable files, so the fallback's failure mode is a silent pass rather
+    than an error.
+    """
+    root = _ah_repo(tmp, "g14gone")
+    write(root, "doc.md", _AH_BAD)
+    sha = commit(root)
+    remove(root, "doc.md")
+
+    rev = run_checker(root, _AH_CHECKER, "--quiet", "--head", sha,
+                      "--changed-only")
+    check("gate 14: a document deleted from the disk is still judged",
+          rev.returncode, 1)
+
+
+def case_gate14_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
+    """A bad revision must be exit 2, never exit 1.
+
+    Exit 1 says "your document is wrong" and sends the author to the document.
+    A typo'd sha is the checker failing to run, and `run_checker` distinguishes
+    the two for the hook's message -- but only if the checker distinguishes them
+    first.
+    """
+    root = _ah_repo(tmp, "g14badrev")
+    write(root, "doc.md", _AH_GOOD)
+    commit(root)
+
+    rev = run_checker(root, _AH_CHECKER, "--quiet", "--head",
+                      "0123456789012345678901234567890123456789",
+                      "--changed-only")
+    check("gate 14: an unopenable revision exits 2, not 1", rev.returncode, 2)
+    check("gate 14: ...and says it could not reach a verdict",
+          "cannot reach a verdict" in rev.stdout + rev.stderr, True)
+
+
+def case_gate14_the_scope_flag_is_refused_without_a_revision(tmp: str) -> None:
+    """`--changed-only` alone has no revision to diff, and must say so.
+
+    Quietly ignoring it would leave the hook's invocation *looking* scoped while
+    judging the whole corpus -- which is the pre-existing-defect problem above,
+    reintroduced by a flag that reads as present.
+    """
+    root = _ah_repo(tmp, "g14noRev")
+    write(root, "doc.md", _AH_GOOD)
+    commit(root)
+
+    rev = run_checker(root, _AH_CHECKER, "--quiet", "--changed-only")
+    check("gate 14: --changed-only without --head is refused", rev.returncode, 2)
+    check("gate 14: ...and names the missing flag",
+          "needs --head" in rev.stdout + rev.stderr, True)
+
+
+# The hook's refusal heredoc, clause-matched rather than headline-matched for
+# `_G13_REFUSAL`'s reason: the em dash in the summary line does not survive a
+# cp1252 console, and the clause below occurs once, in the block that exits 1.
+_G14_REFUSAL = "renders that paragraph's last line as an"
+
+_G14_SEED = {"other.md": _AH_FILLER}
+
+
+def _ah_push_fixture(tmp: str, name: str) -> str:
+    return _push_fixture(tmp, name, (_AH_CHECKER,), dict(_G14_SEED))
+
+
+def case_gate14_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) -> None:
+    """End to end: gate 14's own wiring, not some other gate's."""
+    work = _ah_push_fixture(tmp, "g14push-hide")
+    write(work, "doc.md", _AH_BAD)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a separator that renders as a heading")
+    write(work, "doc.md", _AH_GOOD)
+
+    verdict, blob = _push(work, marker=_G14_REFUSAL)
+    check("gate 14 end to end: the push is refused", verdict, "refused")
+    # `doc.md`, not the word "heading": the refusal heredoc says "heading" in
+    # four places, so that probe is satisfied by boilerplate. The file name
+    # comes only from the checker's finding.
+    check("gate 14 end to end: ...naming the document only the commit has",
+          "doc.md" in blob, True)
+
+
+def case_gate14_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -> None:
+    """End to end: the false fail, plus the proof the gate was actually asked.
+
+    The tally probe is what makes this more than a formality. Gate 14 sets
+    `skip_headings=1` from five separate conditions -- the bypass, a missing
+    interpreter, a missing checker, a `touches` scope that does not match, and
+    an empty push -- and a gate that skipped itself allows this fixture and
+    every other one here.
+    """
+    work = _ah_push_fixture(tmp, "g14push-wip")
+    write(work, "doc.md", _AH_GOOD)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a properly separated document")
+    write(work, "doc.md", _AH_BAD)
+
+    verdict, blob = _push(work, marker=_G14_REFUSAL)
+    check("gate 14 end to end: an uncommitted heading does not block",
+          verdict, "allowed")
+    check("gate 14 end to end: ...and the gate actually ran",
+          "headings" in _tally(blob)[0], True)
+
+
+def case_gate14_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` while checked out on `main`."""
+    work = _ah_push_fixture(tmp, "g14push-offbranch")
+    git(work, "checkout", "--quiet", "-b", "feature")
+    write(work, "doc.md", _AH_BAD)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a bad separator on a branch we will leave")
+    git(work, "checkout", "--quiet", "main")
+
+    verdict, blob = _push(work, "feature", marker=_G14_REFUSAL)
+    check("gate 14 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    check("gate 14 end to end: ...naming the document on that other branch",
+          "doc.md" in blob, True)
+
+
+def case_gate14_the_hook_judges_a_second_ref_in_the_same_push(tmp: str) -> None:
+    """The per-sha loop, and the only fixture shape that can tell it is there.
+
+    `$pushed_shas` holds one sha per ref. Every other end-to-end case in this
+    block pushes one branch, so all of them pass against a gate that judged
+    `${pushed_shas# }` -- the first sha, as a scalar -- and ignored the rest.
+    That is not a strawman shape: the unix-half gate a few hundred lines up the
+    hook does exactly that, deliberately, behind a guard that stands the gate
+    down when the push carries more than one ref.
+
+    So this pushes two branches at once and puts the defect in the *second*,
+    behind a clean first. A scalar read of the list judges `clean`, finds
+    nothing, and publishes the accidental heading on `dirty`.
+
+    The refusal must also still name the document -- a gate that refused because
+    it could not cope with two refs would be a different bug wearing the same
+    verdict.
+    """
+    work = _ah_push_fixture(tmp, "g14push-tworefs")
+    git(work, "checkout", "--quiet", "-b", "clean")
+    write(work, "ok.md", _AH_GOOD)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a properly separated document")
+    git(work, "checkout", "--quiet", "main")
+    git(work, "checkout", "--quiet", "-b", "dirty")
+    write(work, "doc.md", _AH_BAD)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a separator that renders as a heading")
+
+    verdict, blob = _push(work, "clean", marker=_G14_REFUSAL,
+                          extra_refs=("dirty",))
+    check("gate 14 end to end: a clean first ref does not clear a second",
+          verdict, "refused")
+    check("gate 14 end to end: ...naming the document the second ref carries",
+          "doc.md" in blob, True)
+
+
 CASES = (
     case_gate2_a_tidied_worktree_cannot_hide_a_committed_alias,
     case_gate2_an_uncommitted_alias_does_not_block_a_clean_push,
@@ -3611,15 +4011,29 @@ CASES = (
     case_gate13_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate13_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate13_the_hook_judges_a_branch_it_is_not_standing_on,
+    case_gate14_a_tidied_worktree_cannot_hide_a_committed_heading,
+    case_gate14_an_uncommitted_heading_does_not_block_a_clean_push,
+    case_gate14_the_change_set_is_taken_from_the_same_tree,
+    case_gate14_a_root_commits_whole_tree_is_judged,
+    case_gate14_an_untouched_documents_existing_defect_does_not_block,
+    case_gate14_a_commit_touching_no_markdown_is_a_pass_not_a_floor,
+    case_gate14_a_commit_that_deletes_a_document_is_not_a_crash,
+    case_gate14_a_document_absent_from_the_disk_is_still_judged,
+    case_gate14_an_unopenable_revision_is_not_a_finding,
+    case_gate14_the_scope_flag_is_refused_without_a_revision,
+    case_gate14_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate14_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate14_the_hook_judges_a_branch_it_is_not_standing_on,
+    case_gate14_the_hook_judges_a_second_ref_in_the_same_push,
 )
 
 
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 103:
+    if len(CASES) < 117:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 103. The list is broken, not the code.")
+              f"least 117. The list is broken, not the code.")
         return 1
     # ...and each converted gate must be represented, through the real hook as
     # well as directly. A floor on the count alone would be met by any number of
@@ -3664,7 +4078,7 @@ def main() -> int:
                                    ("gate4", 13, 3), ("gate5", 7, 3),
                                    ("gate6", 14, 3), ("gate8", 14, 3),
                                    ("gate9", 9, 3), ("gate11", 11, 3),
-                                   ("gate13", 12, 3)):
+                                   ("gate13", 12, 3), ("gate14", 14, 4)):
         named = [c for c in CASES if c.__name__.startswith(f"case_{gate}_")]
         hooked = [c for c in named if "the_hook" in c.__name__]
         if len(named) < floor or len(hooked) < e2e_floor:

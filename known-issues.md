@@ -57303,7 +57303,7 @@ and that is exactly the shape that survives a reading.
 screenful of information that is a constant compiled into the program. The
 drawing is real, the filtering and sorting and searching are real, the parsing
 is real — and there is no source. This entry names the pattern, because it has
-now been found nine times and writing it up nine times separately would train
+now been found ten times and writing it up ten times separately would train
 the reader to skim it.
 
 **`email` is the sharpest case and the least fixable today.** The client is
@@ -57339,6 +57339,7 @@ promise to break.
 | `finance` | accounts, budgets, transactions | both a source and a way to enter anything; see its own entry | `None`, documented |
 | `email` | an inbox, folders, threads, filters | a network. Every IMAP and SMTP command it can build -- `login`, `select`, `fetch`, `ehlo`, `mail_from`, twenty in all -- returns a protocol string with no socket to write it to | `None`, documented |
 | `rssreader` | feeds, folders, articles, search | an HTTP client. Its RSS/Atom parser is real and now runs at startup on one sample feed, but nothing can fetch a second one, so `global_auto_refresh_seconds` has nothing to refresh | `None`, documented |
+| `ebook` | library, pagination, bookmarks, contents, search | a window that can be resized. The reading position is a byte offset precisely so it survives repagination, and nothing ever repaginated because nothing ever changed size | `None` -- nothing in a book advances on its own |
 | `torrent` | transfers, peers, pieces, trackers | a network. `TrackerRequest::build_url` builds an announce URL nothing can fetch, so no peer list ever comes back -- the swarm a download picks pieces from is invented at the first tick | `PIECE_STEP` while downloading |
 | `spreadsheet` | a sheet a user can actually fill in | nothing to *show* — the gap is the other way round: `import_csv`/`export_csv` work on a `String` and there is no file dialog, command line or system clipboard to carry one | `None`, documented |
 

@@ -82,13 +82,21 @@
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
 //
-// sshd parses SSH-2 binary packets (RFC 4253) and runs cryptographic
-// transforms (AES-CTR, HMAC-SHA256, Curve25519/Ed25519, DH group14).
-// Arithmetic operates on packet lengths, padding sizes, and counter values
-// already bounded by RFC 4253 packet limits and `data.len()` length checks.
-// Indexing/slicing into packet buffers is gated by length checks at the
-// call site; out-of-range conditions return Err, never panic.
-#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+// The crate-wide `#![allow(clippy::arithmetic_side_effects,
+// clippy::indexing_slicing)]` that used to sit here is gone. Its justification
+// read "out-of-range conditions return Err, never panic", and that was not
+// true: the packet decoder read the padding-length byte from past the end of a
+// packet a peer had declared too short -- pre-auth, with the lint that exists
+// to catch exactly that shape switched off across all 8700 lines. See
+// known-issues.md ->
+// TD-B-THE-SERVERS-PACKET-DECODER-TRUSTED-A-LENGTH-IT-HAD-NOT-CHECKED-AND-A-MAC-IT-HAD-NOT-VERIFIED.
+//
+// What replaces it is a per-function `#[expect(..)]` on each function not yet
+// audited, so the rest of the file is linted now rather than once the audit
+// finishes. `expect` rather than `allow` on purpose: it warns as soon as the
+// lint it names stops firing, so cleaning a function deletes its own
+// suppression instead of leaving a stale one to be inherited by whatever is
+// written there next.
 
 use std::env;
 use std::fmt;
@@ -433,6 +441,10 @@ fn tcp_send(handle: u64, data: &[u8]) -> Result<usize, SshdError> {
 }
 
 /// Send all bytes, looping until the entire buffer is transmitted.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn tcp_send_all(handle: u64, data: &[u8]) -> Result<(), SshdError> {
     let mut offset = 0;
     while offset < data.len() {
@@ -1481,6 +1493,10 @@ impl StreamBuffer {
     /// because every caller is in the middle of wanting more bytes. The message
     /// is matched on by `handle_channels`, which treats it as a normal end of
     /// connection rather than a protocol failure.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+    )]
     fn fill_once(&mut self, handle: u64) -> Result<(), SshdError> {
         // Reclaim the consumed prefix before growing. Doing this only past a
         // threshold keeps a long session from memmoving the tail on every
@@ -1565,6 +1581,11 @@ impl BigUint {
         self.bytes.is_empty()
     }
 
+    #[expect(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+    )]
     fn bit_length(&self) -> usize {
         if self.bytes.is_empty() {
             return 0;
@@ -1574,6 +1595,11 @@ impl BigUint {
         (self.bytes.len() - 1) * 8 + top_bits
     }
 
+    #[expect(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+    )]
     fn bit(&self, pos: usize) -> bool {
         let byte_idx = pos / 8;
         let bit_idx = pos % 8;
@@ -1614,6 +1640,11 @@ impl BigUint {
     }
 
     /// Full multiplication (schoolbook, O(n^2)).
+    #[expect(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+    )]
     fn mul_big(&self, other: &BigUint) -> BigUint {
         if self.is_zero() || other.is_zero() {
             return BigUint::zero();
@@ -1654,6 +1685,11 @@ impl BigUint {
     }
 
     /// Division with remainder.
+    #[expect(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+    )]
     fn div_rem(&self, divisor: &BigUint) -> (BigUint, BigUint) {
         if divisor.is_zero() {
             return (BigUint::zero(), BigUint::zero());
@@ -1698,6 +1734,11 @@ impl BigUint {
         (BigUint { bytes: qbytes }, remainder)
     }
 
+    #[expect(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+    )]
     fn shl1(&self) -> BigUint {
         if self.is_zero() {
             return BigUint::zero();
@@ -1719,6 +1760,10 @@ impl BigUint {
         BigUint { bytes: result }
     }
 
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+    )]
     fn add_small(&self, val: u8) -> BigUint {
         if val == 0 {
             return self.clone();
@@ -1739,6 +1784,11 @@ impl BigUint {
         BigUint { bytes: result }
     }
 
+    #[expect(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+    )]
     fn sub_big(&self, other: &BigUint) -> BigUint {
         if other.is_zero() {
             return self.clone();
@@ -1977,6 +2027,11 @@ impl HostKey {
     /// successfully with a host key unrelated to the file named, and the
     /// operator's only clue would have been that every client reported a
     /// changed host key. Failing to parse a host key must stop the daemon.
+    #[expect(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+    )]
     fn load_from_file(path: &str) -> Result<Self, SshdError> {
         let data = fs_read_file(path)?;
         let text = String::from_utf8_lossy(&data);
@@ -2042,6 +2097,11 @@ impl HostKey {
 /// followed by a copy of the public key. We take the seed and re-derive the
 /// public key rather than trusting the copy, so a corrupted file fails the
 /// consistency check below instead of producing a key whose halves disagree.
+#[expect(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn parse_openssh_private_key(text: &str) -> Result<[u8; 32], String> {
     let body: String = text
         .lines()
@@ -2129,6 +2189,10 @@ fn parse_openssh_private_key(text: &str) -> Result<[u8; 32], String> {
 /// this daemon generates can be inspected with `ssh-keygen -lf` and copied to
 /// another machine, and that the round trip through our own parser is exercised
 /// on the very next start.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn write_openssh_private_key(
     path: &str,
     seed: &[u8; 32],
@@ -2190,6 +2254,11 @@ fn write_openssh_private_key(
 }
 
 /// Minimal base64 encoder (RFC 4648, with `=` padding).
+#[expect(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
@@ -2223,6 +2292,11 @@ fn base64_encode(data: &[u8]) -> String {
 // a..d are the four decoded sextets of a base64 quartet; short names match the
 // usual base64 decode formulation.
 #[allow(clippy::many_single_char_names)]
+#[expect(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn base64_decode(input: &str) -> Vec<u8> {
     const DECODE: [u8; 128] = {
         let mut table = [0xFFu8; 128];
@@ -2647,6 +2721,10 @@ struct AuthorizedKey {
 }
 
 /// Parse an `authorized_keys` file.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn parse_authorized_keys(content: &str) -> Vec<AuthorizedKey> {
     let mut keys = Vec::new();
     for line in content.lines() {
@@ -2765,6 +2843,10 @@ const DEFAULT_LOGIN_SHELL: &str = "/bin/sh";
 ///
 /// Malformed lines are skipped rather than failing the whole file: one bad
 /// line in `/etc/passwd` must not lock every account out of the machine.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn parse_passwd(content: &str) -> Vec<PasswdEntry> {
     let mut entries = Vec::new();
     for line in content.lines() {
@@ -3574,6 +3656,10 @@ fn read_version_line(conn: &mut ConnectionState) -> Result<String, SshdError> {
 // parsed software version to enable known-client workarounds. The current
 // handshake only validates the "SSH-2.0" prefix. Not yet invoked (but tested).
 #[allow(dead_code)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn parse_version_string(version: &str) -> Option<&str> {
     // Format: SSH-protoversion-softwareversion SP comments
     let version = version.trim();
@@ -3772,6 +3858,10 @@ fn handle_service_request(conn: &mut ConnectionState) -> Result<(), SshdError> {
 /// per-user failure tally has to outlive the connection, or an attacker gets an
 /// unlimited number of guesses simply by reconnecting after each `max_auth_tries`
 /// refusal. `max_auth_tries` bounds one conversation; `auth` bounds the account.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn do_user_auth(
     conn: &mut ConnectionState,
     auth: &mut authlib::Authenticator,
@@ -4261,6 +4351,10 @@ fn handle_channels(conn: &mut ConnectionState) -> Result<(), SshdError> {
 }
 
 /// Act on one channel-layer message.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn dispatch_channel_message(conn: &mut ConnectionState, payload: &[u8]) -> Result<Flow, SshdError> {
     if payload.is_empty() {
         return Ok(Flow::Continue);
@@ -4393,6 +4487,10 @@ fn global_request_reply(payload: &[u8]) -> Result<(String, Option<Vec<u8>>), Ssh
 }
 
 /// Handle `CHANNEL_OPEN`.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn handle_channel_open(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (chan_type_bytes, off) = read_ssh_string(payload, 1)?;
     let chan_type = String::from_utf8_lossy(chan_type_bytes);
@@ -4445,6 +4543,10 @@ fn handle_channel_open(conn: &mut ConnectionState, payload: &[u8]) -> Result<(),
 }
 
 /// Handle `CHANNEL_REQUEST`.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (recipient, off) = read_u32(payload, 1)?;
     let (req_type_bytes, off) = read_ssh_string(payload, off)?;
@@ -4726,6 +4828,10 @@ fn env_request_allowed(config: &SshdConfig, name: &str, value: &str) -> bool {
 /// reply is the only signal the protocol gives it. A refusal is not a defeat:
 /// FAILURE means "not set", the client can act on it, and OpenSSH answers
 /// exactly the same way for a name outside `AcceptEnv`.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn handle_env_request(
     conn: &mut ConnectionState,
     local_id: u32,
@@ -4835,6 +4941,10 @@ fn channel_is_busy(channel: &Channel) -> bool {
 /// spawned *before* the request is answered, because RFC 4254 §6.5's reply
 /// reports whether the request was accepted, and a shell that could not be
 /// started was not.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn start_shell_session(
     conn: &mut ConnectionState,
     local_id: u32,
@@ -4910,6 +5020,10 @@ fn start_shell_session(
 /// This is the one path behind `exec` and `subsystem` — a subsystem is an
 /// `exec` whose command line came from the server's configuration rather than
 /// from the client — and it is also where a `shell` with no terminal ends up.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn start_pipe_session(
     conn: &mut ConnectionState,
     local_id: u32,
@@ -4941,6 +5055,10 @@ fn start_pipe_session(
 /// Taking the `Result` rather than spawning here is what lets `shell`, `exec`
 /// and `subsystem` share every line of this while each builds its own very
 /// different `Command`.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn start_pipe_session_with(
     conn: &mut ConnectionState,
     idx: usize,
@@ -5021,6 +5139,10 @@ const SESSION_READS_PER_PASS: usize = 16;
 ///
 /// It is the mirror image of `Channel::pending_input`, which *must* buffer,
 /// because window credit for arriving data is owed the moment it arrives.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn pump_channel_output(
     conn: &mut ConnectionState,
     idx: usize,
@@ -5124,6 +5246,10 @@ fn pump_channel_output(
 /// rather than the end of the connection: the process has gone and the pump's
 /// normal exit path will notice and close the channel. Dropping the whole TCP
 /// session because one shell died would take any other channel down with it.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn pump_channel_input(conn: &mut ConnectionState, idx: usize) -> Result<bool, SshdError> {
     if conn.channels[idx].pending_input.is_empty() {
         return Ok(false);
@@ -5212,6 +5338,10 @@ fn pump_channel_input(conn: &mut ConnectionState, idx: usize) -> Result<bool, Ss
 ///
 /// Returns `true` if anything happened, which is what tells the connection loop
 /// to try again immediately instead of sleeping.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+)]
 fn pump_sessions(conn: &mut ConnectionState) -> Result<bool, SshdError> {
     let mut worked = false;
 
@@ -5722,6 +5852,11 @@ struct CliOptions {
 }
 
 impl CliOptions {
+    #[expect(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
+    )]
     fn parse_args() -> Self {
         let args: Vec<String> = env::args().collect();
         let mut opts = Self {
@@ -5953,12 +6088,19 @@ fn main() {
 // Tests
 // ============================================================================
 
+// The panicking lints are allowed here and nowhere else: a test that indexes
+// past the end, or overflows a counter, is a test reporting a failure in the
+// loudest way available, which is what it is for. `arithmetic_side_effects`
+// joined the list when the crate-wide allow that had been covering it was
+// removed -- it was never a considered exemption for the shipping code, only
+// an accident of that blanket's reach.
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
     clippy::format_collect
 )]
 mod tests {

@@ -793,6 +793,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // a raw space outside quotes would have ended the word. Those
                 // lines never reach completion, so asserting about them would
                 // be asserting about a state the shell cannot be in.
+                //
+                // One exclusion is worth naming, because it looks like a
+                // convenient dodge and is not. The `Unquoted` arm also drops any
+                // prefix ending in a lone trailing backslash -- `quote_word`
+                // escapes it, so it fails the equality. That case is precisely
+                // the one documented divergence from bash this module already
+                // carries: `strip_quotes(b"a\\")` yields `a\` where bash yields
+                // `a`, and it is pinned as a divergence in
+                // check-shellquote-vs-bash.py rather than quietly tolerated.
+                // Round-tripping it here would assert our own known-wrong answer
+                // as correct, and the two statements would then disagree. One
+                // place says what we do differently; this loop does not
+                // re-assert it.
                 let typable = match ctx {
                     Ctx::Unquoted => typed.is_empty() || quote_word(typed) == typed,
                     Ctx::Single => !typed.contains(&b'\''),

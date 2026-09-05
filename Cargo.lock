@@ -16733,6 +16733,7 @@ version = "0.1.0"
 dependencies = [
  "posix",
  "quoting",
+ "randrange",
  "sha2",
 ]
 
@@ -16740,6 +16741,7 @@ dependencies = [
 name = "ssh-keygen"
 version = "0.1.0"
 dependencies = [
+ "randrange",
  "sha2",
 ]
 
@@ -16749,6 +16751,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "posix",
+ "randrange",
  "scratchdir",
  "sha2",
 ]

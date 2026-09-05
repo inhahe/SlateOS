@@ -54,34 +54,20 @@ use std::path::{Path, PathBuf};
 // syscalls — WRITE=1=SYS_EXIT (so every write terminated the process),
 // OPEN=2=SYS_TASK_ID, CLOSE=3 unassigned, STAT=4 unassigned, EXIT=60=
 // SYS_SYSCTL_GET, MKDIR=83 unassigned — making the tool completely
-// non-functional.  Randomness uses the posix `getrandom` C symbol because no
-// std API exposes the kernel CSPRNG.
-
-#[cfg(unix)]
-unsafe extern "C" {
-    /// Fill `buf` with `buflen` random bytes; returns bytes written or -1.
-    fn getrandom(buf: *mut u8, buflen: usize, flags: u32) -> isize;
-}
+// non-functional.  Randomness comes from `randrange::fill_secret`, which
+// reaches the kernel CSPRNG through the linked libc's `getrandom` symbol
+// because no std API exposes it.
+//
+// That extern used to be written out here, and the same eight lines were
+// written out twice more (in `ssh` and `sshd`, via `posix::random`). Of the
+// three, this was the only correct one: the other two called into an rlib copy
+// of `posix` whose syscalls are stubbed out in a program build, so they reached
+// a hardware-RDRAND fallback the guest CPU does not have. One copy in one crate
+// is what stops the next tool from picking the wrong one.
 
 /// Fill `buf` with cryptographically random bytes from the kernel CSPRNG.
 fn fill_random(buf: &mut [u8]) -> Result<(), KeygenError> {
-    #[cfg(unix)]
-    {
-        // SAFETY: valid mutable buffer pointer and exact length; the posix
-        // getrandom writes at most `buflen` bytes and returns the count or -1.
-        let ret = unsafe { getrandom(buf.as_mut_ptr(), buf.len(), 0) };
-        if ret < 0 || usize::try_from(ret).unwrap_or(0) != buf.len() {
-            return Err(KeygenError::RandomFailed);
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        // Host test toolchain has no kernel CSPRNG; key generation is not
-        // exercised in host unit tests, so fail explicitly if reached.
-        let _ = buf;
-        Err(KeygenError::RandomFailed)
-    }
+    randrange::fill_secret(buf).map_err(|_| KeygenError::RandomFailed)
 }
 
 /// Apply a Unix permission `mode` to `path` (best effort; no-op off-unix).

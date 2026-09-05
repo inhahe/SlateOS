@@ -8,16 +8,32 @@ description = "SlateOS SSH-2 client"
 # carried its own SHA-256; in a protocol client that is a private protocol,
 # since every one of those digests has to agree with the far end.
 #
-# `posix` for `ed25519` (verifying the server's host key signature) and
-# `random` (the Diffie-Hellman private exponent). Both were placeholders: the
-# signature was not checked at all, and the exponent was two hard-coded
-# constants hashed together -- one secret shared by every copy of the binary.
+# `posix` for `ed25519` (verifying the server's host key signature), which was a
+# placeholder: the signature was not checked at all.
+#
+# `posix` is depended on for `ed25519` *only*, and that is a deliberate limit.
+# `ed25519` is pure arithmetic over caller-owned buffers, which is what makes it
+# safe to reach as a Rust dependency. Anything in `posix` that talks to the
+# kernel is not: a SlateOS program target is `target_os = "linux"`, every
+# syscall in `posix` is gated `#[cfg(target_os = "none")]` for the bare-metal
+# `libc.a` build, so an rlib copy of `posix` linked into a program answers
+# `-ENOSYS` to every syscall while the real libc sits right next to it answering
+# correctly. See known-issues.md
+# `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`.
+#
+# `randrange` for the two secrets this crate draws -- the Diffie-Hellman private
+# exponent and the X11 MIT-MAGIC-COOKIE. The exponent was two hard-coded
+# constants hashed together, one secret shared by every copy of the binary.
+# `randrange` reaches the kernel CSPRNG through the linked libc's `getrandom`
+# symbol, which is the one route that works from a program, and is shared with
+# `sshd` and `ssh-keygen` so there is one implementation rather than three.
 [dependencies]
 # The host name added to known_hosts comes from the command line or from the
 # ssh config file, so it is not text ssh chose.
 quoting = { path = "../quoting" }
 sha2 = { path = "../../sha2" }
 posix = { path = "../../posix" }
+randrange = { path = "../../randrange" }
 
 # Inherit the workspace lint configuration. This crate carried its own
 # `#![deny(clippy::all)]` and nothing else, which is the easy half: it left

@@ -1466,16 +1466,21 @@ fn dh_group14_generator() -> BigUint {
     BigUint::from_bytes_be(&[2])
 }
 
-/// Generate a deterministic-looking private key from available entropy sources.
-/// In a real implementation this would use a CSPRNG, but for this simplified
-/// daemon we derive from process-id and monotonic clock.
+/// Draw a Diffie-Hellman private exponent from the kernel CSPRNG.
+///
+/// This is the secret that makes the session key secret; nothing else in the
+/// exchange hides it. It used to be derived from the process id and the
+/// monotonic clock, which is a search space small enough to enumerate, and the
+/// doc comment here described that as acceptable "for this simplified daemon".
+/// It is not, so it draws from the CSPRNG now and fails the connection if it
+/// cannot.
 fn generate_dh_private() -> Result<BigUint, SshdError> {
     // 256 bits, per RFC 4419 section 6.2's guidance that the exponent be at
     // least twice the 128-bit security level the group14 prime provides.
     let mut bytes = [0u8; 32];
-    posix::random::fill(&mut bytes).map_err(|e| {
+    randrange::fill_secret(&mut bytes).map_err(|e| {
         SshdError::ProtocolError(format!(
-            "cannot generate a Diffie-Hellman private key: CSPRNG errno {e}"
+            "cannot generate a Diffie-Hellman private key: {e}"
         ))
     })?;
     // Set the top bit so the exponent is a full 256 bits rather than however
@@ -1534,10 +1539,8 @@ impl HostKey {
     /// persist is a daemon whose identity changes silently.
     fn generate_and_persist(path: &str) -> Result<Self, SshdError> {
         let mut seed = [0u8; 32];
-        posix::random::fill(&mut seed).map_err(|e| {
-            SshdError::ConfigError(format!(
-                "cannot generate a host key: the kernel CSPRNG returned errno {e}"
-            ))
+        randrange::fill_secret(&mut seed).map_err(|e| {
+            SshdError::ConfigError(format!("cannot generate a host key: {e}"))
         })?;
         let key = Self::from_seed(seed);
         write_openssh_private_key(path, &seed, &key.public_key)?;
@@ -1755,9 +1758,8 @@ fn write_openssh_private_key(
     // never encrypt, so any value works as long as they match; a random one
     // keeps the file byte-identical in structure to what ssh-keygen writes.
     let mut checkint = [0u8; 4];
-    posix::random::fill(&mut checkint).map_err(|e| {
-        SshdError::ConfigError(format!("cannot generate a host key: CSPRNG errno {e}"))
-    })?;
+    randrange::fill_secret(&mut checkint)
+        .map_err(|e| SshdError::ConfigError(format!("cannot generate a host key: {e}")))?;
 
     let mut private = Vec::new();
     private.extend_from_slice(&checkint);

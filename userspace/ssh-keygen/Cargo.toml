@@ -7,8 +7,17 @@ description = "SlateOS SSH key generation and management"
 # SHA-256, which in a key tool is a private copy of a public agreement: the
 # fingerprint it prints is compared by hand against one printed by somebody
 # else. SHA-512 stays local -- Ed25519 needs it and `sha2` does not provide it.
+#
+# `randrange` for the key seed and the OpenSSH-format `checkint`. This crate
+# hand-wrote its own `getrandom` extern and length check, which was the third
+# copy of that eight-line block in the tree -- and the only one of the three
+# that was correct, since `ssh` and `sshd` reached the kernel through `posix`'s
+# Rust API instead, which is stubbed to `-ENOSYS` in a program build. One copy,
+# in one crate, is what stops the next tool from picking the wrong one. See
+# known-issues.md `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`.
 [dependencies]
 sha2 = { path = "../../sha2" }
+randrange = { path = "../../randrange" }
 
 [lints]
 workspace = true

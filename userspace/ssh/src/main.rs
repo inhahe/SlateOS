@@ -1523,8 +1523,12 @@ fn hex_char(nibble: u8) -> char {
 /// protocol flow", and the flow it demonstrated was an encrypted channel that
 /// decrypts to a passive observer.
 ///
-/// The bytes now come from `posix::random`, which reaches the kernel CSPRNG
-/// and *fails* rather than substituting anything when it cannot.
+/// The bytes now come from `randrange::fill_secret`, which reaches the kernel
+/// CSPRNG through the linked libc and *fails* rather than substituting anything
+/// when it cannot. They came from `posix::random` until it turned out that a
+/// program's rlib copy of `posix` has every syscall stubbed out, so the draw
+/// silently reached a hardware-RDRAND fallback that the guest CPU does not have
+/// and returned `EIO` while blaming a kernel it had never asked.
 ///
 /// # Errors
 ///
@@ -1534,10 +1538,8 @@ fn hex_char(nibble: u8) -> char {
 fn generate_dh_private() -> Result<BigUint, SshError> {
     // 256 bits, matching the ~128-bit security the group14 prime provides.
     let mut bytes = [0u8; 32];
-    posix::random::fill(&mut bytes).map_err(|e| {
-        SshError::ProtocolError(format!(
-            "cannot generate a Diffie-Hellman private key: CSPRNG errno {e}"
-        ))
+    randrange::fill_secret(&mut bytes).map_err(|e| {
+        SshError::ProtocolError(format!("cannot generate a Diffie-Hellman private key: {e}"))
     })?;
     // Top bit set so the exponent is a full 256 bits rather than however many
     // the leading zero bytes leave; bottom bit set so it is odd. This is what
@@ -2246,8 +2248,8 @@ impl SshSession {
         // feed into it. Sixteen zero bytes "for simplicity" gave that power to
         // the server alone.
         let mut cookie = [0u8; 16];
-        posix::random::fill(&mut cookie).map_err(|e| {
-            SshError::ProtocolError(format!("cannot generate the KEXINIT cookie: errno {e}"))
+        randrange::fill_secret(&mut cookie).map_err(|e| {
+            SshError::ProtocolError(format!("cannot generate the KEXINIT cookie: {e}"))
         })?;
         payload.extend_from_slice(&cookie);
 

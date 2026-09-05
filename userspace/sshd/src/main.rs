@@ -29,7 +29,8 @@
 //! - User auth: password (through `authlib`, the one verifier the system has),
 //!   public key (`authorized_keys`, with the RFC 4252 section 7 signature
 //!   actually verified)
-//! - Session channels: `exec` requests run the command
+//! - Session channels: `pty-req` + `shell` give a real interactive session on a
+//!   pseudo-terminal; `exec` requests run a command
 //!
 //! # Two independent limits on guessing
 //!
@@ -49,17 +50,33 @@
 //!
 //! # What a session can and cannot do
 //!
-//! `exec` is real: the command runs through the authenticated user's login
-//! shell, as that user, and its stdout, stderr and exit status are reported
-//! separately and truthfully. It does not stream — output is delivered when
-//! the command exits — and its stdin is `/dev/null`.
+//! **`pty-req` + `shell` is a real interactive session.** `pty-req` allocates a
+//! pseudo-terminal sized to the client's window; `shell` runs the authenticated
+//! user's login shell on the slave end, as that user, with `argv[0]` prefixed by
+//! a hyphen so the shell reads the login profiles. Keystrokes go into the
+//! terminal's line discipline — so editing, `^C`, `^Z` and job control are the
+//! kernel's job, not this daemon's — and the shell's output comes back out of
+//! the master. `window-change` resizes the terminal and raises `SIGWINCH`, and
+//! the shell's exit is reported as `exit-status` (or `exit-signal`) followed by
+//! EOF and close, after its final output has been delivered.
 //!
-//! `pty-req` and `shell` are **refused**, and the refusal is the honest
-//! answer rather than a missing feature dressed up as one. `Slate OS` has no
-//! pseudo-terminal device yet (see `requests/b-a-pty-devices-need-the-line-
-//! discipline-that-the-console-already-has.md`), so there is no terminal to
-//! allocate and nothing for an interactive shell to be interactive on. A
-//! client that asks gets `SSH_MSG_CHANNEL_FAILURE` and says so.
+//! This rests on the pty stack landing in the kernel; before that there was no
+//! terminal to allocate, and both requests were refused outright. The request
+//! that asked for it, now fulfilled, is
+//! `b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`
+//! under `requests/`.
+//!
+//! **`exec` is real but does not stream.** The command runs through the user's
+//! login shell, as that user, and its stdout, stderr and exit status are
+//! reported separately and truthfully — but output is collected and delivered
+//! when the command exits, and its stdin is `/dev/null`. A command that never
+//! exits therefore produces nothing.
+//!
+//! **`shell` without a `pty-req` is refused.** `ssh -T host` asks for a shell on
+//! plain pipes, which needs the same streaming machinery `exec` lacks. The
+//! refusal is the honest answer: a `SUCCESS` followed by a session that never
+//! produced a byte would look like a hung server rather than a missing feature.
+//! Both gaps are tracked in `known-issues.md`.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
@@ -94,6 +111,7 @@ use std::process;
 #[allow(dead_code)]
 const SYS_EXIT: u64 = 1;
 const SYS_CLOCK_MONOTONIC: u64 = 10;
+const SYS_SLEEP: u64 = 11;
 #[allow(dead_code)]
 const SYS_PROCESS_SPAWN: u64 = 500;
 const SYS_PROCESS_ID: u64 = 502;
@@ -112,6 +130,7 @@ const SYS_TCP_ACCEPT: u64 = 805;
 #[allow(dead_code)]
 const SYS_TCP_CLOSE_LISTENER: u64 = 806;
 const SYS_TCP_PEER_ADDR: u64 = 808;
+const SYS_TCP_POLL_STATUS: u64 = 845;
 #[allow(dead_code)]
 const SYS_TCP_SHUTDOWN: u64 = 855;
 
@@ -488,10 +507,418 @@ fn process_spawn(path: &str) -> Result<u64, SshdError> {
     Ok(ret as u64)
 }
 
+/// Report whether the connection has something waiting for `tcp_recv`.
+///
+/// `SYS_TCP_POLL_STATUS` answers with the Linux `poll` bitmask — `POLLIN`
+/// (0x01) when the receive buffer is non-empty, `POLLERR` (0x08) and
+/// `POLLHUP` (0x10) when the connection has failed or the peer has gone. All
+/// three mean the same thing to this daemon: a `tcp_recv` will return *now*,
+/// with either bytes or the truth about the connection.
+///
+/// A negative return is deliberately reported as "readable". It happens on a
+/// handle the kernel no longer knows, and on the development host, where the
+/// syscall stub answers `-ENOSYS`. Treating it as ready makes the caller
+/// perform the real `tcp_recv` and act on whatever *that* says, which is both
+/// the honest answer and — on the host — exactly the blocking behaviour the
+/// daemon had before readiness polling existed. Reporting "not ready" instead
+/// would turn an unknown handle into a silent, permanent sleep.
+fn tcp_readable(handle: u64) -> bool {
+    // SAFETY: `handle` is a TCP connection handle owned by this process; the
+    // syscall takes it by value and writes no memory.
+    let status = unsafe { syscall1(SYS_TCP_POLL_STATUS, handle) };
+    if status < 0 {
+        return true;
+    }
+    (status & i64::from(POLLIN | POLLERR | POLLHUP)) != 0
+}
+
+/// Sleep for the given number of **nanoseconds**.
+///
+/// `SYS_SLEEP`'s argument is nanoseconds, not milliseconds — see
+/// `kernel/src/syscall/number.rs`. The unit is easy to get wrong (two other
+/// daemons in this tree did), and getting it wrong is not loud: passing
+/// milliseconds makes every sleep a million times shorter, which looks like a
+/// working program that merely burns a core. Hence the explicit `_ns` name and
+/// nanosecond-valued constants at every call site.
+///
+/// A sleep that fails is ignored: the only caller is the idle backoff in
+/// [`handle_channels`], for which a failed sleep degrades to a spin — worse for
+/// the CPU, but never wrong for the session. There is nothing better to do with
+/// the error, and propagating it would drop a live SSH connection over a
+/// missing nap.
+fn sleep_ns(ns: u64) {
+    // SAFETY: `SYS_SLEEP` takes one scalar argument (a nanosecond count) and
+    // writes no memory.
+    let _ = unsafe { syscall1(SYS_SLEEP, ns) };
+}
+
 /// Format an IPv4 address from network byte order u32.
 fn format_ip(ip: u32) -> String {
     let bytes = ip.to_be_bytes();
     format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3])
+}
+
+// ============================================================================
+// Pseudo-terminal
+// ============================================================================
+//
+// # Why this reaches the *linked* libc instead of the `posix` rlib
+//
+// `posix` is a dependency of this crate, and it has `openpty`, `login_tty` and
+// the fd layer they need. Calling them through the rlib would not work: a
+// SlateOS program target is `target_os = "linux"`, every syscall in `posix` is
+// gated `#[cfg(target_os = "none")]` for the bare-metal `libc.a` build, so the
+// rlib copy answers `-ENOSYS` to everything while the real libc — with the real
+// fd table — sits next to it answering correctly. See this crate's Cargo.toml
+// and `known-issues.md`
+// `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`. The
+// route that works from a program is the C symbol, which is what `randrange`
+// already does for `getrandom`.
+//
+// # Why fds here, when everything else in this file is a raw handle
+//
+// The pty syscalls (544–556) name their ends with `PtyHandle` values, and a
+// handle is what `SYS_PTY_POLL` and friends take. Handles are not reachable
+// from a child process: `login_tty` has to make the slave the child's
+// controlling terminal and its fds 0/1/2, and both of those are fd operations.
+// There is no "adopt this raw pty handle as an fd" call, so a session built on
+// handles could allocate a terminal and then have no way to put a shell on it.
+//
+// Going through libc costs one thing — the socket stays a raw handle, so the
+// readiness loop polls the two sides with two different primitives
+// (`SYS_TCP_POLL_STATUS` on the handle, `poll(2)` on the master fd) rather than
+// one `poll` over both. That is a smaller price than not being able to start a
+// shell, and each primitive is the correct one for its own object.
+
+/// `struct winsize` — the layout `TIOCSWINSZ` and `SYS_PTY_SET_WINSIZE` expect.
+///
+/// Rows come first. SSH's `pty-req` sends columns first (RFC 4254 §6.2), so the
+/// two orders must be crossed exactly once, at the point of conversion.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Winsize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
+/// `struct pollfd`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Pollfd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+/// Data may be read without blocking.
+const POLLIN: i16 = 0x0001;
+/// Data may be written without blocking.
+const POLLOUT: i16 = 0x0004;
+/// Error condition.
+const POLLERR: i16 = 0x0008;
+/// The peer has gone.
+const POLLHUP: i16 = 0x0010;
+/// The descriptor is not open.
+const POLLNVAL: i16 = 0x0020;
+
+/// `ioctl` request number for "set this terminal's window size".
+const TIOCSWINSZ: u64 = 0x5414;
+
+/// `EIO` — on a pty master, the last slave has closed.
+const EIO: i32 = 5;
+
+/// Bindings to the linked C library. See the section comment above for why
+/// these are `extern "C"` rather than calls into the `posix` rlib.
+mod ptylibc {
+    use super::{Pollfd, Winsize};
+
+    #[cfg(target_vendor = "slateos")]
+    unsafe extern "C" {
+        pub fn openpty(
+            amaster: *mut i32,
+            aslave: *mut i32,
+            name: *mut u8,
+            termp: *const u8,
+            winp: *const Winsize,
+        ) -> i32;
+        pub fn login_tty(fd: i32) -> i32;
+        pub fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+        pub fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+        pub fn close(fd: i32) -> i32;
+        pub fn poll(fds: *mut Pollfd, nfds: u64, timeout: i32) -> i32;
+        pub fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32;
+        pub fn __errno_location() -> *mut i32;
+    }
+
+    /// The last error the C library recorded.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the same thread as the failing call, before anything
+    /// else can overwrite it — the same contract C's `errno` has always had.
+    #[cfg(target_vendor = "slateos")]
+    pub unsafe fn errno() -> i32 {
+        // SAFETY: `__errno_location` returns a valid, thread-local, non-null
+        // pointer by its documented ABI; libc guarantees it for the life of
+        // the thread.
+        unsafe { *__errno_location() }
+    }
+
+    // Host stubs. On a development host there is no SlateOS libc to link
+    // against, and these symbols would either fail to resolve or — worse for
+    // `read`/`write`/`close` — resolve to the *host's* C library and operate on
+    // the host's descriptors. Every one of them therefore fails with `ENOSYS`
+    // on the host, exactly as the raw syscall stubs above do, so `cargo test`
+    // and `clippy` exercise the failure paths instead of the host's terminals.
+    //
+    // `dead_code`/`unused_imports`: which of these the host reaches depends on
+    // the host OS, because the one call to `login_tty` lives in a `#[cfg(unix)]`
+    // `pre_exec` block — the hook does not exist on Windows. So the same stub is
+    // live on a Linux host and unreferenced on a Windows one. Deleting it to
+    // silence the Windows build would break the Linux build; gating it on
+    // `unix` in turn would make the two hosts disagree about what this module
+    // contains, for no gain. The complete set is kept, and the lint waived.
+    #[cfg(not(target_vendor = "slateos"))]
+    #[allow(dead_code)]
+    mod host {
+        use super::{Pollfd, Winsize};
+
+        /// `ENOSYS`, as a negative return.
+        pub unsafe fn openpty(
+            _amaster: *mut i32,
+            _aslave: *mut i32,
+            _name: *mut u8,
+            _termp: *const u8,
+            _winp: *const Winsize,
+        ) -> i32 {
+            -1
+        }
+        pub unsafe fn login_tty(_fd: i32) -> i32 {
+            -1
+        }
+        pub unsafe fn read(_fd: i32, _buf: *mut u8, _count: usize) -> isize {
+            -1
+        }
+        pub unsafe fn write(_fd: i32, _buf: *const u8, _count: usize) -> isize {
+            -1
+        }
+        pub unsafe fn close(_fd: i32) -> i32 {
+            -1
+        }
+        pub unsafe fn poll(_fds: *mut Pollfd, _nfds: u64, _timeout: i32) -> i32 {
+            -1
+        }
+        pub unsafe fn ioctl(_fd: i32, _request: u64, _arg: *mut u8) -> i32 {
+            -1
+        }
+        /// `ENOSYS`. See the module comment for why the host cannot answer.
+        pub unsafe fn errno() -> i32 {
+            38
+        }
+    }
+
+    // `unused_imports`: same reason as the `dead_code` waiver above — on a
+    // Windows host nothing calls `login_tty`, so its re-export is unreferenced
+    // there and used on every other host.
+    #[cfg(not(target_vendor = "slateos"))]
+    #[allow(unused_imports)]
+    pub use host::{close, errno, ioctl, login_tty, openpty, poll, read, write};
+}
+
+/// What a read from the master end found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PtyRead {
+    /// This many bytes of program output.
+    Data(usize),
+    /// Nothing right now; the terminal is still there.
+    Empty,
+    /// The last slave has closed — the session's process tree is gone.
+    ///
+    /// The kernel reports this as `EIO` rather than a zero-length read, on
+    /// purpose (`design-decisions.md` §259): a caller that reads 0 as "nothing
+    /// right now" spins forever on a dead terminal.
+    Hangup,
+}
+
+/// A pseudo-terminal pair owned by one session channel.
+///
+/// The daemon holds the master and reads what the shell printed; the child
+/// process adopts the slave as its controlling terminal via `login_tty`.
+struct Pty {
+    /// The master fd. Always open for the life of this value.
+    master: i32,
+    /// The slave fd, or -1 once it has been handed to a child.
+    ///
+    /// The parent **must** close its slave copy after spawning, and that is why
+    /// this is tracked separately rather than closed in `Drop` alone: while any
+    /// slave fd remains open anywhere, the master never reports hangup, so a
+    /// session whose shell had exited would look alive forever.
+    slave: i32,
+}
+
+impl Pty {
+    /// Allocate a pty pair sized for the client's terminal.
+    fn open(cols: u32, rows: u32, width_px: u32, height_px: u32) -> Result<Self, SshdError> {
+        let ws = winsize_from_ssh(cols, rows, width_px, height_px);
+        let mut master: i32 = -1;
+        let mut slave: i32 = -1;
+        // SAFETY: both out-pointers address live locals; `name` is NULL, which
+        // `openpty` documents as "do not report the slave's name"; `termp` is
+        // NULL, meaning "leave the slave's termios at the kernel default"
+        // (cooked, echoing — what a login shell expects); `winp` addresses a
+        // live `Winsize` that outlives the call.
+        let ret = unsafe {
+            ptylibc::openpty(
+                &raw mut master,
+                &raw mut slave,
+                core::ptr::null_mut(),
+                core::ptr::null(),
+                &raw const ws,
+            )
+        };
+        if ret != 0 {
+            return Err(SshdError::IoError(io::Error::last_os_error()));
+        }
+        Ok(Self { master, slave })
+    }
+
+    /// The slave fd, for a child that is about to adopt it.
+    fn slave_fd(&self) -> i32 {
+        self.slave
+    }
+
+    /// Drop the parent's reference to the slave, after a child has inherited it.
+    ///
+    /// Until this happens the master cannot see the session end: hangup is
+    /// "the last slave closed", and the daemon is holding one.
+    fn close_slave(&mut self) {
+        if self.slave >= 0 {
+            // SAFETY: `self.slave` is an fd this process opened via `openpty`
+            // and has not closed; the guard above makes double-close impossible.
+            unsafe {
+                ptylibc::close(self.slave);
+            }
+            self.slave = -1;
+        }
+    }
+
+    /// Whether the master can be read or written without blocking.
+    ///
+    /// Returns `(readable, writable)`. Hangup is folded into `readable` by the
+    /// kernel, deliberately: a read on a hung-up master returns immediately,
+    /// delivering the shell's last output and then `EIO`, and an event loop
+    /// that treated hangup as "not ready" would sleep through the end of the
+    /// session. A failed `poll` also reports readable, so the caller performs
+    /// the read and learns the real reason rather than spinning.
+    fn ready(&self) -> (bool, bool) {
+        let mut pfd = Pollfd {
+            fd: self.master,
+            events: POLLIN | POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: `pfd` is a single live `Pollfd`; `nfds` is 1 to match; a
+        // zero timeout makes the call non-blocking.
+        let ret = unsafe { ptylibc::poll(&raw mut pfd, 1, 0) };
+        if ret < 0 {
+            return (true, false);
+        }
+        if pfd.revents & (POLLERR | POLLNVAL) != 0 {
+            return (true, false);
+        }
+        (
+            pfd.revents & (POLLIN | POLLHUP) != 0,
+            pfd.revents & POLLOUT != 0,
+        )
+    }
+
+    /// Read program output from the master.
+    fn read_output(&self, buf: &mut [u8]) -> PtyRead {
+        // SAFETY: `buf` is a live slice; the length passed is its own.
+        let n = unsafe { ptylibc::read(self.master, buf.as_mut_ptr(), buf.len()) };
+        if n > 0 {
+            #[allow(clippy::cast_sign_loss)] // guarded positive
+            return PtyRead::Data(n as usize);
+        }
+        if n == 0 {
+            // Not expected from a pty master — the kernel reports the end of a
+            // session as EIO — but a zero-length read is unambiguously "no
+            // bytes", so treat it as nothing rather than as a hangup we cannot
+            // prove.
+            return PtyRead::Empty;
+        }
+        // SAFETY: called immediately after the failing `read`, on this thread,
+        // with nothing in between.
+        let err = unsafe { ptylibc::errno() };
+        if err == EIO {
+            PtyRead::Hangup
+        } else {
+            PtyRead::Empty
+        }
+    }
+
+    /// Deliver client keystrokes into the slave's line discipline.
+    ///
+    /// Returns the number of bytes accepted, which may be short: the kernel's
+    /// input ring is finite and a short count is how it applies back-pressure.
+    /// The caller must resume from it rather than assume the whole slice landed.
+    fn write_input(&self, data: &[u8]) -> Result<usize, SshdError> {
+        // SAFETY: `data` is a live slice; the length passed is its own.
+        let n = unsafe { ptylibc::write(self.master, data.as_ptr(), data.len()) };
+        if n < 0 {
+            return Err(SshdError::IoError(io::Error::last_os_error()));
+        }
+        #[allow(clippy::cast_sign_loss)] // guarded non-negative
+        Ok(n as usize)
+    }
+
+    /// Resize the terminal, raising `SIGWINCH` in the session's foreground group.
+    ///
+    /// Setting the size and signalling are one kernel operation, so a client
+    /// that resizes its window cannot leave the program inside disagreeing with
+    /// the terminal about how wide it is.
+    fn set_winsize(&self, cols: u32, rows: u32, width_px: u32, height_px: u32) -> bool {
+        let ws = winsize_from_ssh(cols, rows, width_px, height_px);
+        // SAFETY: `ws` is a live `Winsize`, which is what `TIOCSWINSZ`
+        // documents its third argument to be; the cast to `*mut u8` matches the
+        // C prototype's untyped `arg` and the callee only reads through it.
+        let ret =
+            unsafe { ptylibc::ioctl(self.master, TIOCSWINSZ, (&raw const ws).cast_mut().cast()) };
+        ret == 0
+    }
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        self.close_slave();
+        if self.master >= 0 {
+            // SAFETY: `self.master` came from `openpty` and is closed exactly
+            // once, here, because `Pty` is not `Clone` and owns the fd.
+            unsafe {
+                ptylibc::close(self.master);
+            }
+            self.master = -1;
+        }
+    }
+}
+
+/// Convert an SSH terminal size to a `struct winsize`.
+///
+/// SSH sends 32-bit dimensions; `winsize` holds 16-bit ones. Values that do not
+/// fit are clamped rather than truncated: a client claiming 65 536 columns is
+/// either confused or hostile, and `u16::MAX` is a wrong-but-harmless answer
+/// where a wrapping cast would silently produce zero — and a zero-width
+/// terminal makes `less`, `vi` and every line-wrapping program misbehave in
+/// ways that look like a bug in *them*.
+fn winsize_from_ssh(cols: u32, rows: u32, width_px: u32, height_px: u32) -> Winsize {
+    let clamp = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
+    Winsize {
+        ws_row: clamp(rows),
+        ws_col: clamp(cols),
+        ws_xpixel: clamp(width_px),
+        ws_ypixel: clamp(height_px),
+    }
 }
 
 // ============================================================================
@@ -612,7 +1039,13 @@ fn build_packet(payload: &[u8], encrypted: bool, seq: u32, enc: &EncryptionState
     pkt
 }
 
-/// Read one SSH binary packet from the TCP stream. Returns the payload.
+/// Read one SSH binary packet from the TCP stream, blocking until it arrives.
+///
+/// This is the right shape for the phases that are strictly a conversation —
+/// version exchange, key exchange, authentication — where there is nothing else
+/// to do but wait for the client's next move. Once a session is running there
+/// *is* something else to do (the shell is producing output), and that loop uses
+/// [`try_parse_packet`] and [`StreamBuffer::fill_once`] directly instead.
 fn read_packet(
     handle: u64,
     buf: &mut StreamBuffer,
@@ -620,13 +1053,41 @@ fn read_packet(
     seq: u32,
     enc: &EncryptionState,
 ) -> Result<Vec<u8>, SshdError> {
+    loop {
+        if let Some(payload) = try_parse_packet(buf, encrypted, seq, enc)? {
+            return Ok(payload);
+        }
+        buf.fill_once(handle)?;
+    }
+}
+
+/// Parse one SSH binary packet out of `buf` if a whole one is already there.
+///
+/// Returns `Ok(None)` when more bytes are needed, having consumed nothing, so
+/// the caller may go and do something else and try again later. This is a pure
+/// function of the buffer and the cipher state: it performs no I/O, which is
+/// what makes SSH framing testable on the development host, where there is no
+/// kernel to hold a TCP connection.
+///
+/// Peeking at the first block to learn the packet length does not disturb the
+/// cipher: AES-CTR derives each block's keystream from the sequence number and
+/// block index, not from a running state, so decrypting block 0 twice — once to
+/// read the length, once as part of the whole packet — produces the same bytes.
+fn try_parse_packet(
+    buf: &mut StreamBuffer,
+    encrypted: bool,
+    seq: u32,
+    enc: &EncryptionState,
+) -> Result<Option<Vec<u8>>, SshdError> {
     let block_size = if encrypted {
         enc.block_size.max(8)
     } else {
         BLOCK_SIZE_UNENCRYPTED
     };
 
-    buf.ensure(handle, block_size)?;
+    if buf.available() < block_size {
+        return Ok(None);
+    }
 
     let first_block = buf.peek(block_size);
     let first_decrypted = if encrypted {
@@ -653,7 +1114,9 @@ fn read_packet(
 
     let mac_len = if encrypted { enc.mac_len } else { 0 };
     let total = 4 + packet_length + mac_len;
-    buf.ensure(handle, total)?;
+    if buf.available() < total {
+        return Ok(None);
+    }
 
     let raw = buf.consume(total);
 
@@ -683,7 +1146,7 @@ fn read_packet(
     if 5 + payload_len > decrypted.len() {
         return Err(SshdError::ProtocolError("payload exceeds packet".into()));
     }
-    Ok(decrypted[5..5 + payload_len].to_vec())
+    Ok(Some(decrypted[5..5 + payload_len].to_vec()))
 }
 
 // ============================================================================
@@ -707,19 +1170,30 @@ impl StreamBuffer {
         self.data.len() - self.pos
     }
 
-    fn ensure(&mut self, handle: u64, needed: usize) -> Result<(), SshdError> {
-        while self.available() < needed {
-            if self.pos > 4096 {
-                self.data.drain(..self.pos);
-                self.pos = 0;
-            }
-            let mut tmp = [0u8; 8192];
-            let n = tcp_recv(handle, &mut tmp)?;
-            if n == 0 {
-                return Err(SshdError::ProtocolError("connection closed".into()));
-            }
-            self.data.extend_from_slice(&tmp[..n]);
+    /// Read once from the connection and append whatever arrived.
+    ///
+    /// One read, not a loop: the caller decides what to do when the buffer is
+    /// still short, and a session loop's answer is "go and check whether the
+    /// shell has printed anything" rather than "block until the client types".
+    ///
+    /// A zero-length read is the peer's orderly close and is an error here,
+    /// because every caller is in the middle of wanting more bytes. The message
+    /// is matched on by `handle_channels`, which treats it as a normal end of
+    /// connection rather than a protocol failure.
+    fn fill_once(&mut self, handle: u64) -> Result<(), SshdError> {
+        // Reclaim the consumed prefix before growing. Doing this only past a
+        // threshold keeps a long session from memmoving the tail on every
+        // packet, while still bounding the buffer for one that runs for hours.
+        if self.pos > 4096 {
+            self.data.drain(..self.pos);
+            self.pos = 0;
         }
+        let mut tmp = [0u8; 8192];
+        let n = tcp_recv(handle, &mut tmp)?;
+        if n == 0 {
+            return Err(SshdError::ProtocolError("connection closed".into()));
+        }
+        self.data.extend_from_slice(&tmp[..n]);
         Ok(())
     }
 
@@ -2489,6 +2963,98 @@ fn spawn_session_command(
     cmd.spawn()
 }
 
+/// The `argv[0]` a login shell expects: its own basename with a leading `-`.
+///
+/// That leading hyphen is the entire protocol by which a shell is told it is a
+/// *login* shell, and therefore that it should read `/etc/profile` and the
+/// user's own profile. Passing `-l` instead works for some shells and is a
+/// syntax error for others, which is why every `login`, `su` and sshd in
+/// existence uses the hyphen.
+///
+/// The sole caller is inside `shell_command`'s `#[cfg(unix)]` block, so on a
+/// non-unix *host* build — which is how this crate's tests are compiled — the
+/// function is genuinely unreachable outside the test module. The allow is
+/// therefore conditioned on `not(unix)` rather than unconditional: on the real
+/// target, `dead_code` here would mean the login-shell convention had been
+/// dropped from the spawn path, and that is a warning worth keeping.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn login_argv0(shell_path: &str) -> String {
+    let base = shell_path.rsplit('/').next().unwrap_or(shell_path);
+    let base = if base.is_empty() { shell_path } else { base };
+    format!("-{base}")
+}
+
+/// Build the `Command` that runs `user`'s login shell on the pty slave `slave_fd`.
+///
+/// The identity change is the same one `session_command` performs and for the
+/// same reason: sshd binds port 22 and runs as root, so a session that did not
+/// drop to the authenticated account would hand out root to everyone who could
+/// log in.
+fn shell_command(user: &PasswdEntry, term: &str, slave_fd: i32) -> process::Command {
+    let mut cmd = process::Command::new(&user.shell);
+
+    // Start from an empty environment; see `session_env` for why the daemon's
+    // own environment is not a safe base.
+    cmd.env_clear();
+    for (key, value) in session_env(user) {
+        cmd.env(key, value);
+    }
+    // `TERM` is the one variable the client is allowed to choose, because it
+    // describes the client's own display and nothing on this end can know it.
+    // It is set last so a client cannot use it to overwrite `PATH` or `HOME`.
+    if !term.is_empty() {
+        cmd.env("TERM", term);
+    }
+
+    // The three standard descriptors are wired to `/dev/null` and then
+    // immediately replaced: `login_tty` dup2s the slave over 0, 1 and 2 in the
+    // child. std sets up its own stdio *before* running the `pre_exec` closure,
+    // so the null descriptors exist only for the instant between the two.
+    // Asking for pipes instead would create three the parent must then remember
+    // never to read, and a pipe nobody reads is a shell that blocks on its
+    // first line of output.
+    cmd.stdin(process::Stdio::null());
+    cmd.stdout(process::Stdio::null());
+    cmd.stderr(process::Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        cmd.arg0(login_argv0(&user.shell));
+
+        // Group first: after the uid drops the process can no longer choose its
+        // group. (`std` orders the two correctly on its own; writing them in
+        // this order keeps the reader from having to know that.)
+        cmd.gid(user.gid);
+        cmd.uid(user.uid);
+
+        // SAFETY: the closure runs in the forked child, between `fork` and
+        // `execve`, where only async-signal-safe work is permitted. It calls
+        // `login_tty` and nothing else, and `login_tty` is `setsid` +
+        // `ioctl(TIOCSCTTY)` + three `dup2`s + one `close` — all bare syscalls,
+        // no allocation, no lock, no libc state. `slave_fd` is copied into the
+        // closure by value and is open in the child because `openpty` does not
+        // set `FD_CLOEXEC` on it. Registering a closure also takes `std` off
+        // its `posix_spawn` fast path onto `fork`/`exec`, which is required:
+        // `posix_spawn` has no hook that could acquire a controlling terminal.
+        unsafe {
+            cmd.pre_exec(move || {
+                // SAFETY: as above — `slave_fd` is a live descriptor in this
+                // child, inherited across the fork.
+                if unsafe { ptylibc::login_tty(slave_fd) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = slave_fd;
+
+    cmd
+}
+
 // ============================================================================
 // SSH channel
 // ============================================================================
@@ -2520,10 +3086,46 @@ struct Channel {
     term_width: u32,
     /// Terminal height in rows.
     term_height: u32,
+    /// Terminal width in pixels, as the client reported it (0 when unknown).
+    term_width_px: u32,
+    /// Terminal height in pixels, as the client reported it (0 when unknown).
+    term_height_px: u32,
     /// Whether the channel has been closed.
     closed: bool,
     /// Whether EOF has been sent.
     eof_sent: bool,
+    /// The pseudo-terminal allocated by a `pty-req`, if the client asked.
+    ///
+    /// Held for the channel's whole life rather than moved into the session,
+    /// because `window-change` can arrive both before the shell starts and
+    /// while it runs, and one home for the terminal means one place to look.
+    /// Dropping it closes the master, which hangs up the shell.
+    pty: Option<Pty>,
+    /// The process running on this channel, once a `shell` request started one.
+    child: Option<process::Child>,
+    /// How the process finished, once it has, and before the client is told.
+    ///
+    /// Held between the two halves of ending a session — noticing the exit and
+    /// finishing delivering the output — because those do not happen on the
+    /// same pass of the pump.
+    exit: Option<SessionExit>,
+    /// Client keystrokes accepted from the wire but not yet in the terminal.
+    ///
+    /// The kernel's pty input ring is small and a program that has stopped
+    /// reading its stdin — `cat > file` while the user pastes, a shell running
+    /// a compute loop — fills it. Writing the remainder in a blocking loop
+    /// would stall the *whole daemon* on one uninterested process: no output
+    /// forwarded, no `window-change` handled, no other channel served. So the
+    /// remainder waits here and the pump retries it when the master reports
+    /// writable.
+    ///
+    /// It cannot grow without bound, because the SSH window is precisely the
+    /// mechanism for saying "stop sending": the window is credited back only
+    /// for bytes that have actually entered the terminal, so a client that
+    /// outruns the shell runs out of window and blocks — which is the correct
+    /// end-to-end back-pressure, applied to the client rather than absorbed
+    /// into the daemon's memory.
+    pending_input: Vec<u8>,
 }
 
 impl Channel {
@@ -2537,8 +3139,14 @@ impl Channel {
             term: String::new(),
             term_width: 80,
             term_height: 24,
+            term_width_px: 0,
+            term_height_px: 0,
             closed: false,
             eof_sent: false,
+            pty: None,
+            child: None,
+            exit: None,
+            pending_input: Vec::new(),
         }
     }
 }
@@ -2634,6 +3242,30 @@ impl ConnectionState {
             &self.enc,
         )?;
         self.recv_seq = self.recv_seq.wrapping_add(1);
+        Ok(payload)
+    }
+
+    /// Receive a packet **only if one is already framed in the buffer**.
+    ///
+    /// Returns `Ok(None)` rather than reading the socket, which is what makes
+    /// it safe to call from the session pump: the pump must never block on the
+    /// client, because the shell's output is also waiting to be forwarded.
+    ///
+    /// The sequence number advances only when a packet is actually produced.
+    /// That is the whole correctness requirement here — the sequence number is
+    /// an input to both the MAC and the CTR keystream, so incrementing it for a
+    /// packet that did not arrive would desynchronise the cipher and turn every
+    /// subsequent packet into a MAC failure.
+    fn try_recv_packet(&mut self) -> Result<Option<Vec<u8>>, SshdError> {
+        let payload = try_parse_packet(
+            &mut self.stream_buf,
+            self.encrypted,
+            self.recv_seq,
+            &self.enc,
+        )?;
+        if payload.is_some() {
+            self.recv_seq = self.recv_seq.wrapping_add(1);
+        }
         Ok(payload)
     }
 
@@ -3372,57 +4004,145 @@ fn send_disconnect(
     conn.send_packet(&msg_buf)
 }
 
-/// Handle the channel phase after authentication.
+/// Whether the connection loop should keep running after a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    /// Keep going.
+    Continue,
+    /// The conversation is over; return normally.
+    Stop,
+}
+
+/// Shortest and longest the connection loop sleeps when nothing is happening.
+///
+/// The bound is reset to the minimum on any activity, so a session being typed
+/// into never sleeps longer than the minimum, and one sitting idle costs
+/// 50 wake-ups a second rather than a spin. The maximum is set well under the
+/// ~50 ms at which a human perceives echo as laggy, because the worst case —
+/// the first keystroke after an idle pause — is exactly the one a user notices.
+///
+/// This polling is a consequence of there being no unified readiness syscall:
+/// the socket is a raw TCP handle and the terminal is an fd, and no single call
+/// can wait on both. When the kernel grows one, this loop should block on it
+/// instead. See `design-decisions.md` §770 and `known-issues.md`.
+const IDLE_SLEEP_MIN_NS: u64 = 500_000; // 0.5 ms
+const IDLE_SLEEP_MAX_NS: u64 = 20_000_000; // 20 ms
+
+/// Handle the channel phase after authentication: run the connection until the
+/// client disconnects or every channel it opened has closed.
 fn handle_channels(conn: &mut ConnectionState) -> Result<(), SshdError> {
+    let mut idle_ns = IDLE_SLEEP_MIN_NS;
+
     loop {
-        let payload = match conn.recv_packet() {
-            Ok(p) => p,
-            Err(SshdError::ProtocolError(msg)) if msg.contains("connection closed") => {
+        // With no process running there is nothing to watch but the socket, so
+        // block on it exactly as this loop always did: no polling, no wake-ups,
+        // and no latency added to the client's next packet. Readiness polling
+        // is the price of having a second thing to watch, and it is only paid
+        // when there is one.
+        if !conn.channels.iter().any(|ch| ch.child.is_some()) {
+            let payload = match conn.recv_packet() {
+                Ok(p) => p,
+                Err(SshdError::ProtocolError(msg)) if msg.contains("connection closed") => {
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
+            if dispatch_channel_message(conn, &payload)? == Flow::Stop {
                 return Ok(());
             }
-            Err(e) => return Err(e),
-        };
-
-        if payload.is_empty() {
             continue;
         }
 
-        let msg_type = payload[0];
+        let mut worked = false;
 
-        match msg_type {
-            msg::SSH_MSG_CHANNEL_OPEN => {
-                handle_channel_open(conn, &payload)?;
-            }
-            msg::SSH_MSG_CHANNEL_REQUEST => {
-                handle_channel_request(conn, &payload)?;
-            }
-            msg::SSH_MSG_CHANNEL_DATA => {
-                handle_channel_data(conn, &payload)?;
-            }
-            msg::SSH_MSG_CHANNEL_WINDOW_ADJUST => {
-                handle_window_adjust(conn, &payload)?;
-            }
-            msg::SSH_MSG_CHANNEL_EOF => {
-                handle_channel_eof(conn, &payload)?;
-            }
-            msg::SSH_MSG_CHANNEL_CLOSE => {
-                handle_channel_close(conn, &payload)?;
-                if conn.channels.iter().all(|ch| ch.closed) {
-                    return Ok(());
-                }
-            }
-            msg::SSH_MSG_DISCONNECT => {
-                conn.debug_log("client sent DISCONNECT");
+        // 1. Every packet already framed in the buffer, before asking for more.
+        //    A single TCP read can carry several SSH packets, and leaving the
+        //    extras in the buffer while sleeping would add a whole idle period
+        //    to each of them.
+        while let Some(payload) = conn.try_recv_packet()? {
+            worked = true;
+            if dispatch_channel_message(conn, &payload)? == Flow::Stop {
                 return Ok(());
             }
-            msg::SSH_MSG_IGNORE => {
-                // Ignore.
-            }
-            _ => {
-                conn.debug_log(&format!("unhandled message type: {msg_type}"));
+        }
+
+        // 2. More bytes from the client, but only when there are some: an
+        //    unconditional read here would block, and the shell's output would
+        //    stop until the user typed.
+        if tcp_readable(conn.handle) {
+            match conn.stream_buf.fill_once(conn.handle) {
+                Ok(()) => worked = true,
+                Err(SshdError::ProtocolError(msg)) if msg.contains("connection closed") => {
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
             }
         }
+
+        // 3. The other direction: shell output out, finished sessions reaped.
+        if pump_sessions(conn)? {
+            worked = true;
+        }
+
+        if conn.channels.iter().all(|ch| ch.closed) && !conn.channels.is_empty() {
+            return Ok(());
+        }
+
+        if worked {
+            idle_ns = IDLE_SLEEP_MIN_NS;
+        } else {
+            sleep_ns(idle_ns);
+            idle_ns = idle_ns.saturating_mul(2).min(IDLE_SLEEP_MAX_NS);
+        }
     }
+}
+
+/// Act on one channel-layer message.
+fn dispatch_channel_message(
+    conn: &mut ConnectionState,
+    payload: &[u8],
+) -> Result<Flow, SshdError> {
+    if payload.is_empty() {
+        return Ok(Flow::Continue);
+    }
+
+    let msg_type = payload[0];
+
+    match msg_type {
+        msg::SSH_MSG_CHANNEL_OPEN => {
+            handle_channel_open(conn, payload)?;
+        }
+        msg::SSH_MSG_CHANNEL_REQUEST => {
+            handle_channel_request(conn, payload)?;
+        }
+        msg::SSH_MSG_CHANNEL_DATA => {
+            handle_channel_data(conn, payload)?;
+        }
+        msg::SSH_MSG_CHANNEL_WINDOW_ADJUST => {
+            handle_window_adjust(conn, payload)?;
+        }
+        msg::SSH_MSG_CHANNEL_EOF => {
+            handle_channel_eof(conn, payload)?;
+        }
+        msg::SSH_MSG_CHANNEL_CLOSE => {
+            handle_channel_close(conn, payload)?;
+            if conn.channels.iter().all(|ch| ch.closed) {
+                return Ok(Flow::Stop);
+            }
+        }
+        msg::SSH_MSG_DISCONNECT => {
+            conn.debug_log("client sent DISCONNECT");
+            return Ok(Flow::Stop);
+        }
+        msg::SSH_MSG_IGNORE => {
+            // Ignore.
+        }
+        _ => {
+            conn.debug_log(&format!("unhandled message type: {msg_type}"));
+        }
+    }
+
+    Ok(Flow::Continue)
 }
 
 /// Handle `CHANNEL_OPEN`.
@@ -3501,56 +4221,84 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
 
     match req_type.as_str() {
         "pty-req" => {
-            // Parsed for the log and for the terminal size, but *refused*:
-            // SlateOS has no pseudo-terminal device yet, so there is nothing
-            // to allocate. Answering SUCCESS here would tell the client it had
-            // a terminal, after which it would put its own terminal in raw
-            // mode and wait for echo that no line discipline is producing.
-            // The client handles a FAILURE correctly — it reports "PTY
-            // allocation request failed" and continues without one.
-            //
-            // See `requests/b-a-pty-devices-need-the-line-discipline-that-the-
-            // console-already-has.md` for what has to land before this can
-            // succeed.
-            let (term, width, height, _wpx, _hpx, _modes) = parse_pty_request(payload, off)?;
+            let (term, width, height, wpx, hpx, _modes) = parse_pty_request(payload, off)?;
             channel.term = term;
             channel.term_width = width;
             channel.term_height = height;
-            let term_info = format!(
-                "PTY request refused (no pty device): term={} {}x{}",
-                channel.term, channel.term_width, channel.term_height
-            );
-            // The mutable borrow of `channel` ends here (its last read above),
-            // so `conn` is free for the debug log below.
-            conn.debug_log(&term_info);
+            channel.term_width_px = wpx;
+            channel.term_height_px = hpx;
+            let term_name = channel.term.clone();
+            let already_allocated = channel.pty.is_some();
+            // The mutable borrow of `channel` ends here, so `conn` is free.
 
-            if want_reply {
-                let mut fail = Vec::new();
-                fail.push(msg::SSH_MSG_CHANNEL_FAILURE);
-                fail.extend_from_slice(&remote_id.to_be_bytes());
-                conn.send_packet(&fail)?;
+            // The terminal modes the client sent are deliberately not applied.
+            // They describe the *client's* terminal at the moment it connected,
+            // and the interesting ones (`ECHO`, `ICANON`, the control
+            // characters) are exactly what the shell on this end will set for
+            // itself the moment it starts. Applying them would install a
+            // stranger's idea of ^C on a terminal the shell is about to
+            // reconfigure, and every disagreement between the two would look
+            // like a bug in the shell. OpenSSH does apply them; it can, because
+            // it has a `termios` translation table this daemon does not, and
+            // getting a partial translation wrong is worse than starting from
+            // the kernel's own cooked defaults, which is what a login on the
+            // console gets. Tracked in `known-issues.md`.
+
+            if already_allocated {
+                // A second `pty-req` on one channel is a protocol error (RFC
+                // 4254 §6.2 allows one). Refusing is safer than replacing: the
+                // shell may already be running on the first terminal, and
+                // swapping it out from under a live process would hang it up.
+                conn.debug_log("pty-req refused: channel already has a terminal");
+                if want_reply {
+                    send_channel_failure(conn, remote_id)?;
+                }
+                return Ok(());
+            }
+
+            match Pty::open(width, height, wpx, hpx) {
+                Ok(pty) => {
+                    conn.debug_log(&format!(
+                        "pty allocated: term={term_name} {width}x{height}"
+                    ));
+                    if let Some(channel) =
+                        conn.channels.iter_mut().find(|ch| ch.local_id == recipient)
+                    {
+                        channel.pty = Some(pty);
+                    }
+                    if want_reply {
+                        send_channel_success(conn, remote_id)?;
+                    }
+                }
+                Err(e) => {
+                    // Refusing honestly is important here. A SUCCESS followed
+                    // by no terminal makes the client put *its* terminal into
+                    // raw mode and wait for an echo that will never come, which
+                    // presents to the user as a hung connection rather than as
+                    // a server that could not allocate a pty.
+                    conn.debug_log(&format!("pty-req failed: {e}"));
+                    if want_reply {
+                        send_channel_failure(conn, remote_id)?;
+                    }
+                }
             }
         }
         "shell" => {
-            // Refused for the same reason as `pty-req`, one step removed. An
-            // interactive shell needs a terminal to be interactive on: without
-            // one there is no echo, no line editing, and no way for ^C to
-            // reach the shell. It also needs the connection loop to move bytes
-            // in both directions at once, which this single-threaded blocking
-            // loop cannot do.
-            //
-            // The previous behaviour was to answer SUCCESS and print a
-            // `Welcome to Slate OS` banner with a `$ ` prompt behind which no
-            // process existed, echoing back whatever was typed. That looks
-            // like a shell closely enough to be mistaken for one.
-            conn.debug_log("shell request refused (no pty device)");
-
-            if want_reply {
-                let mut fail = Vec::new();
-                fail.push(msg::SSH_MSG_CHANNEL_FAILURE);
-                fail.extend_from_slice(&remote_id.to_be_bytes());
-                conn.send_packet(&fail)?;
+            // A `shell` request needs a terminal to be interactive on: without
+            // one there is no echo, no line editing, and no way for ^C to reach
+            // the shell. A client that skips `pty-req` (`ssh -T`) is asking for
+            // a shell on plain pipes, which this daemon does not yet offer; it
+            // is refused rather than answered with a terminal the client did
+            // not ask for. See `known-issues.md`.
+            let has_pty = channel.pty.is_some();
+            if !has_pty {
+                conn.debug_log("shell request refused: no pty was requested");
+                if want_reply {
+                    send_channel_failure(conn, remote_id)?;
+                }
+                return Ok(());
             }
+            start_shell_session(conn, recipient, remote_id, want_reply)?;
         }
         "exec" => {
             let (cmd_bytes, _) = read_ssh_string(payload, off)?;
@@ -3591,12 +4339,39 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
             }
         }
         "window-change" => {
-            // Update terminal size.
+            // RFC 4254 §6.7: columns, rows, width in pixels, height in pixels.
+            // The pixel dimensions are optional in practice — clients that do
+            // not know them send zeros — so a short payload updates what it
+            // carries and leaves the rest alone.
             if off + 8 <= payload.len() {
                 let (width, next) = read_u32(payload, off)?;
-                let (height, _) = read_u32(payload, next)?;
+                let (height, next) = read_u32(payload, next)?;
                 channel.term_width = width;
                 channel.term_height = height;
+                if next + 8 <= payload.len() {
+                    let (wpx, next) = read_u32(payload, next)?;
+                    let (hpx, _) = read_u32(payload, next)?;
+                    channel.term_width_px = wpx;
+                    channel.term_height_px = hpx;
+                }
+                // Push the new size through to the terminal itself. The kernel
+                // raises SIGWINCH in the session's foreground process group as
+                // part of the same operation, so a program that redraws on
+                // resize sees the change rather than having to notice it.
+                // Without this the client's window and the shell's idea of it
+                // diverge permanently after the first drag of a window corner.
+                let resized = channel.pty.as_ref().map(|pty| {
+                    pty.set_winsize(
+                        channel.term_width,
+                        channel.term_height,
+                        channel.term_width_px,
+                        channel.term_height_px,
+                    )
+                });
+                // The mutable borrow of `channel` ends here.
+                if resized == Some(false) {
+                    conn.debug_log("window-change: TIOCSWINSZ failed");
+                }
             }
             // No reply needed for window-change.
         }
@@ -3628,6 +4403,311 @@ fn send_channel_failure(conn: &mut ConnectionState, remote_id: u32) -> Result<()
     reply.push(msg::SSH_MSG_CHANNEL_FAILURE);
     reply.extend_from_slice(&remote_id.to_be_bytes());
     conn.send_packet(&reply)
+}
+
+/// Start the authenticated user's login shell on the channel's terminal.
+///
+/// Ordering note, the same one `run_exec_request` observes: the child is
+/// spawned *before* the request is answered, because RFC 4254 §6.5's reply
+/// reports whether the request was accepted, and a shell that could not be
+/// started was not.
+fn start_shell_session(
+    conn: &mut ConnectionState,
+    local_id: u32,
+    remote_id: u32,
+    want_reply: bool,
+) -> Result<(), SshdError> {
+    let Some(user) = lookup_passwd(&conn.username) else {
+        // Authentication proved who they are; without a passwd entry there is
+        // no identity to *become*, and running the shell as the daemon's own
+        // identity (root) is not an acceptable fallback.
+        let name = conn.username.clone();
+        conn.debug_log(&format!("shell refused: no /etc/passwd entry for {name}"));
+        if want_reply {
+            send_channel_failure(conn, remote_id)?;
+        }
+        return Ok(());
+    };
+
+    let Some(idx) = conn.channels.iter().position(|ch| ch.local_id == local_id) else {
+        return Ok(());
+    };
+    let Some(slave_fd) = conn.channels[idx].pty.as_ref().map(Pty::slave_fd) else {
+        return Ok(());
+    };
+    let term = conn.channels[idx].term.clone();
+
+    // A missing home directory is common on a freshly-provisioned account and
+    // must not turn every login into a failure — the account exists and the
+    // user authenticated, so the session should start, just not there. The
+    // first error is dropped deliberately: if the retry also fails, its error
+    // is the one that describes why no shell could start at all.
+    let first = if user.home.is_empty() {
+        None
+    } else {
+        let mut cmd = shell_command(&user, &term, slave_fd);
+        cmd.current_dir(&user.home);
+        cmd.spawn().ok()
+    };
+    let spawned = match first {
+        Some(child) => Ok(child),
+        None => {
+            let mut cmd = shell_command(&user, &term, slave_fd);
+            cmd.current_dir("/");
+            cmd.spawn()
+        }
+    };
+
+    match spawned {
+        Ok(child) => {
+            // The parent must give up its own copy of the slave now. Hangup on
+            // the master means "the last slave closed", and while this daemon
+            // holds one, a shell that has exited leaves a terminal that never
+            // reports the end of the session — the client sits at a dead prompt
+            // until it gives up. This single `close` is the difference between
+            // a session that ends and one that hangs.
+            if let Some(pty) = conn.channels[idx].pty.as_mut() {
+                pty.close_slave();
+            }
+            conn.channels[idx].child = Some(child);
+            conn.debug_log(&format!("shell started on channel {local_id}"));
+            if want_reply {
+                send_channel_success(conn, remote_id)?;
+            }
+        }
+        Err(e) => {
+            conn.debug_log(&format!("shell spawn failed: {e}"));
+            // Release the terminal: nothing is going to run on it, and holding
+            // it would leak a pty for the life of the connection.
+            conn.channels[idx].pty = None;
+            if want_reply {
+                send_channel_failure(conn, remote_id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How many master reads one channel may perform per pass of the session pump.
+///
+/// A shell running `yes` produces output faster than the socket can drain it,
+/// and an unbounded drain loop would never return to check whether the client
+/// had typed `^C`. Sixteen reads of 8 `KiB` is 128 `KiB` of output per pass —
+/// enough that a normal burst leaves in one turn, small enough that the input
+/// direction is never starved for long.
+const PTY_READS_PER_PASS: usize = 16;
+
+/// Hand one channel's queued keystrokes to its terminal, and credit the window.
+///
+/// Returns `true` if any byte moved, so the connection loop knows the pass was
+/// productive and should come round again without sleeping.
+///
+/// Three things make this a loop over a queue rather than a plain `write`:
+///
+/// * **The master can be full.** A program that has stopped reading its stdin
+///   leaves the kernel's input ring full, and the write returns short — or,
+///   because `write` on a master does not honour `O_NONBLOCK` (there is no
+///   `SYS_PTY_MASTER_TRY_WRITE`), *blocks*. The readiness check is therefore
+///   not an optimisation but the thing that keeps one uninterested process from
+///   freezing the whole daemon.
+/// * **Short writes are normal**, not an error, so the remainder must survive
+///   to the next pass instead of being silently lost mid-keystroke.
+/// * **The window must follow consumption, not arrival.** Crediting only what
+///   the terminal accepted is what pushes back-pressure to the client instead
+///   of accumulating it here.
+///
+/// A write that fails outright is treated as the end of the terminal rather
+/// than the end of the connection: the shell has gone and the pump's normal
+/// exit path will notice and close the channel. Dropping the whole TCP session
+/// because a shell died would take any other channel down with it.
+fn pump_channel_input(conn: &mut ConnectionState, idx: usize) -> Result<bool, SshdError> {
+    if conn.channels[idx].pending_input.is_empty() {
+        return Ok(false);
+    }
+
+    let mut written = 0usize;
+    let mut failure = None;
+    loop {
+        // A shared borrow, not `&mut`: the loop only reads the channel, which
+        // leaves `conn` free for `debug_log` and keeps the error path from
+        // needing a second pass over the borrow checker.
+        let channel = &conn.channels[idx];
+        let Some(pty) = channel.pty.as_ref() else { break };
+        let Some(rest) = channel.pending_input.get(written..) else {
+            break;
+        };
+        if rest.is_empty() || !pty.ready().1 {
+            break;
+        }
+        match pty.write_input(rest) {
+            // Accepted nothing despite reporting itself writable. Retrying
+            // inside this loop would spin; the next pass will try again.
+            Ok(0) => break,
+            Ok(n) => written = written.saturating_add(n),
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
+    }
+
+    if let Some(e) = failure {
+        conn.debug_log(&format!("pty write failed: {e}"));
+        conn.channels[idx].pty = None;
+        // The bytes can never be delivered now. Discard them rather than pin
+        // memory for the rest of the connection; the credit below then reopens
+        // the window, so a client still typing into a dead session learns that
+        // the channel is closing instead of blocking on a window forever.
+        written = conn.channels[idx].pending_input.len();
+    }
+
+    if written == 0 {
+        return Ok(false);
+    }
+
+    let mut credit = None;
+    {
+        let channel = &mut conn.channels[idx];
+        channel.pending_input.drain(..written);
+        // The window we *should* be offering is the full initial window less
+        // what is still queued here — that subtraction is the back-pressure.
+        // Announce the difference only once it is worth a quarter of the
+        // window, because an interactive session delivers one byte per
+        // keypress and a `WINDOW_ADJUST` per keystroke would double the
+        // packet rate of every session for no benefit.
+        let queued = u32::try_from(channel.pending_input.len()).unwrap_or(u32::MAX);
+        let target = INITIAL_LOCAL_WINDOW.saturating_sub(queued);
+        let gain = target.saturating_sub(channel.local_window);
+        if gain >= WINDOW_ADJUST_THRESHOLD {
+            channel.local_window = target;
+            credit = Some((channel.remote_id, gain));
+        }
+    }
+    if let Some((remote_id, bytes)) = credit {
+        send_window_adjust(conn, remote_id, bytes)?;
+    }
+
+    Ok(true)
+}
+
+/// Move bytes between running sessions and the client, and reap finished ones.
+///
+/// Returns `true` if anything happened, which is what tells the connection loop
+/// to try again immediately instead of sleeping.
+fn pump_sessions(conn: &mut ConnectionState) -> Result<bool, SshdError> {
+    let mut worked = false;
+
+    for idx in 0..conn.channels.len() {
+        if conn.channels[idx].closed {
+            continue;
+        }
+        let local_id = conn.channels[idx].local_id;
+        let remote_id = conn.channels[idx].remote_id;
+
+        // 1. Client keystrokes into the terminal, before anything else, so a
+        //    keypress and the output it provokes can both leave in one pass.
+        //
+        //    This runs for any channel holding a terminal, including one whose
+        //    shell has not started yet: type-ahead sent between `pty-req` and
+        //    `shell` belongs in the line discipline's buffer, where the shell
+        //    will read it, exactly as it would on a local console.
+        if pump_channel_input(conn, idx)? {
+            worked = true;
+        }
+
+        if conn.channels[idx].child.is_none() {
+            continue;
+        }
+
+        // 2. Whatever the shell has printed, up to this pass's budget.
+        //
+        // `drained` records *why* the loop stopped, and the distinction
+        // matters: stopping because the terminal had no more to give is the
+        // condition for ending a finished session, while stopping because the
+        // budget ran out is not — treating the two alike would truncate the
+        // output of any command that printed more than the budget as it exited.
+        let mut buf = [0u8; 8192];
+        let mut drained = false;
+        for _ in 0..PTY_READS_PER_PASS {
+            let outcome = match conn.channels[idx].pty.as_ref() {
+                Some(pty) if pty.ready().0 => pty.read_output(&mut buf),
+                _ => {
+                    drained = true;
+                    break;
+                }
+            };
+            match outcome {
+                PtyRead::Data(n) => {
+                    worked = true;
+                    send_channel_stream(conn, local_id, false, &buf[..n])?;
+                }
+                PtyRead::Empty => {
+                    drained = true;
+                    break;
+                }
+                PtyRead::Hangup => {
+                    // The terminal is gone and its buffered output has already
+                    // been delivered ahead of the `EIO`. Drop the master, but
+                    // do *not* invent an exit status: it is not known until
+                    // `wait` reports it, and a fabricated one would tell a
+                    // caller's `if ssh host cmd; then` the wrong thing.
+                    conn.channels[idx].pty = None;
+                    drained = true;
+                    worked = true;
+                    break;
+                }
+            }
+        }
+
+        // 3. Has the process finished? Record the status the first time it is
+        //    available; the session is not over until its output is out too.
+        if conn.channels[idx].exit.is_none() {
+            let finished = match conn.channels[idx].child.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(status) => status.map(|s| classify_exit(&s)),
+                    // `try_wait` fails only if the child was already reaped by
+                    // something else, which cannot happen here — but if it
+                    // somehow does, ending the session with the conventional
+                    // "we do not know" status beats waiting forever on a
+                    // process whose fate can no longer be reported.
+                    Err(e) => {
+                        conn.debug_log(&format!("try_wait failed: {e}"));
+                        Some(SessionExit::Status(255))
+                    }
+                },
+                None => None,
+            };
+            if let Some(exit) = finished {
+                worked = true;
+                conn.channels[idx].exit = Some(exit);
+            }
+        }
+
+        // 4. End the session once the process has gone *and* its terminal has
+        //    run dry. Waiting for both is what stops a shell's final line —
+        //    `logout`, or the last screen a full-screen program painted — from
+        //    being cut off by the close.
+        let ready_to_close = drained && conn.channels[idx].exit.is_some();
+        if ready_to_close {
+            let exit = conn.channels[idx]
+                .exit
+                .clone()
+                .unwrap_or(SessionExit::Status(255));
+            conn.debug_log(&format!("shell on channel {local_id} finished: {exit:?}"));
+            // Dropping the child and the terminal releases the pty and reaps
+            // the process table entry before the client is told anything, so a
+            // client that immediately opens another session finds the resources
+            // already free.
+            conn.channels[idx].child = None;
+            conn.channels[idx].pty = None;
+            send_session_exit(conn, remote_id, &exit)?;
+            // `send_channel_close` sends the EOF first and sets `closed`.
+            send_channel_close(conn, local_id)?;
+            worked = true;
+        }
+    }
+
+    Ok(worked)
 }
 
 /// Run an `exec` request's command line and report its output and exit status.
@@ -3690,7 +4770,6 @@ fn run_exec_request(
             let note = format!("sshd: could not collect command output: {e}\r\n");
             send_channel_stream(conn, local_id, true, note.as_bytes())?;
             send_session_exit(conn, remote_id, &SessionExit::Status(255))?;
-            send_channel_eof(conn, remote_id)?;
             send_channel_close(conn, local_id)?;
             return Ok(());
         }
@@ -3706,7 +4785,6 @@ fn run_exec_request(
     send_channel_stream(conn, local_id, false, &output.stdout)?;
     send_channel_stream(conn, local_id, true, &output.stderr)?;
     send_session_exit(conn, remote_id, &exit)?;
-    send_channel_eof(conn, remote_id)?;
     send_channel_close(conn, local_id)?;
     Ok(())
 }
@@ -3721,22 +4799,32 @@ fn handle_channel_data(conn: &mut ConnectionState, payload: &[u8]) -> Result<(),
         data.len()
     ));
 
-    // There is nothing on this end to receive it. `exec` runs its command with
-    // stdin connected to /dev/null and `shell` is refused outright, so no
-    // process is waiting on the channel's input. The data is consumed and
-    // dropped, and the window is credited back so a client that keeps sending
-    // is not left blocked on a window that never reopens.
+    // The window shrinks by what arrived, on every channel. What happens to the
+    // bytes then depends on whether anything is listening:
     //
-    // This used to echo the data straight back, which made an interactive
-    // client look like it was talking to a shell that echoed its typing --
-    // indistinguishable, at the terminal, from a real session.
+    // * A channel with a terminal queues them for the shell. They are credited
+    //   back only once they reach it — see `Channel::pending_input` — because
+    //   crediting on arrival would let a client outrun a shell that has stopped
+    //   reading and turn the SSH window into unbounded daemon memory.
+    //
+    // * A channel without one drops them and credits immediately. `exec` runs
+    //   its command with stdin on /dev/null, so nothing will ever consume this
+    //   input; withholding credit would stall a client forever on a window that
+    //   could never reopen. Dropping is the honest outcome, and is what the
+    //   `exec`-only daemon always did.
+    //
+    // Neither path echoes. An earlier version echoed the data straight back,
+    // which made a client look like it was talking to a shell that echoed its
+    // typing -- at the terminal, indistinguishable from a real session.
     let mut credit = None;
     if let Some(channel) = conn.channels.iter_mut().find(|ch| ch.local_id == recipient) {
-        let consumed = u32::try_from(data.len()).unwrap_or(u32::MAX);
-        channel.local_window = channel.local_window.saturating_sub(consumed);
-        // Re-open the window well before it runs out, in one large credit,
-        // rather than one message per data packet.
-        if channel.local_window < WINDOW_ADJUST_THRESHOLD {
+        let arrived = u32::try_from(data.len()).unwrap_or(u32::MAX);
+        channel.local_window = channel.local_window.saturating_sub(arrived);
+        if channel.pty.is_some() {
+            channel.pending_input.extend_from_slice(data);
+        } else if channel.local_window < WINDOW_ADJUST_THRESHOLD {
+            // Re-open the window well before it runs out, in one large credit,
+            // rather than one message per data packet.
             credit = Some((
                 channel.remote_id,
                 INITIAL_LOCAL_WINDOW.saturating_sub(channel.local_window),
@@ -3791,42 +4879,45 @@ fn handle_channel_eof(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), 
 }
 
 /// Handle `CHANNEL_CLOSE`.
+///
+/// The client is done with this channel, so anything the channel owns has to go
+/// with it. That is not bookkeeping: a session channel owns a *running shell*
+/// and a pseudo-terminal, and the connection loop skips closed channels, so
+/// leaving them attached would strand the shell for the lifetime of the daemon
+/// — a process nobody will ever reap, holding a pty nobody will ever free, with
+/// no path left that could notice. A client that closes a channel without
+/// waiting for its shell to exit is not an error case; it is what pressing
+/// `~.` does.
 fn handle_channel_close(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (recipient, _) = read_u32(payload, 1)?;
     conn.debug_log(&format!("channel close: channel={recipient}"));
 
-    let remote_id = conn
+    // Dropping the master hangs the terminal up, which is the polite half of
+    // this: a shell blocked on a read gets its `EIO` and exits on its own. The
+    // kill is the half that does not depend on the shell cooperating — a
+    // process ignoring its hangup, or not reading the terminal at all, would
+    // otherwise outlive the connection.
+    let child = conn
         .channels
-        .iter()
+        .iter_mut()
         .find(|ch| ch.local_id == recipient)
-        .map(|ch| ch.remote_id);
-
-    // Extract what we need before modifying, to avoid overlapping borrows
-    let needs_eof = conn
-        .channels
-        .iter()
-        .find(|ch| ch.local_id == recipient)
-        .map(|ch| (!ch.eof_sent, ch.remote_id));
-
-    if let Some((send_eof, remote_id)) = needs_eof {
-        if send_eof {
-            send_channel_eof(conn, remote_id)?;
+        .and_then(|ch| {
+            ch.pty = None;
+            ch.child.take()
+        });
+    if let Some(mut child) = child {
+        if let Err(e) = child.kill() {
+            conn.debug_log(&format!("could not signal session on close: {e}"));
         }
-        if let Some(channel) = conn.channels.iter_mut().find(|ch| ch.local_id == recipient) {
-            channel.eof_sent = true;
-            channel.closed = true;
+        // Reap it, or the entry stays in the process table. `kill` has already
+        // been sent, so this cannot wait indefinitely on a live process.
+        if let Err(e) = child.wait() {
+            conn.debug_log(&format!("could not reap session on close: {e}"));
         }
     }
 
-    // Send close back.
-    if let Some(remote_id) = remote_id {
-        let mut close = Vec::new();
-        close.push(msg::SSH_MSG_CHANNEL_CLOSE);
-        close.extend_from_slice(&remote_id.to_be_bytes());
-        conn.send_packet(&close)?;
-    }
-
-    Ok(())
+    // Answer with our own EOF (if it has not gone already) and close.
+    send_channel_close(conn, recipient)
 }
 
 /// Send data on a channel.
@@ -3994,42 +5085,84 @@ fn send_channel_stream(
     Ok(())
 }
 
-/// Send EOF on a channel.
-fn send_channel_eof(conn: &mut ConnectionState, remote_channel_id: u32) -> Result<(), SshdError> {
-    let mut msg_buf = Vec::new();
-    msg_buf.push(msg::SSH_MSG_CHANNEL_EOF);
-    msg_buf.extend_from_slice(&remote_channel_id.to_be_bytes());
-    conn.send_packet(&msg_buf)
-}
-
-/// Send close on a channel.
-fn send_channel_close(conn: &mut ConnectionState, local_channel_id: u32) -> Result<(), SshdError> {
-    // Extract info first to avoid overlapping borrows with send_channel_eof
-    let chan_info = conn
+/// Send EOF on a channel, at most once.
+///
+/// Takes the channel's **local** id, like `send_channel_close`, and looks the
+/// remote id up itself. The two ids are independent — the client picks one and
+/// we pick the other — so passing the wrong one produces a well-formed message
+/// about somebody else's channel, a failure with no symptom at the sender.
+///
+/// The `eof_sent` flag is owned here rather than by the callers because three
+/// of them used to test-and-set it independently while two others skipped it
+/// entirely. `send_channel_eof(...)` followed by `send_channel_close(...)` —
+/// the order every session-ending path in this file writes, because it is the
+/// order the protocol describes — therefore emitted *two* `SSH_MSG_CHANNEL_EOF`
+/// for one channel. With the flag here the second one is a no-op, and no call
+/// site has to know whether some other path already sent it.
+fn send_channel_eof(conn: &mut ConnectionState, local_channel_id: u32) -> Result<(), SshdError> {
+    let Some((remote_id, eof_sent)) = conn
         .channels
         .iter()
         .find(|ch| ch.local_id == local_channel_id)
-        .map(|ch| (ch.remote_id, ch.eof_sent));
-
-    if let Some((remote_id, eof_sent)) = chan_info {
-        if !eof_sent {
-            send_channel_eof(conn, remote_id)?;
-        }
-        // Now update the channel state
-        if let Some(channel) = conn
-            .channels
-            .iter_mut()
-            .find(|ch| ch.local_id == local_channel_id)
-        {
-            channel.closed = true;
-            channel.eof_sent = true;
-        }
-        let mut msg_buf = Vec::new();
-        msg_buf.push(msg::SSH_MSG_CHANNEL_CLOSE);
-        msg_buf.extend_from_slice(&remote_id.to_be_bytes());
-        conn.send_packet(&msg_buf)?;
+        .map(|ch| (ch.remote_id, ch.eof_sent))
+    else {
+        return Ok(());
+    };
+    if eof_sent {
+        return Ok(());
     }
-    Ok(())
+    if let Some(channel) = conn
+        .channels
+        .iter_mut()
+        .find(|ch| ch.local_id == local_channel_id)
+    {
+        channel.eof_sent = true;
+    }
+    let mut msg_buf = Vec::new();
+    msg_buf.push(msg::SSH_MSG_CHANNEL_EOF);
+    msg_buf.extend_from_slice(&remote_id.to_be_bytes());
+    conn.send_packet(&msg_buf)
+}
+
+/// Send close on a channel, preceded by the EOF the protocol expects first, and
+/// at most once.
+///
+/// `Channel::closed` means exactly "we have sent `SSH_MSG_CHANNEL_CLOSE`", and
+/// the once-only rule is RFC 4254's: each side sends the message once, and the
+/// side that did not send it first replies. Both halves happen here, so the
+/// case where we end a session ourselves and the client's own close then
+/// arrives — the ordinary way an interactive session finishes — answers rather
+/// than sending a second close for a channel that is already gone.
+fn send_channel_close(conn: &mut ConnectionState, local_channel_id: u32) -> Result<(), SshdError> {
+    if conn
+        .channels
+        .iter()
+        .any(|ch| ch.local_id == local_channel_id && ch.closed)
+    {
+        return Ok(());
+    }
+
+    send_channel_eof(conn, local_channel_id)?;
+
+    let Some(remote_id) = conn
+        .channels
+        .iter()
+        .find(|ch| ch.local_id == local_channel_id)
+        .map(|ch| ch.remote_id)
+    else {
+        return Ok(());
+    };
+    if let Some(channel) = conn
+        .channels
+        .iter_mut()
+        .find(|ch| ch.local_id == local_channel_id)
+    {
+        channel.closed = true;
+    }
+    let mut msg_buf = Vec::new();
+    msg_buf.push(msg::SSH_MSG_CHANNEL_CLOSE);
+    msg_buf.extend_from_slice(&remote_id.to_be_bytes());
+    conn.send_packet(&msg_buf)
 }
 
 // ============================================================================
@@ -5856,6 +6989,158 @@ DenyGroups nogroup
     fn test_format_ip_localhost() {
         let ip = u32::from_be_bytes([127, 0, 0, 1]);
         assert_eq!(format_ip(ip), "127.0.0.1");
+    }
+
+    // ---- Incremental packet framing ----
+    //
+    // These are the tests the `read_packet` / `try_parse_packet` split was made
+    // for: framing used to be reachable only through a socket, so the one thing
+    // a session pump depends on — that an incomplete packet is reported as
+    // "not yet" and never as an error or a short read — could not be tested at
+    // all.
+
+    /// Feed a buffer one byte at a time; report when a packet first appears.
+    fn feed_byte_at_a_time(wire: &[u8]) -> (usize, Vec<u8>) {
+        let enc = EncryptionState::none();
+        let mut buf = StreamBuffer::new();
+        for (i, byte) in wire.iter().enumerate() {
+            buf.data.push(*byte);
+            match try_parse_packet(&mut buf, false, 0, &enc) {
+                Ok(Some(payload)) => return (i + 1, payload),
+                Ok(None) => {}
+                Err(e) => panic!("framing error at byte {i}: {e}"),
+            }
+        }
+        panic!("packet never completed after {} bytes", wire.len());
+    }
+
+    #[test]
+    fn test_try_parse_packet_waits_for_the_whole_packet() {
+        let enc = EncryptionState::none();
+        let payload = b"hello ssh".to_vec();
+        let wire = build_packet(&payload, false, 0, &enc);
+
+        let (consumed, parsed) = feed_byte_at_a_time(&wire);
+        assert_eq!(parsed, payload);
+        // The packet must be reported exactly when its last byte lands --
+        // neither early (which would mean parsing a partial packet) nor late.
+        assert_eq!(consumed, wire.len());
+    }
+
+    #[test]
+    fn test_try_parse_packet_is_none_on_an_empty_buffer() {
+        let enc = EncryptionState::none();
+        let mut buf = StreamBuffer::new();
+        let got = try_parse_packet(&mut buf, false, 0, &enc);
+        assert!(matches!(got, Ok(None)));
+    }
+
+    #[test]
+    fn test_try_parse_packet_leaves_a_partial_packet_intact() {
+        // A `None` must not consume anything: the bytes it declined are the
+        // start of the packet it will parse on the next call. Consuming them
+        // would desynchronise the stream permanently.
+        let enc = EncryptionState::none();
+        let wire = build_packet(b"payload", false, 0, &enc);
+        let mut buf = StreamBuffer::new();
+        buf.data.extend_from_slice(&wire[..wire.len() - 1]);
+
+        assert!(matches!(try_parse_packet(&mut buf, false, 0, &enc), Ok(None)));
+        assert_eq!(buf.available(), wire.len() - 1);
+
+        buf.data.push(wire[wire.len() - 1]);
+        let got = try_parse_packet(&mut buf, false, 0, &enc)
+            .expect("framing")
+            .expect("packet");
+        assert_eq!(got, b"payload");
+    }
+
+    #[test]
+    fn test_try_parse_packet_returns_several_packets_from_one_buffer() {
+        // A single TCP read can carry several SSH packets. The session pump
+        // drains them all before sleeping, so a second call on the same buffer
+        // must produce the second packet rather than ask for more bytes.
+        let enc = EncryptionState::none();
+        let mut buf = StreamBuffer::new();
+        buf.data
+            .extend_from_slice(&build_packet(b"first", false, 0, &enc));
+        buf.data
+            .extend_from_slice(&build_packet(b"second", false, 1, &enc));
+
+        let a = try_parse_packet(&mut buf, false, 0, &enc)
+            .expect("framing")
+            .expect("first packet");
+        let b = try_parse_packet(&mut buf, false, 1, &enc)
+            .expect("framing")
+            .expect("second packet");
+        assert_eq!(a, b"first");
+        assert_eq!(b, b"second");
+        assert!(matches!(try_parse_packet(&mut buf, false, 2, &enc), Ok(None)));
+    }
+
+    // ---- Login shell argv[0] ----
+
+    #[test]
+    fn test_login_argv0_takes_the_basename() {
+        assert_eq!(login_argv0("/bin/bash"), "-bash");
+        assert_eq!(login_argv0("/usr/local/bin/fish"), "-fish");
+    }
+
+    #[test]
+    fn test_login_argv0_bare_name_needs_no_directory() {
+        // A passwd entry may name the shell without a path.
+        assert_eq!(login_argv0("sh"), "-sh");
+    }
+
+    #[test]
+    fn test_login_argv0_trailing_slash_falls_back_to_the_whole_path() {
+        // `rsplit('/')` yields "" for a path ending in a separator. Emitting
+        // "-" would name a shell that does not exist and start no session, so
+        // the whole string is used instead: still wrong as a shell, but it
+        // fails loudly at `spawn` with a name that says what was configured,
+        // rather than silently becoming a one-character mystery.
+        assert_eq!(login_argv0("/bin/"), "-/bin/");
+    }
+
+    #[test]
+    fn test_login_argv0_keeps_the_hyphen_that_means_login_shell() {
+        // The leading hyphen is the whole point: without it the shell does not
+        // read the user's profile, and a session comes up with no PATH set by
+        // the site's configuration.
+        assert!(login_argv0("/bin/bash").starts_with('-'));
+    }
+
+    // ---- Terminal size conversion ----
+
+    #[test]
+    fn test_winsize_from_ssh_normal() {
+        let ws = winsize_from_ssh(80, 24, 640, 480);
+        assert_eq!(ws.ws_col, 80);
+        assert_eq!(ws.ws_row, 24);
+        assert_eq!(ws.ws_xpixel, 640);
+        assert_eq!(ws.ws_ypixel, 480);
+    }
+
+    #[test]
+    fn test_winsize_from_ssh_clamps_instead_of_truncating() {
+        // 0x1_0000 would wrap to 0 under an `as u16` cast, and a zero-width
+        // terminal breaks every line-wrapping program in ways that look like
+        // bugs in those programs. Clamping keeps the failure visible and sane.
+        let ws = winsize_from_ssh(0x1_0000, 0x1_0000, 0xFFFF_FFFF, 0xFFFF_FFFF);
+        assert_eq!(ws.ws_col, u16::MAX);
+        assert_eq!(ws.ws_row, u16::MAX);
+        assert_eq!(ws.ws_xpixel, u16::MAX);
+        assert_eq!(ws.ws_ypixel, u16::MAX);
+    }
+
+    #[test]
+    fn test_winsize_from_ssh_does_not_transpose_rows_and_columns() {
+        // SSH sends columns first; `struct winsize` stores rows first. The
+        // orders are crossed exactly once, here, and a regression would make
+        // every session's terminal the wrong way round.
+        let ws = winsize_from_ssh(100, 20, 0, 0);
+        assert_eq!(ws.ws_col, 100);
+        assert_eq!(ws.ws_row, 20);
     }
 
     // ---- parse_bool ----

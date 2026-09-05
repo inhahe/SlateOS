@@ -58985,86 +58985,218 @@ real header size.
 recorded in the next entry rather than left to be discovered.
 
 
-## TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION — 2026-08-21
+## TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION — 2026-08-21 — FIXED 2026-09-05
 
-**In short:** `ssh host 'some command'` works properly now. `ssh host` — a
-plain interactive login — does not, and answers with "shell request failed".
-Two separate things are missing: a pseudo-terminal (a fake keyboard-and-screen
-pair that lets a program believe it is at a real terminal), and a connection
-loop that can move bytes in both directions at once. Until both exist, refusing
-is the honest answer; the previous code answered SUCCESS and printed a fake
-prompt.
+**In short:** `ssh host` — a plain interactive login — used to answer "shell
+request failed". It now works: the daemon allocates a pseudo-terminal (a fake
+keyboard-and-screen pair that lets a program believe it is at a real terminal),
+runs the user's login shell on it as that user, and moves bytes both ways.
+Editing, `^C`, job control, `clear`, `vi` and window resizing all behave,
+because they are the terminal's job and there is now a real terminal. Two of the
+three limitations below are gone; the third — `exec` buffering its output
+instead of streaming — remains, and has moved to its own entry.
 
-**Where it lives:** `userspace/sshd/src/main.rs` — `handle_channel_request`'s
-`pty-req` and `shell` arms, and `run_exec_request`.
+**Where it was:** `userspace/sshd/src/main.rs` — `handle_channel_request`'s
+`pty-req` and `shell` arms, and `handle_channels`.
 
-### The three limitations, and what each one costs
+### What unblocked it
 
-**1. `pty-req` is refused, because SlateOS has no pty device.**
-
-`kernel/src/tty.rs` contains a complete, self-tested line discipline —
-canonical mode, `ERASE`/`KILL`, `^C`→`SIGINT`, `VMIN`/`VTIME`, `termios`,
-`winsize` — but it exists exactly once, hardwired to the physical keyboard and
-screen. A pty is that same discipline with a program on the far end. Filed as
+Lane A landed the pty syscalls, fulfilling
 `requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`
-(lane A owns `kernel/**`); the reasoning for why this cannot be done in libc is
-`design-decisions.md` §345.
+and its two follow-ups. `posix` then grew `openpty`/`login_tty`/`forkpty` on top
+of them, which is what a session actually needs: `login_tty` is the only route
+by which a child can adopt a terminal as its *controlling* terminal, and a
+controlling terminal is what makes `^C` reach the foreground job rather than
+nothing at all.
 
-*Cost while unfixed:* clients print "PTY allocation request failed on channel
-0" and continue without one. That is exactly what they do against a real server
-configured with `PermitTTY no`, so it is a supported state rather than a broken
-one.
+### What was built
 
-**2. `shell` is refused, because an interactive shell needs both a pty and
-bidirectional I/O.**
+**1. `pty-req` allocates a real terminal.** `Pty::open` calls `openpty` with the
+client's window size, clamping the 32-bit dimensions SSH sends into the 16-bit
+ones `struct winsize` holds — clamping rather than truncating, because a
+wrapping cast turns 65 536 columns into *zero* columns, and a zero-width
+terminal breaks every line-wrapping program in a way that looks like a bug in
+that program. A second `pty-req` on one channel is refused (RFC 4254 §6.2 allows
+one, and replacing a live terminal would hang up a running shell).
 
-Even given a pty, `run_connection` is a single-threaded loop of blocking
-`recv_packet` calls. Hosting a shell means watching the socket and the child's
-pipes simultaneously. The proper fix is to give the connection loop a readiness
-wait over both — the same `SYS_IO_POLL`-shaped primitive the rest of userspace
-uses — rather than threads, which the target spec's `has-thread-local: false`
-makes a poor bet.
+**2. `shell` runs the login shell on the slave.** `std::process::Command` with a
+`pre_exec` closure that calls `login_tty(slave)`; `argv[0]` is the shell's
+basename with a leading hyphen, which is the entire protocol by which a shell is
+told it is a *login* shell and should read the profiles. Registering `pre_exec`
+is also what takes std off its `posix_spawn` fast path — necessary, because
+`posix_spawn` has no hook that could acquire a controlling terminal.
 
-*Cost while unfixed:* no interactive login over SSH. `ssh host command` covers
-scripted use, which is the majority of what a headless machine needs.
+The parent then closes its copy of the slave fd. That one `close` is the
+difference between a session that ends and one that hangs forever: hangup means
+"the last slave closed", so while the daemon holds one, an exited shell leaves a
+terminal that never reports the end of the session.
 
-**3. `exec` collects output rather than streaming it.**
+**3. The connection loop became readiness-driven.** `handle_channels` polls the
+socket (`SYS_TCP_POLL_STATUS`) and the pty master (`poll` on the fd) and sleeps
+with exponential backoff from 0.5 ms to 20 ms when neither has anything. It
+keeps a **blocking fast path**: with no child running — during key exchange, all
+of authentication, and every `exec`-only session — it blocks on `recv_packet`
+exactly as before, so the polling costs nothing on the paths that do not need
+it.
 
-`child.wait_with_output()` runs to completion and then sends. This is deliberate
-and not merely lazy: reading two pipes one after the other from a single thread
-deadlocks the moment the child fills the pipe that is not being read, and
-`wait_with_output` is the standard-library primitive that drains both together.
+Framing was split for this: `try_parse_packet` is a pure function over the
+buffer that returns `Ok(None)` for an incomplete packet, and `read_packet` is
+the blocking loop around it. The sequence number advances only when a packet is
+actually produced — it feeds both the MAC and the CTR keystream, so advancing it
+for a packet that had not arrived would desynchronise the cipher permanently.
+This is now covered by host tests that feed a packet in one byte at a time.
 
-*Cost while unfixed:* a command that never exits (`tail -f`) produces nothing at
-all, and a command with very large output is buffered in RAM. `ssh host 'find
-/'` will work but will hold the whole listing in memory first.
+**4. Flow control follows consumption, not arrival.** Client keystrokes are
+queued on the channel and written to the master when it reports writable, and
+the SSH window is credited only for bytes that reached the terminal. A program
+that stops reading its stdin therefore back-pressures the *client* instead of
+being absorbed into the daemon's memory — and, because a `write` to a master
+does not honour `O_NONBLOCK` (there is no `SYS_PTY_MASTER_TRY_WRITE`), the
+readiness check is what stops one uninterested process from freezing the whole
+daemon.
 
-*Proper fix:* the same readiness wait as (2). Once the loop can poll the child's
-pipes alongside the socket, all three limitations dissolve into one
-implementation — which is why they are one entry and not three.
+**5. Ending a session waits for both halves.** The channel closes only once the
+process has exited *and* the terminal has run dry — tracked as two separate
+facts — so a shell's final `logout`, or the last screen a full-screen program
+painted, is not cut off by the close. Hangup on the master drops the terminal
+but deliberately does *not* invent an exit status; the status is whatever `wait`
+reports, because a fabricated one would tell a caller's `if ssh host cmd; then`
+the wrong thing.
 
-### Also missing, smaller
+**6. Channel teardown became once-only, and now takes the session with it.**
+Long-lived sessions turned two latent framing faults into reachable ones, so
+both were fixed at their source rather than at the new call site:
+
+- `send_channel_eof` now takes the channel's *local* id (like
+  `send_channel_close`) and owns the `eof_sent` flag. Three call sites used to
+  test-and-set that flag independently and two skipped it, so the natural
+  `send_channel_eof(...); send_channel_close(...)` pairing — written by every
+  session-ending path in the file — emitted **two** `SSH_MSG_CHANNEL_EOF` per
+  channel. `send_channel_close` is likewise a no-op on an already-closed
+  channel, which is RFC 4254's rule: each side sends `CHANNEL_CLOSE` once and
+  the other replies. Without that, the ordinary end of an interactive session —
+  we close, the client closes back — sent a second close for a dead channel.
+- `handle_channel_close` now drops the pty and kills and reaps the child.
+  Before, it only set a flag, and the connection loop skips closed channels: a
+  client closing its channel without waiting (which is exactly what `~.` does)
+  would have stranded a running shell holding a pty for the lifetime of the
+  daemon, with no code path left that could ever notice it. Dropping the master
+  hangs the terminal up so a cooperative shell exits on its own; the kill is
+  the half that does not depend on the shell cooperating.
+
+### Still open, moved to its own entry
+
+`exec` still collects output and sends it when the command exits, and `shell`
+without a `pty-req` (`ssh -T host`) is still refused. Both need the same thing —
+the pump extended over a child's ordinary pipes as well as a pty master — and
+are tracked as `TD-B-SSHD-EXEC-DOES-NOT-STREAM-AND-SSH-DASH-T-IS-REFUSED`.
+
+The smaller gaps below were not addressed and carry over to that entry:
 
 - **`env` requests are accepted and discarded.** The arm replies SUCCESS
   without recording anything, so `ssh -o SendEnv=LC_ALL host` silently loses
-  the variable. Accepting is the right answer only once the variables reach the
-  child; today refusing would be more truthful, but OpenSSH's default is to
-  ignore unlisted variables *silently* too, so this is consistent with the
-  reference implementation rather than a lie.
-- **`exec`'s stdin is `/dev/null`.** `ssh host 'wc -l' < file` reports 0. This
-  is a consequence of (3), not a separate decision.
-- **Supplementary groups are not set.** `session_command` sets the primary gid
-  and uid; `setgroups` is not called, so a session does not carry the account's
+  the variable. Consistent with OpenSSH, which also ignores unlisted variables
+  silently, but not yet a real implementation.
+- **Supplementary groups are not set.** The session sets the primary gid and
+  uid; `setgroups` is not called, so a session does not carry the account's
   secondary group memberships. Blocked on the same gap `su` and `doas` have —
   see the comment at `userspace/doas/src/main.rs:731`.
+- **The client's terminal modes are not applied.** `pty-req` carries the
+  client's `termios` settings and they are dropped. They describe the *client's*
+  terminal, and the shell reconfigures the terminal immediately on startup
+  anyway, so the practical effect is nil; OpenSSH applies them only because it
+  carries a `termios` translation table this daemon does not have.
 
-**Trigger:** revisit when lane A lands the pty syscalls, or sooner if a
-readiness wait over pipes plus sockets appears for another reason.
 
-**If never fixed:** SSH remains a command-execution channel rather than a login
-service. Nothing lies about it — every unsupported request is refused at the
-protocol level and the client says so — but `apps/terminal` and interactive
-CPython over SSH stay out of reach.
+## TD-B-SSHD-EXEC-DOES-NOT-STREAM-AND-SSH-DASH-T-IS-REFUSED — 2026-09-05
+
+**In short:** `ssh host` (a normal interactive login) works. Two narrower things
+do not. `ssh host 'some command'` waits for the command to finish before sending
+any output, so `ssh host 'tail -f /var/log/x'` prints nothing, ever. And
+`ssh -T host` — asking for a shell *without* a terminal, which is how scripts
+pipe data through a remote shell — is refused outright. Both are the same
+missing piece, and neither loses data or misreports anything; they just cannot
+do the thing.
+
+**Where it lives:** `userspace/sshd/src/main.rs` — `run_exec_request`, and the
+`shell` arm of `handle_channel_request`.
+
+### Why they are one problem
+
+The session pump (`pump_sessions`) can move bytes between a client and a
+*pseudo-terminal*, because a pty is a single fd carrying both directions. A
+command without a terminal has three ordinary pipes instead — stdin, stdout,
+stderr — which have to be watched together. `run_exec_request` sidesteps that
+with `child.wait_with_output()`, the standard-library call that drains stdout
+and stderr concurrently and returns when the process exits. That is genuinely
+the right primitive for a blocking one-shot; reading two pipes one after another
+from a single thread deadlocks the moment the child fills the one not being
+read. It is simply not a streaming primitive.
+
+The fix is to teach the pump about pipe-backed sessions as well as pty-backed
+ones: poll the child's stdout and stderr alongside the socket, forward what is
+ready, and forward client `CHANNEL_DATA` into the child's stdin. `ssh -T` then
+becomes the same code path with the user's shell as the command, and `exec`'s
+stdin — currently `/dev/null`, which is why `ssh host 'wc -l' < file` reports
+0 — becomes a real pipe as a side effect.
+
+*Cost while unfixed:* a command that never exits produces nothing; a command
+with very large output is buffered in RAM (`ssh host 'find /'` holds the whole
+listing before sending it); `ssh -T host` fails with a refusal the client
+reports honestly. Interactive use, which is the common case, is unaffected.
+
+**Trigger:** do this next time sshd is opened, or sooner if something needs
+`sftp` — an sftp subsystem is a pipe-backed session with no terminal, so it
+needs exactly this machinery and nothing else new.
+
+**If never fixed:** SSH remains excellent for interactive logins and for
+commands that finish, and unusable for streaming ones and for `sftp`.
+
+
+## TD-B-POLL-SELECT-AND-EPOLL-ARE-A-10MS-SPIN-LOOP-BECAUSE-THERE-IS-NO-KERNEL-WAIT — 2026-09-05
+
+**In short:** `poll()`, `select()` and `epoll_wait()` are the calls a program
+uses to say "wake me when any of these is ready." Ours do not wait at all: they
+check every file descriptor in turn, sleep 10 ms, and check again, until
+something is ready or the timeout runs out. The program still gets the right
+answer, so nothing is visibly broken — it just arrives up to 10 ms late, and the
+process wakes 100 times a second while doing nothing. Every event-driven program
+on SlateOS pays this, which today means every server we have.
+
+**Where it is:** `posix/src/poll.rs` — `poll()` at the `POLL_INTERVAL_NS`
+constant (10 ms), `select()`'s identical loop below it, and
+`posix/src/epoll.rs`, whose `epoll_wait` walks its interest list through the
+same per-fd readiness checks. The module doc has always said so plainly
+("we can't do kernel-level event waiting yet"); it was never tracked here.
+
+**Why it is this way.** Readiness is per-object: a TCP socket answers
+`SYS_TCP_POLL_STATUS`, a pipe answers its own status call, a pty answers
+`SYS_PTY_POLL`. There is no syscall that takes a *set* of kernel objects and
+blocks until one of them is ready. Without that, "wait for any of these" can
+only be built as "ask each of these, repeatedly" — which is what this is.
+
+**What the proper fix is.** A kernel-side multi-object wait: hand it a list of
+handles and an event mask, it blocks the thread on all of them at once and
+returns which fired. `posix`'s three interfaces then become thin wrappers over
+one real wait, and the interval constants are deleted rather than tuned. This is
+lane A's to build (it is a scheduler/wait-queue feature, not a libc one).
+
+**Consequences today, in ascending order of who notices:**
+
+- Any program calling `poll` with a timeout of `-1` gets a 10 ms granularity
+  instead of an immediate wake-up.
+- Idle event loops cost 100 wake-ups/second each, so the cost scales with the
+  number of *idle* connections, which is the wrong direction.
+- It is why sshd's session loop does **not** route through `poll` and runs its
+  own 0.5 ms–20 ms backoff over the two readiness syscalls directly — see
+  design-decisions.md §770. A correct kernel wait would let that loop, and the
+  hand-rolled loops in every other daemon, collapse into one blocking call.
+
+**If never fixed:** everything keeps working and everything stays slightly
+late and slightly wasteful, with each new daemon either paying the 10 ms or
+hand-rolling its own tighter loop — which is how a single missing primitive
+becomes N incompatible workarounds. Nothing is blocked; the cost is diffuse,
+permanent, and grows with the number of programs.
 
 
 ## B-SSH-CLIENT-DISCARDED-THE-REMOTE-EXIT-STATUS-AND-ALL-OF-STDERR — 2026-08-21 — FIXED
@@ -60263,9 +60395,10 @@ on the host and for `x86_64-slateos`.
 `ftpd` sends the password in the clear — a property of FTP, not of this
 implementation, and now stated in its module documentation so that the
 authentication fix is not read as making the daemon safe to expose. The real
-answer is `sftp` over the now-working `sshd`, which is
-`TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION`'s neighbour and not yet
-built.
+answer is `sftp` over the now-working `sshd`, which is not yet built — and is
+blocked on the same missing piece as
+`TD-B-SSHD-EXEC-DOES-NOT-STREAM-AND-SSH-DASH-T-IS-REFUSED`, since an sftp
+subsystem is a pipe-backed session with no terminal.
 
 ## B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS — 2026-08-21 — FIXED
 

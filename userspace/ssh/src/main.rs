@@ -594,6 +594,60 @@ impl StreamBuffer {
 // SSH data encoding helpers
 // ============================================================================
 
+/// What one line of the server's pre-key-exchange greeting turned out to be.
+enum VersionLine {
+    /// The identification string, i.e. `V_S`.
+    Version(String),
+    /// A line before it, rendered safe for a terminal.
+    Banner(String),
+}
+
+/// Decide what a line read during the version exchange is (RFC 4253 §4.2).
+///
+/// `line` is everything up to but not including the LF; the CR of the CRLF is
+/// removed here. A server — and only a server — may send any number of lines
+/// before its identification string; the identification string is the first that
+/// begins with `SSH-`.
+///
+/// # Why this takes bytes
+///
+/// The identification string is `V_S`, the second input to the exchange hash.
+/// The server hashes the bytes it put on the wire, so we have to hash those same
+/// bytes back. This loop used to accumulate a `String` with
+/// `line.push(char::from(byte))`, which reads each byte as a *Latin-1* code
+/// point — so any byte ≥ 0x80 came back out of `as_bytes()` as the two-byte
+/// UTF-8 encoding of that code point, and the two ends hashed different `V_S`
+/// values. The signature check would then fail with nothing to say why.
+///
+/// §4.2 requires printable US-ASCII here, so no conforming server trips it —
+/// which is exactly the property that would have kept it hidden, the same way
+/// the placeholder `V_C` stayed hidden in sshd. Decoding strictly turns a silent
+/// mismatch into a stated error, and matches what sshd does with our line in the
+/// other direction.
+///
+/// Banner lines are *not* hashed and are not held to that: they are free text
+/// from an unauthenticated peer, on their way to a terminal, so they are escaped
+/// rather than decoded. Rejecting the connection over one would be refusing to
+/// talk to a server because of its greeting, and printing one raw would let that
+/// peer emit control sequences.
+fn classify_version_line(line: &[u8]) -> Result<VersionLine, SshError> {
+    let trimmed = match line.split_last() {
+        Some((b'\r', rest)) => rest,
+        _ => line,
+    };
+    if trimmed.starts_with(b"SSH-") {
+        let version = String::from_utf8(trimmed.to_vec()).map_err(|_| {
+            SshError::ProtocolError(
+                "server version line is not valid UTF-8 (RFC 4253 §4.2 requires printable \
+                 US-ASCII)"
+                    .into(),
+            )
+        })?;
+        return Ok(VersionLine::Version(version));
+    }
+    Ok(VersionLine::Banner(quoting::escape_unprintable(trimmed)))
+}
+
 // The encoders -- `ssh_string`, `encode_mpint`, `strip_leading_zeros` -- live in
 // `sshwire`, not here. Each is one half of a contract with whatever is at the
 // other end of the socket, and a private copy of one half is a copy that can
@@ -2064,6 +2118,9 @@ impl SshSession {
     }
 
     // === Phase 1: Version exchange ===
+    //
+    // (`classify_version_line`, which decides what each line read here *is*,
+    // is a free function below so that it can be tested without a socket.)
 
     fn version_exchange(&mut self) -> Result<(), SshError> {
         self.verbose("sending client version");
@@ -2072,9 +2129,9 @@ impl SshSession {
         let version_line = format!("{SSH_VERSION_STRING}\r\n");
         tcp_send_all(self.handle, version_line.as_bytes())?;
 
-        // Read server version line. The server may send banner lines first;
-        // the version line starts with "SSH-".
-        let mut line = String::new();
+        // Read the server's version line. It is accumulated as *bytes*; see
+        // `classify_version_line` for why that is not incidental.
+        let mut line: Vec<u8> = Vec::new();
         loop {
             let mut buf = [0u8; 1];
             let [byte] = *tcp_recv(self.handle, &mut buf)? else {
@@ -2083,16 +2140,18 @@ impl SshSession {
                 ));
             };
             if byte == b'\n' {
-                let trimmed = line.trim_end_matches('\r').to_string();
-                if trimmed.starts_with("SSH-") {
-                    self.server_version = trimmed;
-                    break;
+                match classify_version_line(&line)? {
+                    VersionLine::Version(v) => {
+                        self.server_version = v;
+                        break;
+                    }
+                    VersionLine::Banner(text) => {
+                        self.verbose(&format!("banner: {text}"));
+                        line.clear();
+                    }
                 }
-                // Banner line — print it if verbose.
-                self.verbose(&format!("banner: {trimmed}"));
-                line.clear();
             } else {
-                line.push(char::from(byte));
+                line.push(byte);
                 if line.len() > 1024 {
                     return Err(SshError::ProtocolError("version line too long".into()));
                 }
@@ -3886,6 +3945,91 @@ mod tests {
         assert_eq!(hex_to_bytes(""), Vec::<u8>::new());
         // A dangling digit is dropped rather than read as half a byte.
         assert_eq!(hex_to_bytes("abc"), vec![0xab]);
+    }
+
+    // ------------------------------------------------------------------
+    // Version exchange (RFC 4253 §4.2)
+    // ------------------------------------------------------------------
+
+    fn version_of(line: &[u8]) -> String {
+        match classify_version_line(line) {
+            Ok(VersionLine::Version(v)) => v,
+            Ok(VersionLine::Banner(b)) => panic!("expected a version line, got banner {b:?}"),
+            Err(e) => panic!("expected a version line, got error {e}"),
+        }
+    }
+
+    #[test]
+    fn the_version_line_is_recognised_and_stripped_of_its_cr() {
+        assert_eq!(version_of(b"SSH-2.0-OpenSSH_9.6\r"), "SSH-2.0-OpenSSH_9.6");
+    }
+
+    #[test]
+    fn a_bare_lf_terminator_is_accepted_too() {
+        // OpenSSH tolerates a missing CR, and the byte we hash is the same
+        // either way -- the CRLF is framing, not part of V_S.
+        assert_eq!(version_of(b"SSH-2.0-Dropbear"), "SSH-2.0-Dropbear");
+    }
+
+    #[test]
+    fn only_the_terminating_cr_is_removed() {
+        // A CR earlier in the line is not framing. Trimming every trailing CR
+        // would be a second place where our bytes and the server's could differ.
+        assert_eq!(version_of(b"SSH-2.0-x\r\r"), "SSH-2.0-x\r");
+    }
+
+    #[test]
+    fn the_version_string_we_keep_is_byte_for_byte_what_arrived() {
+        // The regression: `char::from(byte)` read each byte as Latin-1, so this
+        // line came back out as its UTF-8 re-encoding -- one more byte than the
+        // server hashed, and so a different exchange hash and a signature that
+        // could not verify. UTF-8 is not legal here, but a server that sends it
+        // must either be understood exactly or refused, never quietly altered.
+        let raw = "SSH-2.0-Ünicode".as_bytes();
+        assert_eq!(version_of(raw).as_bytes(), raw);
+    }
+
+    #[test]
+    fn a_version_line_that_is_not_utf8_is_refused_rather_than_mangled() {
+        // 0xFF is not valid UTF-8 in any position. The old code turned it into
+        // U+00FF and carried on, hashing two bytes where the server hashed one.
+        let err = classify_version_line(b"SSH-2.0-bad\xFFname\r");
+        assert!(
+            matches!(err, Err(SshError::ProtocolError(_))),
+            "a version line we cannot reproduce byte-for-byte must be an error"
+        );
+    }
+
+    #[test]
+    fn lines_before_the_version_are_banners() {
+        let Ok(VersionLine::Banner(text)) = classify_version_line(b"Authorized users only\r")
+        else {
+            panic!("a line not starting with SSH- is a banner");
+        };
+        assert_eq!(text, "Authorized users only");
+    }
+
+    #[test]
+    fn a_banner_cannot_smuggle_control_sequences_to_the_terminal() {
+        // Banners arrive from an unauthenticated peer and get printed. Escaping
+        // them is why they are not simply decoded.
+        let Ok(VersionLine::Banner(text)) = classify_version_line(b"evil\x1b[2Jbanner") else {
+            panic!("expected a banner");
+        };
+        assert!(
+            !text.contains('\x1b'),
+            "escape byte reached the output: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_banner_that_is_not_utf8_is_shown_rather_than_fatal() {
+        // Unlike the version line, a banner is not hashed, so an undecodable one
+        // is not a reason to refuse to talk to the server.
+        assert!(matches!(
+            classify_version_line(b"caf\xE9"),
+            Ok(VersionLine::Banner(_))
+        ));
     }
 
     #[test]

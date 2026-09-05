@@ -294,10 +294,11 @@ def is_run_from_disk(name: str, data: bytes) -> bool:
 
     * a `.sh`, because `bash` tokenises a CR as part of the word it ends, so
       `set -u` becomes `set -u$'\\r'` and a sourced path gains a trailing CR;
-    * anything opening `#!`, because the kernel reads that line verbatim and a
-      trailing CR becomes part of the interpreter's *path*. `/usr/bin/env
-      python3\\r` is not a program that exists, and the error names a file that
-      plainly does, which is among the worse diagnostics a person can be handed.
+    * anything opening `#!` *followed by a path*, because the kernel reads that
+      line verbatim and a trailing CR becomes part of the interpreter's *path*.
+      `/usr/bin/env python3\\r` is not a program that exists, and the error names
+      a file that plainly does, which is among the worse diagnostics a person
+      can be handed.
 
     Deliberately not keyed on `.py`. CPython decodes CRLF source correctly
     (universal newlines), so an imported module is unharmed; a `.py` that is
@@ -305,10 +306,33 @@ def is_run_from_disk(name: str, data: bytes) -> bool:
     matters. Keying on the suffix instead would refuse builds over library
     files where nothing is wrong, which is the false positive this split exists
     to remove.
+
+    ## Why `#!` alone is not the test (2026-09-04)
+
+    Because `#![deny(clippy::all)]` -- the inner attribute at the top of most
+    crate roots in this tree -- opens with those exact two bytes. While the
+    scope was the declared set no `.rs` was ever read, so the ambiguity could
+    not fire; widening the scope to every tracked file made it fire at once, on
+    lane C's `gui/toolkit/src/colorpicker.rs`, and a cosmetic CR in a Rust
+    source file was about to *stop a build*. Widening what a checker looks at
+    also widens what its heuristics are wrong about, and that is the failure
+    mode to expect from a scope change, not the one it was made to fix.
+
+    The discriminator is that a shebang's interpreter is a **path**: `execve`
+    does not search `PATH` for it, so the token after `#!` must begin with `/`
+    to name anything at all. `#![` cannot. Blanks between are allowed because
+    the kernel allows them (`#! /bin/sh` runs).
+
+    A relative interpreter (`#!./foo`) is excluded on purpose rather than
+    overlooked: it resolves against the *caller's* working directory, not the
+    script's, so it is unusable for a repository script and treating it as one
+    would buy back the ambiguity for a case this tree does not contain.
     """
     if name.endswith(".sh"):
         return True
-    return data.startswith(b"#!")
+    if not data.startswith(b"#!"):
+        return False
+    return data[2:].lstrip(b" \t").startswith(b"/")
 
 
 def is_binary(data: bytes, asserted_text: bool) -> bool:
@@ -575,6 +599,18 @@ def self_test() -> int:
         ("a .py without a #! is not: CPython reads CRLF source correctly",
          is_run_from_disk("x.py", b"import os\n"), False),
         ("prose is not", is_run_from_disk("notes.txt", b"hello\n"), False),
+        # The `#![` regression (2026-09-04). This pair is the whole reason the
+        # shebang test is not `startswith(b"#!")`: a Rust inner attribute opens
+        # with those two bytes, and until the scope widened no `.rs` was ever
+        # read so nothing could notice. Graded as a pair because "recognises a
+        # shebang" and "is not fooled by an attribute" are separate properties
+        # and an implementation can have either one alone.
+        ("a Rust inner attribute is not a shebang",
+         is_run_from_disk("lib.rs", b"#![deny(clippy::all)]\n"), False),
+        ("...and neither is a shebang-shaped comment with no path",
+         is_run_from_disk("x", b"#!not-a-path\n"), False),
+        ("a shebang with a space before the path is still a shebang",
+         is_run_from_disk("x", b"#! /bin/sh\n"), True),
 
         # -- the binary override (2026-09-04). The pairing is the assertion:
         # identical bytes, and only the asserted-text set differs.

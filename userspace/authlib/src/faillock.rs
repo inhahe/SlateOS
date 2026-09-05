@@ -306,11 +306,17 @@ fn hex_decode(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
     }
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(text.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        let hi = char::from(*pair.first()?).to_digit(16)?;
-        let lo = char::from(*pair.get(1)?).to_digit(16)?;
+    // `as_chunks::<2>` rather than `chunks_exact(2)`: the chunk size is a
+    // constant, so each pair arrives as a `[u8; 2]` that destructures directly
+    // instead of a slice whose length the compiler cannot see -- which is what
+    // forced the two `?`-returning lookups below to exist at all. The remainder
+    // is empty because the odd-length case returned above, so `.0` is the whole
+    // input and discarding the rest loses nothing.
+    let (pairs, _) = text.as_bytes().as_chunks::<2>();
+    let mut out = Vec::with_capacity(pairs.len());
+    for [hi_byte, lo_byte] in pairs {
+        let hi = char::from(*hi_byte).to_digit(16)?;
+        let lo = char::from(*lo_byte).to_digit(16)?;
         out.push(u8::try_from(hi.checked_mul(16)?.checked_add(lo)?).ok()?);
     }
     Some(out)

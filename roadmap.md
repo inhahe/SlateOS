@@ -920,23 +920,27 @@ Roadmap:
   which was an O(n²) insertion sort that silently left the array unsorted when
   its `mmap` failed, with an allocation-free introsort.
   Linking, not running — same caveat as CPython. The rootfs rung is next.
-- `[B]` **Pseudo-terminals — scoped 2026-08-21, blocked on lane A.** The libc
-  half is already written and composed over the primitives
-  (`posix/src/pty.rs`: `openpty`/`forkpty`/`login_tty`), so it starts working
-  with no edit the moment `posix_openpt` can return a master fd. What is
-  missing is a kernel object, and it must be one: a pty's `termios` is shared
-  by two *processes*, and `^C` has to reach the foreground group when it is
-  typed rather than when somebody next calls `read`. Neither is expressible in
-  libc — see design-decisions.md §345 for the alternative and why it fails.
-  The ask is mostly a *generalisation* of the console line discipline that
-  `kernel/src/tty.rs` already implements and self-tests, from one hardwired
-  device to N. Filed as
+- `[-]` `[B]` **Pseudo-terminals — scoped 2026-08-21, unblocked 2026-08-23.**
+  **Status: the block is cleared; the remaining work is lane B's.** Lane A
+  landed the pty family (syscalls 544–556, plus 869 `READABLE_BYTES` and
+  870/871 `GET/SET_PGRP`) on 2026-08-23, answering
   `requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`.
-  Blocks: interactive CPython, `apps/terminal` driving a real shell (C), and
-  sshd's PTY support. That last was marked `[x]`; it has since been corrected
-  to `[-]` and sshd now *refuses* `pty-req` and `shell` rather than replying
-  SUCCESS and printing a fake prompt — see
-  `known-issues.md` → `B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT`.
+  The libc half is written and *wired*: `posix/src/ioctl.rs:3896`
+  (`posix_openpt`) issues `SYS_PTY_CREATE` and returns a real master fd, and
+  `posix/src/pty.rs` composes `openpty`/`forkpty`/`login_tty` over it. The
+  paragraph that used to sit here still said "blocked on lane A" eleven days
+  after that stopped being true, which is the failure mode a status line has:
+  it is written once, at the moment of blocking, and nothing prompts a rewrite
+  when the block clears.
+  What remains, and who owns it: **sshd hosting a session** (lane B —
+  `known-issues.md` → `TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION`;
+  sshd still *refuses* `pty-req` and `shell`, which is honest but is a refusal,
+  not support), **interactive CPython** (lane B), and **`apps/terminal` driving
+  a real shell** (lane C). None of the three is blocked on anyone else now.
+  Why it had to be a kernel object, kept for the record: a pty's `termios` is
+  shared by two *processes*, and `^C` has to reach the foreground group when it
+  is typed rather than when somebody next calls `read`. Neither is expressible
+  in libc — see design-decisions.md §345 for the alternative and why it fails.
 - `[B]` Translate POSIX calls to native syscalls (line ~1738)
 - `[B]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
 - `[B]` Rust toolchain, CPython, fastpy compiler self-hosting (lines ~5344–5346)

@@ -1479,9 +1479,7 @@ fn generate_dh_private() -> Result<BigUint, SshdError> {
     // least twice the 128-bit security level the group14 prime provides.
     let mut bytes = [0u8; 32];
     randrange::fill_secret(&mut bytes).map_err(|e| {
-        SshdError::ProtocolError(format!(
-            "cannot generate a Diffie-Hellman private key: {e}"
-        ))
+        SshdError::ProtocolError(format!("cannot generate a Diffie-Hellman private key: {e}"))
     })?;
     // Set the top bit so the exponent is a full 256 bits rather than however
     // many the leading zero bytes leave, and the bottom bit so it is odd. Both
@@ -1539,9 +1537,8 @@ impl HostKey {
     /// persist is a daemon whose identity changes silently.
     fn generate_and_persist(path: &str) -> Result<Self, SshdError> {
         let mut seed = [0u8; 32];
-        randrange::fill_secret(&mut seed).map_err(|e| {
-            SshdError::ConfigError(format!("cannot generate a host key: {e}"))
-        })?;
+        randrange::fill_secret(&mut seed)
+            .map_err(|e| SshdError::ConfigError(format!("cannot generate a host key: {e}")))?;
         let key = Self::from_seed(seed);
         write_openssh_private_key(path, &seed, &key.public_key)?;
         Ok(key)

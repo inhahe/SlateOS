@@ -59127,7 +59127,12 @@ The smaller gaps below were not addressed and carry over to that entry:
   carries a `termios` translation table this daemon does not have.
 
 
-## TD-B-SSHD-EXEC-DOES-NOT-STREAM-AND-SSH-DASH-T-IS-REFUSED — 2026-09-05
+## TD-B-SSHD-EXEC-DOES-NOT-STREAM-AND-SSH-DASH-T-IS-REFUSED — 2026-09-05 — FIXED 2026-09-05 (lane B)
+
+**Fixed.** `exec` streams as the command produces output, `ssh -T` runs a login
+shell on plain pipes, subsystems spawn, and `exec`'s stdin is a real pipe, so
+`ssh host 'wc -l' < file` counts the file instead of reporting 0. What follows
+is the original entry, unchanged; the account of the fix is at the end of it.
 
 **In short:** `ssh host` (a normal interactive login) works. Two narrower things
 do not. `ssh host 'some command'` waits for the command to finish before sending
@@ -59170,6 +59175,64 @@ needs exactly this machinery and nothing else new.
 
 **If never fixed:** SSH remains excellent for interactive logins and for
 commands that finish, and unusable for streaming ones and for `sftp`.
+
+### How it was fixed — 2026-09-05 (lane B)
+
+`wait_with_output()` is gone. A session's standard streams are now a
+`SessionIo` — `None`, `Terminal(Pty)`, or `Pipes` — held on the channel, so
+"terminal *or* three pipes, never both and never one of each" is a fact the
+type system enforces rather than a pair of `Option` fields that could disagree.
+The pump that already carried a pty's bytes now carries a pipe-backed session's
+in the same pass, so all four session kinds run on one code path:
+
+| Request | Before | After |
+|---|---|---|
+| `shell` **with** `pty-req` | worked | unchanged |
+| `shell` **without** `pty-req` (`ssh -T`) | refused | login shell on three pipes |
+| `exec` | buffered until exit, stdin `/dev/null` | streamed, stdin is a real pipe |
+| `subsystem` | refused | spawns the configured command on pipes |
+
+Three things the fix had to get right, each recorded in full in
+`design-decisions.md` §771:
+
+- **Nothing is buffered on the daemon side.** Each read is capped at the
+  channel's `remote_window`, and a zero window reads nothing, so the client's
+  back-pressure reaches the remote process through the kernel's pipe buffer
+  instead of accumulating in daemon memory. `ssh host 'yes'` from a paused
+  client costs one 8 KiB stack buffer, not a growing queue.
+- **The descriptors are made non-blocking, or the session is refused.**
+  `poll` is not sufficient on the write side: POSIX only promises `POLLOUT`
+  means *some* data may be written, so a large payload aimed at a nearly-full
+  pipe would block in `write` despite a clean poll — and one blocked write in
+  this single-threaded daemon stops every other connection on the machine. On
+  SlateOS the flag also selects the syscall: `posix`'s `write` reaches the
+  non-blocking `SYS_PIPE_TRY_WRITE` only when `O_NONBLOCK` is set.
+- **A session ends at end-of-file, not at the child's exit.** Closing on exit
+  races with the child's last write; closing on an empty read is wrong the
+  first time a program pauses mid-output. Both output pipes reaching EOF (or
+  `EIO` on a pty master) is the only unambiguous signal, and it is what
+  licenses the close.
+
+One defect found by review while writing the above and fixed with it: the pump
+originally reported "not finished" whenever the send window was closed, which
+left a session hanging when a command's final write happened to consume the
+last of the window — a client that has everything it asked for has no reason to
+send another `WINDOW_ADJUST`. Whether a session is finished is a fact about its
+streams; the window only decides whether to *read*.
+
+**Verified:** 164 tests pass on the Windows host and again under the WSL linux
+half (`scripts/coreutils-check.sh --only linux --dir userspace/sshd`), which is
+the build where `cfg(unix)` is true and therefore the only one that compiles
+the descriptor code at all. Thirteen of those tests are new and cover the
+stream bookkeeping directly, including a regression test for the zero-window
+defect above. Host and linux clippy are both clean.
+
+**Still open in sshd**, tracked separately: `env` requests are answered SUCCESS
+and discarded
+(`TD-B-SSHD-TELLS-EVERY-CLIENT-ITS-ENVIRONMENT-VARIABLES-WERE-ACCEPTED-AND-THROWS-THEM-AWAY`).
+And the `sftp` subsystem now has the machinery it needs, but no server: the
+configured `/usr/lib/sftp-server` does not exist in this tree, and
+`userspace/sftp` is a *client* that speaks its own protocol over raw TCP.
 
 
 ## TD-B-POLL-SELECT-AND-EPOLL-ARE-A-10MS-SPIN-LOOP-BECAUSE-THERE-IS-NO-KERNEL-WAIT — 2026-09-05
@@ -118194,3 +118257,182 @@ The cost is purely the length of the feedback loop.
 **If never fixed:** the gap widens. Every month the host and the gate diverge
 further, so the local run's predictive value keeps falling and the share of
 pushes that fail on a lint nobody could have seen locally keeps rising.
+
+## TD-B-THE-TREE-IS-ON-A-SPINNING-DISK-AND-BUILDS-SPEND-THEIR-TIME-LISTING-A-69000-FILE-DIRECTORY (lane B)
+
+**Status:** OPEN — 2026-09-05
+
+**In short:** Builds here regularly appear to hang — minutes with no output and
+almost no CPU used. They are not hung. The whole project lives on `D:`, which
+is a **mechanical hard disk** (a spinning platter, ~200× slower per read than a
+solid-state drive), and one build directory in it now holds **69,161 files**.
+Every `rustc` invocation has to list that directory before it can start, and on
+this disk that listing alone can take many minutes. Two solid-state drives sit
+in the same machine, one of them **325 GB free and essentially unused**.
+
+**How to see it.** Attach a debugger to the `rustc` that looks stuck — it is
+not spinning, it is waiting on the filesystem:
+
+```
+$ cdb -p <rustc pid> -pv -c "~*k; q"
+  ...
+  ntdll!NtQueryDirectoryFileEx
+  KERNELBASE!FindNextFileW          <-- here, for minutes
+  rustc_metadata!...find_library_crate
+```
+
+and the per-drive counters say why:
+
+| Drive | Device | Kind | Avg. read | Free |
+|---|---|---|---|---|
+| `C:` | Samsung 980 PRO | NVMe SSD | **0.13 ms** | 129 GB |
+| `D:` | WDC WD2004FBYZ | **SATA HDD, 7200 rpm** | **27.5 ms** | 333 GB |
+| `E:` | Samsung 960 EVO | NVMe SSD | — (idle) | **325 GB** |
+
+`D:` also sat at an average queue length of ~8 during a build — eight requests
+waiting on a device that serves one at a time.
+
+**Where it bit, three times in one session:**
+
+- A `cargo build -p sshd` sat silent for **9 minutes** having consumed **0.6
+  seconds of CPU**. It was enumerating
+  `target/x86_64-pc-windows-gnu/debug/deps` (69,161 files, 63.9 GB) — the `-L`
+  directory rustc must scan to resolve every `extern crate`.
+- `rd /s /q` on that directory ran **45 minutes** and freed no space before it
+  was stopped. It had got as far as `.fingerprint`.
+- Renaming the directory aside — normally an O(1) metadata operation — returned
+  *Access is denied* on two subdirectories and simply never returned on `deps`
+  after 6 minutes, while unrelated renames in the same parent succeeded
+  instantly. The saturated queue, not a stuck handle, is the explanation.
+
+**Why the directory is that large,** and why deleting it does not settle the
+matter: it is *one generation* of build output for the 2,288 fabricated
+userspace command crates described in the `open-questions.md` entry "2,288 of
+the 2,756 commands in `userspace/` report success for work they never did." It
+is not stale accumulation from months of work. Clear it and the next full build
+recreates it. So the size is a symptom of that open question, but the *latency*
+is separate and is fixable on its own.
+
+**What the proper fix is,** cheapest first:
+
+1. **Move the three `target/` directories to `E:`** — either
+   `build.target-dir` in each worktree's `.cargo/config.toml`, or an NTFS
+   junction (`mklink /J`) so no configuration changes at all. This needs no
+   administrator, touches no source, is reversible by deleting the junction,
+   and puts the 69,161-file directory on a device with a 0.13 ms read. It does
+   not move the *source* tree, so `git` operations stay on the HDD, but git is
+   not what is slow here.
+2. **Move the whole project to `E:`.** Strictly better, strictly more
+   disruptive: three worktrees, absolute paths in scripts and in this
+   documentation, and the operator's own shortcuts.
+
+**Relation to A-Q7.** Lane A's open question about antivirus is framed around
+"how we know it is not the disk." It *is* the disk. A-Q7's option 3 (relocate
+the tree) was written as though it required `C:` and an administrator; it
+requires neither, because `E:` is empty and writable. An addendum saying so is
+already filed under A-Q7 in `open-questions.md`.
+
+**Cost while unfixed:** every cold build pays minutes of directory enumeration
+per crate, and — worse than the time — the stalls are indistinguishable from a
+deadlock, so they get "diagnosed" repeatedly. Two separate investigations in
+one session went to a debugger before concluding the machine was merely slow.
+
+**If never fixed:** it worsens monotonically. The `deps` directory grows with
+the crate count, enumeration is linear in it, and the disk does not get faster.
+
+### Addendum 2026-09-05 (lane B) — measured, and a workaround that needs no filesystem surgery
+
+Both halves of the fix above were attempted. **Option 1 does not work as
+written**: renaming `target` aside so a junction can take its place fails with
+*Access is denied*, and it is not a permissions problem — `icacls` shows
+`Authenticated Users:(M)`, which includes delete. NTFS refuses to rename a
+directory while any file beneath it is open, and something in that 69,161-file
+tree is held open by a process this account cannot enumerate (`handle.exe`
+needs administrator). Both `move` and `ren` fail identically; unrelated
+directories in the same parent rename instantly. So the junction is blocked
+until whatever holds it is identified, which needs an elevated `handle.exe`.
+
+**What does work, immediately and with no filesystem changes at all**, is to
+leave the old directory where it is and send new output elsewhere:
+
+```bash
+CARGO_TARGET_DIR="E:/slateos-build/lane-b" cargo build -p sshd --target x86_64-pc-windows-gnu
+```
+
+It is per-command, so it cannot disturb another lane, and there is nothing to
+undo. It must not be committed to `.cargo/config.toml`: that file is tracked
+and shared, so a `build.target-dir` there would follow the branch into `main`
+and point all three lanes at one directory.
+
+**The measurement, same crate, same cold cache, half an hour apart:**
+
+| Target directory | Result |
+|---|---|
+| `D:` (HDD, 69,161-file `deps`) | **killed at 11 min**, still inside `rustc sshd`; 0.7 s of CPU consumed in the last 6 of those minutes |
+| `E:` (NVMe, empty `deps`) | **2 min 09 s**, complete, including `posix`, `userdb`, `authlib` and `sshd` from scratch |
+
+The second run built strictly *more* than the first and finished more than five
+times faster, which settles the question of where the time was going. Later
+runs in the same session: `cargo test -p sshd` 136 s and
+`cargo clippy -p sshd --all-targets` 111 s, both from a warm cache on `E:`.
+
+Reclaiming the 63.9 GB still sitting on `D:` is now independent of all this —
+nothing builds into it any more — but it is not free: `rd /s /q` ran 45 minutes
+against it and freed nothing. `robocopy /MIR` from an empty directory is the
+usual faster route on Windows and is worth trying before another `rd`.
+
+## TD-B-SSHD-TELLS-EVERY-CLIENT-ITS-ENVIRONMENT-VARIABLES-WERE-ACCEPTED-AND-THROWS-THEM-AWAY (lane B)
+
+**Status:** OPEN — 2026-09-05
+
+**In short:** When you run `ssh -o SendEnv=LANG host`, the client asks the
+server to set `LANG` in the session. Our server answers "yes, done" and then
+discards it. Nothing is set. The client has no way to find out, because the
+only signal it gets is the answer we lied in. A program on the far end that
+depends on `LANG`, `TZ` or `LC_ALL` silently runs with the wrong one.
+
+**Where it lives.** `userspace/sshd/src/main.rs`, the `"env"` arm of the
+channel-request handler (~line 4800):
+
+```rust
+"env" => {
+    // Accept environment variable requests silently.
+    if want_reply { /* ... SSH_MSG_CHANNEL_SUCCESS ... */ }
+}
+```
+
+The request payload — name and value, RFC 4254 §6.4 — is never even parsed.
+
+**Why answering SUCCESS is the wrong lie.** RFC 4254 makes the reply mean
+"the request was accepted", and a client is entitled to act on that. Answering
+FAILURE for something we do not do is not a defeat; it is the protocol working.
+This is also what OpenSSH does: `session_env_req` returns success only when the
+name matches an `AcceptEnv` pattern and failure otherwise, and clients handle
+that every day without complaint.
+
+**Why not simply set them.** Because an SSH client's environment is
+attacker-controlled input to a privileged process. `LD_PRELOAD`, `PATH`,
+`IFS`, `BASH_ENV` and friends turn "set a variable" into "run my code as the
+authenticated user with the server's choice of libraries". That is precisely
+why OpenSSH gates it behind an explicit, empty-by-default allowlist rather
+than accepting whatever arrives.
+
+**What the proper fix is,** as its own commit:
+
+1. Parse the request: two SSH strings, name then value.
+2. Add an `AcceptEnv` directive to the config, taking shell-glob patterns, and
+   defaulting to **empty** — the OpenSSH default, and the only safe one.
+3. Match the name against the patterns. On a match, record the pair on the
+   channel and answer SUCCESS; the recorded pairs are applied to the child's
+   environment when `shell`/`exec`/`subsystem` spawns it.
+4. On no match, answer FAILURE and log the rejected name at debug level.
+5. Reject names containing `=` or a NUL outright, whatever the patterns say.
+
+**Cost while unfixed:** any client that sends `SendEnv` gets a wrong answer.
+The practical damage today is limited — `LANG`/`LC_*` are the common cases and
+their absence degrades rather than breaks — but the *reporting* is the bug:
+a caller cannot distinguish "set" from "silently dropped".
+
+**If never fixed:** it stays a quiet correctness lie, and it gets worse the
+moment anything on this OS starts depending on a client-supplied variable,
+because the failure will look like a bug in that program instead of here.

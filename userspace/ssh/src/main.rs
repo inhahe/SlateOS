@@ -328,6 +328,16 @@ impl From<io::Error> for SshError {
 /// Our version identification string.
 const SSH_VERSION_STRING: &str = "SSH-2.0-SlateOS_1.0";
 
+/// How much of one pre-key-exchange greeting line we will hold in memory.
+///
+/// This is *not* the RFC 4253 §4.2 limit on the identification string — that is
+/// [`sshwire::MAX_IDENTIFICATION_LINE`], and `sshwire::decode_identification`
+/// enforces it, because it governs a value both ends have to hash identically.
+/// This bound covers the banner lines a server may send *before* it, which §4.2
+/// does not bound at all. Without one, a peer that never sends a newline grows
+/// this buffer until the client dies — before it has authenticated anything.
+const MAX_GREETING_LINE: usize = 1024;
+
 /// SSH message type codes (RFC 4253 / 4252 / 4254).
 mod msg {
     pub const SSH_MSG_DISCONNECT: u8 = 1;
@@ -604,48 +614,31 @@ enum VersionLine {
 
 /// Decide what a line read during the version exchange is (RFC 4253 §4.2).
 ///
-/// `line` is everything up to but not including the LF; the CR of the CRLF is
-/// removed here. A server — and only a server — may send any number of lines
-/// before its identification string; the identification string is the first that
-/// begins with `SSH-`.
+/// `line` is everything up to but not including the LF. A server — and only a
+/// server — may send any number of lines before its identification string; the
+/// identification string is the first beginning `SSH-`.
 ///
-/// # Why this takes bytes
+/// What that line *is*, once found, is `sshwire`'s to say: it is `V_S`, the
+/// second input to the exchange hash, so the terminator stripping, the length
+/// limit and the strict decode are shared with the server rather than restated
+/// here. Two of the three exchange-hash bugs found in this stack were the two
+/// ends disagreeing about that derivation while agreeing about everything after
+/// it.
 ///
-/// The identification string is `V_S`, the second input to the exchange hash.
-/// The server hashes the bytes it put on the wire, so we have to hash those same
-/// bytes back. This loop used to accumulate a `String` with
-/// `line.push(char::from(byte))`, which reads each byte as a *Latin-1* code
-/// point — so any byte ≥ 0x80 came back out of `as_bytes()` as the two-byte
-/// UTF-8 encoding of that code point, and the two ends hashed different `V_S`
-/// values. The signature check would then fail with nothing to say why.
-///
-/// §4.2 requires printable US-ASCII here, so no conforming server trips it —
-/// which is exactly the property that would have kept it hidden, the same way
-/// the placeholder `V_C` stayed hidden in sshd. Decoding strictly turns a silent
-/// mismatch into a stated error, and matches what sshd does with our line in the
-/// other direction.
-///
-/// Banner lines are *not* hashed and are not held to that: they are free text
-/// from an unauthenticated peer, on their way to a terminal, so they are escaped
-/// rather than decoded. Rejecting the connection over one would be refusing to
-/// talk to a server because of its greeting, and printing one raw would let that
-/// peer emit control sequences.
+/// Banner lines are not hashed and are not held to any of it: they are free text
+/// from a peer that has authenticated nothing, on its way to a terminal, so they
+/// are escaped rather than decoded. Refusing a connection over a greeting would
+/// be wrong, and printing one raw would let that peer emit control sequences.
 fn classify_version_line(line: &[u8]) -> Result<VersionLine, SshError> {
-    let trimmed = match line.split_last() {
-        Some((b'\r', rest)) => rest,
-        _ => line,
-    };
-    if trimmed.starts_with(b"SSH-") {
-        let version = String::from_utf8(trimmed.to_vec()).map_err(|_| {
-            SshError::ProtocolError(
-                "server version line is not valid UTF-8 (RFC 4253 §4.2 requires printable \
-                 US-ASCII)"
-                    .into(),
-            )
+    if sshwire::is_identification_line(line) {
+        let version = sshwire::decode_identification(line).map_err(|e| {
+            SshError::ProtocolError(format!("server identification line rejected: {e}"))
         })?;
-        return Ok(VersionLine::Version(version));
+        return Ok(VersionLine::Version(version.to_owned()));
     }
-    Ok(VersionLine::Banner(quoting::escape_unprintable(trimmed)))
+    Ok(VersionLine::Banner(quoting::escape_unprintable(
+        sshwire::strip_line_terminator(line),
+    )))
 }
 
 // The encoders -- `ssh_string`, `encode_mpint`, `strip_leading_zeros` -- live in
@@ -2152,7 +2145,7 @@ impl SshSession {
                 }
             } else {
                 line.push(byte);
-                if line.len() > 1024 {
+                if line.len() > MAX_GREETING_LINE {
                     return Err(SshError::ProtocolError("version line too long".into()));
                 }
             }

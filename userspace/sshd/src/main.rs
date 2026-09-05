@@ -3991,7 +3991,22 @@ fn do_version_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
     Ok(())
 }
 
-/// Read the SSH version line from the client.
+/// Read the client's identification line (RFC 4253 §4.2).
+///
+/// The result is `V_C`, the first input to the exchange hash, so *what the line
+/// is* -- where it ends, how long it may be, how it becomes a string -- is
+/// `sshwire`'s to say and not this file's. It was decided here once, and
+/// differently from the client: this loop dropped **every** CR in the line while
+/// `ssh` dropped only the trailing one, so `SSH-2.0-a\rb\r\n` would have been
+/// hashed as `SSH-2.0-ab` at this end and `SSH-2.0-a\rb` at the other. The
+/// symptom is a host-key signature that neither end can account for, which is
+/// also what an attack looks like. That was the third such disagreement found in
+/// this handshake; the shared definition is what stops there being a fourth.
+///
+/// Unlike a server, a client may not send anything ahead of its identification
+/// line (§4.2), so the first line read is required to be it -- there is no
+/// banner case here, and adding one would let an unauthenticated peer talk to
+/// this server's log before saying who it is.
 fn read_version_line(conn: &mut ConnectionState) -> Result<String, SshdError> {
     let mut line = Vec::new();
     let mut single = [0u8; 1];
@@ -4002,18 +4017,22 @@ fn read_version_line(conn: &mut ConnectionState) -> Result<String, SshdError> {
                 "connection closed during version exchange".into(),
             ));
         }
-        if single[0] == b'\n' {
+        let [byte] = single;
+        if byte == b'\n' {
             break;
         }
-        if single[0] != b'\r' {
-            line.push(single[0]);
-        }
-        if line.len() > 255 {
+        line.push(byte);
+        // A memory bound, not the protocol one: refuse a line that cannot fit
+        // §4.2's limit as soon as that is certain, rather than reading a
+        // megabyte from an unauthenticated peer to reach the same conclusion.
+        // `decode_identification` applies the exact limit, CRLF included.
+        if line.len() >= sshwire::MAX_IDENTIFICATION_LINE {
             return Err(SshdError::ProtocolError("version string too long".into()));
         }
     }
-    String::from_utf8(line)
-        .map_err(|_| SshdError::ProtocolError("invalid UTF-8 in version string".into()))
+    sshwire::decode_identification(&line)
+        .map(str::to_owned)
+        .map_err(|e| SshdError::ProtocolError(format!("client identification line rejected: {e}")))
 }
 
 /// Parse an SSH version string, returning the software version.

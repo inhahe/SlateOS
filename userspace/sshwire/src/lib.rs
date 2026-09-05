@@ -41,6 +41,96 @@
 use sha2::sha256;
 
 // ============================================================================
+// Identification string (RFC 4253 §4.2)
+// ============================================================================
+
+/// The §4.2 maximum for an identification line, *including* its CRLF.
+pub const MAX_IDENTIFICATION_LINE: usize = 255;
+
+/// Why a line could not be used as `V_C` / `V_S`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentificationError {
+    /// Longer than [`MAX_IDENTIFICATION_LINE`].
+    TooLong,
+    /// Not valid UTF-8, so it cannot be held as a `str` and reproduced
+    /// byte-for-byte. §4.2 requires printable US-ASCII, so this never happens
+    /// with a conforming peer — which is exactly why it must be an error and
+    /// not a lossy conversion.
+    NotUtf8,
+}
+
+impl core::fmt::Display for IdentificationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Spelled out rather than named, because these reach a user as the
+        // reason a connection was refused, and "NotUtf8" is not a reason.
+        let reason = match *self {
+            Self::TooLong => "longer than the 255 bytes RFC 4253 §4.2 allows, including its CRLF",
+            Self::NotUtf8 => {
+                "not valid UTF-8 (§4.2 requires printable US-ASCII); it cannot be hashed as \
+                 the peer sent it, so it is refused rather than altered"
+            }
+        };
+        f.write_str(reason)
+    }
+}
+
+impl core::error::Error for IdentificationError {}
+
+/// Remove the CR of a CRLF terminator — that one, and no other.
+///
+/// The caller has already removed the LF (it is what told them the line ended).
+/// Only the CR immediately before it is framing; a CR anywhere else is a byte of
+/// the line, and both ends must keep or drop it identically or they hash
+/// different strings. sshd used to drop *every* CR in the line and the client
+/// only the last, which is a third way for the two to disagree about `V_C`
+/// after the first two were fixed.
+#[must_use]
+pub fn strip_line_terminator(line: &[u8]) -> &[u8] {
+    match line.split_last() {
+        Some((b'\r', rest)) => rest,
+        _ => line,
+    }
+}
+
+/// Is this line the identification string rather than something before it?
+///
+/// RFC 4253 §4.2 lets a *server* send any number of lines before its
+/// identification string; the identification string is the first beginning
+/// `SSH-`. A client may not send anything first, so a server calls this only to
+/// reject what is not one.
+#[must_use]
+pub fn is_identification_line(line: &[u8]) -> bool {
+    strip_line_terminator(line).starts_with(b"SSH-")
+}
+
+/// Decode an identification line into the `V_C` / `V_S` that gets hashed.
+///
+/// Takes everything up to but not including the LF, strips the CR of the CRLF,
+/// and requires the rest to be exactly representable — because this string goes
+/// into [`compute_exchange_hash`] as bytes, and the far end hashes the bytes it
+/// put on the wire. Anything we cannot hand back unchanged has to be refused
+/// rather than adjusted: an adjusted one produces a hash mismatch reported as a
+/// bad host-key signature, which is indistinguishable from an attack.
+///
+/// Which protocol versions are acceptable (`SSH-2.0-`, and for a client also the
+/// `SSH-1.99-` compatibility form) is the caller's policy and differs by role,
+/// so it is not checked here.
+///
+/// # Errors
+///
+/// [`IdentificationError::TooLong`] past §4.2's limit, or
+/// [`IdentificationError::NotUtf8`] for a line that cannot be reproduced.
+pub fn decode_identification(line: &[u8]) -> Result<&str, IdentificationError> {
+    let trimmed = strip_line_terminator(line);
+    // The limit counts the CRLF, both bytes of it, whether or not this peer
+    // sent the CR.
+    if trimmed.len().saturating_add(2) > MAX_IDENTIFICATION_LINE {
+        return Err(IdentificationError::TooLong);
+    }
+    core::str::from_utf8(trimmed).map_err(|_| IdentificationError::NotUtf8)
+}
+
+// ============================================================================
 // Wire encoding (RFC 4253 §5)
 // ============================================================================
 
@@ -209,6 +299,97 @@ pub fn derive_key(k: &[u8], h: &[u8; 32], x: u8, session_id: &[u8; 32], needed: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- identification line (RFC 4253 §4.2) ----
+
+    #[test]
+    fn the_cr_of_the_crlf_is_framing_and_comes_off() {
+        assert_eq!(strip_line_terminator(b"SSH-2.0-x\r"), b"SSH-2.0-x");
+    }
+
+    #[test]
+    fn a_line_with_no_cr_is_unchanged() {
+        // OpenSSH tolerates a bare LF, and the hashed bytes are the same either
+        // way — the terminator is framing, not part of the string.
+        assert_eq!(strip_line_terminator(b"SSH-2.0-x"), b"SSH-2.0-x");
+    }
+
+    #[test]
+    fn only_the_last_cr_comes_off() {
+        // This is the divergence itself. sshd stripped every CR in the line and
+        // the client only the trailing one, so for this input one end would have
+        // hashed `SSH-2.0-ab` and the other `SSH-2.0-a\rb`.
+        assert_eq!(strip_line_terminator(b"SSH-2.0-a\rb\r"), b"SSH-2.0-a\rb");
+    }
+
+    #[test]
+    fn an_empty_line_survives_the_terminator_strip() {
+        assert_eq!(strip_line_terminator(b""), b"");
+        assert_eq!(strip_line_terminator(b"\r"), b"");
+    }
+
+    #[test]
+    fn the_identification_line_is_the_one_starting_ssh() {
+        assert!(is_identification_line(b"SSH-2.0-OpenSSH_9.6\r"));
+        assert!(is_identification_line(b"SSH-1.99-legacy"));
+        assert!(!is_identification_line(b"Authorized users only\r"));
+        assert!(!is_identification_line(b""));
+        // The prefix test runs after the terminator strip, so a line that is
+        // *only* a terminator is not mistaken for one.
+        assert!(!is_identification_line(b"\r"));
+    }
+
+    #[test]
+    fn a_decoded_identification_is_byte_for_byte_what_arrived() {
+        assert_eq!(
+            decode_identification(b"SSH-2.0-OpenSSH_9.6\r"),
+            Ok("SSH-2.0-OpenSSH_9.6")
+        );
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_reproduced_is_refused_not_adjusted() {
+        // 0xFF is not valid UTF-8 anywhere. Reading it as U+00FF — which is what
+        // `char::from(u8)` does, and what the client used to do — yields a
+        // string whose bytes are two where the wire had one, so the two ends
+        // hash different values of V_S and the signature check fails with
+        // nothing to indicate the cause.
+        assert_eq!(
+            decode_identification(b"SSH-2.0-bad\xFFname\r"),
+            Err(IdentificationError::NotUtf8)
+        );
+    }
+
+    #[test]
+    fn the_length_limit_counts_the_crlf_the_rfc_counts() {
+        // §4.2: 255 bytes including CR and LF, so 253 of content is the most
+        // that fits, whether or not the sender included the CR.
+        let longest = vec![b'x'; MAX_IDENTIFICATION_LINE - 2];
+        assert!(decode_identification(&longest).is_ok());
+
+        let one_too_many = vec![b'x'; MAX_IDENTIFICATION_LINE - 1];
+        assert_eq!(
+            decode_identification(&one_too_many),
+            Err(IdentificationError::TooLong)
+        );
+
+        // A trailing CR is not content, so it does not consume the budget twice.
+        let mut with_cr = vec![b'x'; MAX_IDENTIFICATION_LINE - 2];
+        with_cr.push(b'\r');
+        assert!(decode_identification(&with_cr).is_ok());
+    }
+
+    #[test]
+    fn the_length_check_precedes_the_utf8_check() {
+        // Both are failures, and which is reported matters only for the message
+        // — but a fixed order is one less thing for the two ends to differ on.
+        let mut long_and_invalid = vec![b'x'; MAX_IDENTIFICATION_LINE];
+        long_and_invalid.push(0xFF);
+        assert_eq!(
+            decode_identification(&long_and_invalid),
+            Err(IdentificationError::TooLong)
+        );
+    }
 
     // ---- ssh_string ----
 

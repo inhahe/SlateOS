@@ -2156,6 +2156,198 @@ pub fn dh_group14_prime_bytes() -> Vec<u8> {
         .collect()
 }
 
+// ============================================================================
+// Base64 (RFC 4648 §4)
+// ============================================================================
+
+/// The standard (non-URL-safe) alphabet. RFC 4648 §4 Table 1.
+const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Why a base64 string could not be decoded.
+///
+/// One variant, deliberately. Which character was bad, and where, is the sort
+/// of detail that reads as helpful and is not: every caller here is decoding a
+/// key, and a key file is either well-formed or is not to be used. Reporting
+/// the offset of the first bad byte in a private key is a way of describing
+/// its contents to whoever provoked the error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Base64Error {
+    /// The input contains a character outside the alphabet, or its length is
+    /// not one a base64 encoder can produce.
+    ///
+    /// A quartet encodes 1, 2 or 3 bytes, so a group of exactly one character
+    /// encodes nothing and cannot have been produced by an encoder. That case
+    /// is this variant rather than a silent stop.
+    Invalid,
+}
+
+impl std::fmt::Display for Base64Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::Invalid => f.write_str("not valid base64"),
+        }
+    }
+}
+
+impl std::error::Error for Base64Error {}
+
+/// Encode `data` as base64 **without** `=` padding.
+///
+/// This is the form SSH uses everywhere it puts base64 in a line of text that
+/// something else parses by whitespace: `SHA256:` fingerprints, and the middle
+/// field of an `authorized_keys` or `known_hosts` line.
+#[must_use]
+pub fn base64_encode(data: &[u8]) -> String {
+    encode_inner(data, false)
+}
+
+/// Encode `data` as base64 **with** `=` padding to a multiple of four.
+///
+/// This is the form for anything stored as a standalone blob rather than a
+/// field in a line: the body of a PEM-style private key file.
+///
+/// # Why both spellings exist as separate names
+///
+/// They existed already, in different binaries, under *one* name. `ssh`'s
+/// `base64_encode` emitted no padding and `sshd`'s emitted padding, and the
+/// two programs exchange the strings each produces. Nothing detected it,
+/// because each crate tested its own function against its own expectation.
+/// Naming the padding in the function makes choosing wrong a thing you can see
+/// at the call site.
+#[must_use]
+pub fn base64_encode_padded(data: &[u8]) -> String {
+    encode_inner(data, true)
+}
+
+/// The encoder both public spellings share; `pad` picks which one.
+fn encode_inner(data: &[u8], pad: bool) -> String {
+    /// One base64 digit from the low six bits of `sextet`.
+    ///
+    /// Masking to `0x3f` before the lookup makes the index provably in range
+    /// for a 64-entry table, so the fallback cannot be reached.
+    fn digit(sextet: u32) -> char {
+        B64_ALPHABET
+            .get((sextet & 0x3f) as usize)
+            .map_or('A', |&b| char::from(b))
+    }
+
+    // `chunks(3)` states base64's own grouping rule once. The bit layout is
+    // identical for a full and a partial group -- only the number of digits
+    // emitted differs, and that number is the chunk's own length, so there is
+    // no separate tail case to keep in agreement with the loop head.
+    let mut out = String::with_capacity(data.len().div_ceil(3).saturating_mul(4));
+    for chunk in data.chunks(3) {
+        let [b0, b1, b2] = match *chunk {
+            [b0, b1, b2] => [b0, b1, b2],
+            [b0, b1] => [b0, b1, 0],
+            [b0] => [b0, 0, 0],
+            // `chunks(3)` yields neither an empty nor an over-long slice; this
+            // arm exists only because the compiler cannot know that.
+            _ => continue,
+        };
+        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(digit(n >> 18));
+        out.push(digit(n >> 12));
+        if chunk.len() >= 2 {
+            out.push(digit(n >> 6));
+        } else if pad {
+            out.push('=');
+        }
+        if chunk.len() >= 3 {
+            out.push(digit(n));
+        } else if pad {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Decode base64, accepting either padding form and ignoring ASCII whitespace.
+///
+/// # Errors
+///
+/// [`Base64Error::Invalid`] if the input holds a character outside the
+/// alphabet, or ends in a group of one character, which no encoder emits.
+///
+/// # Why this refuses rather than truncates
+///
+/// The decoder this replaces in `sshd` stopped at the first character it did
+/// not recognise and returned the bytes it had decoded so far. A host key file
+/// with a corrupted character in the middle therefore did not fail to load: it
+/// loaded as a *shorter* key, and the daemon then either rejected it for its
+/// length or — for a corruption past the 64-byte mark — started normally with
+/// a key whose comment had been silently eaten. A decoder that answers `Ok`
+/// for input no encoder produced is not a decoder; it is a guess.
+pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64Error> {
+    /// Not a base64 character. Distinct from every sextet, which are `0..=63`.
+    const INVALID: u8 = 0xFF;
+
+    /// Reverse lookup, built at compile time.
+    ///
+    /// The indexing here is const-evaluated: an out-of-range index fails the
+    /// build rather than panicking at run time, so this suppression cannot
+    /// hide a reachable panic. It is scoped to the table alone, leaving the
+    /// decode loop -- the part that reads bytes someone else wrote -- under
+    /// the lint.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "const-evaluated: an out-of-range index is a compile error, not a panic"
+    )]
+    const DECODE: [u8; 256] = {
+        let mut table = [INVALID; 256];
+        let mut i = 0usize;
+        while i < 64 {
+            table[B64_ALPHABET[i] as usize] = i as u8;
+            i += 1;
+        }
+        table
+    };
+
+    let sextet = |&b: &u8| DECODE.get(b as usize).copied().unwrap_or(INVALID);
+
+    // Padding and layout whitespace come off first, so the quartet loop below
+    // sees only data. Whitespace is stripped rather than rejected because
+    // every producer of these strings wraps them across lines; `=` because
+    // both padded and unpadded input must decode to the same bytes, which is
+    // what lets this one function replace three that disagreed about padding.
+    let body: Vec<u8> = input
+        .iter()
+        .copied()
+        .filter(|b| *b != b'=' && !b.is_ascii_whitespace())
+        .collect();
+
+    let mut out = Vec::with_capacity((body.len() / 4).saturating_mul(3));
+    for quad in body.chunks(4) {
+        // A group of one encodes no bytes at all, so it cannot have come from
+        // an encoder. The decoder this replaces treated it as end-of-input.
+        let (Some(a), Some(b)) = (quad.first().map(sextet), quad.get(1).map(sextet)) else {
+            return Err(Base64Error::Invalid);
+        };
+        if a == INVALID || b == INVALID {
+            return Err(Base64Error::Invalid);
+        }
+        // The shifts discard high bits by design: that is how six-bit sextets
+        // repack into eight-bit bytes. Rust panics only on a shift whose
+        // *amount* reaches the width, and every amount here is a constant
+        // below 8.
+        out.push((a << 2) | (b >> 4));
+
+        if let Some(c) = quad.get(2).map(sextet) {
+            if c == INVALID {
+                return Err(Base64Error::Invalid);
+            }
+            out.push((b << 4) | (c >> 2));
+            if let Some(d) = quad.get(3).map(sextet) {
+                if d == INVALID {
+                    return Err(Base64Error::Invalid);
+                }
+                out.push((c << 6) | d);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 // A test that gets an `Err` where it asserted a value should stop, loudly, at
 // the line that was wrong -- which is what these lints exist to prevent in
@@ -4122,5 +4314,113 @@ mod tests {
         // half-filling it: a partly-written secret that a caller ignored the
         // error on is worse than an untouched one, because it looks plausible.
         assert_eq!(buf, [0, 1, 2, 3]);
+    }
+
+    // ---- base64 (RFC 4648 §4) ----
+
+    #[test]
+    fn the_rfc_4648_test_vectors_encode_as_the_rfc_says() {
+        // §10. Pinning the published vectors rather than only round-tripping
+        // is the point: a round-trip passes for any self-consistent alphabet,
+        // including a wrong one, and these strings are read by OpenSSH.
+        for (plain, padded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64_encode_padded(plain.as_bytes()), padded, "{plain:?}");
+            assert_eq!(
+                base64_encode(plain.as_bytes()),
+                padded.trim_end_matches('='),
+                "{plain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_encoders_differ_only_in_padding() {
+        // This is the property that was false while `ssh` and `sshd` each had
+        // a function named `base64_encode` and only one of them padded. Now
+        // the difference is named, and it is exactly this.
+        for len in 0..40usize {
+            let data: Vec<u8> = (0..len)
+                .map(|i| u8::try_from(i % 251).unwrap_or(0))
+                .collect();
+            let unpadded = base64_encode(&data);
+            let padded = base64_encode_padded(&data);
+            assert_eq!(padded.trim_end_matches('='), unpadded, "len {len}");
+            assert!(padded.len().is_multiple_of(4), "len {len}: {padded}");
+        }
+    }
+
+    #[test]
+    fn both_padding_forms_decode_to_the_same_bytes() {
+        for len in 0..40usize {
+            let data: Vec<u8> = (0..len)
+                .map(|i| u8::try_from(i % 251).unwrap_or(0))
+                .collect();
+            assert_eq!(
+                base64_decode(base64_encode(&data).as_bytes()),
+                Ok(data.clone()),
+                "unpadded, len {len}"
+            );
+            assert_eq!(
+                base64_decode(base64_encode_padded(&data).as_bytes()),
+                Ok(data),
+                "padded, len {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn line_wrapping_survives_a_round_trip() {
+        // Every producer of these strings wraps them: PEM bodies at 70 columns,
+        // `known_hosts` not at all, and a hand-edited file however the editor
+        // felt. A decoder that choked on the newline would reject the files
+        // this crate exists to let two programs exchange.
+        let data: Vec<u8> = (0..96u8).collect();
+        let mut wrapped = String::new();
+        for line in base64_encode_padded(&data).as_bytes().chunks(20) {
+            wrapped.push_str(&String::from_utf8_lossy(line));
+            wrapped.push_str("\r\n");
+        }
+        assert_eq!(base64_decode(wrapped.as_bytes()), Ok(data));
+    }
+
+    #[test]
+    fn a_corrupt_character_is_an_error_and_not_a_shorter_key() {
+        // The bug this replaces, stated as a test. `sshd`'s decoder stopped at
+        // the first unrecognised character and returned what it had, so a host
+        // key file with one bad byte loaded as a *valid key of the wrong
+        // length* rather than failing. Truncation that reports success is
+        // indistinguishable from a legitimate shorter input.
+        let good = base64_encode_padded(&[0u8; 64]);
+        let mut bad = good.clone();
+        bad.replace_range(30..31, "!");
+
+        assert_eq!(base64_decode(good.as_bytes()).map(|v| v.len()), Ok(64));
+        assert_eq!(base64_decode(bad.as_bytes()), Err(Base64Error::Invalid));
+    }
+
+    #[test]
+    fn a_trailing_group_of_one_character_is_refused() {
+        // No encoder emits it: a quartet encodes 1, 2 or 3 bytes, so a group of
+        // one encodes nothing. Accepting it would mean two different strings
+        // decoding to the same bytes, which for a key file is a second valid
+        // spelling of the same secret.
+        assert_eq!(base64_decode(b"Zm9vYmFyZ"), Err(Base64Error::Invalid));
+        assert_eq!(base64_decode(b"Zm9vYmFy"), Ok(b"foobar".to_vec()));
+    }
+
+    #[test]
+    fn the_url_safe_alphabet_is_not_quietly_accepted() {
+        // RFC 4648 §5 swaps `+/` for `-_`. SSH uses §4, and a decoder that took
+        // both would accept key files no OpenSSH tool wrote.
+        assert_eq!(base64_decode(b"-_-_"), Err(Base64Error::Invalid));
+        assert!(base64_decode(b"+/+/").is_ok());
     }
 }

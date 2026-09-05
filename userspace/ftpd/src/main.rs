@@ -313,8 +313,15 @@ fn tcp_shutdown(handle: u64, how: u32) {
 
 /// Sleep for the given number of milliseconds.
 fn sleep_ms(ms: u64) {
-    // SAFETY: SYS_SLEEP takes one scalar argument (milliseconds).
-    let _ = unsafe { syscall1(SYS_SLEEP, ms) };
+    // `SYS_SLEEP`'s argument is **nanoseconds** (kernel/src/syscall/number.rs),
+    // so the millisecond count callers find natural has to be converted here.
+    // This once passed `ms` straight through, which made every sleep a million
+    // times shorter than asked: the bandwidth throttle below slept microseconds
+    // instead of seconds, so `--max-bps` limited nothing at all. A wrong time
+    // unit fails silently — the program still runs, it just never waits — which
+    // is why the conversion is spelled out rather than left to the call site.
+    // SAFETY: SYS_SLEEP takes one scalar argument and writes no memory.
+    let _ = unsafe { syscall1(SYS_SLEEP, ms.saturating_mul(1_000_000)) };
 }
 
 // ============================================================================

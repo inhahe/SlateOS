@@ -35,11 +35,19 @@ description = "SlateOS sshd - SSH server daemon"
 # (design-decisions.md section 329 counted three): it hashed `$5$`/`$6$` entries
 # as sha256(password || salt) in hex, which is not SHA-crypt and is not what
 # `passwd` writes, and then fell through to comparing the entry as plaintext.
+#
+# `sshwire` for the encodings and the key-exchange arithmetic the far end has to
+# agree with byte for byte. It is the `sha2` argument one layer up: this crate
+# and `userspace/ssh` each had a private copy of the RFC 4253 section 8 exchange
+# hash, the server's drifted to hashing a placeholder client version, and no
+# client could verify the host key signature. Both suites were green. See
+# known-issues.md `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
 [dependencies]
 sha2 = { path = "../../sha2" }
 posix = { path = "../../posix" }
 randrange = { path = "../../randrange" }
 authlib = { path = "../authlib" }
+sshwire = { path = "../sshwire" }
 
 # Test-only. The fixtures write a shadow line and read it back, so two tests
 # naming one file make each assert against the other's data -- over the code

@@ -14,6 +14,24 @@
 //!   POLLIN set only when a completed connection is in the accept backlog.
 //! - **UDP sockets**: kernel-queried via `SYS_UDP_RX_READY` — POLLIN set
 //!   only when datagrams are queued; always writable when bound.
+//! - **Pseudo-terminals** (either end): kernel-queried via `SYS_PTY_POLL`.
+//!   Note its bit layout is **not** the pipe/socket one — writable is
+//!   `0x02` there, where a pipe puts `POLLPRI`. Hangup is folded into
+//!   readable on purpose; see `check_readiness` for why that is the right
+//!   shape for an event loop and not a lost condition.
+//! - **Unix-domain stream sockets** (`socketpair`): kernel-queried via
+//!   `SYS_SOCKETPAIR_POLL`, whose layout matches TCP's (writable at
+//!   `0x04`) rather than the pty's.
+//! - **`eventfd` / `timerfd` / `inotify` / `epoll`**: answered from the
+//!   userspace-side state `crate::epoll` keeps for each.
+//!
+//! That is all thirteen `HandleKind` variants — and the enumeration is
+//! kept complete on purpose, because this doc has been wrong by omission
+//! twice. Pty support existed here for some time while the list still
+//! implied `poll` could not see a terminal, and the entry that corrected
+//! that omission introduced another by leaving out `UnixStream`. A missing
+//! line here is not a cosmetic gap: it makes a caller design around a hole
+//! that is not there, which is how sshd nearly grew a second event loop.
 //!
 //! ## Timeout Handling
 //!

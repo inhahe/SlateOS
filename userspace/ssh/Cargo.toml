@@ -27,6 +27,14 @@ description = "SlateOS SSH-2 client"
 # `randrange` reaches the kernel CSPRNG through the linked libc's `getrandom`
 # symbol, which is the one route that works from a program, and is shared with
 # `sshd` and `ssh-keygen` so there is one implementation rather than three.
+#
+# `sshwire` for the encodings and the key-exchange arithmetic the server has to
+# agree with byte for byte. It is the `sha2` argument one layer up: this crate
+# and `userspace/sshd` each had a private copy of the RFC 4253 section 8 exchange
+# hash, the server's drifted to hashing a placeholder client version, and this
+# client -- doing everything right -- could not verify any signature it got.
+# Both suites were green. See known-issues.md
+# `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
 [dependencies]
 # The host name added to known_hosts comes from the command line or from the
 # ssh config file, so it is not text ssh chose.
@@ -34,6 +42,7 @@ quoting = { path = "../quoting" }
 sha2 = { path = "../../sha2" }
 posix = { path = "../../posix" }
 randrange = { path = "../../randrange" }
+sshwire = { path = "../sshwire" }
 
 # Inherit the workspace lint configuration. This crate carried its own
 # `#![deny(clippy::all)]` and nothing else, which is the easy half: it left

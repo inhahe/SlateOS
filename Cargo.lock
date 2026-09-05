@@ -4728,6 +4728,7 @@ name = "email"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -10333,6 +10334,7 @@ name = "mediaconvert"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -15044,6 +15046,7 @@ name = "rssreader"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -15428,6 +15431,7 @@ name = "screenrecorder"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -16737,6 +16741,7 @@ dependencies = [
  "quoting",
  "randrange",
  "sha2",
+ "sshwire",
 ]
 
 [[package]]
@@ -16755,6 +16760,14 @@ dependencies = [
  "posix",
  "randrange",
  "scratchdir",
+ "sha2",
+ "sshwire",
+]
+
+[[package]]
+name = "sshwire"
+version = "0.1.0"
+dependencies = [
  "sha2",
 ]
 
@@ -18113,6 +18126,7 @@ name = "torrent"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

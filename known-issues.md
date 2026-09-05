@@ -57377,8 +57377,17 @@ and that is exactly the shape that survives a reading.
 screenful of information that is a constant compiled into the program. The
 drawing is real, the filtering and sorting and searching are real, the parsing
 is real — and there is no source. This entry names the pattern, because it has
-now been found six times and writing it up six times separately would train
+now been found nine times and writing it up nine times separately would train
 the reader to skim it.
+
+**`email` is the sharpest case and the least fixable today.** The client is
+complete -- MIME parsing, RFC 5322 addresses, threading, filter rules, IMAP and
+SMTP command builders with tests over each -- and none of the protocol half can
+run, because `net/` has no client this lane can call. Twenty of its thirty-four
+uncalled functions are that layer. What was wired instead is everything that
+does not need a socket: reading, flagging, replying, forwarding, searching,
+composing and building the message. Sending stops at the point where a socket
+would be, and says so on the status line.
 
 **`spreadsheet` is the mirror image and belongs here for the same reason.**
 It is not short of a source — the user types the data — it is short of a
@@ -57402,6 +57411,9 @@ promise to break.
 | `sysinfo` | CPU, memory, disks, uptime | any read at all — uptime is the string `"4h 23m 17s"` | `None`, documented |
 | `sysmonitor` | processes, live graphs, alerts | a real process source, but the *clock* is now real | the refresh interval |
 | `finance` | accounts, budgets, transactions | both a source and a way to enter anything; see its own entry | `None`, documented |
+| `email` | an inbox, folders, threads, filters | a network. Every IMAP and SMTP command it can build -- `login`, `select`, `fetch`, `ehlo`, `mail_from`, twenty in all -- returns a protocol string with no socket to write it to | `None`, documented |
+| `rssreader` | feeds, folders, articles, search | an HTTP client. Its RSS/Atom parser is real and now runs at startup on one sample feed, but nothing can fetch a second one, so `global_auto_refresh_seconds` has nothing to refresh | `None`, documented |
+| `torrent` | transfers, peers, pieces, trackers | a network. `TrackerRequest::build_url` builds an announce URL nothing can fetch, so no peer list ever comes back -- the swarm a download picks pieces from is invented at the first tick | `PIECE_STEP` while downloading |
 | `spreadsheet` | a sheet a user can actually fill in | nothing to *show* — the gap is the other way round: `import_csv`/`export_csv` work on a `String` and there is no file dialog, command line or system clipboard to carry one | `None`, documented |
 
 **The rule that came out of it, and it is not "wire a tick".** In each case the
@@ -59068,86 +59080,281 @@ real header size.
 recorded in the next entry rather than left to be discovered.
 
 
-## TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION — 2026-08-21
+## TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION — 2026-08-21 — FIXED 2026-09-05
 
-**In short:** `ssh host 'some command'` works properly now. `ssh host` — a
-plain interactive login — does not, and answers with "shell request failed".
-Two separate things are missing: a pseudo-terminal (a fake keyboard-and-screen
-pair that lets a program believe it is at a real terminal), and a connection
-loop that can move bytes in both directions at once. Until both exist, refusing
-is the honest answer; the previous code answered SUCCESS and printed a fake
-prompt.
+**In short:** `ssh host` — a plain interactive login — used to answer "shell
+request failed". It now works: the daemon allocates a pseudo-terminal (a fake
+keyboard-and-screen pair that lets a program believe it is at a real terminal),
+runs the user's login shell on it as that user, and moves bytes both ways.
+Editing, `^C`, job control, `clear`, `vi` and window resizing all behave,
+because they are the terminal's job and there is now a real terminal. Two of the
+three limitations below are gone; the third — `exec` buffering its output
+instead of streaming — remains, and has moved to its own entry.
 
-**Where it lives:** `userspace/sshd/src/main.rs` — `handle_channel_request`'s
-`pty-req` and `shell` arms, and `run_exec_request`.
+**Where it was:** `userspace/sshd/src/main.rs` — `handle_channel_request`'s
+`pty-req` and `shell` arms, and `handle_channels`.
 
-### The three limitations, and what each one costs
+### What unblocked it
 
-**1. `pty-req` is refused, because SlateOS has no pty device.**
-
-`kernel/src/tty.rs` contains a complete, self-tested line discipline —
-canonical mode, `ERASE`/`KILL`, `^C`→`SIGINT`, `VMIN`/`VTIME`, `termios`,
-`winsize` — but it exists exactly once, hardwired to the physical keyboard and
-screen. A pty is that same discipline with a program on the far end. Filed as
+Lane A landed the pty syscalls, fulfilling
 `requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`
-(lane A owns `kernel/**`); the reasoning for why this cannot be done in libc is
-`design-decisions.md` §345.
+and its two follow-ups. `posix` then grew `openpty`/`login_tty`/`forkpty` on top
+of them, which is what a session actually needs: `login_tty` is the only route
+by which a child can adopt a terminal as its *controlling* terminal, and a
+controlling terminal is what makes `^C` reach the foreground job rather than
+nothing at all.
 
-*Cost while unfixed:* clients print "PTY allocation request failed on channel
-0" and continue without one. That is exactly what they do against a real server
-configured with `PermitTTY no`, so it is a supported state rather than a broken
-one.
+### What was built
 
-**2. `shell` is refused, because an interactive shell needs both a pty and
-bidirectional I/O.**
+**1. `pty-req` allocates a real terminal.** `Pty::open` calls `openpty` with the
+client's window size, clamping the 32-bit dimensions SSH sends into the 16-bit
+ones `struct winsize` holds — clamping rather than truncating, because a
+wrapping cast turns 65 536 columns into *zero* columns, and a zero-width
+terminal breaks every line-wrapping program in a way that looks like a bug in
+that program. A second `pty-req` on one channel is refused (RFC 4254 §6.2 allows
+one, and replacing a live terminal would hang up a running shell).
 
-Even given a pty, `run_connection` is a single-threaded loop of blocking
-`recv_packet` calls. Hosting a shell means watching the socket and the child's
-pipes simultaneously. The proper fix is to give the connection loop a readiness
-wait over both — the same `SYS_IO_POLL`-shaped primitive the rest of userspace
-uses — rather than threads, which the target spec's `has-thread-local: false`
-makes a poor bet.
+**2. `shell` runs the login shell on the slave.** `std::process::Command` with a
+`pre_exec` closure that calls `login_tty(slave)`; `argv[0]` is the shell's
+basename with a leading hyphen, which is the entire protocol by which a shell is
+told it is a *login* shell and should read the profiles. Registering `pre_exec`
+is also what takes std off its `posix_spawn` fast path — necessary, because
+`posix_spawn` has no hook that could acquire a controlling terminal.
 
-*Cost while unfixed:* no interactive login over SSH. `ssh host command` covers
-scripted use, which is the majority of what a headless machine needs.
+The parent then closes its copy of the slave fd. That one `close` is the
+difference between a session that ends and one that hangs forever: hangup means
+"the last slave closed", so while the daemon holds one, an exited shell leaves a
+terminal that never reports the end of the session.
 
-**3. `exec` collects output rather than streaming it.**
+**3. The connection loop became readiness-driven.** `handle_channels` polls the
+socket (`SYS_TCP_POLL_STATUS`) and the pty master (`poll` on the fd) and sleeps
+with exponential backoff from 0.5 ms to 20 ms when neither has anything. It
+keeps a **blocking fast path**: with no child running — during key exchange, all
+of authentication, and every `exec`-only session — it blocks on `recv_packet`
+exactly as before, so the polling costs nothing on the paths that do not need
+it.
 
-`child.wait_with_output()` runs to completion and then sends. This is deliberate
-and not merely lazy: reading two pipes one after the other from a single thread
-deadlocks the moment the child fills the pipe that is not being read, and
-`wait_with_output` is the standard-library primitive that drains both together.
+Framing was split for this: `try_parse_packet` is a pure function over the
+buffer that returns `Ok(None)` for an incomplete packet, and `read_packet` is
+the blocking loop around it. The sequence number advances only when a packet is
+actually produced — it feeds both the MAC and the CTR keystream, so advancing it
+for a packet that had not arrived would desynchronise the cipher permanently.
+This is now covered by host tests that feed a packet in one byte at a time.
 
-*Cost while unfixed:* a command that never exits (`tail -f`) produces nothing at
-all, and a command with very large output is buffered in RAM. `ssh host 'find
-/'` will work but will hold the whole listing in memory first.
+**4. Flow control follows consumption, not arrival.** Client keystrokes are
+queued on the channel and written to the master when it reports writable, and
+the SSH window is credited only for bytes that reached the terminal. A program
+that stops reading its stdin therefore back-pressures the *client* instead of
+being absorbed into the daemon's memory — and, because a `write` to a master
+does not honour `O_NONBLOCK` (there is no `SYS_PTY_MASTER_TRY_WRITE`), the
+readiness check is what stops one uninterested process from freezing the whole
+daemon.
 
-*Proper fix:* the same readiness wait as (2). Once the loop can poll the child's
-pipes alongside the socket, all three limitations dissolve into one
-implementation — which is why they are one entry and not three.
+**5. Ending a session waits for both halves.** The channel closes only once the
+process has exited *and* the terminal has run dry — tracked as two separate
+facts — so a shell's final `logout`, or the last screen a full-screen program
+painted, is not cut off by the close. Hangup on the master drops the terminal
+but deliberately does *not* invent an exit status; the status is whatever `wait`
+reports, because a fabricated one would tell a caller's `if ssh host cmd; then`
+the wrong thing.
 
-### Also missing, smaller
+**6. Channel teardown became once-only, and now takes the session with it.**
+Long-lived sessions turned two latent framing faults into reachable ones, so
+both were fixed at their source rather than at the new call site:
+
+- `send_channel_eof` now takes the channel's *local* id (like
+  `send_channel_close`) and owns the `eof_sent` flag. Three call sites used to
+  test-and-set that flag independently and two skipped it, so the natural
+  `send_channel_eof(...); send_channel_close(...)` pairing — written by every
+  session-ending path in the file — emitted **two** `SSH_MSG_CHANNEL_EOF` per
+  channel. `send_channel_close` is likewise a no-op on an already-closed
+  channel, which is RFC 4254's rule: each side sends `CHANNEL_CLOSE` once and
+  the other replies. Without that, the ordinary end of an interactive session —
+  we close, the client closes back — sent a second close for a dead channel.
+- `handle_channel_close` now drops the pty and kills and reaps the child.
+  Before, it only set a flag, and the connection loop skips closed channels: a
+  client closing its channel without waiting (which is exactly what `~.` does)
+  would have stranded a running shell holding a pty for the lifetime of the
+  daemon, with no code path left that could ever notice it. Dropping the master
+  hangs the terminal up so a cooperative shell exits on its own; the kill is
+  the half that does not depend on the shell cooperating.
+
+### Still open, moved to its own entry
+
+`exec` still collects output and sends it when the command exits, and `shell`
+without a `pty-req` (`ssh -T host`) is still refused. Both need the same thing —
+the pump extended over a child's ordinary pipes as well as a pty master — and
+are tracked as `TD-B-SSHD-EXEC-DOES-NOT-STREAM-AND-SSH-DASH-T-IS-REFUSED`.
+
+The smaller gaps below were not addressed and carry over to that entry:
 
 - **`env` requests are accepted and discarded.** The arm replies SUCCESS
   without recording anything, so `ssh -o SendEnv=LC_ALL host` silently loses
-  the variable. Accepting is the right answer only once the variables reach the
-  child; today refusing would be more truthful, but OpenSSH's default is to
-  ignore unlisted variables *silently* too, so this is consistent with the
-  reference implementation rather than a lie.
-- **`exec`'s stdin is `/dev/null`.** `ssh host 'wc -l' < file` reports 0. This
-  is a consequence of (3), not a separate decision.
-- **Supplementary groups are not set.** `session_command` sets the primary gid
-  and uid; `setgroups` is not called, so a session does not carry the account's
+  the variable. Consistent with OpenSSH, which also ignores unlisted variables
+  silently, but not yet a real implementation.
+- **Supplementary groups are not set.** The session sets the primary gid and
+  uid; `setgroups` is not called, so a session does not carry the account's
   secondary group memberships. Blocked on the same gap `su` and `doas` have —
   see the comment at `userspace/doas/src/main.rs:731`.
+- **The client's terminal modes are not applied.** `pty-req` carries the
+  client's `termios` settings and they are dropped. They describe the *client's*
+  terminal, and the shell reconfigures the terminal immediately on startup
+  anyway, so the practical effect is nil; OpenSSH applies them only because it
+  carries a `termios` translation table this daemon does not have.
 
-**Trigger:** revisit when lane A lands the pty syscalls, or sooner if a
-readiness wait over pipes plus sockets appears for another reason.
 
-**If never fixed:** SSH remains a command-execution channel rather than a login
-service. Nothing lies about it — every unsupported request is refused at the
-protocol level and the client says so — but `apps/terminal` and interactive
-CPython over SSH stay out of reach.
+## TD-B-SSHD-EXEC-DOES-NOT-STREAM-AND-SSH-DASH-T-IS-REFUSED — 2026-09-05 — FIXED 2026-09-05 (lane B)
+
+**Fixed.** `exec` streams as the command produces output, `ssh -T` runs a login
+shell on plain pipes, subsystems spawn, and `exec`'s stdin is a real pipe, so
+`ssh host 'wc -l' < file` counts the file instead of reporting 0. What follows
+is the original entry, unchanged; the account of the fix is at the end of it.
+
+**In short:** `ssh host` (a normal interactive login) works. Two narrower things
+do not. `ssh host 'some command'` waits for the command to finish before sending
+any output, so `ssh host 'tail -f /var/log/x'` prints nothing, ever. And
+`ssh -T host` — asking for a shell *without* a terminal, which is how scripts
+pipe data through a remote shell — is refused outright. Both are the same
+missing piece, and neither loses data or misreports anything; they just cannot
+do the thing.
+
+**Where it lives:** `userspace/sshd/src/main.rs` — `run_exec_request`, and the
+`shell` arm of `handle_channel_request`.
+
+### Why they are one problem
+
+The session pump (`pump_sessions`) can move bytes between a client and a
+*pseudo-terminal*, because a pty is a single fd carrying both directions. A
+command without a terminal has three ordinary pipes instead — stdin, stdout,
+stderr — which have to be watched together. `run_exec_request` sidesteps that
+with `child.wait_with_output()`, the standard-library call that drains stdout
+and stderr concurrently and returns when the process exits. That is genuinely
+the right primitive for a blocking one-shot; reading two pipes one after another
+from a single thread deadlocks the moment the child fills the one not being
+read. It is simply not a streaming primitive.
+
+The fix is to teach the pump about pipe-backed sessions as well as pty-backed
+ones: poll the child's stdout and stderr alongside the socket, forward what is
+ready, and forward client `CHANNEL_DATA` into the child's stdin. `ssh -T` then
+becomes the same code path with the user's shell as the command, and `exec`'s
+stdin — currently `/dev/null`, which is why `ssh host 'wc -l' < file` reports
+0 — becomes a real pipe as a side effect.
+
+*Cost while unfixed:* a command that never exits produces nothing; a command
+with very large output is buffered in RAM (`ssh host 'find /'` holds the whole
+listing before sending it); `ssh -T host` fails with a refusal the client
+reports honestly. Interactive use, which is the common case, is unaffected.
+
+**Trigger:** do this next time sshd is opened, or sooner if something needs
+`sftp` — an sftp subsystem is a pipe-backed session with no terminal, so it
+needs exactly this machinery and nothing else new.
+
+**If never fixed:** SSH remains excellent for interactive logins and for
+commands that finish, and unusable for streaming ones and for `sftp`.
+
+### How it was fixed — 2026-09-05 (lane B)
+
+`wait_with_output()` is gone. A session's standard streams are now a
+`SessionIo` — `None`, `Terminal(Pty)`, or `Pipes` — held on the channel, so
+"terminal *or* three pipes, never both and never one of each" is a fact the
+type system enforces rather than a pair of `Option` fields that could disagree.
+The pump that already carried a pty's bytes now carries a pipe-backed session's
+in the same pass, so all four session kinds run on one code path:
+
+| Request | Before | After |
+|---|---|---|
+| `shell` **with** `pty-req` | worked | unchanged |
+| `shell` **without** `pty-req` (`ssh -T`) | refused | login shell on three pipes |
+| `exec` | buffered until exit, stdin `/dev/null` | streamed, stdin is a real pipe |
+| `subsystem` | refused | spawns the configured command on pipes |
+
+Three things the fix had to get right, each recorded in full in
+`design-decisions.md` §771:
+
+- **Nothing is buffered on the daemon side.** Each read is capped at the
+  channel's `remote_window`, and a zero window reads nothing, so the client's
+  back-pressure reaches the remote process through the kernel's pipe buffer
+  instead of accumulating in daemon memory. `ssh host 'yes'` from a paused
+  client costs one 8 KiB stack buffer, not a growing queue.
+- **The descriptors are made non-blocking, or the session is refused.**
+  `poll` is not sufficient on the write side: POSIX only promises `POLLOUT`
+  means *some* data may be written, so a large payload aimed at a nearly-full
+  pipe would block in `write` despite a clean poll — and one blocked write in
+  this single-threaded daemon stops every other connection on the machine. On
+  SlateOS the flag also selects the syscall: `posix`'s `write` reaches the
+  non-blocking `SYS_PIPE_TRY_WRITE` only when `O_NONBLOCK` is set.
+- **A session ends at end-of-file, not at the child's exit.** Closing on exit
+  races with the child's last write; closing on an empty read is wrong the
+  first time a program pauses mid-output. Both output pipes reaching EOF (or
+  `EIO` on a pty master) is the only unambiguous signal, and it is what
+  licenses the close.
+
+One defect found by review while writing the above and fixed with it: the pump
+originally reported "not finished" whenever the send window was closed, which
+left a session hanging when a command's final write happened to consume the
+last of the window — a client that has everything it asked for has no reason to
+send another `WINDOW_ADJUST`. Whether a session is finished is a fact about its
+streams; the window only decides whether to *read*.
+
+**Verified:** 164 tests pass on the Windows host and again under the WSL linux
+half (`scripts/coreutils-check.sh --only linux --dir userspace/sshd`), which is
+the build where `cfg(unix)` is true and therefore the only one that compiles
+the descriptor code at all. Thirteen of those tests are new and cover the
+stream bookkeeping directly, including a regression test for the zero-window
+defect above. Host and linux clippy are both clean.
+
+**Still open in sshd**, tracked separately: `env` requests are answered SUCCESS
+and discarded
+(`TD-B-SSHD-TELLS-EVERY-CLIENT-ITS-ENVIRONMENT-VARIABLES-WERE-ACCEPTED-AND-THROWS-THEM-AWAY`).
+And the `sftp` subsystem now has the machinery it needs, but no server: the
+configured `/usr/lib/sftp-server` does not exist in this tree, and
+`userspace/sftp` is a *client* that speaks its own protocol over raw TCP.
+
+
+## TD-B-POLL-SELECT-AND-EPOLL-ARE-A-10MS-SPIN-LOOP-BECAUSE-THERE-IS-NO-KERNEL-WAIT — 2026-09-05
+
+**In short:** `poll()`, `select()` and `epoll_wait()` are the calls a program
+uses to say "wake me when any of these is ready." Ours do not wait at all: they
+check every file descriptor in turn, sleep 10 ms, and check again, until
+something is ready or the timeout runs out. The program still gets the right
+answer, so nothing is visibly broken — it just arrives up to 10 ms late, and the
+process wakes 100 times a second while doing nothing. Every event-driven program
+on SlateOS pays this, which today means every server we have.
+
+**Where it is:** `posix/src/poll.rs` — `poll()` at the `POLL_INTERVAL_NS`
+constant (10 ms), `select()`'s identical loop below it, and
+`posix/src/epoll.rs`, whose `epoll_wait` walks its interest list through the
+same per-fd readiness checks. The module doc has always said so plainly
+("we can't do kernel-level event waiting yet"); it was never tracked here.
+
+**Why it is this way.** Readiness is per-object: a TCP socket answers
+`SYS_TCP_POLL_STATUS`, a pipe answers its own status call, a pty answers
+`SYS_PTY_POLL`. There is no syscall that takes a *set* of kernel objects and
+blocks until one of them is ready. Without that, "wait for any of these" can
+only be built as "ask each of these, repeatedly" — which is what this is.
+
+**What the proper fix is.** A kernel-side multi-object wait: hand it a list of
+handles and an event mask, it blocks the thread on all of them at once and
+returns which fired. `posix`'s three interfaces then become thin wrappers over
+one real wait, and the interval constants are deleted rather than tuned. This is
+lane A's to build (it is a scheduler/wait-queue feature, not a libc one).
+
+**Consequences today, in ascending order of who notices:**
+
+- Any program calling `poll` with a timeout of `-1` gets a 10 ms granularity
+  instead of an immediate wake-up.
+- Idle event loops cost 100 wake-ups/second each, so the cost scales with the
+  number of *idle* connections, which is the wrong direction.
+- It is why sshd's session loop does **not** route through `poll` and runs its
+  own 0.5 ms–20 ms backoff over the two readiness syscalls directly — see
+  design-decisions.md §770. A correct kernel wait would let that loop, and the
+  hand-rolled loops in every other daemon, collapse into one blocking call.
+
+**If never fixed:** everything keeps working and everything stays slightly
+late and slightly wasteful, with each new daemon either paying the 10 ms or
+hand-rolling its own tighter loop — which is how a single missing primitive
+becomes N incompatible workarounds. Nothing is blocked; the cost is diffuse,
+permanent, and grows with the number of programs.
 
 
 ## B-SSH-CLIENT-DISCARDED-THE-REMOTE-EXIT-STATUS-AND-ALL-OF-STDERR — 2026-08-21 — FIXED
@@ -60346,9 +60553,10 @@ on the host and for `x86_64-slateos`.
 `ftpd` sends the password in the clear — a property of FTP, not of this
 implementation, and now stated in its module documentation so that the
 authentication fix is not read as making the daemon safe to expose. The real
-answer is `sftp` over the now-working `sshd`, which is
-`TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION`'s neighbour and not yet
-built.
+answer is `sftp` over the now-working `sshd`, which is not yet built — and is
+blocked on the same missing piece as
+`TD-B-SSHD-EXEC-DOES-NOT-STREAM-AND-SSH-DASH-T-IS-REFUSED`, since an sftp
+subsystem is a pipe-backed session with no terminal.
 
 ## B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS — 2026-08-21 — FIXED
 
@@ -118006,3 +118214,906 @@ same request's own table gives `os-lane-c` as 65 CRLF files, 4 fatal, so the
 premise is wrong. The conclusion holds for a different reason — an attribute
 never rewrites a worktree on its own, so nothing converts either way, and lane
 C's files are neither repaired nor broken by this.
+
+### Lesson 121: before adding a private helper to an app you are wiring, grep for the four lines you are about to write again (lane C, 2026-09-05)
+
+Lesson 117 says a surviving mutation sometimes means the code is redundant
+rather than the test weak. I wrote that lesson on 2026-09-04 after it happened
+twice. It happened a third time the next day, in `apps/screenrecorder`, in the
+same shape:
+
+I added `reset_for_new_recording` so that a second recording would not continue
+the first one's frame count. A mutation deleting its three counter lines
+survived. The cause: `start_recording` already zeroed those counters twenty
+lines further down, **and** the file already had a `reset()` doing exactly what
+my helper did plus clearing the annotations. Three copies, one of them mine, and
+mine was the only one with no reason to exist.
+
+The mutation also mis-fired the first time, which is worth noting on its own:
+`s.replace(old, "", 1)` hit the *first* of the three identical blocks, not
+mine. A mutation aimed at duplicated code lands on whichever copy comes first in
+the file, and then proves something about a copy you were not testing. Both
+symptoms — the survivor and the mis-fire — were the same fact reported twice:
+**those lines exist more than once.**
+
+**The habit that would have caught it before writing any code**: when adding a
+private helper to a file you did not write, grep the file for the assignment its
+body would perform. One `grep -n "total_frames = 0"` returns three hits, and the
+helper is not written. That is cheaper than a mutation sweep and it happens at
+the right moment.
+
+This is the third instance in two days and the pattern is stable enough to state
+as a rule: **in a large unfamiliar file, the thing you are about to add usually
+exists.** The wiring campaign's apps are 2000-8000 lines each and were written
+by someone with no memory of them; the odds that a four-line utility is missing
+are much lower than the odds that it is somewhere you have not read yet.
+
+
+## TD-B-A-GREEN-CLIPPY-ON-THE-WINDOWS-HOST-PROVES-LITTLE-ABOUT-GATE-12 (lane B)
+
+**Status:** OPEN — 2026-09-05
+
+**In short:** Before pushing, we run `cargo clippy` on this machine and take a
+clean run as evidence the push will pass. It is not evidence. The clippy that
+runs here is **months older** than the one the push gate runs inside WSL, so
+the gate rejects code the local run called clean. Nothing is broken by this; it
+just means a failed push is the *first* time you learn, and on a crate the gate
+has to compile from cold that costs about seventeen minutes per attempt.
+
+**How to see it.** Three clippies, not two — the host has both channels
+installed and neither is current:
+
+```
+$ cargo clippy --version                  # host default: STABLE
+clippy 0.1.95 (59807616e1 2026-04-14)
+
+$ cargo +nightly clippy --version         # host nightly
+clippy 0.1.97 (d3cd04068e 2026-05-16)
+
+$ wsl -e sh -c '$HOME/.cargo/bin/cargo +nightly clippy --version'
+clippy 0.1.100 (a69a63265c 2026-09-03)    # what gate 12 runs
+```
+
+Two separate things are in play and it is worth keeping them apart, because
+the obvious remedy only addresses one of them. The host's *default* toolchain
+is **stable**, while the gate's is **nightly** — a channel difference. And the
+host's whole rustup installation was last updated 2026-05-16, while WSL's was
+updated 2026-09-03 — an age difference. So saying `cargo +nightly` locally,
+which is the fix for the *other* nightly trap in this file
+(`TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY`), closes the channel
+gap and leaves three and a half months of the age gap wide open. It narrows
+the blind spot; it does not remove it.
+
+**Where it bit.** Pushing the sshd interactive-session work on 2026-09-05. A
+local `cargo clippy -p sshd --all-targets --target x86_64-pc-windows-gnu`
+exited 0 with zero warnings. Gate 12 then failed the push on
+`clippy::needless_late_init` at `userspace/sshd/src/main.rs:1583` — a lint on
+**platform-independent** code (`hmac_sha256`), in a function nobody had touched
+in that change. The older clippy simply does not raise it. That is the
+important half: this is *not* only about `#[cfg(unix)]` arms the host never
+compiles, which is the failure mode gate 12 was built for and which everyone
+already expects. A lint-version skew rejects code that has no conditional
+compilation in it at all, so "I only changed portable code, the local run is
+enough" is exactly the wrong inference.
+
+**Why it is this way.** The two rustup installations live in two operating
+systems, were updated at different times, and nothing pins them together. Note
+what a `rust-toolchain.toml` would and would not buy: it would pin the
+*channel*, fixing the stable-vs-nightly half automatically for anyone who
+forgets `+nightly` — worth having on its own merits — but a channel is not a
+date, so it would leave the three-and-a-half-month age gap exactly where it is.
+
+**What the proper fix is.** Move both installations onto one dated nightly and
+thereafter update them together, pinned. **This is deliberately not being done
+as part of this task**, for two reasons that are about blast radius rather than
+effort. A rustup update invalidates every lane's `target/` cache at once, so
+all three lanes pay a full cold rebuild at a moment none of them chose. And
+lane A's kernel builds against a custom target JSON via `-Zjson-target-spec` —
+an explicitly unstable interface, of exactly the kind a multi-month nightly jump
+is entitled to change underneath it. Landing that from a userspace commit,
+while two other lanes have uncommitted work in flight, is how one lane's
+convenience becomes three lanes' morning. It should be done by whoever can
+watch all three trees, deliberately.
+
+**Workaround until then** — the gate tells you this itself, but it is worth
+having in one place, because the useful time to read it is *before* the push:
+
+```
+bash scripts/coreutils-check.sh --only linux --dir userspace/<crate>
+```
+
+runs exactly what gate 12 runs, on the warm WSL target cache, and takes a
+fraction of a push. Run it on any crate you changed that the gate will pick up.
+
+**Cost while unfixed:** one wasted push cycle per surprise, paid by whichever
+lane touches a crate gate 12 compiles. Nothing reaches `origin` broken — the
+gate is doing its job, and doing it is the only reason this was ever noticed.
+The cost is purely the length of the feedback loop.
+
+**If never fixed:** the gap widens. Every month the host and the gate diverge
+further, so the local run's predictive value keeps falling and the share of
+pushes that fail on a lint nobody could have seen locally keeps rising.
+
+## TD-B-THE-TREE-IS-ON-A-SPINNING-DISK-AND-BUILDS-SPEND-THEIR-TIME-LISTING-A-69000-FILE-DIRECTORY (lane B)
+
+**Status:** OPEN — 2026-09-05
+
+**In short:** Builds here regularly appear to hang — minutes with no output and
+almost no CPU used. They are not hung. The whole project lives on `D:`, which
+is a **mechanical hard disk** (a spinning platter, ~200× slower per read than a
+solid-state drive), and one build directory in it now holds **69,161 files**.
+Every `rustc` invocation has to list that directory before it can start, and on
+this disk that listing alone can take many minutes. Two solid-state drives sit
+in the same machine, one of them **325 GB free and essentially unused**.
+
+**How to see it.** Attach a debugger to the `rustc` that looks stuck — it is
+not spinning, it is waiting on the filesystem:
+
+```
+$ cdb -p <rustc pid> -pv -c "~*k; q"
+  ...
+  ntdll!NtQueryDirectoryFileEx
+  KERNELBASE!FindNextFileW          <-- here, for minutes
+  rustc_metadata!...find_library_crate
+```
+
+and the per-drive counters say why:
+
+| Drive | Device | Kind | Avg. read | Free |
+|---|---|---|---|---|
+| `C:` | Samsung 980 PRO | NVMe SSD | **0.13 ms** | 129 GB |
+| `D:` | WDC WD2004FBYZ | **SATA HDD, 7200 rpm** | **27.5 ms** | 333 GB |
+| `E:` | Samsung 960 EVO | NVMe SSD | — (idle) | **325 GB** |
+
+`D:` also sat at an average queue length of ~8 during a build — eight requests
+waiting on a device that serves one at a time.
+
+**Where it bit, three times in one session:**
+
+- A `cargo build -p sshd` sat silent for **9 minutes** having consumed **0.6
+  seconds of CPU**. It was enumerating
+  `target/x86_64-pc-windows-gnu/debug/deps` (69,161 files, 63.9 GB) — the `-L`
+  directory rustc must scan to resolve every `extern crate`.
+- `rd /s /q` on that directory ran **45 minutes** and freed no space before it
+  was stopped. It had got as far as `.fingerprint`.
+- Renaming the directory aside — normally an O(1) metadata operation — returned
+  *Access is denied* on two subdirectories and simply never returned on `deps`
+  after 6 minutes, while unrelated renames in the same parent succeeded
+  instantly. The saturated queue, not a stuck handle, is the explanation.
+
+**Why the directory is that large,** and why deleting it does not settle the
+matter: it is *one generation* of build output for the 2,288 fabricated
+userspace command crates described in the `open-questions.md` entry "2,288 of
+the 2,756 commands in `userspace/` report success for work they never did." It
+is not stale accumulation from months of work. Clear it and the next full build
+recreates it. So the size is a symptom of that open question, but the *latency*
+is separate and is fixable on its own.
+
+**What the proper fix is,** cheapest first:
+
+1. **Move the three `target/` directories to `E:`** — either
+   `build.target-dir` in each worktree's `.cargo/config.toml`, or an NTFS
+   junction (`mklink /J`) so no configuration changes at all. This needs no
+   administrator, touches no source, is reversible by deleting the junction,
+   and puts the 69,161-file directory on a device with a 0.13 ms read. It does
+   not move the *source* tree, so `git` operations stay on the HDD, but git is
+   not what is slow here.
+2. **Move the whole project to `E:`.** Strictly better, strictly more
+   disruptive: three worktrees, absolute paths in scripts and in this
+   documentation, and the operator's own shortcuts.
+
+**Relation to A-Q7.** Lane A's open question about antivirus is framed around
+"how we know it is not the disk." It *is* the disk. A-Q7's option 3 (relocate
+the tree) was written as though it required `C:` and an administrator; it
+requires neither, because `E:` is empty and writable. An addendum saying so is
+already filed under A-Q7 in `open-questions.md`.
+
+**Cost while unfixed:** every cold build pays minutes of directory enumeration
+per crate, and — worse than the time — the stalls are indistinguishable from a
+deadlock, so they get "diagnosed" repeatedly. Two separate investigations in
+one session went to a debugger before concluding the machine was merely slow.
+
+**If never fixed:** it worsens monotonically. The `deps` directory grows with
+the crate count, enumeration is linear in it, and the disk does not get faster.
+
+### Addendum 2026-09-05 (lane B) — measured, and a workaround that needs no filesystem surgery
+
+Both halves of the fix above were attempted. **Option 1 does not work as
+written**: renaming `target` aside so a junction can take its place fails with
+*Access is denied*, and it is not a permissions problem — `icacls` shows
+`Authenticated Users:(M)`, which includes delete. NTFS refuses to rename a
+directory while any file beneath it is open, and something in that 69,161-file
+tree is held open by a process this account cannot enumerate (`handle.exe`
+needs administrator). Both `move` and `ren` fail identically; unrelated
+directories in the same parent rename instantly. So the junction is blocked
+until whatever holds it is identified, which needs an elevated `handle.exe`.
+
+**What does work, immediately and with no filesystem changes at all**, is to
+leave the old directory where it is and send new output elsewhere:
+
+```bash
+CARGO_TARGET_DIR="E:/slateos-build/lane-b" cargo build -p sshd --target x86_64-pc-windows-gnu
+```
+
+It is per-command, so it cannot disturb another lane, and there is nothing to
+undo. It must not be committed to `.cargo/config.toml`: that file is tracked
+and shared, so a `build.target-dir` there would follow the branch into `main`
+and point all three lanes at one directory.
+
+**The measurement, same crate, same cold cache, half an hour apart:**
+
+| Target directory | Result |
+|---|---|
+| `D:` (HDD, 69,161-file `deps`) | **killed at 11 min**, still inside `rustc sshd`; 0.7 s of CPU consumed in the last 6 of those minutes |
+| `E:` (NVMe, empty `deps`) | **2 min 09 s**, complete, including `posix`, `userdb`, `authlib` and `sshd` from scratch |
+
+The second run built strictly *more* than the first and finished more than five
+times faster, which settles the question of where the time was going. Later
+runs in the same session: `cargo test -p sshd` 136 s and
+`cargo clippy -p sshd --all-targets` 111 s, both from a warm cache on `E:`.
+
+Reclaiming the 63.9 GB still sitting on `D:` is now independent of all this —
+nothing builds into it any more — but it is not free: `rd /s /q` ran 45 minutes
+against it and freed nothing. `robocopy /MIR` from an empty directory is the
+usual faster route on Windows and is worth trying before another `rd`.
+
+## TD-B-SSHD-TELLS-EVERY-CLIENT-ITS-ENVIRONMENT-VARIABLES-WERE-ACCEPTED-AND-THROWS-THEM-AWAY (lane B)
+
+**Status:** FIXED — 2026-09-05 (filed and fixed the same day; see "How it was
+fixed" at the end)
+
+**In short:** When you run `ssh -o SendEnv=LANG host`, the client asks the
+server to set `LANG` in the session. Our server answers "yes, done" and then
+discards it. Nothing is set. The client has no way to find out, because the
+only signal it gets is the answer we lied in. A program on the far end that
+depends on `LANG`, `TZ` or `LC_ALL` silently runs with the wrong one.
+
+**Where it lives.** `userspace/sshd/src/main.rs`, the `"env"` arm of the
+channel-request handler (~line 4800):
+
+```rust
+"env" => {
+    // Accept environment variable requests silently.
+    if want_reply { /* ... SSH_MSG_CHANNEL_SUCCESS ... */ }
+}
+```
+
+The request payload — name and value, RFC 4254 §6.4 — is never even parsed.
+
+**Why answering SUCCESS is the wrong lie.** RFC 4254 makes the reply mean
+"the request was accepted", and a client is entitled to act on that. Answering
+FAILURE for something we do not do is not a defeat; it is the protocol working.
+This is also what OpenSSH does: `session_env_req` returns success only when the
+name matches an `AcceptEnv` pattern and failure otherwise, and clients handle
+that every day without complaint.
+
+**Why not simply set them.** Because an SSH client's environment is
+attacker-controlled input to a privileged process. `LD_PRELOAD`, `PATH`,
+`IFS`, `BASH_ENV` and friends turn "set a variable" into "run my code as the
+authenticated user with the server's choice of libraries". That is precisely
+why OpenSSH gates it behind an explicit, empty-by-default allowlist rather
+than accepting whatever arrives.
+
+**What the proper fix is,** as its own commit:
+
+1. Parse the request: two SSH strings, name then value.
+2. Add an `AcceptEnv` directive to the config, taking shell-glob patterns, and
+   defaulting to **empty** — the OpenSSH default, and the only safe one.
+3. Match the name against the patterns. On a match, record the pair on the
+   channel and answer SUCCESS; the recorded pairs are applied to the child's
+   environment when `shell`/`exec`/`subsystem` spawns it.
+4. On no match, answer FAILURE and log the rejected name at debug level.
+5. Reject names containing `=` or a NUL outright, whatever the patterns say.
+
+**Cost while unfixed:** any client that sends `SendEnv` gets a wrong answer.
+The practical damage today is limited — `LANG`/`LC_*` are the common cases and
+their absence degrades rather than breaks — but the *reporting* is the bug:
+a caller cannot distinguish "set" from "silently dropped".
+
+**If never fixed:** it stays a quiet correctness lie, and it gets worse the
+moment anything on this OS starts depending on a client-supplied variable,
+because the failure will look like a bug in that program instead of here.
+
+### How it was fixed — 2026-09-05 (lane B)
+
+All five steps above, plus one the plan did not anticipate.
+
+| Request | Before | After |
+|---|---|---|
+| `env` for a name in `AcceptEnv` | SUCCESS, discarded | SUCCESS, and the child gets it |
+| `env` for any other name | SUCCESS, discarded | FAILURE, logged at debug level |
+| `env HOME=…` / `USER` / `LOGNAME` / `SHELL` / `TERM` | SUCCESS, discarded | FAILURE, even if a pattern matches |
+| `env` repeated to exhaustion | SUCCESS, discarded | Bounded: 128 variables, 64 KiB, and a repeat replaces |
+
+**The step the plan missed** — a hard refusal set. An allowlist alone leaves
+`AcceptEnv *` meaning "the client picks its own `HOME` and `SHELL`", and those
+are not preferences: they are the server's answers to who this session is,
+read from `/etc/passwd` *after* authentication. A client that chooses `SHELL`
+chooses which dotfiles the login shell sources, and a client that chooses
+`LOGNAME` makes every downstream audit log disagree with the account that
+authenticated. `TERM` is refused for a different reason — it is genuinely the
+client's to choose, but it arrives in the `pty-req` that describes the terminal
+it belongs to, and two sources for one value have no correct precedence.
+Everything else an administrator lists *does* override the base environment,
+`PATH` included: an allowlist that silently declines to do what it says is the
+same lie in a smaller box. `design-decisions.md` §772.
+
+**A second gap found on the way.** `AcceptEnv LC_*` needs a glob matcher, and
+this daemon had none — so `glob_matches`/`pattern_list_matches` were written
+for it, with `*`, `?` and `!` negation, and a negated pattern winning
+regardless of the order it is written in. The matcher backtracks only to the
+most recent `*`, which is deliberate: the pattern is the administrator's but
+the *name* is the client's, and a naive recursive matcher against
+`a*a*a*a*a*b` hands a remote client an unbounded amount of the daemon's CPU.
+There is a test for exactly that shape.
+
+`AllowUsers`, `DenyUsers`, `AllowGroups` and `DenyGroups` still compare
+literally, which means a configuration written with the patterns OpenSSH
+documents does not do what it says — tracked separately in
+`TD-B-SSHD-ALLOWUSERS-IS-DOCUMENTED-AS-A-PATTERN-LIST-AND-COMPARED-AS-A-STRING`.
+
+**Verified:** 180 tests pass on the host and under WSL's linux half (16 new
+ones covering the matcher, the policy, the request path and the child's actual
+environment); clippy clean on both.
+
+---
+
+## TD-B-SSHD-ALLOWUSERS-IS-DOCUMENTED-AS-A-PATTERN-LIST-AND-COMPARED-AS-A-STRING (lane B)
+
+**Status:** FIXED — 2026-09-05 (filed and fixed within the hour; see "How it
+was fixed" at the end)
+
+**In short:** `sshd_config` lets an administrator write `AllowUsers admin*` to
+mean "any account whose name starts with `admin`". Ours compares the whole line
+literally, so that setting matches an account *named* `admin*` — which cannot
+exist — and therefore locks everybody out. The same is true of `DenyUsers`,
+`AllowGroups` and `DenyGroups`. The failure is silent: the daemon starts, the
+configuration parses, and logins are refused with the ordinary "not permitted"
+message.
+
+**Where it lives.** `userspace/sshd/src/main.rs`, the access check:
+
+```rust
+if !config.allow_users.is_empty() && !config.allow_users.iter().any(|u| u == username) {
+    return false;
+}
+```
+
+and the three sibling comparisons beside it. All four use `==`.
+
+**Which direction it fails in.** Both, depending on the directive:
+
+| Directive | A pattern that should… | …actually |
+|---|---|---|
+| `AllowUsers admin*` | let `admin1` in | locks *everyone* out (fails closed) |
+| `DenyUsers guest*` | keep `guest1` out | lets `guest1` **in** (fails open) |
+
+The `Deny` half is the serious one: an administrator who wrote a pattern
+believes an account is blocked and it is not. There is no warning, because a
+pattern is a perfectly valid literal name as far as the parser is concerned.
+
+**What the proper fix is.** The matcher already exists — `pattern_list_matches`
+was written for `AcceptEnv` in the same file, with `*`, `?` and `!` negation
+and OpenSSH's rule that a negated match wins outright. Replace the four `==`
+comparisons with it, and add tests for both failure directions above.
+
+Note the one behaviour change this makes: a configuration that today contains
+`AllowUsers admin*` currently denies everybody, and afterwards will admit the
+`admin*` accounts. That is the directive doing what its name and every
+`sshd_config(5)` say — the present behaviour is not a stricter policy, it is a
+broken one.
+
+**Cost while unfixed:** any `sshd_config` written by someone who knows OpenSSH
+does something other than what it says. Nothing in this tree ships such a
+config yet, which is the only reason this is not urgent.
+
+**If never fixed:** the first real deployment that writes a `Deny` pattern gets
+an access-control rule that quietly does nothing.
+
+### How it was fixed — 2026-09-05 (lane B)
+
+All four comparisons now go through `pattern_list_matches`, the matcher written
+an hour earlier for `AcceptEnv`. `AllowUsers admin*` admits the admins;
+`DenyUsers guest*` blocks the guests; `AllowGroups dev-*` and `DenyGroups no-*`
+likewise; and `!` negation carries over, so `AllowUsers dev* !dev-intern` says
+the thing it looks like it says.
+
+The `Deny` side lost its `is_empty()` guard rather than gaining a pattern one:
+an empty pattern list matches nothing by construction, so the guard was
+restating the matcher's own base case in a second place where it could later
+disagree with it.
+
+**Tests, one per failure direction** — `an_allowusers_pattern_admits_the_accounts_it_names`
+(was fail-closed: locked everyone out) and
+`a_denyusers_pattern_actually_blocks_the_accounts_it_names` (was fail-open: let
+the named accounts in), plus `group_patterns_match_on_both_sides` and
+`a_negated_pattern_carves_an_exception_out_of_an_allow_list`. 184 tests pass on
+the host and under WSL's linux half; clippy clean on both.
+
+The behaviour change flagged above is real and intended: a configuration
+containing `AllowUsers admin*` used to deny everybody and now admits the
+`admin*` accounts. That is the directive doing what it says — the previous
+behaviour was not a stricter policy but a broken one.
+
+## TD-B-SSHD-DROPS-GLOBAL-REQUESTS-SO-SERVERALIVEINTERVAL-KILLS-THE-SESSION (lane B) — FIXED 2026-09-05
+
+**Status:** FIXED — `userspace/sshd/src/main.rs`, commit on `lane-b` 2026-09-05.
+
+**In short:** the option people set to *keep* an ssh session alive was the one
+that killed it. `ServerAliveInterval` makes the client poke the server every N
+seconds and hang up if the server does not answer; sshd never answered, so the
+client concluded the server was dead and closed a session that was perfectly
+healthy. Now it answers.
+
+### What was wrong
+
+`dispatch_channel_message` had no arm for `SSH_MSG_GLOBAL_REQUEST` (message type
+80, RFC 4254 §4). It fell through to the catch-all, which wrote a line to the
+debug log and returned. Nothing was sent back.
+
+RFC 4254 §4 says a global request carrying `want_reply = true` must be answered,
+with `SSH_MSG_REQUEST_SUCCESS` or `SSH_MSG_REQUEST_FAILURE`. The reply is the
+only signal the client gets, and — critically — *`FAILURE` is a perfectly good
+answer*. A client cannot distinguish "the server refused" from "the server is
+not there" by waiting, because both look identical from the outside.
+
+OpenSSH's liveness probe is built on exactly that. With `ServerAliveInterval N`
+set, the client sends `GLOBAL_REQUEST keepalive@openssh.com` with
+`want_reply = true` every N seconds. It picks that name *because* it knows no
+server implements it: any reply at all, `FAILURE` included, proves the far end is
+alive and still parsing packets. Our silence read as a lost probe. After
+`ServerAliveCountMax` of them — default 3 — the client tears the connection down.
+
+| Client configuration | What the user expected | What happened |
+|---|---|---|
+| `ServerAliveInterval 15` (a common NAT workaround) | session survives an idle period | session killed after ~45 s of idle |
+| `ServerAliveInterval 60`, `ServerAliveCountMax 3` | detect a genuinely dead server | every session dies after ~3 min |
+| default (no keepalive) | — | unaffected; this is why it went unnoticed |
+
+The failure is worst for the user who did the most right thing: keepalives are
+what you turn on when a firewall drops idle flows, so the configuration aimed at
+long-lived sessions was the only one that could not have them.
+
+### Two smaller holes found in the same dispatch
+
+- **No `SSH_MSG_UNIMPLEMENTED` for anything.** The constant existed at line 1370
+  and was `#[allow(dead_code)]` — it had never been sent. RFC 4253 §11.4 requires
+  an unrecognised message to be answered with `UNIMPLEMENTED` carrying the
+  sequence number of the packet being rejected.
+- **`window-change` ignored `want_reply`.** RFC 4254 §6.7 says `want_reply`
+  SHOULD be false for that request, and every client we have met sets it false —
+  but SHOULD is not MUST, and a client that set it waited forever. The same arm
+  also dropped a payload shorter than 8 bytes with no reply and no log line.
+
+### How it was fixed
+
+| Message | Before | After |
+|---|---|---|
+| `GLOBAL_REQUEST` (80), `want_reply` | dropped | `REQUEST_FAILURE` (82) |
+| `GLOBAL_REQUEST` (80), no reply wanted | dropped | dropped, logged by name |
+| unrecognised type | dropped | `UNIMPLEMENTED` (3) + rejected sequence number |
+| `DEBUG` (4) | dropped by catch-all | dropped by an explicit arm |
+| `UNIMPLEMENTED` (3) | dropped by catch-all | dropped by an explicit arm — see below |
+| `KEXINIT` (20) post-auth | dropped by catch-all | dropped by an explicit arm, logged plainly |
+| `window-change` with `want_reply` | dropped | `CHANNEL_SUCCESS`, or `CHANNEL_FAILURE` if too short |
+
+`UNIMPLEMENTED` needs its own arm rather than the catch-all, or a peer that sent
+`UNIMPLEMENTED` for our `UNIMPLEMENTED` would get another one back and the two
+ends would ping-pong until a socket buffer filled.
+
+`KEXINIT` is deliberately **not** answered with `UNIMPLEMENTED`: it is a message
+we recognise perfectly well and simply do not support post-handshake, so that
+reply would point the client at the wrong problem. See the separate rekey entry
+below.
+
+### The shape the fix took, and why
+
+The reply decision is a pure function, `global_request_reply(payload) -> (name,
+Option<reply>)`, and the sequence-number arithmetic is a method,
+`ConnectionState::current_recv_seq()`. Both were split out from the handlers so
+they could be tested without a socket — sshd's unit tests run against a
+connection whose handle is `0` and is never written to, so a test that needed a
+real send would simply not have been written, and the reply *is* the entire
+behaviour here.
+
+`current_recv_seq()` exists because of a genuine off-by-one: both receive paths
+advance `recv_seq` the moment a packet is produced, so during dispatch the
+counter already names the *next* packet. Sending it raw would have named a packet
+the client had not sent yet.
+
+**Verified:** 7 new tests, 191 passing in `cargo test -p sshd`, clippy clean.
+The keepalive test asserts the exact bytes an OpenSSH probe gets back.
+
+## TD-B-SSHD-DOES-NOT-REKEY-SO-A-LONG-SESSION-HANGS (lane B)
+
+**Status:** OPEN. Found 2026-09-05 while fixing the global-request entry above.
+
+**In short:** SSH periodically renegotiates its encryption keys, on a timer and
+by volume of data. Our server never does, and — worse — ignores the client when
+*it* asks. An OpenSSH client stops sending anything else until the renegotiation
+it started finishes, so a session that lasts an hour or moves a gigabyte stops
+dead, with no error, forever.
+
+### Where
+
+`userspace/sshd/src/main.rs`, `dispatch_channel_message`: the
+`msg::SSH_MSG_KEXINIT` arm logs and returns. There is no rekey path anywhere in
+the file — grepping for `rekey` finds nothing.
+
+### Why it matters
+
+Rekeying is not optional politeness. RFC 4253 §9 recommends it after one hour or
+one gigabyte, and OpenSSH implements both (`RekeyLimit`, default `default none`,
+which still means the *time*-based rekey at 1 h is off but the cipher-specific
+data limit is not — for AES-CTR that limit is large, but the client also rekeys
+on its own schedule in several builds and distributions patch it).
+
+The failure mode is a hang rather than an error, which is the expensive part. An
+OpenSSH client that sends `KEXINIT` will not send further channel data until the
+exchange completes; it holds the session open and silent. To the user, a working
+session simply stops responding mid-command, with no diagnostic on either end
+unless the server is in debug mode.
+
+### How to reproduce
+
+Connect with `ssh -o RekeyLimit=1M` and move more than a megabyte through the
+session (`cat` a large file). The session stalls at the limit.
+
+### What the proper fix looks like
+
+Implement server-side rekeying. Concretely:
+
+1. Factor the existing handshake so the KEX exchange (`KEXINIT` → `KEX_DH_INIT`
+   → `KEX_DH_REPLY` → `NEWKEYS`) can run against an already-encrypted
+   connection, not only against a fresh one. Today it is inline in the
+   connection setup path.
+2. Preserve the session identifier from the *first* exchange: RFC 4253 §7.2 says
+   the exchange hash `H` of the first KEX remains the session ID forever, and
+   only the keys are re-derived.
+3. Swap the cipher and MAC state at exactly the right packet boundary — new keys
+   take effect on the packet *after* `NEWKEYS` in each direction independently.
+   Getting this wrong desynchronises the keystream and turns every subsequent
+   packet into a MAC failure.
+4. Queue or drop non-KEX traffic while an exchange is in flight, per §7.1.
+5. Initiate our own rekey on the RFC's thresholds so the server is not relying on
+   the client to do it.
+
+The sequence numbers do **not** reset across a rekey, which the existing
+`recv_seq`/`send_seq` handling already gets right.
+
+### Until then
+
+The `KEXINIT` arm logs `client requested rekey (KEXINIT); unsupported, ignoring`
+in debug mode, which at least makes a stalled session diagnosable instead of
+inexplicable. That is a diagnostic, not a fix.
+
+## TD-B-SSHD-SIGNS-AN-EXCHANGE-HASH-OVER-A-CLIENT-VERSION-THE-CLIENT-NEVER-SENT (lane B) — FIXED 2026-09-05
+
+**Status:** FIXED — `userspace/sshd/src/main.rs`, commit on `lane-b` 2026-09-05.
+
+**In short:** the SSH server could not talk to any SSH client at all — not
+OpenSSH, not the `ssh` client in this same tree. Every connection died during
+the handshake, before anyone could even type a password. The cause was one
+line: when the server computed the fingerprint of the handshake that it signs to
+prove who it is, it filled in a *made-up* value where the client's own
+identification string belonged. The client, computing the same fingerprint from
+what really happened, got a different answer, so the server's signature failed
+to check out and the client hung up.
+
+### What was wrong
+
+`compute_exchange_hash` opened with:
+
+```rust
+// V_C: client version (we use a placeholder since we don't store it).
+hash_input.extend_from_slice(&ssh_string(b"SSH-2.0-client"));
+```
+
+and the comment was accurate: `do_version_exchange` read the client's version
+line, checked its prefix, wrote it to the debug log, and dropped it on the
+floor. `ConnectionState` had nowhere to put it.
+
+RFC 4253 §8 defines the exchange hash as
+
+```
+H = HASH(V_C || V_S || I_C || I_S || K_S || e || f || K)
+```
+
+where `V_C` is the client's identification string. `H` is not an internal
+checksum — it is the single value the whole handshake turns on:
+
+- the server **signs `H`** with its host key, and that signature is the only
+  evidence the client has that it is talking to the machine whose key it
+  trusts;
+- the client **recomputes `H` independently** from its own view of the
+  handshake and verifies the signature against its own copy;
+- `H` of the first exchange becomes the **session ID**, which is in turn part of
+  the publickey authentication signed blob (RFC 4252 §7).
+
+So a `V_C` the client never sent does not degrade the handshake, it ends it.
+Our client does exactly what it should — `verify_host_key_signature(&k_s, &h,
+&sig_blob)?` runs before anything else, deliberately ahead of the `known_hosts`
+prompt — and that check could never pass.
+
+| End | `V_C` used to build `H` |
+|---|---|
+| `userspace/ssh` (and OpenSSH) | the real client identification string, e.g. `SSH-2.0-SlateOS_1.0` |
+| `userspace/sshd` | the constant `SSH-2.0-client`, whatever the client sent |
+
+Everything else in the construction already agreed: `I_C`/`I_S` are the full
+KEXINIT payloads including the message byte on both sides, `K_S`, `e`, `f` and
+`K` match, `V_S` matches (the client uses the server version it actually read),
+and `derive_key`/`derive_keys` agree exactly — mpint `K`, then `H`, then the id
+byte, then the session ID. `V_C` was the only divergence, and one was enough.
+
+### Why nobody noticed
+
+There is no test anywhere that makes the two ends agree. `userspace/ssh` and
+`userspace/sshd` each have a thorough unit-test suite, and each suite tests its
+own implementation against its own idea of the protocol. Both compute a hash;
+neither ever compares its hash to the other's. A protocol is a contract between
+two programs, and every test we had checked one signature of that contract
+against itself.
+
+The `Cargo.toml` of *both* crates already contains the argument that would have
+caught this. sshd's says, of SHA-256:
+
+> This crate carried its own SHA-256, as does the client in `userspace/ssh` —
+> two implementations of one digest on the two ends of a connection, which is
+> the arrangement where a divergence hides best.
+
+That reasoning was applied to the digest and stopped there. `compute_exchange_hash`,
+`derive_keys`, `ssh_string`, `encode_mpint`, the readers, `build_packet`,
+`compute_mac` and AES-CTR are all still written twice, once per crate.
+
+### How it was fixed
+
+- `ConnectionState` gained `client_version: String`, with a doc comment saying
+  why it is stored rather than logged.
+- `do_version_exchange` keeps the line it already validated.
+- `compute_exchange_hash` takes `client_version` as its first parameter and
+  hashes it. The placeholder and its comment are gone, replaced by a note
+  recording what the substitution cost.
+
+Four tests. The load-bearing one,
+`the_exchange_hash_is_the_one_rfc_4253_specifies`, writes the §8 construction
+out longhand in the test and compares — deliberately *not* calling the
+production function, because a test that asserts a function equals itself
+catches nothing and the bug here was a missing input.
+`the_clients_own_version_reaches_the_exchange_hash` asserts two different client
+versions give two different digests, which is the property that was false.
+`the_placeholder_version_is_no_longer_what_gets_hashed` pins the specific
+fabricated string out of existence.
+`a_fresh_connection_has_not_learned_a_client_version_yet` pins the field's
+initial value, so a future refactor that computed the hash before the version
+exchange would fail rather than hash an empty string.
+
+**Verified:** 195 passing in `cargo test -p sshd`, clippy clean, rustfmt clean.
+
+### What still needs doing
+
+The fix is correct but the *structure* that produced it is untouched: the wire
+and crypto layer is still implemented twice, and nothing forces the two copies
+to agree. Filed as
+`TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`
+below.
+
+## TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE (lane B)
+
+**Status:** PARTLY FIXED, 2026-09-05. Items 1–3 below are done for the
+*encoders and the key-exchange arithmetic*: `userspace/sshwire` exists, both
+binaries depend on it, and neither keeps a private copy of `ssh_string`,
+`ssh_u32`, `encode_mpint`, `strip_leading_zeros`, the RFC 4253 §8 exchange hash
+or §7.2 key derivation. **Still open:** the fallible *readers*
+(`read_ssh_string`, `read_mpint`, `read_u32`, `read_bool`), `build_packet`,
+`compute_mac` and AES-CTR are still written twice — they return each crate's own
+error type, so moving them needs a shared `WireError` with a `From` impl on each
+side first. **Item 4 — an interop test — is untouched, and is the item that
+matters most**; see the note at the end.
+
+Filed 2026-09-05 alongside the fix above, which is the first bug this
+arrangement produced and the one that found it.
+
+**In short:** the SSH client and the SSH server each contain their own private
+copy of the same protocol plumbing — how to frame a packet, how to encode a
+number, how to compute the handshake fingerprint. The two copies are supposed to
+be identical, and nothing checks that they are. One of them drifted, and the
+result was a server no client could connect to.
+
+### Where
+
+`userspace/ssh/src/main.rs` (4261 lines) and `userspace/sshd/src/main.rs`
+(8775 lines). Duplicated between them, at minimum:
+
+| Function | Purpose | Now |
+|---|---|---|
+| `compute_exchange_hash` | RFC 4253 §8 — **this is the one that drifted** | shared |
+| `derive_key` / `derive_keys` | RFC 4253 §7.2 key derivation | shared |
+| `ssh_string`, `encode_mpint` | wire encoding | shared |
+| identification-line handling | RFC 4253 §4.2 — derives `V_C` / `V_S`, i.e. the *inputs* to the hash above; **drifted twice** | shared |
+| `read_ssh_string`, `read_mpint`, `read_u32`, `read_bool` | wire decoding | **still twice** |
+| `build_packet`, `compute_mac` | RFC 4253 §6 framing and MAC | **still twice** |
+| `aes128_encrypt_block`, AES-CTR | the cipher | **still twice** |
+
+The split is not arbitrary: everything in the first group is total and returns a
+value, so it moved as-is. Everything in the second returns `Result<_, SshError>`
+or `Result<_, SshdError>`, and a shared crate cannot name either. That wants a
+`sshwire::WireError` with `From<WireError>` on each crate's error type — which
+is a fine change, just a different one from the extraction itself.
+
+`sha2`, `randrange` and `posix::ed25519` were already extracted into shared
+crates for exactly this reason, so the precedent and the mechanism both exist.
+The extraction simply stopped short of the protocol layer.
+
+### Why it matters
+
+Every one of these functions is a *contract between two programs*, and a
+divergence in any of them is invisible to both test suites: each end tests its
+copy against its own expectations and passes. The failure only appears when the
+two are made to talk, which nothing currently does.
+
+The severity of a divergence is not uniform, which is the trap — a drift in
+`ssh_string` would break loudly and instantly, while the `V_C` drift produced a
+signature-verification failure that reads like a *security* problem (wrong host
+key? tampered handshake?) rather than a bug in our own encoder.
+
+### What the proper fix looks like
+
+1. Add `userspace/sshwire`, a library crate depended on by both `ssh` and
+   `sshd`, alongside the existing `randrange`/`authlib` precedent.
+2. Move the table above into it, with the RFC section for each item in its doc
+   comment, and its tests with it.
+3. Have both binaries call it. Neither keeps a private copy — a "just this one
+   is different" exception is how the next drift starts.
+4. Add a real interoperability test that drives the client against the server
+   and asserts a session is established. This is the test whose absence let the
+   `V_C` bug ship, and it stays valuable after the extraction: a shared crate
+   makes the two ends agree about the parts they share and says nothing about
+   the parts they do not — message ordering, state machines, who speaks first.
+
+Item 4 was worth doing **even before** items 1–3: it is the check that catches
+this whole class, extraction or no extraction. Items 1–3 got done first anyway,
+and the extraction immediately demonstrated its own limit — reading the two ends'
+version-line parsing side by side afterwards turned up
+`TD-B-SSH-RE-ENCODED-THE-SERVER-VERSION-BEFORE-HASHING-IT` and then
+`TD-B-THE-TWO-ENDS-DISAGREED-ABOUT-WHICH-CARRIAGE-RETURNS-ARE-FRAMING`: two more
+never-agree-on-`H` bugs that a shared hash function does nothing about, because
+what each end *passes* to the shared function was still each end's own business.
+That is what drove the fourth row of the table above — the identification line is
+not merely adjacent to the hash, it *is* two of the hash's eight inputs, so
+deriving it is as much a two-program contract as hashing it, and it now lives in
+`sshwire` on the same reasoning as everything else there.
+
+Three such bugs have now been found by one person reading two files at once, and
+none by a test. That ratio is the argument for item 4, which is the outstanding
+work here.
+
+**Known obstacle to item 4:** both crates' `syscall0/1/3/4` are host stubs that
+return `-ENOSYS` on the Windows host build *and* on the WSL Linux build, so
+neither `ssh` nor `sshd` can open a socket in a `cargo test`. An interop test
+therefore either needs the two ends driven over an in-process transport (the
+handshake logic would have to be separable from `tcp_send_all`/`tcp_recv`, which
+today it is not), or has to run under QEMU as a boot-test stage. The first is
+more work and more useful; the second proves more. Neither is blocked on another
+lane.
+
+### TD-B-SSH-RE-ENCODED-THE-SERVER-VERSION-BEFORE-HASHING-IT
+
+**Status: FIXED** (`userspace/ssh/src/main.rs`, `classify_version_line`).
+
+**What it was.** The client read the server's identification line one byte
+at a time into a `String` with `line.push(char::from(byte))`. `char::from(u8)`
+is the *Latin-1* mapping, so every byte from 0x80 to 0xFF became the code point
+of the same number — and came back out of `.as_bytes()` as that code point's
+**two-byte** UTF-8 encoding.
+
+That string is `V_S`, the second input to the RFC 4253 §8 exchange hash. The
+server hashes the bytes it put on the wire. We would have hashed a re-encoding
+of them, one byte longer, so the two exchange hashes differ, so the host key
+signature does not verify, so the connection dies — reporting only that the
+signature was bad, which is also what a real attack looks like.
+
+**Why it never fired.** §4.2 requires the identification string to be printable
+US-ASCII, and every server anyone has ever run obeys that. The bug was reachable
+only from a non-conforming server, which is precisely the property that would
+have kept it hidden indefinitely — the same shape as the placeholder `V_C` in
+sshd (`TD-B-SSHD-SIGNS-AN-EXCHANGE-HASH-OVER-A-CLIENT-VERSION-THE-CLIENT-NEVER-SENT`),
+which was likewise invisible to every test on either side.
+
+**How it was found.** Not by a test. By reading both ends' version-line parsing
+side by side while extracting `sshwire`, specifically asking whether the two
+still agree on the bytes they feed the now-shared hash. The shared crate removes
+the *hash* from the list of things that can drift; it says nothing about what
+each end passes to it, and this was the first thing checked afterwards for
+exactly that reason.
+
+**The fix.** The line is accumulated as `Vec<u8>` and `classify_version_line`
+decides what it is:
+
+| Line | Then | Because |
+|---|---|---|
+| starts `SSH-` | `String::from_utf8`, strictly; error if it fails | it is `V_S`; a line we cannot reproduce byte-for-byte must be refused, never silently altered |
+| anything before it | `quoting::escape_unprintable` | a banner is not hashed, and is unauthenticated bytes on their way to a terminal |
+
+Being a free function rather than an inline block in `version_exchange` is what
+makes it testable: the loop around it needs a socket, and this crate's tests do
+not have one.
+
+**A second, smaller bug fixed with it.** Banner lines were printed raw under
+`-v`. A server that has authenticated nothing to anybody could therefore write
+arbitrary control sequences to the user's terminal before the handshake even
+started. They are now escaped.
+
+**What is still true after this.** Only that these two ends agree; there is
+still no test that runs one against the other. See
+`TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`
+item 4 — an interop test remains the only thing that would have caught either of
+these without someone happening to read the right two functions on the same day.
+
+### TD-B-THE-TWO-ENDS-DISAGREED-ABOUT-WHICH-CARRIAGE-RETURNS-ARE-FRAMING
+
+**Status: FIXED** (`userspace/sshwire/src/lib.rs`; both ends now call it).
+
+**In short:** the SSH client and the SSH server each decided for themselves where
+the peer's greeting line ended, and they decided differently. A greeting with a
+carriage return in the middle of it would have been read as two different pieces
+of text by the two programs — and that text is one of the eight things both ends
+must hash identically for the connection to work at all. The connection would
+have failed reporting a bad host-key signature, i.e. reporting an attack.
+
+**What it was.** A line ends `\r\n`; the `\r` is framing and comes off. Both ends
+knew that and implemented it separately:
+
+| | sshd, `read_version_line` | ssh, `version_exchange` |
+|---|---|---|
+| CR handling | dropped **every** `\r` in the line (`if b != b'\r' { line.push(b) }`) | dropped only the trailing one |
+| length limit | 255, counting neither CR nor LF | 1024 |
+| decode | `String::from_utf8`, error on failure | `String::from_utf8`, error on failure |
+
+So for a peer sending `SSH-2.0-a\rb\r\n`, sshd would hash `SSH-2.0-ab` and ssh
+would hash `SSH-2.0-a\rb`. Different `V_C`/`V_S` ⇒ different exchange hash ⇒ the
+host key signature does not verify ⇒ the session dies, saying only that the
+signature was bad. The length limits disagreeing is a second, milder split: a
+253-to-1022-byte identification line is legal to one end and fatal to the other.
+
+**Why it never fired.** Same shape as the two before it. RFC 4253 §4.2 requires
+the identification string to be printable US-ASCII, so no conforming peer sends
+an interior CR, and no real peer sends a 300-byte greeting. Every path that
+distinguishes the two implementations is a path only a non-conforming or hostile
+peer takes — which is exactly why it survived: it is unreachable from any test
+either suite would think to write, and reachable from the wire.
+
+**How it was found.** By reading `read_version_line` and `classify_version_line`
+next to each other, immediately after fixing
+`TD-B-SSH-RE-ENCODED-THE-SERVER-VERSION-BEFORE-HASHING-IT` in the second of
+those. The first fix had touched only the client, which left the obvious
+question — *and does the server do it the same way?* — whose answer was no.
+
+**The fix — and why it is not a patch to sshd's loop.** Making sshd strip one CR
+would have made the two agree today and left them free to disagree tomorrow,
+which is the whole failure mode this stack keeps reproducing. The derivation
+moved into `sshwire` instead, next to the hash that consumes it:
+
+- `strip_line_terminator` — removes the CR of a CRLF, that one and no other.
+- `is_identification_line` — the line is the one beginning `SSH-`, terminator
+  stripped first so `SSH-…` cannot be missed for having a CR.
+- `decode_identification` — applies §4.2's 255-byte limit *including the CRLF*
+  (the RFC counts them; the old sshd limit did not) and decodes strictly.
+- `MAX_IDENTIFICATION_LINE` — that limit, named once.
+- `IdentificationError` with a `Display` that spells the reason out, because it
+  reaches a user as the reason a connection was refused.
+
+Nine tests in `sshwire` pin the behaviour, including `only_the_last_cr_comes_off`
+which is the divergence itself, and `the_length_limit_counts_the_crlf_the_rfc_counts`.
+
+Both binaries now call these. What is left in each is only what is genuinely that
+end's own: the client also accepts banner lines ahead of the identification line,
+escapes them with `quoting::escape_unprintable` and bounds them at
+`MAX_GREETING_LINE` (a memory bound over text the RFC does not bound at all, not
+a protocol limit); the server accepts no banner at all, because §4.2 permits them
+only from a server and reading one would let an unauthenticated peer write to
+this server's log before identifying itself.
+
+**What is still true after this.** As with the other two: the ends agree because
+someone read them both, not because anything checks. See item 4 of
+`TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.

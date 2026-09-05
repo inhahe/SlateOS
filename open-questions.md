@@ -2263,6 +2263,32 @@ alone as mine to re-scope). It does not get worse with time as long as the
 ratchet lands, and it cannot cause data loss once the write-claiming sweep is
 done. So this is a "decide when you have a moment", not a "decide today".
 
+### Addendum 2026-09-05 (lane B) — they are no longer free to keep
+
+The paragraph above says this "does not get worse with time". That was measured
+on correctness alone, and it was wrong about cost: the crates are charging every
+lane a large, compounding tax on *every single compile*, and I only found it by
+debugging what looked like a hung build.
+
+What happens is mechanical. Every one of those crates produces build artifacts
+into one flat directory — `target/x86_64-pc-windows-gnu/debug/deps` — which now
+holds **69,161 files and 63.9 GB**. Before `rustc` compiles anything at all it
+lists that directory once, to learn which libraries it may link against. Listing
+it takes minutes: a bare `dir` of it did not finish in 90 seconds, and a single
+`cargo build -p sshd` sat for **9 minutes with 0.6 seconds of CPU**, blocked in
+the filesystem call that walks it. I confirmed the stall with a debugger — the
+stack was `rustc` → `SearchPath::new` → `FindNextFileW` — rather than inferring
+it. That cost lands on every `cargo build`, every `cargo test`, every `cargo
+clippy`, and so on every pre-push gate, for all three lanes.
+
+*What changes if they are deleted:* a compile starts immediately instead of
+several minutes later. Nothing else about the OS changes.
+
+I am not asking you to re-decide on the strength of this; the question is still
+the same question. It is a correction to the last paragraph: the honest summary
+is now "decide when you have a moment, and know that until you do, every build
+in the project pays for it."
+
 **Status:** OPEN
 
 ---
@@ -2457,6 +2483,70 @@ running is wrong on any Windows machine, and that fix is filed separately as
 `A-FIXTURE-CLEANUP-LEAVES-EMPTY-DIRECTORIES-IN-BUILD-AND-CANNOT-TELL-YOU` in
 `known-issues.md`. The point here is only that the evidence for the diagnosis is
 now of two different kinds instead of one.
+
+### Addendum 2026-09-05 (lane B) — the disk *is* just slow, and there are two empty SSDs in the machine
+
+The paragraph above closes with "timing arguments always leave room for 'maybe
+the disk is just slow'". It turns out the disk is just slow — literally, as
+hardware — and that was never checked. This does not overturn the Defender case,
+but it changes option 3 from a vague suggestion into the concrete one, and it
+means the two causes are adding rather than competing.
+
+**`D:` is a mechanical hard disk. `C:` is a solid-state disk. So is a third
+drive that is nearly empty.** From `Get-PhysicalDisk` and `Get-Volume` on
+2026-09-05:
+
+| drive | device | kind | free |
+|---|---|---|---|
+| **`D:`** — the entire project, all three worktrees | WDC WD2004FBYZ, SATA | **spinning disk** | 333 GB |
+| `C:` — Windows | Samsung 980 PRO, NVMe | solid state | 129 GB |
+| **`E:`** | Samsung 960 EVO, NVMe | solid state | **325 GB, essentially unused** |
+
+A spinning disk moves a physical arm for every piece of data that is not next to
+the last piece; a solid-state disk does not. That difference is the whole story
+below.
+
+**Measured, same day, on an otherwise idle machine:** average time to service one
+read is **27.5 ms on `D:` against 0.13 ms on `C:`** — a factor of **200**, not
+the factor of 5 the file-open experiment saw. (The experiment above measured
+whole file opens, where a fixed per-open cost is mixed in with the seek; this
+counter measures the disk alone.) `D:` also sat at a queue length of 8, i.e.
+saturated, while nothing in the project was building.
+
+**What that does to a build.** I lost most of a working session to this before
+diagnosing it, so the numbers are unhappily concrete:
+
+- One `cargo build -p sshd` ran for **9 minutes while using 0.6 seconds of CPU**.
+  I attached a debugger rather than guess: every sample was in
+  `rustc` → `SearchPath::new` → `FindNextFileW` — it was *listing a directory*,
+  not compiling. The directory is `target/x86_64-pc-windows-gnu/debug/deps`,
+  which holds 69,161 files, and `rustc` lists it once per invocation before it
+  compiles anything.
+- Deleting that 64 GB directory with `rd /s /q` ran **45 minutes and freed no
+  measurable space**.
+- *Renaming* a directory — one metadata write, instant on any healthy volume —
+  did not complete in six minutes.
+
+**Why this belongs to your Defender question rather than being a separate one:**
+options 1 and 2 buy back the per-open scan; they do not buy back the seek. On
+this hardware the seek is the larger of the two, and option 3 — which the entry
+above rates "disruptive, uncertain gain, `C:` may not have room" — turns out to
+need neither `C:` nor an administrator, because `E:` is a solid-state disk with
+325 GB free and nothing on it. *What changes if the tree moves there:* every
+build, check and gate in all three lanes gets faster by something in the region
+of the 200× per-read gap, no security setting is weakened, and no admin prompt
+appears. The counter-argument is that I do not know what `E:` is *for* — it is
+your machine, and an empty disk may be empty on purpose.
+
+A cheaper half-step, if the tree itself should stay put: move only the three
+`target/` directories to `E:` (cargo's `build.target-dir`, or a directory
+junction). That is where nearly all of the file traffic and all of the 64 GB
+is, it is regenerable so nothing is at risk, and it is one line of config to
+undo.
+
+**If this is never answered:** the same as before, plus the specific knowledge
+that a single-crate compile can block for nine minutes on directory listing
+alone. I have not changed any setting or moved anything.
 
 # Resolved
 

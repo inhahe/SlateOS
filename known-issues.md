@@ -121420,3 +121420,33 @@ an offline-grinding exposure rather than an immediate compromise — but it is a
 real one, and it is strictly worse than the system's own `/etc/shadow`, which
 is `0600`. It has been true since `userdb` was written; §353 step 2 is what
 makes it *fixable*, not what introduces it.
+
+## B-TOOLING-PIPING-CARGO-TEST-INTO-TAIL-HIDES-THE-FAILURE (lane B, 2026-09-06)
+
+**In short:** running `cargo test ... 2>&1 | tail -30` reports success even
+when the test run failed, because the shell reports the exit status of `tail`,
+which always succeeds. An agent reading only "exit code 0" concludes the suite
+is green when it is not. This bit on 2026-09-06: a `rustdoc` failure in
+`userdb`'s doctest pass was reported as exit code 0 and was only noticed by
+reading the text of the output.
+
+**Where.** Not in the tree — it is a habit in how the test commands are
+invoked. It applies equally to `| head`, `| grep` and `| tee`.
+
+**The fix.** Put `set -o pipefail` at the front of any command that pipes a
+build or test into a filter, or drop the filter and read the output file. Note
+that `scripts/run-timeout.py` is unaffected when it is the *outermost* command
+— it exits with the child's own status — but piping *its* output into `tail`
+loses that status again just the same.
+
+**Adjacent, unexplained.** The `rustdoc` failure that exposed this was itself
+strange: ~98 errors of the form "cannot find type `String` in this scope"
+across the whole of `userspace/userdb/src/lib.rs`, i.e. the crate compiling
+with no `std` prelude, together with an `E0462` (found staticlib where an rlib
+was expected). Re-running the identical command immediately afterwards passed
+with 47/47 and clean doctests, so it is a stale-artifact race rather than a
+source defect — most likely two `cargo` invocations against the same
+`target/` directory, which happens here whenever a lint run and a test run
+overlap. If it recurs and is *not* transient, the thing to check first is
+whether a `.rlib` in `target/x86_64-pc-windows-gnu/debug/deps/` was written
+for a different target.

@@ -270,7 +270,6 @@ userspace/nano/src/main.rs:argv-as-string
 userspace/nc/src/main.rs:argv-as-string
 userspace/netlify-cli/src/main.rs:argv-as-string
 userspace/netstat/src/main.rs:argv-as-string
-userspace/newgrp/src/main.rs:argv-as-string
 userspace/nft/src/main.rs:argv-as-string
 userspace/nftables/src/main.rs:argv-as-string
 userspace/nheko-cli/src/main.rs:argv-as-string

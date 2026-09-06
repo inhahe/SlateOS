@@ -732,22 +732,52 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             // Writing to the master delivers keystrokes into the slave's
             // line discipline — this is the emulator typing at the shell.
             //
-            // `O_NONBLOCK` is *not* honoured here, unlike in `read` above.
-            // That is a missing syscall, not a decision: there is a
-            // `SYS_PTY_MASTER_TRY_READ` (547) and no write-side twin, so
-            // there is nothing to call.  A caller that has set `O_NONBLOCK`
-            // and writes into a full input ring therefore blocks.  Until the
-            // syscall exists, the workaround is to `poll` for `POLLOUT`
-            // first — which narrows the window but cannot close it, since
-            // another writer on a dup'd master can fill the ring in between.
-            // Filed as
-            // `requests/b-a-a-pty-master-write-cannot-be-non-blocking-there-is-no-try-write.md`.
-            let ret = syscall3(SYS_PTY_MASTER_WRITE, entry.handle, buf as u64, count as u64);
+            // `O_NONBLOCK` routes to 1065, exactly as `read` above routes to
+            // 547.  The flag is read from the fd rather than the handle for
+            // the same reason as everywhere else in this function: `fcntl`
+            // can set it after `open`, and the kernel handle never hears
+            // about that.
+            //
+            // The non-obvious part is what 1065 does *not* return.  A full
+            // ring is `WouldBlock`, never a zero count — so there is no
+            // `0 → EAGAIN` conversion to write here, and the existing
+            // `WOULD_BLOCK => EAGAIN` arm in `errno::translate` at the tail
+            // of this `match` already produces the right errno.  A count
+            // that comes back short is a *success* and is returned as-is,
+            // for the caller to resume from.
+            //
+            // `count == 0` never reaches this arm: `write` short-circuits it
+            // far above, before the descriptor is even dispatched on.  That
+            // short-circuit is load-bearing rather than incidental here —
+            // *both* master writes answer `InvalidArgument` for a zero
+            // length, so a zero-length write that got this far would fail
+            // where POSIX requires it to return 0.
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
+            let ret = if is_nb {
+                syscall3(
+                    SYS_PTY_MASTER_TRY_WRITE,
+                    entry.handle,
+                    buf as u64,
+                    count as u64,
+                )
+            } else {
+                syscall3(SYS_PTY_MASTER_WRITE, entry.handle, buf as u64, count as u64)
+            };
             if ret == errno::native::CHANNEL_CLOSED {
                 // Every slave is gone: nothing can ever read these bytes.
                 // POSIX spells that EPIPE, the same as a pipe whose reader
                 // has closed, and lane A's table names EPIPE for this case
                 // explicitly.
+                //
+                // On the non-blocking path this is reported *before* the
+                // transfer is attempted, so a dead slave yields EPIPE on the
+                // first call even when the ring still has room — it does not
+                // wait for the ring to drain.  That is the opposite order
+                // from the read side, where buffered output of a dying
+                // program is drained before the hangup surfaces
+                // (`design-decisions.md` §259), and it is deliberate on both
+                // sides: bytes nobody can ever read are worth refusing
+                // early, bytes already printed are worth delivering late.
                 errno::set_errno(errno::EPIPE);
                 return -1;
             }
@@ -16606,6 +16636,102 @@ mod tests {
             assert_eq!(posix_fadvise(fd, 0, -1, 999), crate::errno::EBADF);
 
             assert!(fdtable::close_fd(fd).is_some());
+        }
+    }
+
+    /// The zero-length short-circuit in `write`, from the pty master's side.
+    ///
+    /// `write(fd, buf, 0)` must return 0 per POSIX.  For most handle kinds that
+    /// is a convenience — the kernel call would also have done nothing.  For a
+    /// pty master it is the *only* thing that makes the call conform, because
+    /// **both** master writes answer `InvalidArgument` for a zero length:
+    /// `SYS_PTY_MASTER_WRITE` (545) always has, and `SYS_PTY_MASTER_TRY_WRITE`
+    /// (1065) follows its twin rather than `SYS_PTY_MASTER_TRY_READ`, which
+    /// returns `Ok(0)` for an empty buffer.  Asking to read nothing is a
+    /// reasonable no-op; asking to write nothing is a caller bug — so the two
+    /// non-blocking pty calls disagree on empty buffers, on purpose, and lane A
+    /// pins each side in `kernel/src/tty/pty.rs::self_test`.
+    ///
+    /// This is the libc half of that pin.  Without the short-circuit, an
+    /// `O_NONBLOCK` master fd would turn a conforming `write(fd, buf, 0)` into
+    /// `EINVAL` — and it would be a *new* bug introduced by routing to 1065,
+    /// even though 1065 behaves exactly as 545 always did, because the routing
+    /// is what put a second chance to get it wrong into this function.
+    ///
+    /// Host builds make the difference observable: `syscall3` returns
+    /// `HOST_ENOSYS` rather than reaching a kernel, so "returned 0" and
+    /// "entered the kernel" are distinguishable outcomes here.
+    mod a_zero_length_write_never_reaches_either_pty_master_call {
+        use super::*;
+
+        /// Not `0` — a handle a real kernel would reject, so a test that
+        /// wrongly reached the kernel could not pass by accident.
+        const PTY_HANDLE: u64 = 0xdead_beef;
+
+        fn master_fd(status_flags: i32) -> i32 {
+            fdtable::alloc_fd_with_flags(
+                fdtable::HandleKind::PtyMaster,
+                PTY_HANDLE,
+                status_flags,
+            )
+            .expect("fd available")
+        }
+
+        #[test]
+        fn blocking_master() {
+            let fd = master_fd(0);
+            let buf = *b"unread";
+            assert_eq!(
+                write(fd, buf.as_ptr(), 0),
+                0,
+                "a zero-length write on a pty master must be 0, not the \
+                 `InvalidArgument` 545 answers"
+            );
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+
+        #[test]
+        fn nonblocking_master() {
+            let fd = master_fd(crate::fcntl::O_NONBLOCK);
+            let buf = *b"unread";
+            assert_eq!(
+                write(fd, buf.as_ptr(), 0),
+                0,
+                "the `O_NONBLOCK` route must short-circuit too: 1065 answers \
+                 `InvalidArgument` for a zero length exactly as 545 does"
+            );
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+
+        /// The control. Without this, both tests above would still pass if
+        /// `write` had simply stopped writing to pty masters at all.
+        #[test]
+        fn but_a_non_empty_one_does_reach_the_kernel_on_both_routes() {
+            for flags in [0, crate::fcntl::O_NONBLOCK] {
+                let fd = master_fd(flags);
+                let buf = *b"typed at the shell";
+                assert_eq!(
+                    write(fd, buf.as_ptr(), buf.len()),
+                    -1,
+                    "a non-empty write must be dispatched; on a host build \
+                     that means the `HOST_ENOSYS` stub, not a fabricated 0"
+                );
+                assert!(fdtable::close_fd(fd).is_some());
+            }
+        }
+
+        /// A zero-length write is short-circuited *after* the descriptor is
+        /// looked up, not before, so a closed fd still outranks it.
+        ///
+        /// Worth pinning because the short-circuit is cheap and looks like it
+        /// belongs at the very top of the function — where it would make
+        /// `write(-1, p, 0)` succeed and hide the caller's bad descriptor.
+        #[test]
+        fn and_a_bad_descriptor_still_outranks_the_short_circuit() {
+            let buf = *b"unread";
+            crate::errno::set_errno(0);
+            assert_eq!(write(-1, buf.as_ptr(), 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
         }
     }
 }

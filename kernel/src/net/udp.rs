@@ -331,16 +331,74 @@ pub fn is_multicast_member_v6(group: Ipv6Addr) -> bool {
 /// Start of IANA dynamic/private port range for ephemeral allocation.
 const EPHEMERAL_PORT_START: u16 = 49152;
 
+/// Number of ports in the IANA dynamic range (49152–65535).
+const EPHEMERAL_PORT_RANGE: u16 = 16384;
+
+/// Draw the offset at which [`allocate_ephemeral_port`] begins its scan.
+///
+/// Drawn from the kernel CSPRNG, not from a counter or the TSC.  For a
+/// UDP request/response protocol with no authentication — DNS above all —
+/// the source port is half the security model: to slip a forged answer
+/// past a client an off-path attacker must guess both the transaction ID
+/// and the port the client is listening on.  A scan that always began at
+/// `EPHEMERAL_PORT_START` made the second half free, because the first
+/// program to ask always got 49152 and the second always got 49153.
+/// Randomising the start restores the ~14 bits, which is what RFC 5452 §9
+/// asks for alongside a random ID.
+///
+/// Called by `bind` *before* it takes `SOCKETS`, deliberately.  The RNG
+/// lazily self-seeds on first use, which reads the HPET over MMIO, and
+/// `SOCKETS` is the same lock the datagram-receive path takes to deliver
+/// a packet — so doing this inside the critical section would add that
+/// read to the receive latency of every concurrent datagram.  Keeping the
+/// draw outside also means no `SOCKETS` → `RNG` lock order exists to get
+/// wrong later.
+fn random_ephemeral_offset() -> u16 {
+    // `next_bounded` is rejection-sampled, so this is uniform over the
+    // range rather than merely spread across it.
+    let offset = crate::rng::next_bounded(u64::from(EPHEMERAL_PORT_RANGE));
+    // `next_bounded` returns strictly less than its bound, so this always
+    // fits.  Written as a checked conversion rather than an `as` cast so
+    // that a future change to the bound cannot silently start truncating;
+    // the unreachable branch falls back to the bottom of the range, which
+    // is a valid port rather than a panic.
+    u16::try_from(offset).unwrap_or(0)
+}
+
 /// Allocate an ephemeral port in the IANA dynamic range (49152–65535).
 ///
-/// Scans linearly from `EPHEMERAL_PORT_START`.  With `MAX_SOCKETS=32`,
-/// we can never have more than 32 active sockets, so a free port is
-/// always found within the first 33 candidates.
-fn allocate_ephemeral_port(sockets: &[UdpSocket; MAX_SOCKETS]) -> KernelResult<u16> {
-    for candidate in EPHEMERAL_PORT_START..=u16::MAX {
+/// Scans linearly from `start_offset` — a random point in the range, see
+/// [`random_ephemeral_offset`] — and wraps around to cover all
+/// `EPHEMERAL_PORT_RANGE` candidates before giving up.  The wraparound is
+/// what preserves the two properties the old bottom-up scan had: every
+/// port in the range is still reachable, so `OutOfMemory` still means
+/// "genuinely none free" rather than "none free above where I started";
+/// and with `MAX_SOCKETS=32` at most 32 ports can be taken, so from *any*
+/// start a free one is still found within the first 33 candidates.
+///
+/// Note that the in-use test ignores `ns_id`, unlike the explicit-port
+/// path in `bind`, so an ephemeral port is unique across all namespaces
+/// and not merely within one.  That is stricter than binding requires and
+/// is kept deliberately: it means a port handed out here can be used to
+/// identify a flow without also carrying the namespace it came from.
+fn allocate_ephemeral_port(
+    sockets: &[UdpSocket; MAX_SOCKETS],
+    start_offset: u16,
+) -> KernelResult<u16> {
+    let mut offset = start_offset;
+    for _ in 0..EPHEMERAL_PORT_RANGE {
+        // Both terms are bounded by construction (`offset` < 16384 and
+        // `EPHEMERAL_PORT_START` is 49152, summing to at most 65535), so
+        // the wrapping form is exact; it is spelled this way to satisfy
+        // `clippy::arithmetic_side_effects` without an allow.
+        let candidate = EPHEMERAL_PORT_START.wrapping_add(offset);
         let in_use = sockets.iter().any(|s| s.active && s.port == candidate);
         if !in_use {
             return Ok(candidate);
+        }
+        offset = offset.wrapping_add(1);
+        if offset >= EPHEMERAL_PORT_RANGE {
+            offset = 0;
         }
     }
     Err(KernelError::OutOfMemory)
@@ -353,12 +411,24 @@ fn allocate_ephemeral_port(sockets: &[UdpSocket; MAX_SOCKETS]) -> KernelResult<u
 /// namespace; pass `netns::ROOT_NS` for the host namespace.  The
 /// same port can be bound in different namespaces without conflict.
 ///
+/// An auto-assigned port is drawn from the kernel CSPRNG rather than
+/// counting up from the bottom of the range; see
+/// [`random_ephemeral_offset`] for why that matters.
+///
 /// Returns a socket index (handle) on success.
 pub fn bind(ns_id: NetNsId, port: u16) -> KernelResult<usize> {
+    // Drawn before `SOCKETS` is taken, so the RNG's lazy first-use seeding
+    // never runs inside a lock the packet-receive path is waiting on.
+    let start_offset = if port == 0 {
+        Some(random_ephemeral_offset())
+    } else {
+        None
+    };
+
     let mut sockets = SOCKETS.lock();
 
-    let effective_port = if port == 0 {
-        allocate_ephemeral_port(&sockets)?
+    let effective_port = if let Some(start_offset) = start_offset {
+        allocate_ephemeral_port(&sockets, start_offset)?
     } else {
         // Check for duplicate binding within the same namespace.
         for sock in sockets.iter() {
@@ -1233,6 +1303,8 @@ pub fn self_test() -> KernelResult<()> {
     test_bind_close()?;
     test_bind_duplicate()?;
     test_ephemeral_port()?;
+    test_ephemeral_scan_wraps()?;
+    test_ephemeral_port_unpredictable()?;
     test_multicast_join_leave()?;
     test_multicast_join_leave_v6()?;
     test_rx_ready_empty()?;
@@ -1241,7 +1313,7 @@ pub fn self_test() -> KernelResult<()> {
     test_v6_process_and_deliver()?;
     test_namespace_isolation()?;
 
-    crate::serial_println!("[udp] UDP self-test PASSED (10 tests)");
+    crate::serial_println!("[udp] UDP self-test PASSED (12 tests)");
     Ok(())
 }
 
@@ -1338,6 +1410,151 @@ fn test_ephemeral_port() -> KernelResult<()> {
     close(h2);
 
     crate::serial_println!("[udp]   ephemeral port: OK (p1={}, p2={})", p1, p2);
+    Ok(())
+}
+
+/// Test that the ephemeral scan advances past taken ports and wraps around
+/// the top of the range.
+///
+/// Driven against a synthetic socket table rather than through `bind`, so
+/// that the scan's behaviour is checked deterministically instead of only
+/// at whatever start the CSPRNG happens to draw.  Wraparound is the
+/// property that makes a random start safe: without it, a start near the
+/// top could reach only a handful of candidates and would report
+/// `OutOfMemory` while thousands of ports sat free below it.
+fn test_ephemeral_scan_wraps() -> KernelResult<()> {
+    const EMPTY: UdpSocket = UdpSocket::empty();
+    let mut sockets = [EMPTY; MAX_SOCKETS];
+
+    // An unobstructed start returns exactly the port at that offset.
+    let want = EPHEMERAL_PORT_START.wrapping_add(100);
+    match allocate_ephemeral_port(&sockets, 100) {
+        Ok(p) if p == want => {}
+        other => {
+            crate::serial_println!("[udp]   FAIL: start=100 gave {:?}, want {}", other, want);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Starting on a taken port advances to the next free one.
+    match sockets.get_mut(0) {
+        Some(s) => {
+            s.active = true;
+            s.port = want;
+        }
+        None => return Err(KernelError::InternalError),
+    }
+    let want_next = EPHEMERAL_PORT_START.wrapping_add(101);
+    match allocate_ephemeral_port(&sockets, 100) {
+        Ok(p) if p == want_next => {}
+        other => {
+            crate::serial_println!(
+                "[udp]   FAIL: occupied start gave {:?}, want {}",
+                other,
+                want_next
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // The scan wraps: starting at the very top of the range with that port
+    // taken must come back around to the bottom.  The old bottom-up scan
+    // could never return a port below where it began, so this is the case
+    // that would have failed before the range became circular.
+    match sockets.get_mut(1) {
+        Some(s) => {
+            s.active = true;
+            s.port = u16::MAX;
+        }
+        None => return Err(KernelError::InternalError),
+    }
+    let top = EPHEMERAL_PORT_RANGE.wrapping_sub(1);
+    match allocate_ephemeral_port(&sockets, top) {
+        Ok(EPHEMERAL_PORT_START) => {}
+        other => {
+            crate::serial_println!(
+                "[udp]   FAIL: wraparound gave {:?}, want {}",
+                other,
+                EPHEMERAL_PORT_START
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[udp]   ephemeral scan advance + wraparound: OK");
+    Ok(())
+}
+
+/// Test that auto-assigned ports are not the predictable ascending run the
+/// allocator used to hand out.
+///
+/// This is the regression guard for the reported issue: every client that
+/// asked for "any free port" used to get 49152, then 49153, so an off-path
+/// attacker forging a UDP reply had nothing to guess.
+///
+/// Both assertions below are statistical, and both are stated with their
+/// false-failure odds so that a future reader does not mistake a flake for
+/// a real regression — at these odds a failure here is a bug, not luck.
+fn test_ephemeral_port_unpredictable() -> KernelResult<()> {
+    const SAMPLES: usize = 4;
+    let mut handles = [usize::MAX; SAMPLES];
+    let mut ports = [0u16; SAMPLES];
+
+    for i in 0..SAMPLES {
+        let h = bind(crate::netns::ROOT_NS, 0)?;
+        let p = local_port(h).unwrap_or(0);
+        match (handles.get_mut(i), ports.get_mut(i)) {
+            (Some(hs), Some(ps)) => {
+                *hs = h;
+                *ps = p;
+            }
+            _ => {
+                close(h);
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // Close first, so an assertion failure below cannot leak sockets.
+    for h in handles.iter() {
+        if *h != usize::MAX {
+            close(*h);
+        }
+    }
+
+    // The exact old behaviour: 49152, 49153, 49154, ...  Reproducing that
+    // by chance needs every one of the four draws to land on one specific
+    // offset, i.e. about 1 in 16384^4 (7e-17).
+    let mut expected = EPHEMERAL_PORT_START;
+    let mut old_behaviour = true;
+    for p in ports.iter() {
+        if *p != expected {
+            old_behaviour = false;
+            break;
+        }
+        expected = expected.wrapping_add(1);
+    }
+    if old_behaviour {
+        crate::serial_println!("[udp]   FAIL: ephemeral ports still ascend from 49152");
+        return Err(KernelError::InternalError);
+    }
+
+    // Spread: the draws should not all be crammed into the bottom 1/256 of
+    // the range.  One draw lands there with probability 64/16384 = 1/256,
+    // so all four do with probability about 2e-10.
+    let low_water = EPHEMERAL_PORT_START.wrapping_add(64);
+    if ports.iter().all(|p| *p < low_water) {
+        crate::serial_println!("[udp]   FAIL: all ephemeral ports in the bottom 64 of the range");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!(
+        "[udp]   ephemeral unpredictability: OK ({}, {}, {}, {})",
+        ports.first().copied().unwrap_or(0),
+        ports.get(1).copied().unwrap_or(0),
+        ports.get(2).copied().unwrap_or(0),
+        ports.get(3).copied().unwrap_or(0)
+    );
     Ok(())
 }
 

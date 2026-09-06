@@ -55579,3 +55579,23 @@ the blanket `#![allow(dead_code)]` that used to cover the file.
 
 The sink available today is the clipboard, which is what `apps/credmanager`'s
 export wants too -- worth doing both the same way when either is done.
+
+## regextester: the pattern library and the history have no UI
+
+`App::save_to_library`, `load_library_entry` and `add_to_history` have no
+callers, so the library the module doc advertises ("Regex library (save/load
+named patterns)") cannot be used and the history is always empty.
+`MAX_LIBRARY_ENTRIES` and `MAX_HISTORY` are unenforced for the same reason --
+there is nothing to bound. Each carries a `#[allow(dead_code, reason = ...)]`
+saying so.
+
+Two things to settle before wiring the history, which is why it was not done
+along with the field limits:
+
+* **When does a pattern enter the history?** `update_regex` runs on every
+  keystroke, so recording each successful compile would store every prefix of
+  what was typed -- `a`, `a+`, `a+b`. It probably wants to record on blur, on
+  an explicit key, or after an idle gap; that needs a clock this app does not
+  currently ask for.
+* **The library needs a name typed for the pattern**, and the window has three
+  fields with no fourth for a name, nor a modal to ask in.

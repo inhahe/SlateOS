@@ -3656,6 +3656,46 @@ check_gates_are_wired() {
 
 check_gates_are_wired
 
+# The harness's own first act, checked before anything trusts a run of it.
+#
+# boot-test.sh copies itself to a snapshot and re-execs, so that an edit
+# landing mid-run is not executed as though it had always been there --
+# bash reads a script incrementally, so editing a running one splices new
+# text into the middle of the old.  With three lanes editing this tree
+# while a ninety-minute run is in flight, that is a routine event, not a
+# hypothetical.
+#
+# The checker does not run boot-test.sh.  It lifts the re-exec preamble out
+# of this file with a `sed` range and runs it around a two-second payload,
+# with a control that carries no preamble and MUST be corrupted by the same
+# edit -- without that control a passing guarded run would prove only that
+# nothing happened.  ~21s.
+#
+# Wired 2026-09-06.  It had existed unwired since it was written, and it
+# was red the first time anything ran it: the `sed` range was still exact,
+# but the preamble had grown a reference to BOOT_TEST_START_EPOCH, which is
+# set far above the block and so is not part of what the range lifts.  The
+# extraction stayed faithful while the extracted script stopped running.
+# That is the argument for wiring it rather than pinning it -- an unwired
+# gate does not hold still, it rots, and this one had.
+check_boot_test_reexec() {
+    echo "=== Checking that a mid-run edit cannot corrupt this run ==="
+    if run_checker check-boot-test-reexec \
+            bash "$PROJECT_ROOT/scripts/check-boot-test-reexec.sh"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  The re-exec guard at the top of this" >&2
+    echo "script no longer isolates a run from edits made while it runs," >&2
+    echo "or the check that proves it can no longer run the preamble." >&2
+    echo "The output above says which: a stale harness names the variable" >&2
+    echo "it is missing, a real failure says the snapshot did not isolate." >&2
+    exit 1
+}
+
+check_boot_test_reexec
+
 # The third arm of the same family, one level in.  The two above ask whether a
 # gate *can* refuse and whether anything *asks* it to; this asks whether the
 # thing that answers the harder question -- is each individual guard inside a

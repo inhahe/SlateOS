@@ -222,7 +222,21 @@ PINNED: dict[str, str] = {
 # `rustscan.py` are all run through `run_checker` by `boot-test.sh`, are all
 # gates in the only sense that matters (each can refuse the build), and were
 # all invisible here because of how they are spelled.
-_GATE_NAME = re.compile(r"(check-[A-Za-z0-9_.-]+\.py)")
+#
+# `.sh` as well as `.py`, decided 2026-09-06 in reply to lane B's request
+# (requests/b-a-check-gates-are-wired-cannot-see-a-gate-written-in-bash.md),
+# which widened `_ANY_SCRIPT` and left this half deliberately to lane A.
+# The narrow `check-*.sh` form is taken rather than every `.sh` under
+# scripts/: the wide form would sweep in boot-test.sh, run-checker.sh and
+# ~85 `*-diff.sh` oracles, none of which are gates, and pinning a dozen
+# non-gates is precisely the "list nobody has to think about" this file's
+# own docstring says PINNED must not become.
+#
+# Widening it found exactly one file, and that file was worth finding:
+# check-boot-test-reexec.sh, which nothing ran and which was red when
+# anything finally did.  It is now wired rather than pinned, so the
+# convention is established with a live example instead of an empty rule.
+_GATE_NAME = re.compile(r"(check-[A-Za-z0-9_.-]+\.(?:py|sh))")
 _ANY_SCRIPT = re.compile(r"[A-Za-z0-9_.-]+\.(?:py|sh)")
 _ASSIGN = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
 # `run_checker` in command position: line start, after a separator, or after
@@ -413,11 +427,20 @@ def audit(root: Path, pinned: dict[str, str] | None = None
         notes.append(f"{rel.as_posix()}: runs {len(runs)} gate(s), "
                      f"self-tests {len(tested)}")
 
-    gates = sorted(p.name for p in (root / "scripts").glob("check-*.py")
+    # Globbed as `check-*` and filtered by `_GATE_NAME`, rather than globbed
+    # per extension.  The glob used to be `check-*.py`, which made `_GATE_NAME`
+    # decorative on this path: widening the regex to accept `.sh` changed
+    # nothing, because the glob never offered it a `.sh` file to judge, and the
+    # count came back identical.  A second narrowing behind the first is this
+    # file's own method-4 failure -- a partial parse reads exactly like a
+    # complete parse of something smaller.  One expression now decides what a
+    # gate is named, so widening it cannot be half-applied again.
+    gates = sorted(p.name for p in (root / "scripts").glob("check-*")
                    if _GATE_NAME.fullmatch(p.name))
     if not gates:
-        findings.append("scripts/: no check-*.py found -- nothing to judge, "
-                        "which is not the same as a clean tree")
+        findings.append("scripts/: no check-*.py or check-*.sh found -- "
+                        "nothing to judge, which is not the same as a clean "
+                        "tree")
         return findings, selftest_findings, notes
 
     unwired = [g for g in gates if g not in wired]
@@ -601,6 +624,25 @@ def selftest() -> int:
         findings, _, _ = audit(fake, {})
         check(any("check-orphan.py" in f for f in findings),
               "an unwired, unpinned gate must be reported")
+
+        # A gate written in bash belongs to the *subject* set too, not only to
+        # the "what does this call run" half that `_ANY_SCRIPT` widened.
+        #
+        # This is the case that would have caught the half-applied version of
+        # that widening: `_GATE_NAME` was widened to accept `.sh` while the
+        # glob feeding it still read `check-*.py`, so the regex never saw a
+        # `.sh` file, the subject count came back identical, and the change
+        # looked applied while doing nothing. Removed again immediately --
+        # later cases here assert an empty finding list, and a fixture that
+        # accumulates state makes every assertion after it weaker.
+        shell_gate = fake / "scripts" / "check-shell-orphan.sh"
+        shell_gate.write_text("", encoding="utf-8", newline="")
+        check(any("check-shell-orphan.sh" in f for f in audit(fake, {})[0]),
+              "an unwired .sh gate must be reported like a .py one")
+        shell_gate.unlink()
+        check(not any("check-shell-orphan.sh" in f for f in audit(fake, {})[0]),
+              "removing it must clear the finding -- otherwise the case above "
+              "proves only that the report is noisy")
 
         real_argv = sys.argv
         try:

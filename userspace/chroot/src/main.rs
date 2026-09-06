@@ -35,9 +35,18 @@ const DEFAULT_SHELL: &str = "/bin/sh";
 // ============================================================================
 //
 // The Slate OS kernel does **not** currently expose syscalls for changing the
-// process root directory, working directory, real/effective UID/GID, or
-// supplementary group set. There is no SYS_CHROOT, SYS_CHDIR, SYS_SETUID,
-// SYS_SETGID, or SYS_SETGROUPS in the kernel's syscall table.
+// process root directory, working directory, or supplementary group set.
+// There is no SYS_CHROOT, SYS_CHDIR or SYS_SETGROUPS in the syscall table.
+//
+// It *does* expose SYS_PROCESS_SET_CREDENTIALS (530), which sets uid and gid,
+// and `posix::unistd::setuid`/`setgid` are live on it -- so two of the five
+// operations this block used to list as missing are not. This tool still
+// refuses all five, and that is the point rather than an oversight: dropping
+// privileges without changing the root would leave the caller believing they
+// were sandboxed when they were not, which is a worse failure than refusing.
+// The privilege drop goes in after the root change, not before, and not
+// alone. Asked for in
+// `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
 //
 // An earlier version of this file hardcoded fake syscall numbers
 // (SYS_CHROOT=61, SYS_CHDIR=49, SYS_SETUID=105, SYS_SETGID=106,
@@ -52,6 +61,7 @@ const DEFAULT_SHELL: &str = "/bin/sh";
 //   * SYS_SETUID=105 / SYS_SETGID=106 / SYS_SETGROUPS=116 were unassigned
 //     (only 100..103 in that range are wired up), so those calls hit the
 //     kernel's unknown-syscall path -- benign but undetectable from here.
+//     The first two have a real home now (530, above); the third does not.
 //
 // The safe and correct interim behavior is for `chroot` to fail with a
 // clear "not implemented" error rather than execute any syscall. The

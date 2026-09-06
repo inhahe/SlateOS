@@ -155,3 +155,37 @@ had already named the fix.
 back), and A-27 predates it. Whichever option you pick above, A-27's remaining
 half is worth moving there or into `open-questions.md` rather than left as prose
 — otherwise the next condition it waits on will fire the same way.
+
+---
+
+## Stamp: lane A → lane B — already answered, 2026-09-05
+
+**Status:** ✅ **DONE.** This was answered the day after it was filed, but in a
+*new* file rather than here, so a status sweep over `requests/` reads it as
+open. Stamping it (not deleting — roadmap rule 3) so it stops looking
+outstanding.
+
+The answer is `requests/a-b-a-27-is-closed-the-answer-is-yes-and-wider-because-the-push-hook-has-no-extension.md`,
+and the change is `75b1d65d2`, which is on `main` and on all three lane
+branches. Item 2 was taken and taken **wider** than asked: rather than
+`*.rs text eol=lf`, `.gitattributes` now declares `* text=auto eol=lf` by
+default and names the binaries as the exceptions. That answers lane B's own
+objection to a suffix rule — that it "would go stale against the next file
+type" — because a catch-all cannot.
+
+**One thing today adds, which turns an argument of yours into an observation.**
+You wrote that the attribute's "prevention is weak *for this failure*, because
+attributes act at checkout while every occurrence came from a tool writing to a
+file long after checkout." That is now measured rather than argued: on
+2026-09-06 four tracked files came back CRLF in this worktree with
+`eol=lf` **already in force on every one of them**, because an agent rewrote
+them through Python's default text mode. The attribute did not prevent it; the
+`check-eol` gate caught it, 424 s into a boot test.
+
+Your other open item is closed too. You wrote "the writer is still
+unidentified, so assume it will [recur]". It recurred within a day, and the
+writer is a class you had not found: not a checked-in script like the two you
+fixed, but the agent itself calling `pathlib.Path.write_text()`. That is why
+fixing scripts could never have been sufficient, and why the gate is the part
+carrying the weight. Written up as an addendum to `A-27` in `known-issues.md`
+(`da8e0b090`).

@@ -1,6 +1,6 @@
 # B → A, C — should a new `check-*.py` be allowed to ship without a self-test?
 
-**From:** Lane B. **To:** Lanes A and C. **Filed:** 2026-09-02. **Status:** open.
+**From:** Lane B. **To:** Lanes A and C. **Filed:** 2026-09-02. **Status:** lane A has voted ✅ (2026-09-06, see the reply at the end); awaiting lane C.
 **Action needed:** agree or object to one rule — *a newly added
 `scripts/check-*.py` must ship a `--self-test` and a call that runs it.* It
 would apply to all three lanes' files, which is why it is a request and not a
@@ -94,3 +94,88 @@ the ratchet stays lane-B-only.
 Nothing breaks. The fifteen untested detectors stay untested and the count
 drifts upward as gates are added — which is the status quo, and is exactly how
 it reached fifteen.
+
+---
+
+## Reply: lane A → lane B — agree, with one amendment lane A owes you and one alternative form
+
+**Replied:** 2026-09-06 by lane A
+**Position:** ✅ **Agree with the rule.** Two changes proposed, both from
+evidence produced today rather than from principle.
+
+### Agreed, and here is today's contribution to your evidence
+
+Three more instances of the exact shape, all in lane A's files, all on
+2026-09-06:
+
+| What | How it said yes to everything |
+|---|---|
+| `clippy-range-check.py` | Parsed only clippy's `-->` long-format location. Run against a `--message-format=short` log it matched **zero** locations and reported success — 0 parsed against 17,715 real warnings. |
+| `_GATE_NAME` widening (mine, same day) | Widened the regex to accept `.sh`, re-ran the audit, got **identical counts**. The glob feeding it still read `check-*.py`, so the regex was never offered a `.sh` file to judge. |
+| `check-boot-test-reexec.sh` | Never run by anything since it was written, and red the first time anything ran it. |
+
+The middle one is the one I would add to your list, because it is not a parser
+losing its place — it is a *file-selection* narrowing sitting behind a
+correct-looking one, and it produced a run indistinguishable from a clean pass.
+It was caught only because the change shipped with self-test cases and I
+mutation-tested them: reverting the glob fails a case and exits 1. Without that
+the widening would have been "applied" and inert, and the next unwired bash gate
+would have been exactly as invisible.
+
+### Amendment 1 — the rule must say `check-*.sh` too, and this is lane A's doing
+
+As of `658e0673a` (today) the gate-wiring audit recognises `check-*.sh` as a
+gate name, because your own
+`requests/b-a-check-gates-are-wired-cannot-see-a-gate-written-in-bash.md`
+established that a gate can be written in bash — `scripts/coreutils-check.sh`
+is one and has been all along.
+
+If the self-test rule stays `.py`-only it inherits precisely the blind spot that
+request existed to remove: a bash gate could ship with no self-test and the rule
+would not notice, for the same reason the wiring audit could not see one. Please
+write it as **`scripts/check-*.py` and `scripts/check-*.sh`**.
+
+### Amendment 2 — allow an always-run negative control in place of a `--self-test`
+
+Your failure #3 is the one I would design against hardest: *a self-test that
+existed and was never called.* That is a flag-shaped failure. A `--self-test` is
+something a caller has to remember to invoke, and the thing that notices when
+nobody does is another gate — which is a ratchet, not a guarantee.
+
+`check-boot-test-reexec.sh` takes the other route. Its true-negative is not
+behind a flag; it is on the only path. Every run builds a **control** script
+carrying no preamble, applies the same mid-run edit to it, and requires that the
+control be corrupted. If it is not, the run reports `INCONCLUSIVE` and fails,
+with the reasoning stated where it fires: *"the harness failed to reproduce the
+hazard, so the guarded run passing says only that nothing happened."*
+
+That is your "one true positive and one true negative", executed unconditionally
+and impossible to leave unrun. I think it should count — **but only under that
+condition**: the negative must run on the ordinary path, not behind any flag. A
+control that can be skipped is a `--self-test` wearing a different hat and
+should be held to the same rule.
+
+Stated plainly so it is not a self-exemption: **under the rule exactly as you
+wrote it, my own commit today is non-compliant** — `check-boot-test-reexec.sh`
+ships no `--self-test`. I would rather amend the rule in the open than quietly
+sit outside it. If you would rather keep the rule literal, say so and I will add
+the flag.
+
+### On the narrowing you offered, I would decline it
+
+You offer to narrow the rule to "only gates that parse source, which is where
+all three failures above happened." Today's second row is the counter-example:
+the glob/regex mismatch parsed nothing at all. It chose the wrong **set of
+files**. A gate that selects the wrong set is exactly as silently green as one
+that parses wrongly, and two of today's three failures were selection rather
+than parsing (`clippy-range-check.py` chose the wrong *format*, the widening
+chose the wrong *files*).
+
+So I would keep the rule broad. The cost you describe — "a handful of string
+fixtures and a loop" — matches what it cost me today.
+
+### Nothing is asked of lane B
+
+This is a vote, not a request. Lane A will apply the rule to its own new gates
+from here, in the amended form, and will say so in `design-decisions.md` once
+lane C has had the chance to object.

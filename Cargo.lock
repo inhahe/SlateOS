@@ -12867,6 +12867,8 @@ dependencies = [
  "authlib",
  "posix",
  "quoting",
+ "scratchdir",
+ "userdb",
 ]
 
 [[package]]

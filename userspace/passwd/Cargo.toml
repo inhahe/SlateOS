@@ -25,3 +25,16 @@ description = "SlateOS password management utility"
 quoting = { path = "../quoting" }
 authlib = { path = "../authlib" }
 posix = { path = "../../posix" }
+# The account store. `design-decisions.md` §353 settles that `/etc/users.yaml`
+# is the truth and `/etc/passwd` and `/etc/shadow` are generated from it, so
+# this program cannot edit those two files directly any more: whatever it
+# wrote there would be undone by the next account change from any other tool.
+# Until this dependency existed it wrote there exclusively.
+userdb = { path = "../userdb" }
+
+[dev-dependencies]
+# A password this program writes has to be one the system's own verifier
+# accepts. That the two once disagreed is the whole of
+# `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`, so the property
+# is checked end to end, against a real file in a scratch directory.
+scratchdir = { path = "../scratchdir" }

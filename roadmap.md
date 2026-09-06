@@ -988,7 +988,22 @@ Roadmap:
       for "never" and must translate at their own edge. `set_password` stamps
       the change date itself, since a writer that forgot it would exempt that
       account from expiry for good rather than merely be late.
-    - `[ ]` **1b.** Move `passwd` onto it.
+    - `[x]` **1b. `passwd` (2026-09-06).** Every read and write goes through
+      `userdb`; the `ShadowEntry`/`PasswdEntry` parsers, the `read_shadow`/
+      `write_shadow`/`find_user` helpers and the duplicate
+      `hash_password`/`generate_salt` pair are all deleted. `find_or_create_shadow`
+      went with them, and its disappearance is the point: it existed because a
+      user could be in `/etc/passwd` with no `/etc/shadow` line, which one
+      database cannot be. Three behaviour fixes fell out — `-S` prints `-1` for
+      a policy nobody set instead of inventing `0 99999 7`; a `-1` day count
+      *clears* a field rather than storing a date one day before the epoch;
+      and `-d` clears the lock, which the `!`-prefix spelling used to do for
+      free. Setting a password no longer unlocks (`design-decisions.md` §1003).
+      The database path is a field of the new `Accounts` type rather than a
+      constant, which is what lets the tests run the real commands against a
+      real database in a scratch directory: 58 tests, including the end-to-end
+      one that a password `passwd` saves is one `authlib` accepts when read
+      back out of the *generated* `/etc/shadow`.
     - `[ ]` **1c.** Move `useradd` onto it — additionally needs a gid
       allocator, since `useradd` creates the user-private group.
     - `[ ]` **1d.** `chage` (`userspace/chage`, 663 lines) reads and writes the

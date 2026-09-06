@@ -1236,11 +1236,6 @@ impl core::fmt::Display for GenerateError {
 
 impl std::error::Error for GenerateError {}
 
-/// Wrap a [`GenerateError`] as the I/O error [`UserDb::save`] reports.
-///
-/// `InvalidData` and not `Other`: the failure is a property of the bytes being
-/// written, and a caller that distinguishes kinds should be able to tell it
-/// from a full disk.
 /// Render one aging field: the number, or nothing at all when unset.
 fn day(value: Option<i64>) -> String {
     let mut buf = String::new();
@@ -1252,6 +1247,11 @@ fn day(value: Option<i64>) -> String {
     buf
 }
 
+/// Wrap a [`GenerateError`] as the I/O error [`UserDb::save`] reports.
+///
+/// `InvalidData` and not `Other`: the failure is a property of the bytes being
+/// written, and a caller that distinguishes kinds should be able to tell it
+/// from a full disk.
 fn unrepresentable(e: GenerateError) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, e)
 }

@@ -107,6 +107,11 @@ use std::io::Read as _;
 use std::io::Write;
 use std::process;
 
+// Clock readings and spans as types rather than as `u64`s named after a unit.
+// This daemon is the reason that crate exists: the login grace timer compared
+// microseconds against seconds and no client could authenticate at all.
+use monoclock::{Elapsed, Instant};
+
 // Everything the far end of the socket has to agree with byte for byte. Not
 // re-implemented here: see the crate's own module docs for why one definition
 // shared by both ends is the point, and `sshd/Cargo.toml` for what a second copy
@@ -458,56 +463,56 @@ fn fs_set_mode(path: &str, mode: u32) -> Result<(), SshdError> {
     })
 }
 
-/// Nanoseconds in a second, for turning a [`clock_monotonic_ns`] reading into
-/// the unit the configuration is written in.
-const NANOS_PER_SEC: u64 = 1_000_000_000;
-
 /// Whether an unauthenticated connection has used up its `LoginGraceTime`.
 ///
-/// The two clock readings are in nanoseconds ([`clock_monotonic_ns`]) and
-/// `grace_secs` is in seconds, because that is the unit `LoginGraceTime` is
-/// written in, in this daemon's configuration file as in OpenSSH's. The
-/// conversion between the two is the entire content of this function, and it is
-/// a function rather than three lines at the one call site because getting it
-/// wrong is silent: it was written as `/ 1000` for a while, which made the
-/// comparison microseconds-against-seconds and expired the default 120-second
-/// grace 120 microseconds after the connection opened. Nothing about that
-/// reports a unit error — the daemon simply disconnects every client during
-/// authentication.
+/// `grace_secs` is in seconds because that is the unit `LoginGraceTime` is
+/// written in, in this daemon's configuration file as in OpenSSH's, and
+/// [`Elapsed::from_secs`] is where that fact is stated. Everything else is the
+/// compiler's problem now: `saturating_since` cannot return anything but a span,
+/// and a span cannot be compared against a bare number at all.
 ///
-/// Saturating because a monotonic clock that steps backwards is a kernel bug and
-/// must not become a panic in a path an unauthenticated peer can reach.
-fn login_grace_expired(start_ns: u64, now_ns: u64, grace_secs: u32) -> bool {
-    now_ns.saturating_sub(start_ns) / NANOS_PER_SEC > u64::from(grace_secs)
+/// It was `now_ns.saturating_sub(start_ns) / 1000 > grace_secs` for a while,
+/// which compared microseconds against seconds and expired the default
+/// 120-second grace 120 microseconds after the connection opened — so no client
+/// could authenticate, and nothing reported a unit error. See
+/// `B-SSHD-LOGIN-GRACE-TIMER-COMPARED-MICROSECONDS-AGAINST-SECONDS` in
+/// `known-issues.md`, and `monoclock`'s module docs for why the types exist.
+fn login_grace_expired(start: Instant, now: Instant, grace_secs: u32) -> bool {
+    now.saturating_since(start) > Elapsed::from_secs(u64::from(grace_secs))
 }
 
-/// The monotonic clock in **nanoseconds**, or `None` if the kernel could not
-/// answer.
+/// Read the monotonic clock, or `None` if the kernel could not answer.
 ///
-/// The unit is the kernel's: `SYS_CLOCK_MONOTONIC` is documented in
+/// This is the one place in this crate that asserts what the syscall's return
+/// value *means*: `SYS_CLOCK_MONOTONIC` is documented in
 /// `kernel/src/syscall/number.rs` as "nanoseconds since boot", and the host
-/// build's shim (`posix::syscall`'s `host_clock::monotonic_ns`) matches it. This
-/// function used to be called `clock_monotonic_ms` and convert nothing, so its
-/// one caller divided a nanosecond count by 1000 and compared the resulting
-/// *microseconds* against a limit in seconds. See
+/// build's shim (`posix::syscall`'s `host_clock::monotonic_ns`) matches it, so
+/// [`Instant::from_nanos_since_boot`] is the correct wrapper. Everything
+/// downstream works in [`Instant`] and [`Elapsed`] and cannot lose the unit
+/// again — which it did: this returned a bare `u64`, was called
+/// `clock_monotonic_ms`, and converted nothing, so its one caller divided a
+/// nanosecond count by 1000 and compared the resulting *microseconds* against a
+/// limit in seconds. See
 /// `B-SSHD-LOGIN-GRACE-TIMER-COMPARED-MICROSECONDS-AGAINST-SECONDS` in
 /// known-issues.md.
 ///
-/// `None` rather than `0`, because a clock that cannot be read and a machine
-/// that booted a moment ago are different facts and this function's only
-/// caller *subtracts* two of its readings. Reporting `0` for a failure made
-/// that subtraction underflow whenever the clock answered when the connection
-/// opened and failed later: in a debug build a panic any unauthenticated peer
-/// could reach by holding a connection open, and in a release build a wrap to a
-/// huge elapsed time that disconnects every client the instant it connects.
-/// Both are worse than the thing the grace timer exists to prevent.
-fn clock_monotonic_ns() -> Option<u64> {
+/// `None` rather than a zero instant, because a clock that cannot be read and a
+/// machine that booted a moment ago are different facts and this function's only
+/// caller *subtracts* two of its readings. Reporting `0` for a failure made that
+/// subtraction underflow whenever the clock answered when the connection opened
+/// and failed later: in a debug build a panic any unauthenticated peer could
+/// reach by holding a connection open, and in a release build a wrap to a huge
+/// elapsed time that disconnects every client the instant it connects. Both are
+/// worse than the thing the grace timer exists to prevent. (`Instant`'s
+/// saturating arithmetic now also rules out the wrap, but the two facts are
+/// still different and the caller still needs to tell them apart.)
+fn clock_monotonic() -> Option<Instant> {
     // SAFETY: SYS_CLOCK_MONOTONIC takes no pointer arguments, returns time.
     let ret = unsafe { syscall0(SYS_CLOCK_MONOTONIC) };
     // `try_from` rather than a sign test and an `as` cast: the negative values
     // are exactly the error returns, so this is the same test spelled in a way
     // that cannot silently reinterpret one as a time.
-    u64::try_from(ret).ok()
+    u64::try_from(ret).ok().map(Instant::from_nanos_since_boot)
 }
 
 /// Get the current process ID.
@@ -3031,8 +3036,8 @@ pub struct ConnectionState {
     next_channel_id: u32,
     debug_mode: bool,
     /// When this connection opened, for the login grace timer — or `None` if
-    /// the clock could not be read at that moment. See [`clock_monotonic_ns`].
-    connection_start_ns: Option<u64>,
+    /// the clock could not be read at that moment. See [`clock_monotonic`].
+    connection_start: Option<Instant>,
     /// Where this connection's unpredictable bytes come from: the packet
     /// padding, the KEXINIT cookie and the Diffie-Hellman exponent.
     ///
@@ -3071,7 +3076,7 @@ impl ConnectionState {
             channels: Vec::new(),
             next_channel_id: 0,
             debug_mode,
-            connection_start_ns: clock_monotonic_ns(),
+            connection_start: clock_monotonic(),
             secrets: sshwire::KERNEL_SECRETS,
         }
     }
@@ -3745,7 +3750,7 @@ fn do_user_auth(
         // bound off for exactly the peers it exists to constrain. The daemon
         // already argues this way about an unreadable host key: it stops
         // rather than serving under a substitute.
-        let (Some(now), Some(start)) = (clock_monotonic_ns(), conn.connection_start_ns) else {
+        let (Some(now), Some(start)) = (clock_monotonic(), conn.connection_start) else {
             send_disconnect(conn, 2, "monotonic clock unavailable")?;
             return Err(SshdError::ProtocolError(
                 "cannot read the monotonic clock, so the login grace time cannot be enforced"
@@ -6399,20 +6404,27 @@ mod tests {
     /// and 10 ms read as 10000, which is greater than 120. Every client was
     /// disconnected during authentication with "login grace time expired", and
     /// no test in this crate reached the auth loop to notice.
+    ///
+    /// The spans are now built with `monoclock::Elapsed`, which is what stops
+    /// the bug being writable at all; this test remains because a type that
+    /// makes a mistake unspellable is not the same as a check that the
+    /// *comparison* is the right way round.
     #[test]
     fn the_login_grace_timer_measures_seconds_and_not_microseconds() {
-        let start = 5_000_000_000; // Some arbitrary point on a monotonic clock.
+        // Some arbitrary point on a monotonic clock.
+        let start = Instant::from_nanos_since_boot(5_000_000_000);
+        let after = |span| start.saturating_add(span);
 
         assert!(
-            !login_grace_expired(start, start + 10 * 1_000_000, 120),
+            !login_grace_expired(start, after(Elapsed::from_millis(10)), 120),
             "10ms into a 120-second grace period was treated as expired"
         );
         assert!(
-            !login_grace_expired(start, start + 119 * NANOS_PER_SEC, 120),
+            !login_grace_expired(start, after(Elapsed::from_secs(119)), 120),
             "119 seconds into a 120-second grace period was treated as expired"
         );
         assert!(
-            login_grace_expired(start, start + 121 * NANOS_PER_SEC, 120),
+            login_grace_expired(start, after(Elapsed::from_secs(121)), 120),
             "121 seconds into a 120-second grace period was not treated as expired"
         );
 
@@ -6420,7 +6432,7 @@ mod tests {
         // unauthenticated peer, so it must not panic -- and it must not be read
         // as an enormous elapsed time either.
         assert!(
-            !login_grace_expired(start, start - NANOS_PER_SEC, 120),
+            !login_grace_expired(start, start.saturating_sub(Elapsed::from_secs(1)), 120),
             "a backwards clock step expired the grace period"
         );
     }
@@ -8715,7 +8727,7 @@ Z
         // holding a connection open, and in a release build an elapsed time so
         // large that every client was disconnected the moment it arrived.
         assert_eq!(
-            clock_monotonic_ns(),
+            clock_monotonic(),
             None,
             "a clock that cannot be read must stay distinguishable from time zero"
         );
@@ -8735,7 +8747,7 @@ Z
         // subtracts from, and the point of the fix is that "we never got a
         // reading" is a state the type can hold — so the check can refuse the
         // connection instead of computing an elapsed time out of a failure.
-        assert_eq!(conn.connection_start_ns, None);
+        assert_eq!(conn.connection_start, None);
     }
 
     #[test]

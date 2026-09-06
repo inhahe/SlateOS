@@ -49,6 +49,16 @@ randrange = { path = "../../randrange" }
 authlib = { path = "../authlib" }
 sshwire = { path = "../sshwire" }
 
+# `monoclock` for the login grace timer. This crate is the reason that crate
+# exists: the timer read a nanosecond clock through a wrapper called
+# `clock_monotonic_ms` and divided by 1000, so it compared microseconds against
+# a limit in seconds and expired the default 120-second grace 120 microseconds
+# after the connection opened -- no client could authenticate at all, and
+# nothing reported a unit error. A unit that lives in an identifier is not
+# checked by anything; `monoclock` puts it in the type. See known-issues.md
+# `B-SSHD-LOGIN-GRACE-TIMER-COMPARED-MICROSECONDS-AGAINST-SECONDS`.
+monoclock = { path = "../../monoclock" }
+
 # Test-only. The fixtures write a shadow line and read it back, so two tests
 # naming one file make each assert against the other's data -- over the code
 # that decides whether a password is correct. See that crate's module docs and

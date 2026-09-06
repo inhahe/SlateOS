@@ -3,7 +3,18 @@ name = "inetd"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS inetd - internet super-server daemon"
+
 [dependencies]
+# `monoclock` for the connection-rate window. This crate is the other reason
+# that crate exists: `prune` subtracted `60_000` from a reading in nanoseconds
+# to mean "one minute", so the sliding window was sixty *microseconds* wide,
+# nothing ever stayed in it, and `MaxRate` could not be exceeded no matter how
+# fast a source connected -- the daemon's only defence against a connection
+# flood accepted everything. A unit that lives in an identifier is not checked
+# by anything; `monoclock` puts it in the type, and `Elapsed::from_secs(60)`
+# cannot be subtracted from anything but an `Instant`. See known-issues.md
+# `B-INETD-RATE-LIMIT-WINDOW-WAS-MICROSECONDS-NOT-MINUTES`.
+monoclock = { path = "../../monoclock" }
 
 [lints]
 workspace = true

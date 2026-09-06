@@ -1,0 +1,21 @@
+[package]
+name = "monoclock"
+version = "0.1.0"
+edition = "2024"
+description = "Monotonic-clock instants and spans, with the unit in the type rather than in a variable name."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free, `no_std`, and with no `alloc` either: every
+# item here is a `u64` newtype and every method is `const`. That is what lets
+# the bare-metal `no_main` services (`init`, `ticker`) use the same types as the
+# `std` daemons (`sshd`, `inetd`), which is the whole point -- the defect this
+# crate removes appeared independently in programs that share nothing else.
+#
+# It deliberately does not issue the syscall; see the module docs for why the
+# boundary is at "what the number means" rather than at "where it came from".
+[dependencies]
+
+[lints]
+workspace = true

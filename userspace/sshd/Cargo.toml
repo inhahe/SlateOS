@@ -59,6 +59,15 @@ sshwire = { path = "../sshwire" }
 # `B-SSHD-LOGIN-GRACE-TIMER-COMPARED-MICROSECONDS-AGAINST-SECONDS`.
 monoclock = { path = "../../monoclock" }
 
+# `quoting` for `os_from_bytes`: the one place in the tree that knows how to
+# turn the bytes of a path back into a name a syscall will take, on the target
+# and on a Windows development host both. The config file is read as bytes here,
+# because a `HostKey` line may name a file whose name is not UTF-8 -- every byte
+# but `/` and NUL is a legal path byte on this OS -- and this crate would
+# otherwise have written a fourth private copy of that `#[cfg(unix)]` dance. It
+# has no dependencies of its own.
+quoting = { path = "../quoting" }
+
 # Test-only. The fixtures write a shadow line and read it back, so two tests
 # naming one file make each assert against the other's data -- over the code
 # that decides whether a password is correct. See that crate's module docs and

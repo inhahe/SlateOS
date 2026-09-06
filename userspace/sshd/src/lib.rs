@@ -131,7 +131,7 @@ use std::io;
 use std::io::Read as _;
 #[allow(unused_imports)]
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 // Clock readings and spans as types rather than as `u64`s named after a unit.
@@ -338,6 +338,24 @@ unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
 //
 // See known-issues.md
 // `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+
+/// The bytes of a file name, as a path.
+///
+/// The inverse of the conversion `Path::display` performs, and the reason this
+/// daemon can read a configuration file as bytes at all: a `HostKey` or `Banner`
+/// line names a file, a file name on this OS is every byte but `/` and NUL
+/// (`design.txt`), and the name has to arrive at `open` as the bytes the
+/// administrator wrote rather than as whatever survived a UTF-8 check.
+///
+/// The work is `quoting::os_from_bytes`, which is shared rather than repeated
+/// here because the `#[cfg(unix)]` half of it — an `OsStr` *is* its bytes on the
+/// target, and is not on a Windows development host — is the kind of thing that
+/// goes subtly wrong in the fourth copy. That crate documents the one limitation:
+/// on Windows the round trip is lossy, which affects testing here and nothing the
+/// daemon does on SlateOS.
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(quoting::os_from_bytes(bytes))
+}
 
 /// The most any file this daemon reads may contain, in bytes.
 ///
@@ -2006,7 +2024,14 @@ fn write_openssh_private_key_with_checkint(
 pub struct SshdConfig {
     port: u16,
     listen_address: String,
-    host_key_file: String,
+    /// The host key's file, as a path rather than as text.
+    ///
+    /// A path on this OS is bytes, and this one is the path where getting it
+    /// wrong costs the most: an unreadable host key is treated as a first start,
+    /// so a name this daemon cannot open becomes a *newly generated identity*
+    /// and every client reporting that the host key changed. See
+    /// [`SshdConfig::parse`] for why the file it is read from is bytes too.
+    host_key_file: PathBuf,
     permit_root_login: PermitRootLogin,
     password_authentication: bool,
     pubkey_authentication: bool,
@@ -2018,7 +2043,13 @@ pub struct SshdConfig {
     max_auth_tries: u32,
     login_grace_time: u32,
     max_sessions: u32,
-    banner_file: String,
+    /// The pre-authentication banner's file, or an empty path for no banner.
+    ///
+    /// A path for the same reason [`SshdConfig::host_key_file`] is one. The
+    /// stakes are lower — an unreadable banner is simply not sent — but a
+    /// configuration where one path keeps its bytes and the one beside it does
+    /// not is a configuration whose rule nobody can state.
+    banner_file: PathBuf,
     print_motd: bool,
     subsystems: Vec<(String, String)>,
     allow_users: Vec<String>,
@@ -2059,7 +2090,7 @@ impl SshdConfig {
             max_auth_tries: 6,
             login_grace_time: 120,
             max_sessions: 10,
-            banner_file: String::new(),
+            banner_file: PathBuf::new(),
             print_motd: true,
             subsystems: vec![("sftp".into(), "/usr/lib/sftp-server".into())],
             allow_users: Vec::new(),
@@ -2071,34 +2102,87 @@ impl SshdConfig {
     }
 
     /// Parse configuration from `sshd_config` file contents.
-    fn parse(content: &str) -> Result<Self, SshdError> {
+    ///
+    /// # Why bytes and not `&str`
+    ///
+    /// This took `&str`, and the caller produced one with
+    /// `String::from_utf8_lossy`. Two directives here name a *file*, and a file
+    /// name on this OS may hold every byte but `/` and NUL (`design.txt`), so
+    /// the lossy conversion replaced a legal byte in a legal path with U+FFFD
+    /// and handed on a name that opens nothing.
+    ///
+    /// For `Banner` that costs a banner. For `HostKey` it costs the host's
+    /// identity: an unreadable host key path is treated as a first start — on
+    /// purpose, so that a fresh machine comes up with a key — so the daemon
+    /// generates a *new* one and every client that had the real one reports the
+    /// change. The lossy conversion therefore defeated, from three functions
+    /// away, the decision [`run_cli`] states in a comment of its own.
+    ///
+    /// # Why the two-stage match
+    ///
+    /// The path directives are answered first, from the bytes. Everything below
+    /// them is genuinely text — a port, a boolean, a user name, a glob — and is
+    /// read as UTF-8, but the failure is now a *refusal* naming the directive
+    /// rather than a silent substitution. Refusing is the right answer for a
+    /// value that is not text: an administrator can fix a config file they are
+    /// told about, and cannot fix one that quietly means something else.
+    ///
+    /// # Errors
+    ///
+    /// [`SshdError::ConfigError`] for a value that does not parse, and for a
+    /// non-path value that is not valid UTF-8.
+    fn parse(content: &[u8]) -> Result<Self, SshdError> {
         let mut config = Self::default_config();
 
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
+        // Split on `\n` rather than through `str::lines`, which is no longer
+        // available. A trailing `\r` needs no special case: it is ASCII
+        // whitespace, so `trim_ascii` takes it off along with any other padding,
+        // which is what `str::lines` was doing for CRLF files anyway.
+        for line in content.split(|&b| b == b'\n') {
+            let line = line.trim_ascii();
+            if line.is_empty() || line.first() == Some(&b'#') {
                 continue;
             }
 
             // Split on first whitespace.
-            let (directive, value) = match line.split_once(|c: char| c.is_whitespace()) {
-                Some((d, v)) => (d.trim(), v.trim()),
-                None => continue,
+            let Some(split) = line.iter().position(u8::is_ascii_whitespace) else {
+                continue;
+            };
+            let (directive, value) = line.split_at(split);
+            let (directive, value) = (directive.trim_ascii(), value.trim_ascii());
+
+            // A directive naming a file keeps its bytes; see the note above.
+            let name = directive.to_ascii_lowercase();
+            match name.as_slice() {
+                b"hostkey" => {
+                    config.host_key_file = path_from_bytes(value);
+                    continue;
+                }
+                b"banner" => {
+                    config.banner_file = path_from_bytes(value);
+                    continue;
+                }
+                _ => {}
+            }
+
+            // Everything past this point is text.
+            let Ok(value) = str::from_utf8(value) else {
+                return Err(SshdError::ConfigError(format!(
+                    "{}: value is not valid UTF-8, and this directive is not a file name",
+                    String::from_utf8_lossy(&name)
+                )));
             };
 
-            match directive.to_lowercase().as_str() {
-                "port" => {
+            match name.as_slice() {
+                b"port" => {
                     config.port = value
                         .parse()
                         .map_err(|_| SshdError::ConfigError(format!("invalid port: {value}")))?;
                 }
-                "listenaddress" => {
+                b"listenaddress" => {
                     config.listen_address = value.into();
                 }
-                "hostkey" => {
-                    config.host_key_file = value.into();
-                }
-                "permitrootlogin" => {
+                b"permitrootlogin" => {
                     config.permit_root_login = match value.to_lowercase().as_str() {
                         "yes" => PermitRootLogin::Yes,
                         "no" => PermitRootLogin::No,
@@ -2112,49 +2196,46 @@ impl SshdConfig {
                         }
                     };
                 }
-                "passwordauthentication" => {
+                b"passwordauthentication" => {
                     config.password_authentication = parse_bool(value)?;
                 }
-                "pubkeyauthentication" => {
+                b"pubkeyauthentication" => {
                     config.pubkey_authentication = parse_bool(value)?;
                 }
-                "authorizedkeysfile" => {
+                b"authorizedkeysfile" => {
                     config.authorized_keys_file = value.into();
                 }
-                "maxauthtries" => {
+                b"maxauthtries" => {
                     config.max_auth_tries = value.parse().map_err(|_| {
                         SshdError::ConfigError(format!("invalid MaxAuthTries: {value}"))
                     })?;
                 }
-                "logingracetime" => {
+                b"logingracetime" => {
                     config.login_grace_time = value.parse().map_err(|_| {
                         SshdError::ConfigError(format!("invalid LoginGraceTime: {value}"))
                     })?;
                 }
-                "maxsessions" => {
+                b"maxsessions" => {
                     config.max_sessions = value.parse().map_err(|_| {
                         SshdError::ConfigError(format!("invalid MaxSessions: {value}"))
                     })?;
                 }
-                "banner" => {
-                    config.banner_file = value.into();
-                }
-                "printmotd" => {
+                b"printmotd" => {
                     config.print_motd = parse_bool(value)?;
                 }
-                "subsystem" => {
+                b"subsystem" => {
                     if let Some((name, cmd)) = value.split_once(|c: char| c.is_whitespace()) {
                         config
                             .subsystems
                             .push((name.trim().into(), cmd.trim().into()));
                     }
                 }
-                "allowusers" => {
+                b"allowusers" => {
                     for user in value.split_whitespace() {
                         config.allow_users.push(user.into());
                     }
                 }
-                "denyusers" => {
+                b"denyusers" => {
                     for user in value.split_whitespace() {
                         config.deny_users.push(user.into());
                     }
@@ -2162,17 +2243,17 @@ impl SshdConfig {
                 // Repeated `AcceptEnv` lines accumulate rather than replace,
                 // which is OpenSSH's behaviour and the only one that lets a
                 // drop-in file add a variable without restating the base list.
-                "acceptenv" => {
+                b"acceptenv" => {
                     for pattern in value.split_whitespace() {
                         config.accept_env.push(pattern.into());
                     }
                 }
-                "allowgroups" => {
+                b"allowgroups" => {
                     for group in value.split_whitespace() {
                         config.allow_groups.push(group.into());
                     }
                 }
-                "denygroups" => {
+                b"denygroups" => {
                     for group in value.split_whitespace() {
                         config.deny_groups.push(group.into());
                     }
@@ -2197,7 +2278,7 @@ impl SshdConfig {
         let mut lines = vec![
             format!("port {}", self.port),
             format!("listenaddress {}", self.listen_address),
-            format!("hostkey {}", self.host_key_file),
+            format!("hostkey {}", self.host_key_file.display()),
             format!("permitrootlogin {root_login}"),
             format!(
                 "passwordauthentication {}",
@@ -2209,8 +2290,8 @@ impl SshdConfig {
             format!("logingracetime {}", self.login_grace_time),
             format!("maxsessions {}", self.max_sessions),
         ];
-        if !self.banner_file.is_empty() {
-            lines.push(format!("banner {}", self.banner_file));
+        if !self.banner_file.as_os_str().is_empty() {
+            lines.push(format!("banner {}", self.banner_file.display()));
         }
         lines.push(format!("printmotd {}", yn(self.print_motd)));
         for (name, cmd) in &self.subsystems {
@@ -3929,8 +4010,8 @@ fn handle_service_request(conn: &mut ConnectionState) -> Result<(), SshdError> {
     conn.send_packet(&accept)?;
 
     // Send banner if configured.
-    if !conn.config.banner_file.is_empty()
-        && let Ok(banner_data) = fs_read_file(Path::new(&conn.config.banner_file))
+    if !conn.config.banner_file.as_os_str().is_empty()
+        && let Ok(banner_data) = fs_read_file(&conn.config.banner_file)
     {
         let mut banner_msg = Vec::new();
         banner_msg.push(msg::SSH_MSG_USERAUTH_BANNER);
@@ -6583,8 +6664,7 @@ pub fn run_cli() -> i32 {
 
     // Load config.
     let mut config = if let Ok(data) = fs_read_file(Path::new(&opts.config_file)) {
-        let content = String::from_utf8_lossy(&data);
-        match SshdConfig::parse(&content) {
+        match SshdConfig::parse(&data) {
             Ok(c) => c,
             Err(e) => {
                 log_error(&format!("config parse error: {e}"), opts.log_stderr);
@@ -6608,7 +6688,7 @@ pub fn run_cli() -> i32 {
         config.port = port;
     }
     if let Some(hk) = &opts.host_key_file {
-        hk.clone_into(&mut config.host_key_file);
+        config.host_key_file = PathBuf::from(hk);
     }
 
     // Test mode.
@@ -6630,14 +6710,17 @@ pub fn run_cli() -> i32 {
     // substitute identity would present clients with a host key that is not the
     // one the operator installed. That is indistinguishable, from the client's
     // side, from the attack host key verification exists to detect, so we stop.
-    let host_key = match HostKey::load_from_file(Path::new(&config.host_key_file)) {
+    let host_key = match HostKey::load_from_file(&config.host_key_file) {
         Ok(hk) => hk,
         Err(SshdError::IoError(_)) => {
             log_info(
-                &format!("no host key at {}, generating one", config.host_key_file),
+                &format!(
+                    "no host key at {}, generating one",
+                    config.host_key_file.display()
+                ),
                 opts.log_stderr,
             );
-            match HostKey::generate_and_persist(Path::new(&config.host_key_file)) {
+            match HostKey::generate_and_persist(&config.host_key_file) {
                 Ok(hk) => hk,
                 Err(e) => {
                     log_error(&format!("cannot create a host key: {e}"), opts.log_stderr);
@@ -6799,61 +6882,61 @@ mod tests {
 
     #[test]
     fn test_config_parse_port() {
-        let config = SshdConfig::parse("Port 2222").unwrap();
+        let config = SshdConfig::parse(b"Port 2222").unwrap();
         assert_eq!(config.port, 2222);
     }
 
     #[test]
     fn test_config_parse_listen_address() {
-        let config = SshdConfig::parse("ListenAddress 192.168.1.1").unwrap();
+        let config = SshdConfig::parse(b"ListenAddress 192.168.1.1").unwrap();
         assert_eq!(config.listen_address, "192.168.1.1");
     }
 
     #[test]
     fn test_config_parse_host_key() {
-        let config = SshdConfig::parse("HostKey /etc/ssh/my_key").unwrap();
-        assert_eq!(config.host_key_file, "/etc/ssh/my_key");
+        let config = SshdConfig::parse(b"HostKey /etc/ssh/my_key").unwrap();
+        assert_eq!(config.host_key_file, Path::new("/etc/ssh/my_key"));
     }
 
     #[test]
     fn test_config_parse_permit_root_login_yes() {
-        let config = SshdConfig::parse("PermitRootLogin yes").unwrap();
+        let config = SshdConfig::parse(b"PermitRootLogin yes").unwrap();
         assert_eq!(config.permit_root_login, PermitRootLogin::Yes);
     }
 
     #[test]
     fn test_config_parse_permit_root_login_no() {
-        let config = SshdConfig::parse("PermitRootLogin no").unwrap();
+        let config = SshdConfig::parse(b"PermitRootLogin no").unwrap();
         assert_eq!(config.permit_root_login, PermitRootLogin::No);
     }
 
     #[test]
     fn test_config_parse_permit_root_login_prohibit() {
-        let config = SshdConfig::parse("PermitRootLogin prohibit-password").unwrap();
+        let config = SshdConfig::parse(b"PermitRootLogin prohibit-password").unwrap();
         assert_eq!(config.permit_root_login, PermitRootLogin::ProhibitPassword);
     }
 
     #[test]
     fn test_config_parse_password_auth() {
-        let config = SshdConfig::parse("PasswordAuthentication no").unwrap();
+        let config = SshdConfig::parse(b"PasswordAuthentication no").unwrap();
         assert!(!config.password_authentication);
     }
 
     #[test]
     fn test_config_parse_pubkey_auth() {
-        let config = SshdConfig::parse("PubkeyAuthentication no").unwrap();
+        let config = SshdConfig::parse(b"PubkeyAuthentication no").unwrap();
         assert!(!config.pubkey_authentication);
     }
 
     #[test]
     fn test_config_parse_max_auth_tries() {
-        let config = SshdConfig::parse("MaxAuthTries 3").unwrap();
+        let config = SshdConfig::parse(b"MaxAuthTries 3").unwrap();
         assert_eq!(config.max_auth_tries, 3);
     }
 
     #[test]
     fn test_config_parse_login_grace_time() {
-        let config = SshdConfig::parse("LoginGraceTime 60").unwrap();
+        let config = SshdConfig::parse(b"LoginGraceTime 60").unwrap();
         assert_eq!(config.login_grace_time, 60);
     }
 
@@ -6904,25 +6987,25 @@ mod tests {
 
     #[test]
     fn test_config_parse_max_sessions() {
-        let config = SshdConfig::parse("MaxSessions 5").unwrap();
+        let config = SshdConfig::parse(b"MaxSessions 5").unwrap();
         assert_eq!(config.max_sessions, 5);
     }
 
     #[test]
     fn test_config_parse_banner() {
-        let config = SshdConfig::parse("Banner /etc/ssh/banner").unwrap();
-        assert_eq!(config.banner_file, "/etc/ssh/banner");
+        let config = SshdConfig::parse(b"Banner /etc/ssh/banner").unwrap();
+        assert_eq!(config.banner_file, Path::new("/etc/ssh/banner"));
     }
 
     #[test]
     fn test_config_parse_print_motd() {
-        let config = SshdConfig::parse("PrintMotd no").unwrap();
+        let config = SshdConfig::parse(b"PrintMotd no").unwrap();
         assert!(!config.print_motd);
     }
 
     #[test]
     fn test_config_parse_subsystem() {
-        let config = SshdConfig::parse("Subsystem sftp /usr/lib/sftp-server").unwrap();
+        let config = SshdConfig::parse(b"Subsystem sftp /usr/lib/sftp-server").unwrap();
         // Default already has sftp; we add another.
         assert!(config.subsystems.len() >= 2);
         assert!(
@@ -6935,67 +7018,160 @@ mod tests {
 
     #[test]
     fn test_config_parse_allow_users() {
-        let config = SshdConfig::parse("AllowUsers alice bob").unwrap();
+        let config = SshdConfig::parse(b"AllowUsers alice bob").unwrap();
         assert_eq!(config.allow_users, vec!["alice", "bob"]);
     }
 
     #[test]
     fn test_config_parse_deny_users() {
-        let config = SshdConfig::parse("DenyUsers mallory").unwrap();
+        let config = SshdConfig::parse(b"DenyUsers mallory").unwrap();
         assert_eq!(config.deny_users, vec!["mallory"]);
     }
 
     #[test]
     fn test_config_parse_allow_groups() {
-        let config = SshdConfig::parse("AllowGroups ssh-users admin").unwrap();
+        let config = SshdConfig::parse(b"AllowGroups ssh-users admin").unwrap();
         assert_eq!(config.allow_groups, vec!["ssh-users", "admin"]);
     }
 
     #[test]
     fn test_config_parse_deny_groups() {
-        let config = SshdConfig::parse("DenyGroups nogroup").unwrap();
+        let config = SshdConfig::parse(b"DenyGroups nogroup").unwrap();
         assert_eq!(config.deny_groups, vec!["nogroup"]);
     }
 
     #[test]
     fn test_config_parse_authorized_keys_file() {
-        let config = SshdConfig::parse("AuthorizedKeysFile .ssh/custom_keys").unwrap();
+        let config = SshdConfig::parse(b"AuthorizedKeysFile .ssh/custom_keys").unwrap();
         assert_eq!(config.authorized_keys_file, ".ssh/custom_keys");
     }
 
     #[test]
     fn test_config_parse_comments_and_empty_lines() {
         let content = "# Comment\n\n  # Another comment\nPort 3333\n";
-        let config = SshdConfig::parse(content).unwrap();
+        let config = SshdConfig::parse(content.as_bytes()).unwrap();
         assert_eq!(config.port, 3333);
     }
 
     #[test]
     fn test_config_parse_empty() {
-        let config = SshdConfig::parse("").unwrap();
+        let config = SshdConfig::parse(b"").unwrap();
         assert_eq!(config.port, 22); // Should have defaults.
     }
 
     #[test]
     fn test_config_parse_invalid_port() {
-        assert!(SshdConfig::parse("Port notanumber").is_err());
+        assert!(SshdConfig::parse(b"Port notanumber").is_err());
     }
 
     #[test]
     fn test_config_parse_invalid_permit_root() {
-        assert!(SshdConfig::parse("PermitRootLogin maybe").is_err());
+        assert!(SshdConfig::parse(b"PermitRootLogin maybe").is_err());
     }
 
     #[test]
     fn test_config_parse_invalid_bool() {
-        assert!(SshdConfig::parse("PasswordAuthentication banana").is_err());
+        assert!(SshdConfig::parse(b"PasswordAuthentication banana").is_err());
     }
 
     #[test]
     fn test_config_parse_unknown_directive() {
         // Unknown directives should be silently ignored.
-        let config = SshdConfig::parse("UnknownDirective value").unwrap();
+        let config = SshdConfig::parse(b"UnknownDirective value").unwrap();
         assert_eq!(config.port, 22);
+    }
+
+    // ---- A configuration file is bytes ----
+    //
+    // These pin the reason `parse` takes `&[u8]`. It took `&str`, and the caller
+    // made one with `String::from_utf8_lossy`, so a `HostKey` naming a file whose
+    // name held byte 0x80 reached the opener with U+FFFD in it. What follows from
+    // that is the whole point: an unreadable host key path means "first start", so
+    // the daemon generates a *new* identity and every client reports the host key
+    // changed.
+
+    /// The host key's file name survives a byte that is not UTF-8.
+    ///
+    /// Unix-only because it asserts on the bytes themselves, and only on the
+    /// target is an `OsStr` its bytes — `quoting::os_from_bytes` says so, and the
+    /// Windows development host is where the round trip is lossy. The
+    /// host-independent half of the claim is the test below.
+    #[test]
+    #[cfg(unix)]
+    fn a_host_key_naming_a_file_whose_name_is_not_utf_8_keeps_every_byte() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let config = SshdConfig::parse(b"HostKey /etc/ssh/host_\xff_key").expect("parse");
+        assert_eq!(
+            config.host_key_file.as_os_str().as_bytes(),
+            b"/etc/ssh/host_\xff_key"
+        );
+    }
+
+    /// A file name that is not UTF-8 is not a *reason to refuse*, on any host.
+    ///
+    /// The lossy conversion this replaces did not fail either — that was the
+    /// trouble — so what distinguishes the two is the name that comes out, which
+    /// only the unix test above can check. This one pins the half that holds
+    /// everywhere: the parser gets as far as producing a path, rather than
+    /// rejecting the line or leaving the default in place.
+    #[test]
+    fn a_host_key_whose_name_is_not_utf_8_is_accepted_rather_than_refused() {
+        let config = SshdConfig::parse(b"HostKey /etc/ssh/host_\xff_key").expect("parse");
+        assert_ne!(
+            config.host_key_file,
+            SshdConfig::default_config().host_key_file,
+            "the line must be applied, not skipped in favour of the default"
+        );
+    }
+
+    /// The banner's file name is bytes for the same reason.
+    #[test]
+    #[cfg(unix)]
+    fn a_banner_naming_a_file_whose_name_is_not_utf_8_keeps_every_byte() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let config = SshdConfig::parse(b"Banner /etc/issue.\x80net").expect("parse");
+        assert_eq!(
+            config.banner_file.as_os_str().as_bytes(),
+            b"/etc/issue.\x80net"
+        );
+    }
+
+    /// A value that is *not* a file name and is not UTF-8 is refused, and the
+    /// refusal names the directive.
+    ///
+    /// This is the deliberate difference from what the lossy read did with the
+    /// same bytes: it substituted U+FFFD and carried on, so `AllowUsers` ended up
+    /// holding a pattern that matches no account and nothing said so. A
+    /// configuration this daemon cannot represent should stop it, loudly, rather
+    /// than quietly mean something the administrator did not write.
+    #[test]
+    fn a_value_that_is_not_a_file_name_and_not_utf_8_is_refused_rather_than_mangled() {
+        // `expect_err` would need `SshdConfig: Debug`, which it deliberately is
+        // not: a derived one would print the whole configuration, and this type
+        // is what a panic message inside the daemon would be built from.
+        let Err(err) = SshdConfig::parse(b"AllowUsers al\xffice") else {
+            panic!("a value that is not UTF-8 must be refused");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("allowusers") && msg.contains("UTF-8"),
+            "the refusal must name the directive and say why, got: {msg}"
+        );
+    }
+
+    /// A CRLF file parses, which `str::lines` used to arrange and the byte split
+    /// has to keep arranging.
+    ///
+    /// `trim_ascii` does it rather than a special case, because `\r` is ASCII
+    /// whitespace — but "it happens to work" is exactly the kind of claim that
+    /// stops being true under an edit, so it is pinned here.
+    #[test]
+    fn a_config_file_with_crlf_line_endings_parses_as_one_with_lf() {
+        let config = SshdConfig::parse(b"Port 2022\r\nMaxSessions 4\r\n").expect("parse");
+        assert_eq!(config.port, 2022);
+        assert_eq!(config.max_sessions, 4);
     }
 
     #[test]
@@ -7027,10 +7203,10 @@ DenyUsers nobody
 AllowGroups wheel
 DenyGroups nogroup
 ";
-        let config = SshdConfig::parse(content).unwrap();
+        let config = SshdConfig::parse(content.as_bytes()).unwrap();
         assert_eq!(config.port, 2222);
         assert_eq!(config.listen_address, "10.0.0.1");
-        assert_eq!(config.host_key_file, "/etc/ssh/host_key");
+        assert_eq!(config.host_key_file, Path::new("/etc/ssh/host_key"));
         assert_eq!(config.permit_root_login, PermitRootLogin::No);
         assert!(config.password_authentication);
         assert_eq!(config.max_auth_tries, 3);
@@ -9066,16 +9242,16 @@ Z
 
     #[test]
     fn test_port_valid_range() {
-        let config = SshdConfig::parse("Port 1").unwrap();
+        let config = SshdConfig::parse(b"Port 1").unwrap();
         assert_eq!(config.port, 1);
-        let config = SshdConfig::parse("Port 65535").unwrap();
+        let config = SshdConfig::parse(b"Port 65535").unwrap();
         assert_eq!(config.port, 65535);
     }
 
     #[test]
     fn test_port_zero_in_config() {
         // Port 0 is parseable but should be rejected at runtime.
-        let config = SshdConfig::parse("Port 0").unwrap();
+        let config = SshdConfig::parse(b"Port 0").unwrap();
         assert_eq!(config.port, 0);
     }
 
@@ -9083,7 +9259,7 @@ Z
 
     #[test]
     fn test_max_auth_tries_setting() {
-        let config = SshdConfig::parse("MaxAuthTries 1").unwrap();
+        let config = SshdConfig::parse(b"MaxAuthTries 1").unwrap();
         assert_eq!(config.max_auth_tries, 1);
     }
 
@@ -9091,13 +9267,13 @@ Z
 
     #[test]
     fn test_login_grace_time_setting() {
-        let config = SshdConfig::parse("LoginGraceTime 30").unwrap();
+        let config = SshdConfig::parse(b"LoginGraceTime 30").unwrap();
         assert_eq!(config.login_grace_time, 30);
     }
 
     #[test]
     fn test_login_grace_time_zero() {
-        let config = SshdConfig::parse("LoginGraceTime 0").unwrap();
+        let config = SshdConfig::parse(b"LoginGraceTime 0").unwrap();
         assert_eq!(config.login_grace_time, 0);
     }
 
@@ -9112,7 +9288,7 @@ Z
 
     #[test]
     fn test_subsystem_custom() {
-        let config = SshdConfig::parse("Subsystem scp /usr/lib/scp-server").unwrap();
+        let config = SshdConfig::parse(b"Subsystem scp /usr/lib/scp-server").unwrap();
         assert!(
             config
                 .subsystems
@@ -9126,13 +9302,13 @@ Z
     #[test]
     fn test_banner_empty_by_default() {
         let config = SshdConfig::default_config();
-        assert!(config.banner_file.is_empty());
+        assert!(config.banner_file.as_os_str().is_empty());
     }
 
     #[test]
     fn test_banner_configured() {
-        let config = SshdConfig::parse("Banner /etc/ssh/banner.txt").unwrap();
-        assert_eq!(config.banner_file, "/etc/ssh/banner.txt");
+        let config = SshdConfig::parse(b"Banner /etc/ssh/banner.txt").unwrap();
+        assert_eq!(config.banner_file, Path::new("/etc/ssh/banner.txt"));
     }
 
     // ---- SHA-256 ----
@@ -10363,9 +10539,9 @@ Z
 
     #[test]
     fn acceptenv_lines_accumulate_and_survive_a_round_trip() {
-        let config = SshdConfig::parse("acceptenv LANG LC_*\nacceptenv TZ\n").unwrap();
+        let config = SshdConfig::parse(b"acceptenv LANG LC_*\nacceptenv TZ\n").unwrap();
         assert_eq!(config.accept_env, vec!["LANG", "LC_*", "TZ"]);
-        let reparsed = SshdConfig::parse(&config.dump()).unwrap();
+        let reparsed = SshdConfig::parse(config.dump().as_bytes()).unwrap();
         assert_eq!(reparsed.accept_env, config.accept_env);
     }
 

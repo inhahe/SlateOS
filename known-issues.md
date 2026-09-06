@@ -120746,7 +120746,33 @@ a `String`. It is expanded against `PasswdEntry::{username, home}`, which come
 from `/etc/passwd` read through `String::from_utf8_lossy` — converting this one
 field alone would move the conversion one call later rather than remove it. See
 `TD-B-SSHD-CANNOT-REPRESENT-A-HOME-DIRECTORY-WHOSE-NAME-IS-NOT-UTF-8` below.
-The `scripts/argv-utf8.py` scope extension called for above is also still open.
+**The `scripts/argv-utf8.py` scope extension called for above is done.** The
+gate no longer covers `userspace/coreutils` and nothing else; it covers every
+crate under `userspace/` that does not *declare itself* unimplemented, and the
+declaration is a dependency on `userspace/notimpl` — something a crate says,
+not something the script infers about it. Inference was tried and does not
+work: `abiword-cli` prints canned text and declares no dependencies at all,
+while `getty`, `telnet` and `dnsmasq` declare none either and are real
+programs, so no property of a manifest separates them.
+
+474 of the 2760 crates there are now in scope, against the one the old rule
+could see. The number that matters for this entry is what that turned up:
+**464 findings in 450 crates**, where the old scope reported 4. `sudo`, `su`,
+`login`, `doas`, `passwd`, `useradd`, `chpasswd`, `getty`, `ftpd`, `ftp`,
+`sftp`, `scp`, `ssh`, `ssh-keygen`, `syslogd`, `crond`, `logind`, `inetd`,
+`telnet`, `ntpd`, `dhcpcd`, `dnsmasq`, `chroot`, `firejail`, `unshare`,
+`nsenter`, `capsh`, `newgrp` and `chage` all have the defect `sshd` had —
+every one of them a program that dies before its first statement on an
+argument holding a byte that is legal in a filename here. They are recorded in
+`scripts/argv-utf8-baseline.txt`, which is a ratchet and only shrinks; the
+next `sshd` cannot be added silently, which is what this follow-up was for.
+
+Roughly half of the 450 are crates that print canned output and never said so
+— they import nothing that could touch a file, a socket or a subprocess. The
+fix for those is the same one line as their 2286 siblings,
+`notimpl::guard(env!("CARGO_PKG_NAME"))`, which also fixes the panic: the
+guard runs before `env::args()` is ever called. The rest are real work, and
+are the backlog this baseline exists to count.
 
 ## TD-B-SSHD-CANNOT-REPRESENT-A-HOME-DIRECTORY-WHOSE-NAME-IS-NOT-UTF-8 (lane B, 2026-09-05)
 

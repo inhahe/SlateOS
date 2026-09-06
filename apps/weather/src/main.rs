@@ -13,7 +13,6 @@
 //! All weather data is simulated locally (no network required).
 //! Uses the guitk library for rendering.
 
-
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};

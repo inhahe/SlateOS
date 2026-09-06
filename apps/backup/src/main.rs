@@ -13,7 +13,6 @@
 //!   backup diff <BACKUP_ID1> <BACKUP_ID2>
 //!   backup info <BACKUP_ID>
 
-
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;

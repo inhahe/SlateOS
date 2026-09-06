@@ -36,7 +36,6 @@
 //! nothing in the test suite would catch, because each side is self-consistent.
 //! One source, read twice.
 
-
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, MouseButton, MouseEvent, MouseEventKind};
 use guitk::modal::{AlertDialog, DialogResult};

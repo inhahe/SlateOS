@@ -12,7 +12,6 @@
 //!   indexer config                    Show current configuration
 //!   indexer config set <KEY> <VALUE>  Set a config option
 
-
 use globmatch::glob_match;
 use std::collections::BTreeMap;
 use std::env;

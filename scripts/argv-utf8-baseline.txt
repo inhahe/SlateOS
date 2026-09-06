@@ -294,7 +294,6 @@ userspace/oguri-cli/src/main.rs:argv-as-string
 userspace/onlyoffice-cli/src/main.rs:argv-as-string
 userspace/overskride-cli/src/main.rs:argv-as-string
 userspace/pango-cli/src/main.rs:argv-as-string
-userspace/passwd/src/main.rs:argv-as-string
 userspace/paste/src/main.rs:argv-as-string
 userspace/patch/src/main.rs:argv-as-string
 userspace/patoline-cli/src/main.rs:argv-as-string

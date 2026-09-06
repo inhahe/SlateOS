@@ -416,7 +416,6 @@ userspace/updatedb/src/main.rs:argv-as-string
 userspace/upower/src/main.rs:argv-as-string
 userspace/uptime/src/main.rs:argv-as-string
 userspace/useradd-cli/src/main.rs:argv-as-string
-userspace/useradd/src/main.rs:argv-as-string
 userspace/useradm/src/main.rs:argv-as-string
 userspace/valentina-cli/src/main.rs:argv-as-string
 userspace/veusz-cli/src/main.rs:argv-as-string

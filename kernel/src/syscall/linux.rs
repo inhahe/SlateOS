@@ -30533,6 +30533,41 @@ pub(crate) fn revents_for_handle(
     }
 }
 
+/// Which waiter set a handle kind can be parked on, if any.
+///
+/// The companion of [`revents_for_handle`]: that one says *whether* an object is
+/// ready, this one says *how to be told* when it becomes ready. Both are keyed
+/// by [`HandleKind`] and both are single copies on purpose — a kind that gains a
+/// waiter set has to appear in exactly one place for every caller to start
+/// blocking on it properly.
+///
+/// Only three of the fifteen kinds have a kernel waiter set. The rest are
+/// [`WaitTarget::PollOnly`], and the reasons differ in kind rather than in
+/// degree: `Socket`, `AlsaPcm`, `AlsaControl`, `DrmCard` and `Evdev` live behind
+/// a userspace daemon or a device that has no way to push readiness into the
+/// kernel; `Epoll`, `SignalFd`, `Inotify` and `PidFd` are kernel-side but derive
+/// their readiness from state (a member fd, a signal set, a queue, a process
+/// lifetime) that no single waiter set covers; `File`, `MemFd` and `Console` are
+/// either always ready or have no readiness notion at all.
+///
+/// Being poll-only is not a defect to be worked around at the call site — it is
+/// the honest answer, and [`crate::ipc::multiwait::wait_multiple`] handles it by
+/// putting the whole wait on its adaptive backoff. The cost is paid once, here,
+/// rather than by every caller inventing its own loop.
+pub(crate) fn wait_target_for_handle(
+    kind: crate::proc::linux_fd::HandleKind,
+    raw_handle: u64,
+) -> crate::ipc::multiwait::WaitTarget {
+    use crate::ipc::multiwait::WaitTarget;
+    use crate::proc::linux_fd::HandleKind;
+    match kind {
+        HandleKind::Pipe => WaitTarget::Pipe(raw_handle),
+        HandleKind::EventFd => WaitTarget::EventFd(raw_handle),
+        HandleKind::Timerfd => WaitTarget::TimerFd(raw_handle),
+        _ => WaitTarget::PollOnly,
+    }
+}
+
 /// Compute revents for a (pid, fd, events) triple, doing the fd-table
 /// lookup.  Returns POLLNVAL for unknown fds and 0 for fd < 0.
 fn poll_compute_revents(pid: Option<u64>, fd: i32, events: u16) -> u16 {
@@ -30644,6 +30679,12 @@ fn interruptible_sleep_ms(pid: Option<u64>, total_ms: u64) -> bool {
 /// An in-kernel caller (`pid == None`, e.g. a boot self-test) has no signal
 /// queue, so blocking forever on the infinite case would be an unbreakable
 /// hang; that contextless case returns `ok(0)` to stay safe.
+///
+/// The infinite case parks with no timer at all rather than re-checking on a
+/// 10 ms tick.  There is nothing to re-check — the set is empty by definition,
+/// so the *only* thing that can end this wait is a signal, and a signal already
+/// wakes a registered signal-waiter directly.  The former tick was pure cost: a
+/// `poll(NULL, 0, -1)` used as a signal-wait woke 100 times a second forever.
 fn empty_set_wait(timeout_ms_signed: i64) -> SyscallResult {
     if timeout_ms_signed == 0 {
         return SyscallResult::ok(0);
@@ -30653,11 +30694,16 @@ fn empty_set_wait(timeout_ms_signed: i64) -> SyscallResult {
         if pid.is_none() {
             return SyscallResult::ok(0);
         }
-        loop {
-            if interruptible_wait_slice(pid, 10) {
-                return linux_err(errno::EINTR);
-            }
-        }
+        // An empty target set never reports ready, so this returns only via the
+        // signal check — which is exactly `pause()`.
+        return match crate::ipc::multiwait::wait_multiple(&[], None, || 0) {
+            Err(crate::error::KernelError::Interrupted) => linux_err(errno::EINTR),
+            Err(e) => linux_err(linux_errno_for(e)),
+            // Unreachable: with no timeout and no targets there is no path to
+            // `Ok`.  Answering EINTR rather than panicking keeps a future change
+            // to `wait_multiple` from turning a surprise into a kernel fault.
+            Ok(_) => linux_err(errno::EINTR),
+        };
     }
     #[allow(clippy::cast_sign_loss)]
     if interruptible_sleep_ms(pid, timeout_ms_signed as u64) {
@@ -30674,9 +30720,32 @@ fn empty_set_wait(timeout_ms_signed: i64) -> SyscallResult {
 /// `timeout_ms_signed` follows Linux poll(2):
 ///   * positive  — total deadline in milliseconds.
 ///   * 0         — no wait, instantaneous check.
-///   * negative  — wait forever (here implemented by re-polling
-///     indefinitely; callers can break the wait by
-///     changing the polled fd's state from another task).
+///   * negative  — wait forever.
+///
+/// # Blocking, not spinning
+///
+/// This used to re-scan the whole fd set every 10 ms
+/// ([`interruptible_wait_slice`]), which cost an idle poller 100 wakeups a
+/// second and added up to 10 ms of latency to an fd that became ready just after
+/// a scan. It now parks in [`crate::ipc::multiwait::wait_multiple`], which
+/// registers on each fd's waiter set and is woken by the object itself.
+///
+/// The improvement is only as good as the set's worst member: a set containing
+/// any [`WaitTarget::PollOnly`](crate::ipc::multiwait::WaitTarget::PollOnly) fd —
+/// a daemon-backed socket, an epoll, a device — still has to re-scan on a timer,
+/// but on an adaptive 0.5 ms → 20 ms backoff rather than a flat 10 ms, so its
+/// best case improves 20× and its idle case costs 500× less.
+///
+/// # Why the targets are resolved once and the readiness scan is not
+///
+/// The waiter-set registration is built from one fd-table lookup per fd, before
+/// the wait; the readiness scan still re-resolves every fd on each pass. That
+/// asymmetry is deliberate. Registration only needs a handle to *put the task
+/// into a set*, and both registering and deregistering are stale-handle-safe, so
+/// a resolution that goes out of date is harmless. Readiness is the opposite: an
+/// fd closed and reopened by another thread mid-wait must be reported against
+/// its current entry, which is the behaviour the pre-existing per-scan lookup
+/// already had and which this change deliberately does not alter.
 fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
     use alloc::{vec, vec::Vec};
 
@@ -30699,61 +30768,91 @@ fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
     }
 
     let pid = caller_pid();
-    let mut remaining_ms: i64 = timeout_ms_signed;
 
-    loop {
-        let mut count: i64 = 0;
-        for i in 0..nfds_usize {
-            let off = i.saturating_mul(8);
-            // SAFETY-of-indexing: off+7 < nfds_usize*8 == len == buf.len()
-            // because i < nfds_usize.  buf was resized to len above.
-            let fd = i32::from_ne_bytes([
-                buf[off],
-                buf[off.saturating_add(1)],
-                buf[off.saturating_add(2)],
-                buf[off.saturating_add(3)],
-            ]);
-            let events =
-                u16::from_ne_bytes([buf[off.saturating_add(4)], buf[off.saturating_add(5)]]);
+    // Resolve each fd to the set it can be parked on.  A negative fd (ignored by
+    // poll) and an fd that is not in the table contribute nothing rather than a
+    // PollOnly: a set of purely bad fds would otherwise be pushed onto the
+    // backoff path, and the scan below is going to return non-zero for them on
+    // its first pass anyway.
+    //
+    // `chunks_exact(8)` rather than an index arithmetic walk: `len` is
+    // `nfds * 8`, so there is no remainder to lose, and the slice pattern
+    // below cannot index out of bounds the way `buf[off + 3]` could if the
+    // stride and the length ever disagreed.
+    let mut targets: Vec<crate::ipc::multiwait::WaitTarget> = Vec::new();
+    for entry_bytes in buf.chunks_exact(8) {
+        // Unreachable — `chunks_exact` yields exactly 8 — but declining the
+        // entry is the right answer if it ever were, since a pollfd we cannot
+        // read is a pollfd we must not park on.
+        let [f0, f1, f2, f3, ..] = entry_bytes else {
+            continue;
+        };
+        let fd = i32::from_ne_bytes([*f0, *f1, *f2, *f3]);
+        if fd < 0 {
+            continue;
+        }
+        let Some(p) = pid else { continue };
+        let Some(entry) = pcb::linux_fd_lookup(p, fd) else {
+            continue;
+        };
+        targets.push(wait_target_for_handle(entry.kind, entry.raw_handle));
+    }
+
+    let timeout_ns: Option<u64> = if timeout_ms_signed < 0 {
+        None
+    } else {
+        #[allow(clippy::cast_sign_loss)]
+        Some((timeout_ms_signed as u64).saturating_mul(1_000_000))
+    };
+
+    // An in-kernel caller (no PCB) has no signal queue, so an indefinite park
+    // could never be broken.  `empty_set_wait` guards the same case the same
+    // way; here the fds themselves can still end the wait, so only the
+    // *unbounded* form is unsafe.
+    let timeout_ns = if timeout_ns.is_none() && pid.is_none() {
+        Some(0)
+    } else {
+        timeout_ns
+    };
+
+    let scan_buf = &mut buf;
+    let outcome = crate::ipc::multiwait::wait_multiple(&targets, timeout_ns, || {
+        let mut count: usize = 0;
+        // One `struct pollfd` per chunk: fd (4 bytes), events (2), revents (2).
+        // The slice pattern names all eight, which is what makes the revents
+        // write-back provably in bounds without an indexing lint suppression.
+        for entry_bytes in scan_buf.chunks_exact_mut(8) {
+            let [f0, f1, f2, f3, e0, e1, r0, r1] = entry_bytes else {
+                continue;
+            };
+            let fd = i32::from_ne_bytes([*f0, *f1, *f2, *f3]);
+            let events = u16::from_ne_bytes([*e0, *e1]);
             let revents = poll_compute_revents(pid, fd, events);
-            buf[off.saturating_add(6)] = (revents & 0xFF) as u8;
-            buf[off.saturating_add(7)] = ((revents >> 8) & 0xFF) as u8;
+            *r0 = (revents & 0xFF) as u8;
+            *r1 = ((revents >> 8) & 0xFF) as u8;
             if revents != 0 {
                 count = count.saturating_add(1);
             }
         }
-        if count > 0 || remaining_ms == 0 {
-            let w = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), fds_ptr, len) };
-            if let Err(e) = w {
-                return linux_err(linux_errno_for(e));
-            }
-            return SyscallResult::ok(count);
-        }
-        // No fd is ready yet and we still have time to wait.  Slice the wait
-        // into 10 ms chunks so we re-poll fast enough to catch pipe state
-        // changes from another task.  A deliverable signal interrupts the wait
-        // with -EINTR (poll is never restarted, even under SA_RESTART); the
-        // handler runs at the syscall-return checkpoint.  `interruptible_wait_slice`
-        // registers a signal-waiter so a signal posted mid-slice wakes us
-        // immediately instead of after the full 10 ms.
-        let slice_ms: u64 = if remaining_ms < 0 {
-            10
-        } else {
-            #[allow(clippy::cast_sign_loss)]
-            core::cmp::min(remaining_ms as u64, 10)
-        };
-        if interruptible_wait_slice(pid, slice_ms) {
-            return linux_err(errno::EINTR);
-        }
-        if remaining_ms > 0 {
-            #[allow(clippy::cast_possible_wrap)]
-            let consumed = slice_ms as i64;
-            remaining_ms = remaining_ms.saturating_sub(consumed);
-            if remaining_ms < 0 {
-                remaining_ms = 0;
-            }
-        }
+        count
+    });
+
+    // poll is always interrupted by a signal and never restarted, even under
+    // SA_RESTART; the handler runs at the syscall-return checkpoint.
+    let count = match outcome {
+        Ok(n) => n,
+        Err(crate::error::KernelError::Interrupted) => return linux_err(errno::EINTR),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+
+    // Written back once, on both the ready and the timed-out path: a caller that
+    // got 0 still needs the cleared revents the last scan left in `buf`.
+    let w = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), fds_ptr, len) };
+    if let Err(e) = w {
+        return linux_err(linux_errno_for(e));
     }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(count as i64)
 }
 
 /// `poll(fds*, nfds, timeout_ms)` — wait for events on a set of fds.

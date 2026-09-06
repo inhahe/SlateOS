@@ -15370,14 +15370,13 @@ fn wait_revents(test: WaitTest, raw: u64, events: u16, pid: u64) -> u16 {
 /// mixed set is only as good as its worst member.
 fn wait_target_for(test: WaitTest, raw: u64) -> crate::ipc::multiwait::WaitTarget {
     use crate::ipc::multiwait::WaitTarget;
-    use crate::proc::linux_fd::HandleKind;
     match test {
-        WaitTest::Handle(HandleKind::Pipe) => WaitTarget::Pipe(raw),
-        WaitTest::Handle(HandleKind::EventFd) => WaitTarget::EventFd(raw),
-        WaitTest::Handle(HandleKind::Timerfd) => WaitTarget::TimerFd(raw),
+        // Deliberately delegated rather than re-listed: `poll` and this syscall
+        // must agree about which kinds can be blocked on, and the way to
+        // guarantee that is to have one table, not two that look alike.
+        WaitTest::Handle(kind) => super::linux::wait_target_for_handle(kind, raw),
         WaitTest::StreamSocket => WaitTarget::StreamSocket(raw),
         WaitTest::Pty => WaitTarget::Pty(raw),
-        WaitTest::Handle(_) => WaitTarget::PollOnly,
     }
 }
 

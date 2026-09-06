@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -399,6 +398,12 @@ impl Deck {
     /// The deck name and description are escaped for the same reason even
     /// though import ignores them -- a newline in a name is the cheapest way
     /// to reach the card parser.
+    /// A deck as text, for moving it somewhere else.
+    ///
+    /// Advertised in the module doc ("Import/export (simple text format)") and
+    /// reachable from nothing: there is no control that calls it and no
+    /// filesystem to write to. See `todo.txt`.
+    #[allow(dead_code, reason = "no import/export control yet -- see todo.txt")]
     fn export_text(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("# {}\n", escape_field(&self.name)));
@@ -422,6 +427,8 @@ impl Deck {
     /// comma-separated tag list with spaces around the commas all still work.
     /// The leniency is confined to *structure*; values are decoded exactly, so
     /// anything this program wrote comes back byte for byte.
+    /// Read a deck back from `export_text`'s format. Same story: no caller.
+    #[allow(dead_code, reason = "no import/export control yet -- see todo.txt")]
     fn import_text(&mut self, text: &str) -> u32 {
         let mut count = 0u32;
         let mut front: Option<String> = None;
@@ -491,16 +498,28 @@ impl Deck {
 /// break is spelled `\n` and nothing else; this format is ours, so the cheaper
 /// honesty is available: escaping CR separately makes the round trip exact
 /// instead of merely faithful-in-spirit, and leaves no lossy corner to explain.
+#[allow(
+    dead_code,
+    reason = "only the import/export pair calls these, and it has no caller"
+)]
 fn escape_field(s: &str) -> String {
     kv::escape(s, &[])
 }
 
 /// Escape a value that also has to survive being joined with commas.
+#[allow(
+    dead_code,
+    reason = "only the import/export pair calls these, and it has no caller"
+)]
 fn escape_tag(s: &str) -> String {
     kv::escape(s, &[','])
 }
 
 /// Decode a value written by [`escape_field`] or [`escape_tag`].
+#[allow(
+    dead_code,
+    reason = "only the import/export pair calls these, and it has no caller"
+)]
 fn unescape_field(s: &str) -> String {
     kv::unescape(s)
 }
@@ -509,6 +528,10 @@ fn unescape_field(s: &str) -> String {
 ///
 /// Accepts `Q: value` and `Q:value` alike, and consumes exactly one space after
 /// the colon, so a value whose own first character is a space round-trips.
+#[allow(
+    dead_code,
+    reason = "only the import/export pair calls these, and it has no caller"
+)]
 fn split_field(line: &str) -> Option<(char, &str)> {
     let mut chars = line.chars();
     let tag = chars.next()?;
@@ -532,6 +555,10 @@ fn split_field(line: &str) -> Option<(char, &str)> {
 /// and so survives the trim, and only *then* is the tag decoded. The trim
 /// therefore still does what it is for -- absorbing the layout of a
 /// hand-written list -- without being able to reach the value.
+#[allow(
+    dead_code,
+    reason = "only the import/export pair calls these, and it has no caller"
+)]
 fn split_tags(value: &str) -> Vec<String> {
     let mut tags = Vec::new();
     let mut current = String::new();
@@ -658,6 +685,15 @@ struct FlashcardsApp {
     study_session: Option<StudySession>,
     /// Search query (used in deck detail view).
     search_query: String,
+    /// Whether the keyboard is in the search box.
+    ///
+    /// Needed because every letter in the deck view is a command -- `s`
+    /// studies, `n` makes a card, `x` deletes one -- so there is no spare
+    /// letter for "and also type this into the search". `handle_search_text`
+    /// and `handle_search_backspace` have been here since the file was
+    /// written with nothing to call them, because the mode they belong to did
+    /// not exist.
+    search_active: bool,
     /// Tag filter (used in deck detail view).
     tag_filter: Option<String>,
     /// Selected card index in deck detail view.
@@ -701,6 +737,7 @@ impl FlashcardsApp {
             current_day: today(),
             study_session: None,
             search_query: String::new(),
+            search_active: false,
             tag_filter: None,
             selected_card: 0,
             editing_card_id: None,
@@ -1065,13 +1102,15 @@ impl FlashcardsApp {
                 return true;
             }
         } else {
-            // Create new card
+            // Create new card. Through `Deck::add_card`, which is where the
+            // id is allocated -- this used to allocate one itself and push the
+            // card directly, so there were two ways to add a card and the one
+            // with a name had no callers.
             if let Some(deck) = self.current_deck_mut() {
-                let id = deck.next_card_id;
-                deck.next_card_id = deck.next_card_id.saturating_add(1);
-                let mut card = Card::new(id, &front, &back);
-                card.tags = tags;
-                deck.cards.push(card);
+                let id = deck.add_card(&front, &back);
+                if let Some(card) = deck.find_card_mut(id) {
+                    card.tags = tags;
+                }
                 self.status_msg = String::from("Card added");
                 self.view = AppView::DeckDetail;
                 return true;
@@ -1084,9 +1123,14 @@ impl FlashcardsApp {
         let matching = self.matching_card_indices();
         if let Some(&card_list_idx) = matching.get(self.selected_card)
             && let Some(deck) = self.current_deck_mut()
-            && card_list_idx < deck.cards.len()
+            && let Some(card_id) = deck.cards.get(card_list_idx).map(|c| c.id)
+            && deck.remove_card(card_id)
         {
-            deck.cards.remove(card_list_idx);
+            // Through `Deck::remove_card` rather than `cards.remove(idx)`
+            // inline. Both are correct -- `card_list_idx` is already an index
+            // into the unfiltered list -- but there was one way to remove a
+            // card that had a name and no callers, and another that had
+            // callers and no name.
             self.status_msg = String::from("Card deleted");
             if self.selected_card > 0 && self.selected_card >= matching.len().saturating_sub(1) {
                 self.selected_card = self.selected_card.saturating_sub(1);
@@ -1192,7 +1236,7 @@ impl FlashcardsApp {
     /// that answers `Consumed` to every key redraws on the ones it ignored.
     /// Comparing the state around the call beats making every arm of five
     /// separate matches remember to report.
-    fn state_fingerprint(&self) -> (AppView, usize, usize, bool, usize, String, String) {
+    fn state_fingerprint(&self) -> (AppView, usize, usize, bool, usize, String, String, bool) {
         (
             self.view,
             self.selected_deck,
@@ -1201,6 +1245,7 @@ impl FlashcardsApp {
             self.decks.len(),
             self.search_query.clone(),
             self.status_msg.clone(),
+            self.search_active,
         )
     }
 
@@ -1233,8 +1278,33 @@ impl FlashcardsApp {
     }
 
     fn handle_key_deck_detail(&mut self, key: &str, _ctrl: bool) {
+        if self.search_active {
+            match key {
+                "Escape" => {
+                    // Out of the box and back to the whole deck: a filter you
+                    // cannot see the edge of is one you forget is on.
+                    self.search_active = false;
+                    self.search_query.clear();
+                    self.selected_card = 0;
+                    self.scroll_offset = 0;
+                }
+                "Enter" => self.search_active = false,
+                "Backspace" => self.handle_search_backspace(),
+                "Space" => self.handle_search_text(" "),
+                other if other.chars().count() == 1 => self.handle_search_text(other),
+                _ => {}
+            }
+            return;
+        }
         match key {
+            "/" => {
+                self.search_active = true;
+                self.status_msg = String::from("Search: type to filter, Esc to clear");
+            }
             "Escape" => {
+                // `search_active` needs no clearing here: this arm is only
+                // reached with the box closed, because the box takes every key
+                // while it is open and both of its exits close it.
                 self.view = AppView::DeckList;
                 self.search_query.clear();
                 self.tag_filter = None;
@@ -1371,7 +1441,6 @@ impl FlashcardsApp {
     // ── Layout constants ────────────────────────────────────────────
     const HEADER_H: f32 = 50.0;
     const STATUS_H: f32 = 28.0;
-    const SIDEBAR_W: f32 = 240.0;
     const CARD_ROW_H: f32 = 48.0;
     const PADDING: f32 = 16.0;
 
@@ -1712,10 +1781,10 @@ impl FlashcardsApp {
             color: SURFACE0,
             corner_radii: CornerRadii::all(4.0),
         });
-        let search_display = if self.search_query.is_empty() {
-            String::from("Search cards...")
-        } else {
-            self.search_query.clone()
+        let search_display = match (self.search_active, self.search_query.is_empty()) {
+            (true, true) => String::from("Type to filter..."),
+            (false, true) => String::from("Search [/]"),
+            (_, false) => self.search_query.clone(),
         };
         let search_color = if self.search_query.is_empty() {
             OVERLAY0
@@ -4295,5 +4364,245 @@ mod tests {
             texts.iter().any(|t| t == "brief"),
             "the short back was cut; got {texts:?}"
         );
+    }
+
+    // == The search box ========================================================
+    //
+    // `handle_search_text` and `handle_search_backspace` were written when the
+    // file was and had no callers: every letter in the deck view is a command,
+    // so there was no mode in which a letter meant "search".
+
+    /// An app sitting in a deck, which is where the search box is drawn.
+    fn app_in_deck() -> FlashcardsApp {
+        let mut app = FlashcardsApp::new();
+        app.view = AppView::DeckDetail;
+        app
+    }
+
+    #[test]
+    fn slash_opens_the_search_box() {
+        let mut app = app_in_deck();
+        assert!(!app.search_active);
+        app.handle_key("/", false, false);
+        assert!(app.search_active);
+    }
+
+    #[test]
+    fn typing_in_the_search_box_filters_the_deck() {
+        let mut app = app_in_deck();
+        let all = app.matching_card_indices().len();
+        assert!(all > 1, "the sample deck should have a few cards");
+        app.handle_key("/", false, false);
+        for ch in "zzzz".chars() {
+            app.handle_key(&ch.to_string(), false, false);
+        }
+        assert_eq!(app.search_query, "zzzz");
+        assert!(
+            app.matching_card_indices().len() < all,
+            "a query that matches nothing should not leave every card showing"
+        );
+    }
+
+    #[test]
+    fn a_letter_is_a_command_until_the_search_box_is_open() {
+        let mut app = app_in_deck();
+        // `s` starts a study session outside the box.
+        app.handle_key("s", false, false);
+        assert!(app.study_session.is_some());
+        assert_eq!(app.search_query, "");
+    }
+
+    #[test]
+    fn a_letter_is_text_once_the_search_box_is_open() {
+        let mut app = app_in_deck();
+        app.handle_key("/", false, false);
+        app.handle_key("s", false, false);
+        assert!(
+            app.study_session.is_none(),
+            "a letter typed into the search box must not also run its shortcut"
+        );
+        assert_eq!(app.search_query, "s");
+    }
+
+    #[test]
+    fn backspace_deletes_from_the_query() {
+        let mut app = app_in_deck();
+        app.handle_key("/", false, false);
+        for ch in "abc".chars() {
+            app.handle_key(&ch.to_string(), false, false);
+        }
+        app.handle_key("Backspace", false, false);
+        assert_eq!(app.search_query, "ab");
+    }
+
+    #[test]
+    fn space_is_typed_rather_than_ignored() {
+        let mut app = app_in_deck();
+        app.handle_key("/", false, false);
+        app.handle_key("a", false, false);
+        app.handle_key("Space", false, false);
+        app.handle_key("b", false, false);
+        assert_eq!(app.search_query, "a b");
+    }
+
+    #[test]
+    fn enter_leaves_the_box_and_keeps_the_filter() {
+        let mut app = app_in_deck();
+        app.handle_key("/", false, false);
+        app.handle_key("a", false, false);
+        app.handle_key("Enter", false, false);
+        assert!(!app.search_active);
+        assert_eq!(app.search_query, "a", "the filter is still on");
+    }
+
+    #[test]
+    fn escape_clears_the_filter_and_leaves_the_box() {
+        let mut app = app_in_deck();
+        let all = app.matching_card_indices().len();
+        app.handle_key("/", false, false);
+        for ch in "zzzz".chars() {
+            app.handle_key(&ch.to_string(), false, false);
+        }
+        app.handle_key("Escape", false, false);
+        assert!(!app.search_active);
+        assert_eq!(app.search_query, "");
+        assert_eq!(
+            app.matching_card_indices().len(),
+            all,
+            "a filter you cannot see the edge of is one you forget is on"
+        );
+    }
+
+    #[test]
+    fn leaving_the_deck_leaves_the_search_with_it() {
+        let mut app = app_in_deck();
+        app.handle_key("/", false, false);
+        app.handle_key("a", false, false);
+        app.handle_key("Escape", false, false);
+        app.handle_key("Escape", false, false);
+        assert_eq!(app.view, AppView::DeckList);
+        assert!(!app.search_active);
+        assert_eq!(app.search_query, "");
+    }
+
+    #[test]
+    fn opening_the_search_box_earns_a_redraw() {
+        // The fingerprint decides whether a keystroke redrew anything, and
+        // entering the box changes nothing else on screen.
+        let mut app = app_in_deck();
+        let before = app.state_fingerprint();
+        app.handle_key("/", false, false);
+        assert_ne!(before, app.state_fingerprint());
+    }
+
+    // == One way to add a card, one way to remove one ==========================
+
+    #[test]
+    fn a_saved_card_gets_its_id_from_the_deck() {
+        // `save_card` used to allocate the id itself and push the card
+        // directly, duplicating `Deck::add_card`.
+        let mut app = FlashcardsApp::new();
+        let next = app.decks[app.selected_deck].next_card_id;
+        app.open_new_card_editor();
+        app.editor_front = String::from("Q");
+        app.editor_back = String::from("A");
+        assert!(app.save_card());
+        let deck = &app.decks[app.selected_deck];
+        assert_eq!(deck.cards.last().map(|c| c.id), Some(next));
+        assert_eq!(
+            deck.next_card_id,
+            next.saturating_add(1),
+            "the counter moves on however the card was added"
+        );
+    }
+
+    #[test]
+    fn deleting_a_filtered_card_deletes_the_one_that_was_selected() {
+        // The index came from the filtered list and the removal happens in the
+        // unfiltered one; going through `Deck::remove_card` by id is what
+        // makes those the same card.
+        let mut app = app_in_deck();
+        app.handle_key("/", false, false);
+        // Filter to something that matches exactly one card, whatever the
+        // sample deck happens to hold.
+        let target = {
+            let deck = &app.decks[app.selected_deck];
+            deck.cards
+                .get(1)
+                .map(|c| c.front.clone())
+                .expect("a second card")
+        };
+        for ch in target.chars() {
+            app.handle_key(&ch.to_string(), false, false);
+        }
+        app.handle_key("Enter", false, false);
+        let matching = app.matching_card_indices();
+        assert!(!matching.is_empty(), "the filter should match its own card");
+        let doomed = {
+            let deck = &app.decks[app.selected_deck];
+            deck.cards[matching[0]].id
+        };
+        app.selected_card = 0;
+        app.delete_selected_card();
+        let deck = &app.decks[app.selected_deck];
+        assert!(
+            !deck.cards.iter().any(|c| c.id == doomed),
+            "the card that was showing is the card that went"
+        );
+    }
+
+    #[test]
+    fn a_named_key_is_not_typed_into_the_search_box() {
+        // "Up", "Delete" and friends reach the same arm a letter does; without
+        // a length check the box would fill up with the words for arrow keys.
+        let mut app = app_in_deck();
+        app.handle_key("/", false, false);
+        app.handle_key("a", false, false);
+        for named in ["Up", "Down", "Left", "Right", "Delete", "Tab"] {
+            app.handle_key(named, false, false);
+        }
+        assert_eq!(app.search_query, "a");
+    }
+
+    #[test]
+    fn the_fingerprint_notices_the_search_box() {
+        // Directly, because opening the box also sets a status message, which
+        // would mask the flag being missing from the summary.
+        let mut app = app_in_deck();
+        let before = app.state_fingerprint();
+        app.search_active = !app.search_active;
+        assert_ne!(
+            before,
+            app.state_fingerprint(),
+            "a keystroke whose only effect is opening the box still has to \
+             earn its redraw"
+        );
+    }
+
+    #[test]
+    fn typing_a_filter_puts_the_selection_back_on_the_first_card() {
+        let mut app = app_in_deck();
+        app.selected_card = 2;
+        app.handle_key("/", false, false);
+        app.handle_key("a", false, false);
+        assert_eq!(
+            app.selected_card, 0,
+            "a selection counted in the old list names a different card in \
+             the filtered one, and may name none at all"
+        );
+    }
+
+    #[test]
+    fn search_text_is_refused_outside_the_deck_view() {
+        // `handle_search_text` is public to the rest of the file and the box
+        // is a deck-view thing; the guard is what stops a stray call filtering
+        // a deck nobody is looking at.
+        let mut app = FlashcardsApp::new();
+        app.view = AppView::StudyMode;
+        app.handle_search_text("x");
+        assert_eq!(app.search_query, "");
+        app.search_query = String::from("ab");
+        app.handle_search_backspace();
+        assert_eq!(app.search_query, "ab");
     }
 }

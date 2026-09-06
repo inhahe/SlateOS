@@ -55568,3 +55568,14 @@ One duplicate to resolve rather than build: `Vault::search_entries` is a second
 full-text search beside the toolbar's, which filters through
 `AppState::refresh_filter`. One of the two should go once it is clear which
 shape the UI wants.
+
+## flashcards: import and export are advertised and unreachable
+
+`Deck::export_text` and `Deck::import_text`, and the five escaping helpers only
+they call, have no caller: the module doc lists "Import/export (simple text
+format)" and there is no control that reaches it, nor a filesystem to write to.
+Each carries a `#[allow(dead_code, reason = ...)]` naming the gap rather than
+the blanket `#![allow(dead_code)]` that used to cover the file.
+
+The sink available today is the clipboard, which is what `apps/credmanager`'s
+export wants too -- worth doing both the same way when either is done.

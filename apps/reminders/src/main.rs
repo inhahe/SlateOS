@@ -34,7 +34,6 @@
 #![allow(clippy::many_single_char_names)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::needless_pass_by_value)]
-#![allow(dead_code)]
 
 #[allow(unused_imports)]
 use guitk::color::Color;

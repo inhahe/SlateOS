@@ -110838,6 +110838,54 @@ run reported `Clippy OK (debug profile, 38s, ...)`. The build cache was warm
 throughout. The 50 minutes were entirely pre-build static analysis — so a run
 lost this way has not lost any compilation work, only wall clock.
 
+### Addendum 2026-09-06: 7200s is no longer a floor, it is a *failing* budget — the gate phase alone measured 7402s
+
+The advice above ("budget 7200s when another lane is building") has now been
+overtaken by the gate phase's own growth. A lane-A boot test on 2026-09-06,
+with lane B running `cargo test -p posix` alongside it, printed:
+
+```
+=== Gates OK (7402s) ===
+=== Slowest gates (of 219 timed, 3717s of the 7402s phase) ===
+    3685s of the phase was NOT in a run_checker gate
+    (the tooling test-suite sweep, shellcheck and clippy are not routed
+     through run_checker, so they are in the remainder, not the table).
+```
+
+**7402s of gates, before a single line of kernel was compiled.** A 7200s
+budget cannot reach QEMU under these conditions — not "might not", cannot. An
+earlier run that same night was killed at exactly that point: it was 92 minutes
+in, still inside `test-checkers-honour-head.py`, with the tooling sweep,
+shellcheck, clippy, the build and the whole QEMU window still ahead of it.
+
+Three things worth carrying forward:
+
+1. **Budget 21600s (6h) for a full boot test, not 7200s.** That is what the
+   successful run used. It is not a generous number; it is roughly 2× the
+   measured gate phase, which is the smallest multiple that leaves room for the
+   build and the boot.
+2. **The split has moved.** The 2026-09-02 measurement above put >3000s in
+   `run_checker` gates. Today the *timed* gates are 3717s and the untimed
+   remainder — the `scripts/test-*.py` sweep, shellcheck, clippy — is 3685s,
+   i.e. very nearly half the phase is in work the slowest-gates table does not
+   show. Reading that table and concluding "the gates cost 3717s" understates
+   the phase by a factor of two. The harness says so itself, in the note quoted
+   above; the note is easy to skim past.
+3. **This is growth, not contention.** The 2026-09-02 entry correctly diagnosed
+   a saturated disk. That is not the story here: the competing load was one
+   `cargo test`, the free-space and toolchain-temp checks both passed with
+   large margins, and the phase is simply doing more than it was — 219 timed
+   gates plus a tooling sweep that now has its own several-hundred-case
+   suites. Sizing the budget from a 2026-09-02 measurement is what produced the
+   failed run.
+
+**Not proposing a fix here, deliberately.** The obvious lever — let the boot
+test skip gates — is one `boot-test.sh` already refuses on purpose
+("people are tempted to skip, which is worse than no gate", line ~3592), and
+that judgment is right. The honest response is a bigger budget and the
+knowledge that a full boot test is now a ~2.5h operation, which is what this
+addendum records.
+
 ---
 
 ### A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE. The Path-Z attribution warning fires on every lane boot, always, because the search never looks at the tree being tested — 2026-09-01 — **Status: OPEN**
@@ -112815,10 +112863,10 @@ For a backgrounded run, redirect instead, and read the status explicitly:
 
 ```bash
 # WRONG — notification reports tail's status, not the build's
-python scripts/run-timeout.py 7200 ./scripts/boot-test.sh 2>&1 | tail -80
+python scripts/run-timeout.py 21600 ./scripts/boot-test.sh 2>&1 | tail -80
 
 # RIGHT — full output kept, status preserved and printed
-python scripts/run-timeout.py 7200 ./scripts/boot-test.sh > /tmp/boot.log 2>&1
+python scripts/run-timeout.py 21600 ./scripts/boot-test.sh > /tmp/boot.log 2>&1
 echo "EXIT=$?"
 ```
 

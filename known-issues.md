@@ -121386,7 +121386,7 @@ non-UTF-8); and `is_safe_filename` refuses `""`, `.`, `..`, `../etc/passwd`,
 `a/b` and an embedded NUL, which guards the `/tmp/.users/<username>` marker
 this program writes and deletes as root.
 
-## B-USERS-YAML-IS-WORLD-READABLE-AND-HOLDS-EVERY-PASSWORD-HASH (lane B, 2026-09-06)
+## B-USERS-YAML-IS-WORLD-READABLE-AND-HOLDS-EVERY-PASSWORD-HASH (lane B, 2026-09-06) — FIXED 2026-09-06
 
 **In short:** `/etc/users.yaml` holds every account's password hash and is
 created with ordinary permissions, so any local user can read it and grind the
@@ -121424,6 +121424,17 @@ an offline-grinding exposure rather than an immediate compromise — but it is a
 real one, and it is strictly worse than the system's own `/etc/shadow`, which
 is `0600`. It has been true since `userdb` was written; §353 step 2 is what
 makes it *fixable*, not what introduces it.
+
+**FIXED (2026-09-06),** in the order the entry prescribes. `chown` and `chroot`
+read `/etc/passwd` and `/etc/group` through `pwdb` now, and `UserDb::save`
+stages the YAML `Access::Private`. The move fixed a second defect on the way:
+both crates were *inventing* the group table — `root`, `admin` and `users` had
+fixed ids and every other group name mentioned by any account was numbered from
+101 in order of appearance — so `chgrp audio` set a gid that depended on which
+accounts existed and that no other program on the system agreed with.
+
+The only remaining unprivileged reader would be a new one, and there is now a
+reason in `UserDb::save` for the next person who considers adding it.
 
 ## B-TOOLING-PIPING-CARGO-TEST-INTO-TAIL-HIDES-THE-FAILURE (lane B, 2026-09-06)
 

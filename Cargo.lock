@@ -2533,7 +2533,9 @@ name = "chown"
 version = "0.1.0"
 dependencies = [
  "modechange",
+ "pwdb",
  "quoting",
+ "scratchdir",
  "userdb",
 ]
 
@@ -2584,7 +2586,9 @@ dependencies = [
 name = "chroot"
 version = "0.1.0"
 dependencies = [
+ "pwdb",
  "quoting",
+ "scratchdir",
  "userdb",
 ]
 

@@ -4,12 +4,24 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS chroot utility"
 
-# `userdb` for `/etc/users.yaml`. This crate carried the fifth hand-rolled
-# parser of that file. See `design-decisions.md` §330.
+# `pwdb` for `/etc/passwd` and `/etc/group`, which is where a name becomes a
+# number for every POSIX tool. This crate read `/etc/users.yaml` through
+# `userdb` until `design-decisions.md` §353 made the flat files generated from
+# it and therefore always in agreement -- at which point reading the database
+# bought nothing and cost something: `chroot` is run unprivileged as often as
+# not, and the database holds every password hash, so an unprivileged reader of
+# it is the reason the file cannot be mode 0600. See `known-issues.md` ->
+# `B-USERS-YAML-IS-WORLD-READABLE-AND-HOLDS-EVERY-PASSWORD-HASH`.
 [dependencies]
 # chroot names the new root directory and the command it will exec, both
 # from the command line. It is a privilege boundary, so a word it prints
 # unquoted is one an unprivileged caller steered into a privileged program's
 # output.
 quoting = { path = "../quoting" }
+pwdb = { path = "../pwdb" }
+
+[dev-dependencies]
+# One test generates `/etc/passwd` with the writer and reads it back with the
+# reader, which is the only step at which the two can be seen to disagree.
 userdb = { path = "../userdb" }
+scratchdir = { path = "../scratchdir" }

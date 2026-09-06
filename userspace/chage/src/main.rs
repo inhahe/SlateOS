@@ -29,6 +29,21 @@
 //! and reported their fabricated aging as fact. `chage -l root` on a machine
 //! with no shadow file printed a policy nobody had ever set.
 //!
+//! # This program must be installed setuid root
+//!
+//! `chage -l` on your own account is a thing an ordinary user may do -- the
+//! policy governs when they will next be made to change their password, which
+//! they are entitled to know. But the account database is mode 0600, because
+//! it holds every password hash, so an ordinary user cannot open it. The same
+//! is true of the `/etc/shadow` the shadow suite's `chage` reads, and the same
+//! answer applies: the binary is setuid root, and the permission check inside
+//! it (`cmd_chage`) is what actually decides who may do what.
+//!
+//! Installed without that bit, `chage -l` works for root and reports
+//! "cannot read `/etc/users.yaml': permission denied" for everyone else --
+//! which is at least an honest failure, and the reason `load` reports the
+//! error rather than treating an unreadable database as an empty one.
+//!
 //! # Absent is not zero
 //!
 //! Each of the six is optional, and an absent one is *no policy*, not a policy

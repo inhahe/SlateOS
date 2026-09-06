@@ -1100,7 +1100,15 @@ impl UserDb {
         let dir = path.parent().unwrap_or_else(|| std::path::Path::new(""));
 
         let plan = [
-            (path.to_path_buf(), self.to_text(), Access::Shared),
+            // Owner-only. The database holds every account's password hash,
+            // which is the exact thing the `/etc/passwd`/`/etc/shadow` split
+            // was invented to keep out of a world-readable file -- and until
+            // `chown` and `chroot` moved onto `pwdb`, this file *was* that
+            // world-readable copy, sitting beside a `/etc/shadow` it made
+            // pointless. Nothing unprivileged reads it now: a program that
+            // wants a name-to-uid mapping reads the generated `/etc/passwd`,
+            // which carries exactly those fields and no secret.
+            (path.to_path_buf(), self.to_text(), Access::Private),
             (dir.join(PASSWD_NAME), passwd, Access::Shared),
             (dir.join(SHADOW_NAME), shadow, Access::Private),
         ];

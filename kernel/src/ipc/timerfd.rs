@@ -667,6 +667,85 @@ pub fn is_readable(handle: TimerFdHandle) -> bool {
     }
 }
 
+/// How long a waiter may sleep before this timerfd could become readable.
+///
+/// **This is not an optimisation — a multi-object waiter is incorrect without
+/// it.** A timerfd's `reader_waiters` set is *not* woken by an ordinary expiry:
+/// [`read_expirations_blocking`] arms a per-read one-shot
+/// [`crate::hrtimer`] that wakes only the one task that armed it, and
+/// the set itself is drained only by [`settime`] and [`clock_was_set`]. So a
+/// task that registers via [`register_waiter`] and parks with no deadline
+/// sleeps straight through the expiry it was waiting for.
+///
+/// `ipc::multiwait` therefore caps its park at the minimum of this over all
+/// its items (and the caller's own timeout). Returns:
+///
+/// * `None` — disarmed, or a stale handle: nothing to wait for, so nothing to
+///   cap. A disarmed timer *can* still become readable, but only via `settime`,
+///   which is a real wake.
+/// * `Some(0)` — readable right now (an unconsumed expiration, or a
+///   `TFD_TIMER_CANCEL_ON_SET` timer cancelled by a clock step). Do not sleep.
+/// * `Some(ns)` — armed and not yet due; `ns` is relative to now.
+///
+/// Relative rather than absolute deliberately: each timerfd measures against
+/// *its own* clock ([`now_for_clock`]), so absolute expiries from a
+/// `CLOCK_MONOTONIC` and a `CLOCK_REALTIME` timerfd are not comparable and
+/// could not be reduced to the single sleep length the caller needs.
+#[must_use]
+pub fn next_deadline_ns(handle: TimerFdHandle) -> Option<u64> {
+    let cid = clockid(handle)?;
+    let now = now_for_clock(cid);
+    let gen_now = crate::timekeeping::realtime_generation();
+    let table = TIMERFD_TABLE.lock();
+    let tfd = table.get(&handle.id())?;
+    if tfd.cancel_on_set && tfd.armed_gen != gen_now {
+        return Some(0);
+    }
+    let (count, _) = advance(tfd.expiry_ns, tfd.interval_ns, now);
+    if count > 0 {
+        return Some(0);
+    }
+    if tfd.expiry_ns == 0 {
+        return None;
+    }
+    // `advance` returned 0 with a non-zero expiry ⇒ `now < expiry`, so this is
+    // strictly positive.
+    Some(remaining(tfd.expiry_ns, tfd.interval_ns, now))
+}
+
+/// Park `task` on this timerfd so that an arm or a clock step wakes it.
+///
+/// The multi-object (`ipc::multiwait`) counterpart to the registration
+/// [`read_expirations_blocking`] does inline — see
+/// [`super::pipe::register_waiter`] for why a stale handle is a silent no-op
+/// rather than an error.
+///
+/// A timerfd has only the one set (there is no writing to a timerfd), and
+/// registering in it is **not sufficient on its own**: it delivers the
+/// `settime` and `clock_was_set` wakes but not ordinary expiry, which is why
+/// [`next_deadline_ns`] exists and why the caller must use both.
+///
+/// Must be paired with [`deregister_waiter`] on every exit path.
+pub fn register_waiter(handle: TimerFdHandle, task: TaskId) {
+    let mut table = TIMERFD_TABLE.lock();
+    let Some(tfd) = table.get_mut(&handle.id()) else {
+        return;
+    };
+    tfd.reader_waiters.insert(task);
+}
+
+/// Undo [`register_waiter`]: remove `task` from this timerfd's waiter set.
+///
+/// Idempotent and stale-handle-safe, so it can be called unconditionally from a
+/// `Drop`. See [`super::pipe::deregister_waiter`] for what a leaked entry does.
+pub fn deregister_waiter(handle: TimerFdHandle, task: TaskId) {
+    let mut table = TIMERFD_TABLE.lock();
+    let Some(tfd) = table.get_mut(&handle.id()) else {
+        return;
+    };
+    tfd.reader_waiters.remove(task);
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------

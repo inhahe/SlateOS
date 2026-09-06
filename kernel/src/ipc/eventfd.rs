@@ -47,7 +47,7 @@ use super::waiters::{
     WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
 };
 use crate::error::{KernelError, KernelResult};
-use crate::sched;
+use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
@@ -747,6 +747,37 @@ pub fn poll_status(handle: EventFdHandle) -> u16 {
         bits |= 0x0010; // POLLHUP
     }
     bits
+}
+
+/// Park `task` on this eventfd so that any state change wakes it.
+///
+/// The multi-object (`ipc::multiwait`) counterpart to the registration the
+/// blocking `read`/`write` loops do inline — see [`super::pipe::register_waiter`]
+/// for why this registers in *both* sets irrespective of the caller's event
+/// mask, and why a stale handle is a silent no-op rather than an error.
+///
+/// Must be paired with [`deregister_waiter`] on every exit path.
+pub fn register_waiter(handle: EventFdHandle, task: TaskId) {
+    let mut table = EVENTFD_TABLE.lock();
+    let Some(efd) = table.get_mut(&handle.id()) else {
+        return;
+    };
+    efd.reader_waiters.insert(task);
+    efd.writer_waiters.insert(task);
+}
+
+/// Undo [`register_waiter`]: remove `task` from both of this eventfd's waiter
+/// sets.
+///
+/// Idempotent and stale-handle-safe, so it can be called unconditionally from a
+/// `Drop`. See [`super::pipe::deregister_waiter`] for what a leaked entry does.
+pub fn deregister_waiter(handle: EventFdHandle, task: TaskId) {
+    let mut table = EVENTFD_TABLE.lock();
+    let Some(efd) = table.get_mut(&handle.id()) else {
+        return;
+    };
+    efd.reader_waiters.remove(task);
+    efd.writer_waiters.remove(task);
 }
 
 // ---------------------------------------------------------------------------

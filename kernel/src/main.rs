@@ -1909,6 +1909,23 @@ extern "C" fn kernel_main() -> ! {
         case();
     }
 
+    {
+        #[inline(never)]
+        fn case() {
+            // Multi-object waiting (`ipc::multiwait`).  Like the timerfd blocking
+            // test above, this cannot run in the early deterministic-init phase:
+            // every phase either parks the caller (released by another task's
+            // wake) or bounds its park with an `hrtimer`, and hrtimer callbacks
+            // are dispatched from the APIC timer ISR — which only exists once the
+            // timer is initialized and IF=1, i.e. from right here.
+            if let Err(e) = ipc::multiwait::self_test() {
+                serial_println!("FATAL: Multi-object wait self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+        }
+        case();
+    }
+
     // End-to-end dynamically-linked Linux launch test (needs a writable VFS,
     // so it runs here rather than in proc::self_test() which precedes VFS
     // init).  Places a minimal interpreter ("ld.so" stand-in) on the

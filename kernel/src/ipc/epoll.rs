@@ -42,11 +42,35 @@
 //! matching Linux: an `epoll_ctl` from the child is visible to the parent
 //! because they refer to the same kernel object.
 //!
+//! ## Waking a parked `epoll_wait` when the interest set changes
+//!
+//! An instance carries a [`WaiterSet`] and a **generation** counter, both
+//! touched only by the three `epoll_ctl` operations.  They exist because
+//! `epoll_wait` no longer re-scans on a timer: it parks on the waiter sets of
+//! the fds *currently* in the interest set, which is a list it has to resolve
+//! before it blocks.  If another thread then registers a fourth fd, the parked
+//! task is registered on the old three and nothing about the new one can reach
+//! it.
+//!
+//! So `ctl_add`/`ctl_mod`/`ctl_del` bump the generation and wake every parked
+//! waiter.  The waiter observes that the generation moved, abandons its
+//! resolved target list, and rebuilds it.  The counter rather than a bare wake
+//! is what makes that unambiguous: a wake alone cannot be told apart from a
+//! member becoming ready, and re-deriving the list on *every* wake would undo
+//! the point of parking.
+//!
+//! Note this set announces **interest-set changes only**, never member
+//! readiness — an epoll instance has no readiness of its own to announce.  A
+//! caller that wants to know when an epoll fd becomes readable (`poll()` on an
+//! epoll fd) must still re-scan; see `WaitTarget::EpollCtl`.
+//!
 //! ## Lock ordering
 //!
-//! `EPOLL_TABLE` is a leaf lock — none of the operations here call into the
-//! scheduler or any other subsystem while holding it, so it never
-//! participates in a lock-ordering cycle.
+//! `EPOLL_TABLE` is a leaf lock — no operation here calls into the scheduler
+//! or any other subsystem *while holding it*, so it never participates in a
+//! lock-ordering cycle.  The `ctl_*` wakes keep that true by taking the waiter
+//! list out of the instance, dropping the table lock, and only then waking, the
+//! same "drop the lock, then wake" shape [`crate::ipc::eventfd`] uses.
 
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
@@ -54,6 +78,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::ipc::waiters::{WaiterSet, wake_all};
+use crate::sched::task::TaskId;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -127,6 +153,14 @@ struct Epoll {
     interest: BTreeMap<i32, InterestEntry>,
     /// Reference count: `create` = 1, each `dup` +1, each `close` −1.
     refcount: u32,
+    /// Tasks parked in `epoll_wait` on this instance, to be woken when the
+    /// interest set changes under them.  See the module docs.
+    waiters: WaiterSet,
+    /// Bumped by every interest-set mutation, so a parked waiter can tell that
+    /// the list it resolved before blocking is stale.  `u64` at one bump per
+    /// `epoll_ctl` cannot wrap in any realistic uptime, so the comparison does
+    /// not have to handle it.
+    generation: u64,
 }
 
 impl Epoll {
@@ -134,7 +168,18 @@ impl Epoll {
         Self {
             interest: BTreeMap::new(),
             refcount: 1,
+            waiters: WaiterSet::new(),
+            generation: 0,
         }
+    }
+
+    /// Record that the interest set changed and take the waiters to wake.
+    ///
+    /// Returns the list rather than waking here so the caller can drop the
+    /// table lock first — see the module docs on lock ordering.
+    fn interest_changed(&mut self) -> Vec<TaskId> {
+        self.generation = self.generation.wrapping_add(1);
+        self.waiters.take_all()
     }
 }
 
@@ -225,6 +270,9 @@ pub fn ctl_add(handle: EpollHandle, fd: i32, events: u32, data: u64) -> KernelRe
         return Err(KernelError::AlreadyExists);
     }
     ep.interest.insert(fd, InterestEntry { events, data });
+    let woken = ep.interest_changed();
+    drop(table);
+    wake_all(woken);
     Ok(())
 }
 
@@ -245,6 +293,9 @@ pub fn ctl_mod(handle: EpollHandle, fd: i32, events: u32, data: u64) -> KernelRe
         Some(entry) => {
             entry.events = events;
             entry.data = data;
+            let woken = ep.interest_changed();
+            drop(table);
+            wake_all(woken);
             Ok(())
         }
         None => Err(KernelError::NotFound),
@@ -264,6 +315,15 @@ pub fn ctl_del(handle: EpollHandle, fd: i32) -> KernelResult<()> {
         .get_mut(&handle.id())
         .ok_or(KernelError::InvalidHandle)?;
     if ep.interest.remove(&fd).is_some() {
+        // A removal cannot make anything ready, so this wake never produces a
+        // result the waiter did not already have.  It is done anyway because
+        // the waiter is parked on the *removed* fd's waiter set: leaving it
+        // there means every later state change on an fd nobody is interested in
+        // wakes the task for a scan that must find nothing.  One wake now
+        // replaces an unbounded number later.
+        let woken = ep.interest_changed();
+        drop(table);
+        wake_all(woken);
         Ok(())
     } else {
         Err(KernelError::NotFound)
@@ -308,6 +368,51 @@ pub fn interest_count(handle: EpollHandle) -> usize {
         .lock()
         .get(&handle.id())
         .map_or(0, |ep| ep.interest.len())
+}
+
+// ---------------------------------------------------------------------------
+// Interest-set change notification (the kernel half of a parked epoll_wait)
+// ---------------------------------------------------------------------------
+
+/// The instance's interest-set generation, or `None` if it is not a live
+/// instance.
+///
+/// `epoll_wait` reads this *before* it snapshots the interest list and compares
+/// it on each readiness scan: an inequality means the list it resolved its wait
+/// targets from has changed and must be rebuilt.  Reading it first is what makes
+/// the check conservative — a mutation racing between the two reads shows up as
+/// a spurious rebuild, never as a missed one.
+///
+/// `None` also doubles as "the instance was closed while we waited", which the
+/// caller must treat as the end of the wait rather than as an empty interest set
+/// (an empty set would park again, forever).
+#[must_use]
+pub fn generation(handle: EpollHandle) -> Option<u64> {
+    EPOLL_TABLE.lock().get(&handle.id()).map(|ep| ep.generation)
+}
+
+/// Park `task` on this instance's interest-set-change notification.
+///
+/// This is **not** a readiness registration: it fires when `epoll_ctl` mutates
+/// the interest set, and never when a member of that set becomes ready.  A
+/// caller that wants readiness must additionally register on the members
+/// themselves, which is what `epoll_wait` does.
+///
+/// Must be paired with [`deregister_waiter`] on every exit path; see
+/// [`crate::ipc::waiters`] for what a leaked entry does.  A handle that is not
+/// live is silently ignored, matching the other families' registration calls.
+pub fn register_waiter(handle: EpollHandle, task: TaskId) {
+    if let Some(ep) = EPOLL_TABLE.lock().get_mut(&handle.id()) {
+        ep.waiters.insert(task);
+    }
+}
+
+/// Undo [`register_waiter`].  No-op if `task` is not registered or the
+/// instance is gone.
+pub fn deregister_waiter(handle: EpollHandle, task: TaskId) {
+    if let Some(ep) = EPOLL_TABLE.lock().get_mut(&handle.id()) {
+        ep.waiters.remove(task);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +539,97 @@ pub fn self_test() -> KernelResult<()> {
     }
     // close() on a stale handle must be a harmless no-op.
     close(ep);
+
+    // 8. The interest-set generation counter.
+    //
+    // `epoll_wait` parks on the fds it resolved *before* blocking and uses this
+    // counter to notice that the list it resolved from has changed.  Two
+    // properties make that work, and both are asserted here:
+    //
+    //   * every successful mutation moves it — miss one and a parked waiter
+    //     stays blocked on a set that no longer describes what it is waiting
+    //     for, which is the bug this counter exists to prevent;
+    //   * a *rejected* mutation does not — a bump there would cost every parked
+    //     waiter a full target rebuild for a call that changed nothing, and a
+    //     program that polls `epoll_ctl` for EEXIST would turn a blocked
+    //     `epoll_wait` back into the spin this replaced.
+    let ep = create();
+    let Some(g0) = generation(ep) else {
+        serial_println!("[epoll]   FAIL: generation() is None for a live instance");
+        close(ep);
+        return Err(KernelError::InternalError);
+    };
+    if generation(ep) != Some(g0) {
+        serial_println!("[epoll]   FAIL: generation moved without a mutation");
+        close(ep);
+        return Err(KernelError::InternalError);
+    }
+    ctl_add(ep, 7, 0x1, 0)?;
+    let Some(g_add) = generation(ep) else {
+        serial_println!("[epoll]   FAIL: generation() is None after ADD");
+        close(ep);
+        return Err(KernelError::InternalError);
+    };
+    // A duplicate ADD is refused before it touches the map, so it must not bump.
+    let _ = ctl_add(ep, 7, 0x1, 0);
+    // Likewise MOD and DEL of an fd that is not registered.
+    let _ = ctl_mod(ep, 99, 0x1, 0);
+    let _ = ctl_del(ep, 99);
+    if generation(ep) != Some(g_add) {
+        serial_println!("[epoll]   FAIL: a rejected epoll_ctl bumped the generation");
+        close(ep);
+        return Err(KernelError::InternalError);
+    }
+    ctl_mod(ep, 7, 0x5, 1)?;
+    let Some(g_mod) = generation(ep) else {
+        serial_println!("[epoll]   FAIL: generation() is None after MOD");
+        close(ep);
+        return Err(KernelError::InternalError);
+    };
+    ctl_del(ep, 7)?;
+    let Some(g_del) = generation(ep) else {
+        serial_println!("[epoll]   FAIL: generation() is None after DEL");
+        close(ep);
+        return Err(KernelError::InternalError);
+    };
+    if !(g_add != g0 && g_mod != g_add && g_del != g_mod) {
+        serial_println!(
+            "[epoll]   FAIL: generation did not move on every mutation \
+             (start {g0}, add {g_add}, mod {g_mod}, del {g_del})"
+        );
+        close(ep);
+        return Err(KernelError::InternalError);
+    }
+
+    // Registering and deregistering a waiter must not disturb the counter — the
+    // two mechanisms are independent, and a park that bumped the generation
+    // would see its own registration as a reason to rebuild and never settle.
+    let task = crate::sched::current_task_id();
+    register_waiter(ep, task);
+    register_waiter(ep, task); // idempotent
+    deregister_waiter(ep, task);
+    deregister_waiter(ep, task); // no-op
+    if generation(ep) != Some(g_del) {
+        serial_println!("[epoll]   FAIL: waiter registration moved the generation");
+        close(ep);
+        return Err(KernelError::InternalError);
+    }
+
+    close(ep);
+    // A closed instance reports no generation at all, which is how a parked
+    // `epoll_wait` tells "the set changed" from "the instance is gone" — the
+    // latter must end the wait, not restart it against an empty set.
+    if generation(ep).is_some() {
+        serial_println!("[epoll]   FAIL: generation() is Some for a closed instance");
+        return Err(KernelError::InternalError);
+    }
+    // Both waiter calls must be harmless on a stale handle: `Registration`'s
+    // `Drop` in `ipc::multiwait` deregisters unconditionally, including after
+    // the instance it was waiting on has been closed underneath it.
+    register_waiter(ep, task);
+    deregister_waiter(ep, task);
+
+    serial_println!("[epoll]   Interest-set generation moves on every real mutation: OK");
 
     serial_println!("[epoll]   epoll instance object (create/ctl/dup/close): OK");
     Ok(())

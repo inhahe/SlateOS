@@ -19,14 +19,18 @@
 //! # What it can and cannot block on
 //!
 //! Only objects with a kernel waiter set can be blocked on. Everything else —
-//! the daemon-backed `net::socket`, DRM, evdev, signalfd, pidfd, epoll, plain
-//! files, the console — has no way to push readiness into the kernel, and is
-//! represented by [`WaitTarget::PollOnly`].
+//! the daemon-backed `net::socket`, DRM, evdev, signalfd, pidfd, an epoll fd's
+//! *readiness*, plain files, the console — has no way to push readiness into the
+//! kernel, and is represented by [`WaitTarget::PollOnly`].
 //!
 //! | set contents | behaviour |
 //! |---|---|
 //! | every item blockable (pipe, eventfd, socketpair, timerfd, pty) | true block: woken by the object, zero wakeups while idle |
 //! | any item poll-only | park capped at an adaptive backoff, re-scanning on each wake |
+//!
+//! [`WaitTarget::EpollCtl`] sits outside that table because it is not a
+//! readiness target at all: it is blockable, but what it announces is a change
+//! to `epoll_wait`'s *own set of targets*. See its own documentation.
 //!
 //! The slice is therefore a property of the *set*, not a constant, and the day
 //! a poll-only family learns to push readiness every caller gets true blocking
@@ -117,6 +121,22 @@ pub enum WaitTarget {
     TimerFd(u64),
     /// [`crate::tty::pty::PtyHandle`] raw value.
     Pty(u64),
+    /// [`super::epoll::EpollHandle`] raw value — the instance's
+    /// **interest-set-change** notification, *not* its readiness.
+    ///
+    /// This is the one target whose wake does not mean "something you are
+    /// waiting for is ready". It means "the set of things you are waiting for
+    /// has changed", which only `epoll_wait` can act on: it resolves its targets
+    /// from the interest list before parking, so a concurrent `epoll_ctl` would
+    /// otherwise leave it blocked on a stale list. See
+    /// [`super::epoll::register_waiter`].
+    ///
+    /// Because of that, this must never be what an epoll *fd* resolves to in
+    /// `poll`/`select`. An epoll fd is readable when a member of its interest
+    /// set is ready, and nothing about a member reaches this set — a `poll()`
+    /// that parked here would sleep through the very event it asked about. Such
+    /// an fd resolves to [`Self::PollOnly`], which re-scans and is correct.
+    EpollCtl(u64),
     /// An object with no kernel waiter set: nothing to register on, so the wait
     /// must re-scan it on a timer. One of these in the set is enough to put the
     /// whole wait on the capped path.
@@ -145,6 +165,9 @@ impl WaitTarget {
             }
             Self::Pty(raw) => {
                 crate::tty::pty::register_waiter(crate::tty::pty::PtyHandle::from_raw(raw), task);
+            }
+            Self::EpollCtl(raw) => {
+                super::epoll::register_waiter(super::epoll::EpollHandle::from_raw(raw), task);
             }
             Self::PollOnly => {}
         }
@@ -178,6 +201,9 @@ impl WaitTarget {
             }
             Self::Pty(raw) => {
                 crate::tty::pty::deregister_waiter(crate::tty::pty::PtyHandle::from_raw(raw), task);
+            }
+            Self::EpollCtl(raw) => {
+                super::epoll::deregister_waiter(super::epoll::EpollHandle::from_raw(raw), task);
             }
             Self::PollOnly => {}
         }

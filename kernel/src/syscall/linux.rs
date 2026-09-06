@@ -30611,13 +30611,12 @@ fn caller_has_deliverable_signal(pid: Option<u64>) -> bool {
 /// if a deliverable signal is (or becomes) pending — in which case the caller
 /// must return `-EINTR`.
 ///
-/// `epoll_wait` waits in short timer slices and re-polls fd readiness when each
-/// slice expires (another task can change a polled fd's state without waking us,
-/// so a periodic re-poll is the readiness mechanism).  `poll` and `select` no
-/// longer do: they park on the objects themselves via
-/// [`crate::ipc::multiwait::wait_multiple`], and only the bounded sleep in
-/// [`interruptible_sleep_ms`] and `epoll_wait_core` still come through here.
-/// But a posted
+/// This is now only reached through [`interruptible_sleep_ms`], i.e. the pure
+/// timed sleep of a `poll`/`select` with an empty fd set.  `poll`, `select` and
+/// `epoll_wait` no longer slice-and-re-poll at all: they park on the objects
+/// themselves via [`crate::ipc::multiwait::wait_multiple`] and are woken by
+/// them.  What remains here is the sleep half — a wait with nothing to register
+/// on still has to be cut short by a signal.  But a posted
 /// signal must interrupt the wait *promptly*, not after the full slice:
 /// `set_pending` wakes registered signal-waiters, so we register before
 /// parking and `try_wake` pulls us out of the timed sleep early.  The
@@ -31648,12 +31647,39 @@ const EP_MAX_EVENTS: i32 = i32::MAX / 12;
 /// Callers have already validated `maxevents` (`1..=EP_MAX_EVENTS`),
 /// confirmed the `events` output buffer is writable, and parsed any
 /// signal mask / timespec into `timeout_ms_signed`.  This function does
-/// the epfd lookup, the interest-set readiness scan (level-triggered,
-/// re-polling on a timeout the same way `poll_core` does), and the
-/// result write-back.
+/// the epfd lookup, the interest-set readiness scan (level-triggered), and
+/// the result write-back.
 ///
 /// `timeout_ms_signed` follows epoll_wait(2): positive = deadline in ms,
 /// 0 = return immediately, negative = wait indefinitely.
+///
+/// # Blocking, not spinning
+///
+/// Like [`poll_core`] and [`select_core`], this used to re-scan the whole
+/// interest set on a flat 10 ms tick.  It now parks in
+/// [`crate::ipc::multiwait::wait_multiple`] on the waiter sets of the fds in the
+/// interest list, so an idle `epoll_wait` over blockable fds costs nothing and
+/// wakes the instant a member changes.
+///
+/// # Why this one needs an outer loop, and poll/select do not
+///
+/// `poll` and `select` watch a set the caller passed by value: it is fixed for
+/// the call, so resolving it to wait targets once is enough.  An epoll interest
+/// set is a *shared kernel object* that any thread — or, since the instance is
+/// refcounted across `fork`, any process holding the fd — can mutate with
+/// `epoll_ctl` while we are parked.  A task parked on the fds it resolved before
+/// blocking is deaf to an fd added after.
+///
+/// So the wait also registers on [`WaitTarget::EpollCtl`](crate::ipc::multiwait::WaitTarget::EpollCtl),
+/// which `epoll_ctl` wakes, and the scan compares the instance's generation
+/// against the value read before the snapshot.  A change makes the scan report
+/// "ready" purely to break out of `wait_multiple`, and the outer loop rebuilds
+/// the target list and parks again on the new one, against what is left of the
+/// caller's deadline.  The wake alone would not do: `wait_multiple` would simply
+/// re-scan and re-park on the same stale targets.
+///
+/// The generation is read *before* the interest snapshot, so a mutation racing
+/// between the two is seen as a spurious rebuild rather than a missed one.
 fn epoll_wait_core(
     epfd: i32,
     events_ptr: u64,
@@ -31682,79 +31708,121 @@ fn epoll_wait_core(
     let max = maxevents as usize;
     // Output buffer: up to `maxevents` packed 12-byte epoll_event records.
     let mut out: Vec<u8> = vec![0u8; max.saturating_mul(12)];
-    let mut remaining_ms: i64 = timeout_ms_signed;
+
+    // The caller's deadline is absolute from here, so the rebuild loop below
+    // cannot extend the wait by restarting it: each pass gets only what is left.
+    let total_ns: Option<u64> = if timeout_ms_signed < 0 {
+        None
+    } else {
+        #[allow(clippy::cast_sign_loss)]
+        Some((timeout_ms_signed as u64).saturating_mul(1_000_000))
+    };
+    let started_ns = crate::hrtimer::now_ns();
 
     loop {
-        // Snapshot the interest set fresh each iteration so an
-        // epoll_ctl from another thread/process (shared instance) is
-        // reflected in the next scan.
+        // Read the generation *before* the snapshot: a mutation racing between
+        // the two then shows up as a spurious rebuild, never as a missed one.
+        // `None` means the instance was closed while we waited, which ends the
+        // wait — treating it as an empty interest set would park forever.
+        let Some(generation) = crate::ipc::epoll::generation(ep_handle) else {
+            return SyscallResult::ok(0);
+        };
         let interest = crate::ipc::epoll::interest_list(ep_handle).unwrap_or_default();
 
-        let mut count: usize = 0;
-        for (fd, events, data) in interest {
-            if count >= max {
-                break;
+        // Resolve the interest set to the waiter sets it can be parked on, plus
+        // the instance's own interest-set-change notification so an epoll_ctl
+        // from another thread can pull us out of the park.
+        let mut targets: Vec<crate::ipc::multiwait::WaitTarget> = Vec::new();
+        for &(fd, _, _) in &interest {
+            if let Some(entry) = pcb::linux_fd_lookup(caller, fd) {
+                targets.push(wait_target_for_handle(entry.kind, entry.raw_handle));
             }
-            // A registered fd that has since been closed is simply not
-            // ready (Linux auto-removes it; we skip it).
-            let Some(target) = pcb::linux_fd_lookup(caller, fd) else {
-                continue;
-            };
-            // The poll engine works in 16-bit POLL* space; EPOLL* readiness
-            // bits (IN/OUT/ERR/HUP/PRI) share those values.  Behaviour
-            // flags in the high bits (EPOLLET 1<<31, EPOLLONESHOT 1<<30)
-            // are not readiness bits and are dropped by the u16 cast.
-            #[allow(clippy::cast_possible_truncation)]
-            let revents = poll_revents_from_entry(target, events as u16, Some(caller));
-            if revents == 0 {
-                continue;
-            }
-            let off = count.saturating_mul(12);
-            // events field (u32): zero-extend the 16-bit revents.
-            let ev_bytes = u32::from(revents).to_ne_bytes();
-            let data_bytes = data.to_ne_bytes();
-            // SAFETY-of-indexing: off+11 < max*12 == out.len() because
-            // count < max (guarded above).
-            out[off..off + 4].copy_from_slice(&ev_bytes);
-            out[off + 4..off + 12].copy_from_slice(&data_bytes);
-            count = count.saturating_add(1);
         }
+        targets.push(crate::ipc::multiwait::WaitTarget::EpollCtl(ep_handle.raw()));
 
-        if count > 0 || remaining_ms == 0 {
-            if count > 0 {
-                let nbytes = count.saturating_mul(12);
-                // SAFETY: the caller validated `events_ptr` is writable for
-                // maxevents*12 bytes; `nbytes <= max*12` so we write within
-                // that validated range.
-                let w = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), events_ptr, nbytes) };
-                if let Err(e) = w {
-                    return linux_err(linux_errno_for(e));
-                }
+        let remaining_ns = match total_ns {
+            Some(total) => {
+                let elapsed = crate::hrtimer::now_ns().saturating_sub(started_ns);
+                Some(total.saturating_sub(elapsed))
             }
-            #[allow(clippy::cast_possible_wrap)]
-            return SyscallResult::ok(count as i64);
-        }
-
-        // Nothing ready yet and we still have time to wait.  A deliverable
-        // signal interrupts epoll_wait with -EINTR (never restarted, even under
-        // SA_RESTART); the handler runs at the syscall-return checkpoint.
-        // Sleep in 10 ms slices so a state change from another task is picked
-        // up promptly; `interruptible_wait_slice` registers a signal-waiter so
-        // a signal posted mid-slice wakes us immediately.
-        let slice_ms: u64 = if remaining_ms < 0 {
-            10
-        } else {
-            #[allow(clippy::cast_sign_loss)]
-            core::cmp::min(remaining_ms as u64, 10)
+            None => None,
         };
-        if interruptible_wait_slice(Some(caller), slice_ms) {
-            return linux_err(errno::EINTR);
+
+        let mut count: usize = 0;
+        let mut stale = false;
+        let out_buf = &mut out;
+        let outcome = crate::ipc::multiwait::wait_multiple(&targets, remaining_ns, || {
+            // The interest set changed under us, so `targets` no longer covers
+            // it.  Report ready to leave `wait_multiple` — it would otherwise
+            // re-park on the same stale list — and let the outer loop rebuild.
+            if crate::ipc::epoll::generation(ep_handle) != Some(generation) {
+                stale = true;
+                return 1;
+            }
+            count = 0;
+            for &(fd, events, data) in &interest {
+                if count >= max {
+                    break;
+                }
+                // A registered fd that has since been closed is simply not
+                // ready (Linux auto-removes it; we skip it).
+                let Some(target) = pcb::linux_fd_lookup(caller, fd) else {
+                    continue;
+                };
+                // The poll engine works in 16-bit POLL* space; EPOLL* readiness
+                // bits (IN/OUT/ERR/HUP/PRI) share those values.  Behaviour
+                // flags in the high bits (EPOLLET 1<<31, EPOLLONESHOT 1<<30)
+                // are not readiness bits and are dropped by the u16 cast.
+                #[allow(clippy::cast_possible_truncation)]
+                let revents = poll_revents_from_entry(target, events as u16, Some(caller));
+                if revents == 0 {
+                    continue;
+                }
+                let off = count.saturating_mul(12);
+                // events field (u32): zero-extend the 16-bit revents.
+                let ev_bytes = u32::from(revents).to_ne_bytes();
+                let data_bytes = data.to_ne_bytes();
+                // `get_mut` on the whole 12-byte record: `count < max` is
+                // guaranteed by the break above, so this cannot miss, and a
+                // bounds-checked write is the honest answer if it ever could.
+                let Some(record) = out_buf.get_mut(off..off.saturating_add(12)) else {
+                    break;
+                };
+                let (ev_slot, data_slot) = record.split_at_mut(4);
+                ev_slot.copy_from_slice(&ev_bytes);
+                data_slot.copy_from_slice(&data_bytes);
+                count = count.saturating_add(1);
+            }
+            count
+        });
+
+        // epoll_wait is always interrupted by a signal and never restarted, even
+        // under SA_RESTART; the handler runs at the syscall-return checkpoint.
+        match outcome {
+            Ok(_) => {}
+            Err(crate::error::KernelError::Interrupted) => return linux_err(errno::EINTR),
+            Err(e) => return linux_err(linux_errno_for(e)),
         }
-        if remaining_ms > 0 {
-            #[allow(clippy::cast_possible_wrap)]
-            let consumed = slice_ms as i64;
-            remaining_ms = remaining_ms.saturating_sub(consumed);
+
+        if stale {
+            // Rebuild against the new interest set.  `remaining_ns` is recomputed
+            // from `started_ns` on the next pass, so this cannot extend the wait;
+            // if the deadline has since passed, the next pass returns 0.
+            continue;
         }
+
+        if count > 0 {
+            let nbytes = count.saturating_mul(12);
+            // SAFETY: the caller validated `events_ptr` is writable for
+            // maxevents*12 bytes; `nbytes <= max*12` so we write within
+            // that validated range.
+            let w = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), events_ptr, nbytes) };
+            if let Err(e) = w {
+                return linux_err(linux_errno_for(e));
+            }
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        return SyscallResult::ok(count as i64);
     }
 }
 

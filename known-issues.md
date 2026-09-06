@@ -121679,3 +121679,34 @@ exactly. The mapping is uniform. The objection to `next_dns_port` is the
 *quality* of its entropy, not its distribution — worth stating because "it has
 modulo bias" is the kind of plausible-sounding claim that gets copied into a
 commit message and then into someone's mental model.
+
+**[A] 2026-09-06 — FIXED in `79efcbcfa`, on the plan above and in the order it
+predicted.** `d28c91908` randomised `allocate_ephemeral_port` first (drawn from
+`rng::next_bounded`, circular scan); `79efcbcfa` then deleted `next_dns_port`
+and moved `dns_query_raw` onto `udp::bind(ns, 0)` + `udp::local_port`. All three
+predicted improvements landed together, which is what made the ordering
+constraint worth writing down rather than discovering.
+
+Two things found in the course of fixing it that the entry above did not
+anticipate:
+
+* **The randomised scan had to become *circular*, not merely random-start.** A
+  random start with the old top-stopping scan would return `OutOfMemory` while
+  thousands of ports sat free below the start — a worse bug than the one being
+  fixed, and one that would have been rare in exactly the same
+  hard-to-reproduce way. `test_ephemeral_scan_wraps` pins the wraparound case
+  specifically, driven against a synthetic socket table so it does not depend
+  on where the CSPRNG happens to land.
+* **The same weakness was in the transaction ID, the other half of RFC 5452.**
+  `next_query_id` was also counter⊕`rdtsc`; fixed in the follow-up commit, which
+  also closed a latent hole in its "never zero" guarantee (the fallback was
+  `counter.wrapping_add(1)`, which is itself 0 when the counter sits at
+  `u16::MAX`). Worth noting the pattern: the port and the ID were written by
+  the same hand at the same time with the same reasoning, so finding one
+  hand-rolled entropy source is good grounds to grep for its siblings rather
+  than to fix it and move on.
+
+Not yet exercised on hardware: the new `udp` self-tests have not run in QEMU
+yet, because the boot test has not been run since. The entry stays closed on
+the strength of the fix being structural (the allocator cannot return a port it
+has not checked), but the self-test evidence is still outstanding.

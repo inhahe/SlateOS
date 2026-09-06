@@ -56,7 +56,17 @@ fi
 } > "$tmp/guarded.sh"
 chmod +x "$tmp/guarded.sh"
 ( sleep 1; printf '#!/usr/bin/env bash\necho "PHASE-1"\nsleep 2\necho "CLOBBERED"\n' > "$tmp/guarded.sh" ) &
-guarded_out="$(bash "$tmp/guarded.sh" 2>&1)"
+# The preamble is lifted as a *block*, and a block does not bring its
+# prerequisites with it: `BOOT_TEST_START_EPOCH` is set at the top of
+# boot-test.sh, well above the `if`, and the preamble forwards it to the
+# re-exec unguarded.  Under `set -u` -- which the guarded script sets
+# because boot-test.sh does -- an unset one aborts before the payload runs.
+#
+# Supplied through the environment rather than by editing the lifted text,
+# so the thing under test stays byte-identical to what boot-test.sh runs.
+# The value is arbitrary; nothing in the preamble reads it, it only
+# forwards it.
+guarded_out="$(BOOT_TEST_START_EPOCH="$(date +%s)" bash "$tmp/guarded.sh" 2>&1)"
 wait
 
 fails=0
@@ -79,6 +89,24 @@ if echo "$guarded_out" | grep -q "CLOBBERED"; then
     fails=$((fails + 1))
 elif echo "$guarded_out" | grep -q "PHASE-2"; then
     echo "ok   the run finished from the snapshot, edit and all"
+elif echo "$guarded_out" | grep -q "unbound variable"; then
+    # Not a property failure -- the harness could not run the preamble at all.
+    # Reporting "the re-exec is broken" here would be a verdict about something
+    # that never executed, which is the one thing a gate must not do.
+    #
+    # This is how the lift really drifts.  The `sed` range keeps the block
+    # honest, but a variable the block *reads* can be added above it, and then
+    # the extraction is still faithful while the extracted script no longer
+    # runs.  That is exactly what BOOT_TEST_START_EPOCH did, and it went
+    # unnoticed because nothing ran this checker.  Name the variable, so the
+    # next one costs minutes instead of a bisect.
+    echo "FAIL the preamble needs a variable this harness does not supply:"
+    echo "$guarded_out" |
+        sed -n 's/.*: \([A-Za-z_][A-Za-z0-9_]*\): unbound variable.*/       \1/p' |
+        sort -u
+    echo "     Supply it next to BOOT_TEST_START_EPOCH above.  This is a stale"
+    echo "     harness, NOT evidence that the re-exec guard is broken."
+    fails=$((fails + 1))
 else
     echo "FAIL the guarded run reached neither PHASE-2 nor CLOBBERED"
     fails=$((fails + 1))

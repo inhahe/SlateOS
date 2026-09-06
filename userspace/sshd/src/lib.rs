@@ -6506,23 +6506,36 @@ fn send_channel_close(conn: &mut ConnectionState, local_channel_id: u32) -> Resu
 
 /// The configuration file read when `-f` does not name one.
 ///
-/// Spelled once because `run_cli` compares against it to tell "the
-/// administrator named this file" from "we fell back to the built-in path", and
-/// two copies of a literal that a comparison depends on is a behaviour change
-/// waiting for somebody to fix a typo in one of them.
+/// A file that is *absent* here is not an error: a machine with no
+/// `sshd_config` starts on the settings compiled in, which is what makes a
+/// fresh install reachable. A file the administrator named and that cannot be
+/// read is the opposite, and [`CliOptions::config_file`] is what keeps the two
+/// apart.
 const DEFAULT_CONFIG_FILE: &str = "/etc/ssh/sshd_config";
 
 struct CliOptions {
     port: Option<u16>,
-    /// The configuration file, as a path rather than as text.
+    /// The configuration file named by `-f`, or `None` for the built-in path.
     ///
-    /// A path on this OS is bytes -- every byte but `/` and NUL -- and an
-    /// argument is bytes too, so there is no point in the round trip where
-    /// requiring UTF-8 buys anything. It cost: `env::args()` *panics* on an
-    /// argument that is not UTF-8, so `sshd -f /etc/ssh/conf\xff` ended the
-    /// process before its first statement, with a message from the standard
-    /// library naming neither sshd nor the argument.
-    config_file: PathBuf,
+    /// # Why `Option` and not a `PathBuf` pre-filled with the default
+    ///
+    /// The two cases behave differently -- a named file that cannot be read is
+    /// a refusal to start, a missing *default* file is an ordinary first start
+    /// on built-in settings -- and the difference used to be recovered after
+    /// the fact by comparing the path against the default's spelling. That
+    /// comparison answers "does this look like the default?" when the question
+    /// is "was one given?", and the two answers differ in both directions:
+    /// `sshd -f /etc/ssh/./sshd_config` names the same file and was refused,
+    /// and `sshd -f /etc/ssh/sshd_config` on a machine that has no such file
+    /// started on built-in settings while telling the administrator nothing --
+    /// they asked for a configuration by name and silently got none. Which
+    /// half of that a given deployment hits depends on how the init script
+    /// happens to spell a path, which is not a thing anybody should have to
+    /// reason about.
+    ///
+    /// A flag either appeared or it did not, and `Option` is that fact rather
+    /// than a reconstruction of it.
+    config_file: Option<PathBuf>,
     debug_mode: bool,
     foreground: bool,
     log_stderr: bool,
@@ -6581,7 +6594,7 @@ impl CliOptions {
     fn parse_from(args: impl IntoIterator<Item = OsString>) -> Result<Self, i32> {
         let mut opts = Self {
             port: None,
-            config_file: PathBuf::from(DEFAULT_CONFIG_FILE),
+            config_file: None,
             debug_mode: false,
             foreground: false,
             log_stderr: false,
@@ -6610,7 +6623,7 @@ impl CliOptions {
                     };
                     opts.port = Some(port);
                 }
-                Some("-f") => opts.config_file = Self::operand(&mut args, "-f")?.into(),
+                Some("-f") => opts.config_file = Some(Self::operand(&mut args, "-f")?.into()),
                 Some("-h") => opts.host_key_file = Some(Self::operand(&mut args, "-h")?.into()),
                 Some("-d") => {
                     opts.debug_mode = true;
@@ -6716,7 +6729,16 @@ pub fn run_cli() -> i32 {
     };
 
     // Load config.
-    let mut config = if let Ok(data) = fs_read_file(&opts.config_file) {
+    // Load config. A file the administrator named must exist; the built-in path
+    // need not, because a machine that has never been configured still has to
+    // come up. See `CliOptions::config_file` for why "was one named?" is a field
+    // rather than a comparison against the default's spelling.
+    let named = opts.config_file.is_some();
+    let config_file = opts
+        .config_file
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE));
+    let mut config = if let Ok(data) = fs_read_file(&config_file) {
         match SshdConfig::parse(&data) {
             Ok(c) => c,
             Err(e) => {
@@ -6725,14 +6747,13 @@ pub fn run_cli() -> i32 {
             }
         }
     } else {
-        if opts.config_file != Path::new(DEFAULT_CONFIG_FILE) {
+        if named {
             log_error(
-                &format!("cannot read config: {}", opts.config_file.display()),
+                &format!("cannot read config: {}", config_file.display()),
                 opts.log_stderr,
             );
             return 1;
         }
-        // Use defaults if default config file doesn't exist.
         SshdConfig::default_config()
     };
 
@@ -9207,7 +9228,11 @@ Z
     fn an_empty_command_line_is_the_documented_defaults() {
         let opts = cli(&[]).expect("no arguments is a valid way to start sshd");
         assert_eq!(opts.port, None, "the port comes from the config file");
-        assert_eq!(opts.config_file, Path::new("/etc/ssh/sshd_config"));
+        assert_eq!(
+            opts.config_file, None,
+            "no -f means the built-in path, and means it as an absence: a \
+             default file that is missing is a first start, not a failure"
+        );
         assert_eq!(opts.host_key_file, None);
         assert!(!opts.debug_mode && !opts.foreground && !opts.log_stderr);
         assert!(!opts.test_config && !opts.extended_test);
@@ -9251,7 +9276,7 @@ Z
     #[test]
     fn a_value_that_looks_like_an_option_is_still_the_value() {
         let opts = cli(&["-f", "-d"]).expect("a config file may be called -d");
-        assert_eq!(opts.config_file, Path::new("-d"));
+        assert_eq!(opts.config_file.as_deref(), Some(Path::new("-d")));
         assert!(
             !opts.debug_mode,
             "the -d was consumed as -f's value, not acted on"
@@ -9311,14 +9336,32 @@ Z
         let opts = cli_os(&["-f".into(), named.clone()])
             .expect("a config file may have any byte in its name");
         assert_eq!(
-            opts.config_file.as_os_str(),
-            named,
+            opts.config_file.as_deref().map(Path::as_os_str),
+            Some(named.as_os_str()),
             "the name must reach `open` as the administrator wrote it"
+        );
+    }
+
+    /// Naming the default path is still naming a file.
+    ///
+    /// The distinction the `Option` exists for. `run_cli` refuses to start when
+    /// a file the administrator *asked for* cannot be read, and falls back to
+    /// built-in settings only when nobody asked for one -- so `-f` recording
+    /// the request is what stops `sshd -f /etc/ssh/sshd_config`, on a machine
+    /// that has no such file, from starting on settings nobody chose and
+    /// saying nothing about it.
+    #[test]
+    fn naming_the_default_config_file_is_not_the_same_as_not_naming_one() {
+        let opts = cli(&["-f", DEFAULT_CONFIG_FILE]).expect("naming the default path is legal");
+        assert_eq!(
+            opts.config_file.as_deref(),
+            Some(Path::new(DEFAULT_CONFIG_FILE)),
+            "the request must be recorded, not collapsed into the default"
         );
         assert_ne!(
             opts.config_file,
-            Path::new(DEFAULT_CONFIG_FILE),
-            "silently falling back to the default would read the wrong file"
+            cli(&[]).expect("no arguments").config_file,
+            "asking for this file and not asking at all are different runs"
         );
     }
 

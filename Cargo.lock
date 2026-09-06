@@ -2410,6 +2410,11 @@ dependencies = [
 [[package]]
 name = "chage"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+ "scratchdir",
+ "userdb",
+]
 
 [[package]]
 name = "chamber-cli"

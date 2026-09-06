@@ -1025,9 +1025,27 @@ Roadmap:
       what empty means). Fallout fixed in the same push: `chown alice:` took
       the first *supplementary* group as the primary one, which was invisible
       while nothing wrote that list and would have become the usual answer.
-    - `[ ]` **1d.** `chage` (`userspace/chage`, 663 lines) reads and writes the
-      same six fields in `/etc/shadow` directly, so it has to move too or it
-      will keep writing into a file the next save overwrites.
+    - `[x]` **1d. `chage` (2026-09-06).** Rewritten onto `userdb::Aging`. The
+      migration was not the main finding: **it never wrote anything.** Every
+      option was parsed, the entry was changed in memory, `chage: updated
+      aging for <user>` was printed, the resulting `/etc/shadow` line was
+      printed to *stdout*, and nothing on disk changed — so a policy an
+      administrator set was gone when the process exited. (One of the
+      2,288 commands in the `open-questions.md` "report success for work they
+      never did" entry, found by moving it rather than by the audit.) A third
+      defect fell out of reading a file that may not exist: when `/etc/shadow`
+      could not be read it **invented three accounts** — `root`, `user`,
+      `nobody`, with made-up hashes and made-up policies — and reported them as
+      fact, so `chage -l root` on a machine with no shadow file printed a
+      policy nobody had set. Now: writes the database (which regenerates
+      `/etc/shadow`), reports an unreadable database instead of inventing one,
+      prints `never`/`-1` for a policy nobody set rather than `0 99999 7`,
+      computes "password expires" only when *both* the change date and the
+      maximum age are known instead of supplying `99999` and `0` for the
+      missing halves, converts `-E`'s date to the day number the column holds,
+      treats `-1` as *clear the field*, implements the interactive form
+      `chage USER` is supposed to show, and requires root to change a policy or
+      to read another account's — it had no permission check at all.
   - `[ ]` **3. Collapse `authlib`'s guess.** Its per-lookup "YAML if it has the
     user, `/etc/shadow` otherwise" fallback is a policy invented before §353
     and must become a straight YAML lookup, the shadow branch deleted.

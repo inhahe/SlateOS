@@ -3,4 +3,20 @@ name = "chage"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS chage utility"
+
 [dependencies]
+# The account store. `design-decisions.md` §353 settles that `/etc/users.yaml`
+# is the truth and `/etc/shadow` is generated from it, so the six aging numbers
+# this command exists to edit are `userdb::Aging`'s fields. It used to parse
+# `/etc/shadow` itself -- and never wrote anything at all: it printed the line
+# it would have written to stdout and reported "updated aging for <user>".
+userdb = { path = "../userdb" }
+# chage names accounts, and a user name is attacker-chosen on any machine where
+# an unprivileged account can be created.
+quoting = { path = "../quoting" }
+
+[dev-dependencies]
+# The commands are run against a real database in a scratch directory, because
+# "the field was set in memory" is what a command that forgot to save would
+# also pass -- which is exactly what this one did.
+scratchdir = { path = "../scratchdir" }
